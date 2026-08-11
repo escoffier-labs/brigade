@@ -18,11 +18,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import urlparse
 
 
 COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
+GITHUB_API_HOST = "api.github.com"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigade-cli/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
 PYPI_POLL_INTERVAL_SECONDS = 5
@@ -75,7 +77,25 @@ def fetch_bytes(url: str) -> bytes:
 
 
 def _github_release_tag_url(tag: str) -> str:
-    return f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{tag}"
+    return f"https://{GITHUB_API_HOST}/repos/{REPOSITORY}/releases/tags/{tag}"
+
+
+def _is_allowed_github_api_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and parsed.netloc == GITHUB_API_HOST
+
+
+class _GithubApiRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only when the target remains on https://api.github.com."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if not _is_allowed_github_api_url(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _github_api_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_GithubApiRedirectHandler())
 
 
 def _github_request_headers() -> dict[str, str]:
@@ -90,9 +110,13 @@ def _is_transient_github_http_status(status: int) -> bool:
 
 
 def _fetch_github_json_once(url: str) -> tuple[int, Any]:
+    if not _is_allowed_github_api_url(url):
+        raise AcceptanceError(f"GitHub release lookup must target https://{GITHUB_API_HOST}: {url}")
     request = urllib.request.Request(url, headers=_github_request_headers())
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _github_api_opener().open(request, timeout=30) as response:
+            if not _is_allowed_github_api_url(response.geturl()):
+                raise AcceptanceError("GitHub release lookup redirected outside api.github.com")
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

@@ -4,6 +4,10 @@ import json
 import os
 import stat
 import subprocess
+import threading
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -134,6 +138,69 @@ def test_github_request_headers_attach_bearer_token_when_present(acceptance_modu
     assert headers["Authorization"] == "Bearer ghs_example_token_value"
     assert headers["Accept"] == "application/vnd.github+json"
     assert headers["User-Agent"] == acceptance_module.USER_AGENT
+
+
+def test_github_api_redirect_handler_blocks_cross_origin_targets(acceptance_module):
+    handler = acceptance_module._GithubApiRedirectHandler()
+    request = urllib.request.Request(
+        f"https://{acceptance_module.GITHUB_API_HOST}/repos/escoffier-labs/brigade/releases/tags/v1.2.3",
+        headers={"Authorization": "Bearer ghs_example_token_value"},
+    )
+
+    assert handler.redirect_request(request, None, 302, "Found", {}, "https://evil.example/steal") is None
+    assert (
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            f"http://{acceptance_module.GITHUB_API_HOST}/repos/escoffier-labs/brigade/releases/tags/v1.2.3",
+        )
+        is None
+    )
+
+
+def test_github_api_opener_does_not_forward_authorization_on_cross_origin_redirect(acceptance_module):
+    stolen_auth: list[str | None] = []
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/redirect":
+                port = self.server.server_address[1]
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{port}/steal")
+                self.end_headers()
+                return
+            if self.path == "/steal":
+                stolen_auth.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        opener = acceptance_module._github_api_opener()
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}/redirect",
+            headers={"Authorization": "Bearer ghs_example_token_value"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            opener.open(request, timeout=2)
+        assert excinfo.value.code == 302
+        assert stolen_auth == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_wait_for_github_release_tag_returns_immediately_when_release_is_visible(acceptance_module):
