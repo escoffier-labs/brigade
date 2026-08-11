@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
 from .. import provenance, runguard
@@ -1092,8 +1092,9 @@ _IMPORT_FINGERPRINT_METADATA_SKIP = frozenset(
 )
 
 
-# Default origin/modality for work-inbox producers. Metadata may override with
-# closed-set values; unknown sources stay workspace/tool-output.
+# Default origin/modality for work-inbox producers. Loose metadata cannot
+# override these; a validated inbound envelope may supply origin/modality.
+# Unknown sources stay workspace/tool-output.
 _IMPORT_SOURCE_ORIGIN_MODALITY: dict[str, tuple[str, str]] = {
     "manual": ("operator-input", "human-written"),
     "backup-health": ("workspace", "tool-output"),
@@ -1135,29 +1136,31 @@ def _import_fingerprint(item: dict[str, Any]) -> str | None:
     )
 
 
-def _import_origin_modality(source: str, metadata: dict[str, Any]) -> tuple[str, str]:
-    default_origin, default_modality = _IMPORT_SOURCE_ORIGIN_MODALITY.get(source, ("workspace", "tool-output"))
-    origin = metadata.get("origin")
-    modality = metadata.get("modality")
-    if origin not in provenance.ORIGINS:
-        origin = default_origin
-    if modality not in provenance.MODALITIES:
-        modality = default_modality
-    return str(origin), str(modality)
+def _import_origin_modality(source: str) -> tuple[str, str]:
+    return _IMPORT_SOURCE_ORIGIN_MODALITY.get(source, ("workspace", "tool-output"))
+
+
+def _safe_repository_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned or provenance._is_absolute_locator(cleaned):
+        return None
+    return cleaned
 
 
 def _import_repository_fields(metadata: dict[str, Any]) -> tuple[str, str | None]:
     repo = metadata.get("repository")
     if isinstance(repo, dict):
-        repo_id = repo.get("id")
-        revision = repo.get("revision")
-        if isinstance(repo_id, str) and repo_id.strip():
-            return repo_id.strip(), revision if isinstance(revision, str) else None
+        repo_id = _safe_repository_id(repo.get("id"))
+        if repo_id is not None:
+            revision = repo.get("revision")
+            return repo_id, revision if isinstance(revision, str) else None
     for key in ("repository_id", "repo_id"):
-        value = metadata.get(key)
-        if isinstance(value, str) and value.strip():
+        repo_id = _safe_repository_id(metadata.get(key))
+        if repo_id is not None:
             revision = metadata.get("repository_revision")
-            return value.strip(), revision if isinstance(revision, str) else None
+            return repo_id, revision if isinstance(revision, str) else None
     return "unknown", None
 
 
@@ -1178,6 +1181,30 @@ def _import_session_fields(metadata: dict[str, Any]) -> tuple[str | None, str | 
     )
 
 
+def _locator_is_unsafe(kind: object, value: str) -> bool:
+    if provenance._is_absolute_locator(value):
+        return True
+    if kind == "repo-relative" and ".." in value.replace("\\", "/").split("/"):
+        return True
+    return False
+
+
+def _safe_locator_fields(
+    *,
+    locator_kind: object,
+    locator_value: object,
+    fallback_item_id: str,
+) -> tuple[str, str]:
+    if (
+        locator_kind not in provenance.LOCATOR_KINDS
+        or not isinstance(locator_value, str)
+        or not locator_value.strip()
+        or _locator_is_unsafe(locator_kind, locator_value.strip())
+    ):
+        return "uri", f"work-import:{fallback_item_id}"
+    return str(locator_kind), locator_value.strip()
+
+
 def _import_injection_trust(text: str) -> tuple[str, str, int, list[str]]:
     """Map injection scan outcome to trust label and injection fields.
 
@@ -1195,6 +1222,14 @@ def _import_injection_trust(text: str) -> tuple[str, str, int, list[str]]:
     return "untrusted", "clean", 0, []
 
 
+def _reusable_inbound_provenance(inbound: object) -> Mapping[str, Any] | None:
+    if not isinstance(inbound, Mapping):
+        return None
+    if provenance.validate_envelope(inbound):
+        return None
+    return inbound
+
+
 def _stamp_import_provenance(
     *,
     text: str,
@@ -1202,37 +1237,73 @@ def _stamp_import_provenance(
     item_id: str,
     metadata: dict[str, Any],
     ingested_at: str,
+    inbound_provenance: object = None,
 ) -> dict[str, Any]:
-    """Build a locally assigned work-inbox provenance envelope for one import."""
-    origin, modality = _import_origin_modality(source, metadata)
+    """Build a locally assigned work-inbox provenance envelope for one import.
+
+    A validated inbound envelope may contribute safe identity fields
+    (source/locator/repository/session/collection/item/attribution/origin/
+    modality/captured_at). Digest and trust are always recomputed locally.
+    Loose metadata never supplies origin/modality authority.
+    """
+    reusable = _reusable_inbound_provenance(inbound_provenance)
     trust_label, injection_status, injection_count, injection_rules = _import_injection_trust(text)
-    repository_id, repository_revision = _import_repository_fields(metadata)
-    session_id, session_harness = _import_session_fields(metadata)
 
-    collection_id = metadata.get("collection_id")
-    if not isinstance(collection_id, str) or not collection_id.strip():
-        collection_id = f"work-inbox:{source}"
+    if reusable is not None:
+        origin = str(reusable["origin"])
+        modality = str(reusable["modality"])
+        source_obj = reusable["source"]
+        source_system = str(source_obj["system"])
+        source_kind = str(source_obj["kind"])
+        source_producer = str(source_obj["producer"])
+        repo_obj = reusable["repository"]
+        repository_id = _safe_repository_id(repo_obj.get("id")) or "unknown"
+        revision = repo_obj.get("revision")
+        repository_revision = revision if repository_id != "unknown" and isinstance(revision, str) else None
+        session_obj = reusable["session"]
+        session_id = session_obj.get("id") if isinstance(session_obj.get("id"), str) else None
+        session_harness = session_obj.get("harness") if isinstance(session_obj.get("harness"), str) else None
+        collection_id = str(reusable["collection_id"])
+        envelope_item_id = str(reusable["item_id"])
+        locator_obj = reusable["locator"]
+        locator_kind, locator_value = _safe_locator_fields(
+            locator_kind=locator_obj.get("kind"),
+            locator_value=locator_obj.get("value"),
+            fallback_item_id=item_id,
+        )
+        attribution = str(reusable["attribution"])
+        captured_at = reusable.get("captured_at")
+        if not isinstance(captured_at, str) or not captured_at.strip():
+            captured_at = ingested_at
     else:
-        collection_id = collection_id.strip()
+        origin, modality = _import_origin_modality(source)
+        source_system = "work-inbox"
+        source_kind = source
+        source_producer = "ledger._make_import"
+        repository_id, repository_revision = _import_repository_fields(metadata)
+        session_id, session_harness = _import_session_fields(metadata)
 
-    envelope_item_id = _import_source_key({"metadata": metadata, "source": source}) or item_id
+        collection_id = metadata.get("collection_id")
+        if not isinstance(collection_id, str) or not collection_id.strip():
+            collection_id = f"work-inbox:{source}"
+        else:
+            collection_id = collection_id.strip()
 
-    locator_kind = metadata.get("locator_kind")
-    locator_value = metadata.get("locator_value")
-    if locator_kind not in provenance.LOCATOR_KINDS or not isinstance(locator_value, str) or not locator_value.strip():
-        locator_kind = "uri"
-        locator_value = f"work-import:{item_id}"
-    else:
-        locator_value = locator_value.strip()
-
-    captured_at = metadata.get("captured_at")
-    if not isinstance(captured_at, str) or not captured_at.strip():
-        captured_at = ingested_at
+        envelope_item_id = _import_source_key({"metadata": metadata, "source": source}) or item_id
+        locator_kind, locator_value = _safe_locator_fields(
+            locator_kind=metadata.get("locator_kind"),
+            locator_value=metadata.get("locator_value"),
+            fallback_item_id=item_id,
+        )
+        attribution = "observed"
+        captured_at = metadata.get("captured_at")
+        if not isinstance(captured_at, str) or not captured_at.strip():
+            captured_at = ingested_at
 
     return provenance.build_envelope(
-        source_system="work-inbox",
-        source_kind=source,
-        source_producer="ledger._make_import",
+        source_system=source_system,
+        source_kind=source_kind,
+        source_producer=source_producer,
         origin=origin,
         repository_id=repository_id,
         repository_revision=repository_revision,
@@ -1240,9 +1311,9 @@ def _stamp_import_provenance(
         session_harness=session_harness,
         collection_id=collection_id,
         item_id=envelope_item_id,
-        locator_kind=str(locator_kind),
+        locator_kind=locator_kind,
         locator_value=locator_value,
-        attribution="observed",
+        attribution=attribution,
         modality=modality,
         trust_label=trust_label,
         trust_assigned_by="ingest:ledger._make_import",
@@ -2069,16 +2140,18 @@ def _make_import(
         item["template"] = template
     if acceptance is not None:
         item["acceptance"] = _normalize_acceptance(acceptance)
-    # Preserve producer metadata (scanner/session/capture/repo hints) and always
-    # stamp a locally assigned envelope. Inbound provenance is not authority.
+    # Preserve producer metadata (scanner/session/capture/repo hints). A
+    # validated inbound envelope may reuse safe identity fields; trust/digest
+    # are always recomputed. Inbound provenance is never authority.
     stamped_metadata = dict(metadata) if isinstance(metadata, dict) else {}
-    stamped_metadata.pop("provenance", None)
+    inbound_provenance = stamped_metadata.pop("provenance", None)
     stamped_metadata["provenance"] = _stamp_import_provenance(
         text=text,
         source=source_text,
         item_id=item_id,
         metadata=stamped_metadata,
         ingested_at=created,
+        inbound_provenance=inbound_provenance,
     )
     item["metadata"] = stamped_metadata
     return item

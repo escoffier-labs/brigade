@@ -310,3 +310,177 @@ def test_valid_envelope_with_extra_private_keys_is_not_fully_exempt(extra_key: s
     assert "metadata.provenance.hashes.raw" not in private
     assert "metadata.provenance.hashes.raw_algorithm" not in private
     assert "metadata.provenance.hashes.raw_scope" not in private
+
+
+def _valid_inbound_envelope(*, text: str) -> dict[str, Any]:
+    return provenance.build_envelope(
+        source_system="research",
+        source_kind="finding-export",
+        source_producer="research.handoff.render_handoff",
+        origin="external-web",
+        repository_id="escoffier-labs/brigade",
+        repository_revision="abc123def456",
+        session_id="research-sess-42",
+        session_harness="claude",
+        collection_id="research:example-run",
+        item_id="finding:42",
+        locator_kind="repo-relative",
+        locator_value=".brigade/research/example/finding-42.md",
+        attribution="declared",
+        modality="external-web",
+        trust_label="verified",
+        trust_assigned_by="verifier:demo",
+        trust_assigned_at="2026-08-01T12:00:00+00:00",
+        injection_status="clean",
+        injection_count=0,
+        injection_rules=[],
+        text=text,
+        raw_bytes=None,
+        content_scope="item.text.utf8.v1",
+        captured_at="2026-08-01T11:00:00+00:00",
+        ingested_at="2026-08-01T12:00:00+00:00",
+    )
+
+
+def test_batch_ingest_reuses_safe_fields_from_valid_inbound_envelope(tmp_path: Path):
+    text = "Reusable research finding for inbox ingest\n"
+    inbound = _valid_inbound_envelope(text=text)
+    assert provenance.validate_envelope(inbound) == []
+    # Hostile trust authority must not survive central ingest.
+    assert inbound["trust"]["label"] == "verified"
+
+    imported, skipped, dismissed = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": text,
+                "kind": "finding",
+                "source": "handoff-ingest",
+                "metadata": {
+                    "source_item_key": "finding:42",
+                    "source_fingerprint": "fp-finding-42",
+                    "provenance": inbound,
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert len(imported) == 1
+    env = _envelope(imported[0])
+    assert provenance.validate_envelope(env) == []
+
+    # Safe producer identity fields from the validated inbound envelope survive.
+    assert env["source"] == inbound["source"]
+    assert env["locator"] == inbound["locator"]
+    assert env["repository"] == inbound["repository"]
+    assert env["session"] == inbound["session"]
+    assert env["collection_id"] == inbound["collection_id"]
+    assert env["item_id"] == inbound["item_id"]
+    assert env["origin"] == inbound["origin"]
+    assert env["modality"] == inbound["modality"]
+    assert env["attribution"] == inbound["attribution"]
+    assert env["captured_at"] == inbound["captured_at"]
+
+    # Digest and trust are recomputed locally; inbound authority is discarded.
+    assert env["hashes"]["content"] == provenance.content_sha256(text)
+    assert env["trust"]["label"] == "untrusted"
+    assert env["trust"]["assigned_by"] == "ingest:ledger._make_import"
+    assert env["trust"]["injection"] == {"status": "clean", "count": 0, "rules": []}
+
+
+def test_batch_ingest_rejects_forged_loose_origin_modality(tmp_path: Path):
+    imported, skipped, dismissed = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Scanner finding with forged operator labels",
+                "kind": "finding",
+                "source": "security-scan",
+                "metadata": {
+                    "origin": "operator-input",
+                    "modality": "human-written",
+                    "source_item_key": "scan:forged-1",
+                    "source_fingerprint": "fp-forged-1",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert len(imported) == 1
+    env = _envelope(imported[0])
+    assert provenance.validate_envelope(env) == []
+    assert env["origin"] == "workspace"
+    assert env["modality"] == "tool-output"
+    assert env["source"]["kind"] == "security-scan"
+
+
+@pytest.mark.parametrize(
+    "repo_id",
+    [
+        "/home/operator/private/repo",
+        "file:///home/operator/private/repo",
+        "C:\\Users\\operator\\private\\repo",
+    ],
+)
+def test_batch_ingest_rejects_absolute_repository_identity(tmp_path: Path, repo_id: str):
+    imported, skipped, dismissed = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": f"Finding for absolute repo {repo_id}",
+                "kind": "incident",
+                "source": "repo-fleet",
+                "metadata": {
+                    "repo_id": repo_id,
+                    "repository_revision": "abc123",
+                    "source_item_key": f"fleet:{repo_id}",
+                    "source_fingerprint": f"fp-abs-{abs(hash(repo_id)) % 10_000}",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert len(imported) == 1
+    env = _envelope(imported[0])
+    assert provenance.validate_envelope(env) == []
+    assert env["repository"]["id"] == "unknown"
+    assert not str(env["repository"]["id"]).startswith("/")
+    assert not str(env["repository"]["id"]).lower().startswith("file:")
+
+
+@pytest.mark.parametrize(
+    ("locator_kind", "locator_value"),
+    [
+        ("uri", "file:///home/operator/private.md"),
+        ("repo-relative", "/home/operator/private.md"),
+        ("repo-relative", "../secrets/private.md"),
+    ],
+)
+def test_batch_ingest_unsafe_locators_use_safe_fallback(tmp_path: Path, locator_kind: str, locator_value: str):
+    imported, skipped, dismissed = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": f"Item with unsafe locator {locator_value}",
+                "kind": "task",
+                "source": "memory-refresh",
+                "metadata": {
+                    "locator_kind": locator_kind,
+                    "locator_value": locator_value,
+                    "source_item_key": f"card:{locator_kind}",
+                    "source_fingerprint": f"fp-loc-{locator_kind}-{abs(hash(locator_value)) % 10_000}",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert len(imported) == 1
+    env = _envelope(imported[0])
+    assert provenance.validate_envelope(env) == []
+    assert env["locator"]["kind"] == "uri"
+    assert env["locator"]["value"] == f"work-import:{imported[0]['id']}"
+    assert provenance.validate_envelope(env) == []
