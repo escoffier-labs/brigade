@@ -46,17 +46,19 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 				failed++
 			}
 		}
+		ns, _ := memory.ResolveNamespace(workspace)
 		writeJSON(out, map[string]any{
-			"source_kind":        ingest.MemorySourceKind,
-			"capability":         ingest.MemoryCapability,
-			"engine_version":     Version,
-			"dry_run":            true,
-			"generated_records":  generated.Records,
-			"canonical_count":    countMemoryRecords(outcomes),
-			"skipped":            skipped,
-			"failed":             failed,
-			"warnings":           generated.Warnings,
-			"files":              generated.Files,
+			"source_kind":       ingest.MemorySourceKind,
+			"capability":        ingest.MemoryCapability,
+			"engine_version":    Version,
+			"memory_namespace":  ns,
+			"dry_run":           true,
+			"generated_records": generated.Records,
+			"canonical_count":   countMemoryRecords(outcomes),
+			"skipped":           skipped,
+			"failed":            failed,
+			"warnings":          generated.Warnings,
+			"files":             generated.Files,
 		})
 		return 0
 	}
@@ -67,31 +69,91 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 	}
 	defer db.Close()
 
-	if bools["rebuild"] {
-		if err := ingest.RebuildMemoryProjection(db); err != nil {
-			return fatalf(errw, "crawl memory rebuild: %s", err)
-		}
-	}
-
-	before, err := ingest.PriorLiveHashes(db)
-	if err != nil {
-		return fatalf(errw, "crawl memory: %s", err)
-	}
-
-	scanID, err := ingest.BeginMemoryScan(db, workspace, Version)
-	if err != nil {
-		return fatalf(errw, "crawl memory: %s", err)
-	}
-
+	// Validate/walk before any destructive rebuild so a missing root cannot
+	// wipe the prior projection.
 	opts := sources.Options{Limit: limit}
 	if bools["full"] || bools["rebuild"] {
 		opts.Skip = func(string, int64, string) bool { return false }
 	}
 	outcomes, generated, walkErr := memory.Walk(workspace, opts)
+
+	namespace := ""
+	if walkErr == nil {
+		namespace, err = memory.ResolveNamespace(workspace)
+		if err != nil {
+			return fatalf(errw, "crawl memory: %s", err)
+		}
+	} else {
+		namespace, _ = memory.ResolveNamespace(workspace)
+		if namespace == "" {
+			namespace = ingest.LastMemoryNamespace(db, workspace)
+		}
+	}
+
 	if walkErr != nil {
-		receipt := &ingest.MemoryScanReceipt{SourcePath: workspace, EngineVersion: Version, Failed: 1}
-		_ = ingest.FailMemoryScan(db, scanID, "failed", receipt)
+		scanID := ""
+		var beginErr error
+		if namespace != "" {
+			scanID, beginErr = ingest.BeginMemoryScan(db, workspace, Version, namespace)
+		}
+		receipt := &ingest.MemoryScanReceipt{
+			SourcePath: workspace, EngineVersion: Version, Namespace: namespace, Failed: 1,
+		}
+		if beginErr == nil && scanID != "" {
+			_ = ingest.FailMemoryScan(db, scanID, "failed", receipt)
+		} else if namespace != "" {
+			_ = ingest.FailMemoryScan(db, "", "failed", receipt)
+		}
 		return fatalf(errw, "crawl memory: %s", walkErr)
+	}
+
+	if dups := memory.DuplicateExplicitIDs(outcomes); len(dups) > 0 {
+		scanID, beginErr := ingest.BeginMemoryScan(db, workspace, Version, namespace)
+		receipt := &ingest.MemoryScanReceipt{
+			SourcePath: workspace, EngineVersion: Version, Namespace: namespace,
+			Failed: 1, Warnings: append([]string{}, generated.Warnings...),
+		}
+		if beginErr == nil {
+			_ = ingest.FailMemoryScan(db, scanID, "failed", receipt)
+		}
+		return fatalf(errw, "crawl memory: duplicate explicit id(s) %v; refusing reconciliation", dups)
+	}
+
+	if err := ingest.RecoverMemoryRebuildState(db, namespace); err != nil {
+		return fatalf(errw, "crawl memory: %s", err)
+	}
+
+	before, err := ingest.PriorLiveHashes(db, namespace)
+	if err != nil {
+		return fatalf(errw, "crawl memory: %s", err)
+	}
+
+	// Begin the scan before a rebuild detaches the live projection. This row is
+	// the durable journal that lets recovery mark a crash between detach and
+	// import as interrupted instead of silently restoring a healthy snapshot.
+	scanID, err := ingest.BeginMemoryScan(db, workspace, Version, namespace)
+	if err != nil {
+		return fatalf(errw, "crawl memory: %s", err)
+	}
+
+	detached := false
+	abortRebuild := func() {
+		if detached {
+			_ = ingest.AbortMemoryRebuild(db, namespace)
+			detached = false
+		}
+	}
+
+	if bools["rebuild"] {
+		if err := ingest.DetachMemoryNamespace(db, namespace); err != nil {
+			receipt := &ingest.MemoryScanReceipt{
+				SourcePath: workspace, EngineVersion: Version, Namespace: namespace, Failed: 1,
+			}
+			_ = ingest.FailMemoryScan(db, scanID, "failed", receipt)
+			return fatalf(errw, "crawl memory rebuild: %s", err)
+		}
+		detached = true
+		before = map[string]string{}
 	}
 
 	skipped, failed := 0, 0
@@ -158,8 +220,9 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 		if errMsg == nil {
 			errMsg = gen.err
 		}
+		abortRebuild()
 		receipt := &ingest.MemoryScanReceipt{
-			SourcePath: workspace, EngineVersion: Version,
+			SourcePath: workspace, EngineVersion: Version, Namespace: namespace,
 			Skipped: skipped, Failed: failed + 1,
 			Warnings: append(generated.Warnings, result.Warnings...),
 		}
@@ -176,10 +239,10 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 		})
 	}
 	created, updated, unchanged, classified := ingest.ClassifyMemoryOutcomes(before, observed)
-	_ = classified
 
 	receipt := &ingest.MemoryScanReceipt{
 		SourcePath:    workspace,
+		Namespace:     namespace,
 		EngineVersion: Version,
 		Created:       created,
 		Updated:       updated,
@@ -189,41 +252,51 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 		Warnings:      append(generated.Warnings, result.Warnings...),
 	}
 	if err := ingest.CompleteMemoryScan(db, scanID, observedForReconcile(classified), receipt); err != nil {
+		abortRebuild()
 		_ = ingest.FailMemoryScan(db, scanID, "failed", receipt)
 		return fatalf(errw, "crawl memory: %s", err)
 	}
+	if detached {
+		if err := ingest.FinalizeMemoryRebuild(db, namespace); err != nil {
+			abortRebuild()
+			_ = ingest.FailMemoryScan(db, scanID, "failed", receipt)
+			return fatalf(errw, "crawl memory rebuild finalize: %s", err)
+		}
+		detached = false
+	}
 	_ = archive.Checkpoint(db, paths.DBPath)
 
-	health, _ := ingest.CollectMemoryHealth(db, Version)
+	health, _ := ingest.CollectMemoryHealth(db, Version, namespace)
 	payload := map[string]any{
-		"scan_id":               receipt.ScanID,
-		"source_kind":           ingest.MemorySourceKind,
-		"capability":            ingest.MemoryCapability,
-		"engine_version":        Version,
-		"status":                receipt.Status,
-		"stale":                 receipt.Stale,
-		"partial":               receipt.Partial,
-		"created":               receipt.Created,
-		"updated":               receipt.Updated,
-		"unchanged":             receipt.Unchanged,
-		"removed":               receipt.Removed,
-		"skipped":               receipt.Skipped,
-		"failed":                receipt.Failed,
-		"canonical_count":       receipt.CanonicalCount,
-		"live_count":            receipt.LiveCount,
-		"hash_divergence":       receipt.HashDivergence,
-		"unresolved_relations":  receipt.UnresolvedRelations,
-		"malformed_skipped":     receipt.MalformedSkipped,
-		"inserted_items":        result.Inserted,
-		"warnings":              receipt.Warnings,
-		"memory_health":         health,
-		"rebuild":               bools["rebuild"],
+		"scan_id":              receipt.ScanID,
+		"source_kind":          ingest.MemorySourceKind,
+		"capability":           ingest.MemoryCapability,
+		"engine_version":       Version,
+		"memory_namespace":     namespace,
+		"status":               receipt.Status,
+		"stale":                receipt.Stale,
+		"partial":              receipt.Partial,
+		"created":              receipt.Created,
+		"updated":              receipt.Updated,
+		"unchanged":            receipt.Unchanged,
+		"removed":              receipt.Removed,
+		"skipped":              receipt.Skipped,
+		"failed":               receipt.Failed,
+		"canonical_count":      receipt.CanonicalCount,
+		"live_count":           receipt.LiveCount,
+		"hash_divergence":      receipt.HashDivergence,
+		"unresolved_relations": receipt.UnresolvedRelations,
+		"malformed_skipped":    receipt.MalformedSkipped,
+		"inserted_items":       result.Inserted,
+		"warnings":             receipt.Warnings,
+		"memory_health":        health,
+		"rebuild":              bools["rebuild"],
 	}
 	if bools["json"] {
 		writeJSON(out, payload)
 	} else {
-		fmt.Fprintf(out, "scan=%s created=%d updated=%d unchanged=%d removed=%d skipped=%d failed=%d live=%d\n",
-			receipt.ScanID, receipt.Created, receipt.Updated, receipt.Unchanged, receipt.Removed, receipt.Skipped, receipt.Failed, receipt.LiveCount)
+		fmt.Fprintf(out, "scan=%s namespace=%s created=%d updated=%d unchanged=%d removed=%d skipped=%d failed=%d live=%d\n",
+			receipt.ScanID, namespace, receipt.Created, receipt.Updated, receipt.Unchanged, receipt.Removed, receipt.Skipped, receipt.Failed, receipt.LiveCount)
 	}
 	return 0
 }
@@ -234,8 +307,6 @@ func observedForReconcile(cards []ingest.ObservedCard) []ingest.ObservedCard {
 		if card.ExternalID == "" {
 			continue
 		}
-		// Skipped/failed cards that still exist keep their prior live row by
-		// remaining in the completed-scan manifest; they are not live imports.
 		out = append(out, card)
 	}
 	return out

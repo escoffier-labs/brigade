@@ -8,12 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+<<<<<<< HEAD
 - `brigade init` gitignore blocks now un-ignore harness parent directories before the managed handoff `TEMPLATE.md` exception so a parent `.claude/` rule cannot shadow the template; the source repo `.gitignore` matches the same repo-local recovery recipe. (#860)
 
 ### Documentation
 - Quickstart commit guidance now states that `.claude/` stays local-only except the managed `.claude/memory-handoffs/TEMPLATE.md` Claude onboarding requires tracked, cross-linking the repo-local shadow recovery from #858 without changing runtime behavior. (#860)
+=======
+- Issue #846 R2 harness sendback (comment 5247390894): JSON secret-history
+  proves synthetic Git/ignore-path; SQLite marks Git history unavailable;
+  cold-start uses parent `subprocess.run` wall with distinct inner timing;
+  RSS uses one subprocess-child sampling protocol with explicit scope labels.
+- Issue #846 R2 harness sendback: SQLite metrics scans the touched store and
+  restores env overrides; restart/cold-start use a fresh subprocess probe;
+  JSON guards cover `if_status` match and mismatch.
+>>>>>>> origin/main
 
 ### Added
+- Issue #846 R2 residual work-store characterization: extend the R1 harness
+  with observed same-actor/guard/empty-filter, restart, schema coercion,
+  backup/restore, install/cold-start/backup timing, resource, metrics-state,
+  and deleted-secret cells plus diffable
+  `docs/measurements/issue-846-work-store-r2.json`. Characterization only; no
+  backend, listener, or runtime dependency.
 - `brigade update --channel beta` installs the newest non-yanked
   `brigade-cli==0.27.0.devYYYYMMDD` wheel from PyPI into the existing
   user-global pipx environment, migrates prior Git-main-SHA beta state to that
@@ -172,11 +188,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Task Scheduler equivalents instead of silently no-oping; tampered blocks are
   reported and not clobbered without `--adopt`.
 - Worker event stream field classification and fail-closed scrubbed projections
-  for the Codex app-server transport (#592): closed classification matrix,
-  scrubber with adversarial golden fixtures, distinct raw/scrubbed media types
-  and artifact classes, and audit/replay rejection of raw streams unless an
-  explicit local-only policy allows salvage. Legacy raw streams stay locally
-  inspectable and marked unclassified until scrubbed.
+  for the Codex app-server transport (#592): closed scrub/export classification
+  matrix (documented for every known method and item type; raw non-delta capture
+  remains open-ended and is not a recorder allowlist), scrubber with adversarial
+  golden fixtures per matrix item type, distinct raw/scrubbed media types and
+  artifact classes, and audit/replay rejection of raw streams unless an explicit
+  local-only policy allows salvage. Legacy raw streams stay locally inspectable
+  and marked unclassified until scrubbed. First slice keeps legacy backfill and
+  export/archive sidecar wiring out.
 - Work verify plan ranks candidate verification commands from GraphTrail
   affected-test impact (#486): `brigade work verify plan` attaches
   `graph_impact` / `ranked_candidates` with hop-distance confidence and

@@ -12,13 +12,21 @@ The MVP uses one SQLite migration with these concepts:
   columns `target_source_kind` and `target_collection_external_id`
 - `imports` and `import_warnings`: import run metadata
 - `item_tags`: indexed item tags from adapter records
-- `item_metadata`: indexed project, workspace, harness, event type, session, model, and file-path metadata
+- `item_metadata`: indexed project, workspace, harness, event type, session, model, file-path, and provenance scalar metadata
 - `source_scans`: source-file scan manifests for native imports
 - `source_scan_runs` / `source_scan_observed`: memory projection scan receipts and manifests
+- `provenance_events`: append-only trust transition events keyed by item id (schema v4; after #850 ingest_seq v3)
 - `item_fts`: SQLite FTS5 index for item and artifact text
 
 Items may carry `tombstoned_at` for soft removal. Live memory cards are the
-latest non-tombstoned row per external id within `brigade-memory`.
+latest non-tombstoned row per external id within a `brigade-memory` namespace
+collection (`collection.external_id = memory-<uuid4>`), ordered by the
+database-monotonic `items.ingest_seq` (schema v3; `id` is only a tie-break).
+Upgrading a v2 archive deterministically backfills `ingest_seq` from prior
+`updated_at` order (stable `id` fallback) so multi-version cards keep the
+previously live winner before any crawl. Legacy pre-namespace rows may still
+exist under `memory:cards` and are never rebuilt or tombstoned by a namespaced
+crawl.
 
 Raw adapter lines are preserved in `items.raw_json`. Raw source references are stored in `raw_hash`, `raw_path`, and `raw_ordinal`.
 
@@ -26,12 +34,16 @@ The migration lives in `internal/archive/db.go`.
 
 ## Provenance Envelope
 
-New MiseLedger `items` rows will carry a `brigade.provenance-envelope.v1` envelope under `metadata_json.provenance`. Slice 1 ships the typed Go mirror, validator, and legacy read synthesis in `internal/provenance/envelope.go`. Persistence, ingest stamping, and consumer enforcement land in later slices.
+New MiseLedger `items` rows carry a `brigade.provenance-envelope.v1` envelope under `metadata_json.provenance`. Slice 1 ships the typed Go mirror, validator, and legacy read synthesis in `internal/provenance/envelope.go`. Slice 2 persists envelopes at ingest, indexes scalar projections, appends `provenance_events`, and backfills legacy rows via `miseledger doctor provenance backfill`.
 
 ### Location
 
 - MiseLedger: `items.metadata_json.provenance` (embedded sorted-key JSON, no document newline).
 - Go mirror package: `internal/provenance` (`Envelope`, `Validate`, `SynthesizeLegacyProvenance`).
+- Indexed projections in `item_metadata`: `provenance.origin`, `provenance.modality`, `provenance.trust_label`, `provenance.content_scope`, `provenance.content_digest`.
+- Trust transitions: append-only `provenance_events` rows (`brigade.provenance-event.v1`, schema v4) with `ON DELETE CASCADE` so prune and rebuild remain safe.
+- Legacy show: when `metadata.provenance` is absent, `show` synthesizes an unknown envelope and surfaces `provenance_display = UNKNOWN PROVENANCE - legacy item`. When provenance is present but malformed, `show` keeps the raw value and sets `provenance_warning`.
+- Operator backfill: `miseledger doctor provenance backfill [--batch N] [--after ID]` is batched, resumable, and idempotent; inferred rows use `trust.label=unknown`. Structurally valid existing envelopes are preserved even when `hashes.content` is nil or differs (projections only). Malformed provenance is isolated per row with bounded `evidence` and does not abort the batch.
 
 ### Field sets
 

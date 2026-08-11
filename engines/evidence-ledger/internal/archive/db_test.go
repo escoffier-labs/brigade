@@ -111,7 +111,7 @@ func TestMigrateAddsCollectionItemsIndexToExistingArchive(t *testing.T) {
 
 func TestCoreTablesExist(t *testing.T) {
 	db := openMigrated(t)
-	for _, table := range []string{"sources", "collections", "actors", "items", "events", "artifacts", "relations", "imports", "item_fts"} {
+	for _, table := range []string{"sources", "collections", "actors", "items", "events", "artifacts", "relations", "imports", "item_fts", "provenance_events"} {
 		var name string
 		err := db.QueryRow(
 			"select name from sqlite_master where type in ('table','view') and name = ?",
@@ -120,6 +120,110 @@ func TestCoreTablesExist(t *testing.T) {
 		if err != nil {
 			t.Fatalf("table %q not found after migrate: %v", table, err)
 		}
+	}
+}
+
+func TestMigrateCreatesProvenanceEventsOnExistingArchive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miseledger.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("baseline schema: %v", err)
+	}
+	if err := ensureSchemaV2(db); err != nil {
+		t.Fatalf("ensureSchemaV2: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 2"); err != nil {
+		t.Fatalf("set v2: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := Migrate(reopened); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	version, err := UserVersion(reopened)
+	if err != nil {
+		t.Fatalf("UserVersion: %v", err)
+	}
+	if version != SchemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, SchemaVersion)
+	}
+	var name string
+	if err := reopened.QueryRow(`select name from sqlite_master where type = 'table' and name = 'provenance_events'`).Scan(&name); err != nil {
+		t.Fatalf("provenance_events missing after v4 migrate: %v", err)
+	}
+	var ingestSeqCol int
+	if err := reopened.QueryRow(`select count(*) from pragma_table_info('items') where name = 'ingest_seq'`).Scan(&ingestSeqCol); err != nil || ingestSeqCol != 1 {
+		t.Fatalf("ingest_seq column missing after migrate through v3: %v count=%d", err, ingestSeqCol)
+	}
+}
+
+func TestMigrateV3ToV4AddsProvenanceEventsPreservingIngestSeq(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v3.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSchemaV2(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSchemaV3(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 3"); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('src1','legacy','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('col1','src1','legacy:col','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq)
+values('item-v3','src1','col1','legacy:item','message',?,?,?,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','{}',7)`, now, now, "v3 body"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := Migrate(reopened); err != nil {
+		t.Fatalf("migrate v3->v4: %v", err)
+	}
+	version, err := UserVersion(reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 4 {
+		t.Fatalf("user_version=%d want 4", version)
+	}
+	var name string
+	if err := reopened.QueryRow(`select name from sqlite_master where type='table' and name='provenance_events'`).Scan(&name); err != nil {
+		t.Fatalf("provenance_events missing after v3->v4: %v", err)
+	}
+	var seq int64
+	if err := reopened.QueryRow(`select ingest_seq from items where id='item-v3'`).Scan(&seq); err != nil {
+		t.Fatal(err)
+	}
+	if seq != 7 {
+		t.Fatalf("ingest_seq reshuffled across v4 migrate: got %d want 7", seq)
 	}
 }
 
@@ -253,4 +357,174 @@ func TestCheckpointTruncatesWALAndKeepsSidecarsPrivate(t *testing.T) {
 			t.Fatalf("%s perms = %o, want no group/other access", path+suffix, perm)
 		}
 	}
+}
+
+func TestMigrateV2ToV3BackfillsIngestSeqFromUpdatedAt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedPreV3MultiVersionArchive(db); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := Migrate(reopened); err != nil {
+		t.Fatalf("migrate v2 archive: %v", err)
+	}
+	got, err := UserVersion(reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != SchemaVersion {
+		t.Fatalf("user_version=%d want %d", got, SchemaVersion)
+	}
+
+	var olderSeq, newerSeq int64
+	if err := reopened.QueryRow(`select ingest_seq from items where id = ?`, "zzzz-older-content-hash-id").Scan(&olderSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.QueryRow(`select ingest_seq from items where id = ?`, "aaaa-newer-content-hash-id").Scan(&newerSeq); err != nil {
+		t.Fatal(err)
+	}
+	if !(newerSeq > olderSeq && olderSeq > 0) {
+		t.Fatalf("backfill must preserve updated_at order: older=%d newer=%d", olderSeq, newerSeq)
+	}
+
+	// Equal updated_at falls back to id ordering so the pre-v3
+	// `updated_at desc, id desc` winner (lexicographically greater id) keeps
+	// the higher ingest_seq.
+	var equalGreaterID, equalLesserID int64
+	if err := reopened.QueryRow(`select ingest_seq from items where id = ?`, "zzzz-equal-clock-older").Scan(&equalGreaterID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.QueryRow(`select ingest_seq from items where id = ?`, "aaaa-equal-clock-newer").Scan(&equalLesserID); err != nil {
+		t.Fatal(err)
+	}
+	if !(equalGreaterID > equalLesserID) {
+		t.Fatalf("equal updated_at id fallback: greater-id seq=%d lesser-id seq=%d", equalGreaterID, equalLesserID)
+	}
+
+	if err := Migrate(reopened); err != nil {
+		t.Fatalf("idempotent migrate: %v", err)
+	}
+	var newerAgain int64
+	if err := reopened.QueryRow(`select ingest_seq from items where id = ?`, "aaaa-newer-content-hash-id").Scan(&newerAgain); err != nil {
+		t.Fatal(err)
+	}
+	if newerAgain != newerSeq {
+		t.Fatalf("second migrate reshuffled ingest_seq %d -> %d", newerSeq, newerAgain)
+	}
+}
+
+func TestMigrateBackfillsZeroIngestSeqWhenColumnAlreadyPresent(t *testing.T) {
+	// Simulates archives upgraded by the pre-backfill schema v3 (all zeros).
+	db := openMigrated(t)
+	now := "2026-08-10T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)`,
+		"src", "brigade-memory", "Memory", "1.0.0", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)`,
+		"col", "src", "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "memory_cards", "cards", "{}", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq)
+values(?,?,?,?,?,?,?,?,?,?,?,0)`, "zzzz-zero-older", "src", "col", "card-zero", "memory_card", "", "2026-08-10T01:00:00Z", "older", "sha256:older", "{}", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq)
+values(?,?,?,?,?,?,?,?,?,?,?,0)`, "aaaa-zero-newer", "src", "col", "card-zero", "memory_card", "", "2026-08-10T02:00:00Z", "newer", "sha256:newer", "{}", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var olderSeq, newerSeq int64
+	if err := db.QueryRow(`select ingest_seq from items where id = ?`, "zzzz-zero-older").Scan(&olderSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select ingest_seq from items where id = ?`, "aaaa-zero-newer").Scan(&newerSeq); err != nil {
+		t.Fatal(err)
+	}
+	if !(newerSeq > olderSeq && olderSeq > 0) {
+		t.Fatalf("zero-column repair backfill failed older=%d newer=%d", olderSeq, newerSeq)
+	}
+}
+
+// seedPreV3MultiVersionArchive builds a schema-v2 shaped archive (no ingest_seq)
+// with multi-version memory cards whose pre-v3 live winner is the later updated_at
+// row (and, for equal clocks, the lexicographically greater id).
+func seedPreV3MultiVersionArchive(db *sql.DB) error {
+	stmts := []string{
+		`create table sources(
+  id text primary key, kind text not null, name text, version text,
+  created_at text not null, updated_at text not null)`,
+		`create table collections(
+  id text primary key, source_id text not null references sources(id),
+  external_id text not null, kind text not null, name text,
+  metadata_json text not null default '{}', created_at text, updated_at text,
+  unique(source_id, external_id))`,
+		`create table items(
+  id text primary key, source_id text not null references sources(id),
+  collection_id text not null references collections(id),
+  actor_id text, external_id text not null, kind text not null,
+  created_at text, updated_at text, text text, summary text,
+  content_hash text not null, raw_json text not null, raw_hash text,
+  raw_path text, raw_ordinal integer, metadata_json text not null default '{}',
+  unique(source_id, collection_id, external_id, content_hash))`,
+		`create table relations(
+  id text primary key, source_item_id text not null, target_item_id text,
+  target_external_id text, relation_type text not null,
+  confidence real not null default 1.0, metadata_json text not null default '{}')`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	if err := ensureSchemaV2(db); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		return err
+	}
+	now := "2026-08-10T00:00:00Z"
+	ns := "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)`,
+		"src-memory", "brigade-memory", "Memory", "1.0.0", now, now); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)`,
+		"col-memory", "src-memory", ns, "memory_cards", "cards", "{}", now, now); err != nil {
+		return err
+	}
+	rows := []struct {
+		id, updated, text, hash string
+	}{
+		{"zzzz-older-content-hash-id", "2026-08-10T01:00:00Z", "older", "sha256:older"},
+		{"aaaa-newer-content-hash-id", "2026-08-10T02:00:00Z", "newer", "sha256:newer"},
+		{"zzzz-equal-clock-older", "2026-08-10T03:00:00Z", "equal-older", "sha256:equal-older"},
+		{"aaaa-equal-clock-newer", "2026-08-10T03:00:00Z", "equal-newer", "sha256:equal-newer"},
+	}
+	for i, row := range rows {
+		ext := "card-order"
+		if i >= 2 {
+			ext = "card-equal"
+		}
+		if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?)`, row.id, "src-memory", "col-memory", ext, "memory_card", "", row.updated, row.text, row.hash, "{}", "{}"); err != nil {
+			return err
+		}
+	}
+	return nil
 }

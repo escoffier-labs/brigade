@@ -211,6 +211,586 @@
       "source_digest": "2e039f1e09b76ea65dccd2b08c1c09edb091c408d7c431d8936482d0309f272f"
     },
     {
+      "name": "item_completed_agentMessage_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "agentMessage-1",
+            "phase": "final_answer",
+            "text": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "type": "agentMessage"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "agentMessage-1",
+            "phase": "final_answer",
+            "type": "agentMessage"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "3a5a67cd65ec66d6c6e2d45f712d0be9c0a46b07b3873ca89eae414f97d0fa65",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "3a5a67cd65ec66d6c6e2d45f712d0be9c0a46b07b3873ca89eae414f97d0fa65"
+    },
+    {
+      "name": "item_completed_collabToolCall_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "agentStatus": "safe-agentStatus",
+            "id": "collabToolCall-1",
+            "newThreadId": "safe-newThreadId",
+            "prompt": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "receiverThreadId": "safe-receiverThreadId",
+            "senderThreadId": "safe-senderThreadId",
+            "status": "completed",
+            "tool": "safe-tool",
+            "type": "collabToolCall"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "agentStatus": "safe-agentStatus",
+            "id": "collabToolCall-1",
+            "newThreadId": "safe-newThreadId",
+            "receiverThreadId": "safe-receiverThreadId",
+            "senderThreadId": "safe-senderThreadId",
+            "status": "completed",
+            "tool": "safe-tool",
+            "type": "collabToolCall"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "bb3ac89ced7f9d3cd9d324c5cf56fe5fe5928ad11491501727dc8ac424236449",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "bb3ac89ced7f9d3cd9d324c5cf56fe5fe5928ad11491501727dc8ac424236449"
+    },
+    {
+      "name": "item_completed_commandExecution_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "aggregatedOutput": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "command": "curl https://example.invalid -H 'Authorization: Bearer sk-live-EXAMPLESECRETVALUE99'",
+            "commandActions": {
+              "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+              "path": "/home/example-user/project",
+              "secret": "sk-live-EXAMPLESECRETVALUE99"
+            },
+            "cwd": "/home/example-user/project",
+            "durationMs": 12,
+            "exitCode": 0,
+            "id": "commandExecution-1",
+            "status": "completed",
+            "type": "commandExecution"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "durationMs": 12,
+            "exitCode": 0,
+            "id": "commandExecution-1",
+            "status": "completed",
+            "type": "commandExecution"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "7b440e4d12693dd3bb0088f8def70069687962fc343963a02d0dbbb4bbbfdfac",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "7b440e4d12693dd3bb0088f8def70069687962fc343963a02d0dbbb4bbbfdfac"
+    },
+    {
+      "name": "item_completed_contextCompaction_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "contextCompaction-1",
+            "type": "contextCompaction"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "contextCompaction-1",
+            "type": "contextCompaction"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "bc6dec2a5b9fba4250726478598be2e29ba1f218f0ff74735fcf94369c8aa039",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "bc6dec2a5b9fba4250726478598be2e29ba1f218f0ff74735fcf94369c8aa039"
+    },
+    {
+      "name": "item_completed_dynamicToolCall_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "arguments": {
+              "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+              "path": "/home/example-user/project",
+              "secret": "sk-live-EXAMPLESECRETVALUE99"
+            },
+            "contentItems": {
+              "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+              "path": "/home/example-user/project",
+              "secret": "sk-live-EXAMPLESECRETVALUE99"
+            },
+            "durationMs": 12,
+            "id": "dynamicToolCall-1",
+            "status": "completed",
+            "success": true,
+            "tool": "safe-tool",
+            "type": "dynamicToolCall"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "durationMs": 12,
+            "id": "dynamicToolCall-1",
+            "status": "completed",
+            "success": true,
+            "tool": "safe-tool",
+            "type": "dynamicToolCall"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "68d4d4e2b2c346f616b9d6150cc5bb5748f45199d4bfb6034dfac3d800a2e65a",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "68d4d4e2b2c346f616b9d6150cc5bb5748f45199d4bfb6034dfac3d800a2e65a"
+    },
+    {
+      "name": "item_completed_enteredReviewMode_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "enteredReviewMode-1",
+            "review": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "type": "enteredReviewMode"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "enteredReviewMode-1",
+            "type": "enteredReviewMode"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "62b6796e93235e249345189e4a83d08abaae92087ca09f05291b9b07826ece3e",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "62b6796e93235e249345189e4a83d08abaae92087ca09f05291b9b07826ece3e"
+    },
+    {
+      "name": "item_completed_exitedReviewMode_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "exitedReviewMode-1",
+            "review": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "type": "exitedReviewMode"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "exitedReviewMode-1",
+            "type": "exitedReviewMode"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "a883135a0dcd3fabdd85d2c3576716985381242b235b322416b0031c4a46a2c8",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "a883135a0dcd3fabdd85d2c3576716985381242b235b322416b0031c4a46a2c8"
+    },
+    {
+      "name": "item_completed_fileChange_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "changes": {
+              "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+              "path": "/home/example-user/project",
+              "secret": "sk-live-EXAMPLESECRETVALUE99"
+            },
+            "id": "fileChange-1",
+            "status": "completed",
+            "type": "fileChange"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "fileChange-1",
+            "status": "completed",
+            "type": "fileChange"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "9db5214db848d6421146dcd11d2afcfe1b2bddb500db8d1b83216fad26416346",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "9db5214db848d6421146dcd11d2afcfe1b2bddb500db8d1b83216fad26416346"
+    },
+    {
+      "name": "item_completed_imageView_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "imageView-1",
+            "path": "/home/example-user/project/.ssh/id_rsa",
+            "type": "imageView"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "imageView-1",
+            "type": "imageView"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "44139890ae435c09c9623451c25329041065dcde83a10473032d69a1d91c937b",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "44139890ae435c09c9623451c25329041065dcde83a10473032d69a1d91c937b"
+    },
+    {
+      "name": "item_completed_mcpToolCall_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "appContext": {
+              "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+              "path": "/home/example-user/project",
+              "secret": "sk-live-EXAMPLESECRETVALUE99"
+            },
+            "arguments": {
+              "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+              "path": "/home/example-user/project",
+              "secret": "sk-live-EXAMPLESECRETVALUE99"
+            },
+            "error": {
+              "body": "provider dump with Cookie: session=abc",
+              "message": "upstream 401 Authorization: Bearer sk-live-EXAMPLESECRETVALUE99"
+            },
+            "id": "mcpToolCall-1",
+            "mcpAppResourceUri": "/home/example-user/project",
+            "pluginId": "safe-pluginId",
+            "result": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "server": "safe-server",
+            "status": "completed",
+            "tool": "safe-tool",
+            "type": "mcpToolCall"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "mcpToolCall-1",
+            "pluginId": "safe-pluginId",
+            "server": "safe-server",
+            "status": "completed",
+            "tool": "safe-tool",
+            "type": "mcpToolCall"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "236022a2bf95fe15566a37e4c3e2352fa59ff6e0ab806f4ecb919706b260108d",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "236022a2bf95fe15566a37e4c3e2352fa59ff6e0ab806f4ecb919706b260108d"
+    },
+    {
+      "name": "item_completed_plan_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "plan-1",
+            "text": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "type": "plan"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "plan-1",
+            "type": "plan"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "86f16834161141d84a3d80d7c844c0e9723a1daec7b435c91788ed8a19b4e860",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "86f16834161141d84a3d80d7c844c0e9723a1daec7b435c91788ed8a19b4e860"
+    },
+    {
+      "name": "item_completed_reasoning_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "content": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "id": "reasoning-1",
+            "summary": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "type": "reasoning"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "reasoning-1",
+            "type": "reasoning"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "b901db23e7c7b25cc000c8c05047c0deb6952d5800e672145782bdb7ac1ae663",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "b901db23e7c7b25cc000c8c05047c0deb6952d5800e672145782bdb7ac1ae663"
+    },
+    {
+      "name": "item_completed_userMessage_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "clientId": "safe-clientId",
+            "content": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "id": "userMessage-1",
+            "type": "userMessage"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "clientId": "safe-clientId",
+            "id": "userMessage-1",
+            "type": "userMessage"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "947009e139c8978b49342fa14db30ea1537998bd85c2f97d82279cc0f8edd1f2",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "947009e139c8978b49342fa14db30ea1537998bd85c2f97d82279cc0f8edd1f2"
+    },
+    {
+      "name": "item_completed_webSearch_adversarial",
+      "raw": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "action": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "id": "webSearch-1",
+            "query": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "type": "webSearch"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        }
+      },
+      "scrubbed": {
+        "classification_status": "scrubbed",
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 42,
+          "item": {
+            "id": "webSearch-1",
+            "type": "webSearch"
+          },
+          "threadId": "thread-demo-1",
+          "turnId": "turn-1"
+        },
+        "schema": "brigade.worker_event_scrubbed.v1",
+        "schema_version": 1,
+        "source_digest": "37be10e11f88d2dbd615ae060cfa6d0e746bb4f1b8640a497746a36f5abdf431",
+        "transport": "codex-app-server"
+      },
+      "source_digest": "37be10e11f88d2dbd615ae060cfa6d0e746bb4f1b8640a497746a36f5abdf431"
+    },
+    {
       "expect_diagnostic_substring": null,
       "expect_error_category": "unknown-method",
       "name": "unknown_method_fails_closed",

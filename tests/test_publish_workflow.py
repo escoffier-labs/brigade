@@ -375,6 +375,25 @@ def test_prepare_dev_wheel_rejects_non_dev_versions(tmp_path, version):
         prepare_dev_wheel(tmp_path, version)
 
 
+def test_published_artifact_acceptance_unix_step_passes_github_token_from_github_token():
+    """Workflow contract: the Unix acceptance step must wire github.token into GITHUB_TOKEN.
+
+    published-artifact-acceptance.py only attaches Authorization when GITHUB_TOKEN is
+    set; github.token is not a default runner environment variable (issue #819).
+    """
+    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    section = text[
+        text.index("      - name: Run published artifact acceptance (Unix)") : text.index(
+            "      - name: Run Windows native acceptance (published CLI)"
+        )
+    ]
+
+    assert "if: matrix.kind == 'unix'" in section
+    assert "BRIGADE_VERSION: ${{ github.ref_name }}" in section
+    assert "GITHUB_TOKEN: ${{ github.token }}" in section
+    assert "scripts/published-artifact-acceptance.py" in section
+
+
 def test_publish_workflow_verifies_version_check_endpoint_after_pypi_upload():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     publish = text.index("      - name: Publish to PyPI")

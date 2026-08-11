@@ -4,6 +4,10 @@ import json
 import os
 import stat
 import subprocess
+import threading
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -126,6 +130,189 @@ def test_command_failure_preserves_installer_or_asset_error(acceptance_module):
 
     with pytest.raises(acceptance_module.AcceptanceError, match="missing asset: digest mismatch"):
         acceptance_module.run_checked(["pipx", "install", "brigade-cli==1.2.3"], runner=failing_runner)
+
+
+def test_github_request_headers_attach_bearer_token_when_present(acceptance_module, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghs_example_token_value")
+    headers = acceptance_module._github_request_headers()
+    assert headers["Authorization"] == "Bearer ghs_example_token_value"
+    assert headers["Accept"] == "application/vnd.github+json"
+    assert headers["User-Agent"] == acceptance_module.USER_AGENT
+
+
+def test_github_api_redirect_handler_blocks_cross_origin_targets(acceptance_module):
+    handler = acceptance_module._GithubApiRedirectHandler()
+    request = urllib.request.Request(
+        f"https://{acceptance_module.GITHUB_API_HOST}/repos/escoffier-labs/brigade/releases/tags/v1.2.3",
+        headers={"Authorization": "Bearer ghs_example_token_value"},
+    )
+
+    assert handler.redirect_request(request, None, 302, "Found", {}, "https://evil.example/steal") is None
+    assert (
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            f"http://{acceptance_module.GITHUB_API_HOST}/repos/escoffier-labs/brigade/releases/tags/v1.2.3",
+        )
+        is None
+    )
+
+
+def test_github_api_opener_does_not_forward_authorization_on_cross_origin_redirect(acceptance_module):
+    stolen_auth: list[str | None] = []
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/redirect":
+                port = self.server.server_address[1]
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{port}/steal")
+                self.end_headers()
+                return
+            if self.path == "/steal":
+                stolen_auth.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        opener = acceptance_module._github_api_opener()
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}/redirect",
+            headers={"Authorization": "Bearer ghs_example_token_value"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            opener.open(request, timeout=2)
+        assert excinfo.value.code == 302
+        assert stolen_auth == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_wait_for_github_release_tag_returns_immediately_when_release_is_visible(acceptance_module):
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        return 200, {"tag_name": "v1.2.3", "draft": False, "prerelease": False}
+
+    payload = acceptance_module.wait_for_github_release_tag(
+        "1.2.3",
+        fetch=fetch,
+        sleep=lambda _: pytest.fail("visible release should not sleep"),
+    )
+
+    assert payload["tag_name"] == "v1.2.3"
+    assert calls == [
+        "https://api.github.com/repos/escoffier-labs/brigade/releases/tags/v1.2.3",
+    ]
+
+
+def test_wait_for_github_release_tag_retries_transient_403_then_succeeds(acceptance_module):
+    sleeps = []
+    responses = iter(
+        (
+            (403, {"message": "rate limit"}),
+            (403, {"message": "abuse detection"}),
+            (200, {"tag_name": "v1.2.3", "draft": False, "prerelease": False}),
+        )
+    )
+
+    acceptance_module.wait_for_github_release_tag(
+        "1.2.3",
+        fetch=lambda _: next(responses),
+        sleep=lambda seconds: sleeps.append(seconds),
+        max_attempts=3,
+        initial_backoff_seconds=2,
+        max_backoff_seconds=8,
+    )
+
+    assert sleeps == [2, 4]
+
+
+def test_wait_for_github_release_tag_retries_429_with_bounded_backoff(acceptance_module):
+    sleeps = []
+    responses = iter(
+        (
+            (429, {"message": "rate limit"}),
+            (200, {"tag_name": "v1.2.3", "draft": False, "prerelease": False}),
+        )
+    )
+
+    acceptance_module.wait_for_github_release_tag(
+        "1.2.3",
+        fetch=lambda _: next(responses),
+        sleep=lambda seconds: sleeps.append(seconds),
+        max_attempts=2,
+        initial_backoff_seconds=3,
+        max_backoff_seconds=3,
+    )
+
+    assert sleeps == [3]
+
+
+def test_wait_for_github_release_tag_fails_after_max_attempts_on_persistent_403(acceptance_module):
+    sleeps = []
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="not available after 3 attempts"):
+        acceptance_module.wait_for_github_release_tag(
+            "1.2.3",
+            fetch=lambda _: (403, {"message": "rate limit"}),
+            sleep=lambda seconds: sleeps.append(seconds),
+            max_attempts=3,
+            initial_backoff_seconds=1,
+            max_backoff_seconds=4,
+        )
+
+    assert sleeps == [1, 2]
+
+
+def test_wait_for_github_release_tag_does_not_retry_permanent_404(acceptance_module):
+    with pytest.raises(acceptance_module.AcceptanceError, match="HTTP 404"):
+        acceptance_module.wait_for_github_release_tag(
+            "1.2.3",
+            fetch=lambda _: (404, {"message": "Not Found"}),
+            sleep=lambda _: pytest.fail("permanent HTTP errors should not sleep"),
+            max_attempts=3,
+        )
+
+
+def test_wait_for_github_release_tag_rejects_tag_name_mismatch(acceptance_module):
+    with pytest.raises(acceptance_module.AcceptanceError, match="did not report tag"):
+        acceptance_module.wait_for_github_release_tag(
+            "1.2.3",
+            fetch=lambda _: (200, {"tag_name": "v9.9.9", "draft": False, "prerelease": False}),
+            sleep=lambda _: pytest.fail("tag mismatch should not sleep"),
+        )
+
+
+def test_wait_for_github_release_tag_error_messages_never_include_token(acceptance_module, monkeypatch):
+    secret = "ghs_super_secret_example_token"
+    monkeypatch.setenv("GITHUB_TOKEN", secret)
+
+    with pytest.raises(acceptance_module.AcceptanceError) as excinfo:
+        acceptance_module.wait_for_github_release_tag(
+            "1.2.3",
+            fetch=lambda _: (403, {"message": "rate limit"}),
+            sleep=lambda _: None,
+            max_attempts=1,
+        )
+
+    assert secret not in str(excinfo.value)
 
 
 def test_wait_for_pypi_version_returns_when_exact_version_is_immediately_available(acceptance_module):
@@ -612,7 +799,9 @@ def test_run_acceptance_proves_go_unavailable_immediately_before_setup_and_smoke
     that excludes Go."""
     source = SCRIPT.read_text()
     run_acceptance_body = source[source.index("def run_acceptance(") :]
-    setup_call = run_acceptance_body.index('run_checked([managed_brigade, "setup"], runner=runner, env=env)')
+    setup_call = run_acceptance_body.index(
+        'run_checked(\n                [managed_brigade, "setup", "--manifest", str(manifest_path)],'
+    )
     smoke_call = run_acceptance_body.index(
         "smoke_managed_components(managed_paths, version=version, runner=runner, env=env)"
     )
@@ -632,3 +821,12 @@ def test_run_acceptance_proves_go_unavailable_immediately_before_setup_and_smoke
     assert "smoke_managed_components" not in between_smoke
     # The PATH used in run_acceptance is built through build_go_free_path so Go is excluded.
     assert "build_go_free_path(" in run_acceptance_body
+    assert "wait_for_github_release_tag(version)" in run_acceptance_body
+    assert (
+        'run_checked(\n                [managed_brigade, "setup", "--manifest", str(manifest_path)],'
+        in run_acceptance_body
+    )
+    assert (
+        'run_checked(\n                [managed_brigade, "setup", "--offline", "--manifest", str(manifest_path)],'
+        in run_acceptance_body
+    )

@@ -104,6 +104,8 @@ selection and rollback rules, and when to use `brigade update` are in
 
 Per-OS setup (apt, Homebrew, Scoop, PowerShell), workspace depth, and multi-harness installs: [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), [first 10 minutes](docs/first-10-minutes.md). Homegrown setup already? `brigade operator adopt plan`.
 
+**Contributing?** See [Your first PR](CONTRIBUTING.md#your-first-pr) in [CONTRIBUTING.md](CONTRIBUTING.md) for starter issues, the 48-hour claim convention, and local verification ([Local dev](CONTRIBUTING.md#local-dev): content-guard scan for docs-only changes; `./scripts/verify` for code).
+
 ## Auditable agents: every action leaves a receipt
 
 An agent that reports "tests pass, nothing else changed" is making a claim. Brigade turns the claim into a record. Run any check through Brigade and it writes a receipt: the command, the real exit code, the graph delta, the git state.
