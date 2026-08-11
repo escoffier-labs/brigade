@@ -57,6 +57,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_export_plan.add_argument("--write", action="store_true", help="Write plan under .brigade/evidence/plans/.")
     p_export_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    # Inert F2 hook: projection-only rebuild + identity audit register later.
+    from .. import evidence_runtime
+
+    evidence_runtime.register_memory_facade_extensions(evidence_sub)
+
     p_evidence.set_defaults(func=dispatch)
 
 

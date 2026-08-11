@@ -208,3 +208,206 @@ def test_check_compatibility_override_drift_does_not_downgrade_version_fail(monk
 
     assert compat.state == "fail"
     assert "version below floor" in compat.detail
+
+
+# ---- memory projection (#844 F1) -------------------------------------------
+
+
+def _miseledger_memory_script(
+    *,
+    version: str = "0.6.0",
+    capability: str | None = "memory-projection.v1",
+    doctor_exit: int = 0,
+    database_ok: bool = True,
+    malformed: bool = False,
+    memory_health: str | None = None,
+) -> str:
+    cap_json = "null" if capability is None else f'"{capability}"'
+    db_ok = "true" if database_ok else "false"
+    health = memory_health or (
+        '{"capability":"memory-projection.v1","engine_version":"%s","status":"absent",'
+        '"last_completed_scan_id":"","canonical_count":0,"live_count":0,'
+        '"hash_divergence":0,"unresolved_relations":0,"malformed_skipped":0,'
+        '"stale":false,"partial":false}' % version
+    )
+    if malformed:
+        doctor_body = 'echo "not-json"; exit 0'
+    else:
+        doctor_body = (
+            f'echo \'{{"ok":{db_ok},"engine_version":"{version}",'
+            f'"capability":{{"engine_version":"{version}","memory":{cap_json}}},'
+            f'"memory_health":{health},'
+            f'"checks":[{{"name":"database","ok":{db_ok},"detail":"db"}}]}}\'; '
+            f"exit {doctor_exit}"
+        )
+    return (
+        f'if [ "$1" = "version" ]; then echo "miseledger {version}"; exit 0; fi\n'
+        f'if [ "$1" = "doctor" ] && [ "$2" = "--json" ]; then {doctor_body}; fi\n'
+        "exit 1\n"
+    )
+
+
+def test_memory_probe_ok(monkeypatch, tmp_path):
+    bin_dir = _make_bin(tmp_path)
+    binary = _write_script(bin_dir / "miseledger", _miseledger_memory_script())
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+
+    probe = evidence_runtime.probe_memory_projection(str(binary))
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert probe.capability == evidence_runtime.MEMORY_PROJECTION_CAPABILITY
+    assert probe.archive_ok is True
+    assert compat.state in {"ok", "warn"}
+
+
+def test_memory_probe_missing_binary():
+    probe = evidence_runtime.probe_memory_projection(None)
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert compat.state == "fail"
+    assert "not found" in compat.detail.lower() or "setup" in compat.detail.lower()
+
+
+def test_memory_probe_absent_capability(monkeypatch, tmp_path):
+    bin_dir = _make_bin(tmp_path)
+    binary = _write_script(bin_dir / "miseledger", _miseledger_memory_script(capability=None))
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+
+    probe = evidence_runtime.probe_memory_projection(str(binary))
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert compat.state == "fail"
+    assert "absent capability" in compat.detail or evidence_runtime.MEMORY_PROJECTION_CAPABILITY in compat.detail
+
+
+def test_memory_probe_future_capability(monkeypatch, tmp_path):
+    bin_dir = _make_bin(tmp_path)
+    binary = _write_script(
+        bin_dir / "miseledger",
+        _miseledger_memory_script(capability="memory-projection.v2"),
+    )
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+
+    probe = evidence_runtime.probe_memory_projection(str(binary))
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert compat.state == "fail"
+    assert "incompatible capability" in compat.detail
+
+
+def test_memory_probe_version_below_floor(monkeypatch, tmp_path):
+    bin_dir = _make_bin(tmp_path)
+    binary = _write_script(bin_dir / "miseledger", _miseledger_memory_script(version="0.5.0"))
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+
+    probe = evidence_runtime.probe_memory_projection(str(binary))
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert compat.state == "fail"
+    assert "version below floor" in compat.detail
+
+
+def test_memory_probe_unreadable_archive(monkeypatch, tmp_path):
+    bin_dir = _make_bin(tmp_path)
+    binary = _write_script(
+        bin_dir / "miseledger",
+        _miseledger_memory_script(database_ok=False, doctor_exit=1),
+    )
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+
+    probe = evidence_runtime.probe_memory_projection(str(binary))
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert compat.state == "fail"
+    assert "archive unreadable" in compat.detail
+
+
+def test_memory_probe_malformed(monkeypatch, tmp_path):
+    bin_dir = _make_bin(tmp_path)
+    binary = _write_script(bin_dir / "miseledger", _miseledger_memory_script(malformed=True))
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+
+    probe = evidence_runtime.probe_memory_projection(str(binary))
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert compat.state == "fail"
+    assert "malformed" in compat.detail
+
+
+def test_memory_projection_healthy_requires_failed_zero():
+    assert evidence_runtime.memory_projection_is_healthy(
+        capability="memory-projection.v1",
+        status="completed",
+        stale=False,
+        partial=False,
+        failed=0,
+        engine_ok=True,
+    )
+    assert not evidence_runtime.memory_projection_is_healthy(
+        capability="memory-projection.v1",
+        status="completed",
+        stale=False,
+        partial=False,
+        failed=1,
+        engine_ok=True,
+    )
+    assert not evidence_runtime.memory_projection_is_healthy(
+        capability="memory-projection.v1",
+        status="completed",
+        stale=True,
+        partial=False,
+        failed=0,
+        engine_ok=True,
+    )
+
+
+def test_classify_memory_crawl_status_partial_and_counts():
+    receipt = {
+        "capability": "memory-projection.v1",
+        "status": "completed",
+        "stale": False,
+        "partial": False,
+        "failed": 2,
+        "scan_id": "scan-1",
+        "created": 1,
+        "updated": 2,
+        "unchanged": 3,
+        "removed": 4,
+        "skipped": 5,
+    }
+    assert evidence_runtime.classify_memory_crawl_status(exit_code=0, receipt=receipt) == "partial"
+    counts = evidence_runtime.extract_memory_crawl_counts(receipt)
+    assert counts == {
+        "scan_id": "scan-1",
+        "created": 1,
+        "updated": 2,
+        "unchanged": 3,
+        "removed": 4,
+        "skipped": 5,
+        "failed": 2,
+    }
+
+
+def test_body_free_memory_health_strips_bodies():
+    raw = {
+        "capability": "memory-projection.v1",
+        "engine_version": "0.6.0",
+        "status": "completed",
+        "text": "SECRET CARD BODY",
+        "raw": {"path": "memory/cards/x.md", "body": "nope"},
+        "canonical_count": 3,
+    }
+    cleaned = evidence_runtime.body_free_memory_health(raw)
+    assert cleaned is not None
+    assert "text" not in cleaned
+    assert "raw" not in cleaned
+    assert cleaned["canonical_count"] == 3
+
+
+def test_register_memory_facade_extensions_is_inert():
+    assert evidence_runtime.register_memory_facade_extensions(None) is None
+
+
+def test_known_sources_excludes_memory():
+    assert "memory" not in evidence_runtime.known_sources()
+    assert "discord" in evidence_runtime.known_sources()

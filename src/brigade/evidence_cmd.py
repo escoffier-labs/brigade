@@ -69,9 +69,10 @@ def _write_last_run(
     started_at: str,
     finished_at: str,
     detail: str,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     _last_run_dir(target).mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         "status": status,
         "exit_code": exit_code,
         "crawler_version": crawler_version,
@@ -80,6 +81,14 @@ def _write_last_run(
         "finished_at": finished_at,
         "detail": detail,
     }
+    if extra:
+        for key, value in extra.items():
+            if key == "status":
+                # Engine scan status is recorded separately; last-run status stays
+                # the Brigade classification (ok|partial|fail).
+                payload["scan_status"] = value
+                continue
+            payload[key] = value
     _last_run_path(target, source).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
@@ -87,6 +96,7 @@ _HEALTH_RANK = {
     "ok": 0,
     "warn": 1,
     "incomplete": 2,
+    "partial": 2,
     "unwired": 3,
     "timeout": 4,
     "missing": 5,
@@ -153,6 +163,117 @@ def _enrich_crawler_health(payload: dict[str, Any], target: Path) -> dict[str, A
             payload["health"] = worst_health
             if worst_health == "fail":
                 payload["summary"] = f"crawler unhealthy; {payload['summary']}"
+    return _enrich_memory_projection_health(payload, target)
+
+
+def _memory_health_from_engine_payloads(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Pull body-free memory health from embedded status/doctor JSON."""
+
+    for section in ("doctor", "status"):
+        block = payload.get(section) or {}
+        if not isinstance(block, dict):
+            continue
+        stdout = block.get("stdout_json")
+        if not isinstance(stdout, dict):
+            continue
+        for key in ("memory_health", "memory"):
+            health = evidence_runtime.body_free_memory_health(
+                stdout.get(key) if isinstance(stdout.get(key), dict) else None
+            )
+            if health:
+                return health
+        # Capability advertisement without a prior scan.
+        capability_block = stdout.get("capability")
+        if isinstance(capability_block, dict) and isinstance(capability_block.get("memory"), str):
+            return evidence_runtime.body_free_memory_health(
+                {
+                    "capability": capability_block.get("memory"),
+                    "engine_version": capability_block.get("engine_version") or stdout.get("engine_version"),
+                    "status": "absent",
+                }
+            )
+    return None
+
+
+def _enrich_memory_projection_health(payload: dict[str, Any], target: Path) -> dict[str, Any]:
+    """Surface body-free memory projection health for doctor/status."""
+
+    last_run = _read_last_run(target, evidence_runtime.MEMORY_SOURCE)
+    engine_health = _memory_health_from_engine_payloads(payload)
+    # Prefer last-run receipt fields when present so a partial crawl cannot be
+    # masked by a stale healthy engine snapshot.
+    merged: dict[str, Any] = {}
+    if engine_health:
+        merged.update(engine_health)
+    if isinstance(last_run, dict):
+        for key in evidence_runtime.MEMORY_HEALTH_SAFE_KEYS:
+            if key in last_run and last_run[key] is not None:
+                merged[key] = last_run[key]
+        if isinstance(last_run.get("scan_status"), str):
+            merged["status"] = last_run["scan_status"]
+        if "failed" in last_run:
+            merged["failed"] = last_run.get("failed")
+        if last_run.get("scan_id"):
+            merged["last_scan_id"] = last_run.get("scan_id")
+        merged["latest_run_status"] = last_run.get("status")
+
+    if not merged and last_run is None:
+        return payload
+
+    capability = merged.get("capability")
+    if not isinstance(capability, str):
+        capability = None
+    status = merged.get("status") if isinstance(merged.get("status"), str) else None
+    stale = merged.get("stale") if isinstance(merged.get("stale"), bool) else None
+    partial = merged.get("partial") if isinstance(merged.get("partial"), bool) else None
+    failed_raw = merged.get("failed")
+    failed = int(failed_raw) if isinstance(failed_raw, int) else None
+    latest = last_run.get("status") if isinstance(last_run, dict) else None
+    engine_ok = payload.get("health") not in ("missing", "fail", "timeout", "incomplete", "unwired")
+    if latest in ("fail", "partial"):
+        engine_ok = False
+    healthy = evidence_runtime.memory_projection_is_healthy(
+        capability=capability,
+        status=status,
+        stale=stale,
+        partial=partial,
+        failed=failed if failed is not None else (0 if status == "completed" and latest == "ok" else None),
+        engine_ok=engine_ok and latest != "fail",
+    )
+    # A failed/partial last-run or missing required capability is never healthy.
+    if latest in ("fail", "partial"):
+        healthy = False
+    if capability and capability != evidence_runtime.MEMORY_PROJECTION_CAPABILITY:
+        healthy = False
+
+    block = {
+        "capability": capability,
+        "engine_version": merged.get("engine_version"),
+        "last_completed_scan_id": merged.get("last_completed_scan_id"),
+        "canonical_count": merged.get("canonical_count"),
+        "live_count": merged.get("live_count"),
+        "hash_divergence": merged.get("hash_divergence"),
+        "unresolved_relations": merged.get("unresolved_relations"),
+        "malformed_skipped": merged.get("malformed_skipped"),
+        "stale": stale,
+        "partial": partial,
+        "status": status,
+        "failed": failed,
+        "healthy": healthy,
+        "latest_run": last_run,
+    }
+    payload["memory_projection"] = block
+
+    # Absent (never crawled) is informational only. Failed/partial last-runs and
+    # non-absent unhealthy engine health must surface on the station health.
+    should_affect_overall = last_run is not None or (status is not None and status != "absent")
+    if not healthy and merged and should_affect_overall:
+        projected = "fail" if latest == "fail" or (isinstance(failed, int) and failed > 0) else "incomplete"
+        if latest == "partial":
+            projected = "incomplete"
+        if _health_rank(projected) > _health_rank(payload.get("health")):
+            payload["health"] = projected
+            payload["summary"] = f"memory projection unhealthy; {payload.get('summary')}"
     return payload
 
 
@@ -208,6 +329,144 @@ def _run_miseledger(verb: str, arguments: list[str], *, env: dict[str, str] | No
     return result.code
 
 
+def _run_memory_crawl(
+    arguments: list[str],
+    *,
+    env: dict[str, str],
+    started_at: str,
+) -> int:
+    """Preflight MiseLedger memory projection, then delegate crawl storage."""
+
+    if len(arguments) < 2:
+        print(
+            "error: usage: brigade evidence crawl memory <workspace> [--json] [--dry-run] [--limit N]",
+            file=sys.stderr,
+        )
+        return 2
+
+    workspace = Path(arguments[1]).expanduser().resolve()
+    rest = list(arguments[2:])
+    target = workspace
+    binary = evidence_brief._miseledger_bin()
+    probe = evidence_runtime.probe_memory_projection(binary, env=env)
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+    if compat.state == "fail":
+        detail = compat.detail
+        print(f"error: evidence crawl refused for memory: {detail}", file=sys.stderr)
+        _write_last_run(
+            target=target,
+            source=evidence_runtime.MEMORY_SOURCE,
+            status="fail",
+            exit_code=1,
+            crawler_version=compat.version,
+            database=compat.database,
+            started_at=started_at,
+            finished_at=_now(),
+            detail=detail,
+            extra={
+                "capability": probe.capability,
+                "engine_version": probe.engine_version or probe.version,
+                "required_capability": evidence_runtime.MEMORY_PROJECTION_CAPABILITY,
+                "preflight": "refused",
+            },
+        )
+        return 1
+
+    # Ensure JSON receipt for pass-through counts; still honor caller --json.
+    want_json = "--json" in rest
+    crawl_args = ["memory", str(workspace), *rest]
+    if not want_json:
+        crawl_args.append("--json")
+
+    result = _run_miseledger_result("crawl", crawl_args, env=env)
+    receipt: dict[str, Any] | None = None
+    parsed = result.json()
+    if isinstance(parsed, dict):
+        receipt = parsed
+    counts = (
+        evidence_runtime.extract_memory_crawl_counts(receipt)
+        if receipt
+        else {
+            "scan_id": None,
+            "created": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "removed": 0,
+            "skipped": 0,
+            "failed": 0,
+        }
+    )
+    run_status = evidence_runtime.classify_memory_crawl_status(exit_code=result.code, receipt=receipt)
+    health = evidence_runtime.body_free_memory_health(
+        receipt.get("memory_health") if isinstance(receipt, dict) else None
+    )
+    extra: dict[str, Any] = {
+        "capability": (receipt or {}).get("capability") or probe.capability,
+        "engine_version": (receipt or {}).get("engine_version") or probe.engine_version or probe.version,
+        "required_capability": evidence_runtime.MEMORY_PROJECTION_CAPABILITY,
+        "workspace": str(workspace),
+        "preflight": "ok",
+        **counts,
+    }
+    if isinstance(receipt, dict):
+        for key in (
+            "status",
+            "stale",
+            "partial",
+            "canonical_count",
+            "live_count",
+            "hash_divergence",
+            "unresolved_relations",
+            "malformed_skipped",
+            "memory_namespace",
+        ):
+            if key in receipt:
+                extra[key] = receipt[key]
+        if health:
+            if not extra.get("last_completed_scan_id") and health.get("last_completed_scan_id"):
+                extra["last_completed_scan_id"] = health.get("last_completed_scan_id")
+            # Prefer receipt scan as last completed when healthy/completed.
+            if receipt.get("status") == "completed" and counts.get("scan_id"):
+                extra["last_completed_scan_id"] = counts["scan_id"]
+    _write_last_run(
+        target=target,
+        source=evidence_runtime.MEMORY_SOURCE,
+        status=run_status,
+        exit_code=result.code if result.code != 0 else (0 if run_status == "ok" else 1),
+        crawler_version=extra.get("engine_version"),
+        database=compat.database,
+        started_at=started_at,
+        finished_at=_now(),
+        detail=(result.stderr or "").strip()[:500] or (f"memory crawl {run_status}; scan_id={counts.get('scan_id')}"),
+        extra=extra,
+    )
+
+    if want_json and result.stdout:
+        print(result.stdout, end="")
+    elif receipt is not None:
+        print(
+            "scan={scan_id} created={created} updated={updated} unchanged={unchanged} "
+            "removed={removed} skipped={skipped} failed={failed} status={status}".format(
+                scan_id=counts.get("scan_id"),
+                created=counts["created"],
+                updated=counts["updated"],
+                unchanged=counts["unchanged"],
+                removed=counts["removed"],
+                skipped=counts["skipped"],
+                failed=counts["failed"],
+                status=run_status,
+            )
+        )
+    elif result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+
+    if result.code != 0:
+        return result.code
+    return 0 if run_status == "ok" else 1
+
+
 def _run_crawl(arguments: list[str]) -> int:
     """Resolve and health-check the crawler before delegating to MiseLedger.
 
@@ -227,6 +486,9 @@ def _run_crawl(arguments: list[str]) -> int:
 
     if source is None:
         return _run_miseledger("crawl", arguments)
+
+    if source == evidence_runtime.MEMORY_SOURCE:
+        return _run_memory_crawl(arguments, env=env, started_at=started_at)
 
     runtime = evidence_runtime.resolve_crawler(source, env=env)
     if runtime is None:
@@ -552,6 +814,23 @@ def status(*, target: Path, json_output: bool = False) -> int:
         for source, block in crawlers.items():
             compat = block.get("compatibility") or {}
             print(f"crawler/{source}: {compat.get('state')} - {compat.get('detail')}")
+    memory_projection = payload.get("memory_projection")
+    if isinstance(memory_projection, dict):
+        print(
+            "memory_projection: "
+            f"healthy={memory_projection.get('healthy')} "
+            f"capability={memory_projection.get('capability')} "
+            f"engine_version={memory_projection.get('engine_version')} "
+            f"last_completed={memory_projection.get('last_completed_scan_id')} "
+            f"canonical={memory_projection.get('canonical_count')} "
+            f"live={memory_projection.get('live_count')} "
+            f"hash_divergence={memory_projection.get('hash_divergence')} "
+            f"unresolved={memory_projection.get('unresolved_relations')} "
+            f"malformed_skipped={memory_projection.get('malformed_skipped')} "
+            f"stale={memory_projection.get('stale')} "
+            f"partial={memory_projection.get('partial')} "
+            f"failed={memory_projection.get('failed')}"
+        )
     doctor_data = (payload.get("doctor") or {}).get("stdout_json") or {}
     if isinstance(doctor_data, dict) and doctor_data.get("checks"):
         print("checks:")
@@ -579,6 +858,23 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     else:
         print(f"evidence doctor: {payload['summary']}")
         print(f"health: {payload.get('health') or 'unknown'}")
+        memory_projection = payload.get("memory_projection")
+        if isinstance(memory_projection, dict):
+            print(
+                "memory_projection: "
+                f"healthy={memory_projection.get('healthy')} "
+                f"capability={memory_projection.get('capability')} "
+                f"engine_version={memory_projection.get('engine_version')} "
+                f"last_completed={memory_projection.get('last_completed_scan_id')} "
+                f"canonical={memory_projection.get('canonical_count')} "
+                f"live={memory_projection.get('live_count')} "
+                f"hash_divergence={memory_projection.get('hash_divergence')} "
+                f"unresolved={memory_projection.get('unresolved_relations')} "
+                f"malformed_skipped={memory_projection.get('malformed_skipped')} "
+                f"stale={memory_projection.get('stale')} "
+                f"partial={memory_projection.get('partial')} "
+                f"failed={memory_projection.get('failed')}"
+            )
         doctor_data = (payload.get("doctor") or {}).get("stdout_json") or {}
         if isinstance(doctor_data, dict) and doctor_data.get("checks"):
             print("checks:")
@@ -608,6 +904,7 @@ def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
         "commands": [
             [miseledger_cmd, "init"],
             [miseledger_cmd, "crawl", "sessions"],
+            [miseledger_cmd, "crawl", "memory", str(target)],
             [miseledger_cmd, "crawl", "files", "--root", str(target)],
             [miseledger_cmd, "crawl", "gitlog", "--repo", str(target)],
             [miseledger_cmd, "status", "--json"],

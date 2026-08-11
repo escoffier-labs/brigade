@@ -424,3 +424,302 @@ def test_stale_cleanup_queue_after_producer_failure(monkeypatch, tmp_path):
 
     assert payload["health"] == "fail"
     assert payload["crawlers"]["discord"]["latest_run"]["status"] == "fail"
+
+
+# ---- memory projection crawl (#844 F1) -------------------------------------
+
+
+def _miseledger_memory_capable_script(
+    *,
+    version: str = "0.6.0",
+    capability: str | None = "memory-projection.v1",
+    crawl_receipt: str | None = None,
+    crawl_exit: int = 0,
+    marker: Path | None = None,
+    database_ok: bool = True,
+) -> str:
+    cap_json = "null" if capability is None else f'"{capability}"'
+    db_ok = "true" if database_ok else "false"
+    receipt = crawl_receipt or (
+        '{"scan_id":"scan-abc","capability":"memory-projection.v1","engine_version":"%s",'
+        '"status":"completed","stale":false,"partial":false,'
+        '"created":1,"updated":2,"unchanged":3,"removed":4,"skipped":5,"failed":0,'
+        '"canonical_count":10,"live_count":9,"hash_divergence":0,'
+        '"unresolved_relations":1,"malformed_skipped":5,'
+        '"memory_health":{"capability":"memory-projection.v1","engine_version":"%s",'
+        '"status":"completed","stale":false,"partial":false,'
+        '"last_completed_scan_id":"scan-abc","canonical_count":10,"live_count":9,'
+        '"hash_divergence":0,"unresolved_relations":1,"malformed_skipped":5}}' % (version, version)
+    )
+    mark = f'echo invoked > "{marker}"\n' if marker is not None else ""
+    return f'''
+if [ "$1" = "version" ]; then echo "miseledger {version}"; exit 0; fi
+if [ "$1" = "doctor" ] && [ "$2" = "--json" ]; then
+  echo '{{"ok":{db_ok},"engine_version":"{version}","capability":{{"engine_version":"{version}","memory":{cap_json}}},"checks":[{{"name":"database","ok":{db_ok},"detail":"db"}}],"fail_count":0,"warn_count":0}}'
+  exit 0
+fi
+if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
+  echo '{{"items":0,"capability":{{"engine_version":"{version}","memory":{cap_json}}},"engine_version":"{version}"}}'
+  exit 0
+fi
+if [ "$1" = "crawl" ] && [ "$2" = "memory" ]; then
+  {mark}echo '{receipt}'
+  exit {crawl_exit}
+fi
+if [ "$1" = "show" ]; then
+  echo '{{"id":"item-1","source":{{"kind":"brigade-memory"}},"collection":{{"external_id":"memory-11111111-1111-4111-8111-111111111111"}},"content_hash":"sha256:abc","raw_hash":"sha256:def","trust_label":"local","injection":"none","live":true,"tombstoned":false,"relations":[{{"type":"derived_from","target_source_kind":"brigade","target_collection_external_id":"brigade:receipts","target_external_id":"receipt:1","target_item_id":null}}]}}'
+  exit 0
+fi
+exit 1
+'''
+
+
+def test_memory_crawl_delegates_when_capable(monkeypatch, tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    marker = tmp_path / "invoked.txt"
+    miseledger = _write_fake_bin(
+        tmp_path,
+        "miseledger",
+        _miseledger_memory_capable_script(marker=marker),
+    )
+    monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
+
+    assert rc == 0
+    assert marker.exists()
+    out = capsys.readouterr().out
+    assert "scan=scan-abc" in out
+    assert "created=1" in out
+    assert "updated=2" in out
+    assert "unchanged=3" in out
+    assert "removed=4" in out
+    assert "skipped=5" in out
+    assert "failed=0" in out
+    last_run = evidence_cmd._read_last_run(workspace, "memory")
+    assert last_run is not None
+    assert last_run["status"] == "ok"
+    assert last_run["scan_id"] == "scan-abc"
+    assert last_run["created"] == 1
+    assert last_run["updated"] == 2
+    assert last_run["unchanged"] == 3
+    assert last_run["removed"] == 4
+    assert last_run["skipped"] == 5
+    assert last_run["failed"] == 0
+    assert last_run["capability"] == "memory-projection.v1"
+
+
+def test_memory_crawl_refuses_missing_binary(monkeypatch, tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: None)
+
+    rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
+
+    assert rc == 1
+    last_run = evidence_cmd._read_last_run(workspace, "memory")
+    assert last_run is not None
+    assert last_run["status"] == "fail"
+    assert last_run.get("preflight") == "refused"
+
+
+def test_memory_crawl_refuses_absent_capability(monkeypatch, tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    marker = tmp_path / "invoked.txt"
+    miseledger = _write_fake_bin(
+        tmp_path,
+        "miseledger",
+        _miseledger_memory_capable_script(capability=None, marker=marker),
+    )
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
+
+    assert rc == 1
+    assert not marker.exists()
+    assert evidence_cmd._read_last_run(workspace, "memory")["status"] == "fail"
+
+
+def test_memory_crawl_refuses_future_capability(monkeypatch, tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    marker = tmp_path / "invoked.txt"
+    miseledger = _write_fake_bin(
+        tmp_path,
+        "miseledger",
+        _miseledger_memory_capable_script(capability="memory-projection.v99", marker=marker),
+    )
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
+
+    assert rc == 1
+    assert not marker.exists()
+
+
+def test_memory_crawl_refuses_old_version(monkeypatch, tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    marker = tmp_path / "invoked.txt"
+    miseledger = _write_fake_bin(
+        tmp_path,
+        "miseledger",
+        _miseledger_memory_capable_script(version="0.5.9", marker=marker),
+    )
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
+
+    assert rc == 1
+    assert not marker.exists()
+
+
+def test_memory_crawl_refuses_unreadable_archive(monkeypatch, tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    marker = tmp_path / "invoked.txt"
+    miseledger = _write_fake_bin(
+        tmp_path,
+        "miseledger",
+        _miseledger_memory_capable_script(database_ok=False, marker=marker),
+    )
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
+
+    assert rc == 1
+    assert not marker.exists()
+
+
+def test_memory_crawl_partial_failed_not_healthy(monkeypatch, tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    receipt = (
+        '{"scan_id":"scan-partial","capability":"memory-projection.v1","engine_version":"0.6.0",'
+        '"status":"completed","stale":false,"partial":false,'
+        '"created":0,"updated":0,"unchanged":0,"removed":0,"skipped":1,"failed":2,'
+        '"canonical_count":1,"live_count":0,"hash_divergence":0,'
+        '"unresolved_relations":0,"malformed_skipped":3,'
+        '"memory_health":{"capability":"memory-projection.v1","engine_version":"0.6.0",'
+        '"status":"completed","stale":false,"partial":false,"failed":2,'
+        '"last_completed_scan_id":"scan-partial","canonical_count":1,"live_count":0,'
+        '"hash_divergence":0,"unresolved_relations":0,"malformed_skipped":3}}'
+    )
+    miseledger = _write_fake_bin(
+        tmp_path,
+        "miseledger",
+        _miseledger_memory_capable_script(crawl_receipt=receipt),
+    )
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
+
+    assert rc == 1
+    last_run = evidence_cmd._read_last_run(workspace, "memory")
+    assert last_run["status"] == "partial"
+    assert last_run["failed"] == 2
+
+    payload = evidence_cmd.status_payload(workspace)
+    assert payload["memory_projection"]["healthy"] is False
+    assert payload["health"] in {"fail", "incomplete"}
+
+
+def test_memory_status_body_free(monkeypatch, tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    evidence_cmd._write_last_run(
+        target=workspace,
+        source="memory",
+        status="ok",
+        exit_code=0,
+        crawler_version="0.6.0",
+        database="ok",
+        started_at="2026-01-01T00:00:00Z",
+        finished_at="2026-01-01T00:01:00Z",
+        detail="ok",
+        extra={
+            "capability": "memory-projection.v1",
+            "engine_version": "0.6.0",
+            "status": "completed",
+            "stale": False,
+            "partial": False,
+            "failed": 0,
+            "scan_id": "scan-abc",
+            "last_completed_scan_id": "scan-abc",
+            "canonical_count": 4,
+            "live_count": 4,
+            "hash_divergence": 0,
+            "unresolved_relations": 0,
+            "malformed_skipped": 0,
+            "text": "SHOULD_NOT_PRINT_CARD_BODY",
+            "raw": {"body": "nope"},
+        },
+    )
+    miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_memory_capable_script())
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.status(target=workspace, json_output=False)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "memory_projection:" in out
+    assert "capability=memory-projection.v1" in out
+    assert "SHOULD_NOT_PRINT_CARD_BODY" not in out
+    assert "nope" not in out
+    payload = evidence_cmd.status_payload(workspace)
+    assert "text" not in (payload.get("memory_projection") or {})
+    assert payload["memory_projection"]["healthy"] is True
+
+
+def test_memory_file_backed_search_works_without_engine(monkeypatch, tmp_path):
+    from brigade import memory_cmd
+
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True)
+    (cards / "alpha.md").write_text(
+        "---\ntopic: alpha-topic\nconfidence: high\nevidence: [README.md]\n---\n\n# Alpha\n\nalpha body keyword zebra\n"
+    )
+    (tmp_path / "MEMORY.md").write_text("- [alpha-topic](memory/cards/alpha.md)\n")
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: None)
+
+    payload = memory_cmd.search_cards_payload(tmp_path, "zebra", limit=5)
+
+    assert payload["matches"]
+    assert any("alpha" in str(row).lower() for row in payload["matches"])
+
+
+def test_generic_show_has_no_memory_renderer(monkeypatch, tmp_path, capsys):
+    miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_memory_capable_script())
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("show", ["item-1", "--json"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    data = json.loads(out)
+    assert data["id"] == "item-1"
+    assert data["live"] is True
+    assert data["relations"][0]["target_source_kind"] == "brigade"
+    assert not hasattr(evidence_cmd, "render_memory_show")
+    assert not hasattr(evidence_cmd, "explain_memory")
+
+
+def test_discord_crawl_still_works_alongside_memory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    _write_fake_bin(tmp_path, "discrawl", _discrawl_script())
+    args_file = tmp_path / "args.txt"
+    miseledger = _write_fake_bin(
+        tmp_path,
+        "miseledger",
+        (f'echo "$*" > "{args_file}"\nif [ "$1" = "crawl" ]; then echo crawled; exit 0; fi\nexit 1\n'),
+    )
+    monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("crawl", ["discord"])
+
+    assert rc == 0
+    assert args_file.read_text().strip() == "crawl discord"

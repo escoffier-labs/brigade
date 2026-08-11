@@ -5,6 +5,10 @@ an explicit override), checks that the resolved binary is compatible, and only
 then asks MiseLedger to crawl.  All destructive or archive-mutating crawler
 subcommands are driven by MiseLedger; this module only runs the read-only
 ``version`` and ``doctor --json`` probes.
+
+Memory projection (#844 F1) probes the configured MiseLedger engine itself for
+the authoritative ``memory-projection.v1`` capability before any crawl
+delegation. Discord/Discrawl keeps the external-crawler contract below.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import proc
+from . import component_bins, proc
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,21 @@ class CompatResult:
     detail: str
 
 
+@dataclass(frozen=True)
+class MemoryProjectionProbe:
+    """Read-only MiseLedger probe for the memory projection capability gate."""
+
+    resolved_path: str | None
+    version: str | None
+    capability: str | None
+    engine_version: str | None
+    archive_ok: bool
+    probe_exit_code: int | None
+    missing_capabilities: list[str]
+    detail: str
+    error: str | None = None
+
+
 # Source contracts encoded in code.  Optional .brigade/evidence.toml parsing may
 # be added later, but defaults must work with no config.
 _CRAWLER_DEFAULTS: dict[str, CrawlerDefaults] = {
@@ -65,6 +84,33 @@ _CRAWLER_DEFAULTS: dict[str, CrawlerDefaults] = {
         required_capabilities=["export"],
     ),
 }
+
+# Native engine source (not an external crawler). Kept out of _CRAWLER_DEFAULTS
+# so Discord PATH/--help probing stays unchanged.
+MEMORY_SOURCE = "memory"
+MEMORY_PROJECTION_CAPABILITY = "memory-projection.v1"
+# Documented diagnostic floor: in-tree engine Version and current managed pin
+# are 0.6.0. Capability memory-projection.v1 is authoritative; a version floor
+# alone cannot distinguish the published pre-feature 0.6.0 release. Do not
+# invent a newer release pin here — that decision is a separate package.
+MISELEDGER_VERSION_FLOOR = "0.6.0"
+
+MEMORY_HEALTH_SAFE_KEYS = (
+    "capability",
+    "engine_version",
+    "memory_namespace",
+    "last_completed_scan_id",
+    "last_completed_at",
+    "canonical_count",
+    "live_count",
+    "hash_divergence",
+    "unresolved_relations",
+    "malformed_skipped",
+    "stale",
+    "partial",
+    "status",
+    "failed",
+)
 
 _CAPABILITY_CANDIDATES = ("version", "doctor", "export", "crawl")
 _READ_ONLY_TIMEOUT = 30.0
@@ -300,3 +346,323 @@ def check_compatibility(runtime: CrawlerRuntime, env: dict[str, str] | None = No
         missing_capabilities=missing_capabilities,
         detail="; ".join(detail_parts) if detail_parts else "crawler compatible",
     )
+
+
+def register_memory_facade_extensions(_evidence_sub: Any = None) -> None:
+    """Inert F2 registration point for rebuild routing and identity audit.
+
+    F1 leaves this as a no-op so F2 can attach projection-only rebuild and
+    read-only identity-audit commands without reshaping the crawl gate.
+    """
+
+    return None
+
+
+def resolve_miseledger(env: dict[str, str] | None = None) -> str | None:
+    """Resolve the configured MiseLedger engine binary, or None when missing."""
+
+    return component_bins.resolve("miseledger", env=env)
+
+
+def _normalize_miseledger_version(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if text.lower().startswith("miseledger "):
+        text = text.split(None, 1)[1].strip()
+    return text or None
+
+
+def _probe_miseledger_version(binary_path: str, env: dict[str, str]) -> str | None:
+    result = proc.run([binary_path, "version"], env=env, timeout=_READ_ONLY_TIMEOUT)
+    if result.code != 0:
+        return None
+    first = (result.stdout or "").strip().splitlines()
+    return _normalize_miseledger_version(first[0] if first else None)
+
+
+def _extract_memory_capability(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return (capability, engine_version) from doctor/status JSON."""
+
+    capability_block = payload.get("capability")
+    if not isinstance(capability_block, dict):
+        return None, None
+    raw_cap = capability_block.get("memory")
+    capability = raw_cap if isinstance(raw_cap, str) else None
+    raw_version = capability_block.get("engine_version")
+    engine_version = raw_version if isinstance(raw_version, str) else None
+    top_version = payload.get("engine_version")
+    if engine_version is None and isinstance(top_version, str):
+        engine_version = top_version
+    return capability, engine_version
+
+
+def _archive_readable_from_doctor(payload: dict[str, Any], exit_code: int) -> tuple[bool, str | None]:
+    """Interpret MiseLedger doctor JSON for archive readability.
+
+    Preflight accepts a readable archive even when memory health is unhealthy
+    (so a stale projection can be re-crawled). A failed database check or a
+    non-JSON probe is refused before delegation.
+    """
+
+    checks = payload.get("checks")
+    if isinstance(checks, list):
+        for row in checks:
+            if not isinstance(row, dict):
+                continue
+            if row.get("name") == "database" and row.get("ok") is False:
+                return False, str(row.get("detail") or "database check failed")
+            if row.get("name") == "paths" and row.get("ok") is False:
+                return False, str(row.get("detail") or "paths check failed")
+    if exit_code not in (0, 1):
+        return False, f"doctor exit {exit_code}"
+    # exit 1 with structured checks is allowed when the archive opened (memory
+    # projection health may fail while capability is still readable).
+    return True, None
+
+
+def probe_memory_projection(
+    binary_path: str | None,
+    env: dict[str, str] | None = None,
+) -> MemoryProjectionProbe:
+    """Read-only probe of MiseLedger for ``memory-projection.v1``.
+
+    Invokes only ``version`` and ``doctor --json``. Never runs crawl/import.
+    """
+
+    if env is None:
+        env = dict(os.environ)
+
+    if not binary_path:
+        return MemoryProjectionProbe(
+            resolved_path=None,
+            version=None,
+            capability=None,
+            engine_version=None,
+            archive_ok=False,
+            probe_exit_code=None,
+            missing_capabilities=[MEMORY_PROJECTION_CAPABILITY],
+            detail="miseledger binary not found; run `brigade setup`",
+            error="missing binary",
+        )
+
+    version = _probe_miseledger_version(binary_path, env)
+    result = proc.run([binary_path, "doctor", "--json"], env=env, timeout=_READ_ONLY_TIMEOUT)
+    data = result.json()
+    if not isinstance(data, dict):
+        return MemoryProjectionProbe(
+            resolved_path=binary_path,
+            version=version,
+            capability=None,
+            engine_version=None,
+            archive_ok=False,
+            probe_exit_code=result.code,
+            missing_capabilities=[MEMORY_PROJECTION_CAPABILITY],
+            detail=(
+                f"malformed miseledger doctor probe: expected JSON object, exit_code={result.code}, version={version!r}"
+            ),
+            error="malformed probe",
+        )
+
+    capability, engine_version = _extract_memory_capability(data)
+    if engine_version is None:
+        engine_version = version
+    archive_ok, archive_detail = _archive_readable_from_doctor(data, result.code)
+    missing: list[str] = []
+    if capability != MEMORY_PROJECTION_CAPABILITY:
+        missing.append(MEMORY_PROJECTION_CAPABILITY)
+
+    detail_parts: list[str] = []
+    if not archive_ok:
+        detail_parts.append(f"archive unreadable: {archive_detail or 'doctor probe failed'}")
+    if capability is None:
+        detail_parts.append(
+            f"absent capability: expected {MEMORY_PROJECTION_CAPABILITY}, observed capability.memory=None"
+        )
+    elif capability != MEMORY_PROJECTION_CAPABILITY:
+        detail_parts.append(
+            f"incompatible capability: expected {MEMORY_PROJECTION_CAPABILITY}, observed {capability!r}"
+        )
+    if not detail_parts:
+        detail_parts.append(f"memory projection probe ok: capability={capability}, engine_version={engine_version}")
+
+    return MemoryProjectionProbe(
+        resolved_path=binary_path,
+        version=version,
+        capability=capability,
+        engine_version=engine_version,
+        archive_ok=archive_ok,
+        probe_exit_code=result.code,
+        missing_capabilities=missing,
+        detail="; ".join(detail_parts),
+        error=None if archive_ok and not missing else "incompatible",
+    )
+
+
+def check_memory_projection_preflight(probe: MemoryProjectionProbe) -> CompatResult:
+    """Gate crawl/import mutation on the memory projection probe.
+
+    Failures (missing binary, failed/malformed probe, absent/old/future
+    capability, below-floor version, unreadable archive) must refuse
+    delegation. Version floor is the documented ``MISELEDGER_VERSION_FLOOR``;
+    capability match remains authoritative.
+    """
+
+    base = CompatResult(
+        state="fail",
+        resolved_path=probe.resolved_path,
+        version=probe.engine_version or probe.version,
+        database="ok" if probe.archive_ok else "unreadable",
+        config_path=None,
+        missing_capabilities=list(probe.missing_capabilities),
+        detail=probe.detail,
+    )
+    if probe.resolved_path is None:
+        return CompatResult(
+            state="fail",
+            resolved_path=None,
+            version=None,
+            database=None,
+            config_path=None,
+            missing_capabilities=[MEMORY_PROJECTION_CAPABILITY],
+            detail=probe.detail or "miseledger binary not found",
+        )
+    if probe.error == "malformed probe" or (probe.probe_exit_code not in (0, 1) and not probe.archive_ok):
+        return base
+    if not probe.archive_ok:
+        return base
+    if probe.missing_capabilities or probe.capability != MEMORY_PROJECTION_CAPABILITY:
+        return base
+
+    observed_raw = probe.engine_version or probe.version
+    observed = _parse_version(observed_raw)
+    required = _parse_version(MISELEDGER_VERSION_FLOOR)
+    detail_parts: list[str] = []
+    state = "ok"
+    if observed_raw is None or observed is None:
+        return CompatResult(
+            state="fail",
+            resolved_path=probe.resolved_path,
+            version=observed_raw,
+            database="ok",
+            config_path=None,
+            missing_capabilities=[],
+            detail=(f"version not parseable: expected >= {MISELEDGER_VERSION_FLOOR}, observed {observed_raw!r}"),
+        )
+    if required is not None and observed < required:
+        return CompatResult(
+            state="fail",
+            resolved_path=probe.resolved_path,
+            version=observed_raw,
+            database="ok",
+            config_path=None,
+            missing_capabilities=[],
+            detail=(f"version below floor: expected >= {MISELEDGER_VERSION_FLOOR}, observed {observed_raw}"),
+        )
+    if observed_raw != MISELEDGER_VERSION_FLOOR:
+        state = "warn"
+        detail_parts.append(
+            f"version drift: expected {MISELEDGER_VERSION_FLOOR}, observed {observed_raw}; "
+            f"capability={MEMORY_PROJECTION_CAPABILITY}"
+        )
+    else:
+        detail_parts.append(
+            f"memory projection compatible: capability={MEMORY_PROJECTION_CAPABILITY}, engine_version={observed_raw}"
+        )
+    return CompatResult(
+        state=state,
+        resolved_path=probe.resolved_path,
+        version=observed_raw,
+        database="ok",
+        config_path=None,
+        missing_capabilities=[],
+        detail="; ".join(detail_parts),
+    )
+
+
+def body_free_memory_health(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return doctor/status memory health fields without card bodies/raw records."""
+
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in MEMORY_HEALTH_SAFE_KEYS:
+        if key in raw:
+            out[key] = raw[key]
+    return out or None
+
+
+def memory_projection_is_healthy(
+    *,
+    capability: str | None,
+    status: str | None,
+    stale: bool | None,
+    partial: bool | None,
+    failed: int | None,
+    engine_ok: bool,
+) -> bool:
+    """Healthy requires completed + not stale/partial + failed=0 + capability + engine ok."""
+
+    if not engine_ok:
+        return False
+    if capability != MEMORY_PROJECTION_CAPABILITY:
+        return False
+    if status != "completed":
+        return False
+    if stale is not False:
+        return False
+    if partial is not False:
+        return False
+    if failed != 0:
+        return False
+    return True
+
+
+def classify_memory_crawl_status(
+    *,
+    exit_code: int,
+    receipt: dict[str, Any] | None,
+) -> str:
+    """Map engine crawl outcome to last-run status: ok | partial | fail."""
+
+    if exit_code != 0:
+        return "fail"
+    if not isinstance(receipt, dict):
+        return "fail"
+    capability = receipt.get("capability")
+    status = receipt.get("status")
+    stale = bool(receipt.get("stale"))
+    partial = bool(receipt.get("partial"))
+    failed = int(receipt.get("failed") or 0)
+    if memory_projection_is_healthy(
+        capability=capability if isinstance(capability, str) else None,
+        status=status if isinstance(status, str) else None,
+        stale=stale,
+        partial=partial,
+        failed=failed,
+        engine_ok=True,
+    ):
+        return "ok"
+    if status == "completed" and (failed > 0 or partial or stale):
+        return "partial"
+    return "fail"
+
+
+def extract_memory_crawl_counts(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Pass through scan_id and the six result counts from an engine receipt."""
+
+    def _int(key: str) -> int:
+        value = receipt.get(key)
+        return int(value) if isinstance(value, int) else 0
+
+    return {
+        "scan_id": receipt.get("scan_id") if isinstance(receipt.get("scan_id"), str) else None,
+        "created": _int("created"),
+        "updated": _int("updated"),
+        "unchanged": _int("unchanged"),
+        "removed": _int("removed"),
+        "skipped": _int("skipped"),
+        "failed": _int("failed"),
+    }
