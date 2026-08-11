@@ -6,23 +6,24 @@ workflow
 
 ## Title
 
-PR #866 rebase onto main 3532f07c for landing
+PR #866 rebase onto main 3e9278f9 for landing
 
 ## Summary
 
-Landing follow-up on PR #866 rebased the reviewed #592 export privacy branch onto exact current main `3532f07cb125bfb6ad5c06a3fab0eb97ee555aeb`. The only main delta was evidence-ledger E2 (#865); CHANGELOG.md and docs/receipt-schemas.md needed no conflict resolution because those files did not overlap with main. Reviewed #592 behavior stayed byte-identical for archive/worker-event sources.
+Landing follow-up on PR #866 rebased the reviewed #592 export privacy branch onto exact current main `3e9278f9f3c968fc95783207d4ed040bc0bfb672` (includes merged #863). Prior tip `3532f07c` was superseded by #863 onboarding/gitignore work. Replay stayed clean: CHANGELOG.md absorbed main's #860/#863 Fixed and Documentation bullets beside the #592 Added entry without a conflict marker, and docs/receipt-schemas.md did not overlap. Reviewed #592 archive/worker-event sources stayed byte-identical.
 
 ## Durable facts
 
-- Exact main tip for this landing was `3532f07cb125bfb6ad5c06a3fab0eb97ee555aeb`
-- Rebase of the three #592 commits was clean with no semantic conflicts
-- Expected mechanical CHANGELOG.md / docs/receipt-schemas.md overlap did not appear against that main tip
-- Reviewed archive/worker-event source trees matched pre-rebase tip `e48b4af6`
+- Exact main tip for this landing is `3e9278f9f3c968fc95783207d4ed040bc0bfb672`
+- Rebase of the #592 commits plus landing handoff was clean with no semantic conflicts
+- CHANGELOG.md carries both main #860/#863 entries and the #592 worker-event privacy bullet
+- docs/receipt-schemas.md needed no conflict resolution against that tip
+- Reviewed archive/worker-event source trees matched pre-rebase tip `f2236f15`
 
 ## Evidence
 
 - files changed: rebase only (no #592 source edits)
-- commands run: `git rebase 3532f07cb125bfb6ad5c06a3fab0eb97ee555aeb`; `pytest -q tests/test_work_run_archive.py tests/test_worker_events.py`; `./scripts/verify`
+- commands run: `git rebase 3e9278f9f3c968fc95783207d4ed040bc0bfb672`; `pytest -q tests/test_work_run_archive.py tests/test_worker_events.py`; `./scripts/verify`
 - error strings: none
 
 ## Recommended memory action
@@ -35,8 +36,9 @@ no-card
 
 ## Suggested document content
 
-### PR #866 landing rebase
+### PR #866 landing rebase onto 3e9278f9
 
-When rebasing #866 onto main `3532f07c`, expect a clean replay if main only
-carries evidence-ledger E2. Preserve the three #592 commits unchanged; do not
-invent CHANGELOG/receipt-schemas merges unless a real conflict appears.
+When rebasing #866 onto main `3e9278f9` (merged #863), expect a clean replay
+that keeps main's gitignore/quickstart CHANGELOG bullets and the #592 Added
+entry together. Preserve the #592 commits unchanged; stop if any semantic
+conflict appears outside mechanical CHANGELOG/docs overlap.
