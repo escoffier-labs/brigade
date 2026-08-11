@@ -106,10 +106,21 @@ func replaceProvenanceProjections(tx *sql.Tx, itemID string, env provenance.Enve
 	return indexProvenanceProjections(tx, itemID, env)
 }
 
-// AppendProvenanceEvent inserts one immutable provenance_events row.
-// Event IDs are stable across wall-clock time so concurrent inferred backfills
-// that race on the same transition collapse via INSERT OR IGNORE.
+// AppendProvenanceEvent inserts one immutable provenance_events row for a real
+// trust transition. The event id includes the occurrence timestamp so cycles
+// such as quarantined -> untrusted -> quarantined -> untrusted each append.
 func AppendProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any) error {
+	return appendProvenanceEvent(tx, itemID, fromLabel, toLabel, contentHash, contentScope, operatorCommand, evidence, false)
+}
+
+// AppendIdempotentProvenanceEvent inserts a repair/backfill provenance event
+// with a deterministic id (no wall-clock component) so concurrent identical
+// repairs collapse via INSERT OR IGNORE.
+func AppendIdempotentProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any) error {
+	return appendProvenanceEvent(tx, itemID, fromLabel, toLabel, contentHash, contentScope, operatorCommand, evidence, true)
+}
+
+func appendProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any, idempotent bool) error {
 	if evidence == nil {
 		evidence = map[string]any{}
 	}
@@ -134,9 +145,25 @@ func AppendProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, conten
 	if err != nil {
 		return err
 	}
-	eventID := stableID("provenance-event", itemID, fromLabel, toLabel, contentHash, contentScope, operatorCommand)
-	_, err = tx.Exec(`insert or ignore into provenance_events(id, item_id, at, from_label, to_label, envelope_content_hash, content_scope, operator_command, evidence_json, event_json)
-values(?,?,?,?,?,?,?,?,?,?)`,
+	var eventID string
+	if idempotent {
+		eventID = stableID("provenance-event", itemID, fromLabel, toLabel, contentHash, contentScope, operatorCommand)
+	} else {
+		var prior int64
+		if err := tx.QueryRow(`select count(*) from provenance_events where item_id = ?`, itemID).Scan(&prior); err != nil {
+			return err
+		}
+		// Occurrence identity: wall-clock at plus per-item sequence so cycles
+		// with identical labels/content/operator each append a distinct row.
+		eventID = stableID("provenance-event", itemID, at, fromLabel, toLabel, contentHash, contentScope, operatorCommand, fmt.Sprintf("%d", prior+1))
+	}
+	stmt := `insert into provenance_events(id, item_id, at, from_label, to_label, envelope_content_hash, content_scope, operator_command, evidence_json, event_json)
+values(?,?,?,?,?,?,?,?,?,?)`
+	if idempotent {
+		stmt = `insert or ignore into provenance_events(id, item_id, at, from_label, to_label, envelope_content_hash, content_scope, operator_command, evidence_json, event_json)
+values(?,?,?,?,?,?,?,?,?,?)`
+	}
+	_, err = tx.Exec(stmt,
 		eventID, itemID, at, nullIfEmpty(fromLabel), toLabel, nullIfEmpty(contentHash), nullIfEmpty(contentScope), nullIfEmpty(operatorCommand), string(evidenceRaw), string(raw))
 	return err
 }
@@ -363,7 +390,7 @@ func backfillOneItem(tx *sql.Tx, itemID, text, metadataJSON, rawHash, rawPath, s
 	if env.Hashes.Content != nil {
 		contentHash = *env.Hashes.Content
 	}
-	if err := AppendProvenanceEvent(tx, itemID, "", "unknown", contentHash, env.Hashes.ContentScope, "ingest:ingest.BackfillProvenance", map[string]any{
+	if err := AppendIdempotentProvenanceEvent(tx, itemID, "", "unknown", contentHash, env.Hashes.ContentScope, "ingest:ingest.BackfillProvenance", map[string]any{
 		"attribution": "inferred",
 		"raw_path":    rawPath,
 	}); err != nil {

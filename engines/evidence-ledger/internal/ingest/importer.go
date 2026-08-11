@@ -712,7 +712,7 @@ func replaceItemSideTables(tx *sql.Tx, rec adapter.Record, itemID, sourceID, col
 		if envelope.Hashes.Content != nil {
 			contentDigest = *envelope.Hashes.Content
 		}
-		if err := AppendProvenanceEvent(tx, itemID, "", envelope.Trust.Label, contentDigest, envelope.Hashes.ContentScope, envelope.Trust.AssignedBy, map[string]any{
+		if err := AppendIdempotentProvenanceEvent(tx, itemID, "", envelope.Trust.Label, contentDigest, envelope.Hashes.ContentScope, envelope.Trust.AssignedBy, map[string]any{
 			"source_kind": rec.Source.Kind,
 			"path":        "ingest.upsertRecord",
 		}); err != nil {

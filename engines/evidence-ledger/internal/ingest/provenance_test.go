@@ -126,6 +126,77 @@ func TestTransitionTrustLabelAppendsImmutableEvent(t *testing.T) {
 	}
 }
 
+func TestTransitionTrustLabelCycleRecordsEveryOccurrence(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:cycle","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"trust cycle fixture","tags":["reader"]},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
+	if _, err := ImportAdapterReader(db, strings.NewReader(jsonl), "reader://fixture", "reader-test"); err != nil {
+		t.Fatal(err)
+	}
+	var itemID string
+	if err := db.QueryRow(`select id from items limit 1`).Scan(&itemID); err != nil {
+		t.Fatal(err)
+	}
+	op := "operator:brigade evidence trust review"
+	// quarantined (ingest) -> untrusted -> quarantined -> untrusted
+	for _, to := range []string{"untrusted", "quarantined", "untrusted"} {
+		if err := TransitionTrustLabel(db, itemID, to, op, map[string]any{"cycle": true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := db.QueryRow(`select count(*) from provenance_events where item_id = ?`, itemID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	// initial ingest + three real transitions
+	if count != 4 {
+		t.Fatalf("events = %d, want 4 (initial + three cycle transitions)", count)
+	}
+	rows, err := db.Query(`select coalesce(from_label,''), to_label from provenance_events where item_id = ? order by at, id`, itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got [][2]string
+	for rows.Next() {
+		var fromLabel, toLabel string
+		if err := rows.Scan(&fromLabel, &toLabel); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, [2]string{fromLabel, toLabel})
+	}
+	want := [][2]string{
+		{"", "quarantined"},
+		{"quarantined", "untrusted"},
+		{"untrusted", "quarantined"},
+		{"quarantined", "untrusted"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("transitions = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("transition[%d] = %v, want %v (full=%v)", i, got[i], want[i], got)
+		}
+	}
+	// unchanged-label remains a no-op
+	if err := TransitionTrustLabel(db, itemID, "untrusted", op, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from provenance_events where item_id = ?`, itemID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 4 {
+		t.Fatalf("same-label no-op changed event count to %d", count)
+	}
+}
+
 func TestBackfillProvenanceBatchedResumableIdempotent(t *testing.T) {
 	db, err := archive.Open(t.TempDir() + "/miseledger.db")
 	if err != nil {
@@ -506,7 +577,7 @@ values('item-stable','src1','col1','legacy:item:stable','message',?,?,'text','',
 	}
 	digest := strings.Repeat("d", 64)
 	for i := 0; i < 3; i++ {
-		if err := AppendProvenanceEvent(tx, "item-stable", "", "unknown", digest, "item.text.utf8.v1", "ingest:ingest.BackfillProvenance", map[string]any{"n": i}); err != nil {
+		if err := AppendIdempotentProvenanceEvent(tx, "item-stable", "", "unknown", digest, "item.text.utf8.v1", "ingest:ingest.BackfillProvenance", map[string]any{"n": i}); err != nil {
 			t.Fatal(err)
 		}
 	}
