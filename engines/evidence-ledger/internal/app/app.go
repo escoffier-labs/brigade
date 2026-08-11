@@ -1889,25 +1889,27 @@ func searchCandidateLimit(limit int) int {
 
 // buildSearchQuery ranks FTS matches first in a bounded, materialized
 // candidate pool, then joins and applies the remaining filters and the
-// relations boost over that pool only. On large archives this bounds the
+// relations boost over that pool only. Latest-live filtering runs inside the
+// candidate CTE so pre-E2 superseded versions cannot fill the 1,000-row cap
+// and hide a matching live item. On large archives this still bounds the
 // per-row relations probe that previously ran for every FTS match. The
 // tradeoff: filters applied only after pooling (collection, from/to, project,
 // tags) can miss rows whose bm25 rank falls below the candidate cap, so a
 // heavily filtered query may return fewer results than an exhaustive scan.
 func buildSearchQuery(opts SearchOpts) (string, []any) {
 	limit := normalizedSearchLimit(opts.Limit)
-	candidateWhere := []string{"item_fts match ?"}
+	candidateWhere := []string{"item_fts match ?", liveDefaultItemPredicate}
 	params := []any{ftsQuery(opts.Query)}
 	if opts.Source != "" {
-		candidateWhere = append(candidateWhere, "source_kind = ?")
+		candidateWhere = append(candidateWhere, "item_fts.source_kind = ?")
 		params = append(params, opts.Source)
 	}
 	if opts.Kind != "" {
-		candidateWhere = append(candidateWhere, "item_kind = ?")
+		candidateWhere = append(candidateWhere, "item_fts.item_kind = ?")
 		params = append(params, opts.Kind)
 	}
 	if opts.ActorType != "" {
-		candidateWhere = append(candidateWhere, "actor_type = ?")
+		candidateWhere = append(candidateWhere, "item_fts.actor_type = ?")
 		params = append(params, opts.ActorType)
 	}
 	params = append(params, searchCandidateLimit(limit))
@@ -1918,8 +1920,9 @@ func buildSearchQuery(opts SearchOpts) (string, []any) {
 	// CROSS JOIN pins the candidate pool as the outer loop. A reorder through
 	// sources and items evaluates correlated filters against the whole archive.
 	sqlText := `with fts_candidates as materialized (
-  select item_id, snippet(item_fts, 5, '[', ']', '...', 20) as snippet, bm25(item_fts) as fts_score
+  select item_fts.item_id as item_id, snippet(item_fts, 5, '[', ']', '...', 20) as snippet, bm25(item_fts) as fts_score
   from item_fts
+  join items i on i.id = item_fts.item_id
   where ` + strings.Join(candidateWhere, " and ") + `
   order by fts_score, item_id
   limit ?
@@ -2736,9 +2739,19 @@ order by s.kind, c.name, i.created_at, i.id`)
 		key := r.source + "/" + r.collectionKind + "/" + r.collection
 		grouped[key] = append(grouped[key], r)
 	}
+
+	stageDir := filepath.Join(outDir, exportStageDirName)
+	_ = os.RemoveAll(stageDir)
+	if err := security.EnsurePrivateDir(stageDir); err != nil {
+		return 0, err
+	}
+	defer func() { _ = os.RemoveAll(stageDir) }()
+
+	managed := map[string]struct{}{}
 	count := 0
 	for key, rows := range grouped {
-		path := filepath.Join(outDir, safeName(key)+".md")
+		name := safeName(key) + ".md"
+		managed[name] = struct{}{}
 		var b strings.Builder
 		fmt.Fprintf(&b, "# %s\n\n", key)
 		for _, r := range rows {
@@ -2753,12 +2766,90 @@ order by s.kind, c.name, i.created_at, i.id`)
 				fmt.Fprintf(&b, "Summary: %s\n\n", r.summary)
 			}
 		}
-		if err := security.WritePrivateFileAtomic(path, []byte(b.String())); err != nil {
+		if err := security.WritePrivateFileAtomic(filepath.Join(stageDir, name), []byte(b.String())); err != nil {
 			return count, err
 		}
 		count++
 	}
+
+	previous, err := readManagedExportManifest(outDir)
+	if err != nil {
+		return count, err
+	}
+	for name := range managed {
+		data, err := os.ReadFile(filepath.Join(stageDir, name))
+		if err != nil {
+			return count, err
+		}
+		if err := security.WritePrivateFileAtomic(filepath.Join(outDir, name), data); err != nil {
+			return count, err
+		}
+	}
+	for name := range previous {
+		if _, keep := managed[name]; keep {
+			continue
+		}
+		if !isManagedExportBasename(name) {
+			continue
+		}
+		path := filepath.Join(outDir, name)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return count, err
+		}
+	}
+	if err := writeManagedExportManifest(outDir, managed); err != nil {
+		return count, err
+	}
 	return count, nil
+}
+
+const (
+	exportManifestName = ".miseledger-export-files"
+	exportStageDirName = ".miseledger-export-stage"
+)
+
+func isManagedExportBasename(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.Contains(name, "/") || strings.Contains(name, `\`) || strings.Contains(name, "..") {
+		return false
+	}
+	return strings.HasSuffix(name, ".md")
+}
+
+func readManagedExportManifest(outDir string) (map[string]struct{}, error) {
+	path := filepath.Join(outDir, exportManifestName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]struct{}{}, nil
+		}
+		return nil, err
+	}
+	out := map[string]struct{}{}
+	for _, line := range strings.Split(string(data), "\n") {
+		name := strings.TrimSpace(line)
+		if !isManagedExportBasename(name) {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	return out, nil
+}
+
+func writeManagedExportManifest(outDir string, managed map[string]struct{}) error {
+	names := make([]string, 0, len(managed))
+	for name := range managed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, name := range names {
+		b.WriteString(name)
+		b.WriteByte('\n')
+	}
+	return security.WritePrivateFileAtomic(filepath.Join(outDir, exportManifestName), []byte(b.String()))
 }
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)

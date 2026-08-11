@@ -333,16 +333,54 @@ func TestE2ExportOmitsSupersededAndTombstonedBodies(t *testing.T) {
 	if !strings.Contains(exported, newUnique) {
 		t.Fatalf("markdown export missing live body:\n%s", exported)
 	}
+	managedBefore := managedExportMarkdownBasenames(t, outDir)
+	if len(managedBefore) == 0 {
+		t.Fatal("expected at least one managed markdown file after live export")
+	}
+	userOwned := filepath.Join(outDir, "user-owned-notes.txt")
+	if err := os.WriteFile(userOwned, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 	runOK(t, "crawl", "memory", ws, "--json")
-	outDir2 := filepath.Join(t.TempDir(), "export2")
-	runJSON(t, "export", "markdown", "--out", outDir2)
-	exported2 := readExportTree(t, outDir2)
+	// Reuse the original destination: managed markdown must be reconciled away
+	// after the last live item is tombstoned; non-managed files stay put.
+	runJSON(t, "export", "markdown", "--out", outDir)
+	exported2 := readExportTree(t, outDir)
 	if strings.Contains(exported2, newUnique) || strings.Contains(exported2, oldUnique) {
-		t.Fatalf("completed-removal tombstone leaked into export:\n%s", exported2)
+		t.Fatalf("completed-removal tombstone leaked into reused export out:\n%s", exported2)
+	}
+	for _, name := range managedBefore {
+		if _, err := os.Stat(filepath.Join(outDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("managed export file %q still present after empty reconcile: err=%v", name, err)
+		}
+	}
+	if data, err := os.ReadFile(userOwned); err != nil || string(data) != "keep me\n" {
+		t.Fatalf("non-managed file was disturbed: err=%v data=%q", err, data)
+	}
+}
+
+func TestE2SearchKeepsLiveWhenFTSCandidatePoolExceedsCap(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	db := openTestDB(t)
+	defer db.Close()
+
+	token := "E2_FTS_POOL_TOKEN_OVER_CAP"
+	seedPreE2OverCapStaleFTSPool(t, db, token, searchCandidateLimit(0)+1)
+
+	results, err := search(db, SearchOpts{Query: token, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("live hit must survive >candidate-cap stale FTS rows, got %#v", results)
+	}
+	if results[0].ID != "item-e2-pool-live" {
+		t.Fatalf("expected live item id, got %#v", results)
 	}
 }
 
@@ -458,6 +496,97 @@ func readExportTree(t *testing.T, dir string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func managedExportMarkdownBasenames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		name := e.Name()
+		if isManagedExportBasename(name) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// seedPreE2OverCapStaleFTSPool builds >candidateCap superseded non-tombstoned
+// FTS hits that would fill the materialize LIMIT before a matching live row if
+// latest-live filtering ran only after candidate selection.
+func seedPreE2OverCapStaleFTSPool(t *testing.T, db *sql.DB, token string, staleCount int) {
+	t.Helper()
+	if staleCount < 1 {
+		t.Fatalf("staleCount must be positive, got %d", staleCount)
+	}
+	stmts := []string{
+		`insert into sources(id, kind, name, version, created_at, updated_at) values('source-e2-pool','codex','Codex','1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`insert into collections(id, source_id, external_id, kind, name, created_at, updated_at) values('collection-e2-pool','source-e2-pool','session:e2-pool','agent_session','pool','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`insert into actors(id, source_id, external_id, type, name) values('actor-e2-pool','source-e2-pool','actor:e2-pool','human','Human')`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed header failed on %s: %v", stmt, err)
+		}
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	itemStmt, err := tx.Prepare(`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq, tombstoned_at)
+values(?,?,?,?,?,?,?,?,?,?,?,?,?,null)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer itemStmt.Close()
+	ftsStmt, err := tx.Prepare(`insert into item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) values(?,?,?,?,?,?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ftsStmt.Close()
+
+	for i := 0; i < staleCount; i++ {
+		ext := fmt.Sprintf("msg:e2-pool-%04d", i)
+		staleID := fmt.Sprintf("item-e2-pool-stale-%04d", i)
+		liveID := fmt.Sprintf("item-e2-pool-curr-%04d", i)
+		// Lexicographically early stale ids + identical bm25 text fill the
+		// ordered candidate LIMIT ahead of the later live hit when the live
+		// predicate is applied only after materialize.
+		if _, err := itemStmt.Exec(staleID, "source-e2-pool", "collection-e2-pool", "actor-e2-pool", ext, "message",
+			"2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", token, fmt.Sprintf("sha256:stale-%04d", i), "{}", "{}", i*2+1); err != nil {
+			t.Fatalf("insert stale item %d: %v", i, err)
+		}
+		if _, err := ftsStmt.Exec(staleID, "codex", "agent_session", "message", "human", token); err != nil {
+			t.Fatalf("insert stale fts %d: %v", i, err)
+		}
+		currText := fmt.Sprintf("current body without shared token %04d", i)
+		if _, err := itemStmt.Exec(liveID, "source-e2-pool", "collection-e2-pool", "actor-e2-pool", ext, "message",
+			"2026-01-01T00:00:01Z", "2026-01-01T00:00:01Z", currText, fmt.Sprintf("sha256:curr-%04d", i), "{}", "{}", i*2+2); err != nil {
+			t.Fatalf("insert current item %d: %v", i, err)
+		}
+		if _, err := ftsStmt.Exec(liveID, "codex", "agent_session", "message", "human", currText); err != nil {
+			t.Fatalf("insert current fts %d: %v", i, err)
+		}
+	}
+
+	liveExt := "msg:e2-pool-live"
+	liveSeq := staleCount*2 + 10
+	if _, err := itemStmt.Exec("item-e2-pool-live", "source-e2-pool", "collection-e2-pool", "actor-e2-pool", liveExt, "message",
+		"2026-01-01T00:00:02Z", "2026-01-01T00:00:02Z", token, "sha256:pool-live", "{}", "{}", liveSeq); err != nil {
+		t.Fatalf("insert live item: %v", err)
+	}
+	if _, err := ftsStmt.Exec("item-e2-pool-live", "codex", "agent_session", "message", "human", token); err != nil {
+		t.Fatalf("insert live fts: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // seedPreE2DuplicateSessionArchive writes a pre-E2 shape: two non-tombstoned
