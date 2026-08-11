@@ -711,13 +711,11 @@ def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_vali
 
 
 @pytest.mark.parametrize("status", ["pending", "dismissed"])
-def test_untrusted_identity_migration_preserves_legacy_decisions_across_source_normalization(
-    tmp_path: Path, status: str
-):
+def test_untrusted_identity_migration_is_scoped_to_trusted_legacy_source(tmp_path: Path, status: str):
     record = {
         "text": "Legacy source-normalized import",
         "kind": "task",
-        "source": "legacy-declared-source",
+        "source": "learning-loop",
         "metadata": {"source_item_key": "legacy-row", "source_fingerprint": "legacy-fingerprint"},
     }
     legacy = ledger._make_import(
@@ -741,6 +739,43 @@ def test_untrusted_identity_migration_preserves_legacy_decisions_across_source_n
     assert rejected == []
     assert len(dismissed if status == "dismissed" else skipped) == 1
     assert len(ledger._read_imports(tmp_path)) == 1
+
+    distinct_source = ledger._make_import(
+        record["text"],
+        kind=record["kind"],
+        source="repo-scan",
+        metadata=record["metadata"],
+    )
+    distinct_source["status"] = status
+    ledger._write_imports(tmp_path, [distinct_source])
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+    unprovenanced_legacy = dict(legacy)
+    unprovenanced_legacy["metadata"] = {"source_item_key": "legacy-row"}
+    unprovenanced_legacy["source"] = "repo-scan"
+    unprovenanced_legacy["status"] = status
+    ledger._write_imports(tmp_path, [unprovenanced_legacy])
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
 
     changed = ledger._sanitize_untrusted_import_record(
         {**record, "text": "Changed source-normalized import"}, importer_source="learning-loop"

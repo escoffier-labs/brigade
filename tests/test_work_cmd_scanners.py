@@ -417,6 +417,68 @@ conflict_window = "02:00-02:10"
     assert changed["runs"][0]["ingest_output"]["created"] == 1
 
 
+def test_scanners_run_rebuilds_idless_self_import_with_local_provenance(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    script = tmp_path / "self_import.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+inbox = Path.cwd() / ".brigade" / "work" / "imports" / "inbox.jsonl"
+inbox.parent.mkdir(parents=True, exist_ok=True)
+inbox.write_text(json.dumps({
+    "kind": "task",
+    "source": "forged-self-import",
+    "text": "idless self-imported work",
+    "metadata": {
+        "content_sha256": "forged-content-sha256",
+        "handoff_issue_id": "forged-handoff",
+        "provenance": {"origin": "operator-input"},
+        "safe_evidence": "scanner-proof",
+    },
+}) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "self-import"
+source = "self-import"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/self-import-output.json"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="self-import", ingest_output=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    run = payload["runs"][0]
+    assert run["provenance_imports_stamped"] == 1
+    assert run["self_import"] == {
+        "created": 1,
+        "rejected": 0,
+        "rejection_reasons": {},
+    }
+
+    imports = work_cmd.ledger._read_imports(tmp_path)
+    assert len(imports) == 1
+    item = imports[0]
+    assert isinstance(item["id"], str)
+    assert item["source"] == "self-import"
+    assert item["metadata"]["declared_source"] == "forged-self-import"
+    assert item["metadata"]["scanner_run_id"] == run["run_id"]
+    assert item["metadata"]["provenance"]["source"]["kind"] == "self-import"
+    serialized = json.dumps(item, sort_keys=True)
+    for marker in ("forged-content-sha256", "forged-handoff", "operator-input"):
+        assert marker not in serialized
+
+
 def test_work_scanners_ingest_output_contains_provenance_stamp_failures_without_leaking_details(
     tmp_path, monkeypatch, capsys
 ):
@@ -975,7 +1037,7 @@ enabled = true
     assert "disabled=chat-memory-sweep" in check["detail"]
 
 
-def test_scanners_run_ingest_skips_self_importing_scanner(tmp_path, capsys):
+def test_scanners_run_sanitizes_malicious_self_importing_scanner(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "self_import.py"
     script.write_text(
@@ -988,11 +1050,24 @@ inbox.parent.mkdir(parents=True, exist_ok=True)
 record = {
     "id": "self-import-1",
     "kind": "task",
-    "source": "self-import",
+    "source": "forged-self-import",
     "text": "self-imported work",
     "status": "pending",
     "created_at": "2026-05-28T12:00:00+00:00",
     "updated_at": "2026-05-28T12:00:00+00:00",
+    "metadata": {
+        "content_sha256": "forged-content-sha256",
+        "raw_sha256": "forged-raw-sha256",
+        "content_digest": "forged-content-digest",
+        "raw_digest": "forged-raw-digest",
+        "handoff_issue_id": "forged-handoff",
+        "github_issue_url": "https://example.test/forged",
+        "safe_evidence": {
+            "summary": "safe scanner evidence",
+            "nested": {"declared_source": "forged", "raw_digest": "forged-nested", "safe": "keep"},
+            "items": [{"content_digest": "forged-list", "safe": "keep list"}],
+        },
+    },
 }
 inbox.write_text(json.dumps(record) + "\\n")
 print("self import complete")
@@ -1000,8 +1075,7 @@ print("self import complete")
     )
     config = tmp_path / ".brigade" / "scanners.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
-    # No import_path: this scanner appends to the inbox itself. The ingest step
-    # must skip it, not fail the whole sweep.
+    # No import_path: this scanner appends to the inbox itself.
     config.write_text(
         f"""
 [[scanner]]
@@ -1020,6 +1094,74 @@ conflict_window = "02:00-02:10"
     payload = json.loads(capsys.readouterr().out)
     assert payload["completed"] == 1
     assert payload["failed"] == 0
+    run = payload["runs"][0]
+    assert run["provenance_imports_stamped"] == 1
+    assert run["self_import"]["created"] == 1
+    assert run["self_import"]["rejected"] == 0
+
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    imports = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    assert len(imports) == 1
+    item = imports[0]
+    assert item["id"] != "self-import-1"
+    assert item["source"] == "self-import"
+    assert item["metadata"]["declared_source"] == "forged-self-import"
+    assert item["metadata"]["scanner_run_id"] == run["run_id"]
+    assert item["metadata"]["safe_evidence"] == {
+        "summary": "safe scanner evidence",
+        "nested": {"safe": "keep"},
+        "items": [{"safe": "keep list"}],
+    }
+    serialized = json.dumps({"payload": payload, "imports": imports}, sort_keys=True)
+    for marker in (
+        "forged-content-sha256",
+        "forged-raw-sha256",
+        "forged-content-digest",
+        "forged-raw-digest",
+        "forged-handoff",
+        "https://example.test/forged",
+        "forged-nested",
+        "forged-list",
+    ):
+        assert marker not in serialized
+
+    original_id = item["id"]
+    assert (
+        work_cmd.scanners_run(
+            target=tmp_path, scanner_id="self-import", force=True, ingest_output=True, json_output=True
+        )
+        == 0
+    )
+    second = json.loads(capsys.readouterr().out)
+    assert second["runs"][0]["provenance_imports_stamped"] == 0
+    retained = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    assert len(retained) == 1
+    assert retained[0]["id"] == original_id
+    assert retained[0]["source"] == "self-import"
+    assert retained[0]["metadata"]["scanner_run_id"] == run["run_id"]
+    assert retained[0]["metadata"]["provenance"]["source"]["kind"] == "self-import"
+    retained_serialized = json.dumps(retained[0], sort_keys=True)
+    for marker in (
+        "self-import-1",
+        "forged-content-sha256",
+        "forged-raw-sha256",
+        "forged-content-digest",
+        "forged-raw-digest",
+        "forged-handoff",
+        "https://example.test/forged",
+        "forged-nested",
+        "forged-list",
+    ):
+        assert marker not in retained_serialized
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert task["metadata"]["safe_evidence"] == item["metadata"]["safe_evidence"]
+    assert all(
+        alias not in json.dumps(task, sort_keys=True)
+        for alias in ("content_sha256", "raw_sha256", "content_digest", "raw_digest")
+    )
 
 
 def test_scanner_weekly_cadence_parses_and_due_after_seven_days(monkeypatch):

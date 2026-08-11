@@ -194,25 +194,62 @@ def _scanner_stamp_new_imports(
     scanner: dict[str, Any],
     run: dict[str, Any],
     before_ids: set[str],
+    before_imports: list[dict[str, Any]],
 ) -> list[str]:
     imports = ledger_mod._read_imports(target)
-    changed = 0
     stamped_ids: list[str] = []
+    rejected = 0
+    scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
+    existing_identities = {
+        ledger_mod._import_source_identity(item) for item in before_imports if isinstance(item, dict)
+    }
+    retained: list[dict[str, Any]] = []
+    retained_ids: set[str] = set()
+    discarded_duplicate = False
     for item in imports:
         import_id = item.get("id")
-        if not isinstance(import_id, str) or import_id in before_ids:
+        if isinstance(import_id, str) and import_id in before_ids:
+            retained.append(item)
+            retained_ids.add(import_id)
             continue
-        if item.get("source") != scanner.get("source"):
+        sanitized = ledger_mod._sanitize_untrusted_import_record(item, importer_source=scanner_source)
+        identity = ledger_mod._import_source_identity(sanitized)
+        if identity in existing_identities:
+            discarded_duplicate = True
             continue
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        if metadata.get("scanner_run_id"):
+        metadata = _scanner_import_provenance(target=target, scanner=scanner, run=run, record=sanitized)
+        try:
+            rebuilt = ledger_mod._make_import(
+                str(sanitized["text"]),
+                kind=str(sanitized["kind"]),
+                source=scanner_source,
+                metadata=metadata,
+                task_type=sanitized.get("type") if isinstance(sanitized.get("type"), str) else None,
+                priority=sanitized.get("priority") if isinstance(sanitized.get("priority"), str) else None,
+                acceptance=sanitized.get("acceptance") if isinstance(sanitized.get("acceptance"), list) else None,
+                template=sanitized.get("template") if isinstance(sanitized.get("template"), str) else None,
+                provenance_source=scanner_source,
+            )
+        except ledger_mod._ImportProvenanceError:
+            rejected += 1
             continue
-        item["metadata"] = _scanner_import_provenance(target=target, scanner=scanner, run=run, record=item)
-        item["updated_at"] = helpers._now().isoformat()
-        changed += 1
-        stamped_ids.append(import_id)
-    if changed:
-        ledger_mod._write_imports(target, imports)
+        retained.append(rebuilt)
+        retained_ids.add(str(rebuilt["id"]))
+        existing_identities.add(identity)
+        stamped_ids.append(str(rebuilt["id"]))
+    for item in before_imports:
+        import_id = item.get("id")
+        if isinstance(import_id, str) and import_id not in retained_ids:
+            retained.append(item)
+            retained_ids.add(import_id)
+    if stamped_ids or rejected or discarded_duplicate:
+        ledger_mod._write_imports(target, retained)
+    if stamped_ids or rejected:
+        run["self_import"] = {
+            "created": len(stamped_ids),
+            "rejected": rejected,
+            "rejection_reasons": {"provenance_stamp_failed": rejected} if rejected else {},
+        }
     return stamped_ids
 
 
@@ -990,13 +1027,18 @@ def _scanners_run_payload(
     runs: list[dict[str, Any]] = []
     contexts: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for scanner in selected:
+        before_imports = ledger_mod._read_imports(target)
         before_ids = {
-            str(item.get("id"))
-            for item in ledger_mod._read_imports(target)
-            if isinstance(item, dict) and isinstance(item.get("id"), str)
+            str(item.get("id")) for item in before_imports if isinstance(item, dict) and isinstance(item.get("id"), str)
         }
         run = _scanner_run_one(target, scanner, force=force)
-        stamped_ids = _scanner_stamp_new_imports(target=target, scanner=scanner, run=run, before_ids=before_ids)
+        stamped_ids = _scanner_stamp_new_imports(
+            target=target,
+            scanner=scanner,
+            run=run,
+            before_ids=before_ids,
+            before_imports=before_imports,
+        )
         run["provenance_imports_stamped"] = len(stamped_ids)
         if stamped_ids:
             run["stamped_import_ids"] = stamped_ids

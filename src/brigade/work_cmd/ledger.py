@@ -1124,6 +1124,30 @@ _UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS = frozenset(
 )
 
 
+def _is_untrusted_import_metadata_key_allowed(key: object) -> bool:
+    return not (
+        key in _UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS
+        or key in _UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS
+        or (
+            isinstance(key, str)
+            and (key.startswith("declared_") or key == "github_issue" or key.startswith("github_issue_"))
+        )
+    )
+
+
+def _sanitize_untrusted_import_metadata(value: object) -> object:
+    """Recursively retain only non-authoritative untrusted import evidence."""
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_untrusted_import_metadata(item)
+            for key, item in value.items()
+            if _is_untrusted_import_metadata_key_allowed(key)
+        }
+    if isinstance(value, list):
+        return [_sanitize_untrusted_import_metadata(item) for item in value]
+    return value
+
+
 def _bound_declared_import_alias(value: object) -> str | None:
     """Return a bounded display value for an untrusted declared identity alias."""
     if isinstance(value, bool):
@@ -1156,12 +1180,9 @@ def _sanitize_untrusted_import_record(record: dict[str, Any], *, importer_source
     raw_metadata = record.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
     stamped_metadata = {
-        key: value
+        key: _sanitize_untrusted_import_metadata(value)
         for key, value in metadata.items()
-        if key not in _UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS
-        and key not in _UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS
-        and not (isinstance(key, str) and key.startswith("declared_"))
-        and not (isinstance(key, str) and (key == "github_issue" or key.startswith("github_issue_")))
+        if _is_untrusted_import_metadata_key_allowed(key)
     }
     canonical_hash = _untrusted_import_canonical_hash(record)
     declared_source = _bound_import_identity(record.get("source"))
@@ -1198,6 +1219,25 @@ def _import_content_identity(item: dict[str, Any]) -> tuple[str, str] | None:
     if not isinstance(kind, str) or not kind:
         return None
     return kind, _untrusted_import_canonical_hash(item)
+
+
+def _legacy_import_source_content_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Return a legacy identity only when local provenance establishes its source."""
+    source = item.get("source")
+    metadata = item.get("metadata")
+    if not isinstance(source, str) or not source or not isinstance(metadata, dict):
+        return None
+    envelope = metadata.get("provenance")
+    if provenance.validate_envelope(envelope):
+        return None
+    envelope_source = envelope.get("source") if isinstance(envelope, Mapping) else None
+    if not isinstance(envelope_source, Mapping) or envelope_source.get("kind") != source:
+        return None
+    content_identity = _import_content_identity(item)
+    if content_identity is None:
+        return None
+    kind, content_hash = content_identity
+    return source, kind, content_hash
 
 
 # Central envelope stamps land under metadata.provenance after identity is fixed.
@@ -1661,16 +1701,16 @@ def _append_import_records(
         if isinstance(item, dict) and item.get("status", "pending") in {"pending", "promoted"}
     }
     existing_by_source: dict[tuple[str, str, str], dict[str, Any]] = {}
-    legacy_by_content: dict[tuple[str, str], dict[str, Any]] = {}
+    legacy_by_source_content: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in imports:
         if not isinstance(item, dict):
             continue
         identity = _import_source_identity(item)
         if identity is not None:
             existing_by_source[identity] = item
-        content_identity = _import_content_identity(item)
-        if content_identity is not None and not _has_canonical_untrusted_import_identity(item):
-            legacy_by_content[content_identity] = item
+        legacy_identity = _legacy_import_source_content_identity(item)
+        if legacy_identity is not None and not _has_canonical_untrusted_import_identity(item):
+            legacy_by_source_content[legacy_identity] = item
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     skipped_dismissed: list[dict[str, Any]] = []
@@ -1691,7 +1731,9 @@ def _append_import_records(
             skipped.append(record)
             continue
         elif migrate_untrusted_identities and _has_canonical_untrusted_import_identity(record):
-            existing_item = legacy_by_content.get(_import_content_identity(record))
+            content_identity = _import_content_identity(record)
+            legacy_identity = (str(record.get("source")), *content_identity) if content_identity is not None else None
+            existing_item = legacy_by_source_content.get(legacy_identity)
             if existing_item is not None:
                 if existing_item.get("status") == "dismissed":
                     skipped_dismissed.append(record)

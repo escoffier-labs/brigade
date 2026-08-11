@@ -72,6 +72,10 @@ _ENVELOPE_METADATA_FIELDS = {
         "raw_hash",
         "raw_hash_algorithm",
         "raw_hash_scope",
+        "content_sha256",
+        "raw_sha256",
+        "content_digest",
+        "raw_digest",
     ),
     "timestamps": ("captured_at", "ingested_at"),
 }

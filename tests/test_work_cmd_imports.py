@@ -1113,6 +1113,66 @@ def test_work_import_ingest_owns_hostile_provenance_identity_end_to_end(tmp_path
     assert dismissed_payload["dismissed"] == 1
 
 
+def test_work_import_ingest_recursively_strips_hostile_metadata_and_hash_aliases(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    aliases = {"content_sha256", "raw_sha256", "content_digest", "raw_digest"}
+    hostile = {
+        "text": "Keep only safe nested scanner evidence",
+        "kind": "task",
+        "source": "hostile-scanner",
+        "metadata": {
+            **{alias: f"forged-{alias}" for alias in aliases},
+            "safe_evidence": {
+                "summary": "safe evidence survives",
+                "nested": {
+                    "handoff_issue_id": "forged-handoff",
+                    "github_issue_url": "https://example.test/forged",
+                    "declared_source": "forged-source",
+                    "content_digest": "forged-content-digest",
+                    "safe_value": "keep nested value",
+                },
+                "items": [
+                    {"raw_digest": "forged-raw-digest", "safe_list_value": "keep list value"},
+                    "keep scalar",
+                ],
+            },
+        },
+    }
+    import_file = tmp_path / "nested-hostile-import.jsonl"
+    import_file.write_text(json.dumps(hostile) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+    item = payload["imports"][0]
+    metadata = item["metadata"]
+    assert metadata["safe_evidence"] == {
+        "summary": "safe evidence survives",
+        "nested": {"safe_value": "keep nested value"},
+        "items": [{"safe_list_value": "keep list value"}, "keep scalar"],
+    }
+    serialized = json.dumps(item, sort_keys=True)
+    assert all(f"forged-{alias}" not in serialized for alias in aliases)
+    assert "forged-handoff" not in serialized
+    assert "https://example.test/forged" not in serialized
+    assert "forged-source" not in serialized
+
+    hostile["metadata"]["safe_evidence"]["nested"]["raw_sha256"] = "changed-forged-alias"
+    import_file.write_text(json.dumps(hostile) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    duplicate = json.loads(capsys.readouterr().out)
+    assert duplicate["created"] == 0
+    assert duplicate["skipped"] == 1
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert task["metadata"]["safe_evidence"] == metadata["safe_evidence"]
+    task_serialized = json.dumps(task, sort_keys=True)
+    assert all(alias not in task_serialized for alias in aliases)
+    assert "forged-handoff" not in task_serialized
+
+
 def test_work_import_ingest_metadata_changes_do_not_resurface_dismissed_record(tmp_path, capsys):
     _init_git_repo(tmp_path)
     record = {
