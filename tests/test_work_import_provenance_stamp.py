@@ -370,15 +370,21 @@ def test_batch_ingest_reuses_safe_fields_from_valid_inbound_envelope(tmp_path: P
     env = _envelope(imported[0])
     assert provenance.validate_envelope(env) == []
 
-    # Safe producer identity fields from the validated inbound envelope survive.
-    assert env["source"] == inbound["source"]
+    # Authoritative source/origin/modality come from the trusted producer mapping.
+    assert env["source"] == {
+        "system": "work-inbox",
+        "kind": "handoff-ingest",
+        "producer": "ledger._make_import",
+    }
+    assert env["origin"] == "agent-session"
+    assert env["modality"] == "mixed"
+
+    # Non-authoritative identity fields from the validated inbound envelope survive.
     assert env["locator"] == inbound["locator"]
     assert env["repository"] == inbound["repository"]
     assert env["session"] == inbound["session"]
     assert env["collection_id"] == inbound["collection_id"]
     assert env["item_id"] == inbound["item_id"]
-    assert env["origin"] == inbound["origin"]
-    assert env["modality"] == inbound["modality"]
     assert env["attribution"] == inbound["attribution"]
     assert env["captured_at"] == inbound["captured_at"]
 
@@ -484,3 +490,105 @@ def test_batch_ingest_unsafe_locators_use_safe_fallback(tmp_path: Path, locator_
     assert env["locator"]["kind"] == "uri"
     assert env["locator"]["value"] == f"work-import:{imported[0]['id']}"
     assert provenance.validate_envelope(env) == []
+
+
+def test_batch_ingest_rejects_attacker_authority_in_valid_inbound_envelope(tmp_path: Path):
+    text = "Scanner finding with attacker envelope\n"
+    inbound = provenance.build_envelope(
+        source_system="attacker",
+        source_kind="spoof",
+        source_producer="evil.module",
+        origin="operator-input",
+        repository_id="escoffier-labs/brigade",
+        repository_revision="abc123",
+        session_id="sess-attacker",
+        session_harness="claude",
+        collection_id="evil:collection",
+        item_id="finding:evil",
+        locator_kind="repo-relative",
+        locator_value=".brigade/security/findings/evil.md",
+        attribution="declared",
+        modality="human-written",
+        trust_label="verified",
+        trust_assigned_by="verifier:demo",
+        trust_assigned_at="2026-08-01T12:00:00+00:00",
+        injection_status="clean",
+        injection_count=0,
+        injection_rules=[],
+        text=text,
+        raw_bytes=None,
+        content_scope="item.text.utf8.v1",
+        captured_at="2026-08-01T11:00:00+00:00",
+        ingested_at="2026-08-01T12:00:00+00:00",
+    )
+    assert provenance.validate_envelope(inbound) == []
+
+    imported, skipped, dismissed = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": text,
+                "kind": "finding",
+                "source": "security-scan",
+                "metadata": {
+                    "source_item_key": "finding:evil",
+                    "source_fingerprint": "fp-attacker-authority",
+                    "provenance": inbound,
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert len(imported) == 1
+    env = _envelope(imported[0])
+    assert provenance.validate_envelope(env) == []
+
+    # Authoritative source/origin/modality come from the trusted producer mapping.
+    assert env["source"] == {
+        "system": "work-inbox",
+        "kind": "security-scan",
+        "producer": "ledger._make_import",
+    }
+    assert env["origin"] == "workspace"
+    assert env["modality"] == "tool-output"
+
+    # Non-authoritative identity fields may still be reused from a valid envelope.
+    assert env["locator"] == inbound["locator"]
+    assert env["repository"] == inbound["repository"]
+    assert env["session"] == inbound["session"]
+    assert env["collection_id"] == inbound["collection_id"]
+    assert env["item_id"] == inbound["item_id"]
+    assert env["attribution"] == inbound["attribution"]
+    assert env["captured_at"] == inbound["captured_at"]
+
+    # Digest and trust remain locally assigned.
+    assert env["hashes"]["content"] == provenance.content_sha256(text)
+    assert env["trust"]["label"] == "untrusted"
+    assert env["trust"]["assigned_by"] == "ingest:ledger._make_import"
+
+
+def test_batch_ingest_rejects_traversal_relative_repository_identity(tmp_path: Path):
+    imported, skipped, dismissed = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Finding with traversal repository identity",
+                "kind": "incident",
+                "source": "repo-fleet",
+                "metadata": {
+                    "repo_id": "../operator-private/repo",
+                    "repository_revision": "abc123",
+                    "source_item_key": "fleet:traversal-1",
+                    "source_fingerprint": "fp-traversal-repo",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert len(imported) == 1
+    env = _envelope(imported[0])
+    assert provenance.validate_envelope(env) == []
+    assert env["repository"]["id"] == "unknown"
+    assert ".." not in str(env["repository"]["id"])

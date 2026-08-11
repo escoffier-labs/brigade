@@ -1092,9 +1092,10 @@ _IMPORT_FINGERPRINT_METADATA_SKIP = frozenset(
 )
 
 
-# Default origin/modality for work-inbox producers. Loose metadata cannot
-# override these; a validated inbound envelope may supply origin/modality.
-# Unknown sources stay workspace/tool-output.
+# Default origin/modality for work-inbox producers. Authoritative source,
+# origin, and modality always come from this mapping (plus the local
+# work-inbox producer stamp). Validated inbound envelopes may reuse only
+# non-authoritative identity fields. Unknown sources stay workspace/tool-output.
 _IMPORT_SOURCE_ORIGIN_MODALITY: dict[str, tuple[str, str]] = {
     "manual": ("operator-input", "human-written"),
     "backup-health": ("workspace", "tool-output"),
@@ -1140,11 +1141,18 @@ def _import_origin_modality(source: str) -> tuple[str, str]:
     return _IMPORT_SOURCE_ORIGIN_MODALITY.get(source, ("workspace", "tool-output"))
 
 
+def _repository_id_is_unsafe(value: str) -> bool:
+    if provenance._is_absolute_locator(value):
+        return True
+    # Same traversal-safe policy used for repo-relative locators.
+    return ".." in value.replace("\\", "/").split("/")
+
+
 def _safe_repository_id(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     cleaned = value.strip()
-    if not cleaned or provenance._is_absolute_locator(cleaned):
+    if not cleaned or _repository_id_is_unsafe(cleaned):
         return None
     return cleaned
 
@@ -1241,21 +1249,19 @@ def _stamp_import_provenance(
 ) -> dict[str, Any]:
     """Build a locally assigned work-inbox provenance envelope for one import.
 
-    A validated inbound envelope may contribute safe identity fields
-    (source/locator/repository/session/collection/item/attribution/origin/
-    modality/captured_at). Digest and trust are always recomputed locally.
-    Loose metadata never supplies origin/modality authority.
+    Authoritative source, origin, and modality always come from the trusted
+    producer mapping. A validated inbound envelope may contribute only
+    non-authoritative identity fields (locator/repository/session/collection/
+    item/attribution/captured_at). Digest and trust are always recomputed.
     """
     reusable = _reusable_inbound_provenance(inbound_provenance)
     trust_label, injection_status, injection_count, injection_rules = _import_injection_trust(text)
+    origin, modality = _import_origin_modality(source)
+    source_system = "work-inbox"
+    source_kind = source
+    source_producer = "ledger._make_import"
 
     if reusable is not None:
-        origin = str(reusable["origin"])
-        modality = str(reusable["modality"])
-        source_obj = reusable["source"]
-        source_system = str(source_obj["system"])
-        source_kind = str(source_obj["kind"])
-        source_producer = str(source_obj["producer"])
         repo_obj = reusable["repository"]
         repository_id = _safe_repository_id(repo_obj.get("id")) or "unknown"
         revision = repo_obj.get("revision")
@@ -1276,10 +1282,6 @@ def _stamp_import_provenance(
         if not isinstance(captured_at, str) or not captured_at.strip():
             captured_at = ingested_at
     else:
-        origin, modality = _import_origin_modality(source)
-        source_system = "work-inbox"
-        source_kind = source
-        source_producer = "ledger._make_import"
         repository_id, repository_revision = _import_repository_fields(metadata)
         session_id, session_harness = _import_session_fields(metadata)
 
