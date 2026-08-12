@@ -44,12 +44,17 @@ _SCANNER_RUN_DIRECTORY_AUTHORITIES: dict[int, _ScannerRunDirectoryAuthority] = {
 
 
 def _open_scanner_runs_directory(target: Path, *, create: bool) -> int:
-    return ledger_mod._open_verifier_owned_directory(
-        target,
-        components=(".brigade", "scanners", "runs"),
-        anchor_name=".runs.authority.json",
-        create=create,
-    )
+    try:
+        return ledger_mod._open_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs"),
+            anchor_name=".runs.authority.json",
+            create=create,
+        )
+    except OSError:
+        if not create:
+            raise
+        return ledger_mod._open_legacy_scanner_runs_directory(target)
 
 
 def _validate_scanner_run_directory(authority: _ScannerRunDirectoryAuthority) -> None:
@@ -81,6 +86,11 @@ def _open_scanner_run_directory(target: Path, run_id: str) -> _ScannerRunDirecto
         )
         authority = _ScannerRunDirectoryAuthority(root=root, directory=directory, run_id=run_id)
         _validate_scanner_run_directory(authority)
+        ledger_mod._record_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs", run_id),
+            directory=directory,
+        )
         return authority
     except BaseException:
         if directory != -1:
@@ -255,7 +265,7 @@ def _record_scanner_import_proof(scanner: dict[str, Any], run: dict[str, Any], i
         )
 
 
-def _read_scanner_receipt_at(root: int, run_id: str, *, path: Path) -> dict[str, Any] | None:
+def _read_scanner_receipt_at(target: Path, root: int, run_id: str, *, path: Path) -> dict[str, Any] | None:
     """Read one receipt through the anchored runs descriptor."""
     run = -1
     receipt = -1
@@ -272,6 +282,11 @@ def _read_scanner_receipt_at(root: int, run_id: str, *, path: Path) -> dict[str,
             named_run.st_ino,
         ):
             return None
+        ledger_mod._validate_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs", run_id),
+            directory=run,
+        )
         receipt = os.open(
             "receipt.json",
             os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
@@ -291,8 +306,14 @@ def _read_scanner_receipt_at(root: int, run_id: str, *, path: Path) -> dict[str,
             after.st_nlink,
         ):
             return None
+        _validate_scanner_run_directory(_ScannerRunDirectoryAuthority(root=root, directory=run, run_id=run_id))
+        ledger_mod._validate_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs", run_id),
+            directory=run,
+        )
         data = json.loads(b"".join(chunks))
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or data.get("run_id") != run_id:
             return None
         data.setdefault("path", str(path))
         return data
@@ -317,7 +338,7 @@ def _scanner_read_receipt(path: Path) -> dict[str, Any] | None:
     except OSError:
         return None
     try:
-        return _read_scanner_receipt_at(root, run_path.name, path=run_path)
+        return _read_scanner_receipt_at(target, root, run_path.name, path=run_path)
     finally:
         os.close(root)
 
@@ -334,7 +355,7 @@ def _scanner_receipt_collection(target: Path) -> tuple[list[dict[str, Any]], lis
             if not isinstance(run_id, str):
                 continue
             path = helpers._scanner_runs_root(target) / run_id
-            receipt = _read_scanner_receipt_at(root, run_id, path=path)
+            receipt = _read_scanner_receipt_at(target, root, run_id, path=path)
             if receipt is None:
                 malformed.append(run_id)
             else:

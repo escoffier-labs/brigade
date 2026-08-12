@@ -42,6 +42,19 @@ def _verified_builtin_scanner_run(scanner: dict[str, object]) -> dict[str, objec
     return run
 
 
+def _record_scanner_run_authority(tmp_path: Path, run_id: str) -> None:
+    directory = helpers._scanner_runs_root(tmp_path) / run_id
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        work_cmd.ledger._record_verifier_owned_directory(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", run_id),
+            directory=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+
+
 def test_scanner_receipt_producer_rejects_run_directory_swap(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -107,6 +120,115 @@ def test_replaced_scanner_runs_directory_cannot_manufacture_receipt_authority(tm
     assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
 
 
+def test_replaced_individual_scanner_run_cannot_manufacture_receipt_authority(tmp_path: Path) -> None:
+    from brigade.work_cmd import constants, helpers, ledger
+
+    item = ledger._make_import("forged child receipt", kind="task", source="handoff-ingest")
+    scanner = dict(next(value for value in constants.SCANNER_DEFAULTS if value["source"] == "handoff-ingest"))
+    metadata = item["metadata"]
+    assert isinstance(metadata, dict)
+    metadata.update({"scanner_id": scanner["id"], "scanner_run_id": "chosen-run"})
+    receipt = {
+        "run_id": "chosen-run",
+        "scanner_id": scanner["id"],
+        "source": scanner["source"],
+        "command": scanner["command"],
+        "status": "completed",
+        "exit_code": 0,
+        "self_import_proofs": {
+            "scanner_id": scanner["id"],
+            "source": scanner["source"],
+            "scanner": scanner,
+            "imports": [{"id": item["id"], "content_hash": ledger._locally_stamped_import_content_hash(item)}],
+        },
+    }
+    root = ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(root)
+    run = helpers._scanner_runs_root(tmp_path) / "chosen-run"
+    run.mkdir()
+    descriptor = os.open(run, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        ledger._record_verifier_owned_directory(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", "chosen-run"),
+            directory=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+    run.rename(run.with_name("chosen-run-original"))
+    replacement = tmp_path / "replacement-run"
+    replacement.mkdir()
+    (replacement / "receipt.json").write_text(json.dumps(receipt))
+    replacement.rename(run)
+
+    assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
+
+
+def test_scanner_receipt_collection_rejects_replaced_bound_run_directory(tmp_path: Path) -> None:
+    from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
+
+    root = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
+    run_id = "bound-run"
+    os.mkdir(run_id, dir_fd=root)
+    run = os.open(run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    try:
+        ledger._record_verifier_owned_directory(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", run_id),
+            directory=run,
+        )
+    finally:
+        os.close(run)
+        os.close(root)
+    run_path = helpers._scanner_runs_root(tmp_path) / run_id
+    (run_path / "receipt.json").write_text(json.dumps({"run_id": run_id, "status": "completed"}))
+    run_path.rename(run_path.with_name(f"{run_id}-original"))
+    replacement = tmp_path / "replacement-run"
+    replacement.mkdir()
+    (replacement / "receipt.json").write_text(json.dumps({"run_id": run_id, "status": "completed"}))
+    replacement.rename(run_path)
+
+    assert scanners_mod._scanner_receipts(tmp_path) == []
+
+
+def test_scanner_receipt_collection_rejects_renamed_receipt(tmp_path: Path) -> None:
+    from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
+
+    root = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
+    run_id = "bound-run"
+    os.mkdir(run_id, dir_fd=root)
+    run = os.open(run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    try:
+        ledger._record_verifier_owned_directory(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", run_id),
+            directory=run,
+        )
+    finally:
+        os.close(run)
+        os.close(root)
+    (helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json").write_text(
+        json.dumps({"run_id": "other-run", "status": "completed"})
+    )
+
+    assert scanners_mod._scanner_receipts(tmp_path) == []
+
+
+def test_pre_anchor_scanner_runs_directory_is_adopted(tmp_path: Path) -> None:
+    from brigade.work_cmd import helpers, scanners as scanners_mod
+
+    helpers._scanner_runs_root(tmp_path).mkdir(parents=True)
+    descriptor = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
+    os.close(descriptor)
+
+    assert (tmp_path / ".brigade" / ".runs.authority.json").is_file()
+
+
 def test_plaintext_runs_anchor_does_not_let_replacement_directory_forge_receipt(tmp_path: Path):
     from brigade.work_cmd import constants, helpers, ledger
 
@@ -144,7 +266,7 @@ def test_plaintext_runs_anchor_does_not_let_replacement_directory_forge_receipt(
     (replacement / run_id / "receipt.json").write_text(json.dumps(receipt))
     replacement.rename(runs)
     info = runs.stat()
-    (runs.parent / ".runs.authority.json").write_text(
+    (tmp_path / ".brigade" / ".runs.authority.json").write_text(
         json.dumps({"schema_version": 1, "device": info.st_dev, "inode": info.st_ino})
     )
 
@@ -844,6 +966,7 @@ conflict_window = "04:00-04:10"
     os.close(authority)
     running = tmp_path / ".brigade" / "scanners" / "runs" / "running"
     running.mkdir(parents=True)
+    _record_scanner_run_authority(tmp_path, "running")
     _write_json(
         running / "receipt.json",
         {
@@ -905,6 +1028,7 @@ conflict_window = "02:00-02:10"
     os.close(authority)
     run_dir = tmp_path / ".brigade" / "scanners" / "runs" / "failed-run"
     run_dir.mkdir(parents=True)
+    _record_scanner_run_authority(tmp_path, "failed-run")
     _write_json(
         run_dir / "receipt.json",
         {
@@ -922,6 +1046,7 @@ conflict_window = "02:00-02:10"
     )
     success_dir = tmp_path / ".brigade" / "scanners" / "runs" / "old-success"
     success_dir.mkdir(parents=True)
+    _record_scanner_run_authority(tmp_path, "old-success")
     (success_dir / "stdout.log").write_text("ok\n")
     (success_dir / "stderr.log").write_text("")
     _write_json(
@@ -941,6 +1066,7 @@ conflict_window = "02:00-02:10"
     )
     bad_run = tmp_path / ".brigade" / "scanners" / "runs" / "bad-run"
     bad_run.mkdir(parents=True)
+    _record_scanner_run_authority(tmp_path, "bad-run")
     (bad_run / "receipt.json").write_text("{not json\n")
 
     assert work_cmd.scanners_doctor(target=tmp_path, import_issues=True) == 1

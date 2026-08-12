@@ -52,6 +52,15 @@ def _write_scanner_import_proof(tmp_path: Path, items: list[dict[str, object]], 
     os.close(descriptor)
     receipt_path = work_cmd.helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
     receipt_path.parent.mkdir(parents=True)
+    descriptor = os.open(receipt_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        work_cmd.ledger._record_verifier_owned_directory(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", run_id),
+            directory=descriptor,
+        )
+    finally:
+        os.close(descriptor)
     receipt_path.write_text(json.dumps(receipt))
     work_cmd.ledger._write_persisted_import_proofs(tmp_path, items, operation_id="0" * 32)
 

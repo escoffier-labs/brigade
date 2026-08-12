@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,10 @@ import pytest
 
 from brigade import provenance
 from brigade.work_cmd import constants, helpers, ledger
+
+
+def _read_imports_in_child(target: str) -> None:
+    ledger._read_imports(Path(target))
 
 
 def _envelope(item: dict[str, Any]) -> dict[str, Any]:
@@ -64,6 +69,15 @@ def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source
     _establish_scanner_runs_authority(tmp_path)
     receipt_path = helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
     receipt_path.parent.mkdir(parents=True)
+    descriptor = os.open(receipt_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        ledger._record_verifier_owned_directory(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", run_id),
+            directory=descriptor,
+        )
+    finally:
+        os.close(descriptor)
     receipt_path.write_text(json.dumps(receipt))
     ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
 
@@ -92,8 +106,28 @@ def _write_builtin_scanner_receipt(
     _establish_scanner_runs_authority(tmp_path)
     path = helpers._scanner_runs_root(tmp_path) / "chosen-run" / "receipt.json"
     path.parent.mkdir(parents=True)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        ledger._record_verifier_owned_directory(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", "chosen-run"),
+            directory=descriptor,
+        )
+    finally:
+        os.close(descriptor)
     path.write_text(json.dumps(receipt))
     return path
+
+
+def test_local_scanner_receipt_requires_payload_run_id_to_match_directory(tmp_path: Path) -> None:
+    item = ledger._make_import("renamed scanner receipt", kind="task", source="handoff-ingest")
+    path = _write_builtin_scanner_receipt(tmp_path, item)
+    payload = json.loads(path.read_text())
+    payload["run_id"] = "other-run"
+    path.write_text(json.dumps(payload))
+
+    assert ledger._read_local_scanner_receipt(tmp_path, "chosen-run") is None
+    assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
 
 
 @pytest.mark.parametrize(("status", "exit_code", "remove_envelope"), [("failed", 23, False), ("completed", 0, True)])
@@ -131,6 +165,33 @@ def test_legacy_identity_rejects_sidecar_without_a_successful_scanner_receipt(tm
 
     assert not ledger._has_locally_stamped_import_proof(legacy, target=tmp_path)
     assert ledger._legacy_import_source_content_identity(legacy, target=tmp_path) is None
+
+
+def test_legacy_migration_requires_persisted_sidecar_in_addition_to_receipt(tmp_path: Path):
+    record = {
+        "text": "receipt-only legacy",
+        "kind": "task",
+        "source": "handoff-ingest",
+        "metadata": {"source_item_key": "legacy-key", "source_fingerprint": "legacy-fingerprint"},
+    }
+    legacy = ledger._make_import(
+        record["text"], kind=record["kind"], source=record["source"], metadata=record["metadata"]
+    )
+    _write_builtin_scanner_receipt(tmp_path, legacy)
+    ledger._write_imports(tmp_path, [legacy])
+    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="handoff-ingest")
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="handoff-ingest",
+        migrate_untrusted_identities=True,
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
 
 
 def test_make_import_stamps_valid_envelope_with_exact_content_hash():
@@ -1131,6 +1192,66 @@ def test_partial_proof_creation_is_removed(tmp_path: Path, monkeypatch: pytest.M
     assert not proofs.exists() or list(proofs.iterdir()) == []
 
 
+def test_proof_name_substitution_restores_prior_inbox_and_removes_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = b'{"text":"before"}\n'
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(before)
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "new", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+    original_validate = ledger._validate_import_proof_descriptor
+    substituted = False
+
+    def substitute_after_validation(descriptor: int) -> None:
+        nonlocal substituted
+        original_validate(descriptor)
+        if substituted:
+            return
+        substituted = True
+        proof_dir = tmp_path / ".brigade" / "work" / "imports" / "proofs"
+        proof = next(path for path in proof_dir.iterdir() if path.suffix == ".json")
+        proof.unlink()
+        proof.write_text('{"attacker":true}')
+
+    monkeypatch.setattr(ledger, "_validate_import_proof_descriptor", substitute_after_validation)
+    with pytest.raises(OSError):
+        ledger._append_import_records(
+            tmp_path,
+            [record],
+            provenance_source="learning-loop",
+            migrate_untrusted_identities=True,
+        )
+
+    assert inbox.read_bytes() == before
+    proof_dir = tmp_path / ".brigade" / "work" / "imports" / "proofs"
+    assert not proof_dir.exists() or list(proof_dir.iterdir()) == []
+
+
+def test_read_imports_rejects_symlinks_and_fifos_without_blocking(tmp_path: Path) -> None:
+    external = tmp_path / "external.jsonl"
+    external.write_text(json.dumps({"text": "attacker", "kind": "task", "source": "manual"}) + "\n")
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.symlink_to(external)
+
+    assert ledger._read_imports(tmp_path) == []
+
+    inbox.unlink()
+    os.mkfifo(inbox)
+    child = multiprocessing.Process(target=_read_imports_in_child, args=(str(tmp_path),))
+    child.start()
+    child.join(0.5)
+    blocked = child.is_alive()
+    if blocked:
+        child.terminate()
+        child.join()
+    assert not blocked
+
+
 def test_scanner_ingest_proof_failure_restores_exact_prior_inbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1194,7 +1315,7 @@ def test_plaintext_proof_anchor_does_not_let_replacement_directory_forge_authori
     assert payload is not None and name is not None
     (replacement / name).write_text(json.dumps(payload))
     replacement.rename(proofs)
-    _rewrite_authority_anchor(proofs.parent / ".proofs.authority.json", proofs)
+    _rewrite_authority_anchor(tmp_path / ".brigade" / "work" / ".proofs.authority.json", proofs)
 
     assert not ledger._has_persisted_import_proof(item, target=tmp_path)
 

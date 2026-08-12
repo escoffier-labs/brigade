@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
-from .. import provenance, runguard
+from .. import component_paths, provenance, runguard
 from ..untrusted import scan_handoff_injection_heuristics
 
 
@@ -340,14 +341,40 @@ def _stale_claim_payload(target: Path, *, stale_after_hours: float | None = None
 
 
 def _read_imports(target: Path) -> list[dict[str, Any]]:
-    path = helpers._imports_path(target)
-    if not path.exists():
-        return []
     imports: list[dict[str, Any]] = []
+    parent = -1
+    descriptor = -1
     try:
-        lines = path.read_text().splitlines()
-    except OSError:
+        parent, name = _open_import_inbox_parent(target, create=False)
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            return []
+        _validate_import_inbox_descriptor(descriptor)
+        before = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+        ):
+            return []
+        lines = b"".join(chunks).decode("utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
         return []
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        if parent != -1:
+            os.close(parent)
     for line in lines:
         if not line.strip():
             continue
@@ -1383,6 +1410,7 @@ def _has_canonical_untrusted_import_identity(record: dict[str, Any]) -> bool:
 _IMPORT_PROOF_SCHEMA_VERSION = 1
 _IMPORT_PROOF_OPERATION_PATTERN = re.compile(r"[0-9a-f]{32}")
 _DIRECTORY_AUTHORITY_SCHEMA_VERSION = 1
+_EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION = 1
 
 
 def _import_proof_name(item_id: object) -> str | None:
@@ -1392,69 +1420,141 @@ def _import_proof_name(item_id: object) -> str | None:
     return f"{helpers._stable_hash({'item_id': item_id})}.json"
 
 
-def _validate_directory_authority_anchor(
-    anchor_parent: int,
-    parent_name: str,
-    parent: int,
-    name: str,
-    directory: int,
-    *,
-    anchor_name: str,
-) -> None:
-    """Bind a durable verifier-owned anchor outside the replaceable directory parent."""
-    if os.stat not in os.supports_dir_fd:
-        raise OSError("descriptor-relative directory authority validation is unavailable")
-    parent_stat = os.fstat(parent)
-    named_parent = os.stat(parent_name, dir_fd=anchor_parent, follow_symlinks=False)
-    if not stat.S_ISDIR(parent_stat.st_mode) or (named_parent.st_dev, named_parent.st_ino) != (
-        parent_stat.st_dev,
-        parent_stat.st_ino,
-    ):
-        raise OSError("directory authority parent no longer matches its held descriptor")
-    directory_stat = os.fstat(directory)
-    named_stat = os.stat(name, dir_fd=parent, follow_symlinks=False)
-    if not stat.S_ISDIR(directory_stat.st_mode) or (named_stat.st_dev, named_stat.st_ino) != (
-        directory_stat.st_dev,
-        directory_stat.st_ino,
-    ):
-        raise OSError("directory authority no longer matches its held descriptor")
+def _directory_authority_store_path(target: Path) -> Path:
+    """Return the verifier-owned authority record for one resolved workspace."""
+    resolved = str(target.expanduser().resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+    try:
+        data_root = Path(component_paths.data_root())
+    except ValueError as exc:
+        raise OSError("external directory authority storage is unavailable") from exc
+    return data_root / "brigade" / "directory-authority" / f"{digest}.json"
+
+
+def _directory_authority_scope(components: tuple[str, ...]) -> str:
+    return "/".join(components)
+
+
+def _directory_identity(descriptor: int) -> dict[str, int]:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise OSError("directory authority is not a directory")
+    return {"device": metadata.st_dev, "inode": metadata.st_ino}
+
+
+def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, Any] | None]:
+    path = _directory_authority_store_path(target)
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return path, None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError("external directory authority record is not a single-link regular file")
+        payload = json.loads(os.read(descriptor, 1024 * 1024))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError("external directory authority record is malformed") from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(payload, dict):
+        raise OSError("external directory authority record is malformed")
+    return path, payload
+
+
+def _write_external_directory_authority(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     descriptor = -1
     try:
         descriptor = os.open(
-            anchor_name,
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=anchor_parent,
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
         )
-        anchor_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(anchor_stat.st_mode) or anchor_stat.st_nlink != 1:
-            raise OSError("directory authority anchor is not a single-link regular file")
-        payload = json.loads(os.read(descriptor, 64 * 1024))
-        if payload != {
-            "schema_version": _DIRECTORY_AUTHORITY_SCHEMA_VERSION,
-            "device": directory_stat.st_dev,
-            "inode": directory_stat.st_ino,
-        }:
-            raise OSError("directory authority anchor does not match directory")
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise OSError("directory authority anchor is malformed") from exc
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if descriptor != -1:
             os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
-def _create_directory_authority_anchor(anchor_parent: int, directory: int, *, anchor_name: str) -> None:
-    """Create the durable binding outside the directory's replaceable parent."""
-    directory_stat = os.fstat(directory)
+def _record_external_directory_authority(target: Path, components: tuple[str, ...], directory: int) -> None:
+    """Persist a directory identity in user-owned state, outside the workspace."""
+    path, existing = _read_external_directory_authority(target)
+    resolved = str(target.expanduser().resolve())
+    if existing is None:
+        payload: dict[str, Any] = {
+            "schema_version": _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION,
+            "target": resolved,
+            "directories": {},
+        }
+    else:
+        payload = existing
+        if (
+            payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+            or payload.get("target") != resolved
+            or not isinstance(payload.get("directories"), dict)
+        ):
+            raise OSError("external directory authority record is malformed")
+    directories = payload["directories"]
+    assert isinstance(directories, dict)
+    scope = _directory_authority_scope(components)
+    identity = _directory_identity(directory)
+    existing_identity = directories.get(scope)
+    if existing_identity is not None:
+        if existing_identity != identity:
+            raise OSError("external directory authority record does not match directory")
+        return
+    directories[scope] = identity
+    _write_external_directory_authority(path, payload)
+
+
+def _validate_external_directory_authority(target: Path, components: tuple[str, ...], directory: int) -> None:
+    _path, payload = _read_external_directory_authority(target)
+    if payload is None:
+        raise OSError("external directory authority record is missing")
+    directories = payload.get("directories")
+    if (
+        payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+        or payload.get("target") != str(target.expanduser().resolve())
+        or not isinstance(directories, dict)
+        or directories.get(_directory_authority_scope(components)) != _directory_identity(directory)
+    ):
+        raise OSError("external directory authority record does not match directory")
+
+
+def _record_verifier_owned_directory(target: Path, *, components: tuple[str, ...], directory: int) -> None:
+    """Record a child directory created by a verifier-owned producer."""
+    _record_external_directory_authority(target, components, directory)
+
+
+def _validate_verifier_owned_directory(target: Path, *, components: tuple[str, ...], directory: int) -> None:
+    """Require that a directory still matches its verifier-owned external record."""
+    _validate_external_directory_authority(target, components, directory)
+
+
+def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *, anchor_name: str) -> None:
+    """Retain the old marker for released workspaces. It is never authority."""
+    identity = _directory_identity(directory)
     payload = json.dumps(
-        {
-            "schema_version": _DIRECTORY_AUTHORITY_SCHEMA_VERSION,
-            "device": directory_stat.st_dev,
-            "inode": directory_stat.st_ino,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
+        {"schema_version": _DIRECTORY_AUTHORITY_SCHEMA_VERSION, **identity}, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    descriptor = -1
     try:
         descriptor = os.open(
             anchor_name,
@@ -1462,28 +1562,86 @@ def _create_directory_authority_anchor(anchor_parent: int, directory: int, *, an
             0o600,
             dir_fd=anchor_parent,
         )
+    except FileExistsError:
+        return
+    try:
         with os.fdopen(os.dup(descriptor), "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        anchor_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(anchor_stat.st_mode) or anchor_stat.st_nlink != 1:
-            raise OSError("directory authority anchor is not a single-link regular file")
         os.fsync(anchor_parent)
-    except BaseException:
-        if descriptor != -1:
-            try:
-                os.unlink(anchor_name, dir_fd=anchor_parent)
-            except OSError:
-                pass
-        raise
     finally:
+        os.close(descriptor)
+
+
+def _adopt_preexisting_scanner_run_directories(target: Path, root: int) -> None:
+    """Capture released scanner run directories by identity, never by receipt bytes."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    for run_id in os.listdir(root):
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", run_id):
+            continue
+        descriptor = -1
+        try:
+            descriptor = os.open(run_id, flags, dir_fd=root)
+            _record_external_directory_authority(
+                target,
+                (".brigade", "scanners", "runs", run_id),
+                descriptor,
+            )
+        except OSError:
+            continue
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+
+
+def _open_legacy_scanner_runs_directory(target: Path) -> int:
+    """Adopt a released scanner-runs root without deriving trust from receipts."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(target.expanduser().resolve(), flags)
+    anchor_parent = -1
+    try:
+        brigade = os.open(".brigade", flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = brigade
+        anchor_parent = os.dup(descriptor)
+        scanners = os.open("scanners", flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = scanners
+        runs = os.open("runs", flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = runs
+
+        _path, payload = _read_external_directory_authority(target)
+        scope = _directory_authority_scope((".brigade", "scanners", "runs"))
+        if payload is not None:
+            directories = payload.get("directories")
+            if (
+                payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+                or payload.get("target") != str(target.expanduser().resolve())
+                or not isinstance(directories, dict)
+            ):
+                raise OSError("external directory authority record is malformed")
+            if scope in directories:
+                raise OSError("external directory authority record does not match directory")
+
+        _record_external_directory_authority(target, (".brigade", "scanners", "runs"), descriptor)
+        _adopt_preexisting_scanner_run_directories(target, descriptor)
+        _write_compatibility_directory_anchor(anchor_parent, descriptor, anchor_name=".runs.authority.json")
+        os.close(anchor_parent)
+        anchor_parent = -1
+        result = descriptor
+        descriptor = -1
+        return result
+    finally:
+        if anchor_parent != -1:
+            os.close(anchor_parent)
         if descriptor != -1:
             os.close(descriptor)
 
 
 def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...], anchor_name: str, create: bool) -> int:
-    """Open a directory that remains authoritative only while its parent anchor matches."""
+    """Open an externally bound directory through no-follow descriptors."""
     if (
         os.name != "posix"
         or not getattr(os, "O_NOFOLLOW", 0)
@@ -1527,20 +1685,14 @@ def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...],
             os.mkdir(name, 0o700, dir_fd=parent)
             child = os.open(name, flags, dir_fd=parent)
             created = True
-        if created:
-            try:
-                _create_directory_authority_anchor(anchor_parent, child, anchor_name=anchor_name)
-            except BaseException:
-                os.close(child)
+        try:
+            _validate_external_directory_authority(target, components, child)
+        except OSError:
+            if created:
+                _record_external_directory_authority(target, components, child)
+            else:
                 raise
-        else:
-            try:
-                _validate_directory_authority_anchor(
-                    anchor_parent, parent_name, parent, name, child, anchor_name=anchor_name
-                )
-            except BaseException:
-                os.close(child)
-                raise
+        _write_compatibility_directory_anchor(anchor_parent, child, anchor_name=anchor_name)
         os.close(parent)
         parent = -1
         os.close(anchor_parent)
@@ -1570,6 +1722,20 @@ def _validate_import_proof_descriptor(descriptor: int) -> None:
     metadata = os.fstat(descriptor)
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         raise OSError("import proof is not a single-link regular file")
+
+
+def _validate_import_proof_name_matches_descriptor(parent: int, name: str, descriptor: int) -> None:
+    """Require the published sidecar name to still identify its held descriptor."""
+    _validate_import_proof_descriptor(descriptor)
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or named.st_nlink != 1
+        or (named.st_dev, named.st_ino, named.st_mode, named.st_nlink)
+        != (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink)
+    ):
+        raise OSError("import proof name no longer matches its held descriptor")
 
 
 def _persisted_import_proof_payload(item: dict[str, Any], *, operation_id: str) -> dict[str, Any] | None:
@@ -1609,6 +1775,7 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
                     handle.flush()
                     os.fsync(handle.fileno())
                 _validate_import_proof_descriptor(descriptor)
+                _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
             finally:
                 os.close(descriptor)
         os.fsync(parent)
@@ -1750,6 +1917,19 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             create=False,
         )
         current = os.open(scanner_run_id, directory_flags, dir_fd=root)
+        opened_run = os.fstat(current)
+        named_run = os.stat(scanner_run_id, dir_fd=root, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened_run.st_mode)
+            or not stat.S_ISDIR(named_run.st_mode)
+            or (opened_run.st_dev, opened_run.st_ino) != (named_run.st_dev, named_run.st_ino)
+        ):
+            return None
+        _validate_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs", scanner_run_id),
+            directory=current,
+        )
         receipt_descriptor = os.open(
             "receipt.json",
             os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
@@ -1769,8 +1949,21 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             after.st_nlink,
         ):
             return None
+        named_run = os.stat(scanner_run_id, dir_fd=root, follow_symlinks=False)
+        if not stat.S_ISDIR(named_run.st_mode) or (opened_run.st_dev, opened_run.st_ino) != (
+            named_run.st_dev,
+            named_run.st_ino,
+        ):
+            return None
+        _validate_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs", scanner_run_id),
+            directory=current,
+        )
         payload = json.loads(b"".join(chunks))
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict) or payload.get("run_id") != scanner_run_id:
+            return None
+        return payload
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     finally:
@@ -1830,7 +2023,9 @@ def _legacy_import_source_content_identity(
     item: dict[str, Any], *, target: Path | None = None
 ) -> tuple[str, str, str] | None:
     """Return a legacy identity only when local provenance establishes its source."""
-    if not _has_locally_stamped_import_proof(item, target=target):
+    if not _has_locally_stamped_import_proof(item, target=target) or not _has_persisted_import_proof(
+        item, target=target
+    ):
         return None
     source = item["source"]
     content_identity = _import_content_identity(item)
