@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -485,6 +486,15 @@ def scan(
     report["config"] = str(effective.config_path)
     report["config_loaded"] = effective.config_loaded
     report["generated_at"] = _utc_iso()
+    candidate_commit = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "HEAD"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if candidate_commit.returncode == 0 and candidate_commit.stdout.strip():
+        report["candidate_commit"] = candidate_commit.stdout.strip()
     if suppression_migrations:
         report["suppression_migrations"] = suppression_migrations
     _write_suppression_health_cache_from_report(target, effective, report)

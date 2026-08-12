@@ -1,4 +1,5 @@
 import json
+import subprocess
 
 import pytest
 
@@ -3082,6 +3083,26 @@ def test_security_finding_outputs_redact_private_url_token_and_path(tmp_path, ca
     assert fingerprint in plain
     assert safe_path in plain
     assert "[REDACTED-URL]" in plain or "[REDACTED]" in plain or "[REDACTED-PATH]" in plain
+
+
+def test_security_scan_records_candidate_commit_in_evidence(tmp_path, capsys):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Dev"], cwd=tmp_path, check=True)
+    (tmp_path / "README.md").write_text("fixture\n")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=tmp_path, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    output_dir = tmp_path / ".brigade" / "security" / "latest"
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+
+    report = json.loads((output_dir / "security-report.json").read_text())
+    assert report["candidate_commit"] == head
+    assert security_cmd.health(tmp_path)["evidence"]["candidate_commit"] == head
 
 
 def test_security_enrich_writes_local_enrichment_bundle(tmp_path, capsys):

@@ -804,6 +804,7 @@ def inspect_evidence_bundle(path: Path) -> dict[str, Any]:
         "ready": True,
         "path": str(path),
         "generated_at": payload.get("generated_at"),
+        "candidate_commit": payload.get("candidate_commit"),
         "finding_count": payload.get("finding_count"),
         "policy": payload.get("policy"),
         "sarif_ready": sarif_path.is_file(),

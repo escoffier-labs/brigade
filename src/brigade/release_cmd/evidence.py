@@ -536,6 +536,14 @@ def _assess(
     if int(sweep_review.get("issue_count") or 0) > 0:
         blockers.append(f"scanner sweep has unresolved issue(s): {sweep_review.get('issue_count')}")
     security = evidence.get("security") if isinstance(evidence.get("security"), dict) else {}
+    security_evidence = security.get("evidence") if isinstance(security.get("evidence"), dict) else {}
+    candidate_commit = git.get("head")
+    evidence_commit = security_evidence.get("candidate_commit")
+    if not candidate_commit or evidence_commit != candidate_commit:
+        blockers.append(
+            f"security evidence does not cover candidate commit {candidate_commit or 'unknown'}; "
+            "remediation: brigade security scan --target ."
+        )
     security_checks = [item for item in security.get("checks", []) if isinstance(item, dict)]
     open_finding_checks = [
         item for item in security_checks if item.get("name") == "security_open_findings" and item.get("status") != OK
