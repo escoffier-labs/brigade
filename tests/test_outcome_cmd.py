@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
@@ -1396,7 +1397,8 @@ def test_capture_discovers_and_fingerprints_unicode_and_space_card_ids(tmp_path,
     card = _write_card(tmp_path, card_id, "# unicode space card\n")
     _write_verify_receipt(tmp_path)
 
-    assert card_id in outcome_cmd._known_card_names(tmp_path)
+    known_card_ids = [unicodedata.normalize("NFC", name) for name in outcome_cmd._known_card_names(tmp_path)]
+    assert unicodedata.normalize("NFC", card_id) in known_card_ids
     assert outcome_cmd.artifact_fingerprint(tmp_path, card_id, "card") == _sha256_of(card)
     assert (
         outcome_cmd.capture(
