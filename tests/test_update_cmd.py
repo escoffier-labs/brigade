@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
+
 import pytest
 
 from brigade import component_manifest, update_cmd
@@ -247,6 +249,82 @@ def test_default_http_rejects_api_redirect_outside_exact_api_path():
     ):
         with pytest.raises(update_cmd.UpdateError, match="GitHub API request redirected"):
             update_cmd._DefaultHttp().json(url)
+
+
+def test_default_http_uses_github_token_for_github_api_requests(monkeypatch):
+    url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
+    monkeypatch.setenv("GITHUB_TOKEN", "github-token-example")
+    monkeypatch.setenv("GH_TOKEN", "gh-token-example")
+    requests = []
+
+    def urlopen(request, *, timeout):
+        requests.append(request)
+        assert timeout == 30
+        return _Response(b"{}", url)
+
+    with patch("urllib.request.urlopen", side_effect=urlopen):
+        assert update_cmd._DefaultHttp().json(url) == {}
+
+    assert requests[0].get_header("Authorization") == "Bearer github-token-example"
+
+
+def test_default_http_uses_gh_token_when_github_token_is_absent(monkeypatch):
+    url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "gh-token-example")
+
+    with patch("urllib.request.urlopen", return_value=_Response(b"{}", url)) as urlopen:
+        assert update_cmd._DefaultHttp().json(url) == {}
+
+    request = urlopen.call_args.args[0]
+    assert request.get_header("Authorization") == "Bearer gh-token-example"
+
+
+@pytest.mark.parametrize("status", (401, 403))
+def test_default_http_retries_github_api_without_rejected_token(monkeypatch, status):
+    url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
+    secret = "rejected-token-example"
+    monkeypatch.setenv("GITHUB_TOKEN", secret)
+    requests = []
+
+    def urlopen(request, *, timeout):
+        requests.append(request)
+        assert timeout == 30
+        if len(requests) == 1:
+            raise urllib.error.HTTPError(url, status, "Bad credentials", {}, None)
+        return _Response(b"{}", url)
+
+    with patch("urllib.request.urlopen", side_effect=urlopen):
+        assert update_cmd._DefaultHttp().json(url) == {}
+
+    assert requests[0].get_header("Authorization") == f"Bearer {secret}"
+    assert requests[1].get_header("Authorization") is None
+
+
+def test_default_http_rejected_token_is_absent_from_final_error(monkeypatch):
+    url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
+    secret = "rejected-token-example"
+    monkeypatch.setenv("GITHUB_TOKEN", secret)
+
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.HTTPError(url, 401, "Bad credentials", {}, None),
+    ):
+        with pytest.raises(update_cmd.UpdateError) as caught:
+            update_cmd._DefaultHttp().json(url)
+
+    assert secret not in str(caught.value)
+
+
+def test_default_http_never_sends_github_token_to_non_api_requests(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "github-token-example")
+    url = BASE + "component-manifest-v1.json"
+
+    with patch("urllib.request.urlopen", return_value=_Response(b"manifest", url)) as urlopen:
+        assert update_cmd._DefaultHttp().bytes(url) == b"manifest"
+
+    request = urlopen.call_args.args[0]
+    assert request.get_header("Authorization") is None
 
 
 def test_cache_manifest_preserves_verified_crlf_bytes_without_text_round_trip(tmp_path, monkeypatch):

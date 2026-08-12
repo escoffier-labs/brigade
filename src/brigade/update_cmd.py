@@ -98,28 +98,35 @@ class _DefaultHttp:
         url: str,
         *,
         accept: str,
+        github_token: str | None = None,
         final_url_is_allowed: Callable[[str], bool],
         redirect_error: str,
         request_error: str,
     ) -> bytes:
-        request = urllib.request.Request(
-            url,
-            headers={"Accept": accept, "User-Agent": "brigade-update/1"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                final = response.geturl()
-                if not final_url_is_allowed(final):
-                    raise UpdateError(f"{redirect_error}: {final}")
-                return response.read()
-        except urllib.error.HTTPError as exc:
-            raise UpdateError(f"{request_error}: {url} HTTP {exc.code}") from exc
-        except urllib.error.URLError as exc:
-            raise UpdateError(f"{request_error}: {url}") from exc
+        tokens: tuple[str | None, ...] = (github_token, None) if github_token else (None,)
+        for index, token in enumerate(tokens):
+            headers = {"Accept": accept, "User-Agent": "brigade-update/1"}
+            if token is not None:
+                headers["Authorization"] = f"Bearer {token}"
+            request = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    final = response.geturl()
+                    if not final_url_is_allowed(final):
+                        raise UpdateError(f"{redirect_error}: {final}")
+                    return response.read()
+            except urllib.error.HTTPError as exc:
+                if token is not None and exc.code in {401, 403} and index + 1 < len(tokens):
+                    continue
+                raise UpdateError(f"{request_error}: {url} HTTP {exc.code}") from exc
+            except urllib.error.URLError as exc:
+                raise UpdateError(f"{request_error}: {url}") from exc
+        raise AssertionError("HTTP request attempts unexpectedly exhausted")
 
     def json(self, url: str) -> Any:
         if _is_github_api_url(url):
             accept = "application/vnd.github+json"
+            github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 
             def final_url_is_allowed(final: str) -> bool:
                 return final == url and _is_github_api_url(final)
@@ -129,6 +136,7 @@ class _DefaultHttp:
             invalid_json = f"GitHub request returned invalid JSON: {url}"
         elif _is_pypi_project_json_url(url):
             accept = "application/json"
+            github_token = None
 
             def final_url_is_allowed(final: str) -> bool:
                 return final == url and _is_pypi_project_json_url(final)
@@ -143,6 +151,7 @@ class _DefaultHttp:
                 self._read(
                     url,
                     accept=accept,
+                    github_token=github_token,
                     final_url_is_allowed=final_url_is_allowed,
                     redirect_error=redirect_error,
                     request_error=request_error,
