@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import evidence_brief, evidence_runtime, proc
+from . import memory_identity_audit
 from .localio import utc_now_iso as _now
 
 
@@ -207,18 +208,39 @@ def _enrich_memory_projection_health(payload: dict[str, Any], target: Path) -> d
     if engine_health:
         merged.update(engine_health)
     if isinstance(last_run, dict):
-        for key in evidence_runtime.MEMORY_HEALTH_SAFE_KEYS:
-            if key in last_run and last_run[key] is not None:
-                merged[key] = last_run[key]
-        if isinstance(last_run.get("scan_status"), str):
-            merged["status"] = last_run["scan_status"]
-        if "failed" in last_run:
-            merged["failed"] = last_run.get("failed")
-        if last_run.get("scan_id"):
-            merged["last_scan_id"] = last_run.get("scan_id")
+        last_health = evidence_runtime.body_free_memory_health(last_run)
+        if last_health:
+            merged.update(last_health)
+        scan_status = evidence_runtime.body_free_memory_health({"status": last_run.get("scan_status")})
+        if scan_status:
+            merged.update(scan_status)
         merged["latest_run_status"] = last_run.get("status")
 
     if not merged and last_run is None:
+        state = (
+            "timed_out"
+            if payload.get("health") == "timeout"
+            else "missing"
+            if payload.get("health") == "missing"
+            else "unknown"
+        )
+        payload["memory_projection"] = {
+            "capability": None,
+            "engine_version": None,
+            "last_completed_scan_id": None,
+            "canonical_count": None,
+            "live_count": None,
+            "hash_divergence": None,
+            "unresolved_relations": None,
+            "malformed_skipped": None,
+            "stale": None,
+            "partial": None,
+            "status": None,
+            "failed": None,
+            "healthy": False,
+            "state": state,
+            "latest_run": None,
+        }
         return payload
 
     capability = merged.get("capability")
@@ -247,6 +269,23 @@ def _enrich_memory_projection_health(payload: dict[str, Any], target: Path) -> d
     if capability and capability != evidence_runtime.MEMORY_PROJECTION_CAPABILITY:
         healthy = False
 
+    if healthy:
+        state = "healthy"
+    elif payload.get("health") == "timeout" or (isinstance(last_run, dict) and last_run.get("exit_code") == 124):
+        state = "timed_out"
+    elif latest == "fail":
+        state = "failed"
+    elif latest in ("partial", "dry_run") or partial is True:
+        state = "partial"
+    elif stale is True:
+        state = "stale"
+    elif status in (None, "absent") and last_run is None:
+        state = "unknown"
+    elif payload.get("health") == "missing":
+        state = "missing"
+    else:
+        state = "unhealthy"
+
     block = {
         "capability": capability,
         "engine_version": merged.get("engine_version"),
@@ -261,6 +300,7 @@ def _enrich_memory_projection_health(payload: dict[str, Any], target: Path) -> d
         "status": status,
         "failed": failed,
         "healthy": healthy,
+        "state": state,
         "latest_run": evidence_runtime.public_memory_latest_run(last_run),
     }
     payload["memory_projection"] = block
@@ -439,19 +479,9 @@ def _run_memory_crawl(
     if counts is not None:
         extra.update(counts)
         if isinstance(receipt, dict):
-            for key in (
-                "status",
-                "stale",
-                "partial",
-                "canonical_count",
-                "live_count",
-                "hash_divergence",
-                "unresolved_relations",
-                "malformed_skipped",
-                "memory_namespace",
-            ):
-                if key in receipt:
-                    extra[key] = receipt[key]
+            safe_health = evidence_runtime.body_free_memory_health(receipt)
+            if safe_health:
+                extra.update(safe_health)
             if receipt.get("status") == "completed" and counts.get("scan_id"):
                 extra["last_completed_scan_id"] = counts["scan_id"]
     elif isinstance(receipt, dict) and run_status == "dry_run":
@@ -588,6 +618,27 @@ def run_engine(verb: str, arguments: list[str]) -> int:
     if verb == "crawl":
         return _run_crawl(arguments)
     return _run_miseledger(verb, arguments)
+
+
+def memory_audit(*, workspaces: list[Path], json_output: bool = False) -> int:
+    """Print the read-only memory identity audit without invoking MiseLedger."""
+
+    payload = memory_identity_audit.audit_workspaces(workspaces)
+    if json_output:
+        _json_print(payload)
+        return 0
+    summary = payload["summary"]
+    print(
+        "memory identity audit: "
+        f"cards={summary['cards']} explicit_ids={summary['explicit_ids']} "
+        f"path_fallbacks={summary['path_fallbacks']} malformed_ids={summary['malformed_ids']} "
+        f"collisions={summary['collisions']}"
+    )
+    readiness = payload["alias_readiness"]
+    print(f"alias_readiness: {'ready' if readiness['ready'] else 'blocked'}")
+    for reason in readiness["blocking_reasons"]:
+        print(f"- {reason}")
+    return 0
 
 
 def _run_json(args: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
@@ -855,6 +906,7 @@ def status(*, target: Path, json_output: bool = False) -> int:
     if isinstance(memory_projection, dict):
         print(
             "memory_projection: "
+            f"state={memory_projection.get('state')} "
             f"healthy={memory_projection.get('healthy')} "
             f"capability={memory_projection.get('capability')} "
             f"engine_version={memory_projection.get('engine_version')} "
