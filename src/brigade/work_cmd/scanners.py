@@ -1154,10 +1154,133 @@ def _scanner_validate_import_output(
         return None, [], []
     if scanner.get("import_format", "jsonl") != "jsonl":
         return import_path, [], [f"{scanner.get('id')}: import_format must be jsonl"]
-    if not import_path.is_file():
+    try:
+        records, errors = _scanner_read_import_jsonl(target, scanner)
+    except (OSError, UnicodeDecodeError):
         return import_path, [], [f"{scanner.get('id')}: import file not found: {import_path}"]
-    records, errors = ledger_mod._load_import_jsonl(import_path)
     return import_path, records, [f"{scanner.get('id')}: {error}" for error in errors]
+
+
+def _scanner_import_read_primitives_available() -> bool:
+    """Return whether scanner imports can be opened without pathname races."""
+    return (
+        os.name == "posix"
+        and bool(getattr(os, "O_NOFOLLOW", 0))
+        and bool(getattr(os, "O_DIRECTORY", 0))
+        and bool(getattr(os, "O_NONBLOCK", 0))
+        and os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+    )
+
+
+def _scanner_import_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink
+
+
+def _validate_scanner_import_leaf(parent: int, name: str, descriptor: int) -> None:
+    opened = os.fstat(descriptor)
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or not stat.S_ISREG(named.st_mode)
+        or named.st_nlink != 1
+        or _scanner_import_identity(opened) != _scanner_import_identity(named)
+    ):
+        raise OSError("scanner import file no longer matches its held descriptor")
+
+
+def _validate_scanner_import_directories(anchor: int, directories: list[tuple[int, str]]) -> None:
+    parent = anchor
+    for descriptor, name in directories:
+        opened = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(named.st_mode)
+            or _scanner_import_identity(opened) != _scanner_import_identity(named)
+        ):
+            raise OSError("scanner import parent no longer matches its held descriptor")
+        parent = descriptor
+
+
+def _scanner_import_relative_path(scanner: dict[str, Any]) -> Path:
+    value = scanner.get("import_path")
+    if not isinstance(value, str) or not value.strip():
+        raise OSError("scanner import path is missing")
+    path = Path(value)
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise OSError("scanner import path must be relative and must not contain '..'")
+    return path
+
+
+def _open_scanner_import_directory(parent: int, name: str, flags: int) -> int:
+    intended = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not stat.S_ISDIR(intended.st_mode):
+        raise OSError("scanner import directory is not a directory")
+    descriptor = os.open(name, flags, dir_fd=parent)
+    try:
+        opened = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or _scanner_import_identity(intended) != _scanner_import_identity(opened)
+            or _scanner_import_identity(intended) != _scanner_import_identity(named)
+        ):
+            raise OSError("scanner import directory no longer matches its held descriptor")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _scanner_read_import_jsonl(target: Path, scanner: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Read scanner JSONL through descriptors rooted at the exact workspace target."""
+    if not _scanner_import_read_primitives_available():
+        raise OSError("descriptor-relative scanner import operations are unavailable")
+    relative = _scanner_import_relative_path(scanner)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    absolute_target = Path(os.path.abspath(target.expanduser()))
+    target_components = absolute_target.parts[1:]
+    if not target_components:
+        raise OSError("scanner import target must have a bindable parent")
+    anchor = -1
+    descriptor = -1
+    directories: list[tuple[int, str]] = []
+    try:
+        anchor = os.open(absolute_target.anchor, directory_flags)
+        parent = anchor
+        for component in target_components:
+            child = _open_scanner_import_directory(parent, component, directory_flags)
+            directories.append((child, component))
+            _validate_scanner_import_directories(anchor, directories)
+            parent = child
+        for component in relative.parts[:-1]:
+            child = _open_scanner_import_directory(parent, component, directory_flags)
+            directories.append((child, component))
+            _validate_scanner_import_directories(anchor, directories)
+            parent = child
+        descriptor = os.open(relative.parts[-1], file_flags, dir_fd=parent)
+        _validate_scanner_import_leaf(parent, relative.parts[-1], descriptor)
+        _validate_scanner_import_directories(anchor, directories)
+        before = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        _validate_scanner_import_leaf(parent, relative.parts[-1], descriptor)
+        _validate_scanner_import_directories(anchor, directories)
+        if _scanner_import_identity(before) != _scanner_import_identity(after):
+            raise OSError("scanner import file changed while reading")
+        return ledger_mod._parse_import_jsonl(b"".join(chunks).decode())
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        for child, _name in reversed(directories):
+            os.close(child)
+        if anchor != -1:
+            os.close(anchor)
 
 
 def _scanner_run_one(

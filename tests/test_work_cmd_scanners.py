@@ -501,6 +501,158 @@ conflict_window = "02:00-02:10"
     assert payload["runs"][0]["provenance_imports_stamped"] == 0
 
 
+def _scanner_import_output(tmp_path, import_path: str):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    return scanners_mod._scanner_validate_import_output(
+        tmp_path,
+        {
+            "id": "output-import",
+            "source": "output-import",
+            "import_path": import_path,
+            "import_format": "jsonl",
+        },
+    )
+
+
+def test_scanner_import_output_rejects_symlinked_leaf_outside_target(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-import.jsonl"
+    outside.write_text('{"text":"Outside scanner import"}\n')
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    (imports / "output.jsonl").symlink_to(outside)
+
+    _path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
+
+    assert records == []
+    assert errors
+
+
+def test_scanner_import_output_rejects_fifo_without_blocking(tmp_path):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable on this platform")
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    os.mkfifo(imports / "output.jsonl")
+
+    _path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
+
+    assert records == []
+    assert errors
+
+
+def test_scanner_import_output_rejects_hard_linked_leaf(tmp_path):
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    original = tmp_path / "original.jsonl"
+    original.write_text('{"text":"Hard linked scanner import"}\n')
+    os.link(original, imports / "output.jsonl")
+
+    _path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
+
+    assert records == []
+    assert errors
+
+
+def test_scanner_import_output_rejects_parent_swapped_while_opening(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    (imports / "output.jsonl").write_text('{"text":"Original scanner import"}\n')
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "output.jsonl").write_text('{"text":"Outside scanner import"}\n')
+    original_open = scanners_mod.os.open
+    swapped = False
+
+    def swap_parent_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == "output.jsonl" and dir_fd is not None:
+            swapped = True
+            held = imports.with_name("imports-held")
+            imports.rename(held)
+            imports.symlink_to(outside, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(scanners_mod.os, "open", swap_parent_then_open)
+    monkeypatch.setattr(
+        scanners_mod.os,
+        "supports_dir_fd",
+        scanners_mod.os.supports_dir_fd | {swap_parent_then_open},
+    )
+
+    _path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
+
+    assert swapped
+    assert records == []
+    assert errors
+
+
+def test_scanner_import_output_rejects_target_root_swapped_while_opening(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    target = tmp_path / "repo"
+    imports = target / "imports"
+    imports.mkdir(parents=True)
+    (imports / "output.jsonl").write_text('{"text":"Original scanner import"}\n')
+    original_open = scanners_mod.os.open
+    swapped = False
+
+    def swap_target_root_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        opening_target_root = (path == target and dir_fd is None) or (path == target.name and dir_fd is not None)
+        if not swapped and opening_target_root:
+            swapped = True
+            target.rename(target.with_name("repo-held"))
+            replacement_imports = target / "imports"
+            replacement_imports.mkdir(parents=True)
+            (replacement_imports / "output.jsonl").write_text('{"text":"Replacement scanner import"}\n')
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(scanners_mod.os, "open", swap_target_root_then_open)
+    monkeypatch.setattr(
+        scanners_mod.os,
+        "supports_dir_fd",
+        scanners_mod.os.supports_dir_fd | {swap_target_root_then_open},
+    )
+
+    _path, records, errors = _scanner_import_output(target, "imports/output.jsonl")
+
+    assert swapped
+    assert records == []
+    assert errors
+
+
+def test_scanner_import_output_loads_ordinary_nested_relative_jsonl(tmp_path):
+    imports = tmp_path / "imports" / "nested"
+    imports.mkdir(parents=True)
+    (imports / "output.jsonl").write_text('{"text":"Nested scanner import","source":"output-import"}\n')
+
+    path, records, errors = _scanner_import_output(tmp_path, "imports/nested/output.jsonl")
+
+    assert path == tmp_path / "imports" / "nested" / "output.jsonl"
+    assert errors == []
+    assert records == [
+        {
+            "text": "Nested scanner import",
+            "kind": "task",
+            "source": "output-import",
+            "metadata": {},
+        }
+    ]
+
+
+def test_scanner_import_output_rejects_absolute_path_when_config_is_bypassed(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-absolute-import.jsonl"
+    outside.write_text('{"text":"Outside scanner import"}\n')
+
+    _path, records, errors = _scanner_import_output(tmp_path, str(outside))
+
+    assert records == []
+    assert errors
+
+
 def test_work_scanners_run_ingest_output_adds_provenance_only_with_flag(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"

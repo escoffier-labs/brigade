@@ -2804,14 +2804,10 @@ def _validate_import_record(
     return record, []
 
 
-def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+def _parse_import_jsonl(text: str) -> tuple[list[dict[str, Any]], list[str]]:
     records: list[dict[str, Any]] = []
     errors: list[str] = []
-    try:
-        lines = path.read_text().splitlines()
-    except OSError as exc:
-        return records, [f"{path}: {exc}"]
-    for line_number, line in enumerate(lines, start=1):
+    for line_number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         label = f"line {line_number}"
@@ -2825,6 +2821,14 @@ def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
         if record is not None:
             records.append(record)
     return records, errors
+
+
+def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        return [], [f"{path}: {exc}"]
+    return _parse_import_jsonl(text)
 
 
 def _append_import_records(
