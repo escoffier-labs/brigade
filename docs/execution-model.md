@@ -22,8 +22,11 @@ A scheduled invocation is still an explicit invocation: the same command runs wh
 
 ## Opt-in care scaffold
 
-`brigade care install --target .` writes managed entries into the operator's
-own scheduler (crontab by default; `--backend systemd` writes user units).
+`brigade care install --target .` explicitly opts the target into the operator's
+own scheduler: namespaced systemd user timers on Linux or namespaced launchd
+agents on macOS. Other platforms report that managed scheduling is unsupported.
+Each registration includes a hash of the absolute target path, so status and
+uninstall can never select another target's entries.
 `brigade care status` audits those entries and shows the latest runbook
 receipt for each recipe. `brigade care uninstall` removes only the
 hash-stamped Brigade block. The schedule still belongs to the operator:

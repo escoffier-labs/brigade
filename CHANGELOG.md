@@ -251,10 +251,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   required set fails closed with typed `no-admissible-tool` and one bounded
   replan instead of letting the model improvise tools.
 - `brigade care install|status|uninstall` (#759): opt-in scaffold that writes
-  hash-stamped managed entries into the operator's crontab (or systemd user
-  units), matching `docs/scheduled-care.md`. Memory-care recipes invoke the
-  shipped runbooks so scheduled fires write normal receipts; Windows prints
-  Task Scheduler equivalents instead of silently no-oping; tampered blocks are
+  target-namespaced systemd user timers on Linux or launchd agents on
+  macOS, matching `docs/scheduled-care.md`. Memory-care recipes invoke the
+  shipped runbooks so scheduled fires write normal receipts; other platforms report explicit unsupported scheduling; tampered blocks are
   reported and not clobbered without `--adopt`.
 - Worker event stream field classification and fail-closed scrubbed projections
   for the Codex app-server transport (#592): closed scrub/export classification

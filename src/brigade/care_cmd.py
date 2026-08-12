@@ -12,9 +12,11 @@ normal runbook receipt.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
+import plistlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -24,8 +26,8 @@ from . import managed_block, memory_cmd, runbook_cmd
 CARE_KIND = "CARE"
 CARE_MARKER_VERSION = 1
 CARE_MARKER_STYLE = managed_block.MARKER_STYLE_HASH
-DEFAULT_BACKEND: Literal["crontab", "systemd"] = "crontab"
-SUPPORTED_BACKENDS = ("crontab", "systemd")
+DEFAULT_BACKEND = "auto"
+SUPPORTED_BACKENDS = ("auto", "crontab", "systemd", "launchd")
 
 MEMORY_CARE_RUNBOOK_REL = {
     "daily-care": ".brigade/memory-care/runbooks/daily-care-pass.json",
@@ -118,6 +120,22 @@ CARE_ENTRIES: tuple[CareEntry, ...] = (
 
 def _is_windows() -> bool:
     return sys.platform == "win32"
+
+
+def _target_identity(target: Path) -> str:
+    """Return the stable, non-secret namespace for one absolute target path."""
+    absolute = target.expanduser().resolve()
+    return hashlib.sha256(os.fsencode(absolute)).hexdigest()[:16]
+
+
+def _resolve_backend(backend: str) -> str | None:
+    if backend != "auto":
+        return backend
+    if sys.platform.startswith("linux"):
+        return "systemd"
+    if sys.platform == "darwin":
+        return "launchd"
+    return None
 
 
 def _path_prefix(home: Path | None = None) -> str:
@@ -379,6 +397,120 @@ def _print_payload(payload: dict[str, Any], *, json_output: bool) -> None:
             print(f"{key}: {value}")
 
 
+def _launchd_dir(home: Path | None = None) -> Path:
+    return (home if home is not None else Path.home()) / "Library" / "LaunchAgents"
+
+
+def _launchd_plists(*, workspace: Path, home: Path | None = None) -> dict[str, bytes]:
+    identity = _target_identity(workspace)
+    result: dict[str, bytes] = {}
+    for entry in CARE_ENTRIES:
+        assert entry.runbook_rel is not None
+        label = f"dev.brigade.care.{identity}.{entry.entry_id}"
+        payload: dict[str, Any] = {
+            "Label": label,
+            "ProgramArguments": [
+                "/usr/bin/env",
+                "brigade",
+                "runbook",
+                "run",
+                "--approved",
+                entry.runbook_rel,
+                "--target",
+                ".",
+            ],
+            "WorkingDirectory": str(workspace),
+            "EnvironmentVariables": {"PATH": _path_prefix(home)},
+        }
+        # launchd supports interval timers directly; calendar recipes use their
+        # documented local hour/minute (weekly additionally pins Monday).
+        if entry.entry_id == "ingest-sweep":
+            payload["StartInterval"] = 1800
+        else:
+            fields = entry.schedule.split()
+            calendar: dict[str, int] = {"Minute": int(fields[0]), "Hour": int(fields[1])}
+            if fields[4] != "*":
+                calendar["Weekday"] = int(fields[4]) + 1
+            payload["StartCalendarInterval"] = calendar
+        result[f"{label}.plist"] = plistlib.dumps(payload, sort_keys=True)
+    return result
+
+
+def _launchd_install(*, target: Path, dry_run: bool, json_output: bool, home: Path | None) -> int:
+    directory = _launchd_dir(home)
+    plists = _launchd_plists(workspace=target, home=home)
+    if not dry_run:
+        directory.mkdir(parents=True, exist_ok=True)
+        for name, contents in plists.items():
+            path = directory / name
+            if path.is_symlink():
+                print(f"error: refusing to follow symlink registration: {path}", file=sys.stderr)
+                return 2
+            path.write_bytes(contents)
+    _print_payload(
+        {
+            "target": str(target),
+            "backend": "launchd",
+            "dry_run": dry_run,
+            "registrations": [str(directory / name) for name in plists],
+        },
+        json_output=json_output,
+    )
+    return 0
+
+
+def _launchd_status(*, target: Path, json_output: bool, home: Path | None) -> int:
+    directory = _launchd_dir(home)
+    expected = _launchd_plists(workspace=target, home=home)
+    states = []
+    for name, desired in expected.items():
+        path = directory / name
+        if path.is_symlink():
+            registration_status = "tampered"
+        elif not path.is_file():
+            registration_status = "missing"
+        else:
+            registration_status = "current" if path.read_bytes() == desired else "tampered"
+        states.append({"name": name, "status": registration_status})
+    state = "current"
+    if any(item["status"] == "tampered" for item in states):
+        state = "tampered"
+    elif any(item["status"] == "missing" for item in states):
+        state = "missing"
+    _print_payload(
+        {"target": str(target), "backend": "launchd", "status": state, "registrations": states}, json_output=json_output
+    )
+    return 1 if state == "tampered" else 0
+
+
+def _launchd_uninstall(*, target: Path, dry_run: bool, json_output: bool, home: Path | None) -> int:
+    directory = _launchd_dir(home)
+    removed: list[str] = []
+    refused: list[str] = []
+    for name, expected in _launchd_plists(workspace=target, home=home).items():
+        path = directory / name
+        if path.is_symlink():
+            print(f"error: refusing to remove symlink registration: {path}", file=sys.stderr)
+            return 2
+        if path.is_file():
+            if path.read_bytes() != expected:
+                refused.append(name)
+                continue
+            removed.append(name)
+            if not dry_run:
+                path.unlink()
+    _print_payload(
+        {"target": str(target), "backend": "launchd", "dry_run": dry_run, "removed": removed, "refused": refused},
+        json_output=json_output,
+    )
+    if not removed and not refused:
+        print(f"no scheduler registration found for target: {target}")
+    if refused:
+        print("error: one or more launchd registrations were modified; refusing to remove", file=sys.stderr)
+        return 1
+    return 0
+
+
 def install(
     *,
     target: Path,
@@ -395,12 +527,22 @@ def install(
     if backend not in SUPPORTED_BACKENDS:
         print(f"error: unsupported care backend: {backend}", file=sys.stderr)
         return 2
+    backend = _resolve_backend(backend) or ""
+    if not backend:
+        print(
+            f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd)",
+            file=sys.stderr,
+        )
+        return 3
     if _is_windows():
         return _windows_print(workspace=target)
 
     rc = _ensure_care_runbooks(target)
     if rc != 0:
         return rc
+
+    if backend == "launchd":
+        return _launchd_install(target=target, dry_run=dry_run, json_output=json_output, home=home)
 
     if backend == "crontab":
         return _install_crontab(target=target, dry_run=dry_run, adopt=adopt, json_output=json_output, home=home)
@@ -531,10 +673,11 @@ def _systemd_user_dir(home: Path | None = None) -> Path:
 
 def _systemd_unit_bodies(*, workspace: Path, home: Path | None = None) -> dict[str, str]:
     path_value = _path_prefix(home)
+    identity = _target_identity(workspace)
     units: dict[str, str] = {}
     for entry in CARE_ENTRIES:
-        service_name = f"brigade-{entry.entry_id}.service"
-        timer_name = f"brigade-{entry.entry_id}.timer"
+        service_name = f"brigade-care-{identity}-{entry.entry_id}.service"
+        timer_name = f"brigade-care-{identity}-{entry.entry_id}.timer"
         assert entry.kind == "runbook" and entry.runbook_rel is not None
         exec_start = _systemd_exec_start_runbook(entry.runbook_rel)
         service_body = "\n".join(
@@ -580,6 +723,7 @@ def _install_systemd(
     home: Path | None,
 ) -> int:
     unit_dir = _systemd_user_dir(home)
+    identity = _target_identity(target)
     units = _systemd_unit_bodies(workspace=target, home=home)
     results: list[dict[str, Any]] = []
     blocked = False
@@ -667,8 +811,8 @@ def _install_systemd(
         "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
         "next_commands": [
             "systemctl --user daemon-reload",
-            "systemctl --user enable --now brigade-daily-care.timer",
-            "systemctl --user list-timers 'brigade-*.timer'",
+            f"systemctl --user enable --now brigade-care-{identity}-daily-care.timer",
+            f"systemctl --user list-timers 'brigade-care-{identity}-*.timer'",
         ],
     }
     _print_payload(payload, json_output=json_output)
@@ -698,6 +842,13 @@ def status(
     if backend not in SUPPORTED_BACKENDS:
         print(f"error: unsupported care backend: {backend}", file=sys.stderr)
         return 2
+    backend = _resolve_backend(backend) or ""
+    if not backend:
+        print(
+            f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd)",
+            file=sys.stderr,
+        )
+        return 3
     if _is_windows():
         windows_payload: dict[str, Any] = {
             "target": str(target),
@@ -708,6 +859,9 @@ def status(
         }
         _print_payload(windows_payload, json_output=json_output)
         return 3
+
+    if backend == "launchd":
+        return _launchd_status(target=target, json_output=json_output, home=home)
 
     if backend == "crontab":
         current, error = _read_crontab()
@@ -832,6 +986,13 @@ def uninstall(
     if backend not in SUPPORTED_BACKENDS:
         print(f"error: unsupported care backend: {backend}", file=sys.stderr)
         return 2
+    backend = _resolve_backend(backend) or ""
+    if not backend:
+        print(
+            f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd)",
+            file=sys.stderr,
+        )
+        return 3
     if _is_windows():
         print("care uninstall: Windows Task Scheduler is not mutated automatically.")
         print("Remove BrigadeCare-* tasks with schtasks /Delete, or Task Scheduler UI.")
@@ -839,6 +1000,9 @@ def uninstall(
             print(f'schtasks /Delete /TN "BrigadeCare-{entry.entry_id}" /F')
         print("error: care uninstall does not mutate the Windows scheduler in this release", file=sys.stderr)
         return 3
+
+    if backend == "launchd":
+        return _launchd_uninstall(target=target, dry_run=dry_run, json_output=json_output, home=home)
 
     if backend == "crontab":
         current, error = _read_crontab()
@@ -883,9 +1047,10 @@ def uninstall(
     skipped: list[str] = []
     refused: list[str] = []
     blocked = False
+    identity = _target_identity(target)
     for entry in CARE_ENTRIES:
         for suffix in (".service", ".timer"):
-            name = f"brigade-{entry.entry_id}{suffix}"
+            name = f"brigade-care-{identity}-{entry.entry_id}{suffix}"
             path = unit_dir / name
             if not path.exists():
                 skipped.append(name)
@@ -939,6 +1104,8 @@ def uninstall(
         "next_commands": ["systemctl --user daemon-reload"],
     }
     _print_payload(payload, json_output=json_output)
+    if not removed and not refused:
+        print(f"no scheduler registration found for target: {target}")
     if blocked:
         print(
             "error: one or more systemd units were hand-edited; refusing to remove without repair",

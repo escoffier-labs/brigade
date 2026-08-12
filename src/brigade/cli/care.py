@@ -23,9 +23,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_install.add_argument(
         "--backend",
-        choices=["crontab", "systemd"],
-        default="crontab",
-        help="Scheduler backend to write (default: crontab). Windows prints Task Scheduler equivalents.",
+        choices=["auto", "systemd", "launchd"],
+        default="auto",
+        help="Scheduler backend (default: systemd on Linux, launchd on macOS).",
     )
     p_install.add_argument("--dry-run", action="store_true", help="Show the plan without writing.")
     p_install.add_argument(
@@ -42,9 +42,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_status.add_argument(
         "--backend",
-        choices=["crontab", "systemd"],
-        default="crontab",
-        help="Scheduler backend to inspect (default: crontab).",
+        choices=["auto", "systemd", "launchd"],
+        default="auto",
+        help="Scheduler backend (default: systemd on Linux, launchd on macOS).",
     )
     p_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
@@ -57,9 +57,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_uninstall.add_argument(
         "--backend",
-        choices=["crontab", "systemd"],
-        default="crontab",
-        help="Scheduler backend to clean (default: crontab).",
+        choices=["auto", "systemd", "launchd"],
+        default="auto",
+        help="Scheduler backend (default: systemd on Linux, launchd on macOS).",
     )
     p_uninstall.add_argument("--dry-run", action="store_true", help="Show the plan without writing.")
     p_uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
