@@ -2,12 +2,12 @@
 
 The schedule belongs to the operator. Brigade only runs when invoked. Copy one
 of the recipes below into your own crontab, user timer, or CI job after
-`brigade init` wires the target, or let `brigade care install --target .`
-scaffold the same recipes as a hash-stamped managed block in your crontab
-(systemd user units with `--backend systemd`). `care status` audits the block
-and latest runbook receipts; `care uninstall` removes only that block. On
-Windows, `care install` prints Task Scheduler equivalents and does not write
-tasks. Brigade still does not own a daemon or background supervisor.
+`brigade init` wires the target, or explicitly opt in with
+`brigade care install --target .`. It installs systemd user timers on Linux or
+launchd agents on macOS and reports an unsupported scheduler elsewhere. Every
+registration is namespaced by a hash of the absolute target path, so status and
+uninstall operate only on that target; uninstalling a missing registration is
+a clear no-op. Brigade still does not own a daemon or background supervisor.
 
 Prerequisites:
 

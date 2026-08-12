@@ -3,11 +3,82 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from brigade import care_cmd, cli, managed_block, memory_cmd
+
+
+def test_care_registration_identity_is_stable_and_target_specific(tmp_path):
+    first = (tmp_path / "first").resolve()
+    second = (tmp_path / "second").resolve()
+    expected = hashlib.sha256(str(first).encode()).hexdigest()[:16]
+    assert care_cmd._target_identity(first) == expected
+    assert care_cmd._target_identity(first) != care_cmd._target_identity(second)
+
+
+def _daily_service(home: Path, target: Path) -> Path:
+    identity = care_cmd._target_identity(target)
+    return home / ".config" / "systemd" / "user" / f"brigade-care-{identity}-daily-care.service"
+
+
+def test_care_systemd_uninstall_only_invoking_target(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=first, backend="systemd", home=home) == 0
+    assert care_cmd.install(target=second, backend="systemd", home=home) == 0
+    second_units = set(care_cmd._systemd_unit_bodies(workspace=second, home=home))
+
+    assert care_cmd.uninstall(target=first, backend="systemd", home=home) == 0
+    unit_dir = care_cmd._systemd_user_dir(home)
+    assert all((unit_dir / name).is_file() for name in second_units)
+
+    assert care_cmd.uninstall(target=first, backend="systemd", home=home) == 0
+    assert "no scheduler registration found" in capsys.readouterr().out
+
+
+def test_care_launchd_registrations_are_target_namespaced(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=first, backend="launchd", home=home) == 0
+    assert care_cmd.install(target=second, backend="launchd", home=home) == 0
+    second_names = set(care_cmd._launchd_plists(workspace=second, home=home))
+    assert care_cmd.uninstall(target=first, backend="launchd", home=home) == 0
+    assert all((care_cmd._launchd_dir(home) / name).is_file() for name in second_names)
+    assert care_cmd.uninstall(target=first, backend="launchd", home=home) == 0
+    assert "no scheduler registration found" in capsys.readouterr().out
+
+
+def test_care_launchd_weekly_weekday_matches_cron_monday(tmp_path):
+    import plistlib
+
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    plists = care_cmd._launchd_plists(workspace=target, home=home)
+    weekly_name = next(name for name in plists if "weekly-outcome-ratchet" in name)
+    payload = plistlib.loads(plists[weekly_name])
+    # cron "0 7 * * 1" and launchd both use 1 = Monday
+    assert payload["StartCalendarInterval"] == {"Minute": 0, "Hour": 7, "Weekday": 1}
+
+
+def test_care_auto_backend_is_explicitly_unsupported_elsewhere(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(care_cmd.sys, "platform", "plan9")
+    assert care_cmd.status(target=tmp_path) == 3
+    assert "unsupported on plan9" in capsys.readouterr().err
 
 
 def test_care_managed_block_round_trip_preserves_neighbor_content():
@@ -90,7 +161,7 @@ def test_care_crontab_install_status_uninstall_round_trip(tmp_path, monkeypatch)
     # Seed memory-care runbooks so status can report presence.
     assert memory_cmd._write_memory_care_runbooks(target) == 0
 
-    assert care_cmd.install(target=target, json_output=True) == 0
+    assert care_cmd.install(target=target, backend="crontab", json_output=True) == 0
     assert "# BEGIN BRIGADE CARE" in store["text"]
     assert "<!-- BEGIN" not in store["text"]
     assert "keep-me" in store["text"]
@@ -110,11 +181,11 @@ def test_care_crontab_install_status_uninstall_round_trip(tmp_path, monkeypatch)
     assert len(digest.meta.recorded_hash or "") == 64
 
     # Idempotent reinstall is a no-op write path (status current).
-    assert care_cmd.install(target=target, json_output=True) == 0
+    assert care_cmd.install(target=target, backend="crontab", json_output=True) == 0
 
-    assert care_cmd.status(target=target, json_output=True) == 0
+    assert care_cmd.status(target=target, backend="crontab", json_output=True) == 0
     # Uninstall restores prior crontab bytes.
-    assert care_cmd.uninstall(target=target, json_output=True) == 0
+    assert care_cmd.uninstall(target=target, backend="crontab", json_output=True) == 0
     assert store["text"] == before
 
 
@@ -134,11 +205,11 @@ def test_care_status_reports_tampered_block_without_clobber(tmp_path, monkeypatc
     monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
 
-    assert care_cmd.status(target=tmp_path, json_output=True) == 1
+    assert care_cmd.status(target=tmp_path, backend="crontab", json_output=True) == 1
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "tampered"
 
-    assert care_cmd.install(target=tmp_path, json_output=True) == 1
+    assert care_cmd.install(target=tmp_path, backend="crontab", json_output=True) == 1
     assert "16 6 * * *" in store["text"]  # unchanged
 
 
@@ -157,7 +228,7 @@ def test_care_uninstall_refuses_tampered_crontab_block(tmp_path, monkeypatch, ca
     )
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
 
-    assert care_cmd.uninstall(target=tmp_path, json_output=True) == 1
+    assert care_cmd.uninstall(target=tmp_path, backend="crontab", json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "tampered"
     assert payload["action"] == managed_block.ACTION_PRESERVE
@@ -194,7 +265,7 @@ def test_care_status_includes_latest_runbook_receipt(tmp_path, monkeypatch, caps
     }
     (runs / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
 
-    assert care_cmd.status(target=tmp_path, json_output=True) == 0
+    assert care_cmd.status(target=tmp_path, backend="crontab", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     daily = next(entry for entry in payload["entries"] if entry["id"] == "daily-care")
     assert daily["last_receipt"]["run_id"] == receipt["run_id"]
@@ -223,7 +294,7 @@ def test_care_crontab_install_refuses_malformed_markers_without_write(tmp_path, 
     monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
 
-    assert care_cmd.install(target=tmp_path, json_output=True) == 1
+    assert care_cmd.install(target=tmp_path, backend="crontab", json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == managed_block.STATUS_MALFORMED
     assert payload["action"] == managed_block.ACTION_PRESERVE
@@ -239,7 +310,7 @@ def test_care_crontab_percent_in_path_is_escaped(tmp_path, monkeypatch):
     monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda t: 0)
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
 
-    assert care_cmd.install(target=target, json_output=True) == 0
+    assert care_cmd.install(target=target, backend="crontab", json_output=True) == 0
     body = care_cmd._crontab_body(workspace=target)
     assert r'cd "ws\%pct"' in body or rf'cd "{target}"'.replace("%", "\\%") in body
     assert "\\%" in body
@@ -253,7 +324,7 @@ def test_care_systemd_install_refuses_malformed_unit_without_write(tmp_path, mon
     target.mkdir()
 
     assert care_cmd.install(target=target, backend="systemd", home=home) == 0
-    service = home / ".config" / "systemd" / "user" / "brigade-daily-care.service"
+    service = _daily_service(home, target)
     before = service.read_text(encoding="utf-8")
     html = managed_block.render_block(
         "tampered-body\n",
@@ -267,7 +338,7 @@ def test_care_systemd_install_refuses_malformed_unit_without_write(tmp_path, mon
     assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["blocked"] is True
-    unit = next(item for item in payload["units"] if item["name"] == "brigade-daily-care.service")
+    unit = next(item for item in payload["units"] if item["name"] == _daily_service(home, target).name)
     assert unit["status"] == managed_block.STATUS_MALFORMED
     assert unit["action"] == managed_block.ACTION_PRESERVE
     assert unit["detail"]
@@ -331,8 +402,8 @@ def test_care_systemd_install_writes_hash_stamped_units(tmp_path, monkeypatch):
 
     assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
     unit_dir = home / ".config" / "systemd" / "user"
-    service = unit_dir / "brigade-daily-care.service"
-    timer = unit_dir / "brigade-daily-care.timer"
+    service = _daily_service(home, target)
+    timer = unit_dir / f"brigade-care-{care_cmd._target_identity(target)}-daily-care.timer"
     assert service.is_file()
     assert timer.is_file()
     text = service.read_text(encoding="utf-8")
@@ -357,7 +428,7 @@ def test_care_systemd_unit_quotes_workspace_paths_with_spaces(tmp_path, monkeypa
     target.mkdir()
 
     assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
-    service = home / ".config" / "systemd" / "user" / "brigade-daily-care.service"
+    service = _daily_service(home, target)
     text = service.read_text(encoding="utf-8")
     parsed = managed_block.parse_blocks(text, kind=care_cmd.CARE_KIND, style=care_cmd.CARE_MARKER_STYLE)
     assert parsed.status == "ok"
@@ -376,7 +447,7 @@ def test_care_systemd_environment_path_quotes_home_with_spaces(tmp_path, monkeyp
     target.mkdir()
 
     assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
-    service = home / ".config" / "systemd" / "user" / "brigade-daily-care.service"
+    service = _daily_service(home, target)
     parsed = managed_block.parse_blocks(
         service.read_text(encoding="utf-8"),
         kind=care_cmd.CARE_KIND,
@@ -395,7 +466,7 @@ def test_care_systemd_percent_in_path_is_escaped(tmp_path, monkeypatch):
     target.mkdir()
 
     assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
-    service = home / ".config" / "systemd" / "user" / "brigade-daily-care.service"
+    service = _daily_service(home, target)
     parsed = managed_block.parse_blocks(
         service.read_text(encoding="utf-8"),
         kind=care_cmd.CARE_KIND,
@@ -414,7 +485,7 @@ def test_care_systemd_uninstall_refuses_tampered_unit(tmp_path, monkeypatch):
     target.mkdir()
 
     assert care_cmd.install(target=target, backend="systemd", home=home) == 0
-    service = home / ".config" / "systemd" / "user" / "brigade-daily-care.service"
+    service = _daily_service(home, target)
     tampered = service.read_text(encoding="utf-8").replace("daily-care-pass", "daily-care-TAMPERED")
     service.write_text(tampered, encoding="utf-8")
 
@@ -536,14 +607,14 @@ def test_care_systemd_status_reports_broken_symlink_as_malformed(tmp_path, monke
     target.mkdir()
 
     assert care_cmd.install(target=target, backend="systemd", home=home) == 0
-    service = home / ".config" / "systemd" / "user" / "brigade-daily-care.service"
+    service = _daily_service(home, target)
     service.unlink()
     service.symlink_to(home / "missing.service")
     capsys.readouterr()
 
     assert care_cmd.status(target=target, backend="systemd", home=home, json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
-    unit = next(item for item in payload["units"] if item["name"] == "brigade-daily-care.service")
+    unit = next(item for item in payload["units"] if item["name"] == _daily_service(home, target).name)
     assert unit["status"] == managed_block.STATUS_MALFORMED
 
 
@@ -555,7 +626,7 @@ def test_care_systemd_uninstall_skips_symlink_swap(tmp_path, monkeypatch):
     target.mkdir()
 
     assert care_cmd.install(target=target, backend="systemd", home=home) == 0
-    service = home / ".config" / "systemd" / "user" / "brigade-daily-care.service"
+    service = _daily_service(home, target)
     secret = tmp_path / "secret.service"
     secret.write_text("[Unit]\nDescription=secret\n", encoding="utf-8")
     service.unlink()
