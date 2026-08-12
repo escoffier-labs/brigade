@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import textwrap
 from pathlib import Path
 
@@ -838,6 +839,32 @@ def test_promote_replaces_existing_card_wholesale(tmp_target: Path):
     text = card.read_text()
     assert "new body" in text
     assert "old body" not in text
+
+
+def test_promote_mints_stable_id_for_new_card_and_preserves_it_on_update(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1002-new.md",
+        _card_handoff_body("stable.md", "stable", "first body"),
+    )
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    card = tmp_target / "memory" / "cards" / "stable.md"
+    first = card.read_text()
+    match = re.search(
+        r"^id: (card-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$", first, re.MULTILINE
+    )
+    assert match is not None
+
+    _write_handoff(
+        inbox,
+        "2026-05-13-1003-update.md",
+        _card_handoff_body("stable.md", "stable", "replacement body"),
+    )
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    updated = card.read_text()
+    assert f"id: {match.group(1)}" in updated
+    assert "replacement body" in updated
 
 
 def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, capsys):

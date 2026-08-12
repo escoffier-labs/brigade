@@ -86,6 +86,21 @@ def test_memory_search_writes_local_search_log(tmp_path: Path, capsys):
     assert len(log_path.read_text().splitlines()) == 1
 
 
+def test_search_log_keeps_legacy_alias_for_explicit_card_id(tmp_path: Path, capsys):
+    card_id = "card-123e4567-e89b-42d3-a456-426614174000"
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True)
+    (cards / "renamed.md").write_text(f"---\nid: {card_id}\ntitle: Renamed\n---\nidentity token\n")
+
+    assert memory_cmd.search(target=tmp_path, query="identity", json_output=True) == 0
+    capsys.readouterr()
+    entry = json.loads((tmp_path / ".brigade" / "memory" / "search-log.jsonl").read_text())
+    assert entry["card_ids"] == [card_id]
+    assert entry["card_aliases"] == ["memory/cards/renamed.md", "renamed"]
+    legacy = {"ts": "2026-08-09T12:00:00Z", "query": "before rename", "card_ids": ["renamed"]}
+    assert memory_cmd.followup_rate_from_entries([legacy, entry])["followup_rate"] == 0.0
+
+
 def test_search_log_drops_oldest_beyond_max_entries(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(memory_cmd, "SEARCH_LOG_MAX_ENTRIES", 2)
     _card(tmp_path, "alpha.md", "Alpha", "alpha unique token")

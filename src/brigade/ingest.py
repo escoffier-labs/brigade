@@ -20,6 +20,7 @@ from typing import Dict, List
 from . import budgets
 from .card_fingerprint import (
     CardMatch,
+    ensure_card_id_frontmatter,
     ensure_fingerprint_frontmatter,
     find_card_match,
     index_cards,
@@ -371,6 +372,16 @@ def _execute(
         assert dest is not None
         content = sections.get("suggested card content", "").strip() + "\n"
         content = ensure_fingerprint_frontmatter(content)
+        if dest.exists():
+            from .card_fingerprint import read_text_nofollow
+            from .card_identity import valid_card_id
+
+            existing, _ = _frontmatter(read_text_nofollow(dest))
+            existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
+            if existing_id is not None:
+                content = ensure_card_id_frontmatter(content, preserve_id=existing_id)
+        else:
+            content = ensure_card_id_frontmatter(content)
         if not content.endswith("\n"):
             content += "\n"
         summary = f"promote → {dest.relative_to(target)}  ({name})"
@@ -426,6 +437,21 @@ def _execute(
         return Action("inboxed", summary)
 
     return Action("skipped", f"skip   {name}  ({outcome.reason})")
+
+
+def _frontmatter(text: str) -> tuple[dict[str, str], bool]:
+    """Small local reader for preservation of a pre-existing stable ID."""
+    if not text.startswith("---"):
+        return {}, False
+    fields: dict[str, str] = {}
+    lines = text.splitlines()
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return fields, True
+        if ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip().strip("'\"")
+    return {}, False
 
 
 def _evidence_pointer(handoff_path: Path, *, sections: Dict[str, str], target: Path) -> str:

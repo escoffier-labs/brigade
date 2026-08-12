@@ -31,10 +31,6 @@ def tokenize(text: str) -> list[str]:
     return [t.lower() for t in _TOKEN_RE.findall(text) if t]
 
 
-def _path_to_card_id(rel_path: str) -> str:
-    return Path(rel_path).stem
-
-
 def current_adapter(target: Path) -> AdapterFn:
     """Existing keyword scorer from ``memory_cmd.search_cards_payload``."""
 
@@ -42,7 +38,7 @@ def current_adapter(target: Path) -> AdapterFn:
         payload = search_cards_payload(target, query, limit=limit)
         ranked: list[tuple[str, float]] = []
         for match in payload["matches"]:
-            ranked.append((_path_to_card_id(str(match["path"])), float(match["score"])))
+            ranked.append((str(match.get("card_id") or match["path"]), float(match["score"])))
         return ranked
 
     return search

@@ -25,6 +25,7 @@ from .localio import (
     utc_now_iso_z as _utc_iso,
 )
 from .memory_doctor.safety import atomic_write_text
+from .card_identity import CardIdentity, card_identity, identity_collision_aliases
 from .templates import template_root
 
 CONFIG_REL_PATH = ".brigade/memory-care.toml"
@@ -531,6 +532,7 @@ def _issue(
         "path": card_path,
         "card_file": card_path,
         "card_id": card_id,
+        "card_aliases": [card_path, Path(card_path).stem],
         "issue_type": issue_type,
         "refresh_reason": issue_type,
         "reason": issue_type,
@@ -591,15 +593,26 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     card_rows: list[dict[str, Any]] = []
     by_id: dict[str, list[str]] = {}
+    identities: list[tuple[str, CardIdentity]] = []
+    identities_by_path: dict[str, CardIdentity] = {}
     enabled = set(config.enabled_checks)
 
     for path in cards:
         rel = str(path.relative_to(target))
         text = path.read_text(encoding="utf-8", errors="replace")
         meta, has_frontmatter = _parse_frontmatter(text)
-        card_id = str(_frontmatter_value(meta, "id", "card_id", "topic") or Path(rel).stem)
+        identity = card_identity(meta, rel)
+        card_id = identity.card_id
         by_id.setdefault(card_id, []).append(rel)
-        row = {"file": rel, "card_id": card_id, "has_frontmatter": has_frontmatter, "bytes": path.stat().st_size}
+        identities.append((rel, identity))
+        identities_by_path[rel] = identity
+        row = {
+            "file": rel,
+            "card_id": card_id,
+            "card_aliases": list(identity.aliases),
+            "has_frontmatter": has_frontmatter,
+            "bytes": path.stat().st_size,
+        }
         if "missing-frontmatter" in enabled and not has_frontmatter:
             issues.append(
                 _issue(
@@ -773,6 +786,27 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                     )
                 )
 
+        for alias, alias_paths in identity_collision_aliases(identities).items():
+            for rel in alias_paths:
+                identity = identities_by_path[rel]
+                issues.append(
+                    _issue(
+                        target=target,
+                        card_path=rel,
+                        card_id=identity.card_id,
+                        issue_type="contradictory",
+                        severity="medium",
+                        summary=f"Card identity alias {alias!r} appears in multiple cards.",
+                        evidence=list(alias_paths),
+                        action="Resolve the alias collision before applying a reviewed card rewrite.",
+                    )
+                )
+
+    for issue in issues:
+        issue_identity = identities_by_path.get(str(issue.get("card_file") or ""))
+        if issue_identity is not None:
+            issue["card_aliases"] = list(issue_identity.aliases)
+
     counts: dict[str, int] = {}
     for issue in issues:
         issue_type = str(issue["issue_type"])
@@ -812,6 +846,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         "refresh_queue_size": len(issues),
         "counts": dict(sorted(counts.items())),
         "metadata": metadata_summary,
+        "identity_collisions": identity_collision_aliases(identities),
         "cards": card_rows,
         "issues": issues,
     }
@@ -1366,6 +1401,11 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
             candidate["fields"].append("fingerprint")
             if reviewed is not None and expiry is not None:
                 candidate["source"] = "content-hash"
+        if candidate["fields"] and not card_identity(meta, rel).explicit:
+            from .card_identity import mint_card_id
+
+            candidate["id"] = mint_card_id()
+            candidate["fields"].append("id")
         candidates.append(candidate)
     return candidates, skipped_no_frontmatter
 
@@ -1397,6 +1437,20 @@ def backfill(*, target: Path, apply: bool = False, json_output: bool = False) ->
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    identity_collisions = _scan_payload(target, config)["identity_collisions"]
+    if apply and identity_collisions:
+        collision_payload = {
+            "target": str(target),
+            "apply": apply,
+            "written_count": 0,
+            "identity_collisions": identity_collisions,
+            "error": "identity alias collisions must be resolved before reviewed backfill",
+        }
+        if json_output:
+            print(json.dumps(collision_payload, indent=2, sort_keys=True))
+        else:
+            print(f"error: {collision_payload['error']}", file=sys.stderr)
+        return 2
     candidates, skipped_no_frontmatter = _backfill_candidates(target, config)
     written = 0
     receipt_path: Path | None = None
@@ -1413,12 +1467,14 @@ def backfill(*, target: Path, apply: bool = False, json_output: bool = False) ->
         write_json(
             receipt_path,
             {
-                "target": str(target),
                 "generated_at": _utc_iso(),
                 "written_count": written,
                 "skipped_no_frontmatter": skipped_no_frontmatter,
                 "stale_after_days": config.stale_after_days,
-                "candidates": candidates,
+                "identity_mapping": [
+                    {"file": candidate["file"], "card_id": candidate.get("id")}
+                    for candidate in sorted(candidates, key=lambda candidate: str(candidate["file"]))
+                ],
             },
         )
     payload: dict[str, Any] = {
@@ -1551,11 +1607,6 @@ def _normalize_search_query(query: str) -> str:
     return " ".join(str(query or "").lower().split())
 
 
-def _card_id_from_match_path(rel_path: str) -> str:
-    """Stem of the card path; same mapping the retrieval eval harness uses."""
-    return Path(str(rel_path)).stem
-
-
 def _search_log_path(target: Path) -> Path:
     return target.expanduser().resolve() / SEARCH_LOG_REL
 
@@ -1581,12 +1632,29 @@ def _search_log_card_ids(matches: list[dict[str, Any]], *, top_k: int = SEARCH_L
     for match in matches[:top_k]:
         if not isinstance(match, dict):
             continue
-        card_id = _card_id_from_match_path(str(match.get("path") or ""))
+        card_id = str(match.get("card_id") or match.get("path") or "")
         if not card_id or card_id in seen:
             continue
         seen.add(card_id)
         ids.append(card_id)
     return ids
+
+
+def _search_log_aliases(matches: list[dict[str, Any]], *, top_k: int = SEARCH_LOG_TOP_K) -> list[str]:
+    aliases: list[str] = []
+    for match in matches[:top_k]:
+        if not isinstance(match, dict):
+            continue
+        value = match.get("card_aliases")
+        if isinstance(value, list):
+            aliases.extend(str(alias) for alias in value if str(alias))
+    return list(dict.fromkeys(aliases))
+
+
+def _entry_identity_keys(entry: dict[str, Any]) -> set[str]:
+    keys = {str(value) for value in entry.get("card_ids", []) if value}
+    keys.update(str(value) for value in entry.get("card_aliases", []) if value)
+    return keys
 
 
 def _should_log_search(query: str) -> bool:
@@ -1631,8 +1699,8 @@ def followup_rate_from_entries(
         next_ids_value = followup.get("card_ids")
         if not isinstance(next_ids_value, list):
             continue
-        prior_ids = {str(item) for item in card_ids_value if item}
-        next_ids = {str(item) for item in next_ids_value if item}
+        prior_ids = _entry_identity_keys(entry)
+        next_ids = _entry_identity_keys(followup)
         if prior_ids.isdisjoint(next_ids):
             misses += 1
     rate = round(misses / searches, 4) if searches else 0.0
@@ -1675,6 +1743,7 @@ def _record_search_log(
         "ts": ts or _utc_iso(),
         "query": _normalize_search_query(query),
         "card_ids": _search_log_card_ids(matches if isinstance(matches, list) else []),
+        "card_aliases": _search_log_aliases(matches if isinstance(matches, list) else []),
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1694,10 +1763,13 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     except OSError:
         return {}
     frontmatter, _ = _parse_frontmatter(text)
+    identity = card_identity(frontmatter, str(path.relative_to(target)))
     tags = frontmatter.get("tags")
     tags_list = [str(t) for t in tags] if isinstance(tags, list) else ([str(tags)] if tags else [])
     return {
         "rel": str(path.relative_to(target)),
+        "card_id": identity.card_id,
+        "card_aliases": list(identity.aliases),
         "title": str(frontmatter.get("title") or path.stem),
         "tags": tags_list,
         "summary": str(frontmatter.get("description") or frontmatter.get("summary") or ""),
@@ -1727,6 +1799,8 @@ def search_cards_payload(target: Path, query: str, *, limit: int = 20) -> dict[s
         matches.append(
             {
                 "path": fields["rel"],
+                "card_id": fields["card_id"],
+                "card_aliases": fields["card_aliases"],
                 "title": fields["title"],
                 "tags": fields["tags"],
                 "summary": fields["summary"],

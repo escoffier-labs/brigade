@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shlex
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -681,13 +682,16 @@ def test_memory_care_backfill_apply_writes_metadata_receipt_and_is_idempotent(tm
     assert "last_reviewed: 2026-03-15" in text
     assert "fresh_until: 2026-06-13" in text
     assert "fingerprint:" in text
+    assert re.search(
+        r"^id: card-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", text, re.MULTILINE
+    )
     assert text.endswith("Body.\n")
     assert (cards / "complete.md").read_text() == complete_before
     receipts = list((tmp_path / ".brigade" / "memory-care" / "backfills").glob("*.json"))
     assert len(receipts) == 1
     receipt = json.loads(receipts[0].read_text())
     assert receipt["written_count"] == 1
-    assert receipt["candidates"][0]["source"] == "git-history"
+    assert receipt["identity_mapping"] == [{"file": "memory/cards/bare.md", "card_id": payload["candidates"][0]["id"]}]
 
     assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -729,14 +733,29 @@ def test_memory_care_backfill_fingerprint_only_for_dated_cards(tmp_path, capsys)
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_count"] == 1
     item = payload["candidates"][0]
-    assert item["fields"] == ["fingerprint"]
+    assert item["fields"] == ["fingerprint", "id"]
     assert item["source"] == "content-hash"
     assert len(item["fingerprint"]) == 64
 
     assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 0
     text = (cards / "dated.md").read_text()
     assert f"fingerprint: {item['fingerprint']}" in text
+    assert re.search(
+        r"^id: card-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", text, re.MULTILINE
+    )
     assert "last_reviewed: 2026-05-01" in text
+
+
+def test_memory_care_backfill_rejects_alias_collisions_without_writing(tmp_path, capsys):
+    cards = tmp_path / "memory" / "cards"
+    _write_card(cards / "one.md", {"topic": "shared", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(cards / "two.md", {"topic": "shared", "confidence": "high", "evidence": ["README.md"]})
+    before = {path.name: path.read_text() for path in cards.glob("*.md")}
+
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity_collisions"] == {"shared": ["memory/cards/one.md", "memory/cards/two.md"]}
+    assert {path.name: path.read_text() for path in cards.glob("*.md")} == before
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")

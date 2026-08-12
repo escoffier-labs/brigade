@@ -12,6 +12,7 @@ from .corpus import (
     fixture_root_label,
     load_cards,
     load_queries,
+    resolve_gold_aliases,
     validate_gold,
 )
 from .metrics import aggregate_scores, ceiling_for_queries, score_query
@@ -46,6 +47,7 @@ def run_eval(
     problems = validate_gold(cards, queries)
     if problems:
         raise ValueError("fixture gold validation failed:\n- " + "\n- ".join(problems))
+    queries = resolve_gold_aliases(cards, queries)
 
     wanted = adapters or ["current", "grep", "semantic"]
     unknown = [name for name in wanted if name not in KNOWN_ADAPTERS]
