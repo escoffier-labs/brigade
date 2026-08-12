@@ -46,10 +46,10 @@ Keeping them separate makes ownership, failure, cadence, and rollback visible.
 | Job id | Purpose and current command boundary | Proposed default | Writes / authority boundary |
 |---|---|---|---|
 | `handoff-ingest` | Validate pending handoffs, then route eligible material through `brigade handoff lint --strict --target .` and `brigade ingest --promote-cards --route-documents --target .`. | Every 30 minutes | May promote only through the existing conservative ingester. A lint failure stops ingest. |
-| `care-scan` | Recompute decay candidates with `brigade memory care scan --target .`, then publish review items with `brigade memory care import-issues --target .`. | Daily at 06:15 local time | Writes the refresh queue and work imports. it does not edit cards. |
+| `care-scan` | Recompute decay candidates with `brigade memory care scan --target .`, then publish review items with `brigade memory care import-issues --target .`. | Daily at 06:15 local time | Writes the refresh queue and work imports. It does not edit cards. |
 | `memory-refresh` | Drain reviewed refresh work using the card-refresh workflow/runbook, grounded in the care queue and source-of-truth files. | Daily at 07:00, after scan | May change only reviewed, allowlisted cards through an approved runbook. If no approved refresh runbook is configured, the entry is not installable. |
 | `evidence-crawl` | Refresh local evidence-memory inputs using an operator-approved evidence-crawl runbook whose steps correspond to the reviewed `brigade evidence crawl plan --target .`. | Daily at 08:00, after refresh | Optional native evidence engine reads local sources. No upload, daemon, or implicit execution of a plan is introduced. Missing engine or approval is a visible non-success receipt. |
-| `memory-closeout` | Record review completion with `brigade memory care closeout --target .`. the runbook must first verify that the applicable scan/refresh/evidence receipts are present and successful or explicitly deferred. | Daily at 09:00, last | Writes closeout metadata only. It must not convert a partial or failed chain into `reviewed`. deferral remains explicit. |
+| `memory-closeout` | Record review completion with `brigade memory care closeout --target .`. The runbook must first verify that the applicable scan/refresh/evidence receipts are present and successful or explicitly deferred. | Daily at 09:00, last | Writes closeout metadata only. It must not convert a partial or failed chain into `reviewed`. Deferral remains explicit. |
 
 The times are defaults, not correctness dependencies. Ordering is enforced by
 receipt prerequisites as well as staggered schedules, because persistent
@@ -99,7 +99,7 @@ field needed by `care status`.
 - `job_id` is stable within a target and is one of the five ids above.
 - `target.canonical_path` is the absolute, symlink-resolved directory captured
   at registration. Execution uses that directory and still passes `--target
-  .`. it never depends on the scheduler's ambient working directory.
+  .`. It never depends on the scheduler's ambient working directory.
 - `target.identity` and `target.namespace` **reuse the exact identity algorithm
   and collision handling selected by #759**. #762 must not introduce a second
   path hash. Moving or replacing a target requires an explicit re-registration.
@@ -121,7 +121,7 @@ field needed by `care status`.
   prerequisite produces a skipped/blocked receipt and no mutation.
 - `definition_hash` covers the canonical entry including target identity,
   schedule, execution, and prerequisites. It provides the existing care drift
-  detection. it is not a content or security signature.
+  detection. It is not a content or security signature.
 - `legacy_job_ref` records enough operator-local information to restore the old
   trigger during the migration window. It must not contain secrets and is not
   executed by Brigade.
@@ -134,7 +134,7 @@ field needed by `care status`.
 | `care-scan` | Shipped scan/import sequence | None | Runbook receipt plus current refresh queue/import result |
 | `memory-refresh` | Operator-approved card-refresh runbook | Successful `care-scan` receipt from the same target, normally within 24 hours | Runbook receipt listing reviewed work without copying card bodies into scheduler state |
 | `evidence-crawl` | Operator-approved local evidence-crawl runbook | Successful or explicitly no-work `memory-refresh` receipt from the same target, normally within 24 hours | Runbook receipt and evidence-engine status/scan identity |
-| `memory-closeout` | Shipped closeout guard plus closeout command | Same-target scan, refresh, and crawl receipts for the closeout window. explicitly deferred optional stages are acceptable | Memory-care closeout receipt linked by ids/digests to the checked receipts |
+| `memory-closeout` | Shipped closeout guard plus closeout command | Same-target scan, refresh, and crawl receipts for the closeout window. Explicitly deferred optional stages are acceptable | Memory-care closeout receipt linked by ids/digests to the checked receipts |
 
 Handoff ingest is independent of the daily chain: a bad handoff must not block
 care scanning. Closeout covers the daily memory-maintenance chain, not every
@@ -151,7 +151,7 @@ targets `A` and `B`, installing `care-scan` creates two registrations:
 (identity(B), care-scan) -> brigade-<namespace(B)>-care-scan
 ```
 
-The concrete prefix follows #759. the important invariant is that the
+The concrete prefix follows #759. The important invariant is that the
 namespace appears anywhere the scheduler requires uniqueness. A single global
 `# BEGIN BRIGADE CARE` block or `brigade-care-scan.timer` is insufficient.
 
@@ -165,7 +165,7 @@ behavior.
 
 Receipts and runbooks remain under each target's `.brigade/` tree. Scheduler
 metadata may repeat only safe identifiers and paths required to launch the
-job. memory contents, evidence text, handoff bodies, and credentials never
+job. Memory contents, evidence text, handoff bodies, and credentials never
 enter the registry.
 
 ## Migration plan
@@ -191,7 +191,7 @@ Migrate in this order:
 2. **Care scan.** Establishes the queue and receipt that downstream jobs use.
 3. **Refresh.** Add only after the approved refresh runbook demonstrably binds
    its edits to reviewed queue items.
-4. **Evidence crawl.** Add after refresh receipts can gate it. absence of the
+4. **Evidence crawl.** Add after refresh receipts can gate it. Absence of the
    optional evidence engine remains explicit rather than silently successful.
 5. **Closeout.** Migrate last, after it can prove that it is closing the
    care-managed chain rather than merely running at the end of the hour.
@@ -210,11 +210,11 @@ registration.
 
 | Job | Rollback-specific action | State intentionally retained |
 |---|---|---|
-| `handoff-ingest` | Restore the old lint-then-ingest trigger. Check for a run already in progress before firing it. | Handoff archive/promotions and ingest receipts. never re-ingest by deleting receipts. |
+| `handoff-ingest` | Restore the old lint-then-ingest trigger. Check for a run already in progress before firing it. | Handoff archive/promotions and ingest receipts. Never re-ingest by deleting receipts. |
 | `care-scan` | Restore the old scan/import trigger. Downstream care entries stay disabled until a fresh scan receipt exists. | Refresh queue and work-import dedupe state. |
-| `memory-refresh` | Disable refresh and restore only the reviewed legacy refresh job. If a partial run occurred, require human review before retry. | Card edits, diffs, work items, and partial runbook receipt. never reverse edits automatically. |
+| `memory-refresh` | Disable refresh and restore only the reviewed legacy refresh job. If a partial run occurred, require human review before retry. | Card edits, diffs, work items, and partial runbook receipt. Never reverse edits automatically. |
 | `evidence-crawl` | Disable the care entry and restore the legacy local crawl. Do not wipe or rebuild the ledger as scheduler rollback. | Evidence database, cursors, scan ids, and failure receipt. |
-| `memory-closeout` | Disable the entry and restore the old closeout trigger only after checking whether a closeout already exists for the receipt set. | Existing closeout receipts. append a correction/defer record rather than rewriting history. |
+| `memory-closeout` | Disable the entry and restore the old closeout trigger only after checking whether a closeout already exists for the receipt set. | Existing closeout receipts. Append a correction/defer record rather than rewriting history. |
 
 If the defect is shared infrastructure (wrong target identity, namespace
 collision, or cross-target uninstall), stop all newly managed jobs for the
@@ -230,11 +230,11 @@ target identities remain untouched.
   mutating steps. It should be visible as `blocked`/`skipped`, with a safe
   reason and next command.
 - Runbook step failure stops subsequent steps. Closeout cannot label a failed
-  chain reviewed. an operator may explicitly defer it with the existing
+  chain reviewed. An operator may explicitly defer it with the existing
   closeout semantics.
 - Concurrent fires for the same `(target.identity, job_id)` require the normal
   runbook single-run protection or a care-level non-overlap guard. A second
-  fire records or reports `already-running`. it does not start another writer.
+  fire records or reports `already-running`. It does not start another writer.
 - Registration never implies `--apply`, broad filesystem authority, network
   upload, or model-seat availability. Any such capability remains an explicit,
   reviewed runbook decision.
@@ -244,19 +244,19 @@ target identities remain untouched.
 Implementation must be test-first, but this design-only change adds no runtime
 test. The implementation slice should begin with failing focused tests for:
 
-1. two targets registering the same five job ids without marker/unit/task-name
+1. Two targets registering the same five job ids without marker/unit/task-name
    collisions.
-2. install, status, repair/adopt, and uninstall selecting only one target
+2. Install, status, repair/adopt, and uninstall selecting only one target
    namespace.
-3. schema validation, canonical target binding, target-relative runbook
+3. Schema validation, canonical target binding, target-relative runbook
    containment, and definition-hash drift.
-4. exact command/runbook mapping for all five entries.
-5. same-target prerequisite success, missing/stale/wrong-target/failed receipt
+4. Exact command/runbook mapping for all five entries.
+5. Same-target prerequisite success, missing/stale/wrong-target/failed receipt
    blocking, and no closeout after a partial chain.
-6. non-overlap behavior and receipt reporting.
-7. per-job migration/rollback leaving unrelated jobs and unowned scheduler
-   content intact. and
-8. backend parity for cron, systemd, and Windows's review-only task rendering.
+6. Non-overlap behavior and receipt reporting.
+7. Per-job migration/rollback leaving unrelated jobs and unowned scheduler
+   content intact. And
+8. Backend parity for cron, systemd, and Windows's review-only task rendering.
 
 Focused care/runbook/memory/evidence tests and Ruff must pass before the full
 `./scripts/verify` gate. Manual acceptance uses two temporary Brigade targets.
