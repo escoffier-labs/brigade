@@ -23,3 +23,6 @@ labels:
   - name: good first issue
     color: "7057FF"
     description: Small, well-scoped issue suitable for a new contributor.
+  - name: help wanted
+    color: "008672"
+    description: Extra attention is needed; good fit for an external contributor with guidance.
