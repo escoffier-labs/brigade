@@ -527,6 +527,7 @@ def scan(
         if requested_output_dir is not None:
             print(f"artifacts: {report['artifacts']}")
         for finding in report["findings"]:
+            finding = _sanitize_finding_for_output(finding)
             print(
                 f"- [{finding['severity']}] {finding['category']} "
                 f"{finding['path']}:{finding['line']} {finding['title']}"

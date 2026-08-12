@@ -54,7 +54,7 @@ def _report_findings_for_review(target: Path, report: dict[str, Any]) -> list[di
     for finding in report.get("findings", []):
         if not isinstance(finding, dict):
             continue
-        record = dict(finding)
+        record = _sanitize_finding_for_output(finding)
         record["status"] = (
             "suppressed" if _finding_matches_fingerprints(finding, suppressed, migration_map=migration_map) else "open"
         )
@@ -67,7 +67,7 @@ def _report_findings_for_review(target: Path, report: dict[str, Any]) -> list[di
     for finding in report.get("suppressed_findings", []):
         if not isinstance(finding, dict):
             continue
-        record = dict(finding)
+        record = _sanitize_finding_for_output(finding)
         record["status"] = "suppressed"
         reason = _suppression_reason_for_finding(
             finding, suppressions=suppressed, reasons=reasons, migration_map=migration_map

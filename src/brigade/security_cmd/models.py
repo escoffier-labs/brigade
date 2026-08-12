@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,61 @@ from ..selection import WRITER_INBOXES
 from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
+
+
+FINDING_PRIVATE_URL_RE = re.compile(r"(?i)https?://[^\s]+")
+
+FINDING_PRIVATE_TOKEN_RE = re.compile(
+    r"(?i)\b(?:bearer\s+[A-Za-z0-9._~+/=-]{8,}|github_pat_[A-Za-z0-9_]{8,}|ghp_[A-Za-z0-9]{8,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{8,}|sk-(?:live|test|proj)-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{12,})\b"
+)
+
+FINDING_PRIVATE_VALUE_RE = re.compile(
+    r"(?i)\b([A-Za-z0-9_]*(?:api[_-]?key|secret|token|password|passwd|pwd)[A-Za-z0-9_]*)\b\s*[:=]\s*['\"]?([A-Za-z0-9_./+=:-]{8,})"
+)
+
+FINDING_PRIVATE_PATH_RE = re.compile(r"(?<!`)/(?:home|Users|private|mnt|Volumes)/[^\s`)]+")
+
+_FINDING_REDACTION_PLACEHOLDERS = (
+    "[REDACTED-URL]",
+    "[REDACTED-PATH]",
+    "[REDACTED]",
+)
+
+
+def _sanitize_finding_text(value: object) -> str:
+    """Render a finding-controlled value as safe, single-line display text."""
+    text = str(value or "")
+    text = "".join(" " if unicodedata.category(char) in {"Cc", "Cf"} else char for char in text)
+    text = FINDING_PRIVATE_URL_RE.sub("[REDACTED-URL]", text)
+    text = FINDING_PRIVATE_TOKEN_RE.sub("[REDACTED]", text)
+    text = FINDING_PRIVATE_VALUE_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
+    text = FINDING_PRIVATE_PATH_RE.sub("[REDACTED-PATH]", text)
+    return " ".join(text.split())
+
+
+def _sanitize_finding_for_output(finding: dict[str, Any]) -> dict[str, Any]:
+    """Copy a finding while sanitizing every string at the output boundary."""
+
+    def sanitize(value: Any) -> Any:
+        if isinstance(value, str):
+            return _sanitize_finding_text(value)
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        if isinstance(value, dict):
+            return {key: sanitize(item) for key, item in value.items()}
+        return value
+
+    return {key: sanitize(value) for key, value in finding.items()}
+
+
+def _escape_finding_markdown(value: object) -> str:
+    """Escape sanitized finding text so it cannot introduce Markdown syntax."""
+    escaped = re.sub(r"([\\`*{}\[\]()<>#+.!_\-|])", r"\\\1", _sanitize_finding_text(value))
+    for placeholder in _FINDING_REDACTION_PLACEHOLDERS:
+        escaped_placeholder = re.sub(r"([\\`*{}\[\]()<>#+.!_\-|])", r"\\\1", placeholder)
+        escaped = escaped.replace(escaped_placeholder, placeholder)
+    return escaped
 
 
 SEVERITY_ORDER = {
