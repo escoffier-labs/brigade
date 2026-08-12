@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,13 @@ def _write_scanner_import_proof(tmp_path: Path, items: list[dict[str, object]], 
             ],
         },
     }
+    descriptor = work_cmd.ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(descriptor)
     receipt_path = work_cmd.helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
     receipt_path.parent.mkdir(parents=True)
     receipt_path.write_text(json.dumps(receipt))

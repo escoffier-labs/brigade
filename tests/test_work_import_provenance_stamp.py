@@ -21,6 +21,21 @@ def _envelope(item: dict[str, Any]) -> dict[str, Any]:
     return env
 
 
+def _establish_scanner_runs_authority(tmp_path: Path) -> None:
+    descriptor = ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(descriptor)
+
+
+def _rewrite_authority_anchor(anchor: Path, directory: Path) -> None:
+    info = directory.stat()
+    anchor.write_text(json.dumps({"schema_version": 1, "device": info.st_dev, "inode": info.st_ino}))
+
+
 def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source: str) -> None:
     """Bind a legacy fixture to a verifier-owned scanner receipt, not its row fields."""
     run_id = "test-proof-run"
@@ -46,6 +61,7 @@ def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source
             ],
         },
     }
+    _establish_scanner_runs_authority(tmp_path)
     receipt_path = helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
     receipt_path.parent.mkdir(parents=True)
     receipt_path.write_text(json.dumps(receipt))
@@ -73,6 +89,7 @@ def _write_builtin_scanner_receipt(
             "imports": [{"id": item["id"], "content_hash": ledger._locally_stamped_import_content_hash(item)}],
         },
     }
+    _establish_scanner_runs_authority(tmp_path)
     path = helpers._scanner_runs_root(tmp_path) / "chosen-run" / "receipt.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(receipt))
@@ -1114,6 +1131,96 @@ def test_partial_proof_creation_is_removed(tmp_path: Path, monkeypatch: pytest.M
     assert not proofs.exists() or list(proofs.iterdir()) == []
 
 
+def test_scanner_ingest_proof_failure_restores_exact_prior_inbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brigade.work_cmd import scanners as scanners_mod
+
+    before_item = ledger._make_import("preexisting", kind="task", source="manual")
+    ledger._write_imports(tmp_path, [before_item])
+    inbox = helpers._imports_path(tmp_path)
+    before = inbox.read_bytes()
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "ingested", "kind": "task", "source": "security-scan", "metadata": {}},
+        importer_source="security-scan",
+    )
+
+    def fail_proof(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("proof persistence failed")
+
+    monkeypatch.setattr(ledger, "_write_persisted_import_proofs", fail_proof)
+    with pytest.raises(OSError, match="proof persistence failed"):
+        ledger._append_import_records(
+            tmp_path,
+            [record],
+            provenance_source="security-scan",
+            contain_provenance_errors=True,
+            migrate_untrusted_identities=True,
+            preserve_existing_raw=lambda data: scanners_mod._append_scanner_inbox_bytes(tmp_path, data),
+            restore_existing_raw=lambda data, exists: scanners_mod._restore_scanner_inbox_bytes(tmp_path, data, exists),
+            existing_imports=scanners_mod._scanner_inbox_imports(tmp_path),
+        )
+
+    assert inbox.read_bytes() == before
+
+
+def test_replaced_proof_directory_cannot_manufacture_producer_proof(tmp_path: Path) -> None:
+    item = ledger._make_import("forged proof", kind="task", source="security-scan")
+    descriptor = ledger._open_import_proof_directory(tmp_path, create=True)
+    os.close(descriptor)
+    proofs = tmp_path / ".brigade" / "work" / "imports" / "proofs"
+    proofs.rename(proofs.with_name("proofs-original"))
+    attacker = tmp_path / "attacker-proofs"
+    attacker.mkdir()
+    payload = ledger._persisted_import_proof_payload(item, operation_id="0" * 32)
+    name = ledger._import_proof_name(item["id"])
+    assert payload is not None and name is not None
+    (attacker / name).write_text(json.dumps(payload))
+    attacker.rename(proofs)
+
+    assert not ledger._has_persisted_import_proof(item, target=tmp_path)
+
+
+def test_plaintext_proof_anchor_does_not_let_replacement_directory_forge_authority(tmp_path: Path):
+    item = ledger._make_import("forged proof", kind="task", source="security-scan")
+    descriptor = ledger._open_import_proof_directory(tmp_path, create=True)
+    os.close(descriptor)
+    proofs = tmp_path / ".brigade" / "work" / "imports" / "proofs"
+    proofs.rename(proofs.with_name("proofs-original"))
+    replacement = tmp_path / "replacement-proofs"
+    replacement.mkdir()
+    payload = ledger._persisted_import_proof_payload(item, operation_id="0" * 32)
+    name = ledger._import_proof_name(item["id"])
+    assert payload is not None and name is not None
+    (replacement / name).write_text(json.dumps(payload))
+    replacement.rename(proofs)
+    _rewrite_authority_anchor(proofs.parent / ".proofs.authority.json", proofs)
+
+    assert not ledger._has_persisted_import_proof(item, target=tmp_path)
+
+
+def test_import_publication_temp_substitution_restores_prior_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    before = b'{"text":"before"}\n'
+    attacker = b'{"text":"attacker"}\n'
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(before)
+    original_replace = ledger.os.replace
+
+    def substitute(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        if destination == "inbox.jsonl" and isinstance(source, str) and source.startswith(".inbox.jsonl."):
+            temporary = inbox.parent / source
+            temporary.unlink()
+            temporary.write_bytes(attacker)
+        return original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(ledger.os, "replace", substitute)
+    with pytest.raises(OSError):
+        ledger._write_imports(tmp_path, [ledger._make_import("new", kind="task", source="manual")])
+
+    assert inbox.read_bytes() == before
+
+
 def test_ordinary_import_publication_cannot_follow_swapped_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1164,14 +1271,18 @@ def test_ordinary_import_rollback_rejects_temp_substitution(tmp_path: Path, monk
     attacker = b'{"text":"attacker"}\n'
     inbox.write_bytes(before)
     original_replace = ledger.os.replace
+    replacements = 0
 
     def fail_proof(*_args: Any, **_kwargs: Any) -> None:
         raise OSError("proof persistence failed")
 
     def substitute_rollback(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
-        rollback = inbox.parent / source
-        rollback.unlink()
-        rollback.write_bytes(attacker)
+        nonlocal replacements
+        replacements += 1
+        if replacements == 2:
+            rollback = inbox.parent / source
+            rollback.unlink()
+            rollback.write_bytes(attacker)
         return original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
 
     monkeypatch.setattr(ledger, "_write_persisted_import_proofs", fail_proof)

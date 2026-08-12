@@ -57,7 +57,11 @@ def import_add(
     imports = ledger_mod._read_imports(target)
     item = ledger_mod._make_import(rendered, kind=kind, source=source_text, metadata=parsed_metadata)
     imports.append(item)
-    ledger_mod._write_imports(target, imports)
+    try:
+        ledger_mod._write_imports(target, imports)
+    except OSError as exc:
+        print(f"error: import inbox persistence failed: {exc}", file=sys.stderr)
+        return 1
     print(f"import: {item['id']}")
     print(f"status: {item['status']}")
     print(f"kind: {item['kind']}")

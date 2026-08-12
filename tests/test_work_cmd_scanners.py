@@ -14,6 +14,7 @@ from brigade import dogfood_cmd
 from brigade import handoff_cmd
 from brigade import localio
 from brigade import work_cmd
+from brigade.work_cmd import helpers
 
 from tests.work_cmd_test_helpers import (
     _write_json,
@@ -39,6 +40,139 @@ def _verified_builtin_scanner_run(scanner: dict[str, object]) -> dict[str, objec
     }
     scanners_mod._register_scanner_run_proof(scanner, run)
     return run
+
+
+def test_scanner_receipt_producer_rejects_run_directory_swap(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    outside = tmp_path / "outside-run"
+    outside.mkdir()
+    real_write_json = work_cmd.helpers._write_json
+    swapped = False
+
+    def swap_then_write(path: Path, data: object) -> None:
+        nonlocal swapped
+        if not swapped and path.name == "receipt.json":
+            swapped = True
+            held = path.parent.with_name(path.parent.name + "-held")
+            path.parent.rename(held)
+            path.parent.symlink_to(outside, target_is_directory=True)
+        real_write_json(path, data)
+
+    monkeypatch.setattr(work_cmd.helpers, "_write_json", swap_then_write)
+    scanner = {"id": "gate", "source": "security-scan", "command": "", "timeout": 1}
+
+    scanners_mod._scanner_run_one(tmp_path, scanner)
+
+    assert not (outside / "receipt.json").exists()
+
+
+def test_replaced_scanner_runs_directory_cannot_manufacture_receipt_authority(tmp_path) -> None:
+    from brigade.work_cmd import constants, ledger
+
+    item = ledger._make_import("forged receipt", kind="task", source="handoff-ingest")
+    scanner = dict(next(value for value in constants.SCANNER_DEFAULTS if value["source"] == "handoff-ingest"))
+    run_id = "forged-run"
+    metadata = item["metadata"]
+    assert isinstance(metadata, dict)
+    metadata.update({"scanner_id": scanner["id"], "scanner_run_id": run_id})
+    receipt = {
+        "run_id": run_id,
+        "scanner_id": scanner["id"],
+        "source": scanner["source"],
+        "command": scanner["command"],
+        "status": "completed",
+        "exit_code": 0,
+        "self_import_proofs": {
+            "scanner_id": scanner["id"],
+            "source": scanner["source"],
+            "scanner": scanner,
+            "imports": [{"id": item["id"], "content_hash": ledger._locally_stamped_import_content_hash(item)}],
+        },
+    }
+    descriptor = ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(descriptor)
+    runs = work_cmd.helpers._scanner_runs_root(tmp_path)
+    runs.rename(runs.with_name("runs-original"))
+    attacker = tmp_path / "attacker-runs"
+    (attacker / run_id).mkdir(parents=True)
+    (attacker / run_id / "receipt.json").write_text(json.dumps(receipt))
+    attacker.rename(runs)
+
+    assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
+
+
+def test_plaintext_runs_anchor_does_not_let_replacement_directory_forge_receipt(tmp_path: Path):
+    from brigade.work_cmd import constants, helpers, ledger
+
+    item = ledger._make_import("forged receipt", kind="task", source="handoff-ingest")
+    scanner = dict(next(value for value in constants.SCANNER_DEFAULTS if value["source"] == "handoff-ingest"))
+    run_id = "forged-run"
+    metadata = item["metadata"]
+    assert isinstance(metadata, dict)
+    metadata.update({"scanner_id": scanner["id"], "scanner_run_id": run_id})
+    receipt = {
+        "run_id": run_id,
+        "scanner_id": scanner["id"],
+        "source": scanner["source"],
+        "command": scanner["command"],
+        "status": "completed",
+        "exit_code": 0,
+        "self_import_proofs": {
+            "scanner_id": scanner["id"],
+            "source": scanner["source"],
+            "scanner": scanner,
+            "imports": [{"id": item["id"], "content_hash": ledger._locally_stamped_import_content_hash(item)}],
+        },
+    }
+    descriptor = ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(descriptor)
+    runs = helpers._scanner_runs_root(tmp_path)
+    runs.rename(runs.with_name("runs-original"))
+    replacement = tmp_path / "replacement-runs"
+    (replacement / run_id).mkdir(parents=True)
+    (replacement / run_id / "receipt.json").write_text(json.dumps(receipt))
+    replacement.rename(runs)
+    info = runs.stat()
+    (runs.parent / ".runs.authority.json").write_text(
+        json.dumps({"schema_version": 1, "device": info.st_dev, "inode": info.st_ino})
+    )
+
+    assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
+
+
+def test_scanner_receipt_temp_substitution_does_not_publish_attacker_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    attacker = b'{"status":"completed","exit_code":0,"attacker":true}\n'
+    original_replace = scanners_mod.os.replace
+
+    def substitute(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        if destination == "receipt.json" and isinstance(source, str) and source.startswith(".receipt.json."):
+            temporary = Path(f"/proc/self/fd/{src_dir_fd}") / source
+            temporary.unlink()
+            temporary.write_bytes(attacker)
+        return original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(scanners_mod.os, "replace", substitute)
+    scanner = {"id": "gate", "source": "security-scan", "command": "", "timeout": 1}
+    with pytest.raises(OSError):
+        scanners_mod._scanner_run_one(tmp_path, scanner)
+
+    receipts = list(helpers._scanner_runs_root(tmp_path).glob("*/receipt.json"))
+    assert not receipts or receipts[0].read_bytes() != attacker
 
 
 def test_work_doctor_warns_for_scanner_queue_health(tmp_path, monkeypatch, capsys):
@@ -701,6 +835,13 @@ output_path = ".brigade/fail.json"
 conflict_window = "04:00-04:10"
 """
     )
+    authority = work_cmd.ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(authority)
     running = tmp_path / ".brigade" / "scanners" / "runs" / "running"
     running.mkdir(parents=True)
     _write_json(
@@ -755,6 +896,13 @@ output_path = ".brigade/due.json"
 conflict_window = "02:00-02:10"
 """
     )
+    authority = work_cmd.ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(authority)
     run_dir = tmp_path / ".brigade" / "scanners" / "runs" / "failed-run"
     run_dir.mkdir(parents=True)
     _write_json(

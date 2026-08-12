@@ -31,6 +31,195 @@ class _ScannerRunProof:
 _SCANNER_RUN_PROOFS: dict[int, _ScannerRunProof] = {}
 
 
+class _ScannerRunDirectoryAuthority:
+    """Retained descriptor authority for files belonging to one scanner run."""
+
+    def __init__(self, *, root: int, directory: int, run_id: str) -> None:
+        self.root = root
+        self.directory = directory
+        self.run_id = run_id
+
+
+_SCANNER_RUN_DIRECTORY_AUTHORITIES: dict[int, _ScannerRunDirectoryAuthority] = {}
+
+
+def _open_scanner_runs_directory(target: Path, *, create: bool) -> int:
+    return ledger_mod._open_verifier_owned_directory(
+        target,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=create,
+    )
+
+
+def _validate_scanner_run_directory(authority: _ScannerRunDirectoryAuthority) -> None:
+    if os.stat not in os.supports_dir_fd:
+        raise OSError("descriptor-relative scanner run validation is unavailable")
+    opened = os.fstat(authority.directory)
+    named = os.stat(authority.run_id, dir_fd=authority.root, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or (
+            opened.st_dev,
+            opened.st_ino,
+        )
+        != (named.st_dev, named.st_ino)
+    ):
+        raise OSError("scanner run directory no longer matches its held descriptor")
+
+
+def _open_scanner_run_directory(target: Path, run_id: str) -> _ScannerRunDirectoryAuthority:
+    root = _open_scanner_runs_directory(target, create=True)
+    directory = -1
+    try:
+        os.mkdir(run_id, 0o700, dir_fd=root)
+        directory = os.open(
+            run_id,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=root,
+        )
+        authority = _ScannerRunDirectoryAuthority(root=root, directory=directory, run_id=run_id)
+        _validate_scanner_run_directory(authority)
+        return authority
+    except BaseException:
+        if directory != -1:
+            os.close(directory)
+        os.close(root)
+        raise
+
+
+def _validate_scanner_run_file(parent: int, name: str, descriptor: int) -> None:
+    if os.stat not in os.supports_dir_fd:
+        raise OSError("descriptor-relative scanner run file validation is unavailable")
+    opened = os.fstat(descriptor)
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or not stat.S_ISREG(named.st_mode)
+        or named.st_nlink != 1
+        or (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink)
+        != (named.st_dev, named.st_ino, named.st_mode, named.st_nlink)
+    ):
+        raise OSError("scanner run file no longer matches its held descriptor")
+
+
+def _write_scanner_run_file(authority: _ScannerRunDirectoryAuthority, name: str, data: bytes) -> None:
+    """Failure-atomically publish one scanner artifact below a retained run descriptor."""
+    _validate_scanner_run_directory(authority)
+    existing = -1
+    descriptor = -1
+    previous_raw = b""
+    previous_exists = False
+    temporary_name = f".{name}.{uuid4().hex}.tmp"
+    try:
+        try:
+            existing = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=authority.directory,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            _validate_scanner_run_file(authority.directory, name, existing)
+            chunks: list[bytes] = []
+            while chunk := os.read(existing, 1024 * 1024):
+                chunks.append(chunk)
+            previous_raw = b"".join(chunks)
+            previous_exists = True
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=authority.directory,
+        )
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _validate_scanner_run_file(authority.directory, temporary_name, descriptor)
+        _validate_scanner_run_directory(authority)
+        os.replace(temporary_name, name, src_dir_fd=authority.directory, dst_dir_fd=authority.directory)
+        _validate_scanner_run_file(authority.directory, name, descriptor)
+        os.fsync(authority.directory)
+    except BaseException:
+        try:
+            os.unlink(temporary_name, dir_fd=authority.directory)
+        except FileNotFoundError:
+            pass
+        _restore_scanner_run_file_snapshot(authority, name, previous_raw, previous_exists)
+        raise
+    finally:
+        if existing != -1:
+            os.close(existing)
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _restore_scanner_run_file_snapshot(
+    authority: _ScannerRunDirectoryAuthority, name: str, data: bytes, exists: bool
+) -> None:
+    """Restore a producer artifact through the same retained run authority."""
+    if not exists:
+        try:
+            os.unlink(name, dir_fd=authority.directory)
+        except FileNotFoundError:
+            pass
+        os.fsync(authority.directory)
+        return
+    for _attempt in range(3):
+        temporary_name = f".{name}.{uuid4().hex}.tmp"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=authority.directory,
+            )
+            with os.fdopen(os.dup(descriptor), "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _validate_scanner_run_file(authority.directory, temporary_name, descriptor)
+            os.replace(temporary_name, name, src_dir_fd=authority.directory, dst_dir_fd=authority.directory)
+            temporary_name = ""
+            _validate_scanner_run_file(authority.directory, name, descriptor)
+            os.fsync(authority.directory)
+            return
+        except OSError:
+            pass
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name, dir_fd=authority.directory)
+                except FileNotFoundError:
+                    pass
+    raise OSError("scanner run artifact rollback could not restore its retained snapshot")
+
+
+def _write_scanner_run_receipt(run: dict[str, Any]) -> None:
+    authority = _SCANNER_RUN_DIRECTORY_AUTHORITIES.get(id(run))
+    if authority is None:
+        raise OSError("scanner run directory authority is unavailable")
+    _write_scanner_run_file(
+        authority,
+        "receipt.json",
+        (json.dumps(run, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    )
+
+
+def _release_scanner_run_directory_authority(run: dict[str, Any]) -> None:
+    authority = _SCANNER_RUN_DIRECTORY_AUTHORITIES.pop(id(run), None)
+    if authority is not None:
+        os.close(authority.directory)
+        os.close(authority.root)
+
+
 def _register_scanner_run_proof(scanner: dict[str, Any], run: dict[str, Any]) -> None:
     """Keep authority for a completed built-in scan outside its serialized row bytes."""
     run_id = run.get("run_id")
@@ -66,26 +255,97 @@ def _record_scanner_import_proof(scanner: dict[str, Any], run: dict[str, Any], i
         )
 
 
+def _read_scanner_receipt_at(root: int, run_id: str, *, path: Path) -> dict[str, Any] | None:
+    """Read one receipt through the anchored runs descriptor."""
+    run = -1
+    receipt = -1
+    try:
+        run = os.open(
+            run_id,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=root,
+        )
+        opened_run = os.fstat(run)
+        named_run = os.stat(run_id, dir_fd=root, follow_symlinks=False)
+        if not stat.S_ISDIR(opened_run.st_mode) or (opened_run.st_dev, opened_run.st_ino) != (
+            named_run.st_dev,
+            named_run.st_ino,
+        ):
+            return None
+        receipt = os.open(
+            "receipt.json",
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=run,
+        )
+        before = os.fstat(receipt)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            return None
+        chunks: list[bytes] = []
+        while chunk := os.read(receipt, 64 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(receipt)
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+        ):
+            return None
+        data = json.loads(b"".join(chunks))
+        if not isinstance(data, dict):
+            return None
+        data.setdefault("path", str(path))
+        return data
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    finally:
+        if receipt != -1:
+            os.close(receipt)
+        if run != -1:
+            os.close(run)
+
+
 def _scanner_read_receipt(path: Path) -> dict[str, Any] | None:
-    receipt = path / "receipt.json" if path.is_dir() else path
-    if not receipt.is_file():
+    """Compatibility reader that still requires the runs-root authority anchor."""
+    run_path = path.parent if path.name == "receipt.json" else path
+    try:
+        target = run_path.parents[2]
+    except IndexError:
         return None
     try:
-        data = json.loads(receipt.read_text())
-    except (OSError, json.JSONDecodeError):
+        root = _open_scanner_runs_directory(target, create=False)
+    except OSError:
         return None
-    if not isinstance(data, dict):
-        return None
-    data.setdefault("path", str(receipt.parent))
-    return data
+    try:
+        return _read_scanner_receipt_at(root, run_path.name, path=run_path)
+    finally:
+        os.close(root)
+
+
+def _scanner_receipt_collection(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        root = _open_scanner_runs_directory(target, create=False)
+    except OSError:
+        return [], []
+    try:
+        valid: list[dict[str, Any]] = []
+        malformed: list[str] = []
+        for run_id in os.listdir(root):
+            if not isinstance(run_id, str):
+                continue
+            path = helpers._scanner_runs_root(target) / run_id
+            receipt = _read_scanner_receipt_at(root, run_id, path=path)
+            if receipt is None:
+                malformed.append(run_id)
+            else:
+                valid.append(receipt)
+        return valid, malformed
+    finally:
+        os.close(root)
 
 
 def _scanner_receipts(target: Path) -> list[dict[str, Any]]:
-    root = helpers._scanner_runs_root(target)
-    if not root.is_dir():
-        return []
-    receipts = [_scanner_read_receipt(path) for path in root.iterdir() if path.is_dir()]
-    valid = [item for item in receipts if isinstance(item, dict)]
+    valid, _malformed = _scanner_receipt_collection(target)
     valid.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
     return valid
 
@@ -894,10 +1154,9 @@ def _scanner_run_one(
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-{helpers._slug(scanner_id)}-{uuid4().hex[:6]}"
     run_dir = helpers._scanner_runs_root(target) / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
+    authority = _open_scanner_run_directory(target, run_id)
     stdout_path = run_dir / "stdout.log"
     stderr_path = run_dir / "stderr.log"
-    receipt_path = run_dir / "receipt.json"
     receipt: dict[str, Any] = {
         "run_id": run_id,
         "scanner_id": scanner_id,
@@ -918,7 +1177,8 @@ def _scanner_run_one(
         "import_format": scanner.get("import_format", "jsonl") if import_path is not None else None,
         "forced": force,
     }
-    helpers._write_json(receipt_path, receipt)
+    _SCANNER_RUN_DIRECTORY_AUTHORITIES[id(receipt)] = authority
+    _write_scanner_run_receipt(receipt)
     if blocker is not None:
         completed = helpers._now()
         receipt.update(
@@ -934,9 +1194,9 @@ def _scanner_run_one(
                 "output_after": _scanner_output_snapshot(output_path),
             }
         )
-        stdout_path.write_text("")
-        stderr_path.write_text(blocker + "\n")
-        helpers._write_json(receipt_path, receipt)
+        _write_scanner_run_file(authority, "stdout.log", b"")
+        _write_scanner_run_file(authority, "stderr.log", (blocker + "\n").encode("utf-8"))
+        _write_scanner_run_receipt(receipt)
         return receipt
     if not cwd.is_dir():
         completed = helpers._now()
@@ -954,9 +1214,9 @@ def _scanner_run_one(
                 "output_after": _scanner_output_snapshot(output_path),
             }
         )
-        stdout_path.write_text("")
-        stderr_path.write_text(error + "\n")
-        helpers._write_json(receipt_path, receipt)
+        _write_scanner_run_file(authority, "stdout.log", b"")
+        _write_scanner_run_file(authority, "stderr.log", (error + "\n").encode("utf-8"))
+        _write_scanner_run_receipt(receipt)
         return receipt
     try:
         completed_process = subprocess.run(
@@ -969,8 +1229,8 @@ def _scanner_run_one(
         )
         stdout = completed_process.stdout or ""
         stderr = completed_process.stderr or ""
-        stdout_path.write_text(stdout)
-        stderr_path.write_text(stderr)
+        _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
+        _write_scanner_run_file(authority, "stderr.log", stderr.encode("utf-8"))
         completed = helpers._now()
         receipt.update(
             {
@@ -987,8 +1247,8 @@ def _scanner_run_one(
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        stdout_path.write_text(stdout)
-        stderr_path.write_text(stderr)
+        _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
+        _write_scanner_run_file(authority, "stderr.log", stderr.encode("utf-8"))
         completed = helpers._now()
         receipt.update(
             {
@@ -1003,7 +1263,7 @@ def _scanner_run_one(
                 "output_after": _scanner_output_snapshot(output_path),
             }
         )
-    helpers._write_json(receipt_path, receipt)
+    _write_scanner_run_receipt(receipt)
     return receipt
 
 
@@ -1194,13 +1454,8 @@ def _scanner_health(target: Path) -> dict[str, Any]:
     elif plan.get("valid"):
         checks.append({"status": constants.OK, "name": "scanner_schedule", "detail": "no scanner schedule conflicts"})
 
-    receipts = _scanner_receipts(target)
-    malformed_receipts = []
-    runs_root = helpers._scanner_runs_root(target)
-    if runs_root.is_dir():
-        for path in runs_root.iterdir():
-            if path.is_dir() and _scanner_read_receipt(path) is None:
-                malformed_receipts.append(path.name)
+    receipts, malformed_receipts = _scanner_receipt_collection(target)
+    receipts.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
     if malformed_receipts:
         checks.append(
             {"status": constants.FAIL, "name": "scanner_run_receipts", "detail": ", ".join(malformed_receipts[:5])}
@@ -1656,8 +1911,7 @@ def _scanners_run_payload(
         run["provenance_imports_stamped"] = len(stamped_ids)
         if stamped_ids:
             run["stamped_import_ids"] = stamped_ids
-        if run.get("path"):
-            helpers._write_json(Path(str(run["path"])) / "receipt.json", run)
+        _write_scanner_run_receipt(run)
         runs.append(run)
         contexts.append((scanner, run))
     ingest_errors: list[str] = []
@@ -1698,6 +1952,8 @@ def _scanners_run_payload(
                 "ingest_errors": ingest_errors,
                 "runs": runs,
             }
+            for run in runs:
+                _release_scanner_run_directory_authority(run)
             return payload, 2
         for scanner, run, path, records in ingest_payloads:
             scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
@@ -1716,8 +1972,7 @@ def _scanners_run_payload(
                     "skipped_source_fingerprints": [],
                     "dismissed_source_fingerprints": [],
                 }
-                if run.get("path"):
-                    helpers._write_json(Path(str(run["path"])) / "receipt.json", run)
+                _write_scanner_run_receipt(run)
                 continue
             imported, skipped_records, skipped_dismissed, rejected = ledger_mod._append_import_records(
                 target,
@@ -1750,8 +2005,7 @@ def _scanners_run_payload(
                     if (fingerprint := ledger_mod._import_fingerprint(record))
                 ],
             }
-            if run.get("path"):
-                helpers._write_json(Path(str(run["path"])) / "receipt.json", run)
+            _write_scanner_run_receipt(run)
     after_counts = _scanner_import_counts(target)
     payload = {
         "target": str(target),
@@ -1770,6 +2024,8 @@ def _scanners_run_payload(
         "ingest_errors": ingest_errors,
         "runs": runs,
     }
+    for run in runs:
+        _release_scanner_run_directory_authority(run)
     return payload, 0 if payload["failed"] == 0 else 1
 
 

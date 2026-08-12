@@ -361,10 +361,19 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
 
 
 def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
-    path = helpers._imports_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports)
-    path.write_text(rendered)
+    """Publish the inbox through its retained parent without following a link."""
+    parent, name, previous_raw, previous_exists = _snapshot_import_inbox(target)
+    rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
+    try:
+        _write_import_inbox_bytes_at(
+            parent,
+            name,
+            rendered,
+            previous_raw=previous_raw,
+            previous_exists=previous_exists,
+        )
+    finally:
+        os.close(parent)
 
 
 def _append_archived_imports(target: Path, imports: list[dict[str, Any]]) -> None:
@@ -1373,6 +1382,7 @@ def _has_canonical_untrusted_import_identity(record: dict[str, Any]) -> bool:
 
 _IMPORT_PROOF_SCHEMA_VERSION = 1
 _IMPORT_PROOF_OPERATION_PATTERN = re.compile(r"[0-9a-f]{32}")
+_DIRECTORY_AUTHORITY_SCHEMA_VERSION = 1
 
 
 def _import_proof_name(item_id: object) -> str | None:
@@ -1382,8 +1392,98 @@ def _import_proof_name(item_id: object) -> str | None:
     return f"{helpers._stable_hash({'item_id': item_id})}.json"
 
 
-def _open_import_proof_directory(target: Path, *, create: bool) -> int:
-    """Open the verifier-owned proof directory through no-follow descriptors."""
+def _validate_directory_authority_anchor(
+    anchor_parent: int,
+    parent_name: str,
+    parent: int,
+    name: str,
+    directory: int,
+    *,
+    anchor_name: str,
+) -> None:
+    """Bind a durable verifier-owned anchor outside the replaceable directory parent."""
+    if os.stat not in os.supports_dir_fd:
+        raise OSError("descriptor-relative directory authority validation is unavailable")
+    parent_stat = os.fstat(parent)
+    named_parent = os.stat(parent_name, dir_fd=anchor_parent, follow_symlinks=False)
+    if not stat.S_ISDIR(parent_stat.st_mode) or (named_parent.st_dev, named_parent.st_ino) != (
+        parent_stat.st_dev,
+        parent_stat.st_ino,
+    ):
+        raise OSError("directory authority parent no longer matches its held descriptor")
+    directory_stat = os.fstat(directory)
+    named_stat = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not stat.S_ISDIR(directory_stat.st_mode) or (named_stat.st_dev, named_stat.st_ino) != (
+        directory_stat.st_dev,
+        directory_stat.st_ino,
+    ):
+        raise OSError("directory authority no longer matches its held descriptor")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            anchor_name,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=anchor_parent,
+        )
+        anchor_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(anchor_stat.st_mode) or anchor_stat.st_nlink != 1:
+            raise OSError("directory authority anchor is not a single-link regular file")
+        payload = json.loads(os.read(descriptor, 64 * 1024))
+        if payload != {
+            "schema_version": _DIRECTORY_AUTHORITY_SCHEMA_VERSION,
+            "device": directory_stat.st_dev,
+            "inode": directory_stat.st_ino,
+        }:
+            raise OSError("directory authority anchor does not match directory")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError("directory authority anchor is malformed") from exc
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _create_directory_authority_anchor(anchor_parent: int, directory: int, *, anchor_name: str) -> None:
+    """Create the durable binding outside the directory's replaceable parent."""
+    directory_stat = os.fstat(directory)
+    payload = json.dumps(
+        {
+            "schema_version": _DIRECTORY_AUTHORITY_SCHEMA_VERSION,
+            "device": directory_stat.st_dev,
+            "inode": directory_stat.st_ino,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            anchor_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=anchor_parent,
+        )
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        anchor_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(anchor_stat.st_mode) or anchor_stat.st_nlink != 1:
+            raise OSError("directory authority anchor is not a single-link regular file")
+        os.fsync(anchor_parent)
+    except BaseException:
+        if descriptor != -1:
+            try:
+                os.unlink(anchor_name, dir_fd=anchor_parent)
+            except OSError:
+                pass
+        raise
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...], anchor_name: str, create: bool) -> int:
+    """Open a directory that remains authoritative only while its parent anchor matches."""
     if (
         os.name != "posix"
         or not getattr(os, "O_NOFOLLOW", 0)
@@ -1391,11 +1491,13 @@ def _open_import_proof_directory(target: Path, *, create: bool) -> int:
         or os.open not in os.supports_dir_fd
         or os.mkdir not in os.supports_dir_fd
     ):
-        raise OSError("descriptor-relative import proof operations are unavailable")
+        raise OSError("descriptor-relative directory authority operations are unavailable")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(target.expanduser().resolve(), flags)
+    anchor_parent = -1
+    parent = -1
     try:
-        for component in (".brigade", "work", "imports", "proofs"):
+        for component in components[:-2]:
             try:
                 child = os.open(component, flags, dir_fd=descriptor)
             except FileNotFoundError:
@@ -1405,10 +1507,63 @@ def _open_import_proof_directory(target: Path, *, create: bool) -> int:
                 child = os.open(component, flags, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
-        return descriptor
+        anchor_parent = descriptor
+        descriptor = -1
+        parent_name = components[-2]
+        try:
+            parent = os.open(parent_name, flags, dir_fd=anchor_parent)
+        except FileNotFoundError:
+            if not create:
+                raise
+            os.mkdir(parent_name, 0o700, dir_fd=anchor_parent)
+            parent = os.open(parent_name, flags, dir_fd=anchor_parent)
+        name = components[-1]
+        created = False
+        try:
+            child = os.open(name, flags, dir_fd=parent)
+        except FileNotFoundError:
+            if not create:
+                raise
+            os.mkdir(name, 0o700, dir_fd=parent)
+            child = os.open(name, flags, dir_fd=parent)
+            created = True
+        if created:
+            try:
+                _create_directory_authority_anchor(anchor_parent, child, anchor_name=anchor_name)
+            except BaseException:
+                os.close(child)
+                raise
+        else:
+            try:
+                _validate_directory_authority_anchor(
+                    anchor_parent, parent_name, parent, name, child, anchor_name=anchor_name
+                )
+            except BaseException:
+                os.close(child)
+                raise
+        os.close(parent)
+        parent = -1
+        os.close(anchor_parent)
+        anchor_parent = -1
+        return child
     except BaseException:
-        os.close(descriptor)
+        if parent != -1:
+            os.close(parent)
+        if anchor_parent != -1:
+            os.close(anchor_parent)
+        if descriptor != -1:
+            os.close(descriptor)
         raise
+
+
+def _open_import_proof_directory(target: Path, *, create: bool) -> int:
+    """Open the verifier-owned proof directory through no-follow descriptors."""
+    return _open_verifier_owned_directory(
+        target,
+        components=(".brigade", "work", "imports", "proofs"),
+        anchor_name=".proofs.authority.json",
+        create=create,
+    )
 
 
 def _validate_import_proof_descriptor(descriptor: int) -> None:
@@ -1588,13 +1743,13 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
     current = -1
     receipt_descriptor = -1
     try:
-        root = os.open(target.expanduser().resolve(), directory_flags)
-        current = root
-        for component in (".brigade", "scanners", "runs", scanner_run_id):
-            child = os.open(component, directory_flags, dir_fd=current)
-            if current != root:
-                os.close(current)
-            current = child
+        root = _open_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs"),
+            anchor_name=".runs.authority.json",
+            create=False,
+        )
+        current = os.open(scanner_run_id, directory_flags, dir_fd=root)
         receipt_descriptor = os.open(
             "receipt.json",
             os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
@@ -1741,13 +1896,44 @@ def _validate_import_inbox_name_matches_descriptor(parent: int, name: str, descr
         raise OSError("import inbox name no longer matches its held descriptor")
 
 
-def _write_import_inbox_bytes_at(parent: int, name: str, data: bytes) -> None:
-    """Write complete import bytes through the transaction's held parent."""
+def _write_import_inbox_bytes_at(
+    parent: int,
+    name: str,
+    data: bytes,
+    *,
+    previous_raw: bytes | None = None,
+    previous_exists: bool | None = None,
+) -> None:
+    """Atomically publish import bytes through the transaction's held parent."""
+    existing = -1
     descriptor = -1
+    temporary_name = f".{name}.{uuid4().hex}.tmp"
     try:
+        try:
+            existing = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            _validate_import_inbox_descriptor(existing)
+            _validate_import_inbox_name_matches_descriptor(parent, name, existing)
+            if previous_raw is None:
+                chunks: list[bytes] = []
+                while chunk := os.read(existing, 1024 * 1024):
+                    chunks.append(chunk)
+                previous_raw = b"".join(chunks)
+            if previous_exists is None:
+                previous_exists = True
+        if previous_exists is None:
+            previous_exists = False
+        if previous_raw is None:
+            previous_raw = b""
         descriptor = os.open(
-            name,
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
             0o600,
             dir_fd=parent,
         )
@@ -1757,9 +1943,19 @@ def _write_import_inbox_bytes_at(parent: int, name: str, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         _validate_import_inbox_descriptor(descriptor)
+        os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
         _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
         os.fsync(parent)
+    except BaseException:
+        try:
+            os.unlink(temporary_name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        _restore_import_inbox_snapshot(parent, name, previous_raw, previous_exists)
+        raise
     finally:
+        if existing != -1:
+            os.close(existing)
         if descriptor != -1:
             os.close(descriptor)
 
@@ -1839,15 +2035,30 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
                     os.unlink(temporary_name, dir_fd=parent)
                 except FileNotFoundError:
                     pass
+    descriptor = -1
     try:
-        _write_import_inbox_bytes_at(parent, name, data)
-    except BaseException:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent,
+        )
+        _validate_import_inbox_descriptor(descriptor)
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, data)
+        os.fsync(descriptor)
+        _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+        os.fsync(parent)
+        return
+    except OSError:
         try:
             os.unlink(name, dir_fd=parent)
         except FileNotFoundError:
             pass
         os.fsync(parent)
         raise OSError("import inbox rollback could not restore its retained snapshot") from None
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
 
 
 # Central envelope stamps land under metadata.provenance after identity is fixed.
@@ -2396,12 +2607,7 @@ def _append_import_records(
         if identity is not None:
             existing_by_source[identity] = item
     if imported and not dry_run:
-        inbox_parent = -1
-        inbox_name = ""
-        previous_raw = b""
-        previous_exists = False
-        if restore_existing_raw is None:
-            inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
+        inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
         published = False
         try:
             if preserve_existing_raw:

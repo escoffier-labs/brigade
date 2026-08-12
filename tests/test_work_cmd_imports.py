@@ -31,6 +31,20 @@ from tests.work_cmd_test_helpers import (
 )
 
 
+def test_import_add_rejects_symlinked_inbox(tmp_path):
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside_before = b'{"outside":true}\n'
+    outside.write_bytes(outside_before)
+    inbox.symlink_to(outside)
+
+    result = work_cmd.import_add(target=tmp_path, text="must stay local")
+
+    assert result != 0
+    assert outside.read_bytes() == outside_before
+
+
 def test_tools_cmd_package_exposes_constants_facade_aliases():
     constants = importlib.import_module("brigade.tools_cmd.constants")
 

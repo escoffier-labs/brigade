@@ -2962,6 +2962,13 @@ conflict_window = "02:00-02:10"
         item.update({"status": "dismissed", "dismissed_at": "2026-05-29T12:00:00+00:00"})
         noisy.append(item)
     work_cmd._write_imports(tmp_path, [missing, stale, promoted, dismissed_changed, changed_pending, *noisy])
+    runs_authority = work_cmd.ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(runs_authority)
     run_dir = tmp_path / ".brigade" / "scanners" / "runs" / "no-import-run"
     run_dir.mkdir(parents=True)
     _write_json(
