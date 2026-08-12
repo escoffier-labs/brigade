@@ -1535,6 +1535,26 @@ def _inventory_item_from_source(
     }
 
 
+def _split_inline_tag_sequence(value: str) -> list[str] | None:
+    """Parse a bracketed comma-separated tag scalar into items.
+
+    Handles Brigade template spellings like ``[memory, handoff, claude-code]``
+    where ``ast.literal_eval`` leaves the value as one string. Returns None when
+    the scalar is not a well-formed bracketed sequence (caller keeps one tag).
+    """
+    text = value.strip()
+    if not (text.startswith("[") and text.endswith("]") and len(text) >= 2):
+        return None
+    inner = text[1:-1]
+    items: list[str] = []
+    for part in inner.split(","):
+        item = part.strip()
+        if len(item) >= 2 and item[0] == item[-1] and item[0] in {"'", '"'}:
+            item = item[1:-1].strip()
+        items.append(item)
+    return items
+
+
 def _inventory_tags(meta: dict[str, Any]) -> list[str]:
     value = memory_cmd._frontmatter_value(meta, "tags", "tag")
     if value is None:
@@ -1542,6 +1562,9 @@ def _inventory_tags(meta: dict[str, Any]) -> list[str]:
     raw_items: list[Any]
     if isinstance(value, list):
         raw_items = list(value)
+    elif isinstance(value, str):
+        split = _split_inline_tag_sequence(value)
+        raw_items = list(split) if split is not None else [value]
     else:
         raw_items = [value]
     tags: list[str] = []

@@ -982,3 +982,136 @@ def test_memory_inventory_joins_real_memory_care_scan(tmp_path, capsys, monkeypa
     assert item["care"]["queued_action"]
     assert "/home/" not in json.dumps(item["care"])
     assert item["care"]["issues"] == sorted(set(item["care"]["issues"]))
+
+
+def _write_card_raw_tags(target: Path, rel: str, *, title: str, tags_line: str) -> Path:
+    """Write a card with an exact tags frontmatter line (no JSON encoding)."""
+    path = target / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "---",
+                f"title: {title}",
+                f"tags: {tags_line}",
+                "---",
+                BODY_SECRET,
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_memory_inventory_parses_brigade_template_bare_inline_tags(tmp_path, capsys):
+    # Exact unquoted Brigade template spelling; literal_eval leaves this as one scalar.
+    _write_card_raw_tags(
+        tmp_path,
+        "memory/cards/template-tags.md",
+        title="TemplateTags",
+        tags_line="[memory, handoff, ingester, claude-code, codex]",
+    )
+
+    payload = _payload(tmp_path, capsys)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/template-tags.md")
+    assert item["tags"] == ["memory", "handoff", "ingester", "claude-code", "codex"]
+    assert "[memory, handoff, ingester, claude-code, codex]" not in item["tags"]
+
+
+def test_memory_inventory_parses_quoted_mixed_empty_and_duplicate_inline_tags(tmp_path, capsys):
+    _write_card_raw_tags(
+        tmp_path,
+        "memory/cards/mixed-tags.md",
+        title="MixedTags",
+        tags_line="[memory, 'handoff', \"ingester\", , memory, 'claude-code']",
+    )
+
+    payload = _payload(tmp_path, capsys)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/mixed-tags.md")
+    assert item["tags"] == ["memory", "handoff", "ingester", "claude-code"]
+
+
+def test_memory_inventory_drops_unsafe_inline_tag_entries(tmp_path, capsys):
+    _write_card_raw_tags(
+        tmp_path,
+        "memory/cards/unsafe-tags.md",
+        title="UnsafeTags",
+        tags_line=(
+            "[safe, /abs/tag, ~/home-tag, C:\\\\Users\\\\tag, "
+            "win\\\\path, control\x01tag, look\\nlike, keep-me]"
+        ),
+    )
+
+    payload = _payload(tmp_path, capsys)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/unsafe-tags.md")
+    dumped = json.dumps(item["tags"])
+    assert "safe" in item["tags"]
+    assert "keep-me" in item["tags"]
+    assert "/abs/tag" not in dumped
+    assert "~/home-tag" not in dumped
+    assert "C:\\Users" not in dumped
+    assert "win\\path" not in dumped
+    assert "\x01" not in dumped
+    assert "look\\nlike" not in item["tags"] or "\n" not in "".join(item["tags"])
+    assert all("\n" not in tag for tag in item["tags"])
+    assert all("/" not in tag and "\\" not in tag and not tag.startswith("~") for tag in item["tags"])
+
+
+def test_memory_inventory_malformed_bracket_tag_scalar_stays_one_safe_tag(tmp_path, capsys):
+    _write_card_raw_tags(
+        tmp_path,
+        "memory/cards/malformed-open.md",
+        title="MalformedOpen",
+        tags_line="[memory, handoff",
+    )
+    _write_card_raw_tags(
+        tmp_path,
+        "memory/cards/malformed-close.md",
+        title="MalformedClose",
+        tags_line="memory, handoff]",
+    )
+    _write_card_raw_tags(
+        tmp_path,
+        "memory/cards/plain-tag.md",
+        title="PlainTag",
+        tags_line="single-tag",
+    )
+
+    payload = _payload(tmp_path, capsys)
+    by_path = {item["canonical_path"]: item for item in payload["items"]}
+    assert by_path["memory/cards/malformed-open.md"]["tags"] == ["[memory, handoff"]
+    assert by_path["memory/cards/malformed-close.md"]["tags"] == ["memory, handoff]"]
+    assert by_path["memory/cards/plain-tag.md"]["tags"] == ["single-tag"]
+
+
+def test_memory_inventory_filters_on_parsed_template_inline_tags(tmp_path, capsys):
+    _write_card_raw_tags(
+        tmp_path,
+        "memory/cards/template-a.md",
+        title="TemplateA",
+        tags_line="[memory, handoff, ingester, claude-code, codex]",
+    )
+    _write_card_raw_tags(
+        tmp_path,
+        "memory/cards/template-b.md",
+        title="TemplateB",
+        tags_line="[ops, runbook]",
+    )
+    _write_card(
+        tmp_path,
+        "memory/cards/json-list.md",
+        title="JsonList",
+        tags=["memory", "listed"],
+    )
+
+    memory_only = _payload(tmp_path, capsys, "--tag", "memory")
+    paths = {item["canonical_path"] for item in memory_only["items"]}
+    assert "memory/cards/template-a.md" in paths
+    assert "memory/cards/json-list.md" in paths
+    assert "memory/cards/template-b.md" not in paths
+    assert memory_only["filters"]["tag"] == ["memory"]
+
+    both = _payload(tmp_path, capsys, "--tag", "memory", "--tag", "handoff")
+    assert both["pagination"]["total"] == 1
+    assert both["items"][0]["canonical_path"] == "memory/cards/template-a.md"
