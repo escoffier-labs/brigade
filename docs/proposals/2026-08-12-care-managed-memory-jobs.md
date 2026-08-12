@@ -16,8 +16,13 @@ registered, their target binding, and their observable receipts.
 The migration is deliberately entry-by-entry. Each job can be enabled,
 observed, and rolled back without replacing the other four. A registration is
 identified by both its logical job id and the identity of its target. Two
-checkouts registered by the same user therefore never share a cron marker,
-systemd unit, Task Scheduler name, status row, or uninstall action.
+checkouts registered by the same user therefore never share a systemd unit,
+launchd label, status row, or uninstall action on the namespaced backends.
+The optional crontab backend remains a single global `# BEGIN BRIGADE CARE`
+managed block (not target-namespaced); `#759` keeps it for compatibility but
+omits it from the default CLI `--backend` choices (`auto`/`systemd`/`launchd`).
+Windows reports managed scheduling as unsupported under `auto` rather than
+minting Task Scheduler names.
 
 ## Goals and non-goals
 
@@ -101,12 +106,16 @@ field needed by `care status`.
   at registration. Execution uses that directory and still passes `--target
   .`. It never depends on the scheduler's ambient working directory.
 - `target.identity` and `target.namespace` **reuse the exact identity algorithm
-  and collision handling selected by #759**. #762 must not introduce a second
-  path hash. Moving or replacing a target requires an explicit re-registration.
-  a coincidentally similar basename is not the same target.
-- The registry key is `(target.identity, job_id)`. The rendered cron marker,
-  systemd service/timer basename, Windows task name, status lookup, repair, and
-  uninstall selector all include `target.namespace`.
+  selected by #759** (`sha256` of the resolved absolute path, truncated to 16
+  hex chars). #759 does not ship separate collision-handling beyond that
+  identity string; #762 must not invent a second path hash or a parallel
+  collision table. Moving or replacing a target requires an explicit
+  re-registration. A coincidentally similar basename is not the same target.
+- The registry key is `(target.identity, job_id)`. Namespaced backends
+  (systemd service/timer basename, launchd label) plus status lookup, repair,
+  and uninstall selectors include `target.namespace`. The optional crontab
+  backend still uses one global managed marker and is not the preferred path
+  for multi-target installs. Windows has no managed registration under `auto`.
 - `schedule` contains equivalent backend forms. Local timezone semantics match
   `brigade care`. `persistent` requests catch-up where the backend supports it.
 - `execution.kind` is `runbook` for all five jobs. Multi-command shell strings
@@ -151,9 +160,12 @@ targets `A` and `B`, installing `care-scan` creates two registrations:
 (identity(B), care-scan) -> brigade-<namespace(B)>-care-scan
 ```
 
-The concrete prefix follows #759. The important invariant is that the
-namespace appears anywhere the scheduler requires uniqueness. A single global
-`# BEGIN BRIGADE CARE` block or `brigade-care-scan.timer` is insufficient.
+The concrete prefix follows #759 (`brigade-care-<identity>-<entry>` for
+systemd; `dev.brigade.care.<identity>.<entry>` for launchd). The important
+invariant is that the namespace appears anywhere those backends require
+uniqueness. A non-namespaced `brigade-care-scan.timer` is insufficient.
+Crontab remains an optional compatibility backend with one global
+`# BEGIN BRIGADE CARE` block; do not rely on it for multi-target isolation.
 
 `care install --target A` may create or update only entries in `A`'s
 namespace. `status`, drift repair, adoption, and `uninstall` apply the same
@@ -177,8 +189,10 @@ For each step use the same cutover protocol:
 
 1. Install the new entry disabled or in dry-run form and inspect its resolved
    target, namespace, runbook hash/pins, schedule, and prerequisite edges.
-2. Run it once manually through `brigade care`, then confirm the target-local
-   runbook/domain receipt and `care status` agree.
+2. Fire the underlying runbook once with
+   `brigade runbook run --approved <runbook> --target .` (care CLI today only
+   exposes install/status/uninstall — it does not run jobs), then confirm the
+   target-local runbook/domain receipt and `care status` agree.
 3. Disable the corresponding legacy trigger. Do not leave old and new triggers
    enabled together for a trial period.
 4. Enable the care entry and observe at least one scheduled success/no-work
@@ -256,7 +270,9 @@ test. The implementation slice should begin with failing focused tests for:
 6. Non-overlap behavior and receipt reporting.
 7. Per-job migration/rollback leaving unrelated jobs and unowned scheduler
    content intact. And
-8. Backend parity for cron, systemd, and Windows's review-only task rendering.
+8. Backend parity for the #759-supported managed backends (systemd and
+   launchd under `auto`, plus optional crontab compatibility), with Windows
+   remaining explicitly unsupported for managed scheduling under `auto`.
 
 Focused care/runbook/memory/evidence tests and Ruff must pass before the full
 `./scripts/verify` gate. Manual acceptance uses two temporary Brigade targets.
