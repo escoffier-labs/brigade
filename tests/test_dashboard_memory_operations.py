@@ -86,15 +86,202 @@ def test_render_mode_tabs_and_inventory_fields():
 
     assert 'data-mo-mode="topology"' in fragment
     assert 'data-mo-mode="inventory"' in fragment
-    assert "care scan" in fragment
+    assert "Care scan" in fragment or "care scan" in fragment.lower()
     assert "Fixture Alpha Card" in fragment
     assert "memory/cards/fixture-alpha.md" in fragment
-    assert "alpha, fixture" in fragment
+    assert 'class="mo-tag"' in fragment
+    assert "alpha" in fragment and "fixture" in fragment
     assert "2026-05-01" in fragment
     assert "2026-12-01" in fragment
     assert "<th>Title</th>" in fragment
     assert "<th>Freshness</th>" in fragment
     assert "<th>Evidence</th>" in fragment
+    # Id column is folded into the Title cell expander, not a standalone header.
+    assert "<th>Id</th>" not in fragment
+
+
+def test_render_summary_strip_and_pipeline_svg():
+    """Operator-first topology: plain summary + shared SVG pipeline, not receipt jargon."""
+    payload = {
+        "topology": {
+            "health": {
+                "care_scan": {"status": "ok", "issue_count": 12},
+                "refresh_queue": {"status": "ok", "count": 12},
+                "handoff_backlog": {"status": "ok", "pending": 0},
+                "quarantine": {"status": "unknown", "count": None},
+                "closeout": {"status": "missing"},
+                "evidence_projection": {"status": "timeout"},
+            },
+            "flags": [],
+            "paths": [
+                {
+                    "id": "path:claude",
+                    "harness": "claude",
+                    "edge_ids": [
+                        "edge:claude:emit",
+                        "edge:claude:lint",
+                        "edge:lint:ingest",
+                        "edge:ingest:write:cards",
+                    ],
+                }
+            ],
+            "nodes": [
+                {
+                    "id": "harness:claude",
+                    "kind": "harness",
+                    "label": "claude",
+                    "state": "present",
+                    "counts": {},
+                },
+                {
+                    "id": "inbox:claude",
+                    "kind": "inbox",
+                    "label": "claude handoff inbox",
+                    "state": "present",
+                    "counts": {"pending": 0, "processed": 10},
+                },
+                {
+                    "id": "stage:lint",
+                    "kind": "stage",
+                    "label": "handoff lint",
+                    "state": "enabled",
+                    "counts": {},
+                },
+                {
+                    "id": "stage:ingest",
+                    "kind": "stage",
+                    "label": "handoff ingest",
+                    "state": "enabled",
+                    "counts": {},
+                },
+                {
+                    "id": "canonical:cards",
+                    "kind": "canonical",
+                    "label": "Memory cards",
+                    "state": "canonical",
+                    "counts": {},
+                },
+                {
+                    "id": "stage:care_scan",
+                    "kind": "stage",
+                    "label": "memory care scan",
+                    "state": "manual",
+                    "counts": {"issue_count": 12},
+                },
+                {
+                    "id": "stage:refresh_queue",
+                    "kind": "queue",
+                    "label": "memory care refresh queue",
+                    "state": "manual",
+                    "counts": {"queued": 12},
+                },
+                {
+                    "id": "stage:evidence_projection",
+                    "kind": "derived",
+                    "label": "evidence projection",
+                    "state": "derived",
+                    "counts": {"status": "timeout"},
+                    "next_action": "brigade evidence status",
+                },
+            ],
+            "edges": [
+                {
+                    "id": "edge:claude:emit",
+                    "from": "harness:claude",
+                    "to": "inbox:claude",
+                    "flow": "emit",
+                    "enabled": True,
+                },
+                {
+                    "id": "edge:claude:lint",
+                    "from": "inbox:claude",
+                    "to": "stage:lint",
+                    "flow": "validate",
+                    "enabled": True,
+                },
+                {
+                    "id": "edge:lint:ingest",
+                    "from": "stage:lint",
+                    "to": "stage:ingest",
+                    "flow": "advance",
+                    "enabled": True,
+                },
+                {
+                    "id": "edge:ingest:write:cards",
+                    "from": "stage:ingest",
+                    "to": "canonical:cards",
+                    "flow": "write",
+                    "enabled": True,
+                    "latest_receipt": {"run_id": "ingest-1", "status": "ok"},
+                },
+            ],
+        },
+        "inventory": {"items": [], "total": 0},
+    }
+    fragment = memory_operations.render(payload, "nonce-summary")
+
+    assert 'class="mo-summary"' in fragment or "data-mo-summary" in fragment
+    assert "waiting on care" in fragment.lower() or "care review" in fragment.lower()
+    assert "empty" in fragment.lower() or "handoff" in fragment.lower()
+    assert "timed out" in fragment.lower() or "timeout" in fragment.lower()
+
+    assert "<svg" in fragment
+    assert 'class="mo-pipeline"' in fragment or "data-mo-pipeline" in fragment
+    assert "Claude" in fragment
+    assert "Lint gate" in fragment or "Lint" in fragment
+    assert "Ingestion" in fragment or "Ingest" in fragment
+    assert "Canonical cards" in fragment or "Memory cards" in fragment
+
+    # Raw contract ids stay out of the primary visible copy (details/title only).
+    primary = fragment.split("<details", 1)[0]
+    assert "stage:ingest" not in primary
+    assert "edge:ingest:write:cards" not in primary
+    assert "ingest-1" not in primary
+    assert "signal=+1" not in primary
+
+    assert 'class="mo-health-tile"' in fragment or "mo-health-tiles" in fragment
+    assert "TIMED OUT" in fragment or "Timed out" in fragment
+    assert "brigade evidence status" in fragment
+
+
+def test_render_inventory_tag_chips_hide_empty_columns_and_fold_id():
+    payload = {
+        "topology": {"health": {}, "flags": [], "paths": [], "nodes": [], "edges": []},
+        "inventory": {
+            "items": [
+                {
+                    "id": "card:memory/cards/chip-row.md",
+                    "title": "Chip Row Card",
+                    "canonical_path": "memory/cards/chip-row.md",
+                    "logical_destination": "cards",
+                    "store_type": "card",
+                    "category": "ops",
+                    "tags": ["one", "two", "three", "four", "five", "six"],
+                    "created_at": None,
+                    "updated_at": None,
+                    "last_reviewed": "2026-05-01",
+                    "fresh_until": "2026-12-01",
+                    "freshness": "fresh",
+                    "review_state": "reviewed",
+                    "evidence_state": "present",
+                    "source_harness": "claude",
+                    "source_handoff": None,
+                    "owning_workflow": "ingest",
+                    "last_mutation": None,
+                    "care": {"issues": [], "queued_action": None},
+                }
+            ],
+            "total": 1,
+        },
+    }
+    fragment = memory_operations.render(payload, "nonce-chips")
+    assert 'class="mo-tag"' in fragment
+    assert "+1 more" in fragment or "+2 more" in fragment or "more" in fragment.lower()
+    assert "<th>Id</th>" not in fragment
+    assert "card:memory/cards/chip-row.md" in fragment  # still reachable via expander/details
+    assert "Created/Updated not tracked" in fragment or "not tracked" in fragment.lower()
+    assert "<th>Created</th>" not in fragment
+    assert "<th>Updated</th>" not in fragment
 
 
 def test_render_escapes_hostile_inventory_title():

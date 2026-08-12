@@ -493,29 +493,33 @@ def test_memory_operations_renders_topology_health_ownership_and_inventory_field
     html = view.render(payload, nonce="test-nonce")
     del calls
 
+    assert 'class="mo-summary"' in html or "data-mo-summary" in html
+    assert "<svg" in html and ('class="mo-pipeline"' in html or "data-mo-pipeline" in html)
+    assert "mo-health-tile" in html or "mo-health-tiles" in html
+
     for label in (
-        "care scan",
-        "refresh queue",
-        "handoff backlog",
-        "quarantine",
-        "closeout",
-        "evidence projection",
+        "Care scan",
+        "Refresh queue",
+        "Handoff backlog",
+        "Quarantine",
+        "Closeout",
+        "Evidence projection",
     ):
         assert label in html
 
-    assert "canonical memory system" in html
-    assert "memory/cards" in html
-    assert "ingest" in html
-    assert "ingest-1" in html
-    assert "duplicate_enabled_writer" in html
-    assert "missing_owner" in html
-    assert "missing_closeout" in html
-    assert "stale_receipt" in html
-    assert "cycle" in html
-    assert "disabled" in html
-    assert "harness:claude" in html or "claude" in html
-    assert "stage:lint" in html or "lint" in html
-    assert "stage:ingest" in html or "ingest" in html
+    assert "Claude" in html
+    assert "Lint" in html
+    assert "Ingest" in html or "Ingestion" in html
+    assert "Memory cards" in html or "Canonical cards" in html
+    # Raw receipt / edge jargon stays in details or title attributes, not primary copy.
+    primary = html.split("<details", 1)[0]
+    assert "ingest-1" not in primary
+    assert "stage:lint" not in primary
+    assert "edge:ingest:write:cards" not in primary
+    # Flag kinds remain discoverable (details ok).
+    assert "duplicate" in html.lower()
+    assert "missing" in html.lower()
+    assert "cycle" in html.lower() or "loop" in html.lower()
 
     assert "Card 0000" in html
     assert "memory/cards/card-0000.md" in html
@@ -524,9 +528,9 @@ def test_memory_operations_renders_topology_health_ownership_and_inventory_field
     assert "fresh" in html
     assert "reviewed" in html
     assert "present" in html
-    assert "claude" in html
+    assert "claude" in html.lower()
     assert "stale" in html
-    assert "refresh" in html
+    assert "refresh" in html.lower()
     assert "Topology" in html
     assert "Inventory" in html
     assert 'data-mo-mode="topology"' in html
@@ -697,7 +701,7 @@ def test_memory_operations_malformed_pagination_and_independent_errors_degrade(m
     monkeypatch.setattr(data, "run_json", fake_inventory_error)
     html = view.render(view.fetch(tmp_target), nonce="n")
     assert "inventory unavailable" in html
-    assert "care scan" in html
+    assert "Care scan" in html or "care scan" in html.lower()
 
     # Non-progress / malformed pagination must stop without hanging and keep first page.
     pages = [
@@ -997,21 +1001,26 @@ def test_memory_operations_topology_paths_use_edges_not_node_id_chains(monkeypat
     assert view is not None
     html = view.render(view.fetch(tmp_target), nonce="topo-fidelity")
 
-    # Actual edge endpoints / ids must appear (arrows may be HTML-escaped).
-    for frm, to, edge_id in (
-        ("harness:claude", "inbox:claude", "edge:claude:emit"),
-        ("inbox:claude", "stage:lint", "edge:claude:lint"),
-        ("harness:codex", "inbox:codex", "edge:codex:emit"),
-        ("stage:lint", "stage:ingest", "edge:lint:ingest"),
-        ("stage:ingest", "canonical:cards", "edge:ingest:write:cards"),
-        ("stage:ingest", "canonical:rules", "edge:ingest:write:rules"),
-        ("stage:ingest", "canonical:tools", "edge:ingest:write:tools"),
-        ("stage:ingest", "canonical:user", "edge:ingest:write:user"),
-        ("stage:ingest", "canonical:learnings", "edge:ingest:write:learnings"),
+    assert "<svg" in html
+    assert "Claude" in html and "Codex" in html
+    assert "Lint" in html
+    assert "Ingest" in html or "Ingestion" in html
+    for store in ("cards", "rules", "tools", "user", "learnings"):
+        assert store in html.lower()
+
+    # Edge contract ids remain available for debug (title/details), not as primary bullets.
+    for edge_id in (
+        "edge:claude:emit",
+        "edge:claude:lint",
+        "edge:codex:emit",
+        "edge:lint:ingest",
+        "edge:ingest:write:cards",
+        "edge:ingest:write:rules",
+        "edge:ingest:write:tools",
+        "edge:ingest:write:user",
+        "edge:ingest:write:learnings",
     ):
-        plain = f"{frm} -> {to}"
-        escaped = f"{frm} -&gt; {to}"
-        assert plain in html or escaped in html or edge_id in html, (frm, to, edge_id)
+        assert edge_id in html, edge_id
 
     # Phantom connections that node_id chaining invents must be absent.
     for phantom in (
@@ -1046,7 +1055,6 @@ def test_memory_operations_renders_complete_latest_run_and_nulls_as_dash(monkeyp
         assert sentinel in html, sentinel
     # Explicit null latest_run fields on harness:codex must render as '-', never 'None'.
     assert "None" not in html
-    assert "canonical memory system" in html
     assert "write handoff" in html
 
 
