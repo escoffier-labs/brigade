@@ -1,0 +1,44 @@
+{
+  "schema": "memory-retrieval-quality-input.v1",
+  "as_of": "2026-08-12",
+  "retrievals": [
+    {
+      "id": "q-stale",
+      "scope": {
+        "repository": "repo-beta",
+        "task": null,
+        "operator": null,
+        "branch": null,
+        "worktree": null
+      },
+      "results": [
+        "retired-endpoint",
+        "card-11111111-2222-4333-8444-555555555555"
+      ]
+    },
+    {
+      "id": "q-current",
+      "scope": {
+        "repository": "repo-beta",
+        "task": null,
+        "operator": null,
+        "branch": null,
+        "worktree": null
+      },
+      "results": [
+        "card-11111111-2222-4333-8444-555555555555",
+        "memory/cards/deployment-policy.md"
+      ]
+    }
+  ],
+  "projections": [
+    {
+      "external_id": "card-11111111-2222-4333-8444-555555555555",
+      "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "external_id": "retired-endpoint",
+      "content_hash": "9c340d5c4fa253310ebb1ff99cada4b075f2477d5df7e9fe88c5d677fb529b55"
+    }
+  ]
+}
