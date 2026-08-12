@@ -950,6 +950,7 @@ def activity(*, target: Path, json_output: bool = False, limit: int = 50) -> int
         "agent_activity": agents,
         "agent_activity_count": len(agents),
         "agent_activity_summary": agent_activity.summary(agents),
+        "completed_window_seconds": agent_activity.completed_window_seconds(target),
     }
     if json_output:
         return emit(payload, json_output, [], 0)

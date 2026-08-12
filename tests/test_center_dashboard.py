@@ -92,6 +92,45 @@ def test_get_each_registered_view_returns_200(dashboard_server, view_name):
     assert "failed to render" not in body
 
 
+def test_agents_view_renders_machine_cards_and_tiles(dashboard_server, monkeypatch):
+    from brigade.center_cmd.dashboard.views import agent_activity
+
+    def fake_fetch(target):
+        del target
+        return {
+            "agent_activity_summary": [{"provider": "brigade", "state_counts": {"running": 1}}],
+            "agent_activity": [
+                {
+                    "activity_id": "brigade:run:demo",
+                    "parent_activity_id": None,
+                    "provider": "brigade",
+                    "harness": "brigade-run",
+                    "kind": "run",
+                    "host": "rocinante",
+                    "label": "Brigade run",
+                    "task_label": "Browser check task",
+                    "model": "gpt-5.6-terra",
+                    "state": "running",
+                    "started_at": "2026-08-12T12:00:00+00:00",
+                    "last_updated_at": "2026-08-12T12:01:00+00:00",
+                    "elapsed_seconds": 60,
+                    "source": {"name": "brigade-run-journal", "authority": "authoritative"},
+                    "links": {},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(agent_activity, "fetch", fake_fetch)
+    host, port = dashboard_server.server_address
+    response = _raw_request(dashboard_server, f"{host}:{port}", path="/view/agents")
+    assert _status_code(response) == "200"
+    _, body = _headers_and_body(response)
+    assert 'class="machine-card"' in body
+    assert 'class="agent-tile"' in body
+    assert "Browser check task" in body
+    assert 'data-host="cloud"' in body
+
+
 def test_get_unknown_view_returns_404(dashboard_server):
     host, port = dashboard_server.server_address
     response = _raw_request(dashboard_server, f"{host}:{port}", path="/view/nope")

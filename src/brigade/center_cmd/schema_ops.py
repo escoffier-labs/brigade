@@ -234,6 +234,7 @@ def _center_schema_manifest_schemas() -> list[dict[str, Any]]:
                 _schema_field("agent_activity", "array"),
                 _schema_field("agent_activity_count", "integer"),
                 _schema_field("agent_activity_summary", "array"),
+                _schema_field("completed_window_seconds", "integer", required=False),
             ],
             "item_fields": item_fields,
             "agent_activity_fields": [
@@ -245,6 +246,7 @@ def _center_schema_manifest_schemas() -> list[dict[str, Any]]:
                 _schema_field("host", "string"),
                 _schema_field("label", "string"),
                 _schema_field("task_label", "string"),
+                _schema_field("model", "string|null", required=False),
                 _schema_field("state", "string"),
                 _schema_field("started_at", "string|null", required=False),
                 _schema_field("last_updated_at", "string|null", required=False),

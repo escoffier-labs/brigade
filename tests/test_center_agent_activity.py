@@ -123,9 +123,10 @@ def test_agent_activity_view_uses_state_words_and_keeps_ids_in_details():
                     "provider": "brigade",
                     "harness": "brigade-run",
                     "kind": "run",
-                    "host": "local",
+                    "host": "rocinante",
                     "label": "Brigade run",
                     "task_label": "Build activity view",
+                    "model": "gpt-5.6-terra",
                     "state": "running",
                     "started_at": "2026-08-12T12:00:00+00:00",
                     "last_updated_at": "2026-08-12T12:01:00+00:00",
@@ -138,11 +139,156 @@ def test_agent_activity_view_uses_state_words_and_keeps_ids_in_details():
         "test-nonce",
     )
 
-    assert "Provider summary" in fragment
+    assert 'class="machine-card"' in fragment
+    assert 'data-host="rocinante"' in fragment
+    assert 'class="agent-tile"' in fragment
     assert "● running" in fragment
     assert "Build activity view" in fragment
+    assert "gpt-5.6-terra" in fragment
+    assert "Br" in fragment  # brigade-run monogram
     assert "private-id" in fragment.split("<details>", 1)[1]
     assert "private-id" not in fragment.split("<details>", 1)[0]
+    assert "Table" in fragment
+    assert 'class="data-table"' in fragment
+
+
+def test_agent_activity_view_groups_hosts_nests_children_and_collapses_old_completed():
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    parent = {
+        "activity_id": "brigade:run:parent",
+        "parent_activity_id": None,
+        "provider": "brigade",
+        "harness": "brigade-run",
+        "kind": "run",
+        "host": "rocinante",
+        "label": "Brigade run",
+        "task_label": "Parent task",
+        "model": None,
+        "state": "running",
+        "started_at": now.isoformat(),
+        "last_updated_at": now.isoformat(),
+        "elapsed_seconds": 30,
+        "source": {"name": "brigade-run-journal", "authority": "authoritative"},
+        "links": {},
+    }
+    child = {
+        **parent,
+        "activity_id": "brigade:worker:parent:coder",
+        "parent_activity_id": "brigade:run:parent",
+        "kind": "worker",
+        "label": "coder",
+        "task_label": "Child assignment",
+        "provider": "cursor",
+        "harness": "cursor-agent",
+        "model": "grok-4.5",
+    }
+    old_done = {
+        **parent,
+        "activity_id": "brigade:run:old",
+        "task_label": "Finished hours ago",
+        "state": "succeeded",
+        "started_at": (now - timedelta(hours=5)).isoformat(),
+        "last_updated_at": (now - timedelta(hours=4)).isoformat(),
+        "elapsed_seconds": 3600,
+    }
+    fragment = agent_activity.render(
+        {
+            "agent_activity_summary": [],
+            "agent_activity": [parent, child, old_done],
+            "completed_window_seconds": 3600,
+        },
+        "test-nonce",
+    )
+
+    assert fragment.index("Parent task") < fragment.index("Finished hours ago")
+    assert 'class="agent-tile agent-tile-child"' in fragment
+    assert "show 1 completed" in fragment.lower() or "Show 1 completed" in fragment
+    assert 'data-host="cloud"' in fragment
+    assert "cloud tracking not wired" in fragment.lower()
+    assert "#890" in fragment
+    assert "Cu" in fragment  # cursor monogram
+    for host in ("rocinante", "shadowfax", "gandalf", "cloud"):
+        assert f'data-host="{host}"' in fragment
+
+
+def test_humanize_cwd_folder_name_strips_date_prefix():
+    assert (
+        activity_records._humanize_folder_name("2026-08-11-you-are-a-fresh-frontier-conductor")
+        == "you are a fresh frontier conductor"
+    )
+
+
+def test_codex_session_extracts_task_label_from_cwd_folder(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "home"
+    folder = "2026-08-11-you-are-a-fresh-frontier-conductor"
+    codex = home / ".codex" / "sessions" / "2026" / "08" / "12"
+    codex.mkdir(parents=True)
+    session = codex / "rollout-safe-session.jsonl"
+    session.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "cwd": f"/tmp/worktrees/{folder}",
+                    "model_provider": "openai",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "turn_context",
+                "payload": {"cwd": f"/tmp/worktrees/{folder}", "model": "gpt-5.6-terra"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "secret private prompt body"},
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    _write_json(
+        tmp_path / ".brigade" / "center" / "agent-activity-sources.json",
+        {"local_host": "rocinante"},
+    )
+
+    assert center_cmd.activity(target=tmp_path, json_output=True) == 0
+    records = json.loads(capsys.readouterr().out)["agent_activity"]
+    codex_row = next(record for record in records if record["provider"] == "codex" and record["kind"] == "agent")
+
+    assert codex_row["task_label"] == "you are a fresh frontier conductor"
+    assert codex_row["model"] == "gpt-5.6-terra"
+    assert codex_row["host"] == "rocinante"
+    assert "secret private prompt body" not in json.dumps(records)
+    assert "/tmp/" not in json.dumps(records)
+
+
+def test_codex_session_falls_back_to_first_user_prompt_when_cwd_is_generic(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    codex = home / ".codex" / "sessions" / "2026" / "08" / "12"
+    codex.mkdir(parents=True)
+    (codex / "rollout-prompt.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"cwd": "/tmp/repos/brigade"}})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "Revise the agent activity view layout"},
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+
+    records = activity_records.collect(tmp_path)
+    codex_row = next(record for record in records if record["provider"] == "codex" and record["kind"] == "agent")
+    assert codex_row["task_label"] == "Revise the agent activity view layout"
 
 
 def test_external_sources_redact_journal_text_and_missing_local_sources_are_stale(tmp_path, capsys, monkeypatch):
@@ -173,8 +319,9 @@ def test_external_sources_redact_journal_text_and_missing_local_sources_are_stal
 
     t3 = next(record for record in records if record["provider"] == "t3")
     assert t3["label"] == "t3 agent"
-    assert t3["task_label"] == "Task unavailable"
+    assert t3["task_label"] == "Unknown task"
     assert t3["parent_activity_id"] is None
     assert {record["provider"] for record in records} >= {"codex", "cursor"}
     assert all(record["state"] == "stale" for record in records if record["kind"] == "source")
     assert "TOKEN=secret" not in json.dumps(records)
+    assert all(record.get("task_label") != "Task unavailable" for record in records)
