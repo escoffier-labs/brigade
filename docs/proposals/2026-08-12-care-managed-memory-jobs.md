@@ -6,8 +6,8 @@ Depends on: the target-scoped `brigade care` redo from #759
 
 ## Summary
 
-Move the maintainer's five recurring memory jobs. handoff ingest, care scan,
-refresh, evidence crawl, and closeout. behind `brigade care` registrations.
+Move the maintainer's five recurring memory jobs (handoff ingest, care scan,
+refresh, evidence crawl, and closeout) behind `brigade care` registrations.
 This is a scheduler ownership change, not a new background service and not
 permission for unattended agents to make judgment-heavy memory edits. The
 operator's scheduler remains the trigger. Brigade owns only the entries it
