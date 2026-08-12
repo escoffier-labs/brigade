@@ -1243,26 +1243,8 @@ def _is_locally_stamped_self_import(
     record: dict[str, Any], *, importer_source: str, proof: _LocallyStampedImportProof | None = None
 ) -> bool:
     """Return whether a self-import was emitted by the local work-inbox producer."""
-    source = record.get("source")
-    text = record.get("text")
-    metadata = record.get("metadata")
-    if source != importer_source or not isinstance(text, str) or not isinstance(metadata, dict):
-        return False
-    envelope = metadata.get("provenance")
-    if provenance.validate_envelope(envelope):
-        return False
-    envelope_source = envelope.get("source") if isinstance(envelope, Mapping) else None
-    envelope_trust = envelope.get("trust") if isinstance(envelope, Mapping) else None
-    envelope_hashes = envelope.get("hashes") if isinstance(envelope, Mapping) else None
     return (
-        isinstance(envelope_source, Mapping)
-        and envelope_source.get("system") == "work-inbox"
-        and envelope_source.get("kind") == importer_source
-        and envelope_source.get("producer") == "ledger._make_import"
-        and isinstance(envelope_trust, Mapping)
-        and envelope_trust.get("assigned_by") == "ingest:ledger._make_import"
-        and isinstance(envelope_hashes, Mapping)
-        and envelope_hashes.get("content") == provenance.content_sha256(text)
+        _has_local_import_envelope(record, importer_source=importer_source)
         and isinstance(proof, _LocallyStampedImportProof)
         and proof.importer_source == importer_source
         and proof.content_hash == _locally_stamped_import_content_hash(record)
@@ -1452,6 +1434,7 @@ def _persisted_import_proof_payload(item: dict[str, Any], *, operation_id: str) 
 def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *, operation_id: str) -> None:
     """Record verifier-owned proof only after the corresponding inbox write succeeds."""
     parent = _open_import_proof_directory(target, create=True)
+    created: list[str] = []
     try:
         for item in items:
             payload = _persisted_import_proof_payload(item, operation_id=operation_id)
@@ -1464,6 +1447,7 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
                 0o600,
                 dir_fd=parent,
             )
+            created.append(name)
             try:
                 with os.fdopen(os.dup(descriptor), "wb") as handle:
                     handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
@@ -1472,6 +1456,34 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
                 _validate_import_proof_descriptor(descriptor)
             finally:
                 os.close(descriptor)
+        os.fsync(parent)
+    except BaseException:
+        for name in created:
+            try:
+                os.unlink(name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+        os.fsync(parent)
+        raise
+    finally:
+        os.close(parent)
+
+
+def _remove_persisted_import_proofs(target: Path, items: list[dict[str, Any]]) -> None:
+    """Remove sidecars created for a failed import publication transaction."""
+    try:
+        parent = _open_import_proof_directory(target, create=False)
+    except OSError:
+        return
+    try:
+        for item in items:
+            name = _import_proof_name(item.get("id"))
+            if name is None:
+                continue
+            try:
+                os.unlink(name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
         os.fsync(parent)
     finally:
         os.close(parent)
@@ -1529,6 +1541,92 @@ def _import_content_identity(item: dict[str, Any]) -> tuple[str, str] | None:
     return kind, _untrusted_import_canonical_hash(item)
 
 
+def _has_local_import_envelope(item: dict[str, Any], *, importer_source: str) -> bool:
+    """Validate the immutable provenance envelope emitted by the local inbox writer."""
+    source = item.get("source")
+    text = item.get("text")
+    metadata = item.get("metadata")
+    if source != importer_source or not isinstance(text, str) or not isinstance(metadata, dict):
+        return False
+    envelope = metadata.get("provenance")
+    if provenance.validate_envelope(envelope):
+        return False
+    envelope_source = envelope.get("source") if isinstance(envelope, Mapping) else None
+    envelope_trust = envelope.get("trust") if isinstance(envelope, Mapping) else None
+    envelope_hashes = envelope.get("hashes") if isinstance(envelope, Mapping) else None
+    return (
+        isinstance(envelope_source, Mapping)
+        and envelope_source.get("system") == "work-inbox"
+        and envelope_source.get("kind") == importer_source
+        and envelope_source.get("producer") == "ledger._make_import"
+        and isinstance(envelope_trust, Mapping)
+        and envelope_trust.get("assigned_by") == "ingest:ledger._make_import"
+        and isinstance(envelope_hashes, Mapping)
+        and envelope_hashes.get("content") == provenance.content_sha256(text)
+    )
+
+
+def _trusted_builtin_scanner_configuration(scanner: object) -> bool:
+    """Require the exact built-in scanner record serialized into a local receipt."""
+    if not isinstance(scanner, dict):
+        return False
+    return any(scanner == trusted for trusted in constants.SCANNER_DEFAULTS)
+
+
+def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, Any] | None:
+    """Read one local scanner receipt through no-follow descriptor traversal."""
+    if (
+        os.name != "posix"
+        or not getattr(os, "O_NOFOLLOW", 0)
+        or not getattr(os, "O_DIRECTORY", 0)
+        or os.open not in os.supports_dir_fd
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", scanner_run_id)
+    ):
+        return None
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    root = -1
+    current = -1
+    receipt_descriptor = -1
+    try:
+        root = os.open(target.expanduser().resolve(), directory_flags)
+        current = root
+        for component in (".brigade", "scanners", "runs", scanner_run_id):
+            child = os.open(component, directory_flags, dir_fd=current)
+            if current != root:
+                os.close(current)
+            current = child
+        receipt_descriptor = os.open(
+            "receipt.json",
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=current,
+        )
+        before = os.fstat(receipt_descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            return None
+        chunks: list[bytes] = []
+        while chunk := os.read(receipt_descriptor, 64 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(receipt_descriptor)
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+        ):
+            return None
+        payload = json.loads(b"".join(chunks))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    finally:
+        if receipt_descriptor != -1:
+            os.close(receipt_descriptor)
+        if current != -1 and current != root:
+            os.close(current)
+        if root != -1:
+            os.close(root)
+
+
 def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
     """Return whether a verifier-owned scanner receipt binds this exact row."""
     if target is None:
@@ -1541,19 +1639,21 @@ def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | No
     scanner_id = metadata.get("scanner_id")
     if not isinstance(scanner_run_id, str) or not scanner_run_id or not isinstance(scanner_id, str) or not scanner_id:
         return False
-    receipt_path = helpers._scanner_runs_root(target) / scanner_run_id / "receipt.json"
-    try:
-        receipt_path.resolve(strict=True).relative_to(helpers._scanner_runs_root(target).resolve(strict=True))
-        receipt = json.loads(receipt_path.read_text())
-    except (OSError, ValueError, json.JSONDecodeError):
+    if not _has_local_import_envelope(item, importer_source=source):
         return False
-    if not isinstance(receipt, dict) or receipt.get("run_id") != scanner_run_id:
+    receipt = _read_local_scanner_receipt(target, scanner_run_id)
+    if (
+        receipt is None
+        or receipt.get("run_id") != scanner_run_id
+        or receipt.get("status") != "completed"
+        or receipt.get("exit_code") != 0
+    ):
         return False
     proof = receipt.get("self_import_proofs")
     if not isinstance(proof, dict) or proof.get("scanner_id") != scanner_id or proof.get("source") != source:
         return False
     scanner = proof.get("scanner")
-    if not isinstance(scanner, dict):
+    if not _trusted_builtin_scanner_configuration(scanner):
         return False
     if (
         receipt.get("scanner_id") != scanner_id
@@ -1583,6 +1683,171 @@ def _legacy_import_source_content_identity(
         return None
     kind, content_hash = content_identity
     return source, kind, content_hash
+
+
+def _open_import_inbox_parent(target: Path, *, create: bool) -> tuple[int, str]:
+    """Hold the inbox parent for an import/proof publication transaction."""
+    if (
+        os.name != "posix"
+        or not getattr(os, "O_NOFOLLOW", 0)
+        or not getattr(os, "O_DIRECTORY", 0)
+        or os.open not in os.supports_dir_fd
+        or os.mkdir not in os.supports_dir_fd
+    ):
+        raise OSError("descriptor-relative import inbox operations are unavailable")
+    target_root = target.expanduser().resolve()
+    inbox_path = helpers._imports_path(target_root)
+    try:
+        relative = inbox_path.relative_to(target_root)
+    except ValueError as exc:
+        raise OSError("import inbox escapes target") from exc
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    parent = os.open(target_root, flags)
+    try:
+        for component in relative.parts[:-1]:
+            try:
+                child = os.open(component, flags, dir_fd=parent)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o700, dir_fd=parent)
+                child = os.open(component, flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        return parent, relative.parts[-1]
+    except BaseException:
+        os.close(parent)
+        raise
+
+
+def _validate_import_inbox_descriptor(descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise OSError("import inbox is not a single-link regular file")
+
+
+def _validate_import_inbox_name_matches_descriptor(parent: int, name: str, descriptor: int) -> None:
+    """Ensure a directory entry still names the retained regular inbox object."""
+    if os.stat not in os.supports_dir_fd:
+        raise OSError("descriptor-relative import inbox validation is unavailable")
+    opened = os.fstat(descriptor)
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or named.st_nlink != 1
+        or (named.st_dev, named.st_ino, named.st_mode, named.st_nlink)
+        != (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink)
+    ):
+        raise OSError("import inbox name no longer matches its held descriptor")
+
+
+def _write_import_inbox_bytes_at(parent: int, name: str, data: bytes) -> None:
+    """Write complete import bytes through the transaction's held parent."""
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=parent,
+        )
+        _validate_import_inbox_descriptor(descriptor)
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _validate_import_inbox_descriptor(descriptor)
+        _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+        os.fsync(parent)
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
+    """Capture exact inbox bytes while retaining authority to restore them."""
+    parent, name = _open_import_inbox_parent(target, create=True)
+    descriptor = -1
+    try:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            return parent, name, b"", False
+        _validate_import_inbox_descriptor(descriptor)
+        before = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+        ):
+            raise OSError("import inbox changed while snapshotting")
+        return parent, name, b"".join(chunks), True
+    except BaseException:
+        os.close(parent)
+        raise
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: bool) -> None:
+    """Restore an ordinary import transaction through its original parent."""
+    if not exists:
+        try:
+            os.unlink(name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.fsync(parent)
+        return
+    for _attempt in range(3):
+        temporary_name = f".{name}.{uuid4().hex}.tmp"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=parent,
+            )
+            with os.fdopen(os.dup(descriptor), "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _validate_import_inbox_descriptor(descriptor)
+            _validate_import_inbox_name_matches_descriptor(parent, temporary_name, descriptor)
+            os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+            temporary_name = ""
+            _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+            os.fsync(parent)
+            return
+        except OSError:
+            pass
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+    try:
+        _write_import_inbox_bytes_at(parent, name, data)
+    except BaseException:
+        try:
+            os.unlink(name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.fsync(parent)
+        raise OSError("import inbox rollback could not restore its retained snapshot") from None
 
 
 # Central envelope stamps land under metadata.provenance after identity is fixed.
@@ -2044,6 +2309,7 @@ def _append_import_records(
     contain_provenance_errors: bool = False,
     migrate_untrusted_identities: bool = False,
     preserve_existing_raw: Callable[[bytes], None] | None = None,
+    restore_existing_raw: Callable[[bytes, bool], None] | None = None,
     existing_imports: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     imports = existing_imports if existing_imports is not None else _read_imports(target)
@@ -2130,17 +2396,49 @@ def _append_import_records(
         if identity is not None:
             existing_by_source[identity] = item
     if imported and not dry_run:
-        if preserve_existing_raw:
+        inbox_parent = -1
+        inbox_name = ""
+        previous_raw = b""
+        previous_exists = False
+        if restore_existing_raw is None:
+            inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
+        published = False
+        try:
+            if preserve_existing_raw:
+                try:
+                    preserve_existing_raw(
+                        b"".join(json.dumps(item, sort_keys=True).encode("utf-8") + b"\n" for item in imported)
+                    )
+                except OSError:
+                    return [], [], [], ["inbox_persistence_failed"]
+                published = True
+            else:
+                imports.extend(imported)
+                published = True
+                rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
+                try:
+                    _write_import_inbox_bytes_at(inbox_parent, inbox_name, rendered)
+                except BaseException:
+                    _restore_import_inbox_snapshot(inbox_parent, inbox_name, previous_raw, previous_exists)
+                    raise
             try:
-                preserve_existing_raw(
-                    b"".join(json.dumps(item, sort_keys=True).encode("utf-8") + b"\n" for item in imported)
-                )
-            except OSError:
-                return [], [], [], ["inbox_persistence_failed"]
-        else:
-            imports.extend(imported)
-            _write_imports(target, imports)
-        _write_persisted_import_proofs(target, imported, operation_id=uuid4().hex)
+                _write_persisted_import_proofs(target, imported, operation_id=uuid4().hex)
+            except BaseException:
+                try:
+                    if published:
+                        if restore_existing_raw is not None:
+                            restore_existing_raw(previous_raw, previous_exists)
+                        else:
+                            _restore_import_inbox_snapshot(inbox_parent, inbox_name, previous_raw, previous_exists)
+                finally:
+                    try:
+                        _remove_persisted_import_proofs(target, imported)
+                    except BaseException:
+                        pass
+                raise
+        finally:
+            if inbox_parent != -1:
+                os.close(inbox_parent)
     return imported, skipped, skipped_dismissed, rejected
 
 

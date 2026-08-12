@@ -27,6 +27,8 @@ def _write_scanner_import_proof(tmp_path: Path, items: list[dict[str, object]], 
         "scanner_id": scanner["id"],
         "source": scanner["source"],
         "command": scanner["command"],
+        "status": "completed",
+        "exit_code": 0,
         "self_import_proofs": {
             "scanner_id": scanner["id"],
             "source": scanner["source"],
@@ -43,6 +45,7 @@ def _write_scanner_import_proof(tmp_path: Path, items: list[dict[str, object]], 
     receipt_path = work_cmd.helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
     receipt_path.parent.mkdir(parents=True)
     receipt_path.write_text(json.dumps(receipt))
+    work_cmd.ledger._write_persisted_import_proofs(tmp_path, items, operation_id="0" * 32)
 
 
 def test_work_sweep_runs_due_scanners_ingests_output_and_reports(tmp_path, capsys):
@@ -231,16 +234,17 @@ conflict_window = "04:00-04:10"
 
 def test_work_sweep_records_skipped_and_dismissed_fingerprints(tmp_path, capsys):
     _init_git_repo(tmp_path)
+    scanner_source = "handoff-ingest"
     pending = work_cmd._make_import(
         "Existing pending",
         kind="task",
-        source="repo-scan",
+        source=scanner_source,
         metadata={"source_item_key": "same-pending", "source_fingerprint": "fp-pending"},
     )
     dismissed = work_cmd._make_import(
         "Existing dismissed",
         kind="task",
-        source="repo-scan",
+        source=scanner_source,
         metadata={"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
     )
     dismissed["status"] = "dismissed"
@@ -253,19 +257,19 @@ from pathlib import Path
 records = [
     {
         "kind": "task",
-        "source": "repo-scan",
+        "source": "handoff-ingest",
         "text": "Existing pending",
         "metadata": {"source_item_key": "same-pending", "source_fingerprint": "fp-pending"},
     },
     {
         "kind": "task",
-        "source": "repo-scan",
+        "source": "handoff-ingest",
         "text": "Existing dismissed",
         "metadata": {"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
     },
     {
         "kind": "task",
-        "source": "repo-scan",
+        "source": "handoff-ingest",
         "text": "Existing dismissed, changed",
         "metadata": {"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
     },
@@ -282,7 +286,7 @@ path.write_text("\\n".join(json.dumps(record) for record in records) + "\\n")
         f"""
 [[scanner]]
 id = "repo-scan"
-source = "repo-scan"
+source = "handoff-ingest"
 command = "{command}"
 cadence = "daily@02:00"
 enabled = true
@@ -296,18 +300,7 @@ conflict_window = "02:00-02:10"
     _write_scanner_import_proof(
         tmp_path,
         [pending, dismissed],
-        scanner={
-            "id": "repo-scan",
-            "source": "repo-scan",
-            "command": command,
-            "cadence": "daily@02:00",
-            "enabled": True,
-            "timeout": 30,
-            "output_path": ".brigade/scanner-imports.jsonl",
-            "import_path": ".brigade/scanner-imports.jsonl",
-            "import_format": "jsonl",
-            "conflict_window": "02:00-02:10",
-        },
+        scanner=dict(next(item for item in work_cmd.constants.SCANNER_DEFAULTS if item["id"] == "handoff-ingest")),
     )
     work_cmd._write_imports(tmp_path, [pending, dismissed])
 

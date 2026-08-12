@@ -514,11 +514,28 @@ def _scanner_inbox_descriptor_bytes(descriptor: int) -> bytes:
     return b"".join(chunks)
 
 
-def _replace_scanner_inbox_from_retained_temp(parent: int, source: str, name: str, descriptor: int) -> None:
-    """Publish only the name currently bound to the retained verifier-written file."""
-    _validate_scanner_inbox_name_matches_descriptor(parent, source, descriptor)
-    os.replace(source, name, src_dir_fd=parent, dst_dir_fd=parent)
-    _validate_scanner_inbox_name_matches_descriptor(parent, name, descriptor)
+def _restore_scanner_inbox_from_snapshot(parent: int, name: str, data: bytes) -> None:
+    """Restore a failed publication, retrying if a rollback temp is substituted."""
+    for _attempt in range(3):
+        temporary_name, temporary = _write_scanner_inbox_temp(parent, data)
+        try:
+            os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+            temporary_name = ""
+            try:
+                _validate_scanner_inbox_name_matches_descriptor(parent, name, temporary)
+            except OSError:
+                continue
+            return
+        finally:
+            os.close(temporary)
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+    _remove_scanner_inbox_at(parent, name)
+    _fsync_scanner_inbox_parent(parent)
+    raise OSError("scanner inbox rollback could not restore its retained snapshot")
 
 
 def _remove_scanner_inbox_at(parent: int, name: str) -> None:
@@ -535,9 +552,8 @@ def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
     parent, name, identities = _open_scanner_inbox_parent(target, create=True)
     temporary_name = _scanner_inbox_temp_name()
     temporary = -1
-    rollback_name = ""
-    rollback = -1
     previous = -1
+    previous_bytes = b""
     rollback_required = False
     try:
         try:
@@ -550,7 +566,7 @@ def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
             pass
         else:
             _validate_scanner_inbox_descriptor(previous)
-            rollback_name, rollback = _write_scanner_inbox_temp(parent, _scanner_inbox_descriptor_bytes(previous))
+            previous_bytes = _scanner_inbox_descriptor_bytes(previous)
         temporary_name, temporary = _write_scanner_inbox_temp(parent, data)
         if not _scanner_inbox_parent_is_current(target, identities):
             raise OSError("scanner inbox parent changed before replacement")
@@ -565,9 +581,8 @@ def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
         rollback_required = False
     except BaseException:
         if rollback_required:
-            if rollback != -1:
-                _replace_scanner_inbox_from_retained_temp(parent, rollback_name, name, rollback)
-                rollback_name = ""
+            if previous != -1:
+                _restore_scanner_inbox_from_snapshot(parent, name, previous_bytes)
             else:
                 _remove_scanner_inbox_at(parent, name)
             _fsync_scanner_inbox_parent(parent)
@@ -577,16 +592,9 @@ def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
             os.close(previous)
         if temporary != -1:
             os.close(temporary)
-        if rollback != -1:
-            os.close(rollback)
         if temporary_name:
             try:
                 os.unlink(temporary_name, dir_fd=parent)
-            except FileNotFoundError:
-                pass
-        if rollback_name:
-            try:
-                os.unlink(rollback_name, dir_fd=parent)
             except FileNotFoundError:
                 pass
         os.close(parent)
@@ -608,18 +616,40 @@ def _scanner_inbox_bytes(target: Path) -> bytes:
 
 
 def _append_scanner_inbox_bytes(target: Path, data: bytes) -> None:
-    """Append scanner records through a no-follow regular-file descriptor."""
-    descriptor = _open_scanner_inbox(target, os.O_RDWR, create=True)
+    """Append scanner records by atomically publishing complete inbox bytes."""
+    existing = _scanner_inbox_bytes(target)
+    separator = b"\n" if existing and not existing.endswith((b"\n", b"\r")) else b""
+    _write_scanner_inbox_bytes(target, existing + separator + data)
+
+
+def _restore_scanner_inbox_bytes(target: Path, data: bytes, exists: bool) -> None:
+    """Restore the scanner inbox transaction to its exact pre-publication state."""
+    if exists:
+        _write_scanner_inbox_bytes(target, data)
+        return
+    parent, name, identities = _open_scanner_inbox_parent(target, create=True)
     try:
-        with os.fdopen(descriptor, "r+b") as handle:
-            descriptor = -1
-            existing = handle.read()
-            if existing and not existing.endswith((b"\n", b"\r")):
-                handle.write(b"\n")
-            handle.write(data)
+        if not _scanner_inbox_parent_is_current(target, identities):
+            raise OSError("scanner inbox parent changed during restoration")
+        _remove_scanner_inbox_at(parent, name)
+        _fsync_scanner_inbox_parent(parent)
     finally:
-        if descriptor != -1:
-            os.close(descriptor)
+        os.close(parent)
+
+
+def _restore_scanner_inbox_snapshot_direct(target: Path, data: bytes, exists: bool) -> None:
+    """Recover a scanner transaction without re-entering its publication wrapper."""
+    parent, name, identities = _open_scanner_inbox_parent(target, create=True)
+    try:
+        if not _scanner_inbox_parent_is_current(target, identities):
+            raise OSError("scanner inbox parent changed during restoration")
+        if exists:
+            _restore_scanner_inbox_from_snapshot(parent, name, data)
+        else:
+            _remove_scanner_inbox_at(parent, name)
+        _fsync_scanner_inbox_parent(parent)
+    finally:
+        os.close(parent)
 
 
 def _scanner_inbox_imports(target: Path) -> list[dict[str, Any]]:
@@ -670,6 +700,7 @@ def _scanner_stamp_new_imports(
     if before_raw is None:
         before_raw = b""
     stamped_ids: list[str] = []
+    staged_proof_items: list[dict[str, Any]] = []
     rejected = 0
     scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
     trusted_scanner = _trusted_builtin_scanner(scanner)
@@ -679,7 +710,10 @@ def _scanner_stamp_new_imports(
         for item in before_imports
         if (
             isinstance(item, dict)
-            and ledger_mod._has_locally_stamped_import_proof(item, target=target)
+            and (
+                ledger_mod._has_locally_stamped_import_proof(item, target=target)
+                or ledger_mod._has_persisted_import_proof(item, target=target)
+            )
             and (identity := ledger_mod._import_source_identity(item)) is not None
             and (content_identity := ledger_mod._import_content_identity(item)) is not None
         )
@@ -726,9 +760,10 @@ def _scanner_stamp_new_imports(
         if item is None:
             rejected += 1
             continue
+        producer_proof = ledger_mod._has_persisted_import_proof(item, target=target)
         item_proof = (
             ledger_mod._make_locally_stamped_import_proof(item, importer_source=scanner_source)
-            if run_proof is not None
+            if producer_proof and run_proof is not None
             else None
         )
         locally_stamped = ledger_mod._is_locally_stamped_self_import(
@@ -786,8 +821,7 @@ def _scanner_stamp_new_imports(
                 (rebuilt_identity, ledger_mod._import_fingerprint(rebuilt), rebuilt_content_identity)
             )
         stamped_ids.append(str(rebuilt["id"]))
-        if run_proof is not None:
-            _record_scanner_import_proof(scanner, run, rebuilt)
+        staged_proof_items.append(rebuilt)
     rendered = b"".join(final_rows)
     if rendered != imports_raw:
         try:
@@ -799,6 +833,24 @@ def _scanner_stamp_new_imports(
                 "rejection_reasons": {"provenance_stamp_failed": rejected + len(stamped_ids) + 1},
             }
             return []
+        try:
+            ledger_mod._write_persisted_import_proofs(target, staged_proof_items, operation_id=uuid4().hex)
+        except BaseException:
+            ledger_mod._remove_persisted_import_proofs(target, staged_proof_items)
+            try:
+                _write_scanner_inbox_bytes(target, imports_raw)
+            except BaseException:
+                _restore_scanner_inbox_snapshot_direct(target, imports_raw, exists=True)
+                raise
+            run["self_import"] = {
+                "created": 0,
+                "rejected": rejected + len(stamped_ids) + 1,
+                "rejection_reasons": {"provenance_stamp_failed": rejected + len(stamped_ids) + 1},
+            }
+            return []
+        if run_proof is not None:
+            for rebuilt in staged_proof_items:
+                _record_scanner_import_proof(scanner, run, rebuilt)
     if stamped_ids or rejected:
         run["self_import"] = {
             "created": len(stamped_ids),
@@ -1674,6 +1726,7 @@ def _scanners_run_payload(
                 contain_provenance_errors=True,
                 migrate_untrusted_identities=True,
                 preserve_existing_raw=lambda data: _append_scanner_inbox_bytes(target, data),
+                restore_existing_raw=lambda data, exists: _restore_scanner_inbox_bytes(target, data, exists),
                 existing_imports=existing_imports,
             )
             if _scanner_run_proof(scanner, run) is not None:

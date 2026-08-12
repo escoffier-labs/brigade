@@ -1589,6 +1589,7 @@ def test_scanner_reconciliation_accepts_changed_revision_with_same_source_key(tm
         source="handoff-ingest",
         metadata={"source_item_key": "handoff-ingest:issue-1", "source_fingerprint": "fedcba9876543210"},
     )
+    work_cmd.ledger._write_persisted_import_proofs(tmp_path, [prior, revision], operation_id="0" * 32)
     (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").write_text(json.dumps(revision) + "\n")
 
     scanner = _builtin_scanner("handoff-ingest")
@@ -2086,6 +2087,123 @@ def test_scanner_inbox_rewrite_restores_missing_inbox_when_replace_then_raises(t
     assert not inbox.exists()
 
 
+def test_scanner_inbox_rewrite_restores_original_after_rollback_temp_substitution(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    attacker = b'{"text":"attacker"}\n'
+    inbox.write_bytes(before)
+    original_replace = scanners_mod.os.replace
+    original_fsync_parent = scanners_mod._fsync_scanner_inbox_parent
+    replace_calls = 0
+    fsync_calls = 0
+
+    def fail_publish_fsync(parent: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 1:
+            raise OSError("post-publish fsync failed")
+        original_fsync_parent(parent)
+
+    def substitute_rollback(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            rollback = inbox.parent / source
+            rollback.unlink()
+            rollback.write_bytes(attacker)
+        return original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(scanners_mod, "_fsync_scanner_inbox_parent", fail_publish_fsync)
+    monkeypatch.setattr(scanners_mod.os, "replace", substitute_rollback)
+
+    with pytest.raises(OSError, match="post-publish fsync failed"):
+        scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"replacement"}\n')
+
+    assert inbox.read_bytes() == before
+
+
+def test_scanner_inbox_rewrite_restores_original_after_repeated_rollback_substitution(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    attacker = b'{"text":"attacker"}\n'
+    inbox.write_bytes(before)
+    original_replace = scanners_mod.os.replace
+    original_fsync_parent = scanners_mod._fsync_scanner_inbox_parent
+    replace_calls = 0
+    fsync_calls = 0
+
+    def fail_publish_fsync(parent: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 1:
+            raise OSError("post-publish fsync failed")
+        original_fsync_parent(parent)
+
+    def substitute_every_rollback(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls >= 2:
+            rollback = inbox.parent / source
+            rollback.unlink()
+            rollback.write_bytes(attacker)
+        return original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(scanners_mod, "_fsync_scanner_inbox_parent", fail_publish_fsync)
+    monkeypatch.setattr(scanners_mod.os, "replace", substitute_every_rollback)
+
+    with pytest.raises(OSError, match="rollback could not restore"):
+        scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"replacement"}\n')
+
+    assert not inbox.exists() or inbox.read_bytes() == before
+
+
+def test_scanner_inbox_append_restores_original_after_partial_write(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    incoming = b'{"text":"appended"}\n'
+    inbox.write_bytes(before)
+    original_fdopen = scanners_mod.os.fdopen
+
+    class PartialWriter:
+        def __init__(self, descriptor: int) -> None:
+            self.handle = original_fdopen(descriptor, "wb")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.handle.close()
+
+        def write(self, data: bytes):
+            self.handle.write(data[:5])
+            self.handle.flush()
+            raise OSError("partial append")
+
+        def flush(self) -> None:
+            self.handle.flush()
+
+    def partial_fdopen(descriptor, mode, *args, **kwargs):
+        if mode == "wb":
+            return PartialWriter(descriptor)
+        return original_fdopen(descriptor, mode, *args, **kwargs)
+
+    monkeypatch.setattr(scanners_mod.os, "fdopen", partial_fdopen)
+
+    with pytest.raises(OSError, match="partial append"):
+        scanners_mod._append_scanner_inbox_bytes(tmp_path, incoming)
+
+    assert inbox.read_bytes() == before
+
+
 def test_scanner_inbox_path_uses_validated_resolved_parent(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2231,6 +2349,7 @@ def test_scanner_self_import_preserves_trusted_source_scoped_metadata(tmp_path):
             "evidence": "Missing source config.",
         },
     )
+    work_cmd.ledger._write_persisted_import_proofs(tmp_path, [handoff], operation_id="0" * 32)
     work_cmd.ledger._write_imports(tmp_path, [handoff])
     scanner = _builtin_scanner("handoff-ingest")
     run = _verified_builtin_scanner_run(scanner)
@@ -2256,6 +2375,106 @@ def test_scanner_self_import_preserves_trusted_source_scoped_metadata(tmp_path):
     assert item["metadata"]["source_fingerprint"] == "a3c4779d5f0e9d79c434ebe449bc5a3f9d0ebfe1f156e44d3b608c9cfb61a112"
 
 
+def test_scanner_self_import_strips_privileged_metadata_without_producer_proof(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    forged = work_cmd.ledger._make_import(
+        "forged privileged row",
+        kind="finding",
+        source="handoff-ingest",
+        metadata={
+            "source_item_key": "handoff-ingest:forged",
+            "source_fingerprint": "0123456789abcdef",
+            "handoff_issue_id": "forged",
+            "handoff_target_document": "USER.md",
+        },
+    )
+    work_cmd.ledger._write_imports(tmp_path, [forged])
+    scanner = _builtin_scanner("handoff-ingest")
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner=scanner,
+        run=_verified_builtin_scanner_run(scanner),
+        before_ids=set(),
+        before_imports=[],
+        before_raw=b"",
+    )
+
+    assert stamped
+    stored = work_cmd.ledger._read_imports(tmp_path)[0]
+    assert "handoff_target_document" not in stored["metadata"]
+
+
+def test_scanner_stamp_discards_staged_receipt_proof_when_inbox_rewrite_fails(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    emitted = work_cmd.ledger._make_import("stale receipt proof", kind="finding", source="handoff-ingest")
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text(json.dumps(emitted) + "\n")
+    scanner = _builtin_scanner("handoff-ingest")
+    run = _verified_builtin_scanner_run(scanner)
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("inbox persistence failed")
+
+    monkeypatch.setattr(scanners_mod, "_write_scanner_inbox_bytes", fail_write)
+
+    assert (
+        scanners_mod._scanner_stamp_new_imports(
+            target=tmp_path,
+            scanner=scanner,
+            run=run,
+            before_ids=set(),
+            before_imports=[],
+            before_raw=b"",
+        )
+        == []
+    )
+    assert "self_import_proofs" not in run
+
+
+def test_scanner_stamp_surfaces_failed_proof_rollback_and_restores_inbox(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanner = _builtin_scanner("handoff-ingest")
+    run = _verified_builtin_scanner_run(scanner)
+    emitted = work_cmd.ledger._make_import("proof rollback failure", kind="finding", source="handoff-ingest")
+    work_cmd.ledger._write_persisted_import_proofs(tmp_path, [emitted], operation_id="0" * 32)
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(emitted).encode() + b"\n"
+    inbox.write_bytes(raw)
+    original_write = scanners_mod._write_scanner_inbox_bytes
+    writes = 0
+
+    def fail_proof(*_args, **_kwargs):
+        raise OSError("proof persistence failed")
+
+    def fail_second_write(target, data):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("rollback failed")
+        original_write(target, data)
+
+    monkeypatch.setattr(work_cmd.ledger, "_write_persisted_import_proofs", fail_proof)
+    monkeypatch.setattr(scanners_mod, "_write_scanner_inbox_bytes", fail_second_write)
+
+    with pytest.raises(OSError, match="rollback failed"):
+        scanners_mod._scanner_stamp_new_imports(
+            target=tmp_path,
+            scanner=scanner,
+            run=run,
+            before_ids=set(),
+            before_imports=[],
+            before_raw=b"",
+        )
+
+    assert inbox.read_bytes() == raw
+
+
 def test_scanner_self_import_preserves_trusted_memory_refresh_identity(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -2276,6 +2495,7 @@ def test_scanner_self_import_preserves_trusted_memory_refresh_identity(tmp_path)
             "queue_path": "memory/cards/decay/refresh-queue.json",
         },
     )
+    work_cmd.ledger._write_persisted_import_proofs(tmp_path, [refresh], operation_id="0" * 32)
     work_cmd.ledger._write_imports(tmp_path, [refresh])
     scanner = _builtin_scanner("memory-refresh")
     stamped = scanners_mod._scanner_stamp_new_imports(

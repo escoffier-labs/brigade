@@ -24,7 +24,7 @@ def _envelope(item: dict[str, Any]) -> dict[str, Any]:
 def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source: str) -> None:
     """Bind a legacy fixture to a verifier-owned scanner receipt, not its row fields."""
     run_id = "test-proof-run"
-    scanner = {"id": "test-proof", "source": source, "command": "test-scanner"}
+    scanner = dict(next(item for item in constants.SCANNER_DEFAULTS if item["source"] == source))
     metadata = item.setdefault("metadata", {})
     metadata.update({"scanner_id": scanner["id"], "scanner_run_id": run_id})
     receipt = {
@@ -32,6 +32,8 @@ def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source
         "scanner_id": scanner["id"],
         "source": source,
         "command": scanner["command"],
+        "status": "completed",
+        "exit_code": 0,
         "self_import_proofs": {
             "scanner_id": scanner["id"],
             "source": source,
@@ -47,6 +49,71 @@ def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source
     receipt_path = helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
     receipt_path.parent.mkdir(parents=True)
     receipt_path.write_text(json.dumps(receipt))
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+
+
+def _write_builtin_scanner_receipt(
+    tmp_path: Path, item: dict[str, Any], *, status: str = "completed", exit_code: int = 0
+) -> Path:
+    scanner = dict(next(item for item in constants.SCANNER_DEFAULTS if item["id"] == "handoff-ingest"))
+    metadata = item.setdefault("metadata", {})
+    assert isinstance(metadata, dict)
+    metadata.update({"scanner_id": scanner["id"], "scanner_run_id": "chosen-run"})
+    receipt = {
+        "run_id": "chosen-run",
+        "scanner_id": scanner["id"],
+        "source": scanner["source"],
+        "command": scanner["command"],
+        "status": status,
+        "exit_code": exit_code,
+        "self_import_proofs": {
+            "scanner_id": scanner["id"],
+            "source": scanner["source"],
+            "scanner": scanner,
+            "imports": [{"id": item["id"], "content_hash": ledger._locally_stamped_import_content_hash(item)}],
+        },
+    }
+    path = helpers._scanner_runs_root(tmp_path) / "chosen-run" / "receipt.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(receipt))
+    return path
+
+
+@pytest.mark.parametrize(("status", "exit_code", "remove_envelope"), [("failed", 23, False), ("completed", 0, True)])
+def test_locally_stamped_receipt_requires_success_and_local_envelope(
+    tmp_path: Path, status: str, exit_code: int, remove_envelope: bool
+):
+    item = ledger._make_import("forged legacy", kind="task", source="handoff-ingest")
+    if remove_envelope:
+        metadata = item["metadata"]
+        assert isinstance(metadata, dict)
+        metadata.pop("provenance")
+    _write_builtin_scanner_receipt(tmp_path, item, status=status, exit_code=exit_code)
+
+    assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def test_locally_stamped_receipt_rejects_symlink_inside_runs_root(tmp_path: Path):
+    item = ledger._make_import("symlink receipt", kind="task", source="handoff-ingest")
+    actual = _write_builtin_scanner_receipt(tmp_path, item)
+    chosen = helpers._scanner_runs_root(tmp_path) / "chosen-run" / "receipt.json"
+    receipt_bytes = actual.read_bytes()
+    chosen.unlink()
+    moved = helpers._scanner_runs_root(tmp_path) / "attacker-controlled" / "receipt.json"
+    moved.parent.mkdir()
+    moved.write_bytes(receipt_bytes)
+    chosen.symlink_to(moved)
+
+    assert not ledger._has_locally_stamped_import_proof(item, target=tmp_path)
+
+
+def test_legacy_identity_rejects_sidecar_without_a_successful_scanner_receipt(tmp_path: Path):
+    legacy = ledger._make_import("sidecar-only legacy", kind="task", source="handoff-ingest")
+    ledger._write_persisted_import_proofs(tmp_path, [legacy], operation_id="0" * 32)
+
+    assert not ledger._has_locally_stamped_import_proof(legacy, target=tmp_path)
+    assert ledger._legacy_import_source_content_identity(legacy, target=tmp_path) is None
 
 
 def test_make_import_stamps_valid_envelope_with_exact_content_hash():
@@ -745,7 +812,7 @@ def test_untrusted_identity_migration_is_scoped_to_trusted_legacy_source(tmp_pat
     record = {
         "text": "Legacy source-normalized import",
         "kind": "task",
-        "source": "learning-loop",
+        "source": "handoff-ingest",
         "metadata": {"source_item_key": "legacy-row", "source_fingerprint": "legacy-fingerprint"},
     }
     legacy = ledger._make_import(
@@ -755,14 +822,14 @@ def test_untrusted_identity_migration_is_scoped_to_trusted_legacy_source(tmp_pat
         metadata=record["metadata"],
     )
     legacy["status"] = status
-    _write_external_import_proof(tmp_path, legacy, source="learning-loop")
+    _write_external_import_proof(tmp_path, legacy, source="handoff-ingest")
     ledger._write_imports(tmp_path, [legacy])
 
-    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="learning-loop")
+    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="handoff-ingest")
     imported, skipped, dismissed, rejected = ledger._append_import_records(
         tmp_path,
         [incoming],
-        provenance_source="learning-loop",
+        provenance_source="handoff-ingest",
         migrate_untrusted_identities=True,
     )
 
@@ -782,7 +849,7 @@ def test_untrusted_identity_migration_is_scoped_to_trusted_legacy_source(tmp_pat
     imported, skipped, dismissed, rejected = ledger._append_import_records(
         tmp_path,
         [incoming],
-        provenance_source="learning-loop",
+        provenance_source="handoff-ingest",
         migrate_untrusted_identities=True,
     )
 
@@ -799,7 +866,7 @@ def test_untrusted_identity_migration_is_scoped_to_trusted_legacy_source(tmp_pat
     imported, skipped, dismissed, rejected = ledger._append_import_records(
         tmp_path,
         [incoming],
-        provenance_source="learning-loop",
+        provenance_source="handoff-ingest",
         migrate_untrusted_identities=True,
     )
 
@@ -991,10 +1058,10 @@ def test_failed_import_persistence_does_not_create_import_proof(tmp_path: Path, 
         importer_source="learning-loop",
     )
 
-    def fail_write(_target: Path, _imports: list[dict[str, Any]]) -> None:
+    def fail_write(_parent: int, _name: str, _data: bytes) -> None:
         raise OSError("simulated inbox persistence failure")
 
-    monkeypatch.setattr(ledger, "_write_imports", fail_write)
+    monkeypatch.setattr(ledger, "_write_import_inbox_bytes_at", fail_write)
 
     with pytest.raises(OSError, match="simulated inbox persistence failure"):
         ledger._append_import_records(
@@ -1005,6 +1072,192 @@ def test_failed_import_persistence_does_not_create_import_proof(tmp_path: Path, 
         )
 
     assert not (tmp_path / ".brigade" / "work" / "imports" / "proofs").exists()
+
+
+def test_failed_proof_publication_restores_exact_prior_import_inbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    before = b'{"text":"retained raw row"}\n'
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(before)
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "atomic row proof", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    def fail_proof(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("proof persistence failed")
+
+    monkeypatch.setattr(ledger, "_write_persisted_import_proofs", fail_proof)
+
+    with pytest.raises(OSError, match="proof persistence failed"):
+        ledger._append_import_records(
+            tmp_path,
+            [record],
+            provenance_source="learning-loop",
+            migrate_untrusted_identities=True,
+        )
+
+    assert inbox.read_bytes() == before
+
+
+def test_partial_proof_creation_is_removed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    item = ledger._make_import("partial proof", kind="task", source="learning-loop")
+
+    def fail_validation(_descriptor: int) -> None:
+        raise OSError("proof validation failed")
+
+    monkeypatch.setattr(ledger, "_validate_import_proof_descriptor", fail_validation)
+    with pytest.raises(OSError, match="proof validation failed"):
+        ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+
+    proofs = tmp_path / ".brigade" / "work" / "imports" / "proofs"
+    assert not proofs.exists() or list(proofs.iterdir()) == []
+
+
+def test_ordinary_import_publication_cannot_follow_swapped_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    inbox.write_bytes(before)
+    outside_work = tmp_path / "outside-work"
+    outside_inbox = outside_work / "imports" / "inbox.jsonl"
+    outside_inbox.parent.mkdir(parents=True)
+    outside_before = b'{"text":"outside"}\n'
+    outside_inbox.write_bytes(outside_before)
+    work_parent = inbox.parent.parent
+    original_work = tmp_path / "original-work"
+    original_write = ledger._write_import_inbox_bytes_at
+
+    def swap_then_write(parent: int, name: str, data: bytes) -> None:
+        work_parent.rename(original_work)
+        work_parent.symlink_to(outside_work, target_is_directory=True)
+        original_write(parent, name, data)
+
+    def fail_proof(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("proof persistence failed")
+
+    monkeypatch.setattr(ledger, "_write_import_inbox_bytes_at", swap_then_write)
+    monkeypatch.setattr(ledger, "_write_persisted_import_proofs", fail_proof)
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "atomic transaction", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    with pytest.raises(OSError, match="proof persistence failed"):
+        ledger._append_import_records(
+            tmp_path,
+            [record],
+            provenance_source="learning-loop",
+            migrate_untrusted_identities=True,
+        )
+
+    assert outside_inbox.read_bytes() == outside_before
+    assert (original_work / "imports" / "inbox.jsonl").read_bytes() == before
+
+
+def test_ordinary_import_rollback_rejects_temp_substitution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    attacker = b'{"text":"attacker"}\n'
+    inbox.write_bytes(before)
+    original_replace = ledger.os.replace
+
+    def fail_proof(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("proof persistence failed")
+
+    def substitute_rollback(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        rollback = inbox.parent / source
+        rollback.unlink()
+        rollback.write_bytes(attacker)
+        return original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(ledger, "_write_persisted_import_proofs", fail_proof)
+    monkeypatch.setattr(ledger.os, "replace", substitute_rollback)
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "atomic transaction", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    with pytest.raises(OSError, match="proof persistence failed"):
+        ledger._append_import_records(
+            tmp_path,
+            [record],
+            provenance_source="learning-loop",
+            migrate_untrusted_identities=True,
+        )
+
+    assert inbox.read_bytes() == before
+
+
+def test_proof_cleanup_failure_does_not_prevent_inbox_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    inbox.write_bytes(before)
+
+    def fail_proof(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("proof persistence failed")
+
+    def fail_cleanup(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("proof cleanup failed")
+
+    monkeypatch.setattr(ledger, "_write_persisted_import_proofs", fail_proof)
+    monkeypatch.setattr(ledger, "_remove_persisted_import_proofs", fail_cleanup)
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "atomic transaction", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    with pytest.raises(OSError, match="proof persistence failed"):
+        ledger._append_import_records(
+            tmp_path,
+            [record],
+            provenance_source="learning-loop",
+            migrate_untrusted_identities=True,
+        )
+
+    assert inbox.read_bytes() == before
+
+
+def test_failed_proof_publication_restores_held_inbox_after_parent_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    inbox.write_bytes(before)
+    outside_work = tmp_path / "outside-work"
+    outside_inbox = outside_work / "imports" / "inbox.jsonl"
+    outside_inbox.parent.mkdir(parents=True)
+    outside_before = b'{"text":"outside"}\n'
+    outside_inbox.write_bytes(outside_before)
+    work_parent = inbox.parent.parent
+    original_work = tmp_path / "original-work"
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "atomic row proof", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    def swap_then_fail(*_args: Any, **_kwargs: Any) -> None:
+        work_parent.rename(original_work)
+        work_parent.symlink_to(outside_work, target_is_directory=True)
+        raise OSError("proof persistence failed")
+
+    monkeypatch.setattr(ledger, "_write_persisted_import_proofs", swap_then_fail)
+
+    with pytest.raises(OSError, match="proof persistence failed"):
+        ledger._append_import_records(
+            tmp_path,
+            [record],
+            provenance_source="learning-loop",
+            migrate_untrusted_identities=True,
+        )
+
+    assert outside_inbox.read_bytes() == outside_before
+    assert (original_work / "imports" / "inbox.jsonl").read_bytes() == before
 
 
 def test_batch_ingest_rejects_whitespace_identity_metadata_before_persistence(tmp_path: Path):
@@ -1308,6 +1561,7 @@ def test_self_import_accepts_producer_stable_hash_fingerprint_and_normalizes_que
             "queue_path": str(queue),
         },
     )
+    ledger._write_persisted_import_proofs(tmp_path, [refresh], operation_id="0" * 32)
     ledger._write_imports(tmp_path, [refresh])
 
     scanner = dict(next(scanner for scanner in constants.SCANNER_DEFAULTS if scanner["id"] == "memory-refresh"))
