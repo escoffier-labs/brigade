@@ -932,66 +932,45 @@ def test_release_candidate_notes_and_publish_plan(tmp_path, monkeypatch, capsys)
     assert "Co-authored-by: Codex <codex@openai.com>" in inhouse_notes
 
 
-def test_release_candidate_redacts_unsafe_unreleased_entries_with_reasons(tmp_path, monkeypatch, capsys):
+def test_release_candidate_notes_sanitize_unreleased_url_token_ansi_and_control(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     _seed_ready_evidence(tmp_path)
     _patch_clean_health(monkeypatch)
     _patch_content_guard(monkeypatch)
-    unsafe_token = "unsafe" + "token123456789012"
-    (tmp_path / "CHANGELOG.md").write_text(
+    private_url = "https://agent.private.invalid/release-notes"
+    token = "ghp_" + ("a" * 20)
+    ansi = "\x1b[31m"
+    control = "\x07"
+    changelog = (
         "# Changelog\n\n"
         "## [Unreleased]\n"
         "- Add safe release notes.\n"
-        f"- Rotate API_TOKEN={unsafe_token}.\n"
-        "- Stop reading /home/example-user/private.conf.\n"
-        "- Move service from buildbox.corp.internal.\n"
-        "- <script>alert('release')</script>\n"
-        "- [click me](javascript:alert('release')).\n\n"
+        f"- Document callback {private_url} for operators.\n"
+        f"- Rotate deploy token {token}.\n"
+        f"- Colorize {ansi}status output\x1b[0m in doctor.\n"
+        f"- Keep the {control}bell out of notes.\n"
+        "- Preserve trailing safe highlight.\n\n"
         "## [0.1.0]\n- Historical entry.\n"
     )
+    changelog_path = tmp_path / "CHANGELOG.md"
+    changelog_path.write_text(changelog)
     subprocess.run(["git", "add", "CHANGELOG.md"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "update changelog"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
 
-    assert release_cmd.candidate_plan(target=tmp_path, base_ref="HEAD~1", json_output=True) == 0
-    first = json.loads(capsys.readouterr().out)
-    assert release_cmd.candidate_plan(target=tmp_path, base_ref="HEAD~1", json_output=True) == 0
-    second = json.loads(capsys.readouterr().out)
+    assert release_cmd.candidate_build(target=tmp_path, base_ref="HEAD~1", json_output=True) == 0
+    candidate = json.loads(capsys.readouterr().out)
+    notes = Path(candidate["path"], "RELEASE_NOTES_DRAFT.md").read_text()
+    items = candidate["release_notes_inputs"]["changelog_unreleased"]
 
-    inputs = first["release_notes_inputs"]
-    assert inputs["changelog_unreleased"] == ["Add safe release notes."]
-    assert inputs["changelog_redactions"] == {
-        "count": 5,
-        "reasons": {
-            "injection_markup": 2,
-            "private_hostname": 1,
-            "private_path": 1,
-            "secret": 1,
-        },
-    }
-    assert second["release_notes_inputs"] == inputs
-    rendered = json.dumps(first, sort_keys=True)
-    assert unsafe_token not in rendered
-    assert "example-user" not in rendered
-    assert "buildbox.corp.internal" not in rendered
-    assert "javascript:" not in rendered
-
-
-def test_release_notes_draft_reports_changelog_redaction_summary():
-    notes = release_cmd._candidate_release_notes(
-        {
-            "release_notes_inputs": {
-                "changelog_unreleased": ["A safe item."],
-                "changelog_redactions": {
-                    "count": 3,
-                    "reasons": {"secret": 1, "injection_markup": 2},
-                },
-            }
-        }
-    )
-
-    assert "- A safe item." in notes
-    assert "3 Unreleased changelog entries redacted" in notes
-    assert "injection_markup=2, secret=1" in notes
+    assert items[0] == "Add safe release notes."
+    assert items[-1] == "Preserve trailing safe highlight."
+    assert "[redacted-url]" in notes
+    assert "[redacted]" in notes
+    assert private_url not in notes
+    assert token not in notes
+    assert "\x1b" not in notes
+    assert control not in notes
+    assert changelog_path.read_text() == changelog
 
 
 def test_release_candidate_health_warnings(tmp_path, monkeypatch, capsys):

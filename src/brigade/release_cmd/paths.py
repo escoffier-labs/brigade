@@ -60,6 +60,11 @@ RELEASE_REPORT_TOKEN_RE = re.compile(
     r"xox[baprs]-[A-Za-z0-9-]{8,}|sk-(?:live|test|proj)-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{12,})\b"
 )
 
+RELEASE_REPORT_CONTROL_RE = re.compile(
+    r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|"
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069])+"
+)
+
 SCHEMA_MANIFEST_VERSION = 1
 
 INSTALL_SMOKE_STALE_HOURS = 168
@@ -206,6 +211,7 @@ def _release_report_safe_text(value: object, *, fallback: str = "", limit: int =
     rendered = RELEASE_REPORT_TOKEN_RE.sub("[redacted]", rendered)
     rendered = RELEASE_PRIVATE_VALUE_RE.sub(lambda match: f"{match.group(1)}=[redacted]", rendered)
     rendered = RELEASE_PRIVATE_PATH_RE.sub("[redacted-path]", rendered)
+    rendered = RELEASE_REPORT_CONTROL_RE.sub("", rendered)
     rendered = " ".join(rendered.split())
     if len(rendered) <= limit:
         return rendered
