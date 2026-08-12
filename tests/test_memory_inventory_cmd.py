@@ -622,7 +622,7 @@ def test_memory_inventory_title_fallback_sanitizes_path_stem(tmp_path, monkeypat
 
 
 def test_memory_inventory_config_oserror_fails_open_without_path_leak(tmp_path, capsys, monkeypatch):
-    from brigade import memory_cmd, memory_operations
+    from brigade import memory_cmd
 
     _write_card(tmp_path, "memory/cards/a.md", title="A", fresh_until="2099-01-01")
     _write_care_artifacts(
