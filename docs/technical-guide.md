@@ -118,7 +118,7 @@ For a remote T3 controller journal already available locally, configure an alias
 {"sources":[{"provider":"t3","host":"fleet-east","journal":"fleet/t3-controller.jsonl"}]}
 ```
 
-Each journal row may provide safe `label`, `task_label`, `state`, `started_at`, `last_updated_at`, and `parent_activity_id` fields. Center never follows that path outside the selected workspace, and it does not attempt network discovery or control remote agents.
+Each journal row may provide `state`, `started_at`, and `last_updated_at`. Center uses generic provider and task labels for controller data, so untrusted journal text cannot appear in the payload. It never follows that path outside the selected workspace, and it does not attempt network discovery or control remote agents.
 
 Browse the public template index in [`templates/`](../templates/).
 The installable source files live under `src/brigade/templates/`; root workspace files are local dogfood state and stay ignored.
