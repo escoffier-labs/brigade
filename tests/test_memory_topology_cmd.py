@@ -1007,7 +1007,10 @@ def test_memory_topology_manual_refresh_graph_direction(tmp_path, capsys, monkey
         lambda target, home=None: {
             "enabled": True,
             "target_match": True,
-            "backends": {"crontab": {"status": "current", "target_match": True}, "systemd": {"status": "missing", "target_match": False}},
+            "backends": {
+                "crontab": {"status": "current", "target_match": True},
+                "systemd": {"status": "missing", "target_match": False},
+            },
             "entries": [
                 {
                     "id": entry.entry_id,
@@ -1600,8 +1603,7 @@ def test_memory_topology_care_stage_ownership_when_scheduler_enabled(tmp_path, c
     by_edge = {e["id"]: e for e in payload["edges"]}
     assert by_edge["edge:care_scan:queue"]["enabled"] is True
     assert all(
-        by_edge[f"edge:care_job:{n['id'].split(':', 1)[1]}"]["enabled"] is (n["state"] == "enabled")
-        for n in care_jobs
+        by_edge[f"edge:care_job:{n['id'].split(':', 1)[1]}"]["enabled"] is (n["state"] == "enabled") for n in care_jobs
     )
 
 

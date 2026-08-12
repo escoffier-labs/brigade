@@ -91,8 +91,7 @@ def _fetch_inventory(target: Path) -> dict:
             if items:
                 partial = True
                 partial_reason = (
-                    f"Inventory is partial: page command failed after loading "
-                    f"{len(items)} item(s) ({last_error})."
+                    f"Inventory is partial: page command failed after loading {len(items)} item(s) ({last_error})."
                 )
             break
 
@@ -114,14 +113,10 @@ def _fetch_inventory(target: Path) -> dict:
             partial = True
             if isinstance(contract_total, int):
                 partial_reason = (
-                    f"Inventory is partial: loaded {len(items)} of {contract_total} "
-                    "(pagination did not advance)."
+                    f"Inventory is partial: loaded {len(items)} of {contract_total} (pagination did not advance)."
                 )
             else:
-                partial_reason = (
-                    f"Inventory is partial: loaded {len(items)} item(s) "
-                    "(pagination did not advance)."
-                )
+                partial_reason = f"Inventory is partial: loaded {len(items)} item(s) (pagination did not advance)."
             break
         offset = next_offset
 
@@ -143,9 +138,7 @@ def _fetch_inventory(target: Path) -> dict:
         if partial_reason:
             result["warning"] = partial_reason
         elif last_error is not None:
-            result["warning"] = (
-                f"Inventory is partial: loaded {len(items)} item(s) ({last_error})."
-            )
+            result["warning"] = f"Inventory is partial: loaded {len(items)} item(s) ({last_error})."
         else:
             result["warning"] = f"Inventory is partial: loaded {len(items)} item(s)."
     elif last_error is not None and not items:
@@ -159,19 +152,13 @@ def _fetch_inventory(target: Path) -> dict:
 
 def _mode_tabs() -> str:
     return (
-        '<div class="mo-modes" role="tablist" aria-label="'
-        + html.esc("Memory Operations modes")
-        + '">'
+        '<div class="mo-modes" role="tablist" aria-label="' + html.esc("Memory Operations modes") + '">'
         '<a href="#mo-topology" id="mo-tab-topology" class="mo-mode" role="tab" '
         'data-mo-mode="topology" aria-selected="true" aria-controls="mo-topology" '
-        'tabindex="0">'
-        + html.esc("Topology")
-        + "</a>"
+        'tabindex="0">' + html.esc("Topology") + "</a>"
         '<a href="#mo-inventory" id="mo-tab-inventory" class="mo-mode" role="tab" '
         'data-mo-mode="inventory" aria-selected="false" aria-controls="mo-inventory" '
-        'tabindex="-1">'
-        + html.esc("Inventory")
-        + "</a>"
+        'tabindex="-1">' + html.esc("Inventory") + "</a>"
         "</div>"
     )
 
@@ -298,10 +285,7 @@ def _paths_block(paths: list, edges: list) -> str:
             flow = "; ".join(segments)
         else:
             flow = "-"
-        blocks.append(
-            f'<li><strong>{harness}</strong>: '
-            f'<span class="mo-path-flow">{html.esc(flow)}</span></li>'
-        )
+        blocks.append(f'<li><strong>{harness}</strong>: <span class="mo-path-flow">{html.esc(flow)}</span></li>')
     if not blocks:
         return f"<p>{html.esc('No harness paths.')}</p>"
     return f'<ul class="mo-paths">{"".join(blocks)}</ul>'
@@ -330,10 +314,7 @@ def _ordered_path_edges(paths: list, edge_by_id: dict[str, dict[str, Any]]) -> l
 def _flow_graph(paths: list, nodes: list, edges: list) -> str:
     """Accessible compact flow list: every arrow is an actual edge.from -> edge.to."""
     if not paths:
-        return (
-            f"<p>{html.esc('Nodes')}: {html.esc(len(nodes))}; "
-            f"{html.esc('Edges')}: {html.esc(len(edges))}</p>"
-        )
+        return f"<p>{html.esc('Nodes')}: {html.esc(len(nodes))}; {html.esc('Edges')}: {html.esc(len(edges))}</p>"
 
     edge_by_id = _edge_lookup(edges)
     used = _ordered_path_edges(paths, edge_by_id)
@@ -577,9 +558,7 @@ def _render_inventory(inventory: dict) -> str:
     warn_html = "".join(f'<p class="error">{html.esc(bit)}</p>' for bit in warn_bits)
     meta = ""
     if partial and isinstance(contract_total, int):
-        meta = (
-            f'<p class="mo-muted">{html.esc(f"Loaded {loaded} of {contract_total} (partial).")}</p>'
-        )
+        meta = f'<p class="mo-muted">{html.esc(f"Loaded {loaded} of {contract_total} (partial).")}</p>'
     return html.panel(
         html.esc("Inventory"),
         warn_html + meta + filter_bar + pager + f'<div class="mo-scroll">{table}</div>',

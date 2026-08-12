@@ -821,7 +821,10 @@ def test_memory_inventory_skips_file_and_directory_symlinks(tmp_path, capsys):
     )
 
     # Scanner sees unresolved paths through the symlink root; inventory must not emit them.
-    scanned = {str(path.relative_to(tmp_path)) for path in memory_cmd._iter_cards(tmp_path, memory_cmd._config_or_default(tmp_path))}
+    scanned = {
+        str(path.relative_to(tmp_path))
+        for path in memory_cmd._iter_cards(tmp_path, memory_cmd._config_or_default(tmp_path))
+    }
     assert "memory/cards/linked-card.md" in scanned
 
     payload = memory_operations.inventory_payload(tmp_path)
@@ -888,7 +891,9 @@ def test_memory_inventory_robust_against_missing_malformed_oversized_and_non_utf
     no_fm.write_text(f"plain body with {BODY_SECRET}\n", encoding="utf-8")
 
     bad_bytes = tmp_path / "memory" / "cards" / "bad-body.md"
-    bad_bytes.write_bytes(b"---\ntitle: StillValid\nfresh_until: 2099-01-01\n---\n" + b"\xff\xfe" + BODY_SECRET.encode())
+    bad_bytes.write_bytes(
+        b"---\ntitle: StillValid\nfresh_until: 2099-01-01\n---\n" + b"\xff\xfe" + BODY_SECRET.encode()
+    )
 
     oversized = tmp_path / "memory" / "cards" / "oversized-fm.md"
     oversized.write_bytes(b"---\n" + (b"x: " + b"y" * 200 + b"\n") * 400 + b"title: NeverClose\n")
@@ -1038,8 +1043,7 @@ def test_memory_inventory_drops_unsafe_inline_tag_entries(tmp_path, capsys):
         "memory/cards/unsafe-tags.md",
         title="UnsafeTags",
         tags_line=(
-            "[safe, /abs/tag, ~/home-tag, C:\\\\Users\\\\tag, "
-            "win\\\\path, control\x01tag, look\\nlike, keep-me]"
+            "[safe, /abs/tag, ~/home-tag, C:\\\\Users\\\\tag, win\\\\path, control\x01tag, look\\nlike, keep-me]"
         ),
     )
 

@@ -244,9 +244,7 @@ def dispatch(args) -> int:
         if args.offset < 0:
             args._brigade_parser.error("--offset must be >= 0")
         if args.limit < 1 or args.limit > memory_operations.INVENTORY_MAX_LIMIT:
-            args._brigade_parser.error(
-                f"--limit must be between 1 and {memory_operations.INVENTORY_MAX_LIMIT}"
-            )
+            args._brigade_parser.error(f"--limit must be between 1 and {memory_operations.INVENTORY_MAX_LIMIT}")
         try:
             store_type = memory_operations.normalize_inventory_enum_filter(
                 args.store_type, allowed=memory_operations.STORE_TYPES, flag="--store-type"

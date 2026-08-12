@@ -1629,9 +1629,7 @@ def _inventory_last_mutation(meta: dict[str, Any]) -> dict[str, Any] | None:
     evidence_raw = _bound_single_line(memory_cmd._frontmatter_value(meta, "last_mutation_evidence_state"))
     evidence_map = {item.lower(): item for item in EVIDENCE_STATES}
     evidence_state = evidence_map.get(evidence_raw.lower(), "missing") if evidence_raw is not None else "missing"
-    duration_seconds = _finite_nonnegative_number(
-        memory_cmd._frontmatter_value(meta, "last_mutation_duration_seconds")
-    )
+    duration_seconds = _finite_nonnegative_number(memory_cmd._frontmatter_value(meta, "last_mutation_duration_seconds"))
     receipt = {
         "evidence_state": evidence_state,
         "status": status,
