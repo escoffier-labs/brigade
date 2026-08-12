@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
-from . import agents, proc, receipt_schema, run_control, runguard
+from . import agents, proc, receipt_schema, run_budget, run_control, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
 from .seat_health_policy import SeatQuarantineState, decide_retry, failure_for_worker_result
 
@@ -896,6 +896,8 @@ def dispatch(
                     stage_results_by_index[index] = future.result()
                 except runguard.RetainRunLockError:
                     raise
+                except run_budget.BudgetPolicyError:
+                    raise
                 except Exception as exc:  # pragma: no cover - defensive boundary
                     assignment = stage_assignments[index]
                     stage_results_by_index[index] = WorkerResult(
@@ -1123,6 +1125,8 @@ def _dag_dispatch(
                 finished = done.result()
                 results[i] = finished
             except runguard.RetainRunLockError:
+                raise
+            except run_budget.BudgetPolicyError:
                 raise
             except Exception as exc:
                 finished = WorkerResult(

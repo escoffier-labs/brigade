@@ -1816,8 +1816,8 @@ def test_run_cli_terminalizes_keyboard_interrupt_during_dispatch(tmp_path, monke
     assert run_meta["finished_at"].endswith("Z")
     assert run_meta["failure"] == {
         "phase": "dispatch",
-        "kind": "keyboard-interrupt",
-        "detail": "run canceled by user",
+        "kind": "operator-cancelled",
+        "detail": "run canceled by operator",
         "seat": "coder",
     }
     assert not (repo / ".brigade" / "run.lock").exists()
@@ -1826,7 +1826,7 @@ def test_run_cli_terminalizes_keyboard_interrupt_during_dispatch(tmp_path, monke
 @pytest.mark.parametrize(
     ("sig", "expected_code", "failure_kind"),
     [
-        (signal.SIGINT, 128 + signal.SIGINT, "keyboard-interrupt"),
+        (signal.SIGINT, 128 + signal.SIGINT, "operator-cancelled"),
         (signal.SIGTERM, 128 + signal.SIGTERM, "signal"),
     ],
 )

@@ -60,6 +60,8 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "lifecycle_journal_requested",
         "run_journal_authority_requested",
         "approval_reference",
+        "verification_contract",
+        "run_budget",
         # Timing
         "started_at",
         "status_started_at",
@@ -153,6 +155,14 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "control.requested",
         "control.observed",
         "control.failed",
+        # Run-budget lifecycle facts are status-neutral; terminal policy is
+        # applied by the coordinator via run.failed / run.interrupted (issue #593).
+        "run_budget.threshold_reached",
+        "run_budget.reservation_denied",
+        "run_budget.exhausted",
+        "run_budget.cancel_requested",
+        "run_budget.cancelled",
+        "run_budget.usage_reconciled",
     }
 )
 

@@ -103,6 +103,16 @@ def _full_base_snapshot() -> dict:
             "source": "daily",
             "fingerprint": "approval-fingerprint",
         },
+        "verification_contract": {
+            "schema": "brigade.verification_contract.v1",
+            "schema_version": 1,
+            "budget": {"worker_dispatch_count": 2},
+        },
+        "run_budget": {
+            "schema": "brigade.run_budget.v1",
+            "schema_version": 1,
+            "ceilings": {"worker_dispatch_count": 2},
+        },
         "started_at": "2026-07-27T15:30:00.000000Z",
         "status_started_at": "2026-07-27T15:30:00.000000Z",
         "finished_at": None,
@@ -527,7 +537,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 50
+    assert len(PRESERVED_FIELDS) == 52
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",

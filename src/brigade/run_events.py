@@ -122,6 +122,38 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     "control.requested": frozenset({"op", "worker", "text_digest", "turn_id", "request_id"}),
     "control.observed": frozenset({"op", "worker", "turn_id", "request_id", "detail"}),
     "control.failed": frozenset({"op", "worker", "turn_id", "request_id", "error_class", "detail_digest"}),
+    # Run budget lifecycle (issue #593). Safe summaries only — never raw
+    # diagnostics, prompts, tool args, or provider bodies.
+    "run_budget.threshold_reached": frozenset(
+        {"dimension", "mode", "declared", "used", "remaining", "threshold_pct", "reason_class"}
+    ),
+    "run_budget.reservation_denied": frozenset(
+        {"dimension", "mode", "declared", "used", "remaining", "request_id", "reason_class"}
+    ),
+    "run_budget.exhausted": frozenset({"dimension", "mode", "declared", "used", "remaining", "reason_class"}),
+    "run_budget.cancel_requested": frozenset({"request_id", "reason_class", "transport_capability", "dimension"}),
+    "run_budget.cancelled": frozenset(
+        {
+            "request_id",
+            "reason_class",
+            "transport_capability",
+            "transport_result",
+            "active_remaining",
+            "dimension",
+        }
+    ),
+    "run_budget.usage_reconciled": frozenset(
+        {
+            "dimension",
+            "mode",
+            "usage_source",
+            "estimated_used",
+            "provider_used",
+            "used",
+            "request_id",
+            "reason_class",
+        }
+    ),
 }
 CONTROL_FAILURE_CLASSES = frozenset({"transport_exception", "transport_rejected", "transport_protocol_error"})
 APPROVAL_DECISION_STATES = frozenset({"pending", "approved", "rejected", "held", "consumed"})
@@ -363,6 +395,10 @@ def _validate_payload(event_type: str, payload: Any) -> None:
         detail_digest = payload.get("detail_digest")
         if not isinstance(detail_digest, str) or not _HEX64.fullmatch(detail_digest):
             raise CanonicalizationError("control.failed detail_digest is invalid")
+    if event_type.startswith("run_budget."):
+        from brigade import run_budget
+
+        run_budget.validate_run_budget_payload(event_type, payload)
 
 
 def validate_event(env: Any) -> list[str]:

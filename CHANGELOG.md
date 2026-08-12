@@ -51,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `brigade.run_event.v1` records and rejects raw JSON-RPC worker envelopes.
   Source runs remain unclassified until scrubbed; audit/replay still require
   `policy=local-only` for raw salvage.
+- Run budget enforcement first slice (#593): wall-clock and worker-dispatch
+  ceilings are reserved before new worker dispatch; durable
+  `run_budget.threshold_reached` / `reservation_denied` / `exhausted` /
+  `cancel_requested` / `cancelled` / `usage_reconciled` lifecycle events use
+  stable idempotency keys; restart-safe projection rebuilds remaining
+  allocation from the journal. Model/tool/token/cost stay observed unless an
+  adapter exposes an enforceable boundary. Budget exhaustion and operator
+  cancellation are terminal policy lifecycle states (`budget-exhausted` /
+  `operator-cancelled`), not #576 worker FailureClass values and not
+  infrastructure-neutral under #580. Child allocation remains #594.
 - Issue #846 R2 residual work-store characterization: extend the R1 harness
   with observed same-actor/guard/empty-filter, restart, schema coercion,
   backup/restore, install/cold-start/backup timing, resource, metrics-state,
@@ -98,8 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an independent verifier, failure/rollback path, and token/latency budget before
   execution (`brigade.verification_contract.v1`). Plan surfaces incompleteness;
   run refuses incomplete consequential templates. Receipts record `budget_use`
-  and `verification` separately from `model_completion`. Budget enforcement
-  remains #593.
+  and `verification` separately from `model_completion`. First-slice enforcement
+  of wall-clock and worker-dispatch ceilings lands in #593.
 - Optional dispatch annotations on work tasks (#815): `--seat-class`
   (`mechanical` | `judgment` | `review`) and `--spend-by` (ISO-8601 deadline)
   round-trip through `brigade work task add` / `brigade work task annotate` and
@@ -160,6 +170,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `load_error` / `load_warnings` text for missing path-based skill selectors.
 
 ### Fixed
+- Run budget resume gate (#593 / PR #864): `brigade runs resume` evaluates the
+  persisted declaration, original `started_at`, and authoritative budget
+  lifecycle projection before `AppServer.start()`, refusing expired or
+  already-exhausted declared runs without provider or synthesis calls.
+  Undeclared and non-expired declared resumes keep existing recovery behavior.
+- Run budget restart reclaim (#593 / PR #864): evaluate the wall-clock ceiling
+  before reclaiming a durable pending dispatch can authorize external work, so
+  an expired run cannot relaunch attempt 1 after recovery.
+- Run budget declared-only contract (#593 / PR #864): document that hard
+  wall-clock / worker-dispatch ceilings apply only when a run carries
+  `run_budget` or `verification_contract.budget`; ordinary undeclared
+  `brigade run`, dogfood, and model-trial paths remain unbounded for
+  backward compatibility (no invented flags, defaults, or timeout→budget
+  mapping). Add undeclared-path regressions alongside the declared
+  enforcement test.
+- Run budget normal-run wiring (#593 / PR #864): persist declared
+  verification-contract / run_budget through start and plan receipts so the
+  coordinator enforces real wall-clock and dispatch ceilings; allocate
+  same-seat attempts inside the reservation lock so `worker_dispatch_count=1`
+  launches once; bridge optional `input_tokens` / `output_tokens` while keeping
+  aggregate `token_budget` distinct.
+- Run budget `token_budget` bridge (#593 / PR #864): preserve aggregate
+  VerificationContract `token_budget` / receipt `tokens_used` semantics; do not
+  map the legacy ceiling onto `observed.input_tokens`. Explicit `input_tokens` /
+  `output_tokens` remain separate observed dimensions.
+- Run budget dispatch reservations (#593 / PR #864): serialize parallel
+  same-stage reservations under the coordinator lock; use stable
+  `dispatch:{seat}:{attempt}` request identities with durable
+  reservation→`run.dispatch.requested` ordering and restart-safe idempotency;
+  live Ctrl-C during dispatch terminalizes as `operator-cancelled` (not
+  infrastructure-neutral). Wall-clock, usage labels, compatibility diagnostics,
+  and #594 exclusion unchanged.
 - Claude harness readiness now fails when a global `core.excludesFile` rule
   such as `.claude/` hides the managed handoff `TEMPLATE.md`.
   `operator verify-harness --harness claude` returns `ready: no` with a nonzero

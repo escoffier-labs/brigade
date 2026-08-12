@@ -1254,6 +1254,193 @@ def test_lifecycle_run_dispatch_emits_only_identified_worker_dispatch_facts(monk
     assert any(event.event_type == "run.dispatching.started" for event in events)
 
 
+def test_normal_run_persists_and_enforces_declared_dispatch_ceiling(monkeypatch, tmp_path):
+    """Declared ceilings survive start/plan and refuse a second same-stage dispatch."""
+    from brigade import run_journal, run_lifecycle, verification_contract
+
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    calls: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        calls.append(str(cli_ref))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps(
+                    {
+                        "assignments": [
+                            {"stage": 1, "worker": "coder", "task": "implement"},
+                            {"stage": 1, "worker": "reviewer", "task": "review"},
+                        ]
+                    }
+                ),
+                ok=True,
+            )
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "run"
+    contract = {
+        "schema": verification_contract.VERIFICATION_CONTRACT_SCHEMA,
+        "schema_version": verification_contract.VERIFICATION_CONTRACT_SCHEMA_VERSION,
+        "verifier": {"source": "command", "command": "true"},
+        "rollback": {"policy": "none"},
+        "budget": {
+            "latency_seconds": 3600,
+            "wall_clock_seconds": 3600,
+            "worker_dispatch_count": 1,
+        },
+    }
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=tmp_path,
+            output_dir=output_dir,
+            route_enabled=False,
+            code_graph_enabled=False,
+            evidence_enabled=False,
+            verification_contract_payload=contract,
+        )
+        == 1
+    )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["verification_contract"]["budget"]["worker_dispatch_count"] == 1
+    assert run_meta["verification_contract"]["budget"]["wall_clock_seconds"] == 3600
+    plan = json.loads((output_dir / "plan.json").read_text())
+    assert plan["verification_contract"]["budget"]["worker_dispatch_count"] == 1
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure"]["kind"] == "budget-exhausted"
+    assert run_meta["failure"]["phase"] == "dispatch"
+
+    events = run_journal.read_journal(run_lifecycle._journal_path(output_dir)).events
+    requested = [event for event in events if event.event_type == "run.dispatch.requested"]
+    denied = [event for event in events if event.event_type == "run_budget.reservation_denied"]
+    exhausted = [event for event in events if event.event_type == "run_budget.exhausted"]
+    assert len(requested) == 1
+    assert denied
+    assert exhausted
+
+
+def test_undeclared_ordinary_run_invents_no_hard_ceiling(monkeypatch, tmp_path):
+    """Undeclared brigade-run shape: no verification_contract/run_budget → no ceiling."""
+    from brigade import run_journal, run_lifecycle
+
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    calls: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        calls.append(str(cli_ref))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps(
+                    {
+                        "assignments": [
+                            {"stage": 1, "worker": "coder", "task": "implement"},
+                            {"stage": 1, "worker": "reviewer", "task": "review"},
+                        ]
+                    }
+                ),
+                ok=True,
+            )
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "run"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=tmp_path,
+            output_dir=output_dir,
+            route_enabled=False,
+            code_graph_enabled=False,
+            evidence_enabled=False,
+        )
+        == 0
+    )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert "verification_contract" not in run_meta
+    # Coordinator must not invent enforceable ceilings on undeclared runs.
+    if isinstance(run_meta.get("run_budget"), dict):
+        nested = run_meta["run_budget"].get("declaration", run_meta["run_budget"])
+        ceilings = nested.get("ceilings", {}) if isinstance(nested, dict) else {}
+        assert ceilings.get("wall_clock_seconds") is None
+        assert ceilings.get("worker_dispatch_count") is None
+    assert run_meta["status"] == "ok"
+
+    events = run_journal.read_journal(run_lifecycle._journal_path(output_dir)).events
+    requested = [event for event in events if event.event_type == "run.dispatch.requested"]
+    denied = [event for event in events if event.event_type == "run_budget.reservation_denied"]
+    exhausted = [event for event in events if event.event_type == "run_budget.exhausted"]
+    assert len(requested) == 2
+    assert denied == []
+    assert exhausted == []
+    # Chef plan + two worker CLIs + chef synthesize (cli refs, not seat names).
+    assert "ollama:llama3.3" in calls
+    assert calls.count("codex") >= 2
+
+
+@pytest.mark.parametrize(
+    "run_meta",
+    [
+        {"run_budget": "not-an-object"},
+        {"run_budget": {"declaration": "not-an-object"}},
+        {
+            "run_budget": {
+                "schema": "unsupported.run_budget.v2",
+                "schema_version": 1,
+                "declaration": {
+                    "schema": "brigade.run_budget.v1",
+                    "schema_version": 1,
+                    "ceilings": {"worker_dispatch_count": 1},
+                },
+            }
+        },
+        {
+            "verification_contract": {
+                "schema": "brigade.verification_contract.v1",
+                "schema_version": 1,
+                "budget": "not-an-object",
+            }
+        },
+        {"verification_contract": "not-an-object"},
+        {
+            "verification_contract": {
+                "schema": "unsupported.verification_contract.v2",
+                "schema_version": 1,
+                "budget": {"worker_dispatch_count": 1},
+            }
+        },
+        *[
+            {
+                "verification_contract": {
+                    "schema": "brigade.verification_contract.v1",
+                    "schema_version": schema_version,
+                    "budget": {"worker_dispatch_count": 1},
+                }
+            }
+            for schema_version in (99, True, 1.0)
+        ],
+    ],
+)
+def test_initial_budget_coordinator_refuses_malformed_declarations_before_dispatch(tmp_path, run_meta):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    payload = {"lifecycle_journal_requested": True, **run_meta}
+    (output_dir / "run.json").write_text(json.dumps(payload))
+
+    with pytest.raises(aboyeur.run_budget.BudgetCompatibilityError):
+        aboyeur._build_budget_coordinator(
+            output_dir,
+            started_at=datetime(2026, 8, 11, tzinfo=timezone.utc),
+            append_event=lambda *_args: (_ for _ in ()).throw(AssertionError("worker dispatch")),
+        )
+
+
 def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_path):
     def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
         return agents.AgentResult(
@@ -2006,8 +2193,8 @@ def test_run_stage_two_interruption_records_current_stage_seat(monkeypatch, tmp_
     assert run_meta["status_started_at"].endswith("Z")
     assert run_meta["failure"] == {
         "phase": "dispatch",
-        "kind": "keyboard-interrupt",
-        "detail": "run canceled by user",
+        "kind": "operator-cancelled",
+        "detail": "run canceled by operator",
         "seat": "reviewer",
     }
 

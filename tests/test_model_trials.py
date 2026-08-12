@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 
 from brigade import agents
 from brigade import cli
@@ -224,6 +225,42 @@ def test_execute_writes_running_marker_before_aboyeur_run(tmp_path, monkeypatch)
     final = json.loads((root / "cells" / cell.cell_id / "cell.json").read_text())
     assert final["state"] == "accepted"
     assert final["started_at"] == started_at_seen[0]
+
+
+def test_model_trial_ordinary_path_does_not_declare_run_budget(tmp_path, monkeypatch):
+    """Model-trial cell starts must not invent verification_contract / run_budget payloads."""
+    manifest = _manifest()
+    manifest["trials"] = 1
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    root = tmp_path / "results"
+    start_kwargs: list[dict] = []
+    run_kwargs: list[dict] = []
+
+    def fake_record_run_start(output_dir, **kwargs):
+        start_kwargs.append(dict(kwargs))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "run.json").write_text(json.dumps({"status": "started"}))
+
+    def fake_run(task, roster, **kwargs):
+        run_kwargs.append(dict(kwargs))
+        out = kwargs["output_dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "final.txt").write_text("hello\n")
+        (out / "run.json").write_text(json.dumps({"status": "ok", "duration_seconds": 0.5}))
+        return 0
+
+    monkeypatch.setattr(model_trials.aboyeur, "record_run_start", fake_record_run_start)
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    monkeypatch.setattr(model_trials.runguard, "run_lock", lambda *a, **k: nullcontext())
+
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 0
+    assert start_kwargs
+    assert "verification_contract_payload" not in start_kwargs[0]
+    assert "run_budget_payload" not in start_kwargs[0]
+    assert run_kwargs
+    assert "verification_contract_payload" not in run_kwargs[0]
+    assert "run_budget_payload" not in run_kwargs[0]
 
 
 def test_resume_does_not_skip_running_cells(tmp_path, monkeypatch):

@@ -514,6 +514,34 @@ def test_dispatch_facts_pair_each_real_attempt_without_reusing_pending_identity(
     assert run_lifecycle.pending_dispatch_requests(events) == [("coder", 2)]
 
 
+def test_next_dispatch_attempt_reuses_open_pending_request(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started", lock_workspace=repo)
+    _write_run_json_locked(repo, run_dir, "started", lock_workspace=repo)
+    _write_run_json_locked(repo, run_dir, "dispatching", lock_workspace=repo)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        first = run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+            attempt=1,
+        )
+        assert first is not None
+        assert run_lifecycle.next_dispatch_attempt(run_dir, "coder") == 1
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.failed",
+            seat="coder",
+            attempt=1,
+        )
+        assert run_lifecycle.next_dispatch_attempt(run_dir, "coder") == 2
+
+
 def test_artifact_collection_intermediate_appends_the_second_a(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
@@ -2510,6 +2538,37 @@ def test_authority_dispatch_checkpoint_is_base_stripped_and_recovers_exact_tail(
     assert repaired["journal_last_sequence"] == events[-1].sequence
     assert repaired["journal_last_event_digest"] == events[-1].event_digest
     assert repaired["projector_version"] == run_projector.PROJECTOR_VERSION
+
+
+def test_authoritative_projection_and_checkpoint_recovery_preserve_budget_declarations(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    verification_contract = {
+        "schema": "brigade.verification_contract.v1",
+        "schema_version": 1,
+        "budget": {"worker_dispatch_count": 2},
+    }
+    run_budget = {
+        "schema": "brigade.run_budget.v1",
+        "schema_version": 1,
+        "ceilings": {"worker_dispatch_count": 2},
+    }
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        payload = _apply_authority_request(run_dir, _run_payload("dispatching", lock_workspace=repo))
+        payload["verification_contract"] = verification_contract
+        payload["run_budget"] = run_budget
+        aboyeur._write_json(run_dir / "run.json", payload)
+
+    projected = json.loads((run_dir / "run.json").read_text())
+    assert projected["verification_contract"] == verification_contract
+    assert projected["run_budget"] == run_budget
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["verification_contract"] == verification_contract
+    assert repaired["run_budget"] == run_budget
 
 
 def test_authoritative_dispatch_requested_recovers_exact_old_ceiling_checkpoint(tmp_path, monkeypatch):

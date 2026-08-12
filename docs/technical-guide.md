@@ -225,6 +225,13 @@ Use `brigade work import issue-repairs` when issue-backed local tasks need revie
 One orchestrator plans the work, Brigade dispatches assigned workers through their own CLIs, then the orchestrator synthesizes the final answer.
 It is intentionally bounded: two orchestrator calls plus the worker calls in the plan.
 
+Hard run-budget ceilings (`wall_clock_seconds`, `worker_dispatch_count`) apply
+only when a run persists `run_budget` or `verification_contract.budget` (#593).
+Ordinary `brigade run`, dogfood, and model-trial starts without those
+declarations stay unbounded for backward compatibility; per-agent
+`timeout_seconds` is not a run-budget declaration. See
+[`receipt-schemas.md`](receipt-schemas.md) (run budget lifecycle).
+
 Plans may include integer `stage` values. Assignments in the same stage run in parallel, stages run from lowest to highest, and later-stage workers receive earlier-stage worker results in their prompt. Plans that omit `stage` remain compatible and run as stage 1.
 
 When `--cwd` is a git worktree, write runs refuse to start on a dirty tree
