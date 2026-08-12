@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Issue #846 work-store characterization harness (R1 baseline + R2 residuals).
+"""Issue #846 work-store characterization harness (R1/R2 baseline + R3 repair).
 
 Measures candidate store *shapes* against synthetic, machine-neutral graph
 fixtures. This script is research-only: it does not edit production work-store
@@ -16,7 +16,7 @@ Shapes:
 Protocol defaults match the #846 scoping comment: 10 warmups and 100 measured
 trials, nearest-rank p50/p95, two-claimer barrier race requiring one success
 and one exit 13, and pass/fail gates for #737/#738 anchors where exercised.
-R2 adds residual no-listener cells: same-actor rejection, guards/empty-filter,
+R3 retains the residual no-listener cells: same-actor rejection, guards/empty-filter,
 restart recovery, schema coercion observation, branch/config backup restore,
 install footprint, cold-start/backup timing, resource samples, and observed
 metrics-state plus deleted-secret/history checks. Latency remains descriptive
@@ -57,18 +57,19 @@ from brigade.work_cmd import helpers as work_helpers
 from brigade.work_cmd import ledger as ledger_mod
 
 ISSUE = 846
-SLICE = "R2"
+SLICE = "R3"
 KIND = "work-store-characterization"
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 TIMEBOX_NOTE = (
-    "R2 residual timebox: extend the R1 JSON/SQLite harness with no-listener "
-    "residual cells only. Dolt shapes stay optional characterization candidates "
+    "R3 bounded repair: correct the SQLite release characterization while "
+    "retaining the accepted no-listener scope and residual cells. Dolt shapes "
+    "stay optional characterization candidates "
     "and must not enter Brigade runtime dependencies. Server listeners, TLS, "
     "and permission cells that need a listener remain blocked pending separate "
     "operator approval and are never started here."
 )
-SYNTHETIC_SECRET = "synth-secret-846-r2-TOKEN-not-a-real-credential"
-SYNTHETIC_SECRET_PATH = "synth/paths/issue-846-r2/private-token.example"
+SYNTHETIC_SECRET = "synth-secret-846-r3-TOKEN-not-a-real-credential"
+SYNTHETIC_SECRET_PATH = "synth/paths/issue-846-r3/private-token.example"
 METRICS_SCAN_NAMES = (
     "telemetry",
     "metrics.json",
@@ -292,7 +293,7 @@ def _write_synthetic_backup_config(target: Path) -> Path:
     config_path.write_text(
         "# synthetic characterization only\n"
         "[destinations.nas]\n"
-        'label = "synth-nas-846-r2"\n'
+        'label = "synth-nas-846-r3"\n'
         'summary_path = ".brigade/backups/nas-summary.json"\n',
         encoding="utf-8",
     )
@@ -1564,12 +1565,13 @@ def _sqlite_claim(path: Path, task_id: str, *, actor: str, claim_id: str) -> tup
         if row is None:
             conn.execute("ROLLBACK")
             return 2, {"reason": claim_mod.REASON_UNKNOWN_TASK}
-        status, assignee, existing_claim, revision, payload_raw = row
+        status, assignee, existing_claim, _revision, payload_raw = row
         task = json.loads(payload_raw)
-        if existing_claim == claim_id and status == "in_progress" and assignee == actor:
+        existing = claim_mod.claim_record(task)
+        if existing is not None and existing["claim_id"] == claim_id and status == "in_progress" and assignee == actor:
             conn.execute("COMMIT")
             return 0, {"created": False, "reason": "idempotent_retry"}
-        if status == "in_progress" or existing_claim:
+        if status == "in_progress" or existing_claim or existing is not None:
             holder = assignee or "unknown"
             conn.execute("ROLLBACK")
             return EXIT_CLAIM_BUSY, {
@@ -1584,28 +1586,75 @@ def _sqlite_claim(path: Path, task_id: str, *, actor: str, claim_id: str) -> tup
                 "exit_code": EXIT_CLAIM_BUSY,
             }
         claimed_at = _FIXED_CREATED_AT
-        task["status"] = "in_progress"
-        task["assignee"] = actor
-        task["claim"] = {
-            "claim_id": claim_id,
-            "actor": actor,
-            "claimed_at": claimed_at,
-            "item_revision": int(revision) + 1,
-        }
-        task["updated_at"] = claimed_at
+        record = claim_mod._set_claim(task, actor=actor, claim_id=claim_id, claimed_at=claimed_at)
         conn.execute(
             "UPDATE tasks SET status=?, assignee=?, claim_id=?, item_revision=?, payload=? WHERE id=?",
             (
                 "in_progress",
                 actor,
                 claim_id,
-                int(revision) + 1,
+                record["item_revision"],
                 json.dumps(task, sort_keys=True),
                 task_id,
             ),
         )
         conn.execute("COMMIT")
         return 0, {"created": True, "holder": actor, "claim_id": claim_id}
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def _sqlite_release(
+    path: Path,
+    task_id: str,
+    *,
+    actor: str | None = None,
+    if_actor: str | None = None,
+    if_status: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Release a SQLite claim atomically with Brigade's canonical semantics."""
+    conn = _sqlite_connect(path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT payload FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return 2, {"reason": claim_mod.REASON_UNKNOWN_TASK, "task_id": task_id}
+        task = json.loads(row[0])
+        try:
+            result = claim_mod.apply_release_to_task(
+                {"tasks": [task], "edges": []},
+                task,
+                actor=actor,
+                if_actor=if_actor,
+                if_status=if_status,
+            )
+        except claim_mod.ClaimError as exc:
+            conn.execute("ROLLBACK")
+            return int(exc.exit_code), exc.as_dict()
+        record = result["released"]
+        conn.execute(
+            "UPDATE tasks SET status=?, assignee=NULL, claim_id=NULL, item_revision=?, payload=? WHERE id=?",
+            (
+                task["status"],
+                task["item_revision"],
+                json.dumps(task, sort_keys=True),
+                task_id,
+            ),
+        )
+        conn.execute("COMMIT")
+        return 0, {
+            "task_id": task_id,
+            "status": task["status"],
+            "released": record,
+            "item_revision": task["item_revision"],
+        }
     except Exception:
         try:
             conn.execute("ROLLBACK")
@@ -1743,6 +1792,51 @@ def _sqlite_same_actor_and_retry(root: Path, ledger: dict[str, Any]) -> dict[str
                 "pass": same_ok,
             },
             "pass": ok,
+        }
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_guard_and_empty_filter(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-guards-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, ledger)
+        task_id = _claim_target_id(ledger)
+        claim_code, _claimed = _sqlite_claim(db_path, task_id, actor="lane-a", claim_id="guard-claim")
+        actor_code, actor_payload = _sqlite_release(db_path, task_id, if_actor="other-lane")
+        status_code, status_payload = _sqlite_release(db_path, task_id, if_status="pending")
+        empty_code, empty_payload = _sqlite_release(db_path, task_id, actor="")
+        release_code, released = _sqlite_release(
+            db_path,
+            task_id,
+            if_actor="lane-a",
+            if_status="in_progress",
+        )
+        exported = _sqlite_export_ledger(db_path)
+        stored = next(task for task in exported["tasks"] if task["id"] == task_id)
+        cleanup_ok = (
+            stored.get("status") == "pending"
+            and stored.get("item_revision") == 2
+            and not any(key in stored for key in ("assignee", "claim", "claim_id", "claimed_at"))
+        )
+        actor_ok = actor_code == EXIT_CLAIM_BUSY and actor_payload.get("reason") == claim_mod.REASON_GUARD_MISMATCH
+        status_ok = status_code == EXIT_CLAIM_BUSY and status_payload.get("reason") == claim_mod.REASON_GUARD_MISMATCH
+        empty_ok = empty_code == 2 and empty_payload.get("reason") == claim_mod.REASON_EMPTY_FILTER
+        success_ok = release_code == 0 and released.get("item_revision") == 2 and cleanup_ok
+        return {
+            "status": "measured",
+            "if_actor_mismatch": {"exit_code": actor_code, "reason": actor_payload.get("reason"), "pass": actor_ok},
+            "if_status_mismatch": {
+                "exit_code": status_code,
+                "reason": status_payload.get("reason"),
+                "guard": status_payload.get("guard"),
+                "pass": status_ok,
+            },
+            "empty_filter": {"exit_code": empty_code, "reason": empty_payload.get("reason"), "pass": empty_ok},
+            "if_status_match": {"exit_code": release_code, "released": success_ok, "pass": success_ok},
+            "claim_cleanup": {"item_revision": stored.get("item_revision"), "pass": cleanup_ok},
+            "pass": claim_code == 0 and actor_ok and status_ok and empty_ok and success_ok,
         }
     finally:
         for suffix in ("", "-wal", "-shm"):
@@ -2085,10 +2179,7 @@ def measure_sqlite_wal(
     mutation = _sqlite_measure_mutation(root, ledger, warmups=warmups, trials=trials)
     claim_race = _sqlite_claim_race(root, ledger)
     same_actor = _sqlite_same_actor_and_retry(root, ledger)
-    guards = _cell_unavailable(
-        "sqlite characterization adapter does not implement Brigade release "
-        "guards or empty-filter semantics; measured on json_ledger"
-    )
+    guards = _sqlite_guard_and_empty_filter(root, ledger)
     restart = _sqlite_restart_recovery(root, ledger)
     schema = _sqlite_schema_version_policy(root, ledger)
     # Graph readiness still evaluated by Brigade resolver on exported form.
@@ -2114,7 +2205,7 @@ def measure_sqlite_wal(
     metrics_state = _sqlite_metrics_state(root, ledger)
     secret_history = _sqlite_secret_history(root, ledger)
     baseline_stats = None if json_baseline is None else json_baseline.get("mutation_latency")
-    claim_738 = bool(claim_race.get("pass")) and bool(same_actor.get("pass"))
+    claim_738 = bool(claim_race.get("pass")) and bool(same_actor.get("pass")) and bool(guards.get("pass"))
     gates = {
         "issue_737_graph": graph["pass"],
         "issue_738_claim": claim_738,
@@ -2206,14 +2297,14 @@ def measure_dolt_shape(shape: str, dataset: str, *, dolt_bin: str | None) -> dic
         return _dolt_blocked_result(
             shape,
             dataset,
-            "R2 policy: harness must not start a network listener; "
+            "R3 policy: harness must not start a network listener; "
             "operator-owned server characterization requires separate approval",
         )
     if shape == "embedded_dolt":
         return _dolt_blocked_result(
             shape,
             dataset,
-            "No embedded Dolt boundary is checked into this repo; R2 does not build or persist a Go/Dolt dependency",
+            "No embedded Dolt boundary is checked into this repo; R3 does not build or persist a Go/Dolt dependency",
         )
     # dolt_cli_per_command
     resolved = dolt_bin or shutil.which("dolt")
@@ -2224,12 +2315,12 @@ def measure_dolt_shape(shape: str, dataset: str, *, dolt_bin: str | None) -> dic
             "dolt binary not available on PATH; optional temporary CLI not supplied "
             "(--dolt-bin). Cell left unmeasured rather than fabricated",
         )
-    # A binary may be present for future optional runners; R2 still does not
+    # A binary may be present for future optional runners; R3 still does not
     # auto-run Dolt mutations without an explicit enable flag.
     return _dolt_blocked_result(
         shape,
         dataset,
-        f"dolt binary observed at {Path(resolved).name} but R2 timebox keeps "
+        f"dolt binary observed at {Path(resolved).name} but R3 timebox keeps "
         "CLI mutation runner disabled; documentation-only characterization applies",
     )
 
@@ -2360,7 +2451,7 @@ def capability_matrix_notes() -> dict[str, Any]:
         },
         "dolt_cli_per_command": {
             "portable_sync": "clone_push_pull_candidate",
-            "concurrent_same_store_claim": "unmeasured_r2",
+            "concurrent_same_store_claim": "unmeasured_r3",
             "concurrent_cross_machine_claim": "not_by_cli_alone",
             "branch_diff_merge": "native_candidate",
             "row_locks": "unsupported_select_for_update",
@@ -2396,7 +2487,7 @@ def capability_matrix_notes() -> dict[str, Any]:
                 "meet measured correctness through file or replica candidates"
             ),
             "runtime_dependency": "forbidden_unless_later_issue_approves",
-            "status": "blocked_no_listener_in_r2",
+            "status": "blocked_no_listener_in_r3",
         },
         "sources": [
             "https://www.dolthub.com/docs/sql-reference/sql-support/supported-statements/",
@@ -2413,7 +2504,7 @@ def decision_record() -> dict[str, Any]:
         "current_need": "sequential_portable_sync_plus_reviewable_branch_merge_proposals",
         "concurrent_cross_machine_claims": "not_current_requirement",
         "store_decision": "keep_machine_local_json_ledger",
-        "portable_sync": "adopt_as_follow_up_requirement_not_implemented_in_r2",
+        "portable_sync": "adopt_as_follow_up_requirement_not_implemented_in_r3",
         "sqlite": "optional_local_characterization_only_not_runtime_dependency",
         "shared_store_conformance_fixture": "not_approved",
         "shared_service_eligibility": ("only_if_later_concurrent_claim_requirement_fails_file_or_replica_candidates"),
