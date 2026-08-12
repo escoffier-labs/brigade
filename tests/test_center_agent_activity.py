@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from brigade import center_cmd
+from brigade.center_cmd import agent_activity as activity_records
 from brigade.center_cmd.dashboard.views import agent_activity
 
 
@@ -17,7 +18,6 @@ def test_center_activity_v2_lists_run_workers_and_stale_fleet_observation(tmp_pa
         run / "run.json",
         {
             "task": "A prompt that must not enter the activity payload",
-            "task_label": "Operator view",
             "orchestrator": "planner",
             "status": "dispatching",
             "started_at": (now - timedelta(minutes=3)).isoformat(),
@@ -28,8 +28,8 @@ def test_center_activity_v2_lists_run_workers_and_stale_fleet_observation(tmp_pa
         run / "plan.json",
         {
             "assignments": [
-                {"worker": "worker-a", "task": "private worker prompt", "task_label": "Build contract"},
-                {"worker": "worker-b", "task": "private worker prompt", "task_label": "Build view"},
+                {"worker": "worker-a", "task": "private worker prompt"},
+                {"worker": "worker-b", "task": "private worker prompt"},
             ]
         },
     )
@@ -49,7 +49,7 @@ def test_center_activity_v2_lists_run_workers_and_stale_fleet_observation(tmp_pa
     workers = [record for record in records if record["kind"] == "worker"]
     assert len(workers) == 2
     assert all(record["parent_activity_id"] == run_record["activity_id"] for record in workers)
-    assert {record["task_label"] for record in workers} == {"Build contract", "Build view"}
+    assert {record["task_label"] for record in workers} == {"Worker assignment"}
     assert next(record for record in workers if record["label"] == "worker-b")["state"] == "succeeded"
     fleet = next(record for record in records if record["provider"] == "t3")
     assert fleet["host"] == "fleet-east"
@@ -80,6 +80,23 @@ def test_center_activity_observes_codex_and_cursor_session_files_without_transcr
     rendered = json.dumps(records)
     assert "private prompt" not in rendered
     assert "private transcript" not in rendered
+
+
+def test_session_discovery_bounds_directory_walks(tmp_path, monkeypatch):
+    root = tmp_path / "sessions"
+    for index in range(300):
+        (root / f"session-{index:03}").mkdir(parents=True, exist_ok=True)
+    actual_scandir = activity_records.os.scandir
+    calls = []
+
+    def tracked_scandir(path):
+        calls.append(path)
+        return actual_scandir(path)
+
+    monkeypatch.setattr(activity_records.os, "scandir", tracked_scandir)
+
+    assert activity_records._bounded_session_paths(root, "codex") == []
+    assert len(calls) == 200
 
 
 def test_agent_activity_view_uses_state_words_and_keeps_ids_in_details():

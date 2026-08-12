@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections import deque
+from fnmatch import fnmatch
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -107,35 +109,22 @@ def _local_session_records(now: datetime) -> list[dict[str, Any]]:
     """Observe file freshness only. Session files are never parsed as transcripts."""
     home = Path(os.environ.get("HOME", str(Path.home()))).expanduser()
     codex_home = Path(os.environ.get("CODEX_HOME", str(home / ".codex"))).expanduser()
-    records = _session_file_records(
-        codex_home / "sessions", "rollout-*.jsonl", "codex", "codex-cli", "Codex session", now
-    )
+    records = _session_file_records(codex_home / "sessions", "codex", "codex-cli", "Codex session", now)
     if not records:
         records.append(_missing_local_source("codex", "codex-cli", now))
     cursor_records = _session_file_records(
-        home / ".cursor" / "projects",
-        "agent-transcripts/*/*.jsonl",
-        "cursor",
-        "cursor-agent",
-        "Cursor session",
-        now,
+        home / ".cursor" / "projects", "cursor", "cursor-agent", "Cursor session", now
     )
     records.extend(cursor_records or [_missing_local_source("cursor", "cursor-agent", now)])
     return records
 
 
-def _session_file_records(
-    root: Path, pattern: str, provider: str, harness: str, label: str, now: datetime
-) -> list[dict[str, Any]]:
+def _session_file_records(root: Path, provider: str, harness: str, label: str, now: datetime) -> list[dict[str, Any]]:
     if not root.is_dir():
         return []
     records: list[dict[str, Any]] = []
     try:
-        paths = []
-        for path in root.rglob(pattern):
-            paths.append(path)
-            if len(paths) >= 200:
-                break
+        paths = _bounded_session_paths(root, provider)
         paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
         paths = paths[:25]
     except OSError:
@@ -164,6 +153,33 @@ def _session_file_records(
             )
         )
     return records
+
+
+def _bounded_session_paths(root: Path, provider: str) -> list[Path]:
+    """Find a bounded number of session files without scanning an entire home tree."""
+    paths: list[Path] = []
+    pending = deque([root])
+    directories_seen = 0
+    while pending and directories_seen < 200 and len(paths) < 200:
+        directory_path = pending.popleft()
+        directories_seen += 1
+        entries = sorted(os.scandir(directory_path), key=lambda entry: entry.name)
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(Path(entry.path))
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            filename = entry.name
+            is_codex_rollout = provider == "codex" and fnmatch(filename, "rollout-*.jsonl")
+            is_cursor_transcript = (
+                provider == "cursor" and "agent-transcripts" in directory_path.parts and filename.endswith(".jsonl")
+            )
+            if is_codex_rollout or is_cursor_transcript:
+                paths.append(directory_path / filename)
+                if len(paths) >= 200:
+                    return paths
+    return paths
 
 
 def _missing_local_source(provider: str, harness: str, now: datetime) -> dict[str, Any]:
