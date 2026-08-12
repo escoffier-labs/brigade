@@ -110,18 +110,24 @@ def _seed_release_prereqs(path: Path):
 
 
 def _patch_release_health(monkeypatch):
-    monkeypatch.setattr(
-        security_cmd,
-        "health",
-        lambda target: {
+    def clean_security_health(target):
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=target, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        return {
             "config_path": str(target / ".brigade" / "security.toml"),
             "valid": True,
             "issue_count": 0,
             "top_issue": None,
             "top_finding": None,
-            "evidence": {"ready": True, "finding_count": 0},
+            "evidence": {"ready": True, "finding_count": 0, "candidate_commit": head},
             "checks": [],
-        },
+        }
+
+    monkeypatch.setattr(
+        security_cmd,
+        "health",
+        clean_security_health,
     )
     monkeypatch.setattr(
         handoff_cmd,
