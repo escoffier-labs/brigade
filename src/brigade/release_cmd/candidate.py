@@ -92,13 +92,28 @@ def _load_guard_policy(selection: str | Path | None) -> Policy:
     return load_policy(default_policy(name))
 
 
-def _changelog_unreleased(path: Path) -> list[str]:
+def _changelog_entry_redaction_reasons(item: str) -> set[str]:
+    reasons: set[str] = set()
+    if RELEASE_REPORT_URL_RE.search(item):
+        reasons.add("private_url")
+    if RELEASE_REPORT_TOKEN_RE.search(item) or RELEASE_PRIVATE_VALUE_RE.search(item):
+        reasons.add("secret")
+    if RELEASE_PRIVATE_PATH_RE.search(item):
+        reasons.add("private_path")
+    if RELEASE_REPORT_CONTROL_RE.search(item):
+        reasons.add("control")
+    return reasons
+
+
+def _changelog_unreleased_with_redactions(path: Path) -> tuple[list[str], dict[str, Any]]:
     changelog = path / "CHANGELOG.md"
     if not changelog.is_file():
-        return []
+        return [], {"count": 0, "reasons": {}}
     lines = changelog.read_text(encoding="utf-8").splitlines()
     capture = False
     items: list[str] = []
+    redaction_count = 0
+    reason_counts: dict[str, int] = {}
     for line in lines:
         if line.startswith("## [Unreleased]"):
             capture = True
@@ -106,9 +121,20 @@ def _changelog_unreleased(path: Path) -> list[str]:
         if capture and line.startswith("## "):
             break
         if capture and line.strip().startswith("- "):
-            items.append(_release_report_safe_text(line.strip()[2:], limit=500))
-        if len(items) >= 20:
-            break
+            item = line.strip()[2:]
+            reasons = _changelog_entry_redaction_reasons(item)
+            sanitized = _release_report_safe_text(item, limit=500)
+            if len(items) < 20:
+                items.append(sanitized)
+            if reasons:
+                redaction_count += 1
+                for reason in sorted(reasons):
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    return items, {"count": redaction_count, "reasons": dict(sorted(reason_counts.items()))}
+
+
+def _changelog_unreleased(path: Path) -> list[str]:
+    items, _redactions = _changelog_unreleased_with_redactions(path)
     return items
 
 
@@ -157,6 +183,7 @@ def _candidate_payload(target: Path, *, base_ref: str | None, guard_policy: str 
     if not isinstance(changed_files, list):
         changed_files = _changed_files(target, base_ref)
     active_guard_policy = _load_guard_policy(guard_policy)
+    changelog_unreleased, changelog_redactions = _changelog_unreleased_with_redactions(target)
     return {
         "target": str(target),
         "base_ref": base_ref,
@@ -208,7 +235,8 @@ def _candidate_payload(target: Path, *, base_ref: str | None, guard_policy: str 
             if isinstance(check, dict) and str(check.get("name", "")).startswith("content_guard")
         },
         "release_notes_inputs": {
-            "changelog_unreleased": _changelog_unreleased(target),
+            "changelog_unreleased": changelog_unreleased,
+            "changelog_redactions": changelog_redactions,
             # Keep the serialized key for release-candidate schema compatibility;
             # its values now contain full sanitized commit messages.
             "commit_subjects": _commit_messages(target, base_ref, guard_policy=active_guard_policy),
@@ -432,11 +460,18 @@ def _candidate_release_notes(candidate: dict[str, Any]) -> str:
     changelog = inputs.get("changelog_unreleased") if isinstance(inputs.get("changelog_unreleased"), list) else []
     commits = inputs.get("commit_subjects") if isinstance(inputs.get("commit_subjects"), list) else []
     docs = inputs.get("touched_docs") if isinstance(inputs.get("touched_docs"), list) else []
+    redactions = inputs.get("changelog_redactions") if isinstance(inputs.get("changelog_redactions"), dict) else {}
     lines = ["# Release Notes Draft", "", "## Highlights", ""]
     if changelog:
         lines.extend(f"- {item}" for item in changelog[:10])
     else:
         lines.append("- review-needed: summarize user-visible changes.")
+    redaction_count = int(redactions.get("count") or 0)
+    if redaction_count:
+        reasons = redactions.get("reasons") if isinstance(redactions.get("reasons"), dict) else {}
+        reason_summary = ", ".join(f"{name}={count}" for name, count in sorted(reasons.items()))
+        detail = f" ({reason_summary})" if reason_summary else ""
+        lines.append(f"- {redaction_count} Unreleased changelog entries redacted{detail}.")
     lines.extend(["", "## Commit Subjects", ""])
     lines.extend(f"- {item}" for item in commits[:20]) if commits else lines.append(
         "- review-needed: no commit subjects found for base ref."
