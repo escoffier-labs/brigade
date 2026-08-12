@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import sys
+import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1306,7 +1307,7 @@ def _enumerate_inventory_sources(target: Path) -> list[tuple[str, Path, str]]:
 
     try:
         config = memory_cmd._config_or_default(target)
-    except ValueError:
+    except (OSError, ValueError):
         config = memory_cmd.MemoryCareConfig()
 
     for path in memory_cmd._iter_cards(target, config):
@@ -1390,9 +1391,11 @@ def _canonical_relpath(target: Path, path: Path) -> str | None:
 
 def _read_frontmatter_only(path: Path) -> dict[str, Any]:
     """Read YAML-ish frontmatter only; never read bytes after the closing fence."""
+    # Pass max+1 so a newline-free first/frontmatter line cannot load unbounded.
+    line_cap = FRONTMATTER_READ_MAX_BYTES + 1
     try:
         with path.open("rb") as handle:
-            first = handle.readline()
+            first = handle.readline(line_cap)
             if not first or len(first) > FRONTMATTER_READ_MAX_BYTES:
                 return {}
             if first not in (b"---\n", b"---\r\n"):
@@ -1400,10 +1403,10 @@ def _read_frontmatter_only(path: Path) -> dict[str, Any]:
             chunks = [first]
             total = len(first)
             while True:
-                line = handle.readline()
+                line = handle.readline(line_cap)
                 if not line:
                     return {}
-                if total + len(line) > FRONTMATTER_READ_MAX_BYTES:
+                if len(line) > FRONTMATTER_READ_MAX_BYTES or total + len(line) > FRONTMATTER_READ_MAX_BYTES:
                     return {}
                 chunks.append(line)
                 total += len(line)
@@ -1440,7 +1443,9 @@ def _bound_single_line(
 ) -> str | None:
     if value in (None, ""):
         return None
-    text = str(value).replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0].strip()
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0]
+    # Strip terminal C0/control (Unicode Cc) characters; preserve safe text.
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cc").strip()
     if not text:
         return None
     if not allow_path_like and _is_path_like(text):
@@ -1484,7 +1489,9 @@ def _inventory_item_from_source(
 ) -> dict[str, Any]:
     store_type, path, canonical_path = source
     meta = _read_frontmatter_only(path)
-    title = _bound_single_line(memory_cmd._frontmatter_value(meta, "title")) or path.stem
+    title = _bound_single_line(memory_cmd._frontmatter_value(meta, "title"))
+    if title is None:
+        title = _bound_single_line(path.stem) or "untitled"
     category = _bound_single_line(memory_cmd._frontmatter_value(meta, "category"))
     tags = _inventory_tags(meta)
     created_at = _explicit_date_string(meta, "created", "created_at")
@@ -1626,7 +1633,7 @@ def _load_care_index(target: Path) -> dict[str, dict[str, Any]]:
     allowed_issues = set(memory_cmd.CHECKS)
     try:
         config = memory_cmd._config_or_default(target)
-    except ValueError:
+    except (OSError, ValueError):
         config = memory_cmd.MemoryCareConfig()
 
     scan_payload = _safe_json_object(memory_cmd._scan_path(target, config))

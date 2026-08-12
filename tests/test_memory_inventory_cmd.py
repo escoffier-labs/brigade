@@ -522,16 +522,18 @@ def test_memory_inventory_deterministic_order_before_filter_and_human_output(tmp
     assert not re.search(r"/home/[^\s]+", out)
 
 
-def test_memory_inventory_bounded_frontmatter_reader_never_reads_10mb_body(tmp_path, capsys, monkeypatch):
+def test_memory_inventory_frontmatter_readline_requests_are_byte_bounded(tmp_path, monkeypatch):
+    """Both binary readline calls must pass FRONTMATTER_READ_MAX_BYTES + 1 (not unbounded)."""
     from brigade import memory_operations
 
+    bound = memory_operations.FRONTMATTER_READ_MAX_BYTES + 1
     frontmatter = b"---\ntitle: HugeBody\nfresh_until: 2099-01-01\n---\n"
     body_marker = b"BODY_NEVER_READ_875_" + (b"X" * (10 * 1024 * 1024))
     path = tmp_path / "memory" / "cards" / "huge.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(frontmatter + body_marker)
 
-    max_offset = {"value": 0}
+    readline_sizes: list[int | None] = []
     real_open = Path.open
 
     def guarded_open(self, mode="r", *args, **kwargs):
@@ -539,18 +541,14 @@ def test_memory_inventory_bounded_frontmatter_reader_never_reads_10mb_body(tmp_p
         if self.resolve() != path.resolve():
             return handle
         if "b" not in str(mode):
-            # Inventory must open the card in binary for a bounded frontmatter read.
             raise AssertionError(f"expected binary open for inventory card, got mode={mode!r}")
-        orig_read = handle.read
+        orig_readline = handle.readline
 
-        def tracked_read(size=-1):
-            data = orig_read(size)
-            pos = handle.tell()
-            if pos > max_offset["value"]:
-                max_offset["value"] = pos
-            return data
+        def tracked_readline(size: int | None = -1):
+            readline_sizes.append(size)
+            return orig_readline(size) if size is not None else orig_readline()
 
-        handle.read = tracked_read  # type: ignore[method-assign]
+        handle.readline = tracked_readline  # type: ignore[method-assign]
         return handle
 
     monkeypatch.setattr(Path, "open", guarded_open)
@@ -559,12 +557,101 @@ def test_memory_inventory_bounded_frontmatter_reader_never_reads_10mb_body(tmp_p
     item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/huge.md")
     assert item["title"] == "HugeBody"
     assert item["freshness"] == "fresh"
-    assert max_offset["value"] <= len(frontmatter)
-    assert max_offset["value"] < 64 * 1024
-    assert max_offset["value"] < len(frontmatter) + 1024  # never near the 10MB body
+    assert readline_sizes, "expected binary readline calls for frontmatter"
+    assert all(size == bound for size in readline_sizes), readline_sizes
     dumped = json.dumps(payload)
     assert "BODY_NEVER_READ_875_" not in dumped
-    assert BODY_SECRET not in dumped
+
+    # 10 MB newline-free degenerate first line must never be loaded unbounded.
+    readline_sizes.clear()
+    degenerate = tmp_path / "memory" / "cards" / "degenerate.md"
+    degenerate.write_bytes(b"X" * (10 * 1024 * 1024))
+    payload = memory_operations.inventory_payload(tmp_path)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/degenerate.md")
+    assert item["title"]
+    assert all(size == bound for size in readline_sizes), readline_sizes
+    assert "X" * 1024 not in json.dumps(payload)
+
+
+def test_memory_inventory_bound_single_line_strips_c0_controls_preserving_safe_text():
+    from brigade import memory_operations
+
+    assert memory_operations._bound_single_line("safe title") == "safe title"
+    assert memory_operations._bound_single_line("hello\x07world") == "helloworld"
+    assert memory_operations._bound_single_line("x\x1by\x00z") == "xyz"
+    assert memory_operations._bound_single_line("\x07\x1b\x00") is None
+    assert memory_operations._bound_single_line("keep\t tabs") == "keep tabs"
+    # CR/LF still collapse to a single line without leaking the remainder.
+    assert memory_operations._bound_single_line("one\ntwo") == "one"
+    assert memory_operations._bound_single_line("one\rtwo") == "one"
+
+
+def test_memory_inventory_title_fallback_sanitizes_path_stem(tmp_path, monkeypatch):
+    from brigade import memory_operations
+
+    path = tmp_path / "memory" / "cards" / "notitle.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("---\ncategory: ops\n---\nbody\n", encoding="utf-8")
+
+    real_stem = Path.stem
+
+    def stem_get(self: Path) -> str:
+        if self.resolve() == path.resolve():
+            return "hello\x07\x1bworld"
+        return real_stem.__get__(self, type(self))
+
+    monkeypatch.setattr(Path, "stem", property(stem_get))
+
+    payload = memory_operations.inventory_payload(tmp_path)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/notitle.md")
+    assert item["title"] == "helloworld"
+    assert "\x07" not in item["title"]
+    assert "\x1b" not in item["title"]
+
+    def path_like_stem(self: Path) -> str:
+        if self.resolve() == path.resolve():
+            return "/abs/evil\x07stem"
+        return real_stem.__get__(self, type(self))
+
+    monkeypatch.setattr(Path, "stem", property(path_like_stem))
+    payload = memory_operations.inventory_payload(tmp_path)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/notitle.md")
+    assert isinstance(item["title"], str) and item["title"].strip()
+    assert "/" not in item["title"]
+    assert "\x07" not in item["title"]
+
+
+def test_memory_inventory_config_oserror_fails_open_without_path_leak(tmp_path, capsys, monkeypatch):
+    from brigade import memory_cmd, memory_operations
+
+    _write_card(tmp_path, "memory/cards/a.md", title="A", fresh_until="2099-01-01")
+    _write_care_artifacts(
+        tmp_path,
+        issues=[
+            {
+                "file": "memory/cards/a.md",
+                "issue_type": "stale",
+                "suggested_refresh_action": "refresh",
+            }
+        ],
+    )
+
+    def boom(_target: Path):
+        raise OSError(13, "Permission denied", "/secret/path/.brigade/memory-care.toml")
+
+    monkeypatch.setattr(memory_cmd, "_config_or_default", boom)
+
+    rc, out, err = _run_inventory(tmp_path, capsys)
+    assert rc == 0, err
+    assert "Traceback" not in err
+    dumped = out + err
+    assert "/secret/path" not in dumped
+    assert "memory-care.toml" not in dumped
+    payload = json.loads(out)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/a.md")
+    assert item["title"] == "A"
+    # Care join also fails open on config OSError (defaults), still joins artifacts by path.
+    assert "stale" in item["care"]["issues"]
 
 
 def test_memory_inventory_last_mutation_receipt_fields_are_allowlisted(tmp_path, capsys):
