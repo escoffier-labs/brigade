@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -26,6 +27,10 @@ INVENTORY_SCHEMA_NAME = "memory-inventory"
 INVENTORY_SCHEMA_VERSION = 1
 INVENTORY_DEFAULT_LIMIT = 100
 INVENTORY_MAX_LIMIT = 500
+FRONTMATTER_READ_MAX_BYTES = 64 * 1024
+INVENTORY_FIELD_MAX_CHARS = 256
+# Safe receipt status vocabulary already used by Brigade health/verify/care receipts.
+INVENTORY_RECEIPT_STATUSES = ("ok", "warn", "fail", "failed", "error", "skipped", "completed", "missing")
 
 STORE_TYPES = ("card", "rule", "tools", "user", "learning")
 FRESHNESS_VALUES = ("fresh", "stale", "missing", "unassessable", "not_applicable")
@@ -194,6 +199,10 @@ def inventory_payload(
     owning_workflow: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the versioned memory-inventory JSON contract for *target*."""
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+    if limit < 1 or limit > INVENTORY_MAX_LIMIT:
+        raise ValueError(f"limit must be between 1 and {INVENTORY_MAX_LIMIT}")
     target = target.expanduser().resolve()
     filters = {
         "store_type": _normalize_filter_values(store_type),
@@ -1344,13 +1353,34 @@ def _enumerate_inventory_sources(target: Path) -> list[tuple[str, Path, str]]:
     return sources
 
 
-def _canonical_relpath(target: Path, path: Path) -> str | None:
+def _has_symlinked_ancestor(target: Path, path: Path) -> bool:
+    """True when any unresolved ancestor between *path* and *target* is a symlink."""
     try:
-        resolved = path.resolve()
-        rel = resolved.relative_to(target.resolve())
-    except (OSError, ValueError):
-        return None
+        path.relative_to(target)
+    except ValueError:
+        return True
+    for ancestor in (path.parent, *path.parent.parents):
+        if ancestor == target:
+            return False
+        try:
+            if ancestor.is_symlink():
+                return True
+        except OSError:
+            return True
+        if ancestor == ancestor.parent:
+            break
+    return False
+
+
+def _canonical_relpath(target: Path, path: Path) -> str | None:
+    """Return unresolved repo-relative path, skipping file/dir symlink reaches."""
     if path.is_symlink():
+        return None
+    if _has_symlinked_ancestor(target, path):
+        return None
+    try:
+        rel = path.relative_to(target)
+    except ValueError:
         return None
     text = str(rel).replace("\\", "/")
     if text.startswith("../") or text == ".." or "/../" in f"/{text}/":
@@ -1359,13 +1389,91 @@ def _canonical_relpath(target: Path, path: Path) -> str | None:
 
 
 def _read_frontmatter_only(path: Path) -> dict[str, Any]:
+    """Read YAML-ish frontmatter only; never read bytes after the closing fence."""
     try:
-        # Read whole file for the shared frontmatter splitter; body is discarded.
-        text = path.read_text(encoding="utf-8")
+        with path.open("rb") as handle:
+            first = handle.readline()
+            if not first or len(first) > FRONTMATTER_READ_MAX_BYTES:
+                return {}
+            if first not in (b"---\n", b"---\r\n"):
+                return {}
+            chunks = [first]
+            total = len(first)
+            while True:
+                line = handle.readline()
+                if not line:
+                    return {}
+                if total + len(line) > FRONTMATTER_READ_MAX_BYTES:
+                    return {}
+                chunks.append(line)
+                total += len(line)
+                if line in (b"---\n", b"---\r\n", b"---"):
+                    break
+            # Stop immediately after the closing fence; do not read the body.
+        text = b"".join(chunks).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except (OSError, UnicodeDecodeError):
         return {}
-    meta, _has = memory_cmd._parse_frontmatter(text)
-    return meta if isinstance(meta, dict) else {}
+    meta, has_frontmatter = memory_cmd._parse_frontmatter(text)
+    if not has_frontmatter or not isinstance(meta, dict):
+        return {}
+    return meta
+
+
+def _is_path_like(text: str) -> bool:
+    value = text.strip()
+    if not value:
+        return False
+    if value.startswith("~") or value.startswith("/") or value.startswith("\\"):
+        return True
+    if "\\" in value:
+        return True
+    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
+        return True
+    return False
+
+
+def _bound_single_line(
+    value: Any,
+    *,
+    max_chars: int = INVENTORY_FIELD_MAX_CHARS,
+    allow_path_like: bool = False,
+) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0].strip()
+    if not text:
+        return None
+    if not allow_path_like and _is_path_like(text):
+        return None
+    if len(text) > max_chars:
+        text = text[:max_chars]
+    return text
+
+
+def _parse_iso8601_timestamp(value: Any) -> str | None:
+    text = _bound_single_line(value)
+    if text is None:
+        return None
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    return text
+
+
+def _finite_nonnegative_number(value: Any) -> float | int | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    if number.is_integer():
+        return int(number)
+    return number
 
 
 def _inventory_item_from_source(
@@ -1376,10 +1484,8 @@ def _inventory_item_from_source(
 ) -> dict[str, Any]:
     store_type, path, canonical_path = source
     meta = _read_frontmatter_only(path)
-    title_value = memory_cmd._frontmatter_value(meta, "title")
-    title = str(title_value).strip() if title_value not in (None, "") else path.stem
-    category_value = memory_cmd._frontmatter_value(meta, "category")
-    category = str(category_value).strip() if category_value not in (None, "") else None
+    title = _bound_single_line(memory_cmd._frontmatter_value(meta, "title")) or path.stem
+    category = _bound_single_line(memory_cmd._frontmatter_value(meta, "category"))
     tags = _inventory_tags(meta)
     created_at = _explicit_date_string(meta, "created", "created_at")
     updated_at = _explicit_date_string(meta, "updated", "updated_at")
@@ -1389,15 +1495,16 @@ def _inventory_item_from_source(
     freshness = _compute_freshness(store_type, fresh_until_raw)
     if isinstance(fresh_until_raw, str) and fresh_until_raw.strip():
         parsed = memory_cmd._parse_date(fresh_until_raw)
-        fresh_until = parsed.isoformat() if parsed is not None else fresh_until_raw.strip()
+        if parsed is not None:
+            fresh_until = parsed.isoformat()
+        else:
+            fresh_until = _bound_single_line(fresh_until_raw)
     review_state = "reviewed" if last_reviewed is not None else "missing"
     evidence_state = _compute_evidence_state(meta, canonical_path, care_index=care_index)
-    source_harness_value = memory_cmd._frontmatter_value(meta, "source_harness")
-    source_harness = str(source_harness_value).strip() if source_harness_value not in (None, "") else "unknown"
-    source_handoff_value = memory_cmd._frontmatter_value(meta, "source_handoff")
-    source_handoff = str(source_handoff_value).strip() if source_handoff_value not in (None, "") else None
-    owning_workflow_value = memory_cmd._frontmatter_value(meta, "owning_workflow")
-    owning_workflow = str(owning_workflow_value).strip() if owning_workflow_value not in (None, "") else "unknown"
+    source_harness = _bound_single_line(memory_cmd._frontmatter_value(meta, "source_harness")) or "unknown"
+    source_handoff_raw = _bound_single_line(memory_cmd._frontmatter_value(meta, "source_handoff"))
+    source_handoff = _safe_repo_path(source_handoff_raw) if source_handoff_raw is not None else None
+    owning_workflow = _bound_single_line(memory_cmd._frontmatter_value(meta, "owning_workflow")) or "unknown"
     return {
         "id": f"{store_type}:{canonical_path}",
         "title": title,
@@ -1425,10 +1532,17 @@ def _inventory_tags(meta: dict[str, Any]) -> list[str]:
     value = memory_cmd._frontmatter_value(meta, "tags", "tag")
     if value is None:
         return []
+    raw_items: list[Any]
     if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    text = str(value).strip()
-    return [text] if text else []
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    tags: list[str] = []
+    for item in raw_items:
+        bound = _bound_single_line(item)
+        if bound and bound not in tags:
+            tags.append(bound)
+    return tags
 
 
 def _explicit_date_string(meta: dict[str, Any], *keys: str) -> str | None:
@@ -1436,7 +1550,9 @@ def _explicit_date_string(meta: dict[str, Any], *keys: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     parsed = memory_cmd._parse_date(value)
-    return parsed.isoformat() if parsed is not None else value.strip()
+    if parsed is not None:
+        return parsed.isoformat()
+    return _bound_single_line(value)
 
 
 def _compute_freshness(store_type: str, fresh_until_raw: Any) -> str:
@@ -1459,6 +1575,8 @@ def _compute_evidence_state(
     *,
     care_index: dict[str, dict[str, Any]],
 ) -> str:
+    # Approved contract (not reviewer I5): non-empty evidence metadata => present,
+    # unless a persisted missing-evidence-ref issue makes it unresolved. Missing metadata => missing.
     if not memory_cmd._has_evidence(meta):
         return "missing"
     care = care_index.get(canonical_path) or {}
@@ -1470,37 +1588,42 @@ def _compute_evidence_state(
 
 
 def _inventory_last_mutation(meta: dict[str, Any]) -> dict[str, Any] | None:
-    workflow = memory_cmd._frontmatter_value(meta, "last_mutation_workflow")
-    if workflow in (None, ""):
+    workflow = _bound_single_line(memory_cmd._frontmatter_value(meta, "last_mutation_workflow"))
+    if workflow is None:
         return None
-    status = memory_cmd._frontmatter_value(meta, "last_mutation_status")
-    run_id = memory_cmd._frontmatter_value(meta, "last_mutation_run_id")
-    completed_at = memory_cmd._frontmatter_value(meta, "last_mutation_completed_at")
-    evidence_state = memory_cmd._frontmatter_value(meta, "last_mutation_evidence_state")
-    duration_raw = memory_cmd._frontmatter_value(meta, "last_mutation_duration_seconds")
-    duration_seconds: float | int | None
-    if duration_raw in (None, ""):
-        duration_seconds = None
-    else:
-        try:
-            duration_seconds = float(duration_raw)
-            if duration_seconds.is_integer():
-                duration_seconds = int(duration_seconds)
-        except (TypeError, ValueError):
-            duration_seconds = None
+    status_raw = _bound_single_line(memory_cmd._frontmatter_value(meta, "last_mutation_status"))
+    status_map = {item.lower(): item for item in INVENTORY_RECEIPT_STATUSES}
+    status = status_map.get(status_raw.lower()) if status_raw is not None else None
+    run_id = _bound_single_line(memory_cmd._frontmatter_value(meta, "last_mutation_run_id"))
+    completed_at = _parse_iso8601_timestamp(memory_cmd._frontmatter_value(meta, "last_mutation_completed_at"))
+    evidence_raw = _bound_single_line(memory_cmd._frontmatter_value(meta, "last_mutation_evidence_state"))
+    evidence_map = {item.lower(): item for item in EVIDENCE_STATES}
+    evidence_state = evidence_map.get(evidence_raw.lower(), "missing") if evidence_raw is not None else "missing"
+    duration_seconds = _finite_nonnegative_number(
+        memory_cmd._frontmatter_value(meta, "last_mutation_duration_seconds")
+    )
     receipt = {
-        "evidence_state": str(evidence_state).strip() if evidence_state not in (None, "") else "missing",
-        "status": str(status).strip() if status not in (None, "") else None,
-        "run_id": str(run_id).strip() if run_id not in (None, "") else None,
-        "completed_at": str(completed_at).strip() if completed_at not in (None, "") else None,
+        "evidence_state": evidence_state,
+        "status": status,
+        "run_id": run_id,
+        "completed_at": completed_at,
         "duration_seconds": duration_seconds,
     }
-    return {"workflow": str(workflow).strip(), "receipt": receipt}
+    return {"workflow": workflow, "receipt": receipt}
+
+
+def _care_action_from_row(row: dict[str, Any]) -> str | None:
+    # Producer key is suggested_refresh_action; action is a legacy alias.
+    action = row.get("suggested_refresh_action")
+    if not (isinstance(action, str) and action.strip()):
+        action = row.get("action")
+    return _bound_single_line(action)
 
 
 def _load_care_index(target: Path) -> dict[str, dict[str, Any]]:
     """Join persisted care scan/queue facts by exact repo-relative path; fail open."""
     index: dict[str, dict[str, Any]] = {}
+    allowed_issues = set(memory_cmd.CHECKS)
     try:
         config = memory_cmd._config_or_default(target)
     except ValueError:
@@ -1511,27 +1634,29 @@ def _load_care_index(target: Path) -> dict[str, dict[str, Any]]:
 
     for issue in _care_issue_rows(scan_payload):
         path = str(issue.get("file") or issue.get("path") or issue.get("card_file") or "").replace("\\", "/")
-        if not path:
+        if not path or _is_path_like(path) or _safe_repo_path(path) is None:
             continue
+        path = _safe_repo_path(path) or path
         entry = index.setdefault(path, {"issues": [], "queued_action": None})
         issue_type = str(issue.get("issue_type") or "").strip()
-        if issue_type and issue_type not in entry["issues"]:
+        if issue_type in allowed_issues and issue_type not in entry["issues"]:
             entry["issues"].append(issue_type)
-        action = issue.get("action")
-        if entry["queued_action"] is None and isinstance(action, str) and action.strip():
-            entry["queued_action"] = action.strip()
+        action = _care_action_from_row(issue)
+        if entry["queued_action"] is None and action is not None:
+            entry["queued_action"] = action
 
     for card in _care_issue_rows(queue_payload, key="cards"):
         path = str(card.get("file") or card.get("path") or card.get("card_file") or "").replace("\\", "/")
-        if not path:
+        if not path or _is_path_like(path) or _safe_repo_path(path) is None:
             continue
+        path = _safe_repo_path(path) or path
         entry = index.setdefault(path, {"issues": [], "queued_action": None})
         issue_type = str(card.get("issue_type") or card.get("refresh_reason") or "").strip()
-        if issue_type and issue_type not in entry["issues"]:
+        if issue_type in allowed_issues and issue_type not in entry["issues"]:
             entry["issues"].append(issue_type)
-        action = card.get("action")
-        if entry["queued_action"] is None and isinstance(action, str) and action.strip():
-            entry["queued_action"] = action.strip()
+        action = _care_action_from_row(card)
+        if entry["queued_action"] is None and action is not None:
+            entry["queued_action"] = action
     return index
 
 
@@ -1557,11 +1682,11 @@ def _care_issue_rows(payload: dict[str, Any] | None, *, key: str = "issues") -> 
 def _care_for_path(canonical_path: str, care_index: dict[str, dict[str, Any]]) -> dict[str, Any]:
     entry = care_index.get(canonical_path) or {}
     raw_issues = entry.get("issues")
-    issues = [str(item) for item in raw_issues if str(item).strip()] if isinstance(raw_issues, list) else []
-    queued = entry.get("queued_action")
+    issues = sorted({str(item) for item in raw_issues if str(item).strip()}) if isinstance(raw_issues, list) else []
+    queued = _bound_single_line(entry.get("queued_action"))
     return {
         "issues": issues,
-        "queued_action": str(queued).strip() if isinstance(queued, str) and queued.strip() else None,
+        "queued_action": queued,
     }
 
 

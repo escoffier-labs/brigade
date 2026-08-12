@@ -7,6 +7,8 @@ from pathlib import Path
 
 
 def register(sub: argparse._SubParsersAction) -> None:
+    from .. import memory_operations
+
     # memory
     p_memory = sub.add_parser("memory", help="Inspect local memory maintenance workflows.")
     memory_sub = p_memory.add_subparsers(dest="memory_command", metavar="<memory-command>")
@@ -97,8 +99,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_inventory.add_argument(
         "--limit",
         type=int,
-        default=100,
-        help="Page size (default: 100, max: 500).",
+        default=memory_operations.INVENTORY_DEFAULT_LIMIT,
+        help=(
+            f"Page size (default: {memory_operations.INVENTORY_DEFAULT_LIMIT}, "
+            f"max: {memory_operations.INVENTORY_MAX_LIMIT})."
+        ),
     )
     p_memory_inventory.add_argument(
         "--store-type",
@@ -238,8 +243,10 @@ def dispatch(args) -> int:
     if args.memory_command == "inventory":
         if args.offset < 0:
             args._brigade_parser.error("--offset must be >= 0")
-        if args.limit < 1 or args.limit > 500:
-            args._brigade_parser.error("--limit must be between 1 and 500")
+        if args.limit < 1 or args.limit > memory_operations.INVENTORY_MAX_LIMIT:
+            args._brigade_parser.error(
+                f"--limit must be between 1 and {memory_operations.INVENTORY_MAX_LIMIT}"
+            )
         try:
             store_type = memory_operations.normalize_inventory_enum_filter(
                 args.store_type, allowed=memory_operations.STORE_TYPES, flag="--store-type"

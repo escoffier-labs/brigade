@@ -520,3 +520,378 @@ def test_memory_inventory_deterministic_order_before_filter_and_human_output(tmp
     assert "memory inventory:" in out
     assert BODY_SECRET not in out
     assert not re.search(r"/home/[^\s]+", out)
+
+
+def test_memory_inventory_bounded_frontmatter_reader_never_reads_10mb_body(tmp_path, capsys, monkeypatch):
+    from brigade import memory_operations
+
+    frontmatter = b"---\ntitle: HugeBody\nfresh_until: 2099-01-01\n---\n"
+    body_marker = b"BODY_NEVER_READ_875_" + (b"X" * (10 * 1024 * 1024))
+    path = tmp_path / "memory" / "cards" / "huge.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(frontmatter + body_marker)
+
+    max_offset = {"value": 0}
+    real_open = Path.open
+
+    def guarded_open(self, mode="r", *args, **kwargs):
+        handle = real_open(self, mode, *args, **kwargs)
+        if self.resolve() != path.resolve():
+            return handle
+        if "b" not in str(mode):
+            # Inventory must open the card in binary for a bounded frontmatter read.
+            raise AssertionError(f"expected binary open for inventory card, got mode={mode!r}")
+        orig_read = handle.read
+
+        def tracked_read(size=-1):
+            data = orig_read(size)
+            pos = handle.tell()
+            if pos > max_offset["value"]:
+                max_offset["value"] = pos
+            return data
+
+        handle.read = tracked_read  # type: ignore[method-assign]
+        return handle
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+
+    payload = memory_operations.inventory_payload(tmp_path)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/huge.md")
+    assert item["title"] == "HugeBody"
+    assert item["freshness"] == "fresh"
+    assert max_offset["value"] <= len(frontmatter)
+    assert max_offset["value"] < 64 * 1024
+    assert max_offset["value"] < len(frontmatter) + 1024  # never near the 10MB body
+    dumped = json.dumps(payload)
+    assert "BODY_NEVER_READ_875_" not in dumped
+    assert BODY_SECRET not in dumped
+
+
+def test_memory_inventory_last_mutation_receipt_fields_are_allowlisted(tmp_path, capsys):
+    _write_card(
+        tmp_path,
+        "memory/cards/mutation.md",
+        title="Mutation",
+        last_mutation_workflow="memory-care-closeout\nEXTRA",
+        last_mutation_status="totally-made-up-status",
+        last_mutation_run_id="run\nid",
+        last_mutation_completed_at="not-iso-8601",
+        last_mutation_duration_seconds="-3",
+        last_mutation_evidence_state="asserted-present",
+    )
+    _write_card(
+        tmp_path,
+        "memory/cards/mutation-ok.md",
+        title="Mutation OK",
+        last_mutation_workflow="memory-care-closeout",
+        last_mutation_status="ok",
+        last_mutation_run_id="run-2",
+        last_mutation_completed_at="2026-08-11T12:00:00Z",
+        last_mutation_duration_seconds="2",
+        last_mutation_evidence_state="present",
+    )
+    _write_card(
+        tmp_path,
+        "memory/cards/mutation-inf.md",
+        title="Mutation Inf",
+        last_mutation_workflow="memory-care-closeout",
+        last_mutation_status="ok",
+        last_mutation_run_id="run-3",
+        last_mutation_completed_at="2026-08-11T12:00:00Z",
+        last_mutation_duration_seconds="inf",
+        last_mutation_evidence_state="present",
+    )
+
+    payload = _payload(tmp_path, capsys)
+    by_path = {item["canonical_path"]: item for item in payload["items"]}
+
+    bad = by_path["memory/cards/mutation.md"]["last_mutation"]
+    assert bad is not None
+    assert "\n" not in bad["workflow"]
+    assert bad["receipt"]["status"] is None
+    assert bad["receipt"]["run_id"] is None or "\n" not in str(bad["receipt"]["run_id"])
+    assert bad["receipt"]["completed_at"] is None
+    assert bad["receipt"]["duration_seconds"] is None
+    assert bad["receipt"]["evidence_state"] == "missing"
+
+    good = by_path["memory/cards/mutation-ok.md"]["last_mutation"]
+    assert good == {
+        "workflow": "memory-care-closeout",
+        "receipt": {
+            "evidence_state": "present",
+            "status": "ok",
+            "run_id": "run-2",
+            "completed_at": "2026-08-11T12:00:00Z",
+            "duration_seconds": 2,
+        },
+    }
+    assert by_path["memory/cards/mutation-inf.md"]["last_mutation"]["receipt"]["duration_seconds"] is None
+
+
+def test_memory_inventory_care_artifacts_allowlist_producer_key_and_paths(tmp_path, capsys):
+    _write_card(tmp_path, "memory/cards/care.md", title="Care")
+    _write_care_artifacts(
+        tmp_path,
+        issues=[
+            {
+                "file": "memory/cards/care.md",
+                "issue_type": "not-a-real-check",
+                "action": "/home/secret/refresh.sh",
+                "suggested_refresh_action": "refresh card metadata",
+            },
+            {
+                "file": "memory/cards/care.md",
+                "issue_type": "stale",
+                "suggested_refresh_action": "refresh card metadata",
+            },
+            {
+                "file": "memory/cards/care.md",
+                "issue_type": "stale",
+                "action": "legacy only",
+            },
+            {
+                "file": "memory/cards/care.md",
+                "issue_type": "expired",
+                "suggested_refresh_action": "C:\\Windows\\repair.bat",
+            },
+            {
+                "file": "memory/cards/care.md",
+                "issue_type": "missing-reviewed",
+                "action": "review again",
+            },
+        ],
+    )
+
+    payload = _payload(tmp_path, capsys)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/care.md")
+    assert item["care"]["issues"] == ["expired", "missing-reviewed", "stale"]
+    assert item["care"]["queued_action"] == "refresh card metadata"
+    dumped = json.dumps(payload)
+    assert "/home/secret" not in dumped
+    assert "C:\\Windows" not in dumped
+    assert "not-a-real-check" not in dumped
+
+
+def test_memory_inventory_payload_validates_offset_and_limit_constants(tmp_path, capsys):
+    from brigade import memory_operations
+    from brigade.cli import memory as memory_cli
+
+    _write_card(tmp_path, "memory/cards/a.md", title="A")
+
+    with pytest.raises(ValueError):
+        memory_operations.inventory_payload(tmp_path, offset=-1)
+    with pytest.raises(ValueError):
+        memory_operations.inventory_payload(tmp_path, limit=0)
+    with pytest.raises(ValueError):
+        memory_operations.inventory_payload(tmp_path, limit=memory_operations.INVENTORY_MAX_LIMIT + 1)
+
+    source = Path(memory_cli.__file__).read_text(encoding="utf-8")
+    assert "INVENTORY_MAX_LIMIT" in source
+    assert "INVENTORY_DEFAULT_LIMIT" in source
+    assert "args.limit > 500" not in source
+    assert "max: 500" not in source
+
+    payload = _payload(tmp_path, capsys)
+    assert payload["pagination"]["limit"] == memory_operations.INVENTORY_DEFAULT_LIMIT
+
+
+def test_memory_inventory_skips_file_and_directory_symlinks(tmp_path, capsys):
+    # Real cards under a real root.
+    real_root = tmp_path / "real-cards"
+    real_root.mkdir()
+    (real_root / "kept.md").write_text("---\ntitle: Kept\n---\nbody\n", encoding="utf-8")
+
+    # Symlinked card root: scanner can see these, inventory must skip symlink ancestors.
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (outside / "linked-card.md").write_text("---\ntitle: ViaDirLink\n---\nbody\n", encoding="utf-8")
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    (memory / "cards").symlink_to(outside)
+
+    # Also keep a non-symlink store so inventory is non-empty and paths stay unresolved.
+    _write_markdown(tmp_path, "rules/shipping.md", title="Shipping")
+
+    outside_file = tmp_path / "outside-file.md"
+    outside_file.write_text("---\ntitle: ViaFileLink\n---\nbody\n", encoding="utf-8")
+    # File symlink under a real cards tree (separate target).
+    alt = tmp_path / "alt-cards"
+    alt.mkdir()
+    (alt / "file-link.md").symlink_to(outside_file)
+    (alt / "real.md").write_text("---\ntitle: AltReal\n---\nbody\n", encoding="utf-8")
+
+    from brigade import memory_cmd
+    from brigade import memory_operations
+
+    # Configure one real root + the symlinked memory/cards root.
+    config_path = tmp_path / ".brigade" / "memory-care.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'card_roots = ["memory/cards", "alt-cards", "real-cards"]\n'
+        'index_paths = ["MEMORY.md"]\n'
+        'exclude_paths = ["memory/cards/decay"]\n',
+        encoding="utf-8",
+    )
+
+    # Scanner sees unresolved paths through the symlink root; inventory must not emit them.
+    scanned = {str(path.relative_to(tmp_path)) for path in memory_cmd._iter_cards(tmp_path, memory_cmd._config_or_default(tmp_path))}
+    assert "memory/cards/linked-card.md" in scanned
+
+    payload = memory_operations.inventory_payload(tmp_path)
+    paths = {item["canonical_path"] for item in payload["items"]}
+    assert "rules/shipping.md" in paths
+    assert "real-cards/kept.md" in paths
+    assert "alt-cards/real.md" in paths
+    assert "alt-cards/file-link.md" not in paths
+    assert "memory/cards/linked-card.md" not in paths
+    assert "outside/linked-card.md" not in paths
+    assert "outside-dir/linked-card.md" not in paths
+    assert all(not path.startswith("..") for path in paths)
+    dumped = json.dumps(payload)
+    assert "ViaDirLink" not in dumped
+    assert "ViaFileLink" not in dumped
+
+
+def test_memory_inventory_redacts_hostile_frontmatter_contract_fields(tmp_path, capsys):
+    long_title = "T" * 500
+    _write_card(
+        tmp_path,
+        "memory/cards/hostile.md",
+        title=f"/home/secret/{long_title}",
+        category="C:\\Users\\secret\\ops",
+        tags=["~/secret-tag", "safe-tag", "normal\nmultiline"],
+        source_harness="/var/lib/harness",
+        source_handoff="/tmp/escape.md",
+        owning_workflow="~/workflow",
+        last_mutation_workflow="/abs/workflow",
+        last_mutation_status="ok",
+        last_mutation_run_id="~/run-id",
+        last_mutation_completed_at="2026-08-11T12:00:00Z",
+        last_mutation_evidence_state="present",
+    )
+
+    payload = _payload(tmp_path, capsys)
+    item = next(i for i in payload["items"] if i["canonical_path"] == "memory/cards/hostile.md")
+    dumped = json.dumps(payload)
+    assert "/home/secret" not in dumped
+    assert "C:\\Users" not in dumped
+    assert "~/secret-tag" not in dumped
+    assert "/tmp/escape.md" not in dumped
+    assert "/var/lib/harness" not in dumped
+    assert "~/workflow" not in dumped
+    assert "/abs/workflow" not in dumped
+    assert "\n" not in item["title"]
+    assert len(item["title"]) <= 256
+    assert item["category"] is None or ("/" not in item["category"] and "\\" not in item["category"])
+    assert "safe-tag" in item["tags"]
+    assert all("\n" not in tag for tag in item["tags"])
+    assert item["source_handoff"] is None
+    assert item["source_harness"] == "unknown" or not item["source_harness"].startswith("/")
+    assert item["owning_workflow"] == "unknown" or not str(item["owning_workflow"]).startswith("~")
+    mutation = item["last_mutation"]
+    assert mutation is None or (
+        not str(mutation["workflow"]).startswith("/")
+        and (mutation["receipt"]["run_id"] is None or not str(mutation["receipt"]["run_id"]).startswith("~"))
+    )
+
+
+def test_memory_inventory_robust_against_missing_malformed_oversized_and_non_utf8_body(tmp_path, capsys):
+    no_fm = tmp_path / "memory" / "cards" / "no-fm.md"
+    no_fm.parent.mkdir(parents=True, exist_ok=True)
+    no_fm.write_text(f"plain body with {BODY_SECRET}\n", encoding="utf-8")
+
+    bad_bytes = tmp_path / "memory" / "cards" / "bad-body.md"
+    bad_bytes.write_bytes(b"---\ntitle: StillValid\nfresh_until: 2099-01-01\n---\n" + b"\xff\xfe" + BODY_SECRET.encode())
+
+    oversized = tmp_path / "memory" / "cards" / "oversized-fm.md"
+    oversized.write_bytes(b"---\n" + (b"x: " + b"y" * 200 + b"\n") * 400 + b"title: NeverClose\n")
+
+    malformed = tmp_path / "memory" / "cards" / "malformed-fm.md"
+    malformed.write_text("---\n: not a key\n[this is broken\n---\n" + BODY_SECRET + "\n", encoding="utf-8")
+
+    _write_card(tmp_path, "memory/cards/care-hostile.md", title="CareHostile", fresh_until="2099-01-01")
+    _write_care_artifacts(
+        tmp_path,
+        issues=[
+            {
+                "file": "memory/cards/care-hostile.md",
+                "issue_type": "stale",
+                "suggested_refresh_action": "/home/leak/action",
+            }
+        ],
+    )
+
+    payload = _payload(tmp_path, capsys)
+    by_path = {item["canonical_path"]: item for item in payload["items"]}
+    dumped = json.dumps(payload)
+
+    assert BODY_SECRET not in dumped
+    assert "/home/leak" not in dumped
+    assert "NeverClose" not in dumped
+
+    assert "memory/cards/no-fm.md" in by_path
+    assert by_path["memory/cards/no-fm.md"]["freshness"] == "missing"
+
+    bad = by_path["memory/cards/bad-body.md"]
+    assert bad["title"] == "StillValid"
+    assert bad["freshness"] == "fresh"  # valid frontmatter must not become unassessable from body bytes
+
+    assert by_path["memory/cards/oversized-fm.md"]["title"] == "oversized-fm"
+    assert by_path["memory/cards/care-hostile.md"]["care"]["queued_action"] is None
+
+
+def test_memory_inventory_evidence_state_present_unless_persisted_missing_ref(tmp_path, capsys):
+    """Approved contract (not I5): non-empty evidence => present unless scan says missing-evidence-ref."""
+    _write_card(
+        tmp_path,
+        "memory/cards/has-evidence.md",
+        title="HasEvidence",
+        evidence="['receipt:.brigade/ok.json']",
+    )
+    _write_card(
+        tmp_path,
+        "memory/cards/no-evidence.md",
+        title="NoEvidence",
+    )
+    payload = _payload(tmp_path, capsys)
+    by_path = {item["canonical_path"]: item for item in payload["items"]}
+    assert by_path["memory/cards/has-evidence.md"]["evidence_state"] == "present"
+    assert by_path["memory/cards/no-evidence.md"]["evidence_state"] == "missing"
+
+
+def test_memory_inventory_joins_real_memory_care_scan(tmp_path, capsys, monkeypatch):
+    from brigade import memory_cmd
+
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 8, 11))
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True)
+    (cards / "needs-review.md").write_text(
+        "\n".join(
+            [
+                "---",
+                "title: Needs Review",
+                "topic: needs-review",
+                "confidence: high",
+                "evidence: ['README.md']",
+                "fresh_until: 2099-01-01",
+                "---",
+                "body",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "MEMORY.md").write_text("- [needs-review](memory/cards/needs-review.md)\n", encoding="utf-8")
+    assert memory_cmd.init(target=tmp_path, force=True, update_gitignore=False, with_runbooks=False) == 0
+    capsys.readouterr()
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    scan_out = capsys.readouterr().out
+    scan_payload = json.loads(scan_out)
+    assert any(issue.get("issue_type") == "missing-reviewed" for issue in scan_payload.get("issues") or [])
+
+    inventory = _payload(tmp_path, capsys)
+    item = next(i for i in inventory["items"] if i["canonical_path"] == "memory/cards/needs-review.md")
+    assert "missing-reviewed" in item["care"]["issues"]
+    assert item["care"]["queued_action"]
+    assert "/home/" not in json.dumps(item["care"])
+    assert item["care"]["issues"] == sorted(set(item["care"]["issues"]))
