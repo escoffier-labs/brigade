@@ -259,15 +259,34 @@ def _status_role(raw: object) -> tuple[str, str, str, str]:
     if status in {"ok", "healthy", "present", "enabled", "canonical", "fresh"}:
         return ("good", "OK", "\u2713", _STATUS_GOOD)
     if status in {"warn", "warning", "unknown", "manual", "disabled", "degraded"}:
-        return ("warning", "ATTENTION", "!", _STATUS_WARNING)
-    if status in {"timeout", "timed_out", "missing", "stale", "error", "fail", "failed", "critical"}:
-        word = "TIMED OUT" if status in {"timeout", "timed_out"} else status.replace("_", " ").upper()
-        if status in {"missing"}:
-            word = "MISSING"
-        if status in {"error", "fail", "failed", "critical"}:
-            return ("critical", word if word != "FAIL" else "FAILED", "\u2717", _STATUS_CRITICAL)
-        return ("serious", word, "!", _STATUS_SERIOUS)
-    return ("warning", status.upper() or "UNKNOWN", "?", _STATUS_WARNING)
+        return ("warning", "WARN", "!", _STATUS_WARNING)
+    if status in {"timeout", "timed_out"}:
+        return ("serious", "TIMEOUT", "!", _STATUS_SERIOUS)
+    if status in {"missing"}:
+        return ("serious", "MISSING", "!", _STATUS_SERIOUS)
+    if status in {"stale"}:
+        return ("serious", "STALE", "!", _STATUS_SERIOUS)
+    if status in {"error", "fail", "failed", "critical"}:
+        return ("critical", "FAILED", "\u2717", _STATUS_CRITICAL)
+    return ("warning", "WARN", "?", _STATUS_WARNING)
+
+
+def _health_word(raw: object) -> str:
+    """Full operator status word for health tiles (not truncated SVG chips)."""
+    status = str(raw or "unknown").strip().lower()
+    if status in {"ok", "healthy", "present", "enabled", "canonical", "fresh"}:
+        return "OK"
+    if status in {"warn", "warning", "unknown", "manual", "disabled", "degraded"}:
+        return "ATTENTION"
+    if status in {"timeout", "timed_out"}:
+        return "TIMED OUT"
+    if status in {"missing"}:
+        return "MISSING"
+    if status in {"stale"}:
+        return "STALE"
+    if status in {"error", "fail", "failed", "critical"}:
+        return "FAILED"
+    return status.replace("_", " ").upper() or "UNKNOWN"
 
 
 def _summary_strip(health: dict, nodes: list, flags: list) -> str:
@@ -377,7 +396,7 @@ def _health_tiles(health: dict) -> str:
     for key, label in _HEALTH_KEYS:
         block = health.get(key) if isinstance(health.get(key), dict) else {}
         status = block.get("status", "unknown")
-        role, word, icon, color = _status_role(status)
+        role, _word, icon, color = _status_role(status)
         meaning = _health_meaning(key, block)
         debug_bits: list[str] = []
         for detail_key in (
@@ -405,7 +424,7 @@ def _health_tiles(health: dict) -> str:
             f'<span class="mo-chip-icon" aria-hidden="true" style="background:{html.esc(color)}">'
             f"{html.esc(icon)}</span>"
             f'<span class="mo-health-label">{html.esc(label)}</span>'
-            f'<span class="mo-chip-word">{html.esc(word)}</span>'
+            f'<span class="mo-chip-word">{html.esc(_health_word(status))}</span>'
             f"</div>"
             f'<p class="mo-health-meaning">{html.esc(meaning)}</p>'
             f"{debug}"
@@ -452,21 +471,23 @@ def _svg_box(
     sub = f" ({count})" if count else ""
     text = f"{label}{sub}"
     tip = html.esc(title)
-    chip_x = x + w - 58
+    chip_w = 64 if len(chip_word) > 4 else 48
+    chip_x = x + w - chip_w - 8
     chip_y = y + 8
+    word_x = chip_x + 10 + (chip_w - 14) / 2
     return (
         f'<g class="mo-node" role="img">'
         f"<title>{tip}</title>"
         f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="6" ry="6" '
         f'fill="{html.esc(_BOX_FILL)}" stroke="{html.esc(_BOX_STROKE)}" stroke-width="1"/>'
         f'<text x="{x + 10}" y="{y + 22}" class="mo-svg-label">{html.esc(text)}</text>'
-        f'<rect x="{chip_x}" y="{chip_y}" width="48" height="18" rx="9" ry="9" '
+        f'<rect x="{chip_x}" y="{chip_y}" width="{chip_w}" height="18" rx="9" ry="9" '
         f'fill="{html.esc(_SURFACE)}" stroke="{html.esc(chip_color)}" stroke-width="1.5"/>'
         f'<circle cx="{chip_x + 10}" cy="{chip_y + 9}" r="5" fill="{html.esc(chip_color)}"/>'
         f'<text x="{chip_x + 10}" y="{chip_y + 12}" text-anchor="middle" class="mo-svg-chip-icon">'
         f"{html.esc(chip_icon)}</text>"
-        f'<text x="{chip_x + 28}" y="{chip_y + 13}" text-anchor="middle" class="mo-svg-chip-word">'
-        f"{html.esc(chip_word[:3])}</text>"
+        f'<text x="{word_x}" y="{chip_y + 13}" text-anchor="middle" class="mo-svg-chip-word">'
+        f"{html.esc(chip_word)}</text>"
         f"</g>"
     )
 
