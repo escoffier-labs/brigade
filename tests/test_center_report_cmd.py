@@ -286,7 +286,13 @@ def test_center_report_integrates_with_work_and_release(tmp_path, monkeypatch, c
             "issue_count": 0,
             "top_issue": None,
             "top_finding": None,
-            "evidence": {"ready": True, "finding_count": 0},
+            "evidence": {
+                "ready": True,
+                "finding_count": 0,
+                "candidate_commit": subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=target, check=True, capture_output=True, text=True
+                ).stdout.strip(),
+            },
         },
     )
     monkeypatch.setattr(

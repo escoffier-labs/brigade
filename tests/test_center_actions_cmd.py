@@ -88,6 +88,12 @@ def _seed_release_prereqs(path: Path):
     )
 
 
+def _git_head(target: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=target, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
 def _patch_release_health(monkeypatch):
     monkeypatch.setattr(
         security_cmd,
@@ -98,7 +104,7 @@ def _patch_release_health(monkeypatch):
             "issue_count": 0,
             "top_issue": None,
             "top_finding": None,
-            "evidence": {"ready": True, "finding_count": 0},
+            "evidence": {"ready": True, "finding_count": 0, "candidate_commit": _git_head(target)},
             "checks": [],
         },
     )
