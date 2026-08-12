@@ -1320,6 +1320,122 @@ def test_plaintext_proof_anchor_does_not_let_replacement_directory_forge_authori
     assert not ledger._has_persisted_import_proof(item, target=tmp_path)
 
 
+def test_import_proof_directory_reanchors_after_same_inode_workspace_relocation(tmp_path: Path) -> None:
+    original = tmp_path / "original-workspace"
+    original.mkdir()
+    descriptor = ledger._open_import_proof_directory(original, create=True)
+    original_proof_identity = os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino
+    os.close(descriptor)
+
+    relocated = tmp_path / "relocated-workspace"
+    original.rename(relocated)
+
+    descriptor = ledger._open_import_proof_directory(relocated, create=True)
+    try:
+        assert (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino) == original_proof_identity
+    finally:
+        os.close(descriptor)
+
+
+def test_import_proof_directory_reanchor_rejects_workspace_root_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = tmp_path / "original-workspace"
+    original.mkdir()
+    descriptor = ledger._open_import_proof_directory(original, create=True)
+    os.close(descriptor)
+
+    relocated = tmp_path / "relocated-workspace"
+    original.rename(relocated)
+    attacker = tmp_path / "attacker-workspace"
+    attacker.mkdir()
+    original_record = ledger._record_external_directory_authority
+    swapped = False
+
+    def swap_then_record(
+        target: Path, components: tuple[str, ...], directory: int, *, workspace: dict[str, int]
+    ) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            relocated.rename(tmp_path / "held-workspace")
+            attacker.rename(relocated)
+        original_record(target, components, directory, workspace=workspace)
+
+    monkeypatch.setattr(ledger, "_record_external_directory_authority", swap_then_record)
+
+    with pytest.raises(OSError, match="workspace directory identity does not match expected identity"):
+        ledger._open_import_proof_directory(relocated, create=True)
+
+
+def test_import_proof_directory_relocation_rejects_record_without_workspace_binding(tmp_path: Path) -> None:
+    original = tmp_path / "original-workspace"
+    original.mkdir()
+    descriptor = ledger._open_import_proof_directory(original, create=True)
+    os.close(descriptor)
+    authority_path = ledger._directory_authority_store_path(original)
+    authority = json.loads(authority_path.read_text())
+    authority.pop("workspace", None)
+    authority_path.write_text(json.dumps(authority))
+
+    relocated = tmp_path / "relocated-workspace"
+    original.rename(relocated)
+
+    with pytest.raises(OSError, match="external directory authority record is missing"):
+        ledger._open_import_proof_directory(relocated, create=True)
+
+
+def test_import_inbox_rollback_short_write_restores_all_prior_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent, name = ledger._open_import_inbox_parent(tmp_path, create=True)
+    before = b'{"text":"before"}\n'
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+    try:
+        os.write(descriptor, before)
+    finally:
+        os.close(descriptor)
+    original_write = ledger.os.write
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("forced replacement failure")
+
+    def short_write(descriptor: int, data: bytes) -> int:
+        return original_write(descriptor, data[:1])
+
+    monkeypatch.setattr(ledger.os, "replace", fail_replace)
+    monkeypatch.setattr(ledger.os, "write", short_write)
+    try:
+        ledger._restore_import_inbox_snapshot(parent, name, before, True)
+        assert helpers._imports_path(tmp_path).read_bytes() == before
+    finally:
+        os.close(parent)
+
+
+def test_import_inbox_rollback_zero_write_fails_without_reporting_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent, name = ledger._open_import_inbox_parent(tmp_path, create=True)
+    before = b'{"text":"before"}\n'
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+    try:
+        os.write(descriptor, before)
+    finally:
+        os.close(descriptor)
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("forced replacement failure")
+
+    monkeypatch.setattr(ledger.os, "replace", fail_replace)
+    monkeypatch.setattr(ledger.os, "write", lambda _descriptor, _data: 0)
+    try:
+        with pytest.raises(OSError, match="rollback could not restore"):
+            ledger._restore_import_inbox_snapshot(parent, name, before, True)
+        assert not helpers._imports_path(tmp_path).exists()
+    finally:
+        os.close(parent)
+
+
 def test_import_publication_temp_substitution_restores_prior_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     before = b'{"text":"before"}\n'
     attacker = b'{"text":"attacker"}\n'

@@ -1442,15 +1442,33 @@ def _directory_identity(descriptor: int) -> dict[str, int]:
     return {"device": metadata.st_dev, "inode": metadata.st_ino}
 
 
-def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, Any] | None]:
-    path = _directory_authority_store_path(target)
+def _workspace_directory_identity(target: Path) -> dict[str, int]:
+    """Return the identity of the workspace root through a no-follow descriptor."""
+    descriptor = os.open(
+        target.expanduser().resolve(),
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        return _directory_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _require_workspace_directory_identity(target: Path, expected: dict[str, int]) -> None:
+    """Require a reopened workspace path to identify the originally held root."""
+    if _workspace_directory_identity(target) != expected:
+        raise OSError("workspace directory identity does not match expected identity")
+
+
+def _read_external_directory_authority_path(path: Path) -> dict[str, Any] | None:
+    """Read one external authority record without deriving authority from its path."""
     try:
         descriptor = os.open(
             path,
             os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
         )
     except FileNotFoundError:
-        return path, None
+        return None
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
@@ -1462,7 +1480,12 @@ def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, An
         os.close(descriptor)
     if not isinstance(payload, dict):
         raise OSError("external directory authority record is malformed")
-    return path, payload
+    return payload
+
+
+def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, Any] | None]:
+    path = _directory_authority_store_path(target)
+    return path, _read_external_directory_authority_path(path)
 
 
 def _write_external_directory_authority(path: Path, payload: dict[str, Any]) -> None:
@@ -1494,14 +1517,19 @@ def _write_external_directory_authority(path: Path, payload: dict[str, Any]) -> 
             pass
 
 
-def _record_external_directory_authority(target: Path, components: tuple[str, ...], directory: int) -> None:
+def _record_external_directory_authority(
+    target: Path, components: tuple[str, ...], directory: int, *, workspace: dict[str, int]
+) -> None:
     """Persist a directory identity in user-owned state, outside the workspace."""
+    _require_workspace_directory_identity(target, workspace)
     path, existing = _read_external_directory_authority(target)
     resolved = str(target.expanduser().resolve())
+    _require_workspace_directory_identity(target, workspace)
     if existing is None:
         payload: dict[str, Any] = {
             "schema_version": _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION,
             "target": resolved,
+            "workspace": workspace,
             "directories": {},
         }
     else:
@@ -1509,6 +1537,7 @@ def _record_external_directory_authority(target: Path, components: tuple[str, ..
         if (
             payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
             or payload.get("target") != resolved
+            or payload.get("workspace") != workspace
             or not isinstance(payload.get("directories"), dict)
         ):
             raise OSError("external directory authority record is malformed")
@@ -1525,7 +1554,49 @@ def _record_external_directory_authority(target: Path, components: tuple[str, ..
     _write_external_directory_authority(path, payload)
 
 
-def _validate_external_directory_authority(target: Path, components: tuple[str, ...], directory: int) -> None:
+def _reanchor_external_directory_authority(
+    target: Path, components: tuple[str, ...], directory: int, *, workspace: dict[str, int]
+) -> bool:
+    """Copy an external authority record only after exact root and directory identity matches."""
+    _require_workspace_directory_identity(target, workspace)
+    current_path = _directory_authority_store_path(target)
+    current_target = str(target.expanduser().resolve())
+    identity = _directory_identity(directory)
+    scope = _directory_authority_scope(components)
+    try:
+        candidates = list(current_path.parent.iterdir())
+    except FileNotFoundError:
+        return False
+    for candidate in candidates:
+        if candidate == current_path:
+            continue
+        try:
+            payload = _read_external_directory_authority_path(candidate)
+        except OSError:
+            continue
+        if payload is None:
+            continue
+        recorded_target = payload.get("target")
+        directories = payload.get("directories")
+        if (
+            not isinstance(recorded_target, str)
+            or recorded_target == current_target
+            or candidate.name != f"{hashlib.sha256(recorded_target.encode('utf-8')).hexdigest()}.json"
+            or payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+            or payload.get("workspace") != workspace
+            or not isinstance(directories, dict)
+            or directories.get(scope) != identity
+        ):
+            continue
+        _record_external_directory_authority(target, components, directory, workspace=workspace)
+        return True
+    return False
+
+
+def _validate_external_directory_authority(
+    target: Path, components: tuple[str, ...], directory: int, *, workspace: dict[str, int]
+) -> None:
+    _require_workspace_directory_identity(target, workspace)
     _path, payload = _read_external_directory_authority(target)
     if payload is None:
         raise OSError("external directory authority record is missing")
@@ -1533,20 +1604,54 @@ def _validate_external_directory_authority(target: Path, components: tuple[str, 
     if (
         payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
         or payload.get("target") != str(target.expanduser().resolve())
+        or payload.get("workspace") != workspace
         or not isinstance(directories, dict)
         or directories.get(_directory_authority_scope(components)) != _directory_identity(directory)
     ):
         raise OSError("external directory authority record does not match directory")
 
 
-def _record_verifier_owned_directory(target: Path, *, components: tuple[str, ...], directory: int) -> None:
+def _external_workspace_directory_identity(target: Path) -> dict[str, int]:
+    """Read and recheck the root identity already bound by an external authority record."""
+    _path, payload = _read_external_directory_authority(target)
+    if payload is None:
+        raise OSError("external directory authority record is missing")
+    workspace = payload.get("workspace")
+    if (
+        payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+        or payload.get("target") != str(target.expanduser().resolve())
+        or not isinstance(workspace, dict)
+        or set(workspace) != {"device", "inode"}
+        or not all(isinstance(value, int) and not isinstance(value, bool) for value in workspace.values())
+        or not isinstance(payload.get("directories"), dict)
+    ):
+        raise OSError("external directory authority record is malformed")
+    _require_workspace_directory_identity(target, workspace)
+    return workspace
+
+
+def _record_verifier_owned_directory(
+    target: Path, *, components: tuple[str, ...], directory: int, workspace: dict[str, int] | None = None
+) -> None:
     """Record a child directory created by a verifier-owned producer."""
-    _record_external_directory_authority(target, components, directory)
+    _record_external_directory_authority(
+        target,
+        components,
+        directory,
+        workspace=_external_workspace_directory_identity(target) if workspace is None else workspace,
+    )
 
 
-def _validate_verifier_owned_directory(target: Path, *, components: tuple[str, ...], directory: int) -> None:
+def _validate_verifier_owned_directory(
+    target: Path, *, components: tuple[str, ...], directory: int, workspace: dict[str, int] | None = None
+) -> None:
     """Require that a directory still matches its verifier-owned external record."""
-    _validate_external_directory_authority(target, components, directory)
+    _validate_external_directory_authority(
+        target,
+        components,
+        directory,
+        workspace=_external_workspace_directory_identity(target) if workspace is None else workspace,
+    )
 
 
 def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *, anchor_name: str) -> None:
@@ -1574,7 +1679,7 @@ def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *,
         os.close(descriptor)
 
 
-def _adopt_preexisting_scanner_run_directories(target: Path, root: int) -> None:
+def _adopt_preexisting_scanner_run_directories(target: Path, root: int, *, workspace: dict[str, int]) -> None:
     """Capture released scanner run directories by identity, never by receipt bytes."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     for run_id in os.listdir(root):
@@ -1587,6 +1692,7 @@ def _adopt_preexisting_scanner_run_directories(target: Path, root: int) -> None:
                 target,
                 (".brigade", "scanners", "runs", run_id),
                 descriptor,
+                workspace=workspace,
             )
         except OSError:
             continue
@@ -1599,6 +1705,7 @@ def _open_legacy_scanner_runs_directory(target: Path) -> int:
     """Adopt a released scanner-runs root without deriving trust from receipts."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(target.expanduser().resolve(), flags)
+    workspace = _directory_identity(descriptor)
     anchor_parent = -1
     try:
         brigade = os.open(".brigade", flags, dir_fd=descriptor)
@@ -1619,14 +1726,20 @@ def _open_legacy_scanner_runs_directory(target: Path) -> int:
             if (
                 payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
                 or payload.get("target") != str(target.expanduser().resolve())
+                or payload.get("workspace") != workspace
                 or not isinstance(directories, dict)
             ):
                 raise OSError("external directory authority record is malformed")
             if scope in directories:
                 raise OSError("external directory authority record does not match directory")
 
-        _record_external_directory_authority(target, (".brigade", "scanners", "runs"), descriptor)
-        _adopt_preexisting_scanner_run_directories(target, descriptor)
+        _record_external_directory_authority(
+            target,
+            (".brigade", "scanners", "runs"),
+            descriptor,
+            workspace=workspace,
+        )
+        _adopt_preexisting_scanner_run_directories(target, descriptor, workspace=workspace)
         _write_compatibility_directory_anchor(anchor_parent, descriptor, anchor_name=".runs.authority.json")
         os.close(anchor_parent)
         anchor_parent = -1
@@ -1652,6 +1765,7 @@ def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...],
         raise OSError("descriptor-relative directory authority operations are unavailable")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(target.expanduser().resolve(), flags)
+    workspace = _directory_identity(descriptor)
     anchor_parent = -1
     parent = -1
     try:
@@ -1686,10 +1800,12 @@ def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...],
             child = os.open(name, flags, dir_fd=parent)
             created = True
         try:
-            _validate_external_directory_authority(target, components, child)
+            _validate_external_directory_authority(target, components, child, workspace=workspace)
         except OSError:
             if created:
-                _record_external_directory_authority(target, components, child)
+                _record_external_directory_authority(target, components, child, workspace=workspace)
+            elif _reanchor_external_directory_authority(target, components, child, workspace=workspace):
+                _validate_external_directory_authority(target, components, child, workspace=workspace)
             else:
                 raise
         _write_compatibility_directory_anchor(anchor_parent, child, anchor_name=anchor_name)
@@ -2239,7 +2355,12 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
         )
         _validate_import_inbox_descriptor(descriptor)
         os.ftruncate(descriptor, 0)
-        os.write(descriptor, data)
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("import inbox rollback write made no progress")
+            remaining = remaining[written:]
         os.fsync(descriptor)
         _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
         os.fsync(parent)
