@@ -96,7 +96,7 @@ Brigade has grown from a bootstrap kit into a local control plane for agent work
 - Work loop: dogfood runs, work sessions, task ledgers, issue imports, acceptance criteria, verification receipts, review closeouts, sweep closeouts, and work closeout receipts.
 - Scanner inbox: explicit local scanner registry, scanner runs, scanner sweeps, import validation, provenance checks, dedupe, dismiss-until-changed behavior, handoff promotion, and inbox hygiene.
 - Daily driver: `brigade daily status/plan/review/run/closeout` plus approvals, resume, repair, unblock, protocol, telemetry, and hardening audits for one bounded local action at a time.
-- Operator center: local status, activity, reviews, templates, reports, report diffs, action queues, readiness closeouts, and wrapper-facing schemas.
+- Operator center: local status, activity, agent activity, reviews, templates, reports, report diffs, action queues, readiness closeouts, and wrapper-facing schemas.
 - Release gates: release readiness receipts, CI deprecation checks, install-smoke receipts, release candidates, candidate audit and compare, candidate closeouts, manual-only publish plans, and schema contracts.
 - Repo fleet: local repo discovery plans, repo health scans, fleet sweeps, reports, actions, action dispatch, context packs, release trains, train evidence, waivers, manifests, audits, and ready gates.
 - AFK phase ledger: phase records, reports, closeouts, compares, action queues, sessions, checkpoints, recovery notes, risk, verification, privacy, handoff, progress, protocol, audit, gate, and release evidence.
@@ -107,6 +107,18 @@ Brigade has grown from a bootstrap kit into a local control plane for agent work
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
 
 The common rule is deliberate friction: Brigade writes local receipts and review queues, but it does not start daemons, mutate remotes, edit canonical memory, run arbitrary commands, publish releases, or auto-promote findings without an explicit operator command. See [`docs/execution-model.md`](execution-model.md).
+
+### Agent activity
+
+`brigade center activity --json` keeps its existing receipt list and adds a version 2 `agent_activity` section. Brigade run records are local authoritative observations. Codex and Cursor session files are freshness-only observations: Center does not read their prompt or transcript contents. A missing source is shown as stale, never as completed.
+
+For a remote T3 controller journal already available locally, configure an alias and a repo-relative journal path in `.brigade/center/agent-activity-sources.json`:
+
+```json
+{"sources":[{"provider":"t3","host":"fleet-east","journal":"fleet/t3-controller.jsonl"}]}
+```
+
+Each journal row may provide safe `label`, `task_label`, `state`, `started_at`, `last_updated_at`, and `parent_activity_id` fields. Center never follows that path outside the selected workspace, and it does not attempt network discovery or control remote agents.
 
 Browse the public template index in [`templates/`](../templates/).
 The installable source files live under `src/brigade/templates/`; root workspace files are local dogfood state and stay ignored.

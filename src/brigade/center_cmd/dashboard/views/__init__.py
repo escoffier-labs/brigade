@@ -18,6 +18,7 @@ from typing import Protocol
 from brigade.center_cmd.dashboard import render
 from brigade.center_cmd.dashboard.views import (
     activity_heatmap,
+    agent_activity,
     dispatch_waves,
     handoff_inbox,
     memory_operations,
@@ -35,6 +36,7 @@ _VIEW_MODULES: tuple[ModuleType, ...] = (
     outcome_rank,
     run_timeline,
     activity_heatmap,
+    agent_activity,
     ready_graph,
     dispatch_waves,
     task_claims,
