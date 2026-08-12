@@ -10,7 +10,7 @@ from brigade.center_cmd.dashboard import render as html
 
 NAME = "agents"
 TITLE = "Agent Activity"
-ORDER = 7
+ORDER = 6.5
 
 _STATE_ICON = {
     "queued": "○",

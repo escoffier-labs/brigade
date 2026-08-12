@@ -16,7 +16,7 @@ from brigade.center_cmd.dashboard import work_graph as wg
 
 NAME = "waves"
 TITLE = "Waves"
-ORDER = 9
+ORDER = 8
 
 
 def fetch(target: Path) -> dict:
