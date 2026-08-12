@@ -1,0 +1,26 @@
+{
+  "schema": "brigade.memory-quality-input.v1",
+  "as_of": "2026-08-12",
+  "retrievals": [
+    {
+      "id": "q-stale",
+      "scope": {"repository": "repo-beta"},
+      "results": ["retired-endpoint", "deployment-policy"]
+    },
+    {
+      "id": "q-current",
+      "scope": {"repository": "repo-beta"},
+      "results": ["deployment-policy", "deployment-policy"]
+    }
+  ],
+  "projections": [
+    {
+      "card_id": "deployment-policy",
+      "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "card_id": "retired-endpoint",
+      "content_hash": "sha256:7e13123a6daf6462a985ffbd23ccbeba93c7db5be985f088040ff8f3ee197221"
+    }
+  ]
+}
