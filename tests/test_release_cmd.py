@@ -932,6 +932,78 @@ def test_release_candidate_notes_and_publish_plan(tmp_path, monkeypatch, capsys)
     assert "Co-authored-by: Codex <codex@openai.com>" in inhouse_notes
 
 
+def test_release_candidate_notes_sanitize_unreleased_url_token_ansi_and_control(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    private_url = "https://agent.private.invalid/release-notes"
+    token = "ghp_" + ("a" * 20)
+    ansi = "\x1b[31m"
+    c0 = "\x07"
+    c1 = "\x9b"
+    changelog = (
+        "# Changelog\n\n"
+        "## [Unreleased]\n"
+        "- Add safe release notes.\n"
+        f"- Document callback {private_url} for operators.\n"
+        f"- Rotate deploy token {token}.\n"
+        f"- Colorize {ansi}status output\x1b[0m in doctor.\n"
+        f"- Keep the {c0}bell out of notes.\n"
+        f"- Strip C1 {c1}bytes from notes.\n"
+        "- Preserve trailing safe highlight.\n\n"
+        "## [0.1.0]\n- Historical entry.\n"
+    )
+    changelog_path = tmp_path / "CHANGELOG.md"
+    changelog_path.write_text(changelog)
+    subprocess.run(["git", "add", "CHANGELOG.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "update changelog"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+
+    assert release_cmd.candidate_build(target=tmp_path, base_ref="HEAD~1", json_output=True) == 0
+    candidate = json.loads(capsys.readouterr().out)
+    notes = Path(candidate["path"], "RELEASE_NOTES_DRAFT.md").read_text()
+    inputs = candidate["release_notes_inputs"]
+    items = inputs["changelog_unreleased"]
+    redactions = inputs["changelog_redactions"]
+
+    assert items[0] == "Add safe release notes."
+    assert items[-1] == "Preserve trailing safe highlight."
+    assert "[redacted-url]" in notes
+    assert "[redacted]" in notes
+    assert private_url not in notes
+    assert token not in notes
+    assert "\x1b" not in notes
+    assert c0 not in notes
+    assert c1 not in notes
+    assert "\x1b" not in "".join(items)
+    assert c0 not in "".join(items)
+    assert c1 not in "".join(items)
+    assert redactions["count"] == 5
+    assert redactions["reasons"]["private_url"] == 1
+    assert redactions["reasons"]["secret"] == 1
+    assert redactions["reasons"]["control"] >= 3
+    assert "5 Unreleased changelog entries redacted" in notes
+    assert changelog_path.read_text() == changelog
+
+
+def test_release_notes_draft_reports_changelog_redaction_summary():
+    notes = release_cmd._candidate_release_notes(
+        {
+            "release_notes_inputs": {
+                "changelog_unreleased": ["A safe item."],
+                "changelog_redactions": {
+                    "count": 3,
+                    "reasons": {"secret": 1, "control": 2},
+                },
+            }
+        }
+    )
+
+    assert "- A safe item." in notes
+    assert "3 Unreleased changelog entries redacted" in notes
+    assert "control=2, secret=1" in notes
+
+
 def test_release_candidate_health_warnings(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     _seed_ready_evidence(tmp_path)
