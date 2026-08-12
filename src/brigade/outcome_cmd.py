@@ -15,9 +15,11 @@ import io
 import json
 import os
 import platform as platform_mod
+import re
 import secrets
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,9 @@ from . import localio, outcome as core, receipt_schema, scorecard as scorecard_m
 
 _LOCK_WAIT_SECONDS = 30.0
 _LOCK_SENTINEL_BYTE = b"\0"
+# Align with Brigade public/slug identifiers (no arbitrary length cap).
+_SAFE_SKILL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_WARNING_LABEL_LIMIT = 80
 
 # Generic fallback when no exercised skill/card is known. Prefer a real artifact
 # id at capture time so distinct skills do not collapse into one rank bucket.
@@ -97,16 +102,130 @@ def load_status(target: Path) -> dict[str, dict]:
     return artifacts if isinstance(artifacts, dict) else {}
 
 
-def _known_skill_names(target: Path) -> list[str]:
-    """Skill ids the target actually has: wired into a harness or in the registry."""
+def _artifact_id_has_controls(artifact_id: str) -> bool:
+    """True when artifact_id contains Unicode control (Cc) or format (Cf) characters."""
+    return any(unicodedata.category(ch) in {"Cc", "Cf"} for ch in artifact_id)
+
+
+def _safe_path_component(artifact_id: str) -> str | None:
+    """Return artifact_id only when it is a single safe on-disk path component."""
+    if not artifact_id or artifact_id in {".", ".."}:
+        return None
+    if any(sep in artifact_id for sep in ("/", "\\")):
+        return None
+    if artifact_id.startswith("~") or ":" in artifact_id:
+        return None
+    if any(ch in artifact_id for ch in "*?[]"):
+        return None
+    if _artifact_id_has_controls(artifact_id):
+        return None
+    return artifact_id
+
+
+def _safe_skill_id_component(skill_id: str) -> str | None:
+    """Return skill_id only when it is a single safe slug path component."""
+    safe = _safe_path_component(skill_id)
+    if safe is None:
+        return None
+    if _SAFE_SKILL_ID_RE.fullmatch(safe) is None:
+        return None
+    return safe
+
+
+def _safe_card_id_component(card_id: str) -> str | None:
+    """Return card_id when it is a single safe path component (Unicode/spaces ok)."""
+    return _safe_path_component(card_id)
+
+
+def _resolve_root(root: Path) -> Path | None:
+    try:
+        return root.expanduser().resolve()
+    except OSError:
+        return None
+
+
+def _contained_under(root_resolved: Path, candidate: Path) -> Path | None:
+    """Return candidate when it resolves to a real file inside root."""
+    try:
+        if not candidate.is_file():
+            return None
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    if not resolved.is_relative_to(root_resolved):
+        return None
+    return candidate
+
+
+def _contained_card_file(target: Path, candidate: Path) -> Path | None:
+    """Return candidate when it resolves under the selected cards root inside target.
+
+    Blocks both an escaping ``memory`` / ``memory/cards`` directory symlink
+    (cards resolve outside the target) and a per-file symlink that lands
+    outside ``memory/cards`` even when still inside the target tree.
+    """
+    target_resolved = _resolve_root(target)
+    if target_resolved is None:
+        return None
+    cards_resolved = _resolve_root(target / "memory" / "cards")
+    if cards_resolved is None or not cards_resolved.is_relative_to(target_resolved):
+        return None
+    return _contained_under(cards_resolved, candidate)
+
+
+def _skill_names_at(root: Path) -> set[str]:
+    """Skill ids present under one checkout: harness installs or registry dirs."""
     names: set[str] = set()
-    for skill_md in target.glob(".*/skills/*/SKILL.md"):
-        names.add(skill_md.parent.name)
-    registry = target / ".brigade" / "skills" / "registry"
+    root_resolved = _resolve_root(root)
+    if root_resolved is None:
+        return names
+    for skill_md in root.glob(".*/skills/*/SKILL.md"):
+        skill_id = _safe_skill_id_component(skill_md.parent.name)
+        if skill_id is None:
+            continue
+        if _contained_under(root_resolved, skill_md) is None:
+            continue
+        names.add(skill_id)
+    registry = root / ".brigade" / "skills" / "registry"
     if registry.is_dir():
         for child in registry.iterdir():
-            if child.is_dir():
-                names.add(child.name)
+            skill_id = _safe_skill_id_component(child.name)
+            if skill_id is None:
+                continue
+            skill_md = child / "SKILL.md"
+            if _contained_under(root_resolved, skill_md) is None:
+                continue
+            names.add(skill_id)
+    return names
+
+
+def _linked_worktree_skill_roots(target: Path) -> list[Path]:
+    """Target first, then linked-worktree parent. Never global home skill dirs."""
+    roots = [target]
+    from . import roster
+
+    parent = roster._linked_worktree_parent(target)
+    if parent is None:
+        return roots
+    try:
+        if parent.resolve() == target.expanduser().resolve():
+            return roots
+    except OSError:
+        return roots
+    roots.append(parent)
+    return roots
+
+
+def _known_skill_names(target: Path) -> list[str]:
+    """Skill ids the target actually has: wired into a harness or in the registry.
+
+    Linked git worktrees inherit the parent clone's harness/registry skills after
+    the target-local set, matching roster resolution. Global home skill dirs are
+    intentionally out of scope so capture attribution stays repo-bounded.
+    """
+    names: set[str] = set()
+    for root in _linked_worktree_skill_roots(target):
+        names |= _skill_names_at(root)
     return sorted(names)
 
 
@@ -114,7 +233,15 @@ def _known_card_names(target: Path) -> list[str]:
     cards = target / "memory" / "cards"
     if not cards.is_dir():
         return []
-    return sorted(p.stem for p in cards.glob("*.md"))
+    names: list[str] = []
+    for path in cards.glob("*.md"):
+        card_id = _safe_card_id_component(path.stem)
+        if card_id is None:
+            continue
+        if _contained_card_file(target, path) is None:
+            continue
+        names.append(card_id)
+    return sorted(names)
 
 
 def _artifact_known(target: Path, artifact_id: str, kind: str) -> bool:
@@ -123,27 +250,145 @@ def _artifact_known(target: Path, artifact_id: str, kind: str) -> bool:
     return artifact_id in _known_skill_names(target)
 
 
+def _artifact_content_path_at(root: Path, artifact_id: str) -> Path | None:
+    """Harness-installed copy first, then registry master, under one root."""
+    skill_id = _safe_skill_id_component(artifact_id)
+    if skill_id is None:
+        return None
+    root_resolved = _resolve_root(root)
+    if root_resolved is None:
+        return None
+    # Enumerate harness skill roots without interpolating the untrusted id into glob.
+    for skills_root in sorted(path for path in root.glob(".*/skills") if path.is_dir()):
+        candidate = skills_root / skill_id / "SKILL.md"
+        contained = _contained_under(root_resolved, candidate)
+        if contained is not None:
+            return contained
+    registry_md = root / ".brigade" / "skills" / "registry" / skill_id / "SKILL.md"
+    return _contained_under(root_resolved, registry_md)
+
+
 def _artifact_content_path(target: Path, artifact_id: str, kind: str) -> Path | None:
     """Locate the artifact text a fingerprint should pin.
 
     Harness-installed copy first: a verified run exercises the installed skill,
     not the registry master, so when the two drift the installed text is what
     the signal is evidence about. The registry copy is the fallback for skills
-    known but not yet installed. capture and rank/explain both resolve through
-    here, so "current cohort" always means the text that actually runs.
+    known but not yet installed. On a linked worktree, target-local copies win
+    over the parent clone. capture and rank/explain both resolve through here,
+    so "current cohort" always means the text that actually runs.
     """
     if kind == "card":
-        card = target / "memory" / "cards" / f"{artifact_id}.md"
-        return card if card.is_file() else None
-    for skill_md in sorted(target.glob(f".*/skills/{artifact_id}/SKILL.md")):
-        if skill_md.is_file():
-            return skill_md
+        card_id = _safe_card_id_component(artifact_id)
+        if card_id is None:
+            return None
+        candidate = target / "memory" / "cards" / f"{card_id}.md"
+        return _contained_card_file(target, candidate)
+    for root in _linked_worktree_skill_roots(target):
+        path = _artifact_content_path_at(root, artifact_id)
+        if path is not None:
+            return path
+    return None
+
+
+def _strip_warning_controls(value: str) -> str:
+    """Remove terminal, C0/C1, bidi, and other format controls from warning text."""
+    pieces: list[str] = []
+    for character in value:
+        category = unicodedata.category(character)
+        if category in {"Cc", "Cf"}:
+            if character in "\t\n\r":
+                pieces.append(" ")
+            continue
+        pieces.append(character)
+    return "".join(pieces)
+
+
+def _warning_label(value: str) -> str:
+    """Render a bounded, control-stripped label for stderr warnings."""
+    clean = " ".join(_strip_warning_controls(value).split())
+    if len(clean) <= _WARNING_LABEL_LIMIT:
+        return clean
+    return clean[: _WARNING_LABEL_LIMIT - 3] + "..."
+
+
+def _normalize_path_separators(value: str) -> str:
+    return value.replace("\\", "/")
+
+
+def _path_shaped_artifact_id(artifact_id: str) -> bool:
+    normalized = _normalize_path_separators(artifact_id)
+    return (
+        normalized.startswith(("~", "/"))
+        or "/" in normalized
+        or normalized.endswith("SKILL.md")
+        or (len(normalized) >= 2 and normalized[1] == ":")
+    )
+
+
+def _skill_id_from_path_shaped(artifact_id: str) -> str | None:
+    normalized = _normalize_path_separators(artifact_id)
+    try:
+        home = str(Path.home().expanduser().resolve())
+    except OSError:
+        home = ""
+    rendered = normalized
+    if home:
+        rendered = rendered.replace(_normalize_path_separators(home), "~")
+        rendered = rendered.replace(home, "~")
+    path = Path(rendered)
+    name = path.name
+    if name == "SKILL.md":
+        name = path.parent.name
+    if not name or name in {".", ".."}:
+        return None
+    return name
+
+
+def _safe_artifact_id_for_warning(artifact_id: str) -> str:
+    """Keep untrusted path-shaped capture ids out of warning text."""
+    if not artifact_id or artifact_id in {".", ".."}:
+        return _warning_label(artifact_id)
+    if not _path_shaped_artifact_id(artifact_id):
+        return _warning_label(artifact_id)
+    name = _skill_id_from_path_shaped(artifact_id)
+    if name is None:
+        return "[redacted-path]"
+    return _warning_label(name)
+
+
+def _unknown_artifact_remedy(artifact_id: str, artifact_kind: str) -> str | None:
+    """Exact repair command when Brigade can name one without guessing paths."""
+    if artifact_kind != "skill":
+        return None
+    # Path-shaped ids are caller mistakes; point at the directory name only.
+    if _path_shaped_artifact_id(artifact_id):
+        skill_id = _skill_id_from_path_shaped(artifact_id)
+        if skill_id is None:
+            return None
+        safe_id = _warning_label(skill_id)
+        return f"Capture against the skill id `{safe_id}`, not a filesystem path."
     from . import skills_cmd
 
-    registry_md = skills_cmd._skill_md_path(skills_cmd._skill_path(target, artifact_id))
-    if registry_md.is_file():
-        return registry_md
+    if skills_cmd._bundled_skill_exists(artifact_id):
+        safe_id = _warning_label(artifact_id)
+        return f"Install it with: brigade skills install {safe_id}"
     return None
+
+
+def _unknown_artifact_warning(target: Path, artifact_id: str, artifact_kind: str) -> str:
+    known = _known_skill_names(target) if artifact_kind == "skill" else _known_card_names(target)
+    hint = ", ".join(_warning_label(name) for name in known) if known else "none"
+    display_id = _safe_artifact_id_for_warning(artifact_id)
+    message = (
+        f"warning: '{display_id}' is not a known installed {artifact_kind}; recording anyway. "
+        f"Capture against a real {artifact_kind} id to keep ranking trustworthy. "
+        f"known {artifact_kind}s: {hint}"
+    )
+    remedy = _unknown_artifact_remedy(artifact_id, artifact_kind)
+    if remedy:
+        return f"{message} {remedy}"
+    return message
 
 
 # Files inside a skill bundle that are not part of its logic: OS cruft and the
@@ -164,8 +409,18 @@ def _bundle_fingerprint(skill_dir: Path) -> str | None:
     ``sha256(SKILL.md)`` - byte-identical to the pre-bundle fingerprint - so
     existing single-file records are never invalidated. Only a genuinely
     multi-file bundle takes the composite path.
+
+    Symlinks that resolve outside the selected skill directory are excluded so
+    the fingerprint never hashes external dependency bytes.
     """
-    files = sorted(p for p in skill_dir.rglob("*") if p.is_file() and p.name not in _BUNDLE_IGNORED_NAMES)
+    skill_root = _resolve_root(skill_dir)
+    if skill_root is None:
+        return None
+    files = sorted(
+        p
+        for p in skill_dir.rglob("*")
+        if p.name not in _BUNDLE_IGNORED_NAMES and _contained_under(skill_root, p) is not None
+    )
     if not files:
         return None
     skill_md = skill_dir / "SKILL.md"
@@ -202,17 +457,25 @@ def _linked_card_closure(cards_dir: Path, root_id: str) -> list[str]:
     itself. Cycle-safe (a shared visited set), deterministic (sorted output), and
     tolerant of dead links (a ``[[missing]]`` contributes nothing until the card
     exists). Case-insensitive resolution to the actual on-disk stem.
+
+    Only cards whose resolved path stays under the selected cards directory are
+    discoverable, so a symlink escaping that root is treated as a dead link.
     """
     from brigade.memory_doctor.parsing import extract_wiki_links
 
-    stem_by_lower = {p.stem.lower(): p.stem for p in cards_dir.glob("*.md")}
+    cards_root = _resolve_root(cards_dir)
+    if cards_root is None:
+        return []
+    stem_by_lower = {
+        p.stem.lower(): p.stem for p in cards_dir.glob("*.md") if _contained_under(cards_root, p) is not None
+    }
     visited = {root_id.lower()}
     queue = [root_id]
     reached: set[str] = set()
     while queue:
         current = queue.pop()
         card_path = cards_dir / f"{current}.md"
-        if not card_path.is_file():
+        if _contained_under(cards_root, card_path) is None:
             continue
         for raw in extract_wiki_links(card_path.read_text(encoding="utf-8", errors="replace")):
             slug = _link_target_slug(raw).lower()
@@ -236,6 +499,9 @@ def _card_fingerprint(card_path: Path) -> str | None:
     invalidates the referrer the way editing the card itself does.
     """
     cards_dir = card_path.parent
+    cards_root = _resolve_root(cards_dir)
+    if cards_root is None or _contained_under(cards_root, card_path) is None:
+        return None
     try:
         self_bytes = card_path.read_bytes()
         closure = _linked_card_closure(cards_dir, card_path.stem)
@@ -245,9 +511,12 @@ def _card_fingerprint(card_path: Path) -> str | None:
         digest.update(hashlib.sha256(self_bytes).hexdigest().encode("ascii"))
         digest.update(b"\0")
         for stem in closure:
+            linked = cards_dir / f"{stem}.md"
+            if _contained_under(cards_root, linked) is None:
+                continue
             digest.update(stem.encode("utf-8"))
             digest.update(b"\0")
-            digest.update(hashlib.sha256((cards_dir / f"{stem}.md").read_bytes()).hexdigest().encode("ascii"))
+            digest.update(hashlib.sha256(linked.read_bytes()).hexdigest().encode("ascii"))
             digest.update(b"\0")
         return digest.hexdigest()
     except OSError:
@@ -1766,15 +2035,16 @@ def capture(
     if run_id is not None and run_receipt is not None:
         print("error: pass either --run-id or --run-receipt, not both", file=sys.stderr)
         return 1
-    if not _artifact_known(target, artifact_id, artifact_kind):
-        known = _known_skill_names(target) if artifact_kind == "skill" else _known_card_names(target)
-        hint = ", ".join(known) if known else "none"
+    if _artifact_id_has_controls(artifact_id):
+        # Reject before any stdout or ledger write; strip Cc/Cf from the error text.
+        kind_label = "skill" if artifact_kind == "skill" else "card"
         print(
-            f"warning: '{artifact_id}' is not a known installed {artifact_kind}; recording anyway. "
-            f"Capture against a real {artifact_kind} id (or `brigade-work` itself) to keep ranking "
-            f"trustworthy. known {artifact_kind}s: {hint}",
+            f"error: {kind_label} id contains control characters: {_warning_label(artifact_id)}",
             file=sys.stderr,
         )
+        return 1
+    if not _artifact_known(target, artifact_id, artifact_kind):
+        print(_unknown_artifact_warning(target, artifact_id, artifact_kind), file=sys.stderr)
     source = "verify"
     effective_status = ""
     evidence_ref = ""
