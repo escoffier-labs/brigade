@@ -424,13 +424,14 @@ def _launchd_plists(*, workspace: Path, home: Path | None = None) -> dict[str, b
         }
         # launchd supports interval timers directly; calendar recipes use their
         # documented local hour/minute (weekly additionally pins Monday).
+        # launchd Weekday uses the same numbering as cron (0/7=Sunday, 1=Monday).
         if entry.entry_id == "ingest-sweep":
             payload["StartInterval"] = 1800
         else:
             fields = entry.schedule.split()
             calendar: dict[str, int] = {"Minute": int(fields[0]), "Hour": int(fields[1])}
             if fields[4] != "*":
-                calendar["Weekday"] = int(fields[4]) + 1
+                calendar["Weekday"] = int(fields[4])
             payload["StartCalendarInterval"] = calendar
         result[f"{label}.plist"] = plistlib.dumps(payload, sort_keys=True)
     return result

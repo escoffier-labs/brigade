@@ -62,6 +62,19 @@ def test_care_launchd_registrations_are_target_namespaced(tmp_path, monkeypatch,
     assert "no scheduler registration found" in capsys.readouterr().out
 
 
+def test_care_launchd_weekly_weekday_matches_cron_monday(tmp_path):
+    import plistlib
+
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    plists = care_cmd._launchd_plists(workspace=target, home=home)
+    weekly_name = next(name for name in plists if "weekly-outcome-ratchet" in name)
+    payload = plistlib.loads(plists[weekly_name])
+    # cron "0 7 * * 1" and launchd both use 1 = Monday
+    assert payload["StartCalendarInterval"] == {"Minute": 0, "Hour": 7, "Weekday": 1}
+
+
 def test_care_auto_backend_is_explicitly_unsupported_elsewhere(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(care_cmd.sys, "platform", "plan9")
     assert care_cmd.status(target=tmp_path) == 3
