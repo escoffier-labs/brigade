@@ -2099,6 +2099,50 @@ func TestSearchMultiTermAndPrefix(t *testing.T) {
 	}
 }
 
+func TestCollectStatusSourceCountsUseCoveringIndex(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	db, paths, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	now := "2026-07-02T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, created_at, updated_at) values
+('src-codex','codex','Codex',?,?),
+('src-claude','claude','Claude',?,?)`, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name) values('col-codex','src-codex','collection:codex','agent_session','Codex')`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("item-codex-%d", i)
+		if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, text, content_hash, raw_json)
+values(?,?,?,?,?,?,?,?,?)`, id, "src-codex", "col-codex", id, "message", now, "body", "hash-"+id, "{}"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	status, err := collectStatus(db, paths)
+	if err != nil {
+		t.Fatalf("collectStatus: %v", err)
+	}
+	if got, want := status.SourceCounts["codex"], int64(3); got != want {
+		t.Fatalf("populated source count = %d, want %d", got, want)
+	}
+	if got, want := status.SourceCounts["claude"], int64(0); got != want {
+		t.Fatalf("zero-item source count = %d, want %d", got, want)
+	}
+
+	plan := explainPlan(t, db, statusSourceCountSQL)
+	wantCovering := "USING COVERING INDEX idx_items_source_external"
+	if !strings.Contains(plan, wantCovering) {
+		t.Fatalf("status source-count plan missing %q:\n%s", wantCovering, plan)
+	}
+}
+
 func TestSearchPlanBoundsFTSCandidatesBeforeJoins(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
