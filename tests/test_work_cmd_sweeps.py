@@ -15,6 +15,36 @@ from tests.work_cmd_test_helpers import (
 )
 
 
+def _write_scanner_import_proof(tmp_path: Path, items: list[dict[str, object]], *, scanner: dict[str, object]) -> None:
+    """Bind legacy scanner rows to the external receipt that produced them."""
+    run_id = "legacy-repo-scan-proof"
+    for item in items:
+        metadata = item.setdefault("metadata", {})
+        assert isinstance(metadata, dict)
+        metadata.update({"scanner_id": scanner["id"], "scanner_run_id": run_id})
+    receipt = {
+        "run_id": run_id,
+        "scanner_id": scanner["id"],
+        "source": scanner["source"],
+        "command": scanner["command"],
+        "self_import_proofs": {
+            "scanner_id": scanner["id"],
+            "source": scanner["source"],
+            "scanner": scanner,
+            "imports": [
+                {
+                    "id": item["id"],
+                    "content_hash": work_cmd.ledger._locally_stamped_import_content_hash(item),
+                }
+                for item in items
+            ],
+        },
+    }
+    receipt_path = work_cmd.helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(json.dumps(receipt))
+
+
 def test_work_sweep_runs_due_scanners_ingests_output_and_reports(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
@@ -214,7 +244,6 @@ def test_work_sweep_records_skipped_and_dismissed_fingerprints(tmp_path, capsys)
         metadata={"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
     )
     dismissed["status"] = "dismissed"
-    work_cmd._write_imports(tmp_path, [pending, dismissed])
     script = tmp_path / "scanner.py"
     script.write_text(
         """
@@ -248,12 +277,13 @@ path.write_text("\\n".join(json.dumps(record) for record in records) + "\\n")
     )
     config = tmp_path / ".brigade" / "scanners.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
+    command = f"{sys.executable} {script}"
     config.write_text(
         f"""
 [[scanner]]
 id = "repo-scan"
 source = "repo-scan"
-command = "{sys.executable} {script}"
+command = "{command}"
 cadence = "daily@02:00"
 enabled = true
 timeout = 30
@@ -263,6 +293,23 @@ import_format = "jsonl"
 conflict_window = "02:00-02:10"
 """
     )
+    _write_scanner_import_proof(
+        tmp_path,
+        [pending, dismissed],
+        scanner={
+            "id": "repo-scan",
+            "source": "repo-scan",
+            "command": command,
+            "cadence": "daily@02:00",
+            "enabled": True,
+            "timeout": 30,
+            "output_path": ".brigade/scanner-imports.jsonl",
+            "import_path": ".brigade/scanner-imports.jsonl",
+            "import_format": "jsonl",
+            "conflict_window": "02:00-02:10",
+        },
+    )
+    work_cmd._write_imports(tmp_path, [pending, dismissed])
 
     assert work_cmd.sweep(target=tmp_path, scanner_id="repo-scan", json_output=True) == 0
     report = json.loads(capsys.readouterr().out)

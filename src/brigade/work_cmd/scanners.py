@@ -1,6 +1,7 @@
 """Scanner run, doctor, and health operations."""
 
 from __future__ import annotations
+import errno
 import json
 import os
 import stat
@@ -17,6 +18,52 @@ from ..install import apply_gitignore
 from . import constants, helpers, ledger as ledger_mod, config as config_mod
 
 from . import sweeps as sweeps_mod
+
+
+class _ScannerRunProof:
+    """Non-serialized verifier capability for one completed built-in scanner run."""
+
+    def __init__(self, *, scanner: dict[str, Any], run_id: str) -> None:
+        self.scanner = dict(scanner)
+        self.run_id = run_id
+
+
+_SCANNER_RUN_PROOFS: dict[int, _ScannerRunProof] = {}
+
+
+def _register_scanner_run_proof(scanner: dict[str, Any], run: dict[str, Any]) -> None:
+    """Keep authority for a completed built-in scan outside its serialized row bytes."""
+    run_id = run.get("run_id")
+    if run.get("status") == "completed" and run.get("exit_code") == 0 and isinstance(run_id, str) and run_id:
+        _SCANNER_RUN_PROOFS[id(run)] = _ScannerRunProof(scanner=scanner, run_id=run_id)
+
+
+def _scanner_run_proof(scanner: dict[str, Any], run: dict[str, Any]) -> _ScannerRunProof | None:
+    """Return a capability only for this exact verifier-owned scanner run object."""
+    proof = _SCANNER_RUN_PROOFS.get(id(run))
+    if proof is None or proof.run_id != run.get("run_id") or proof.scanner != scanner:
+        return None
+    return proof
+
+
+def _record_scanner_import_proof(scanner: dict[str, Any], run: dict[str, Any], item: dict[str, Any]) -> None:
+    """Persist the verifier's content binding outside the imported row itself."""
+    proof_data = run.setdefault(
+        "self_import_proofs",
+        {
+            "scanner_id": scanner.get("id"),
+            "source": scanner.get("source"),
+            "scanner": dict(scanner),
+            "imports": [],
+        },
+    )
+    if isinstance(proof_data, dict) and isinstance(proof_data.get("imports"), list):
+        proof_data["imports"].append(
+            {
+                "id": item.get("id"),
+                "content_hash": ledger_mod._locally_stamped_import_content_hash(item),
+            }
+        )
 
 
 def _scanner_read_receipt(path: Path) -> dict[str, Any] | None:
@@ -286,46 +333,267 @@ def _scanner_inbox_has_single_link(metadata: os.stat_result) -> bool:
     return type(link_count) is int and link_count == 1
 
 
-def _open_scanner_inbox(target: Path, flags: int, *, create: bool = False) -> int:
-    """Open the target-contained inbox without following or blocking on replacements."""
-    inbox_path = _scanner_inbox_path(target)
-    no_follow = getattr(os, "O_NOFOLLOW", 0)
-    safe_flags = flags | no_follow | getattr(os, "O_NONBLOCK", 0)
+def _scanner_inbox_open_primitives_available() -> bool:
+    """Return whether this platform can keep every inbox path component no-follow."""
+    return (
+        os.name == "posix"
+        and bool(getattr(os, "O_NOFOLLOW", 0))
+        and bool(getattr(os, "O_DIRECTORY", 0))
+        and os.open in os.supports_dir_fd
+        and os.mkdir in os.supports_dir_fd
+    )
+
+
+def _open_scanner_inbox_parent(target: Path, *, create: bool) -> tuple[int, str, tuple[tuple[int, int], ...]]:
+    """Open the inbox parent by descriptors, rejecting every symlinked component."""
+    if not _scanner_inbox_open_primitives_available():
+        raise OSError("descriptor-relative scanner inbox operations are unavailable")
+    target_root = target.expanduser().resolve()
+    inbox_path = helpers._imports_path(target_root)
     try:
-        before_open = os.lstat(inbox_path)
-    except FileNotFoundError:
-        if not create:
-            raise
-        inbox_path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(inbox_path, safe_flags | os.O_CREAT | os.O_EXCL, 0o600)
-        before_open = None
-    else:
-        if not stat.S_ISREG(before_open.st_mode):
-            raise OSError("scanner inbox is not a regular file")
-        if not _scanner_inbox_has_single_link(before_open):
-            raise OSError("scanner inbox link count is not exactly one")
-        descriptor = os.open(inbox_path, safe_flags)
+        relative = inbox_path.relative_to(target_root)
+    except ValueError as exc:
+        raise OSError("scanner inbox escapes target") from exc
+    if len(relative.parts) < 2:
+        raise OSError("scanner inbox path is incomplete")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(target_root, directory_flags)
+    identities: list[tuple[int, int]] = []
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise OSError("scanner inbox is not a regular file")
-        if not _scanner_inbox_has_single_link(opened):
-            raise OSError("scanner inbox link count is not exactly one")
-        if before_open is not None:
-            before_identity = _scanner_inbox_identity(before_open)
-            opened_identity = _scanner_inbox_identity(opened)
-            if not no_follow and (before_identity is None or opened_identity is None):
-                raise OSError("scanner inbox identity unavailable while opening")
-            if before_identity is not None and opened_identity is not None and before_identity != opened_identity:
-                raise OSError("scanner inbox changed while opening")
-        return descriptor
-    except OSError:
+        identity = _scanner_inbox_identity(opened)
+        if not stat.S_ISDIR(opened.st_mode) or identity is None:
+            raise OSError("scanner inbox root identity unavailable")
+        identities.append(identity)
+        for component in relative.parts[:-1]:
+            try:
+                child = os.open(component, directory_flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o700, dir_fd=descriptor)
+                child = os.open(component, directory_flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            opened = os.fstat(descriptor)
+            identity = _scanner_inbox_identity(opened)
+            if not stat.S_ISDIR(opened.st_mode) or identity is None:
+                raise OSError("scanner inbox parent is not an identified directory")
+            identities.append(identity)
+        return descriptor, relative.parts[-1], tuple(identities)
+    except BaseException:
         os.close(descriptor)
         raise
 
 
+def _scanner_inbox_parent_is_current(target: Path, identities: tuple[tuple[int, int], ...]) -> bool:
+    """Reject a namespace swap even though held descriptors would remain safe."""
+    try:
+        descriptor, _name, current = _open_scanner_inbox_parent(target, create=False)
+    except OSError:
+        return False
+    try:
+        return current == identities
+    finally:
+        os.close(descriptor)
+
+
+def _validate_scanner_inbox_descriptor(descriptor: int) -> None:
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not _scanner_inbox_has_single_link(opened)
+        or _scanner_inbox_identity(opened) is None
+    ):
+        raise OSError("scanner inbox is not an identified single-link regular file")
+
+
+def _open_scanner_inbox(target: Path, flags: int, *, create: bool = False) -> int:
+    """Open the inbox through held parent descriptors with no-follow authority."""
+    parent, name, identities = _open_scanner_inbox_parent(target, create=create)
+    safe_flags = flags | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+    try:
+        try:
+            descriptor = os.open(name, safe_flags, dir_fd=parent)
+        except FileNotFoundError:
+            if not create:
+                raise
+            descriptor = os.open(name, safe_flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+        try:
+            _validate_scanner_inbox_descriptor(descriptor)
+            if not _scanner_inbox_parent_is_current(target, identities):
+                raise OSError("scanner inbox parent changed while opening")
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+    finally:
+        os.close(parent)
+
+
+def _validate_scanner_inbox_at(parent: int, name: str, *, missing_ok: bool) -> None:
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
+    except FileNotFoundError:
+        if missing_ok:
+            return
+        raise
+    try:
+        _validate_scanner_inbox_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_scanner_inbox_name_matches_descriptor(parent: int, name: str, descriptor: int) -> None:
+    """Require a no-follow name lookup to still identify the held descriptor."""
+    _validate_scanner_inbox_descriptor(descriptor)
+    expected_identity = _scanner_inbox_identity(os.fstat(descriptor))
+    assert expected_identity is not None
+    candidate = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
+    try:
+        try:
+            _validate_scanner_inbox_descriptor(candidate)
+        except OSError as exc:
+            raise OSError("temporary scanner inbox changed before replacement") from exc
+        if _scanner_inbox_identity(os.fstat(candidate)) != expected_identity:
+            raise OSError("temporary scanner inbox changed before replacement")
+    finally:
+        os.close(candidate)
+
+
+def _fsync_scanner_inbox_parent(parent: int) -> None:
+    """Durably record an inbox replacement when the platform supports directory fsync."""
+    try:
+        os.fsync(parent)
+    except OSError as exc:
+        unsupported = {
+            errno.EINVAL,
+            getattr(errno, "ENOTSUP", errno.EINVAL),
+            getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+        }
+        if exc.errno not in unsupported:
+            raise
+
+
+def _scanner_inbox_temp_name() -> str:
+    return f".inbox.{uuid4().hex}.tmp"
+
+
+def _write_scanner_inbox_temp(parent: int, data: bytes) -> tuple[str, int]:
+    """Write and retain one validated temporary inbox object."""
+    name = _scanner_inbox_temp_name()
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+        dir_fd=parent,
+    )
+    try:
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _validate_scanner_inbox_descriptor(descriptor)
+        return name, descriptor
+    except BaseException:
+        os.close(descriptor)
+        try:
+            os.unlink(name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _scanner_inbox_descriptor_bytes(descriptor: int) -> bytes:
+    """Read the retained regular inbox object for a rollback snapshot."""
+    _validate_scanner_inbox_descriptor(descriptor)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while chunk := os.read(descriptor, 1024 * 1024):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _replace_scanner_inbox_from_retained_temp(parent: int, source: str, name: str, descriptor: int) -> None:
+    """Publish only the name currently bound to the retained verifier-written file."""
+    _validate_scanner_inbox_name_matches_descriptor(parent, source, descriptor)
+    os.replace(source, name, src_dir_fd=parent, dst_dir_fd=parent)
+    _validate_scanner_inbox_name_matches_descriptor(parent, name, descriptor)
+
+
+def _remove_scanner_inbox_at(parent: int, name: str) -> None:
+    """Restore a previously missing inbox after a failed first publication."""
+    try:
+        os.unlink(name, dir_fd=parent)
+    except FileNotFoundError:
+        pass
+    _validate_scanner_inbox_at(parent, name, missing_ok=True)
+
+
+def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
+    """Atomically publish complete inbox bytes through a held no-follow parent."""
+    parent, name, identities = _open_scanner_inbox_parent(target, create=True)
+    temporary_name = _scanner_inbox_temp_name()
+    temporary = -1
+    rollback_name = ""
+    rollback = -1
+    previous = -1
+    rollback_required = False
+    try:
+        try:
+            previous = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            _validate_scanner_inbox_descriptor(previous)
+            rollback_name, rollback = _write_scanner_inbox_temp(parent, _scanner_inbox_descriptor_bytes(previous))
+        temporary_name, temporary = _write_scanner_inbox_temp(parent, data)
+        if not _scanner_inbox_parent_is_current(target, identities):
+            raise OSError("scanner inbox parent changed before replacement")
+        _validate_scanner_inbox_name_matches_descriptor(parent, temporary_name, temporary)
+        rollback_required = True
+        os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+        temporary_name = ""
+        _validate_scanner_inbox_name_matches_descriptor(parent, name, temporary)
+        if not _scanner_inbox_parent_is_current(target, identities):
+            raise OSError("scanner inbox parent changed during replacement")
+        _fsync_scanner_inbox_parent(parent)
+        rollback_required = False
+    except BaseException:
+        if rollback_required:
+            if rollback != -1:
+                _replace_scanner_inbox_from_retained_temp(parent, rollback_name, name, rollback)
+                rollback_name = ""
+            else:
+                _remove_scanner_inbox_at(parent, name)
+            _fsync_scanner_inbox_parent(parent)
+        raise
+    finally:
+        if previous != -1:
+            os.close(previous)
+        if temporary != -1:
+            os.close(temporary)
+        if rollback != -1:
+            os.close(rollback)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+        if rollback_name:
+            try:
+                os.unlink(rollback_name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+        os.close(parent)
+
+
 def _scanner_inbox_bytes(target: Path) -> bytes:
-    """Read a regular inbox without following a replacement symlink."""
+    """Read a regular inbox through a held no-follow parent descriptor."""
     try:
         descriptor = _open_scanner_inbox(target, os.O_RDONLY)
     except FileNotFoundError:
@@ -334,19 +602,6 @@ def _scanner_inbox_bytes(target: Path) -> bytes:
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
             return handle.read()
-    finally:
-        if descriptor != -1:
-            os.close(descriptor)
-
-
-def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
-    """Write a regular inbox without following a replacement symlink."""
-    descriptor = _open_scanner_inbox(target, os.O_WRONLY, create=True)
-    try:
-        os.ftruncate(descriptor, 0)
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = -1
-            handle.write(data)
     finally:
         if descriptor != -1:
             os.close(descriptor)
@@ -418,12 +673,13 @@ def _scanner_stamp_new_imports(
     rejected = 0
     scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
     trusted_scanner = _trusted_builtin_scanner(scanner)
+    run_proof = _scanner_run_proof(scanner, run)
     existing_identities = {
         (identity, ledger_mod._import_fingerprint(item), content_identity)
         for item in before_imports
         if (
             isinstance(item, dict)
-            and ledger_mod._has_locally_stamped_import_proof(item)
+            and ledger_mod._has_locally_stamped_import_proof(item, target=target)
             and (identity := ledger_mod._import_source_identity(item)) is not None
             and (content_identity := ledger_mod._import_content_identity(item)) is not None
         )
@@ -470,8 +726,15 @@ def _scanner_stamp_new_imports(
         if item is None:
             rejected += 1
             continue
-        locally_stamped = ledger_mod._is_locally_stamped_self_import(item, importer_source=scanner_source)
-        trusted_local = locally_stamped and trusted_scanner
+        item_proof = (
+            ledger_mod._make_locally_stamped_import_proof(item, importer_source=scanner_source)
+            if run_proof is not None
+            else None
+        )
+        locally_stamped = ledger_mod._is_locally_stamped_self_import(
+            item, importer_source=scanner_source, proof=item_proof
+        )
+        trusted_local = locally_stamped and trusted_scanner and run_proof is not None
         raw_record, errors = ledger_mod._validate_import_record(
             item,
             label="self-import",
@@ -480,11 +743,17 @@ def _scanner_stamp_new_imports(
         if errors or raw_record is None:
             rejected += 1
             continue
+        record_proof = (
+            ledger_mod._make_locally_stamped_import_proof(raw_record, importer_source=scanner_source)
+            if trusted_local
+            else None
+        )
         sanitized = ledger_mod._sanitize_self_import_record(
             raw_record,
             importer_source=scanner_source,
             target=target,
             trusted_producer=trusted_local,
+            proof=record_proof,
         )
         identity = ledger_mod._import_source_identity(sanitized)
         content_identity = ledger_mod._import_content_identity(sanitized)
@@ -517,6 +786,8 @@ def _scanner_stamp_new_imports(
                 (rebuilt_identity, ledger_mod._import_fingerprint(rebuilt), rebuilt_content_identity)
             )
         stamped_ids.append(str(rebuilt["id"]))
+        if run_proof is not None:
+            _record_scanner_import_proof(scanner, run, rebuilt)
     rendered = b"".join(final_rows)
     if rendered != imports_raw:
         try:
@@ -1321,6 +1592,7 @@ def _scanners_run_payload(
             str(item.get("id")) for item in before_imports if isinstance(item, dict) and isinstance(item.get("id"), str)
         }
         run = _scanner_run_one(target, scanner, force=force)
+        _register_scanner_run_proof(scanner, run)
         stamped_ids = _scanner_stamp_new_imports(
             target=target,
             scanner=scanner,
@@ -1404,6 +1676,9 @@ def _scanners_run_payload(
                 preserve_existing_raw=lambda data: _append_scanner_inbox_bytes(target, data),
                 existing_imports=existing_imports,
             )
+            if _scanner_run_proof(scanner, run) is not None:
+                for item in imported:
+                    _record_scanner_import_proof(scanner, run, item)
             run["ingest_output"] = {
                 "path": str(path),
                 "created": len(imported),

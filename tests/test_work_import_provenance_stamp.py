@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,34 @@ def _envelope(item: dict[str, Any]) -> dict[str, Any]:
     env = metadata.get("provenance")
     assert isinstance(env, dict)
     return env
+
+
+def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source: str) -> None:
+    """Bind a legacy fixture to a verifier-owned scanner receipt, not its row fields."""
+    run_id = "test-proof-run"
+    scanner = {"id": "test-proof", "source": source, "command": "test-scanner"}
+    metadata = item.setdefault("metadata", {})
+    metadata.update({"scanner_id": scanner["id"], "scanner_run_id": run_id})
+    receipt = {
+        "run_id": run_id,
+        "scanner_id": scanner["id"],
+        "source": source,
+        "command": scanner["command"],
+        "self_import_proofs": {
+            "scanner_id": scanner["id"],
+            "source": source,
+            "scanner": scanner,
+            "imports": [
+                {
+                    "id": item["id"],
+                    "content_hash": ledger._locally_stamped_import_content_hash(item),
+                }
+            ],
+        },
+    }
+    receipt_path = helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(json.dumps(receipt))
 
 
 def test_make_import_stamps_valid_envelope_with_exact_content_hash():
@@ -725,6 +755,7 @@ def test_untrusted_identity_migration_is_scoped_to_trusted_legacy_source(tmp_pat
         metadata=record["metadata"],
     )
     legacy["status"] = status
+    _write_external_import_proof(tmp_path, legacy, source="learning-loop")
     ledger._write_imports(tmp_path, [legacy])
 
     incoming = ledger._sanitize_untrusted_import_record(record, importer_source="learning-loop")
@@ -867,6 +898,113 @@ def test_untrusted_identity_migration_does_not_trust_forged_canonical_existing_r
     assert skipped == []
     assert dismissed == []
     assert rejected == []
+
+
+def test_canonical_import_dedupe_requires_persisted_local_proof(tmp_path: Path):
+    record = {
+        "text": "Ordinary canonical proof",
+        "kind": "task",
+        "source": "learning-loop",
+        "metadata": {},
+    }
+    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="learning-loop")
+    imported, _skipped, _dismissed, _rejected = ledger._append_import_records(
+        tmp_path, [incoming], provenance_source="learning-loop", migrate_untrusted_identities=True
+    )
+
+    assert len(imported) == 1
+    assert ledger._has_persisted_import_proof(imported[0], target=tmp_path)
+
+    tampered_content = json.loads(json.dumps(imported[0]))
+    tampered_content["text"] = "Changed canonical proof"
+    assert not ledger._has_persisted_import_proof(tampered_content, target=tmp_path)
+
+    tampered_source = json.loads(json.dumps(imported[0]))
+    tampered_source["source"] = "other-importer"
+    assert not ledger._has_persisted_import_proof(tampered_source, target=tmp_path)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform does not support FIFOs")
+def test_persisted_import_proof_rejects_fifo_without_blocking(tmp_path: Path):
+    item = ledger._make_import("FIFO proof", kind="task", source="learning-loop")
+    proof_name = ledger._import_proof_name(item["id"])
+    assert proof_name is not None
+    proof_path = tmp_path / ".brigade" / "work" / "imports" / "proofs" / proof_name
+    proof_path.parent.mkdir(parents=True)
+    os.mkfifo(proof_path)
+
+    assert not ledger._has_persisted_import_proof(item, target=tmp_path)
+
+
+def test_persisted_import_proof_rejects_tampered_sidecar(tmp_path: Path):
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "Tampered proof", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+    imported, _skipped, _dismissed, _rejected = ledger._append_import_records(
+        tmp_path, [record], provenance_source="learning-loop", migrate_untrusted_identities=True
+    )
+    proof_name = ledger._import_proof_name(imported[0]["id"])
+    assert proof_name is not None
+    proof_path = tmp_path / ".brigade" / "work" / "imports" / "proofs" / proof_name
+    proof = json.loads(proof_path.read_text())
+    proof["content_hash"] = "0" * 64
+    proof_path.write_text(json.dumps(proof))
+
+    assert not ledger._has_persisted_import_proof(imported[0], target=tmp_path)
+
+
+def test_persisted_import_proof_path_is_not_chosen_by_row_id(tmp_path: Path):
+    forged = {
+        "id": "../outside-proof",
+        "kind": "task",
+        "source": "learning-loop",
+        "text": "Forged proof path",
+        "metadata": {},
+    }
+
+    assert not ledger._has_persisted_import_proof(forged, target=tmp_path)
+    assert not (tmp_path.parent / "outside-proof").exists()
+
+
+def test_dry_run_does_not_persist_import_proof(tmp_path: Path):
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "Dry run proof", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    imported, _skipped, _dismissed, _rejected = ledger._append_import_records(
+        tmp_path,
+        [record],
+        dry_run=True,
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+    )
+
+    assert len(imported) == 1
+    assert not ledger._has_persisted_import_proof(imported[0], target=tmp_path)
+
+
+def test_failed_import_persistence_does_not_create_import_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "Failed proof persistence", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    def fail_write(_target: Path, _imports: list[dict[str, Any]]) -> None:
+        raise OSError("simulated inbox persistence failure")
+
+    monkeypatch.setattr(ledger, "_write_imports", fail_write)
+
+    with pytest.raises(OSError, match="simulated inbox persistence failure"):
+        ledger._append_import_records(
+            tmp_path,
+            [record],
+            provenance_source="learning-loop",
+            migrate_untrusted_identities=True,
+        )
+
+    assert not (tmp_path / ".brigade" / "work" / "imports" / "proofs").exists()
 
 
 def test_batch_ingest_rejects_whitespace_identity_metadata_before_persistence(tmp_path: Path):
@@ -1172,10 +1310,13 @@ def test_self_import_accepts_producer_stable_hash_fingerprint_and_normalizes_que
     )
     ledger._write_imports(tmp_path, [refresh])
 
+    scanner = dict(next(scanner for scanner in constants.SCANNER_DEFAULTS if scanner["id"] == "memory-refresh"))
+    run = {"run_id": "scanner-run", "status": "completed", "exit_code": 0, "output_after": {"path": "output"}}
+    scanners_mod._register_scanner_run_proof(scanner, run)
     scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner=dict(next(scanner for scanner in constants.SCANNER_DEFAULTS if scanner["id"] == "memory-refresh")),
-        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        scanner=scanner,
+        run=run,
         before_ids=set(),
         before_imports=[],
     )

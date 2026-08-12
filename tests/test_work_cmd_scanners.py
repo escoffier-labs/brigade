@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import stat
@@ -24,6 +25,20 @@ def _builtin_scanner(scanner_id: str) -> dict[str, object]:
     from brigade.work_cmd import constants
 
     return dict(next(scanner for scanner in constants.SCANNER_DEFAULTS if scanner["id"] == scanner_id))
+
+
+def _verified_builtin_scanner_run(scanner: dict[str, object]) -> dict[str, object]:
+    """Construct the verifier-held capability used by direct scanner unit tests."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    run: dict[str, object] = {
+        "run_id": f"verified-{scanner['id']}",
+        "status": "completed",
+        "exit_code": 0,
+        "output_after": {"path": "output"},
+    }
+    scanners_mod._register_scanner_run_proof(scanner, run)
+    return run
 
 
 def test_work_doctor_warns_for_scanner_queue_health(tmp_path, monkeypatch, capsys):
@@ -1462,6 +1477,24 @@ def test_scanner_reconciliation_keeps_builtin_lifecycle_mutation_and_strips_untr
     assert "handoff_target_document" not in metadata
 
 
+def test_locally_stamped_import_authority_cannot_be_forged_from_row_fields():
+    """A copied local envelope is not authority without a verifier-held proof."""
+    forged = work_cmd.ledger._make_import(
+        "Forged handoff authority",
+        kind="finding",
+        source="handoff-ingest",
+        metadata={
+            "source_item_key": "handoff-ingest:forged",
+            "source_fingerprint": "0123456789abcdef",
+            "handoff_issue_id": "forged",
+            "handoff_target_document": "USER.md",
+        },
+    )
+
+    assert not work_cmd.ledger._is_locally_stamped_self_import(forged, importer_source="handoff-ingest")
+    assert not work_cmd.ledger._has_locally_stamped_import_proof(forged)
+
+
 def test_scanner_reconciliation_replaces_only_matching_duplicate_id_raw_row(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -1522,10 +1555,11 @@ def test_scanner_reconciliation_separates_appended_row_after_final_row_without_n
     inbox.parent.mkdir(parents=True)
     inbox.write_bytes(json.dumps(candidate).encode("utf-8") + b"\n")
 
+    scanner = _builtin_scanner("handoff-ingest")
     stamped = scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner=_builtin_scanner("handoff-ingest"),
-        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        scanner=scanner,
+        run=_verified_builtin_scanner_run(scanner),
         before_ids={prior["id"]},
         before_imports=[prior],
         before_raw=before_raw,
@@ -1557,10 +1591,11 @@ def test_scanner_reconciliation_accepts_changed_revision_with_same_source_key(tm
     )
     (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").write_text(json.dumps(revision) + "\n")
 
+    scanner = _builtin_scanner("handoff-ingest")
     stamped = scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner=_builtin_scanner("handoff-ingest"),
-        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        scanner=scanner,
+        run=_verified_builtin_scanner_run(scanner),
         before_ids={prior["id"]},
         before_imports=before,
         before_raw=before_raw,
@@ -1827,6 +1862,230 @@ def test_scanner_inbox_helpers_reject_path_swap_without_no_follow(
     assert outside.read_bytes() == b'{"text":"outside"}\n'
 
 
+@pytest.mark.parametrize(
+    ("helper", "data"),
+    [
+        ("read", None),
+        ("rewrite", b'{"text":"replacement"}\n'),
+        ("append", b'{"text":"appended"}\n'),
+    ],
+)
+def test_scanner_inbox_helpers_reject_parent_swap_without_touching_outside(tmp_path, monkeypatch, helper, data):
+    """A parent symlink introduced after validation cannot redirect an inbox operation."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b'{"text":"inside"}\n')
+    outside_work = tmp_path / "outside-work"
+    outside_parent = outside_work / "imports"
+    outside_parent.mkdir(parents=True)
+    outside = outside_parent / "inbox.jsonl"
+    outside.write_bytes(b'{"text":"outside"}\n')
+    work_parent = inbox.parent.parent
+    original_parent = tmp_path / "original-work"
+    original_open = scanners_mod.os.open
+    swapped = False
+
+    def swap_parent_before_final_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and (Path(path) == inbox or (dir_fd is not None and path == inbox.name)):
+            swapped = True
+            work_parent.rename(original_parent)
+            work_parent.symlink_to(outside_work, target_is_directory=True)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(scanners_mod.os, "open", swap_parent_before_final_open)
+
+    with pytest.raises(OSError):
+        if helper == "read":
+            scanners_mod._scanner_inbox_bytes(tmp_path)
+        elif helper == "rewrite":
+            scanners_mod._write_scanner_inbox_bytes(tmp_path, data)
+        else:
+            scanners_mod._append_scanner_inbox_bytes(tmp_path, data)
+
+    assert outside.read_bytes() == b'{"text":"outside"}\n'
+
+
+def test_scanner_inbox_rewrite_failure_preserves_original_bytes(tmp_path, monkeypatch):
+    """A write failure before publication leaves the prior inbox intact."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    inbox.write_bytes(before)
+
+    original_fdopen = scanners_mod.os.fdopen
+
+    class WriteFails:
+        def __init__(self, descriptor):
+            self.handle = original_fdopen(descriptor, "wb")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.handle.close()
+
+        def write(self, _data):
+            raise OSError(errno.ENOSPC, "no space left on device")
+
+    def fail_write_open(descriptor, mode, *args, **kwargs):
+        if mode == "wb":
+            return WriteFails(descriptor)
+        return original_fdopen(descriptor, mode, *args, **kwargs)
+
+    monkeypatch.setattr(scanners_mod.os, "fdopen", fail_write_open)
+
+    with pytest.raises(OSError, match="no space"):
+        scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"replacement"}\n')
+
+    assert inbox.read_bytes() == before
+
+
+def test_scanner_inbox_rewrite_rejects_post_write_temp_substitution(tmp_path, monkeypatch):
+    """A substituted temp name cannot replace the existing inbox."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    inbox.write_bytes(before)
+    outside = tmp_path / "outside-inbox.jsonl"
+    outside_bytes = b'{"text":"outside"}\n'
+    outside.write_bytes(outside_bytes)
+    original_fsync = scanners_mod.os.fsync
+    substituted = False
+
+    def substitute_temp_after_write(descriptor):
+        nonlocal substituted
+        original_fsync(descriptor)
+        if not substituted:
+            substituted = True
+            (temporary,) = inbox.parent.glob(".inbox.*.tmp")
+            temporary.unlink()
+            os.link(outside, temporary)
+
+    monkeypatch.setattr(scanners_mod.os, "fsync", substitute_temp_after_write)
+
+    with pytest.raises(OSError):
+        scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"replacement"}\n')
+
+    assert inbox.read_bytes() == before
+    assert outside.read_bytes() == outside_bytes
+
+
+def test_scanner_inbox_rewrite_rolls_back_replace_boundary_temp_substitution(tmp_path, monkeypatch):
+    """A temp alias substituted inside replace cannot displace the prior inbox."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    inbox.write_bytes(before)
+    outside = tmp_path / "outside-inbox.jsonl"
+    outside_bytes = b'{"text":"outside"}\n'
+    outside.write_bytes(outside_bytes)
+    original_replace = scanners_mod.os.replace
+    substituted = False
+
+    def substitute_temp_inside_replace(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        nonlocal substituted
+        if not substituted and source.startswith(".inbox."):
+            substituted = True
+            temporary = inbox.parent / source
+            temporary.unlink()
+            os.link(outside, temporary)
+        return original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(scanners_mod.os, "replace", substitute_temp_inside_replace)
+
+    with pytest.raises(OSError):
+        scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"replacement"}\n')
+
+    assert inbox.read_bytes() == before
+    assert outside.read_bytes() == outside_bytes
+
+
+def test_scanner_inbox_rewrite_preserves_original_when_replace_raises_before_mutation(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    inbox.write_bytes(before)
+    original_replace = scanners_mod.os.replace
+    calls = 0
+
+    def fail_before_replacement(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("replace failed before mutation")
+        return original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(scanners_mod.os, "replace", fail_before_replacement)
+
+    with pytest.raises(OSError, match="before mutation"):
+        scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"replacement"}\n')
+
+    assert inbox.read_bytes() == before
+
+
+def test_scanner_inbox_rewrite_restores_existing_inbox_when_replace_then_raises(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"original"}\n'
+    inbox.write_bytes(before)
+    original_replace = scanners_mod.os.replace
+    calls = 0
+
+    def replace_then_interrupt(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        nonlocal calls
+        calls += 1
+        result = original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        if calls == 1:
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(scanners_mod.os, "replace", replace_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"replacement"}\n')
+
+    assert inbox.read_bytes() == before
+
+
+def test_scanner_inbox_rewrite_restores_missing_inbox_when_replace_then_raises(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    original_replace = scanners_mod.os.replace
+    calls = 0
+
+    def replace_then_interrupt(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        nonlocal calls
+        calls += 1
+        result = original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        if calls == 1:
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(scanners_mod.os, "replace", replace_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"replacement"}\n')
+
+    assert not inbox.exists()
+
+
 def test_scanner_inbox_path_uses_validated_resolved_parent(tmp_path):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -1973,10 +2232,11 @@ def test_scanner_self_import_preserves_trusted_source_scoped_metadata(tmp_path):
         },
     )
     work_cmd.ledger._write_imports(tmp_path, [handoff])
-    run = {"run_id": "scanner-run", "output_after": {"path": "output"}}
+    scanner = _builtin_scanner("handoff-ingest")
+    run = _verified_builtin_scanner_run(scanner)
     stamped = scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner=_builtin_scanner("handoff-ingest"),
+        scanner=scanner,
         run=run,
         before_ids=set(),
         before_imports=[],
@@ -2017,10 +2277,11 @@ def test_scanner_self_import_preserves_trusted_memory_refresh_identity(tmp_path)
         },
     )
     work_cmd.ledger._write_imports(tmp_path, [refresh])
+    scanner = _builtin_scanner("memory-refresh")
     stamped = scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner=_builtin_scanner("memory-refresh"),
-        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        scanner=scanner,
+        run=_verified_builtin_scanner_run(scanner),
         before_ids=set(),
         before_imports=[],
     )

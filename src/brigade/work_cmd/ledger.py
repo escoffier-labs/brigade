@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -1200,7 +1202,46 @@ def _sanitize_untrusted_import_record(record: dict[str, Any], *, importer_source
     return sanitized
 
 
-def _is_locally_stamped_self_import(record: dict[str, Any], *, importer_source: str) -> bool:
+class _LocallyStampedImportProof:
+    """An in-memory verifier capability for one scanner-emitted immutable row."""
+
+    def __init__(self, *, importer_source: str, content_hash: str) -> None:
+        self.importer_source = importer_source
+        self.content_hash = content_hash
+
+
+def _locally_stamped_import_content_hash(record: dict[str, Any]) -> str:
+    """Hash every immutable import field, leaving lifecycle changes out of scope."""
+    immutable = {
+        key: value
+        for key, value in record.items()
+        if key
+        not in {
+            "status",
+            "updated_at",
+            "dismissed_at",
+            "dismiss_reason",
+            "promoted_at",
+            "task_id",
+            "handoff_path",
+            "handoff_target_document",
+            "handoff_source_fingerprint",
+        }
+    }
+    return provenance.content_sha256(json.dumps(immutable, sort_keys=True, separators=(",", ":"), default=str))
+
+
+def _make_locally_stamped_import_proof(record: dict[str, Any], *, importer_source: str) -> _LocallyStampedImportProof:
+    """Create the non-serialized capability used by the scanner verifier."""
+    return _LocallyStampedImportProof(
+        importer_source=importer_source,
+        content_hash=_locally_stamped_import_content_hash(record),
+    )
+
+
+def _is_locally_stamped_self_import(
+    record: dict[str, Any], *, importer_source: str, proof: _LocallyStampedImportProof | None = None
+) -> bool:
     """Return whether a self-import was emitted by the local work-inbox producer."""
     source = record.get("source")
     text = record.get("text")
@@ -1222,6 +1263,9 @@ def _is_locally_stamped_self_import(record: dict[str, Any], *, importer_source: 
         and envelope_trust.get("assigned_by") == "ingest:ledger._make_import"
         and isinstance(envelope_hashes, Mapping)
         and envelope_hashes.get("content") == provenance.content_sha256(text)
+        and isinstance(proof, _LocallyStampedImportProof)
+        and proof.importer_source == importer_source
+        and proof.content_hash == _locally_stamped_import_content_hash(record)
     )
 
 
@@ -1260,10 +1304,17 @@ def _safe_stable_source_fingerprint(value: object) -> str | None:
 
 
 def _trusted_self_import_metadata(
-    record: dict[str, Any], *, importer_source: str, target: Path | None = None, trusted_producer: bool = False
+    record: dict[str, Any],
+    *,
+    importer_source: str,
+    target: Path | None = None,
+    trusted_producer: bool = False,
+    proof: _LocallyStampedImportProof | None = None,
 ) -> dict[str, Any]:
     """Retain the narrow source-owned metadata required by self-import producers."""
-    if not trusted_producer or not _is_locally_stamped_self_import(record, importer_source=importer_source):
+    if not trusted_producer or not _is_locally_stamped_self_import(
+        record, importer_source=importer_source, proof=proof
+    ):
         return {}
     metadata = record.get("metadata")
     if not isinstance(metadata, dict):
@@ -1301,7 +1352,12 @@ def _trusted_self_import_metadata(
 
 
 def _sanitize_self_import_record(
-    record: dict[str, Any], *, importer_source: str, target: Path | None = None, trusted_producer: bool = False
+    record: dict[str, Any],
+    *,
+    importer_source: str,
+    target: Path | None = None,
+    trusted_producer: bool = False,
+    proof: _LocallyStampedImportProof | None = None,
 ) -> dict[str, Any]:
     """Sanitize a self-import, preserving only authenticated source-owned fields."""
     sanitized = _sanitize_untrusted_import_record(record, importer_source=importer_source)
@@ -1309,7 +1365,11 @@ def _sanitize_self_import_record(
         for key in ("queue_path", "refresh_reason"):
             sanitized["metadata"].pop(key, None)
     trusted_metadata = _trusted_self_import_metadata(
-        record, importer_source=importer_source, target=target, trusted_producer=trusted_producer
+        record,
+        importer_source=importer_source,
+        target=target,
+        trusted_producer=trusted_producer,
+        proof=proof,
     )
     if trusted_metadata:
         sanitized["metadata"].update(trusted_metadata)
@@ -1329,6 +1389,138 @@ def _has_canonical_untrusted_import_identity(record: dict[str, Any]) -> bool:
     )
 
 
+_IMPORT_PROOF_SCHEMA_VERSION = 1
+_IMPORT_PROOF_OPERATION_PATTERN = re.compile(r"[0-9a-f]{32}")
+
+
+def _import_proof_name(item_id: object) -> str | None:
+    """Return an opaque proof filename, never a path chosen by an import row."""
+    if not isinstance(item_id, str) or not item_id:
+        return None
+    return f"{helpers._stable_hash({'item_id': item_id})}.json"
+
+
+def _open_import_proof_directory(target: Path, *, create: bool) -> int:
+    """Open the verifier-owned proof directory through no-follow descriptors."""
+    if (
+        os.name != "posix"
+        or not getattr(os, "O_NOFOLLOW", 0)
+        or not getattr(os, "O_DIRECTORY", 0)
+        or os.open not in os.supports_dir_fd
+        or os.mkdir not in os.supports_dir_fd
+    ):
+        raise OSError("descriptor-relative import proof operations are unavailable")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(target.expanduser().resolve(), flags)
+    try:
+        for component in (".brigade", "work", "imports", "proofs"):
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o700, dir_fd=descriptor)
+                child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _validate_import_proof_descriptor(descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise OSError("import proof is not a single-link regular file")
+
+
+def _persisted_import_proof_payload(item: dict[str, Any], *, operation_id: str) -> dict[str, Any] | None:
+    item_id = item.get("id")
+    source = item.get("source")
+    if not isinstance(item_id, str) or not item_id or not isinstance(source, str) or not source:
+        return None
+    return {
+        "schema_version": _IMPORT_PROOF_SCHEMA_VERSION,
+        "item_id": item_id,
+        "importer_source": source,
+        "content_hash": _locally_stamped_import_content_hash(item),
+        "operation_id": operation_id,
+    }
+
+
+def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *, operation_id: str) -> None:
+    """Record verifier-owned proof only after the corresponding inbox write succeeds."""
+    parent = _open_import_proof_directory(target, create=True)
+    try:
+        for item in items:
+            payload = _persisted_import_proof_payload(item, operation_id=operation_id)
+            name = _import_proof_name(item.get("id"))
+            if payload is None or name is None:
+                raise OSError("cannot persist import proof for malformed local item")
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=parent,
+            )
+            try:
+                with os.fdopen(os.dup(descriptor), "wb") as handle:
+                    handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                _validate_import_proof_descriptor(descriptor)
+            finally:
+                os.close(descriptor)
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def _has_persisted_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
+    """Verify the external local-import proof without trusting row-controlled paths."""
+    if target is None:
+        return False
+    name = _import_proof_name(item.get("id"))
+    if name is None:
+        return False
+    try:
+        parent = _open_import_proof_directory(target, create=False)
+    except OSError:
+        return False
+    try:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        except OSError:
+            return False
+        try:
+            _validate_import_proof_descriptor(descriptor)
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 64 * 1024):
+                chunks.append(chunk)
+            payload = json.loads(b"".join(chunks))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+    if not isinstance(payload, dict):
+        return False
+    operation_id = payload.get("operation_id")
+    expected = _persisted_import_proof_payload(item, operation_id=operation_id if isinstance(operation_id, str) else "")
+    return (
+        expected is not None
+        and isinstance(operation_id, str)
+        and _IMPORT_PROOF_OPERATION_PATTERN.fullmatch(operation_id) is not None
+        and payload == expected
+    )
+
+
 def _import_content_identity(item: dict[str, Any]) -> tuple[str, str] | None:
     """Return the immutable-content identity used to migrate sanitized imports."""
     kind = item.get("kind")
@@ -1337,36 +1529,53 @@ def _import_content_identity(item: dict[str, Any]) -> tuple[str, str] | None:
     return kind, _untrusted_import_canonical_hash(item)
 
 
-def _has_locally_stamped_import_proof(item: dict[str, Any]) -> bool:
-    """Return whether an existing row has a locally assigned source and content proof."""
+def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
+    """Return whether a verifier-owned scanner receipt binds this exact row."""
+    if target is None:
+        return False
     source = item.get("source")
     metadata = item.get("metadata")
-    text = item.get("text")
-    if not isinstance(source, str) or not source or not isinstance(text, str) or not isinstance(metadata, dict):
+    if not isinstance(source, str) or not source or not isinstance(metadata, dict):
         return False
-    envelope = metadata.get("provenance")
-    if provenance.validate_envelope(envelope):
+    scanner_run_id = metadata.get("scanner_run_id")
+    scanner_id = metadata.get("scanner_id")
+    if not isinstance(scanner_run_id, str) or not scanner_run_id or not isinstance(scanner_id, str) or not scanner_id:
         return False
-    envelope_source = envelope.get("source") if isinstance(envelope, Mapping) else None
-    envelope_trust = envelope.get("trust") if isinstance(envelope, Mapping) else None
-    envelope_hashes = envelope.get("hashes") if isinstance(envelope, Mapping) else None
+    receipt_path = helpers._scanner_runs_root(target) / scanner_run_id / "receipt.json"
+    try:
+        receipt_path.resolve(strict=True).relative_to(helpers._scanner_runs_root(target).resolve(strict=True))
+        receipt = json.loads(receipt_path.read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(receipt, dict) or receipt.get("run_id") != scanner_run_id:
+        return False
+    proof = receipt.get("self_import_proofs")
+    if not isinstance(proof, dict) or proof.get("scanner_id") != scanner_id or proof.get("source") != source:
+        return False
+    scanner = proof.get("scanner")
+    if not isinstance(scanner, dict):
+        return False
     if (
-        not isinstance(envelope_source, Mapping)
-        or envelope_source.get("system") != "work-inbox"
-        or envelope_source.get("kind") != source
-        or envelope_source.get("producer") != "ledger._make_import"
-        or not isinstance(envelope_trust, Mapping)
-        or envelope_trust.get("assigned_by") != "ingest:ledger._make_import"
-        or not isinstance(envelope_hashes, Mapping)
-        or envelope_hashes.get("content") != provenance.content_sha256(text)
+        receipt.get("scanner_id") != scanner_id
+        or receipt.get("source") != source
+        or receipt.get("command") != scanner.get("command")
+        or scanner.get("id") != scanner_id
+        or scanner.get("source") != source
     ):
         return False
-    return True
+    content_hash = _locally_stamped_import_content_hash(item)
+    imports = proof.get("imports")
+    return isinstance(imports, list) and any(
+        isinstance(entry, dict) and entry.get("id") == item.get("id") and entry.get("content_hash") == content_hash
+        for entry in imports
+    )
 
 
-def _legacy_import_source_content_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
+def _legacy_import_source_content_identity(
+    item: dict[str, Any], *, target: Path | None = None
+) -> tuple[str, str, str] | None:
     """Return a legacy identity only when local provenance establishes its source."""
-    if not _has_locally_stamped_import_proof(item):
+    if not _has_locally_stamped_import_proof(item, target=target):
         return None
     source = item["source"]
     content_identity = _import_content_identity(item)
@@ -1851,7 +2060,7 @@ def _append_import_records(
         identity = _import_source_identity(item)
         if identity is not None:
             existing_by_source[identity] = item
-        legacy_identity = _legacy_import_source_content_identity(item)
+        legacy_identity = _legacy_import_source_content_identity(item, target=target)
         if legacy_identity is not None and not _has_canonical_untrusted_import_identity(item):
             legacy_by_source_content[legacy_identity] = item
     imported: list[dict[str, Any]] = []
@@ -1863,11 +2072,16 @@ def _append_import_records(
         identity = _import_source_identity(record)
         if identity is not None and identity in existing_by_source:
             existing_item = existing_by_source[identity]
-            canonical_migration = migrate_untrusted_identities and _has_canonical_untrusted_import_identity(record)
-            existing_migration_proof = _has_locally_stamped_import_proof(existing_item) and _import_content_identity(
-                existing_item
-            ) == _import_content_identity(record)
-            if canonical_migration and not existing_migration_proof:
+            canonical_existing_proof = _has_persisted_import_proof(existing_item, target=target)
+            canonical_existing_row = _has_canonical_untrusted_import_identity(existing_item)
+            canonical_incoming_row = _has_canonical_untrusted_import_identity(record)
+            canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row
+            existing_migration_proof = _has_locally_stamped_import_proof(
+                existing_item, target=target
+            ) and _import_content_identity(existing_item) == _import_content_identity(record)
+            if canonical_existing_row and canonical_incoming_row and not canonical_existing_proof:
+                pass
+            elif canonical_migration and not existing_migration_proof:
                 pass
             elif existing_item.get("status") == "dismissed":
                 if _import_fingerprint(existing_item) == _import_fingerprint(record):
@@ -1926,6 +2140,7 @@ def _append_import_records(
         else:
             imports.extend(imported)
             _write_imports(target, imports)
+        _write_persisted_import_proofs(target, imported, operation_id=uuid4().hex)
     return imported, skipped, skipped_dismissed, rejected
 
 

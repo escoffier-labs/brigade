@@ -408,6 +408,33 @@ def test_work_import_validate_and_ingest_jsonl(tmp_path, monkeypatch, capsys):
     assert payload["imports"][0]["metadata"]["thread"] == "abc123"
 
 
+def test_work_import_ingest_dedupes_canonical_existing_row_without_scanner_receipt(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Keep canonical ordinary import dedupe",
+                "kind": "finding",
+                "source": "external-scanner",
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    existing = first["imports"][0]
+    assert work_cmd.ledger._has_canonical_untrusted_import_identity(existing)
+    assert not work_cmd.ledger._has_locally_stamped_import_proof(existing, target=tmp_path)
+    assert work_cmd.ledger._has_persisted_import_proof(existing, target=tmp_path)
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    duplicate = json.loads(capsys.readouterr().out)
+    assert duplicate["created"] == 0
+    assert duplicate["skipped"] == 1
+
+
 def test_work_import_ingest_contains_stamp_failure_without_leaking_record_content(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     hostile_marker = "HOSTILE-PRIVATE-PAYLOAD-DO-NOT-LEAK"
