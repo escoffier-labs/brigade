@@ -1,43 +1,56 @@
-"""Read-only stale-recall, projection-drift, and scope-leakage eval (#845)."""
+"""Read-only stale-recall, projection-drift, and scope-leakage metrics (#845).
+
+Builds on the #722 retrieval envelope and #891 card-identity dual-read. Does not
+invent a parallel harness CLI or ``projection_items`` vocabulary.
+"""
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from brigade.memory_cmd import MemoryCareConfig, _iter_cards, _parse_frontmatter
+from brigade.memory_cmd import _parse_frontmatter
 
-from .corpus import repo_root
+from .corpus import load_cards, repo_root
+from .projection import SCOPE_DIMENSIONS, content_hash
 
-REPORT_SCHEMA = "brigade.memory-quality-eval.v1"
-INPUT_SCHEMA = "brigade.memory-quality-input.v1"
-DEFAULT_QUALITY_ROOT = repo_root() / "evals" / "memory-quality"
-SCOPE_DIMENSIONS = ("repository", "task", "operator", "branch", "worktree")
+QUALITY_SCHEMA = "memory-retrieval-quality.v1"
+INPUT_SCHEMA = "memory-retrieval-quality-input.v1"
+DEFAULT_QUALITY_ROOT = repo_root() / "evals" / "memory-retrieval" / "quality"
+PROJECTION_UNAVAILABLE = "eval input has no projections list with external_id/content_hash rows"
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 6) if denominator else None
 
 
-def _cards(root: Path) -> dict[str, dict[str, Any]]:
-    cards: dict[str, dict[str, Any]] = {}
-    for path in _iter_cards(root, MemoryCareConfig()):
-        raw = path.read_bytes()
-        metadata, _ = _parse_frontmatter(raw.decode("utf-8"))
-        card_id = str(metadata.get("id") or path.stem)
-        scope = metadata.get("scope")
-        if not isinstance(scope, dict):
-            scope = {key: metadata.get(key) for key in SCOPE_DIMENSIONS if metadata.get(key) is not None}
-        cards[card_id] = {
+def _scope_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    scope = metadata.get("scope")
+    if isinstance(scope, dict):
+        return {key: scope.get(key) for key in SCOPE_DIMENSIONS}
+    return {key: metadata.get(key) for key in SCOPE_DIMENSIONS}
+
+
+def _card_index(root: Path) -> dict[str, dict[str, Any]]:
+    """Index cards by canonical id and every alias for dual-read resolution."""
+    root = root.expanduser().resolve()
+    index: dict[str, dict[str, Any]] = {}
+    for card in load_cards(root):
+        path = root / card.path
+        text = path.read_text(encoding="utf-8")
+        metadata, _ = _parse_frontmatter(text)
+        record = {
+            "external_id": card.card_id,
             "fresh_until": metadata.get("fresh_until"),
-            "hash": f"sha256:{hashlib.sha256(raw).hexdigest()}",
-            "path": path.relative_to(root).as_posix(),
-            "scope": scope,
+            "hash": content_hash(text),
+            "path": card.path,
+            "scope": _scope_from_metadata(metadata if isinstance(metadata, dict) else {}),
         }
-    return cards
+        for key in (card.card_id, *card.aliases):
+            index[key] = record
+    return index
 
 
 def _unavailable(reason: str) -> dict[str, Any]:
@@ -51,14 +64,18 @@ def _unavailable(reason: str) -> dict[str, Any]:
     }
 
 
+def _resolve(cards: dict[str, dict[str, Any]], key: str) -> dict[str, Any] | None:
+    return cards.get(key)
+
+
 def evaluate_memory_quality(root: Path = DEFAULT_QUALITY_ROOT) -> dict[str, Any]:
-    """Evaluate existing cards and captured evidence contracts without writing them."""
+    """Evaluate existing cards and captured retrieval/projection rows without writing them."""
     root = root.expanduser().resolve()
     payload = json.loads((root / "eval.json").read_text(encoding="utf-8"))
     if payload.get("schema") != INPUT_SCHEMA:
         raise ValueError(f"eval input schema must be {INPUT_SCHEMA!r}")
     as_of = date.fromisoformat(str(payload["as_of"]))
-    cards = _cards(root)
+    cards = _card_index(root)
     retrievals = payload.get("retrievals")
     if not isinstance(retrievals, list):
         raise ValueError("retrievals must be a list")
@@ -71,17 +88,18 @@ def evaluate_memory_quality(root: Path = DEFAULT_QUALITY_ROOT) -> dict[str, Any]
         if not isinstance(query, dict) or not isinstance(query.get("results"), list):
             raise ValueError("each retrieval must contain a results list")
         requested = query.get("scope") if isinstance(query.get("scope"), dict) else None
-        for rank, card_id_raw in enumerate(query["results"], 1):
-            card_id = str(card_id_raw)
-            card = cards.get(card_id)
+        for rank, key_raw in enumerate(query["results"], 1):
+            key = str(key_raw)
+            card = _resolve(cards, key)
             if card is None:
-                continue
+                raise ValueError(f"retrieval result {key!r} did not resolve via card_id or alias")
             retrieval_count += 1
+            external_id = str(card["external_id"])
             fresh_until = card["fresh_until"]
             if isinstance(fresh_until, str) and date.fromisoformat(fresh_until) < as_of:
                 stale_violations.append(
                     {
-                        "card_id": card_id,
+                        "external_id": external_id,
                         "fresh_until": fresh_until,
                         "query_id": str(query.get("id") or ""),
                         "rank": rank,
@@ -96,7 +114,7 @@ def evaluate_memory_quality(root: Path = DEFAULT_QUALITY_ROOT) -> dict[str, Any]
                         if actual is not None and wanted != actual:
                             scope_violations.append(
                                 {
-                                    "card_id": card_id,
+                                    "external_id": external_id,
                                     "declared": actual,
                                     "dimension": dimension,
                                     "query_id": str(query.get("id") or ""),
@@ -113,14 +131,22 @@ def evaluate_memory_quality(root: Path = DEFAULT_QUALITY_ROOT) -> dict[str, Any]
         for row in projections:
             if not isinstance(row, dict):
                 continue
-            card_id = str(row.get("card_id") or "")
-            card = cards.get(card_id)
+            key = str(row.get("external_id") or "")
+            card = _resolve(cards, key)
             projection_hash = row.get("content_hash")
-            if card is None or not isinstance(projection_hash, str):
+            if card is None:
+                raise ValueError(f"projection external_id {key!r} did not resolve via card_id or alias")
+            if not isinstance(projection_hash, str):
                 continue
             compared += 1
             if projection_hash != card["hash"]:
-                drift.append({"card_id": card_id, "canonical_hash": card["hash"], "projection_hash": projection_hash})
+                drift.append(
+                    {
+                        "external_id": str(card["external_id"]),
+                        "canonical_hash": card["hash"],
+                        "projection_hash": projection_hash,
+                    }
+                )
         projection = {
             "available": True,
             "sample_count": compared,
@@ -129,7 +155,7 @@ def evaluate_memory_quality(root: Path = DEFAULT_QUALITY_ROOT) -> dict[str, Any]
             "violations": drift,
         }
     else:
-        projection = _unavailable("evidence contract has no projection_items field")
+        projection = _unavailable(PROJECTION_UNAVAILABLE)
         projection["divergent_count"] = 0
 
     scope = (
@@ -143,13 +169,14 @@ def evaluate_memory_quality(root: Path = DEFAULT_QUALITY_ROOT) -> dict[str, Any]
         if any(isinstance(q, dict) and isinstance(q.get("scope"), dict) for q in retrievals)
         else _unavailable("retrieval contract has no requested scope field")
     )
+    canonical_ids = {record["external_id"] for record in cards.values()}
     return {
-        "schema": REPORT_SCHEMA,
+        "schema": QUALITY_SCHEMA,
         "issue": 845,
         "as_of": as_of.isoformat(),
         "read_only": True,
         "source": "existing-memory-and-evidence-contracts",
-        "card_count": len(cards),
+        "card_count": len(canonical_ids),
         "stale_recall": {
             "available": True,
             "sample_count": retrieval_count,
@@ -159,14 +186,13 @@ def evaluate_memory_quality(root: Path = DEFAULT_QUALITY_ROOT) -> dict[str, Any]
         },
         "projection_drift": projection,
         "scope_leakage": scope,
-        "contract_wishes": {
-            "projection_items": {
-                "available": isinstance(projections, list),
-                "wish": "evidence reports should expose card_id and content_hash per derived item",
-            },
-            "retrieval_explanations": {
-                "available": False,
-                "wish": "retrieval reports should expose exclusion reasons and freshness decisions",
-            },
-        },
     }
+
+
+def attach_quality_to_report(report: dict[str, Any], quality: dict[str, Any]) -> dict[str, Any]:
+    """Nest quality metrics under the #722 report's projection section."""
+    attached = dict(report)
+    projection = dict(attached.get("projection") or {})
+    projection["quality"] = quality
+    attached["projection"] = projection
+    return attached

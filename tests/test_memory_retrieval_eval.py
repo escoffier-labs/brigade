@@ -18,18 +18,26 @@ from brigade.memory_retrieval_eval.metrics import (
     precision_at_k,
     recall_at_k,
 )
+from brigade.card_identity import valid_card_id
 from brigade.memory_retrieval_eval.projection import (
     CATEGORIES,
     PROJECTION_SCHEMA,
     SCOPE_DIMENSIONS,
     adapter_projection_violation,
     build_projection_section,
+    content_hash,
     external_contract_fields,
     load_manifest,
     load_projection_fixture_cards,
     load_scenarios,
     validate_all_fixtures,
     validate_scope_annotation,
+)
+from brigade.memory_retrieval_eval.quality import (
+    DEFAULT_QUALITY_ROOT,
+    QUALITY_SCHEMA,
+    attach_quality_to_report,
+    evaluate_memory_quality,
 )
 from brigade.memory_retrieval_eval.report import format_table
 
@@ -416,3 +424,106 @@ def test_build_projection_section_fixture_reference_passes_without_search():
     section = build_projection_section(adapter="fixture-reference")
     assert section["summary"]["failed"] == 0
     assert section["summary"]["report_level_failure_count"] == len(SCOPE_DIMENSIONS)
+
+
+DEPLOY_CARD_ID = "card-11111111-2222-4333-8444-555555555555"
+RETIRED_CARD_ID = "card-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+def test_quality_fixtures_use_canonical_card_ids_and_dual_read_aliases():
+    cards = load_cards(DEFAULT_QUALITY_ROOT)
+    by_id = {card.card_id: card for card in cards}
+    assert set(by_id) == {DEPLOY_CARD_ID, RETIRED_CARD_ID}
+    assert all(valid_card_id(card_id) for card_id in by_id)
+    deploy = by_id[DEPLOY_CARD_ID]
+    retired = by_id[RETIRED_CARD_ID]
+    assert "deployment-policy" in deploy.aliases
+    assert "memory/cards/deployment-policy.md" in deploy.aliases
+    assert "retired-endpoint" in retired.aliases
+
+
+def test_quality_metrics_are_deterministic_read_only_and_envelope_shaped():
+    before = {
+        path.relative_to(DEFAULT_QUALITY_ROOT).as_posix(): path.read_bytes()
+        for path in sorted(DEFAULT_QUALITY_ROOT.rglob("*"))
+        if path.is_file()
+    }
+    first = evaluate_memory_quality(DEFAULT_QUALITY_ROOT)
+    second = evaluate_memory_quality(DEFAULT_QUALITY_ROOT)
+    after = {
+        path.relative_to(DEFAULT_QUALITY_ROOT).as_posix(): path.read_bytes()
+        for path in sorted(DEFAULT_QUALITY_ROOT.rglob("*"))
+        if path.is_file()
+    }
+    assert before == after
+    assert first == second
+    assert first["schema"] == QUALITY_SCHEMA
+    assert first["issue"] == 845
+    assert first["read_only"] is True
+    assert first["stale_recall"]["violation_count"] == 1
+    assert first["stale_recall"]["rate"] == 0.25
+    assert first["projection_drift"]["divergent_count"] == 1
+    assert first["projection_drift"]["rate"] == 0.5
+    assert first["scope_leakage"]["violation_count"] == 1
+    assert first["scope_leakage"]["rate"] == 0.25
+    assert "projection_items" not in first
+    assert "contract_wishes" not in first
+    json.dumps(first, sort_keys=True)
+
+
+def test_quality_metrics_resolve_aliases_and_use_projection_content_hash():
+    report = evaluate_memory_quality(DEFAULT_QUALITY_ROOT)
+    stale = report["stale_recall"]["violations"][0]
+    assert stale["external_id"] == RETIRED_CARD_ID
+    assert stale["fresh_until"] == "2026-01-31"
+    assert stale["query_id"] == "q-stale"
+    assert stale["rank"] == 1
+
+    drift = report["projection_drift"]["violations"][0]
+    assert drift["external_id"] == DEPLOY_CARD_ID
+    deploy_text = (DEFAULT_QUALITY_ROOT / "memory" / "cards" / "deployment-policy.md").read_text(encoding="utf-8")
+    assert drift["canonical_hash"] == content_hash(deploy_text)
+    assert not drift["canonical_hash"].startswith("sha256:")
+    assert drift["projection_hash"] == "0" * 64
+
+    leak = report["scope_leakage"]["violations"][0]
+    assert leak["external_id"] == RETIRED_CARD_ID
+    assert leak["dimension"] == "repository"
+    assert leak["declared"] == "repo-alpha"
+    assert leak["requested"] == "repo-beta"
+
+
+def test_quality_metrics_attach_under_projection_on_722_envelope():
+    base = run_eval(adapters=["grep"])
+    quality = evaluate_memory_quality(DEFAULT_QUALITY_ROOT)
+    report = attach_quality_to_report(base, quality)
+    assert report["kind"] == "memory-retrieval-eval"
+    assert report["issue"] == 722
+    assert report["projection"]["quality"] == quality
+    assert report["projection"]["quality"]["schema"] == QUALITY_SCHEMA
+    table = format_table(report)
+    assert "quality metrics (#845)" in table
+
+
+def test_quality_missing_projection_rows_are_unavailable_without_wish_vocab(tmp_path: Path):
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True)
+    card_id = "card-99999999-9999-4999-8999-999999999999"
+    (cards / "one.md").write_text(
+        f"---\nid: {card_id}\nfresh_until: 2027-01-01\n---\nOne\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "eval.json").write_text(
+        json.dumps(
+            {
+                "schema": "memory-retrieval-quality-input.v1",
+                "as_of": "2026-08-12",
+                "retrievals": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = evaluate_memory_quality(tmp_path)
+    assert report["projection_drift"]["available"] is False
+    assert "projection_items" not in str(report)
+    assert report["scope_leakage"]["available"] is False

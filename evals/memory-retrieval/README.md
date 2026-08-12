@@ -63,6 +63,9 @@ Output is a small table plus optional JSON (`--json`) so runs are diffable.
   `memory-projection-eval.v1` report builder in `projection.py` (schema, scope
   annotations, nullable #495/#498 fields, cost metrics, diffable failure artifacts).
   Runtime harness attachment lands in V2 after #843/#844.
+- Measure read-only stale-recall, projection-drift, and scope-leakage rates over
+  `evals/memory-retrieval/quality/` cards (canonical `card-<uuid>` ids with
+  alias dual-read) nested under `projection.quality` on the #722 envelope.
 
 **Cannot**
 

@@ -79,6 +79,25 @@ def format_table(report: dict[str, Any]) -> str:
                 f"{summary.get('report_level_failure_count', 0):>8}"
             )
 
+    quality = projection.get("quality") if isinstance(projection, dict) else None
+    if isinstance(quality, dict):
+        lines.extend(
+            [
+                "",
+                "quality metrics (#845)",
+                f"{'metric':<28} {'rate':>8} {'n':>8} {'bad':>8}",
+                "-" * 68,
+            ]
+        )
+        for name in ("stale_recall", "projection_drift", "scope_leakage"):
+            block = quality.get(name) or {}
+            if not block.get("available", True):
+                lines.append(_row(name, None, skipped=True, reason=str(block.get("reason") or "unavailable")))
+                continue
+            sample = block.get("sample_count", 0)
+            bad = block.get("violation_count", block.get("divergent_count", 0))
+            lines.append(f"{name:<28} {_fmt_float(block.get('rate')):>8} {sample:>8} {bad:>8}")
+
     lines.append("")
     lines.append(
         "Gate reminder: semantic lands only if it beats grep on paraphrase/cross_tag, "
