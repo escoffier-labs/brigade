@@ -1,95 +1,159 @@
+"""Unit tests for the Memory Operations dashboard view (replaces Cards)."""
+
 from pathlib import Path
 
-from brigade.center_cmd.dashboard.views import memory_cards
+from brigade.center_cmd.dashboard.views import memory_operations
 
 
-def test_fetch_uses_memory_search_json(monkeypatch, tmp_path):
-    expected = {"matches": [], "match_count": 0}
+def test_fetch_uses_topology_and_inventory_json(monkeypatch, tmp_path):
     calls: list[tuple[Path, list[str]]] = []
 
     def fake_run_json(target: Path, args: list[str]) -> dict:
-        calls.append((target, args))
-        return expected
+        calls.append((target, list(args)))
+        if list(args)[:2] == ["memory", "topology"]:
+            return {"nodes": [], "edges": [], "paths": [], "flags": [], "health": {}}
+        return {
+            "items": [],
+            "pagination": {
+                "offset": 0,
+                "limit": 500,
+                "total": 0,
+                "returned": 0,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
 
     monkeypatch.setattr("brigade.center_cmd.dashboard.data.run_json", fake_run_json)
 
-    assert memory_cards.fetch(tmp_path) == expected
-    assert calls == [(tmp_path, ["memory", "search", ":", "--limit", "500"])]
+    payload = memory_operations.fetch(tmp_path)
+    assert "topology" in payload
+    assert "inventory" in payload
+    assert (tmp_path, ["memory", "topology"]) in calls
+    assert any(args[:2] == ["memory", "inventory"] for _, args in calls)
+    assert all("search" not in args for _, args in calls)
 
 
-def test_render_displays_card_rows_and_filter_wiring():
+def test_render_mode_tabs_and_inventory_fields():
     payload = {
-        "match_count": 2,
-        "matches": [
-            {
-                "path": "memory/cards/fixture-alpha.md",
-                "title": "Fixture Alpha Card",
-                "tags": ["alpha", "fixture"],
-                "summary": "Example alpha summary",
-                "score": 3,
+        "topology": {
+            "health": {
+                "care_scan": {"status": "ok", "issue_count": 0},
+                "refresh_queue": {"status": "ok", "count": 0},
+                "handoff_backlog": {"status": "ok", "pending": 0},
+                "quarantine": {"status": "unknown", "count": None},
+                "closeout": {"status": "missing"},
+                "evidence_projection": {"status": "ok"},
             },
-            {
-                "path": "memory/cards/fixture-beta.md",
-                "title": "Fixture Beta Card",
-                "tags": ["beta"],
-                "summary": "Example beta summary",
-                "score": 3,
-                "last_reviewed": "2026-05-01",
-                "fresh_until": "2026-12-01",
-            },
-        ],
+            "flags": [],
+            "paths": [],
+            "nodes": [],
+            "edges": [],
+        },
+        "inventory": {
+            "items": [
+                {
+                    "id": "card:memory/cards/fixture-alpha.md",
+                    "title": "Fixture Alpha Card",
+                    "canonical_path": "memory/cards/fixture-alpha.md",
+                    "logical_destination": "cards",
+                    "store_type": "card",
+                    "category": "fixture",
+                    "tags": ["alpha", "fixture"],
+                    "created_at": "2026-01-01",
+                    "updated_at": "2026-01-02",
+                    "last_reviewed": "2026-05-01",
+                    "fresh_until": "2026-12-01",
+                    "freshness": "fresh",
+                    "review_state": "reviewed",
+                    "evidence_state": "present",
+                    "source_harness": "claude",
+                    "source_handoff": None,
+                    "owning_workflow": "ingest",
+                    "last_mutation": None,
+                    "care": {"issues": [], "queued_action": None},
+                }
+            ],
+            "total": 1,
+        },
     }
 
-    fragment = memory_cards.render(payload, "unused")
+    fragment = memory_operations.render(payload, "unused-nonce")
 
-    assert 'data-filter-target="memory-cards-table"' in fragment
-    assert 'id="memory-cards-table"' in fragment
+    assert 'data-mo-mode="topology"' in fragment
+    assert 'data-mo-mode="inventory"' in fragment
+    assert "care scan" in fragment
     assert "Fixture Alpha Card" in fragment
-    assert "Fixture Beta Card" in fragment
+    assert "memory/cards/fixture-alpha.md" in fragment
     assert "alpha, fixture" in fragment
-    assert "beta" in fragment
     assert "2026-05-01" in fragment
     assert "2026-12-01" in fragment
-    assert ">-<" in fragment
     assert "<th>Title</th>" in fragment
-    assert "<th>Tags</th>" in fragment
-    assert "<th>Reviewed</th>" in fragment
     assert "<th>Freshness</th>" in fragment
+    assert "<th>Evidence</th>" in fragment
 
 
-def test_render_escapes_hostile_card_title():
+def test_render_escapes_hostile_inventory_title():
     payload = {
-        "matches": [
-            {
-                "title": "<script>alert(1)</script><img src=x onerror=alert(2)>",
-                "tags": ["<b>tag</b>"],
-                "summary": "hostile fixture",
-                "score": 1,
-            }
-        ]
+        "topology": {"health": {}, "flags": [], "paths": [], "nodes": [], "edges": []},
+        "inventory": {
+            "items": [
+                {
+                    "title": "<script>alert(1)</script><img src=x onerror=alert(2)>",
+                    "id": "card:x",
+                    "canonical_path": "memory/cards/x.md",
+                    "logical_destination": "cards",
+                    "store_type": "card",
+                    "category": "<b>tag</b>",
+                    "tags": ["<b>tag</b>"],
+                    "created_at": None,
+                    "updated_at": None,
+                    "last_reviewed": None,
+                    "fresh_until": None,
+                    "freshness": "missing",
+                    "review_state": "missing",
+                    "evidence_state": "missing",
+                    "source_harness": "unknown",
+                    "source_handoff": None,
+                    "owning_workflow": "unknown",
+                    "last_mutation": None,
+                    "care": {"issues": [], "queued_action": None},
+                }
+            ],
+            "total": 1,
+        },
     }
 
-    fragment = memory_cards.render(payload, "unused")
+    fragment = memory_operations.render(payload, "unused-nonce")
 
-    # The XSS boundary is whether a tag can form, not whether the string
-    # "onerror=" appears. Once < and > are entities the payload is text, so
-    # assert no tag opens and that the payload survives only in escaped form.
-    assert "<script" not in fragment
     assert "<img" not in fragment
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in fragment
     assert "&lt;img src=x onerror=alert(2)&gt;" in fragment
     assert "&lt;b&gt;tag&lt;/b&gt;" in fragment
 
-    # No raw angle bracket from the hostile input reached the output: every
-    # tag in the fragment is one the view itself emitted.
     import re
 
+    assert re.search(r"<script(?![^>]*\bnonce=)", fragment, re.IGNORECASE) is None
     for tag in re.findall(r"<[^>]*>", fragment):
-        assert "alert(" not in tag
+        stripped = re.sub(r'"[^"]*"', '""', tag)
+        stripped = re.sub(r"'[^']*'", "''", stripped)
+        for name in re.findall(r"\s([A-Za-z_:][\w:.-]*)\s*=", stripped):
+            assert not re.fullmatch(r"on\w+", name, re.IGNORECASE), tag
 
 
 def test_render_error_and_empty_payloads_degrade_safely():
-    assert "boom" in memory_cards.render({"error": "boom"}, "unused")
+    fragment = memory_operations.render(
+        {"topology": {"error": "boom"}, "inventory": {"error": "bang"}},
+        "unused-nonce",
+    )
+    assert "boom" in fragment
+    assert "bang" in fragment
 
-    assert "Nothing here." in memory_cards.render({}, "unused")
-    assert "Nothing here." in memory_cards.render({"matches": []}, "unused")
+    empty = memory_operations.render(
+        {
+            "topology": {"health": {}, "flags": [], "paths": [], "nodes": [], "edges": []},
+            "inventory": {"items": [], "total": 0},
+        },
+        "unused-nonce",
+    )
+    assert "Nothing here." in empty

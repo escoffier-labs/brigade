@@ -20,7 +20,7 @@ from brigade.center_cmd.dashboard.views import (
     activity_heatmap,
     dispatch_waves,
     handoff_inbox,
-    memory_cards,
+    memory_operations,
     outcome_rank,
     ready_graph,
     run_timeline,
@@ -31,7 +31,7 @@ from brigade.center_cmd.dashboard.views import (
 _VIEW_MODULES: tuple[ModuleType, ...] = (
     status_grid,
     handoff_inbox,
-    memory_cards,
+    memory_operations,
     outcome_rank,
     run_timeline,
     activity_heatmap,
