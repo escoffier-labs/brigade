@@ -9,18 +9,17 @@ for the later migration slice.
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from .card_identity import valid_card_id
 from .memory_cmd import _parse_frontmatter
 
 
 _CARD_ROOT = Path("memory/cards")
 _NAMESPACE_PATH = Path("memory/NAMESPACE")
-_EXPLICIT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _namespace(workspace: Path) -> str | None:
@@ -46,7 +45,7 @@ def _engine_string_field(meta: dict[str, Any], *keys: str) -> str:
 
 
 def _identity_warning(identity: str) -> str | None:
-    if _EXPLICIT_ID_PATTERN.fullmatch(identity) and identity.startswith("card-"):
+    if valid_card_id(identity):
         return None
     return "explicit ID does not meet the future card-<uuid> policy"
 

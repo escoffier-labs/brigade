@@ -22,10 +22,11 @@ def _card(cards, name: str, frontmatter: str) -> None:
 def test_audit_reports_coverage_collisions_legacy_keys_and_deterministic_aliases(tmp_path):
     first, first_cards = _workspace(tmp_path, "first", "memory-11111111-1111-4111-8111-111111111111")
     second, second_cards = _workspace(tmp_path, "second", "memory-22222222-2222-4222-8222-222222222222")
-    _card(first_cards, "explicit.md", "id: card-shared\ntopic: release")
+    shared_id = "card-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    _card(first_cards, "explicit.md", f"id: {shared_id}\ntopic: release")
     _card(first_cards, "fallback.md", "topic: fallback-topic")
     _card(first_cards, "malformed.md", "id: path:memory/cards/fallback.md")
-    _card(second_cards, "same.md", "id: card-shared")
+    _card(second_cards, "same.md", f"id: {shared_id}")
 
     audit = memory_identity_audit.audit_workspaces([first, second])
 
@@ -79,8 +80,8 @@ def test_audit_uses_the_engine_id_precedence_and_coercion_rules(tmp_path):
 
 def test_audit_reports_duplicates_inside_a_namespace_without_writing_cards(tmp_path):
     workspace, cards = _workspace(tmp_path, "one", "memory-33333333-3333-4333-8333-333333333333")
-    _card(cards, "a.md", "id: card-duplicate")
-    _card(cards, "b.md", "card_id: card-duplicate")
+    _card(cards, "a.md", "id: card-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    _card(cards, "b.md", "card_id: card-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
     before = {path.name: path.read_text() for path in cards.glob("*.md")}
 
     audit = memory_identity_audit.audit_workspaces([workspace])
@@ -90,7 +91,7 @@ def test_audit_reports_duplicates_inside_a_namespace_without_writing_cards(tmp_p
         {
             "scope": "namespace",
             "namespace": "memory-33333333-3333-4333-8333-333333333333",
-            "id": "card-duplicate",
+            "id": "card-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             "paths": ["memory/cards/a.md", "memory/cards/b.md"],
         }
     ]
@@ -99,7 +100,7 @@ def test_audit_reports_duplicates_inside_a_namespace_without_writing_cards(tmp_p
 
 def test_evidence_memory_audit_cli_is_read_only_and_json_safe(tmp_path, capsys):
     workspace, cards = _workspace(tmp_path, "one", "memory-44444444-4444-4444-8444-444444444444")
-    _card(cards, "card.md", "id: card-safe\ntopic: safe")
+    _card(cards, "card.md", "id: card-cccccccc-cccc-4ccc-8ccc-cccccccccccc\ntopic: safe")
     before = (cards / "card.md").read_text()
 
     assert cli.main(["evidence", "memory", "audit", str(workspace), "--json"]) == 0
