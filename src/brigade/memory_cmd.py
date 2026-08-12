@@ -1164,12 +1164,14 @@ def health(target: Path) -> dict[str, Any]:
     closeout = _latest_closeout(target)
     closed = set(closeout.get("source_fingerprints", [])) if isinstance(closeout, dict) else set()
     top_issue = None
+    queue_count = 0
     if isinstance(queue_payload, dict) and isinstance(queue_payload.get("cards"), list) and queue_payload["cards"]:
         open_cards = [
             card
             for card in queue_payload["cards"]
             if isinstance(card, dict) and str(card.get("source_fingerprint") or "") not in closed
         ]
+        queue_count = len(open_cards)
         if open_cards:
             top_issue = open_cards[0]
             checks.append(
@@ -1191,6 +1193,12 @@ def health(target: Path) -> dict[str, Any]:
         if isinstance(scan_payload, dict) and isinstance(scan_payload.get("metadata"), dict)
         else {}
     )
+    if isinstance(scan_payload, dict) and isinstance(scan_payload.get("issue_count"), int):
+        scan_issue_count: int | None = int(scan_payload["issue_count"])
+    elif isinstance(scan_payload, dict) and isinstance(scan_payload.get("issues"), list):
+        scan_issue_count = len(scan_payload["issues"])
+    else:
+        scan_issue_count = None
     autofix_plan = (
         _autofix_plan_payload(target, config, scan_payload)
         if isinstance(scan_payload, dict)
@@ -1211,6 +1219,8 @@ def health(target: Path) -> dict[str, Any]:
         "queue_path": str(queue_path),
         "valid": not any(check["status"] == "fail" for check in checks),
         "issue_count": len(issues),
+        "scan_issue_count": scan_issue_count,
+        "queue_count": queue_count,
         "top_issue": top_issue or (issues[0] if issues else None),
         "checks": checks,
         "metadata": metadata,

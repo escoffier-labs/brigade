@@ -140,6 +140,46 @@ def test_care_managed_block_reports_tampered_and_refuses_clobber_without_adopt()
     ).status == (managed_block.STATUS_CURRENT)
 
 
+def test_care_status_payload_reports_crontab_and_systemd_enabled(tmp_path, monkeypatch):
+    """Public structured helper covers both backends without scraping BrigadeCare text."""
+    store = {"text": ""}
+    home = tmp_path / "home"
+
+    monkeypatch.setattr(care_cmd, "_read_crontab", lambda: (store["text"], None))
+    monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: store.__setitem__("text", text) or None)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+
+    target = tmp_path / "ws"
+    target.mkdir()
+    assert memory_cmd._write_memory_care_runbooks(target) == 0
+
+    missing = care_cmd.status_payload(target=target, home=home)
+    assert missing["enabled"] is False
+    assert missing["backends"]["crontab"]["status"] == "missing"
+    assert missing["backends"]["systemd"]["status"] == "missing"
+    assert {entry["id"] for entry in missing["entries"]} >= {
+        "daily-care",
+        "ingest-sweep",
+        "weekly-outcome-ratchet",
+        "daily-observability",
+        "nightly-ops",
+    }
+
+    assert care_cmd.install(target=target, backend="crontab", home=home, json_output=True) == 0
+    assert "BrigadeCare" not in store["text"]
+    assert "# BEGIN BRIGADE CARE" in store["text"]
+    cron_enabled = care_cmd.status_payload(target=target, home=home)
+    assert cron_enabled["enabled"] is True
+    assert cron_enabled["backends"]["crontab"]["status"] == "current"
+
+    store["text"] = ""
+    assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
+    systemd_enabled = care_cmd.status_payload(target=target, home=home)
+    assert systemd_enabled["enabled"] is True
+    assert systemd_enabled["backends"]["systemd"]["status"] == "current"
+
+
 def test_care_crontab_install_status_uninstall_round_trip(tmp_path, monkeypatch):
     store = {"text": "# keep-me\n0 2 * * * /usr/bin/true\n"}
     before = store["text"]
@@ -505,6 +545,65 @@ def test_care_entries_match_scheduled_care_doc_schedules():
     assert by_id["weekly-outcome-ratchet"].runbook_rel.endswith("weekly-outcome-ratchet.json")
     assert by_id["daily-observability"].runbook_rel.endswith("daily-observability.json")
     assert by_id["daily-observability"].kind == "runbook"
+
+
+def test_care_status_payload_different_workspace_does_not_enable_jobs(tmp_path, monkeypatch):
+    store = {"text": ""}
+    home = tmp_path / "home"
+    other = tmp_path / "other-ws"
+    other.mkdir()
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    monkeypatch.setattr(care_cmd, "_read_crontab", lambda: (store["text"], None))
+    monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: store.__setitem__("text", text) or None)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda t: 0)
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    assert memory_cmd._write_memory_care_runbooks(other) == 0
+    assert care_cmd.install(target=other, backend="crontab", home=home, json_output=True) == 0
+
+    status = care_cmd.status_payload(target=target, home=home)
+    assert status["backends"]["crontab"]["status"] in {"current", "stale", "tampered"}
+    assert status["backends"]["crontab"]["target_match"] is False
+    assert status["enabled"] is False
+
+
+def test_care_status_payload_same_workspace_stale_remains_visible(tmp_path, monkeypatch):
+    store = {"text": ""}
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    monkeypatch.setattr(care_cmd, "_read_crontab", lambda: (store["text"], None))
+    monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: store.__setitem__("text", text) or None)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda t: 0)
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    assert memory_cmd._write_memory_care_runbooks(target) == 0
+    assert care_cmd.install(target=target, backend="crontab", home=home, json_output=True) == 0
+    # Tamper one schedule line so assessment is stale but still for this workspace.
+    store["text"] = store["text"].replace("15 6 * * *", "16 6 * * *")
+
+    status = care_cmd.status_payload(target=target, home=home)
+    assert status["backends"]["crontab"]["status"] in {"stale", "tampered"}
+    assert status["backends"]["crontab"]["target_match"] is True
+    assert status["enabled"] is True
+
+
+def test_care_systemd_aggregate_status_malformed_beats_missing(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda t: 0)
+    monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
+    service = home / ".config" / "systemd" / "user" / "brigade-daily-care.service"
+    service.unlink()
+    service.symlink_to(home / "missing.service")
+
+    status = care_cmd.status_payload(target=target, home=home)
+    assert status["backends"]["systemd"]["status"] == managed_block.STATUS_MALFORMED
 
 
 def test_care_crontab_block_passes_crontab_syntax_check(tmp_path):

@@ -73,11 +73,12 @@ def surfaces_capture(*, target: Path, json_output: bool = False) -> int:
 SURFACE_REVIEW_STATUSES = {"external-ok", "brigade-runbook-candidate", "retire-candidate", "needs-owner"}
 
 
-def surfaces_list(*, target: Path, json_output: bool = False) -> int:
+def surfaces_list_payload(target: Path) -> dict[str, Any]:
+    """Public redacted JSON contract for the latest operator surfaces capture."""
     target = target.expanduser().resolve()
     payload = _read_latest_surfaces_capture(target)
     if payload is None:
-        result = {
+        return {
             "target": str(target),
             "status": "missing-capture",
             "surface_count": 0,
@@ -85,18 +86,22 @@ def surfaces_list(*, target: Path, json_output: bool = False) -> int:
             "records": [],
             "next_command": "brigade operator surfaces capture --target . --json",
         }
-    else:
-        result = {
-            "target": str(target),
-            "status": "captured",
-            "captured_at": payload.get("captured_at"),
-            "surface_count": payload.get("surface_count"),
-            "record_count": payload.get("record_count"),
-            "records": payload.get("records") if isinstance(payload.get("records"), list) else [],
-            "review_summary": _surface_review_summary(target, capture=payload),
-            "privacy": payload.get("privacy"),
-            "source_fingerprint": payload.get("source_fingerprint"),
-        }
+    return {
+        "target": str(target),
+        "status": "captured",
+        "captured_at": payload.get("captured_at"),
+        "surface_count": payload.get("surface_count"),
+        "record_count": payload.get("record_count"),
+        "records": payload.get("records") if isinstance(payload.get("records"), list) else [],
+        "review_summary": _surface_review_summary(target, capture=payload),
+        "privacy": payload.get("privacy"),
+        "source_fingerprint": payload.get("source_fingerprint"),
+    }
+
+
+def surfaces_list(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    result = surfaces_list_payload(target)
     if json_output:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

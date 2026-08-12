@@ -6,6 +6,7 @@ No new dependencies, config, or durable state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -21,6 +22,16 @@ from .selection import WRITER_INBOXES
 SCHEMA_NAME = "memory-topology"
 SCHEMA_VERSION = 1
 
+CANONICAL_OWNER = "canonical memory system"
+BRIGADE_OWNER = "brigade"
+SCHEDULER_OWNER = "scheduler"
+MANUAL_OWNER = "manual process"
+EXTERNAL_ADAPTER_OWNER = "external adapter"
+EXTERNAL_SCHEDULER_SURFACES = frozenset({"shell_crontab", "openclaw_cron"})
+
+# Legitimate read-only scan edges are exempt from unsafe cycle detection.
+CYCLE_EXEMPT_EDGE_IDS = frozenset({"edge:cards:care_scan"})
+
 CANONICAL_DESTINATIONS: tuple[tuple[str, str, str], ...] = (
     ("cards", "memory/cards", "Memory cards"),
     ("rules", "rules", "Rules"),
@@ -34,7 +45,16 @@ CARE_CADENCE = {
     "ingest-sweep": "every_30m",
     "weekly-outcome-ratchet": "weekly",
     "daily-observability": "daily",
-    "nightly-maintenance": "nightly",
+    "nightly-ops": "nightly",
+}
+
+# Cadence-aware stale thresholds. Weekly jobs stay healthy past day 4.
+CADENCE_STALE_SECONDS = {
+    "every_30m": 6 * 60 * 60,
+    "daily": HANDOFF_BACKLOG_STALE_SECONDS,
+    "nightly": HANDOFF_BACKLOG_STALE_SECONDS,
+    "weekly": 8 * 24 * 60 * 60,
+    "scheduled": HANDOFF_BACKLOG_STALE_SECONDS,
 }
 
 _INBOX_TO_HARNESS = {inbox: harness for harness, inbox in WRITER_INBOXES.items()}
@@ -46,21 +66,25 @@ def topology_payload(target: Path) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     paths: list[dict[str, Any]] = []
+    flags: list[dict[str, Any]] = []
 
     care_health = memory_cmd.health(target)
     handoff_health = handoff_cmd.inspect(target)
     draft_queue = handoff_cmd.draft_queue_payload(target)
     evidence = _safe_evidence_status(target)
-    care_entries = [_care_entry_view(target, entry) for entry in care_cmd.CARE_ENTRIES]
-    care_enabled = _care_jobs_enabled(target)
+    care_status = _safe_care_status(target)
+    care_entries = list(care_status.get("entries") or [])
+    care_enabled = bool(care_status.get("enabled"))
 
     _add_shared_stages(nodes)
     _add_canonical_nodes(nodes)
+    _add_manual_refresh_node(nodes)
     _add_care_nodes(nodes, care_entries, care_enabled=care_enabled, care_health=care_health)
     _add_evidence_node(nodes, evidence)
 
-    active_harnesses = _active_writer_harnesses(target, handoff_health)
+    active_harnesses, config_malformed = _active_writer_harnesses(target, handoff_health)
     ingest_receipt = _normalize_receipt(_latest_ingest_receipt(draft_queue))
+    shared_edge_ids = _add_shared_ingest_edges(edges, ingest_receipt=ingest_receipt)
     for harness, inbox_rel, present, pending, processed in active_harnesses:
         path = _add_harness_path(
             nodes,
@@ -70,29 +94,41 @@ def topology_payload(target: Path) -> dict[str, Any]:
             present=present,
             pending=pending,
             processed=processed,
-            ingest_receipt=ingest_receipt,
+            shared_edge_ids=shared_edge_ids,
         )
         paths.append(path)
 
     _add_unknown_adapter_nodes(nodes, edges, target)
-    _add_care_and_evidence_edges(nodes, edges, care_entries, care_enabled=care_enabled, evidence=evidence)
+    _add_external_scheduler_node(nodes, target)
+    _add_care_and_evidence_edges(nodes, edges, care_entries, evidence=evidence, target=target)
 
     health = _health_blocks(
         care_health=care_health,
         handoff_health=handoff_health,
         draft_queue=draft_queue,
         evidence=evidence,
+        config_malformed=config_malformed,
     )
-    node_list = list(nodes.values())
-    flags = detect_flags(node_list, edges, health=health)
+    if config_malformed:
+        flags.append(
+            {
+                "kind": "malformed_config",
+                "detail": "brigade config.json is malformed or unreadable",
+            }
+        )
+
+    node_list = sorted(nodes.values(), key=lambda item: str(item.get("id") or ""))
+    edge_list = sorted(edges, key=lambda item: str(item.get("id") or ""))
+    path_list = sorted(paths, key=lambda item: str(item.get("id") or ""))
+    flags.extend(detect_flags(node_list, edge_list, health=health))
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
         "target": ".",
         "generated_at": utc_now_iso_z(),
         "nodes": node_list,
-        "edges": edges,
-        "paths": paths,
+        "edges": edge_list,
+        "paths": path_list,
         "flags": flags,
         "health": health,
     }
@@ -130,8 +166,10 @@ def detect_flags(
     """Detect duplicate writers, stale receipts, missing owners, missing closeout, and cycles."""
     flags: list[dict[str, Any]] = []
     health = health or {}
+    nodes_by_id = {str(node.get("id")): node for node in nodes if isinstance(node, dict)}
 
     writers_by_dest: dict[str, list[str]] = {}
+    queue_producers: dict[tuple[str, str], list[str]] = {}
     for edge in edges:
         if not edge.get("enabled"):
             continue
@@ -139,6 +177,10 @@ def detect_flags(
             "write",
             "mutate",
         }:
+            if edge.get("authority") == "queue_producer":
+                dest = str(edge.get("to") or "")
+                writer = str(edge.get("writer_component") or edge.get("from") or "unknown")
+                queue_producers.setdefault((dest, writer), []).append(str(edge.get("id") or ""))
             continue
         dest = str(edge.get("to") or "")
         writer = str(edge.get("writer_component") or edge.get("from") or "unknown")
@@ -154,22 +196,49 @@ def detect_flags(
                     "detail": f"{len(unique)} enabled writers for {dest}",
                 }
             )
+    for (dest, writer), edge_ids in sorted(queue_producers.items()):
+        unique_ids = sorted({edge_id for edge_id in edge_ids if edge_id})
+        if len(unique_ids) > 1:
+            flags.append(
+                {
+                    "kind": "duplicate_enabled_queue_producer",
+                    "destination": dest,
+                    "writer_component": writer,
+                    "edge_ids": unique_ids,
+                    "detail": f"{len(unique_ids)} enabled queue producers for {dest} ({writer})",
+                }
+            )
 
+    stale_groups: dict[tuple[str, str, str, int], list[str]] = {}
     for edge in edges:
+        if not edge.get("enabled"):
+            continue
         receipt = edge.get("latest_receipt")
         if not isinstance(receipt, dict) or receipt.get("evidence_state") != "present":
             continue
-        completed = receipt.get("completed_at") or receipt.get("started_at")
+        completed = _receipt_completion_timestamp(receipt)
         age = _age_seconds(completed)
-        if age is not None and age >= HANDOFF_BACKLOG_STALE_SECONDS:
-            flags.append(
-                {
-                    "kind": "stale_receipt",
-                    "edge_id": edge.get("id"),
-                    "writer_component": edge.get("writer_component"),
-                    "detail": f"receipt older than {HANDOFF_BACKLOG_STALE_SECONDS // 86400}d",
-                }
-            )
+        threshold = _stale_threshold_seconds(edge, nodes_by_id)
+        if threshold is None or age is None or age < threshold:
+            continue
+        writer = str(edge.get("writer_component") or "")
+        run_id = str(receipt.get("run_id") or "")
+        completed_key = str(completed or "")
+        edge_id = str(edge.get("id") or "")
+        if not edge_id:
+            continue
+        stale_groups.setdefault((writer, run_id, completed_key, threshold), []).append(edge_id)
+    for (writer, _run_id, _completed, threshold), edge_ids in sorted(stale_groups.items()):
+        unique_ids = sorted(set(edge_ids))
+        flags.append(
+            {
+                "kind": "stale_receipt",
+                "edge_id": unique_ids[0],
+                "edge_ids": unique_ids,
+                "writer_component": writer,
+                "detail": f"receipt older than {max(1, threshold // 86400)}d for cadence",
+            }
+        )
 
     for node in nodes:
         if node.get("owner") == "unknown":
@@ -236,8 +305,9 @@ def _edge(
     writer_component: str | None,
     latest_receipt: dict[str, Any],
     enabled: bool,
+    cycle_exempt: bool = False,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "id": edge_id,
         "from": frm,
         "to": to,
@@ -247,6 +317,9 @@ def _edge(
         "latest_receipt": latest_receipt,
         "enabled": enabled,
     }
+    if cycle_exempt or edge_id in CYCLE_EXEMPT_EDGE_IDS:
+        payload["cycle_exempt"] = True
+    return payload
 
 
 def _add_shared_stages(nodes: dict[str, dict[str, Any]]) -> None:
@@ -278,11 +351,25 @@ def _add_canonical_nodes(nodes: dict[str, dict[str, Any]]) -> None:
             node_id=f"canonical:{key}",
             kind="canonical",
             label=label,
-            owner="brigade",
+            owner=CANONICAL_OWNER,
             authority="canonical_writer",
             state="canonical",
             path=rel,
         )
+
+
+def _add_manual_refresh_node(nodes: dict[str, dict[str, Any]]) -> None:
+    nodes["stage:manual_refresh"] = _node(
+        node_id="stage:manual_refresh",
+        kind="manual_writer",
+        label="manual card refresh / backfill",
+        owner=MANUAL_OWNER,
+        authority="canonical_writer",
+        state="manual",
+        path=".brigade/memory-care",
+        schedule={"source": "manual", "cadence": "on_demand"},
+        next_action="brigade memory care backfill",
+    )
 
 
 def _add_care_nodes(
@@ -293,46 +380,38 @@ def _add_care_nodes(
     care_health: dict[str, Any],
 ) -> None:
     scan_meta = care_health.get("metadata") if isinstance(care_health.get("metadata"), dict) else {}
+    scan_issue_count = care_health.get("scan_issue_count")
+    queue_count = int(care_health.get("queue_count") or 0)
+    top = care_health.get("top_issue")
+    # Brigade owns scan/queue primitives; the operator scheduler owns timing (care_job:*).
+    stage_state = "enabled" if care_enabled else "manual"
     nodes["stage:care_scan"] = _node(
         node_id="stage:care_scan",
         kind="stage",
         label="memory care scan",
-        owner="brigade",
+        owner=BRIGADE_OWNER,
         authority="queue_producer",
-        state="enabled" if care_enabled else "disabled",
+        state=stage_state,
         path=".brigade/memory-care",
-        schedule={"source": "brigade_care", "cadence": "daily"},
-        counts={"issue_count": care_health.get("issue_count")},
+        schedule={"source": "manual", "cadence": "on_demand"},
+        counts={"issue_count": scan_issue_count},
         latest_run=_public_run(scan_meta.get("scanned_at") or scan_meta.get("generated_at")),
         next_action="brigade memory care scan",
     )
-    queue_count = 0
-    top = care_health.get("top_issue")
-    if isinstance(care_health.get("checks"), list):
-        for check in care_health["checks"]:
-            if isinstance(check, dict) and check.get("name") == "memory_care_open_issues":
-                detail = str(check.get("detail") or "")
-                if detail.startswith("queued"):
-                    try:
-                        queue_count = int(detail.split()[0].split("=")[-1]) if "=" in detail else 0
-                    except ValueError:
-                        queue_count = 0
-                elif detail not in {"none", "queued issues reviewed or deferred"} and "queued" in detail:
-                    # e.g. "3 queued, top=..."
-                    try:
-                        queue_count = int(detail.split()[0])
-                    except ValueError:
-                        queue_count = 0
     nodes["stage:refresh_queue"] = _node(
         node_id="stage:refresh_queue",
         kind="queue",
         label="memory care refresh queue",
-        owner="brigade",
+        owner=BRIGADE_OWNER,
         authority="queue_producer",
-        state="enabled",
+        state=stage_state,
         path=".brigade/memory-care",
         counts={"queued": queue_count},
-        latest_run=_public_run((care_health.get("latest_closeout") or {}).get("created_at") if isinstance(care_health.get("latest_closeout"), dict) else None),
+        latest_run=_public_run(
+            (care_health.get("latest_closeout") or {}).get("created_at")
+            if isinstance(care_health.get("latest_closeout"), dict)
+            else None
+        ),
         next_action="brigade memory care plan-fixes" if top else None,
     )
     for entry in care_entries:
@@ -345,10 +424,13 @@ def _add_care_nodes(
             node_id=f"care_job:{entry_id}",
             kind="care_job",
             label=str(entry.get("description") or entry_id),
-            owner="brigade",
+            owner=SCHEDULER_OWNER,
             authority="queue_producer",
             state=state,
-            path=str(entry.get("runbook") or ""),
+            path=(
+                _safe_repo_path(str(entry.get("runbook") or ""))
+                or ("redacted:unsafe-path" if entry.get("runbook") else None)
+            ),
             schedule={"source": "brigade_care", "cadence": CARE_CADENCE.get(entry_id, "scheduled")},
             counts={},
             latest_run=_public_run_from_receipt(receipt if isinstance(receipt, dict) else None),
@@ -377,11 +459,15 @@ def _add_evidence_node(nodes: dict[str, dict[str, Any]], evidence: dict[str, Any
     nodes["stage:evidence_projection"]["counts"]["status"] = status
 
 
-def _active_writer_harnesses(
-    target: Path, handoff_health: Any
-) -> list[tuple[str, str, bool, int, int]]:
+def _active_writer_harnesses(target: Path, handoff_health: Any) -> tuple[list[tuple[str, str, bool, int, int]], bool]:
     configured: set[str] = set()
-    cfg = load_config(target)
+    config_malformed = False
+    try:
+        cfg = load_config(target)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        cfg = None
+        config_path = target / ".brigade" / "config.json"
+        config_malformed = config_path.is_file()
     if cfg is not None:
         configured = {h for h in cfg.selection.harnesses if h in WRITER_INBOXES}
 
@@ -400,7 +486,7 @@ def _active_writer_harnesses(
         has_items = pending > 0 or processed > 0 or _inbox_has_handoffs(target / inbox_rel)
         if harness in configured or present or has_items:
             active.append((harness, inbox_rel, present, pending, processed))
-    return active
+    return active, config_malformed
 
 
 def _inbox_has_handoffs(inbox: Path) -> bool:
@@ -412,6 +498,43 @@ def _inbox_has_handoffs(inbox: Path) -> bool:
     return False
 
 
+def _add_shared_ingest_edges(
+    edges: list[dict[str, Any]],
+    *,
+    ingest_receipt: dict[str, Any],
+) -> list[str]:
+    shared_ids: list[str] = []
+    edges.append(
+        _edge(
+            edge_id="edge:lint:ingest",
+            frm="stage:lint",
+            to="stage:ingest",
+            flow="approve",
+            authority="read_only",
+            writer_component=None,
+            latest_receipt={"evidence_state": "missing"},
+            enabled=True,
+        )
+    )
+    shared_ids.append("edge:lint:ingest")
+    for key, _rel, _label in CANONICAL_DESTINATIONS:
+        edge_id = f"edge:ingest:write:{key}"
+        edges.append(
+            _edge(
+                edge_id=edge_id,
+                frm="stage:ingest",
+                to=f"canonical:{key}",
+                flow="write",
+                authority="canonical_writer",
+                writer_component="ingest",
+                latest_receipt=ingest_receipt,
+                enabled=True,
+            )
+        )
+        shared_ids.append(edge_id)
+    return shared_ids
+
+
 def _add_harness_path(
     nodes: dict[str, dict[str, Any]],
     edges: list[dict[str, Any]],
@@ -421,7 +544,7 @@ def _add_harness_path(
     present: bool,
     pending: int,
     processed: int,
-    ingest_receipt: dict[str, Any],
+    shared_edge_ids: list[str],
 ) -> dict[str, Any]:
     harness_id = f"harness:{harness}"
     inbox_id = f"inbox:{harness}"
@@ -445,9 +568,11 @@ def _add_harness_path(
         counts={"pending": pending, "processed": processed},
         next_action="brigade handoff lint" if pending else None,
     )
+    emit_id = f"edge:{harness}:emit"
+    lint_id = f"edge:{harness}:lint"
     edges.append(
         _edge(
-            edge_id=f"edge:{harness}:emit",
+            edge_id=emit_id,
             frm=harness_id,
             to=inbox_id,
             flow="emit",
@@ -459,7 +584,7 @@ def _add_harness_path(
     )
     edges.append(
         _edge(
-            edge_id=f"edge:{harness}:lint",
+            edge_id=lint_id,
             frm=inbox_id,
             to="stage:lint",
             flow="validate",
@@ -469,35 +594,11 @@ def _add_harness_path(
             enabled=True,
         )
     )
-    edges.append(
-        _edge(
-            edge_id=f"edge:{harness}:ingest-stage",
-            frm="stage:lint",
-            to="stage:ingest",
-            flow="approve",
-            authority="read_only",
-            writer_component=None,
-            latest_receipt={"evidence_state": "missing"},
-            enabled=True,
-        )
-    )
     node_ids = [harness_id, inbox_id, "stage:lint", "stage:ingest"]
+    edge_ids = [emit_id, lint_id, *shared_edge_ids]
     for key, _rel, _label in CANONICAL_DESTINATIONS:
-        dest_id = f"canonical:{key}"
-        edges.append(
-            _edge(
-                edge_id=f"edge:{harness}:write:{key}",
-                frm="stage:ingest",
-                to=dest_id,
-                flow="write",
-                authority="canonical_writer",
-                writer_component="ingest",
-                latest_receipt=ingest_receipt,
-                enabled=True,
-            )
-        )
-        node_ids.append(dest_id)
-    return {"id": f"path:{harness}", "harness": harness, "node_ids": node_ids}
+        node_ids.append(f"canonical:{key}")
+    return {"id": f"path:{harness}", "harness": harness, "node_ids": node_ids, "edge_ids": edge_ids}
 
 
 def _add_unknown_adapter_nodes(
@@ -505,7 +606,6 @@ def _add_unknown_adapter_nodes(
     edges: list[dict[str, Any]],
     target: Path,
 ) -> None:
-    # Writer inboxes already covered. Surface watched source inboxes that are not known writers.
     sources_path = handoff_cmd.default_sources_path(target)
     if not sources_path.is_file():
         return
@@ -521,15 +621,14 @@ def _add_unknown_adapter_nodes(
         if not isinstance(entry, dict):
             continue
         root = entry.get("root", ".")
+        inbox_values = entry.get("inboxes") or []
+        if not isinstance(inbox_values, list):
+            continue
         if root != ".":
-            # External roots stay visible as unknown without exposing host paths.
-            inbox_values = entry.get("inboxes") or []
-            if not isinstance(inbox_values, list):
-                continue
             for inbox in inbox_values:
                 if not isinstance(inbox, str):
                     continue
-                node_id = f"adapter:external:{len(seen)}"
+                node_id = _opaque_adapter_id("external", str(root), inbox)
                 if node_id in seen:
                     continue
                 seen.add(node_id)
@@ -540,32 +639,48 @@ def _add_unknown_adapter_nodes(
                     owner="unknown",
                     authority="queue_producer",
                     state="unknown",
-                    path="external:handoff-source",
+                    path="redacted:external-root",
                     next_action="identify owning adapter",
                 )
             continue
-        for inbox in entry.get("inboxes") or []:
+        for inbox in inbox_values:
             if not isinstance(inbox, str):
                 continue
-            normalized = inbox.strip().strip("/")
-            if normalized in _INBOX_TO_HARNESS or normalized in seen:
+            safe = _safe_repo_path(inbox)
+            if safe is None:
+                node_id = _opaque_adapter_id("redacted", inbox)
+                if node_id in seen:
+                    continue
+                seen.add(node_id)
+                nodes[node_id] = _node(
+                    node_id=node_id,
+                    kind="adapter",
+                    label="redacted adapter inbox",
+                    owner="unknown",
+                    authority="queue_producer",
+                    state="unknown",
+                    path="redacted:unsafe-path",
+                    next_action="identify owning adapter",
+                )
                 continue
-            seen.add(normalized)
-            node_id = f"adapter:{normalized}"
-            present = (target / normalized).is_dir()
+            if safe in _INBOX_TO_HARNESS or safe in seen:
+                continue
+            seen.add(safe)
+            node_id = f"adapter:{safe}"
+            present = (target / safe).is_dir()
             nodes[node_id] = _node(
                 node_id=node_id,
                 kind="adapter",
-                label=normalized,
+                label=safe,
                 owner="unknown",
                 authority="queue_producer",
                 state="present" if present else "missing",
-                path=normalized,
+                path=safe,
                 next_action="identify owning adapter",
             )
             edges.append(
                 _edge(
-                    edge_id=f"edge:unknown:{normalized}:lint",
+                    edge_id=f"edge:unknown:{safe}:lint",
                     frm=node_id,
                     to="stage:lint",
                     flow="validate",
@@ -582,14 +697,15 @@ def _add_care_and_evidence_edges(
     edges: list[dict[str, Any]],
     care_entries: list[dict[str, Any]],
     *,
-    care_enabled: bool,
     evidence: dict[str, Any],
+    target: Path,
 ) -> None:
     scan_receipt = {"evidence_state": "missing"}
     for entry in care_entries:
         if entry.get("id") == "daily-care" and isinstance(entry.get("last_receipt"), dict):
             scan_receipt = _normalize_receipt(entry.get("last_receipt"))
             break
+    backfill_receipt = _normalize_receipt(_latest_backfill_receipt(target))
     edges.append(
         _edge(
             edge_id="edge:care_scan:queue",
@@ -599,20 +715,46 @@ def _add_care_and_evidence_edges(
             authority="queue_producer",
             writer_component="memory-care-scan",
             latest_receipt=scan_receipt,
-            enabled=care_enabled,
+            # Manual `brigade memory care scan` remains traversable without a scheduler.
+            enabled=True,
         )
     )
-    # Care refresh can mutate canonical cards when enabled.
     edges.append(
         _edge(
-            edge_id="edge:refresh_queue:cards",
+            edge_id="edge:queue:manual_refresh",
             frm="stage:refresh_queue",
+            to="stage:manual_refresh",
+            flow="review",
+            authority="read_only",
+            writer_component="memory-care-review",
+            latest_receipt={"evidence_state": "missing"},
+            enabled=True,
+        )
+    )
+    edges.append(
+        _edge(
+            edge_id="edge:manual_refresh:cards",
+            frm="stage:manual_refresh",
             to="canonical:cards",
             flow="mutate",
             authority="canonical_writer",
-            writer_component="memory-care",
+            writer_component="memory-care-backfill",
+            latest_receipt=backfill_receipt,
+            # Historical backfill receipts are evidence only; the writer stays manual-disabled.
+            enabled=False,
+        )
+    )
+    edges.append(
+        _edge(
+            edge_id="edge:cards:care_scan",
+            frm="canonical:cards",
+            to="stage:care_scan",
+            flow="scan",
+            authority="read_only",
+            writer_component="memory-care-scan",
             latest_receipt=scan_receipt,
-            enabled=care_enabled,
+            enabled=True,
+            cycle_exempt=True,
         )
     )
     for entry in care_entries:
@@ -620,12 +762,21 @@ def _add_care_and_evidence_edges(
         node_id = f"care_job:{entry_id}"
         if node_id not in nodes:
             continue
-        receipt = _normalize_receipt(entry.get("last_receipt") if isinstance(entry.get("last_receipt"), dict) else None)
+        receipt = _normalize_receipt(
+            entry.get("last_receipt") if isinstance(entry.get("last_receipt"), dict) else None,
+            next_action=nodes[node_id].get("next_action"),
+        )
+        if entry_id == "daily-care":
+            destination = "stage:care_scan"
+        elif entry_id == "ingest-sweep":
+            destination = "stage:ingest"
+        else:
+            destination = "stage:refresh_queue"
         edges.append(
             _edge(
                 edge_id=f"edge:care_job:{entry_id}",
                 frm=node_id,
-                to="stage:care_scan" if entry_id == "daily-care" else "stage:ingest" if entry_id == "ingest-sweep" else "stage:refresh_queue",
+                to=destination,
                 flow="schedule",
                 authority="queue_producer",
                 writer_component=entry_id,
@@ -637,12 +788,16 @@ def _add_care_and_evidence_edges(
     evidence_receipt = {"evidence_state": "missing"}
     latest = projection.get("latest_run")
     if isinstance(latest, dict) and latest:
-        evidence_receipt = {
-            "evidence_state": "present",
-            "status": latest.get("status") or projection.get("status"),
-            "completed_at": latest.get("completed_at") or latest.get("started_at"),
-            "run_id": latest.get("scan_id") or latest.get("run_id"),
-        }
+        evidence_receipt = _normalize_receipt(
+            {
+                "status": latest.get("status") or projection.get("status"),
+                "started_at": latest.get("started_at"),
+                "finished_at": latest.get("finished_at"),
+                "completed_at": latest.get("completed_at"),
+                "duration_seconds": latest.get("duration_seconds"),
+                "run_id": latest.get("scan_id") or latest.get("run_id"),
+            }
+        )
     edges.append(
         _edge(
             edge_id="edge:cards:evidence",
@@ -663,27 +818,20 @@ def _health_blocks(
     handoff_health: Any,
     draft_queue: dict[str, Any],
     evidence: dict[str, Any],
+    config_malformed: bool,
 ) -> dict[str, Any]:
     scan_status = "missing"
-    scan_count = None
     for check in care_health.get("checks") or []:
         if isinstance(check, dict) and check.get("name") == "memory_care_scan":
             scan_status = check.get("status") or "unknown"
             break
     queue_status = "missing"
-    queue_count = 0
     for check in care_health.get("checks") or []:
         if isinstance(check, dict) and check.get("name") == "memory_care_queue":
             queue_status = check.get("status") or "unknown"
-        if isinstance(check, dict) and check.get("name") == "memory_care_open_issues":
-            detail = str(check.get("detail") or "")
-            if detail and detail[0].isdigit():
-                try:
-                    queue_count = int(detail.split()[0])
-                except ValueError:
-                    queue_count = 0
-            elif detail in {"none", "queued issues reviewed or deferred"}:
-                queue_count = 0
+            break
+    queue_count = int(care_health.get("queue_count") or 0)
+    scan_issue_count = care_health.get("scan_issue_count")
 
     pending_total = sum(int(inbox.pending or 0) for inbox in getattr(handoff_health, "inboxes", ()) or ())
     backlog_status = "ok" if pending_total == 0 else "warn"
@@ -714,7 +862,7 @@ def _health_blocks(
         }
 
     return {
-        "care_scan": {"status": scan_status, "issue_count": care_health.get("issue_count")},
+        "care_scan": {"status": scan_status, "issue_count": scan_issue_count},
         "refresh_queue": {"status": queue_status, "count": queue_count},
         "handoff_backlog": {
             "status": backlog_status,
@@ -725,24 +873,37 @@ def _health_blocks(
         "quarantine": {"status": "unknown", "count": None},
         "closeout": closeout_block,
         "evidence_projection": evidence_block,
+        "config": {
+            "status": "malformed" if config_malformed else "ok",
+        },
     }
 
 
-def _care_entry_view(target: Path, entry: care_cmd.CareEntry) -> dict[str, Any]:
-    return care_cmd._entry_status(target, entry)
-
-
-def _care_jobs_enabled(target: Path) -> bool:
-    """True when a Brigade care scheduler block is installed for this target."""
+def _safe_care_status(target: Path) -> dict[str, Any]:
     try:
-        current, error = care_cmd._read_crontab()
-    except Exception:
-        return False
-    if error or not current:
-        return False
-    marker = str(target)
-    # Avoid leaking that we compared absolute paths in the public payload; this is local only.
-    return "BrigadeCare" in current and marker in current
+        return care_cmd.status_payload(target=target)
+    except Exception:  # noqa: BLE001 - topology must stay read-only and non-fatal
+        return {
+            "enabled": False,
+            "backends": {
+                "crontab": {"status": "unreadable"},
+                "systemd": {"status": "unreadable"},
+            },
+            "entries": [
+                {
+                    "id": entry.entry_id,
+                    "schedule": entry.schedule,
+                    "on_calendar": entry.on_calendar,
+                    "kind": entry.kind,
+                    "description": entry.description,
+                    "runbook": entry.runbook_rel,
+                    "runbook_id": entry.runbook_id,
+                    "runbook_present": (target / entry.runbook_rel).is_file() if entry.runbook_rel else False,
+                    "last_receipt": None,
+                }
+                for entry in care_cmd.CARE_ENTRIES
+            ],
+        }
 
 
 def _safe_evidence_status(target: Path) -> dict[str, Any]:
@@ -757,20 +918,55 @@ def _latest_ingest_receipt(draft_queue: dict[str, Any]) -> dict[str, Any] | None
     return latest if isinstance(latest, dict) else None
 
 
-def _normalize_receipt(receipt: dict[str, Any] | None) -> dict[str, Any]:
+def _latest_backfill_receipt(target: Path) -> dict[str, Any] | None:
+    receipts_dir = target / ".brigade" / "memory-care" / "backfills"
+    if not receipts_dir.is_dir():
+        return None
+    candidates = sorted(receipts_dir.glob("*.json"))
+    if not candidates:
+        return None
+    try:
+        payload = json.loads(candidates[-1].read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _receipt_completion_timestamp(receipt: dict[str, Any]) -> Any:
+    return (
+        receipt.get("finished_at")
+        or receipt.get("completed_at")
+        or receipt.get("generated_at")
+        or receipt.get("started_at")
+    )
+
+
+def _normalize_receipt(
+    receipt: dict[str, Any] | None,
+    *,
+    next_action: str | None = None,
+) -> dict[str, Any]:
     if not isinstance(receipt, dict) or not receipt:
         return {"evidence_state": "missing"}
-    completed = receipt.get("completed_at") or receipt.get("started_at")
+    completed = _receipt_completion_timestamp(receipt)
     status = receipt.get("status")
     run_id = receipt.get("run_id")
+    started_at = receipt.get("started_at")
+    duration_seconds = receipt.get("duration_seconds")
     if completed is None and status is None and run_id is None:
         return {"evidence_state": "missing"}
-    return {
+    payload: dict[str, Any] = {
         "evidence_state": "present",
         "status": status,
+        "started_at": started_at,
         "completed_at": completed,
         "run_id": run_id,
     }
+    if isinstance(duration_seconds, (int, float)):
+        payload["duration_seconds"] = duration_seconds
+    if next_action:
+        payload["next_action"] = next_action
+    return payload
 
 
 def _public_run(timestamp: Any) -> dict[str, Any] | None:
@@ -782,14 +978,67 @@ def _public_run(timestamp: Any) -> dict[str, Any] | None:
 def _public_run_from_receipt(receipt: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(receipt, dict):
         return None
-    completed = receipt.get("completed_at") or receipt.get("started_at")
+    completed = _receipt_completion_timestamp(receipt)
     if not completed and not receipt.get("run_id"):
         return None
-    return {
+    payload: dict[str, Any] = {
         "run_id": receipt.get("run_id"),
         "status": receipt.get("status"),
         "completed_at": completed,
     }
+    if receipt.get("started_at"):
+        payload["started_at"] = receipt.get("started_at")
+    duration_seconds = receipt.get("duration_seconds")
+    if isinstance(duration_seconds, (int, float)):
+        payload["duration_seconds"] = duration_seconds
+    return payload
+
+
+def _safe_repo_path(value: str) -> str | None:
+    """Return a repo-relative path, or None when the value is absolute/home/Windows."""
+    text = value.strip()
+    if not text:
+        return None
+    while text.startswith("./"):
+        text = text[2:]
+    if text.startswith("~") or text.startswith("/") or text.startswith("\\"):
+        return None
+    if "\\" in text:
+        return None
+    if len(text) >= 2 and text[1] == ":" and text[0].isalpha():
+        return None
+    normalized = text.replace("\\", "/").strip("/")
+    if not normalized or normalized.startswith("..") or "/../" in f"/{normalized}/":
+        return None
+    parts = Path(normalized).parts
+    if any(part == ".." for part in parts):
+        return None
+    return normalized
+
+
+def _stale_threshold_seconds(edge: dict[str, Any], nodes_by_id: dict[str, dict[str, Any]]) -> int | None:
+    writer = str(edge.get("writer_component") or "")
+    if writer in CARE_CADENCE:
+        cadence = CARE_CADENCE[writer]
+        return int(CADENCE_STALE_SECONDS.get(cadence, HANDOFF_BACKLOG_STALE_SECONDS))
+    frm = nodes_by_id.get(str(edge.get("from") or ""))
+    if isinstance(frm, dict) and isinstance(frm.get("schedule"), dict):
+        cadence = str(frm["schedule"].get("cadence") or "")
+        if cadence in {"on_demand", "manual"}:
+            return None
+        if cadence in CADENCE_STALE_SECONDS:
+            return int(CADENCE_STALE_SECONDS[cadence])
+    to = nodes_by_id.get(str(edge.get("to") or ""))
+    if isinstance(to, dict) and isinstance(to.get("schedule"), dict):
+        cadence = str(to["schedule"].get("cadence") or "")
+        if cadence in {"on_demand", "manual"}:
+            return None
+    return int(HANDOFF_BACKLOG_STALE_SECONDS)
+
+
+def _opaque_adapter_id(kind: str, *material: str) -> str:
+    digest = hashlib.sha256(":".join(material).encode()).hexdigest()[:12]
+    return f"adapter:{kind}:{digest}"
 
 
 def _age_seconds(value: Any) -> float | None:
@@ -807,10 +1056,42 @@ def _age_seconds(value: Any) -> float | None:
     return max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds())
 
 
+def _add_external_scheduler_node(nodes: dict[str, dict[str, Any]], target: Path) -> None:
+    try:
+        from .operator_cmd.surfaces import surfaces_list_payload
+    except ImportError:
+        return
+    listed = surfaces_list_payload(target)
+    if not isinstance(listed, dict) or listed.get("status") != "captured":
+        return
+    records = listed.get("records") if isinstance(listed.get("records"), list) else []
+    scheduler_records = [
+        record
+        for record in records
+        if isinstance(record, dict) and str(record.get("surface") or "") in EXTERNAL_SCHEDULER_SURFACES
+    ]
+    if not scheduler_records:
+        return
+    nodes["adapter:external_scheduler"] = _node(
+        node_id="adapter:external_scheduler",
+        kind="adapter",
+        label="external scheduler",
+        owner=EXTERNAL_ADAPTER_OWNER,
+        authority="queue_producer",
+        state="external",
+        path="redacted:operator-surfaces",
+        schedule={"source": "external", "cadence": "unknown"},
+        counts={"record_count": len(scheduler_records)},
+        next_action="brigade operator surfaces list --json",
+    )
+
+
 def _detect_cycles(edges: list[dict[str, Any]]) -> list[list[str]]:
     graph: dict[str, list[str]] = {}
     for edge in edges:
         if not edge.get("enabled", True):
+            continue
+        if edge.get("cycle_exempt") or edge.get("id") in CYCLE_EXEMPT_EDGE_IDS:
             continue
         frm = str(edge.get("from") or "")
         to = str(edge.get("to") or "")

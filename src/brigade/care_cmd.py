@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import plistlib
@@ -829,6 +830,222 @@ def _install_systemd(
     return 0
 
 
+_INSTALLED_CARE_STATUSES = frozenset(
+    {
+        managed_block.STATUS_CURRENT,
+        managed_block.STATUS_STALE,
+        "tampered",
+    }
+)
+
+_SYSTEMD_STATUS_RANK: dict[str, int] = {
+    managed_block.STATUS_MALFORMED: 0,
+    "tampered": 1,
+    managed_block.STATUS_STALE: 2,
+    managed_block.STATUS_MISSING: 3,
+    managed_block.STATUS_CURRENT: 4,
+    "unreadable": 5,
+}
+
+_WORKSPACE_CD_RE = re.compile(r'cd\s+"((?:[^"\\]|\\.)*)"')
+
+
+def _backend_is_installed(status: str) -> bool:
+    return status in _INSTALLED_CARE_STATUSES
+
+
+def _normalize_workspace_path(value: str) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return Path(text).expanduser().resolve()
+    except OSError:
+        return None
+
+
+def _workspace_from_care_body(body: str) -> Path | None:
+    for line in body.splitlines():
+        match = _WORKSPACE_CD_RE.search(line)
+        if match:
+            raw = match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+            return _normalize_workspace_path(raw)
+    for line in body.splitlines():
+        if not line.startswith("WorkingDirectory="):
+            continue
+        value = line.split("=", 1)[1].strip()
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        return _normalize_workspace_path(value)
+    return None
+
+
+def _target_matches(installed: Path | None, target: Path) -> bool:
+    if installed is None:
+        return False
+    try:
+        return installed == target.expanduser().resolve()
+    except OSError:
+        return False
+
+
+def _aggregate_systemd_status(unit_statuses: list[str]) -> str:
+    if not unit_statuses:
+        return managed_block.STATUS_MISSING
+    worst = managed_block.STATUS_CURRENT
+    for status in unit_statuses:
+        if _SYSTEMD_STATUS_RANK.get(status, 99) < _SYSTEMD_STATUS_RANK.get(worst, 99):
+            worst = status
+    return worst
+
+
+def _crontab_backend_status(*, target: Path, home: Path | None = None) -> dict[str, Any]:
+    current, error = _read_crontab()
+    if error:
+        return {
+            "backend": "crontab",
+            "status": "unreadable",
+            "target_match": False,
+            "error": error,
+            "action": None,
+            "recorded_hash": None,
+            "live_hash": None,
+            "desired_hash": None,
+            "detail": error,
+            "profile": None,
+        }
+    desired_body = _crontab_body(workspace=target, home=home)
+    assessment = managed_block.assess_block(
+        current,
+        desired=desired_body,
+        kind=CARE_KIND,
+        profile="crontab",
+        style=CARE_MARKER_STYLE,
+    )
+    plan = managed_block.plan_install(
+        current,
+        desired=desired_body,
+        kind=CARE_KIND,
+        profile="crontab",
+        style=CARE_MARKER_STYLE,
+    )
+    parsed = managed_block.parse_blocks(current, kind=CARE_KIND, style=CARE_MARKER_STYLE)
+    public_status = _public_block_status(assessment.status)
+    installed_workspace = _workspace_from_care_body(parsed.body) if parsed.status == "ok" else None
+    payload: dict[str, Any] = {
+        "backend": "crontab",
+        "status": public_status,
+        "target_match": _target_matches(installed_workspace, target),
+        "error": None,
+        "action": plan.action,
+        "recorded_hash": assessment.recorded_hash,
+        "live_hash": assessment.actual_hash,
+        "desired_hash": assessment.desired_hash,
+        "detail": assessment.detail,
+        "profile": parsed.meta.profile if parsed.meta else None,
+    }
+    if public_status == "tampered":
+        payload["fix_command"] = "brigade care install --target . --adopt"
+    elif public_status == "stale":
+        payload["fix_command"] = "brigade care install --target ."
+    elif public_status == managed_block.STATUS_MISSING:
+        payload["fix_command"] = "brigade care install --target ."
+    return payload
+
+
+def _systemd_backend_status(*, target: Path, home: Path | None = None) -> dict[str, Any]:
+    unit_dir = _systemd_user_dir(home)
+    units = _systemd_unit_bodies(workspace=target, home=home)
+    results: list[dict[str, Any]] = []
+    unit_statuses: list[str] = []
+    installed_workspace: Path | None = None
+    for name, desired_text in units.items():
+        path = unit_dir / name
+        if path.is_symlink():
+            public_status = managed_block.STATUS_MALFORMED
+            results.append(
+                {
+                    "name": name,
+                    "path": str(path),
+                    "status": public_status,
+                    "recorded_hash": None,
+                    "live_hash": None,
+                    "desired_hash": None,
+                }
+            )
+            unit_statuses.append(public_status)
+            continue
+        if not path.is_file():
+            existing_text = ""
+        else:
+            try:
+                existing_text = managed_block.read_text_nofollow(path)
+            except OSError:
+                existing_text = ""
+        desired_body = _block_body_from_rendered(desired_text)
+        assessment = managed_block.assess_block(
+            existing_text,
+            desired=desired_body,
+            kind=CARE_KIND,
+            profile="systemd",
+            style=CARE_MARKER_STYLE,
+        )
+        public_status = _public_block_status(assessment.status)
+        if installed_workspace is None and name.endswith(".service") and existing_text:
+            parsed = managed_block.parse_blocks(existing_text, kind=CARE_KIND, style=CARE_MARKER_STYLE)
+            if parsed.status == "ok":
+                installed_workspace = _workspace_from_care_body(parsed.body)
+        results.append(
+            {
+                "name": name,
+                "path": str(path),
+                "status": public_status,
+                "recorded_hash": assessment.recorded_hash,
+                "live_hash": assessment.actual_hash,
+                "desired_hash": assessment.desired_hash,
+            }
+        )
+        unit_statuses.append(public_status)
+    return {
+        "backend": "systemd",
+        "status": _aggregate_systemd_status(unit_statuses),
+        "target_match": _target_matches(installed_workspace, target),
+        "error": None,
+        "unit_dir": str(unit_dir),
+        "units": results,
+    }
+
+
+def status_payload(*, target: Path, home: Path | None = None) -> dict[str, Any]:
+    """Public structured care scheduler status across crontab and systemd.
+
+    Topology and other read-only consumers should use this instead of scraping
+    crontab text or private markers. ``enabled`` is true when either backend has
+    a Brigade care block installed for *target* (current, stale, or tampered).
+    """
+    target = target.expanduser().resolve()
+    entries = [_entry_status(target, entry) for entry in CARE_ENTRIES]
+    if _is_windows():
+        return {
+            "enabled": False,
+            "backends": {
+                "crontab": {"backend": "crontab", "status": "unsupported-backend", "error": None},
+                "systemd": {"backend": "systemd", "status": "unsupported-backend", "error": None},
+            },
+            "entries": entries,
+        }
+    crontab = _crontab_backend_status(target=target, home=home)
+    systemd = _systemd_backend_status(target=target, home=home)
+    crontab_enabled = _backend_is_installed(str(crontab.get("status"))) and bool(crontab.get("target_match"))
+    systemd_enabled = _backend_is_installed(str(systemd.get("status"))) and bool(systemd.get("target_match"))
+    return {
+        "enabled": crontab_enabled or systemd_enabled,
+        "target_match": bool(crontab.get("target_match")) or bool(systemd.get("target_match")),
+        "backends": {"crontab": crontab, "systemd": systemd},
+        "entries": entries,
+    }
+
+
 def status(
     *,
     target: Path,
@@ -865,109 +1082,26 @@ def status(
         return _launchd_status(target=target, json_output=json_output, home=home)
 
     if backend == "crontab":
-        current, error = _read_crontab()
-        if error:
-            print(f"error: failed to read crontab: {error}", file=sys.stderr)
+        crontab = _crontab_backend_status(target=target, home=home)
+        if crontab.get("error"):
+            print(f"error: failed to read crontab: {crontab['error']}", file=sys.stderr)
             return 2
-        desired_body = _crontab_body(workspace=target, home=home)
-        assessment = managed_block.assess_block(
-            current,
-            desired=desired_body,
-            kind=CARE_KIND,
-            profile="crontab",
-            style=CARE_MARKER_STYLE,
-        )
-        plan = managed_block.plan_install(
-            current,
-            desired=desired_body,
-            kind=CARE_KIND,
-            profile="crontab",
-            style=CARE_MARKER_STYLE,
-        )
-        parsed = managed_block.parse_blocks(current, kind=CARE_KIND, style=CARE_MARKER_STYLE)
-        public_status = _public_block_status(assessment.status)
         crontab_payload: dict[str, Any] = {
             "target": str(target),
-            "backend": "crontab",
-            "status": public_status,
-            "action": plan.action,
-            "recorded_hash": assessment.recorded_hash,
-            "live_hash": assessment.actual_hash,
-            "desired_hash": assessment.desired_hash,
-            "detail": assessment.detail,
-            "profile": parsed.meta.profile if parsed.meta else None,
+            **{k: v for k, v in crontab.items() if k != "error"},
             "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
         }
-        if public_status == "tampered":
-            crontab_payload["fix_command"] = "brigade care install --target . --adopt"
-        elif public_status == "stale":
-            crontab_payload["fix_command"] = "brigade care install --target ."
-        elif public_status == managed_block.STATUS_MISSING:
-            crontab_payload["fix_command"] = "brigade care install --target ."
+        public_status = str(crontab_payload.get("status"))
         _print_payload(crontab_payload, json_output=json_output)
         return 0 if public_status in {"current", managed_block.STATUS_MISSING} else 1
 
-    unit_dir = _systemd_user_dir(home)
-    units = _systemd_unit_bodies(workspace=target, home=home)
-    results: list[dict[str, Any]] = []
-    worst = "current"
-    for name, desired_text in units.items():
-        path = unit_dir / name
-        if path.is_symlink():
-            existing_text = ""
-            public_status = managed_block.STATUS_MALFORMED
-            results.append(
-                {
-                    "name": name,
-                    "path": str(path),
-                    "status": public_status,
-                    "recorded_hash": None,
-                    "live_hash": None,
-                    "desired_hash": None,
-                }
-            )
-            worst = public_status if worst == "current" else worst
-            continue
-        if not path.is_file():
-            existing_text = ""
-        else:
-            try:
-                existing_text = managed_block.read_text_nofollow(path)
-            except OSError:
-                existing_text = ""
-        desired_body = _block_body_from_rendered(desired_text)
-        assessment = managed_block.assess_block(
-            existing_text,
-            desired=desired_body,
-            kind=CARE_KIND,
-            profile="systemd",
-            style=CARE_MARKER_STYLE,
-        )
-        public_status = _public_block_status(assessment.status)
-        results.append(
-            {
-                "name": name,
-                "path": str(path),
-                "status": public_status,
-                "recorded_hash": assessment.recorded_hash,
-                "live_hash": assessment.actual_hash,
-                "desired_hash": assessment.desired_hash,
-            }
-        )
-        if public_status == "tampered":
-            worst = "tampered"
-        elif public_status == managed_block.STATUS_STALE and worst != "tampered":
-            worst = "stale"
-        elif public_status == managed_block.STATUS_MISSING and worst == "current":
-            worst = managed_block.STATUS_MISSING
+    systemd = _systemd_backend_status(target=target, home=home)
     payload = {
         "target": str(target),
-        "backend": "systemd",
-        "status": worst,
-        "unit_dir": str(unit_dir),
-        "units": results,
+        **{k: v for k, v in systemd.items() if k != "error"},
         "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
     }
+    worst = str(payload.get("status"))
     _print_payload(payload, json_output=json_output)
     return 0 if worst in {"current", managed_block.STATUS_MISSING} else 1
 

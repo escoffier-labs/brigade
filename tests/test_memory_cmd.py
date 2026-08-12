@@ -295,6 +295,27 @@ def test_memory_care_status_explains_freshness_metadata(tmp_path, monkeypatch, c
     assert "missing-freshness" in imported_types
 
 
+def test_memory_care_health_exposes_scan_and_queue_counts(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
+    cards = tmp_path / "memory" / "cards"
+    _write_card(
+        cards / "stale.md",
+        {
+            "topic": "stale",
+            "last_reviewed": "2026-01-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
+    (tmp_path / "MEMORY.md").write_text("- [stale](memory/cards/stale.md)\n")
+    assert memory_cmd.scan(target=tmp_path) == 0
+    health = memory_cmd.health(tmp_path)
+    assert health["scan_issue_count"] >= 1
+    assert health["queue_count"] >= 1
+    assert health["issue_count"] == len([c for c in health["checks"] if c.get("status") != "ok"])
+
+
 def test_memory_care_scan_flags_missing_evidence_refs(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     cache_home = tmp_path / "cache"
