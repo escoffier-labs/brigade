@@ -15,7 +15,7 @@ from brigade.center_cmd.dashboard import work_graph as wg
 
 NAME = "graph"
 TITLE = "Graph"
-ORDER = 7
+ORDER = 8
 
 _NODE_WIDTH = 160
 _NODE_HEIGHT = 52

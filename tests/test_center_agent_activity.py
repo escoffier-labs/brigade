@@ -113,3 +113,38 @@ def test_agent_activity_view_uses_state_words_and_keeps_ids_in_details():
     assert "Build activity view" in fragment
     assert "private-id" in fragment.split("<details>", 1)[1]
     assert "private-id" not in fragment.split("<details>", 1)[0]
+
+
+def test_external_sources_redact_journal_text_and_missing_local_sources_are_stale(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "empty-home"
+    journal = tmp_path / "fleet" / "t3.jsonl"
+    journal.parent.mkdir()
+    journal.write_text(
+        json.dumps(
+            {
+                "label": "private prompt TOKEN=secret",
+                "task_label": "/home/private/project",
+                "parent_activity_id": "private-parent",
+                "state": "running",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        + "\n"
+    )
+    _write_json(
+        tmp_path / ".brigade" / "center" / "agent-activity-sources.json",
+        {"sources": [{"provider": "t3", "host": "fleet-east", "journal": "fleet/t3.jsonl"}]},
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+
+    assert center_cmd.activity(target=tmp_path, json_output=True) == 0
+    records = json.loads(capsys.readouterr().out)["agent_activity"]
+
+    t3 = next(record for record in records if record["provider"] == "t3")
+    assert t3["label"] == "t3 agent"
+    assert t3["task_label"] == "Task unavailable"
+    assert t3["parent_activity_id"] is None
+    assert {record["provider"] for record in records} >= {"codex", "cursor"}
+    assert all(record["state"] == "stale" for record in records if record["kind"] == "source")
+    assert "TOKEN=secret" not in json.dumps(records)

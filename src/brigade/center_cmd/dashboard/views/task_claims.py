@@ -16,7 +16,7 @@ from brigade.work_cmd import constants as work_constants
 
 NAME = "claims"
 TITLE = "Claims"
-ORDER = 9
+ORDER = 10
 
 
 def fetch(target: Path) -> dict:

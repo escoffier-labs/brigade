@@ -110,16 +110,17 @@ def _local_session_records(now: datetime) -> list[dict[str, Any]]:
     records = _session_file_records(
         codex_home / "sessions", "rollout-*.jsonl", "codex", "codex-cli", "Codex session", now
     )
-    records.extend(
-        _session_file_records(
-            home / ".cursor" / "projects",
-            "agent-transcripts/*/*.jsonl",
-            "cursor",
-            "cursor-agent",
-            "Cursor session",
-            now,
-        )
+    if not records:
+        records.append(_missing_local_source("codex", "codex-cli", now))
+    cursor_records = _session_file_records(
+        home / ".cursor" / "projects",
+        "agent-transcripts/*/*.jsonl",
+        "cursor",
+        "cursor-agent",
+        "Cursor session",
+        now,
     )
+    records.extend(cursor_records or [_missing_local_source("cursor", "cursor-agent", now)])
     return records
 
 
@@ -130,7 +131,13 @@ def _session_file_records(
         return []
     records: list[dict[str, Any]] = []
     try:
-        paths = sorted(root.rglob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)[:25]
+        paths = []
+        for path in root.rglob(pattern):
+            paths.append(path)
+            if len(paths) >= 200:
+                break
+        paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        paths = paths[:25]
     except OSError:
         return []
     for path in paths:
@@ -157,6 +164,25 @@ def _session_file_records(
             )
         )
     return records
+
+
+def _missing_local_source(provider: str, harness: str, now: datetime) -> dict[str, Any]:
+    return _record(
+        activity_id=f"{provider}:source:local",
+        parent_activity_id=None,
+        provider=provider,
+        harness=harness,
+        kind="source",
+        host="local",
+        label=f"{provider} activity",
+        task_label="activity unavailable",
+        state="stale",
+        started_at=None,
+        updated_at=None,
+        source=_source(f"{provider}-local-session", "best-effort", now),
+        links={},
+        now=now,
+    )
 
 
 def _worker_records(
@@ -215,7 +241,7 @@ def _configured_sources(target: Path, now: datetime) -> list[dict[str, Any]]:
     for index, source_config in enumerate(sources[:50]):
         if not isinstance(source_config, dict):
             continue
-        provider = str(source_config.get("provider") or "unknown").lower()
+        provider = _safe_provider(source_config.get("provider"))
         host = _safe_alias(source_config.get("host"))
         journal = source_config.get("journal")
         if not isinstance(journal, str) or not journal:
@@ -231,7 +257,7 @@ def _configured_sources(target: Path, now: datetime) -> list[dict[str, Any]]:
             records.append(_unavailable_record(provider, host, index, now, "activity journal unavailable"))
             continue
         try:
-            lines = journal_path.read_text(encoding="utf-8").splitlines()[-100:]
+            lines = _tail_lines(journal_path)
         except OSError:
             records.append(_unavailable_record(provider, host, index, now, "activity journal unavailable"))
             continue
@@ -248,13 +274,13 @@ def _configured_sources(target: Path, now: datetime) -> list[dict[str, Any]]:
             records.append(
                 _record(
                     activity_id=f"{provider}:journal:{index}:{line_number}",
-                    parent_activity_id=_safe_parent_id(item.get("parent_activity_id")),
+                    parent_activity_id=None,
                     provider=provider,
-                    harness=_safe_label(item.get("harness"), f"{provider} observation"),
-                    kind=_safe_label(item.get("kind"), "agent"),
+                    harness=f"{provider} observation",
+                    kind="agent",
                     host=host,
-                    label=_safe_label(item.get("label"), f"{provider} agent"),
-                    task_label=_safe_label(item.get("task_label"), "Task unavailable"),
+                    label=f"{provider} agent",
+                    task_label="Task unavailable",
                     state=_normalized_state(
                         item.get("state") or item.get("status"), updated_at, now, authoritative=False
                     ),
@@ -370,12 +396,15 @@ def _parse_time(value: object) -> datetime | None:
 
 
 def _safe_alias(value: object) -> str:
-    text = _safe_label(value, "local")
-    return text if "/" not in text and "\\" not in text else "local"
+    if not isinstance(value, str):
+        return "local"
+    text = value.lower().strip()
+    return text if text and len(text) <= 64 and text.replace("-", "").isalnum() else "local"
 
 
-def _safe_parent_id(value: object) -> str | None:
-    return str(value)[:128] if isinstance(value, str) and value and "/" not in value else None
+def _safe_provider(value: object) -> str:
+    provider = str(value or "unknown").lower()
+    return provider if provider in {"brigade", "codex", "cursor", "t3"} else "unknown"
 
 
 def _safe_label(value: object, fallback: str) -> str:
@@ -393,3 +422,12 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _tail_lines(path: Path, limit: int = 65536) -> list[str]:
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - limit))
+        text = handle.read().decode("utf-8", errors="replace")
+    return text.splitlines()[-100:]
