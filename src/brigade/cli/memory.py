@@ -75,6 +75,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--defer", action="store_true", help="Mark current queue deferred instead of reviewed."
     )
     p_memory_care_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_topology = memory_sub.add_parser(
+        "topology",
+        help="Read-only ownership and harness-to-canonical flow graph for local memory.",
+    )
+    p_memory_topology.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
+    )
+    p_memory_topology.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_search = memory_sub.add_parser("search", help="Keyword-search local memory cards.")
     p_memory_search.add_argument("query", help="Search terms (matched against title, tags, summary, and body).")
     p_memory_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to search.")
@@ -157,7 +165,10 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 def dispatch(args) -> int:
     from .. import memory_cmd
+    from .. import memory_operations
 
+    if args.memory_command == "topology":
+        return memory_operations.topology(target=args.target, json_output=args.json)
     if args.memory_command == "care":
         if args.memory_care_command == "init":
             return memory_cmd.init(
