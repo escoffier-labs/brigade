@@ -392,8 +392,10 @@ def detect_flags(
                 }
             )
 
-    closeout = health.get("closeout") if isinstance(health.get("closeout"), dict) else {}
-    refresh = health.get("refresh_queue") if isinstance(health.get("refresh_queue"), dict) else {}
+    closeout_raw = health.get("closeout")
+    closeout = closeout_raw if isinstance(closeout_raw, dict) else {}
+    refresh_raw = health.get("refresh_queue")
+    refresh = refresh_raw if isinstance(refresh_raw, dict) else {}
     if closeout.get("status") in {None, "missing", "absent"} and (refresh.get("count") or 0) > 0:
         flags.append(
             {
@@ -521,7 +523,8 @@ def _add_care_nodes(
     care_enabled: bool,
     care_health: dict[str, Any],
 ) -> None:
-    scan_meta = care_health.get("metadata") if isinstance(care_health.get("metadata"), dict) else {}
+    scan_meta_raw = care_health.get("metadata")
+    scan_meta = scan_meta_raw if isinstance(scan_meta_raw, dict) else {}
     scan_issue_count = care_health.get("scan_issue_count")
     queue_count = int(care_health.get("queue_count") or 0)
     top = care_health.get("top_issue")
@@ -581,7 +584,8 @@ def _add_care_nodes(
 
 
 def _add_evidence_node(nodes: dict[str, dict[str, Any]], evidence: dict[str, Any]) -> None:
-    projection = evidence.get("memory_projection") if isinstance(evidence.get("memory_projection"), dict) else {}
+    projection_raw = evidence.get("memory_projection")
+    projection = projection_raw if isinstance(projection_raw, dict) else {}
     status = projection.get("status") or evidence.get("health") or "unknown"
     nodes["stage:evidence_projection"] = _node(
         node_id="stage:evidence_projection",
@@ -926,7 +930,8 @@ def _add_care_and_evidence_edges(
                 enabled=nodes[node_id]["state"] == "enabled",
             )
         )
-    projection = evidence.get("memory_projection") if isinstance(evidence.get("memory_projection"), dict) else {}
+    projection_raw = evidence.get("memory_projection")
+    projection = projection_raw if isinstance(projection_raw, dict) else {}
     evidence_receipt = {"evidence_state": "missing"}
     latest = projection.get("latest_run")
     if isinstance(latest, dict) and latest:
@@ -977,7 +982,8 @@ def _health_blocks(
 
     pending_total = sum(int(inbox.pending or 0) for inbox in getattr(handoff_health, "inboxes", ()) or ())
     backlog_status = "ok" if pending_total == 0 else "warn"
-    draft_counts = draft_queue.get("counts") if isinstance(draft_queue.get("counts"), dict) else {}
+    draft_counts_raw = draft_queue.get("counts")
+    draft_counts = draft_counts_raw if isinstance(draft_counts_raw, dict) else {}
 
     closeout = care_health.get("latest_closeout")
     if isinstance(closeout, dict) and closeout:
@@ -989,7 +995,8 @@ def _health_blocks(
     else:
         closeout_block = {"status": "missing", "closeout_id": None, "created_at": None}
 
-    projection = evidence.get("memory_projection") if isinstance(evidence.get("memory_projection"), dict) else None
+    projection_raw = evidence.get("memory_projection")
+    projection = projection_raw if isinstance(projection_raw, dict) else None
     if projection is None:
         evidence_block: dict[str, Any] = {
             "status": str(evidence.get("health") or "missing"),
@@ -1206,7 +1213,8 @@ def _add_external_scheduler_node(nodes: dict[str, dict[str, Any]], target: Path)
     listed = surfaces_list_payload(target)
     if not isinstance(listed, dict) or listed.get("status") != "captured":
         return
-    records = listed.get("records") if isinstance(listed.get("records"), list) else []
+    records_raw = listed.get("records")
+    records = records_raw if isinstance(records_raw, list) else []
     scheduler_records = [
         record
         for record in records
