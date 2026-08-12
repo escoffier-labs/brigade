@@ -146,8 +146,8 @@ MEMORY_LATEST_RUN_PUBLIC_KEYS = (
 )
 
 MEMORY_COUNT_KEYS = ("created", "updated", "unchanged", "removed", "skipped", "failed")
-MEMORY_F2_REJECTED_FLAGS = frozenset({"--rebuild", "--full"})
-MEMORY_ALLOWED_FLAGS = frozenset({"--json", "--dry-run", "--limit"})
+MEMORY_F2_REJECTED_FLAGS = frozenset({"--full"})
+MEMORY_ALLOWED_FLAGS = frozenset({"--json", "--dry-run", "--rebuild", "--limit"})
 
 _CAPABILITY_CANDIDATES = ("version", "doctor", "export", "crawl")
 _READ_ONLY_TIMEOUT = 30.0
@@ -385,14 +385,19 @@ def check_compatibility(runtime: CrawlerRuntime, env: dict[str, str] | None = No
     )
 
 
-def register_memory_facade_extensions(_evidence_sub: Any = None) -> None:
-    """Inert F2 registration point for rebuild routing and identity audit.
+def register_memory_facade_extensions(evidence_sub: Any = None) -> None:
+    """Register the F2 read-only identity audit beneath ``evidence memory``."""
 
-    F1 leaves this as a no-op so F2 can attach projection-only rebuild and
-    read-only identity-audit commands without reshaping the crawl gate.
-    """
+    if evidence_sub is None:
+        return
+    from pathlib import Path
 
-    return None
+    memory = evidence_sub.add_parser("memory", help="Audit canonical memory projection identity without editing cards.")
+    memory_sub = memory.add_subparsers(dest="evidence_memory_command", metavar="<memory-command>")
+    memory_sub.required = True
+    audit = memory_sub.add_parser("audit", help="Read identity coverage and proposed aliases for memory cards.")
+    audit.add_argument("workspaces", nargs="+", type=Path, help="Workspace roots containing memory/cards/.")
+    audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
 
 def resolve_miseledger(env: dict[str, str] | None = None) -> str | None:
@@ -655,8 +660,47 @@ def body_free_memory_health(raw: dict[str, Any] | None) -> dict[str, Any] | None
         return None
     out: dict[str, Any] = {}
     for key in MEMORY_HEALTH_SAFE_KEYS:
-        if key in raw:
-            out[key] = raw[key]
+        value = raw.get(key)
+        if key == "capability" and isinstance(value, str) and re.fullmatch(r"memory-projection\.v\d+", value):
+            out[key] = value
+        elif (
+            key == "engine_version"
+            and isinstance(value, str)
+            and re.fullmatch(r"\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.-]+)?", value)
+        ):
+            out[key] = value
+        elif (
+            key == "memory_namespace"
+            and isinstance(value, str)
+            and re.fullmatch(
+                r"memory-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+                value,
+            )
+        ):
+            out[key] = value
+        elif (
+            key == "last_completed_scan_id"
+            and isinstance(value, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value)
+        ):
+            out[key] = value
+        elif (
+            key
+            in {
+                "canonical_count",
+                "live_count",
+                "hash_divergence",
+                "unresolved_relations",
+                "malformed_skipped",
+                "failed",
+            }
+            and _typed_nonneg_int(value) is not None
+        ):
+            out[key] = value
+        elif key in {"stale", "partial"} and isinstance(value, bool):
+            out[key] = value
+        elif key == "status" and value in {"absent", "completed", "failed", "interrupted"}:
+            out[key] = value
     return out or None
 
 
@@ -680,8 +724,9 @@ def public_memory_latest_run(raw: dict[str, Any] | None) -> dict[str, Any] | Non
 def parse_memory_crawl_options(rest: list[str]) -> tuple[str | None, bool, bool, list[str]]:
     """Parse F1 crawl trailing options.
 
-    Returns ``(error, want_json, dry_run, passthrough)``. Rejects F2
-    ``--rebuild``/``--full``. Unknown options are refused rather than forwarded.
+    Returns ``(error, want_json, dry_run, passthrough)``. ``--rebuild`` is
+    delegated only after the same preflight as a normal crawl; ``--full`` is
+    intentionally not exposed because it is broader than this projection.
     """
 
     want_json = False
@@ -703,6 +748,10 @@ def parse_memory_crawl_options(rest: list[str]) -> tuple[str | None, bool, bool,
             continue
         if arg == "--dry-run":
             dry_run = True
+            i += 1
+            continue
+        if arg == "--rebuild":
+            passthrough.append(arg)
             i += 1
             continue
         if arg == "--limit":

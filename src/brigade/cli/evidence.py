@@ -72,6 +72,11 @@ def dispatch(args) -> int:
         return evidence_cmd.status(target=args.target, json_output=args.json)
     if args.evidence_command == "doctor":
         return evidence_cmd.doctor(target=args.target, json_output=args.json)
+    if args.evidence_command == "memory":
+        if args.evidence_memory_command == "audit":
+            return evidence_cmd.memory_audit(workspaces=args.workspaces, json_output=args.json)
+        args._brigade_parser.error(f"unknown evidence memory command: {args.evidence_memory_command}")
+        return 2
     if args.evidence_command == "crawl":
         if args.engine_args and args.engine_args[0] == "plan":
             plan_args = _crawl_plan_parser().parse_args(args.engine_args[1:])

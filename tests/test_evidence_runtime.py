@@ -563,9 +563,9 @@ def test_parse_memory_receipt_dry_run_is_non_current():
 
 
 def test_parse_memory_options_rejects_rebuild_and_full():
-    err, *_rest = evidence_runtime.parse_memory_crawl_options(["--rebuild"])
-    assert err is not None
-    assert "--rebuild" in err
+    err, _want_json, _dry_run, passthrough = evidence_runtime.parse_memory_crawl_options(["--rebuild"])
+    assert err is None
+    assert passthrough == ["--rebuild"]
     err, *_rest = evidence_runtime.parse_memory_crawl_options(["--full"])
     assert err is not None
     assert "--full" in err
