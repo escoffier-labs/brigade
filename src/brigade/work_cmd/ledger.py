@@ -1231,10 +1231,18 @@ def _safe_self_import_document_target(value: object) -> str | None:
     return value if _handoff_is_document_target(value) else None
 
 
-def _safe_self_import_path(value: object) -> str | None:
-    if not isinstance(value, str) or not provenance.is_safe_identity_label(value):
+def _safe_self_import_path(value: object, *, target: Path | None = None) -> str | None:
+    if not isinstance(value, str):
         return None
-    return value
+    path = Path(value)
+    if path.is_absolute():
+        if target is None:
+            return None
+        try:
+            return path.resolve(strict=False).relative_to(target.resolve()).as_posix()
+        except ValueError:
+            return None
+    return value if provenance.is_safe_identity_label(value) else None
 
 
 def _safe_self_import_source_item_key(value: object, *, importer_source: str) -> str | None:
@@ -1246,14 +1254,16 @@ def _safe_self_import_source_item_key(value: object, *, importer_source: str) ->
 
 
 def _safe_stable_source_fingerprint(value: object) -> str | None:
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+    if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{64})", value):
         return None
     return value
 
 
-def _trusted_self_import_metadata(record: dict[str, Any], *, importer_source: str) -> dict[str, Any]:
+def _trusted_self_import_metadata(
+    record: dict[str, Any], *, importer_source: str, target: Path | None = None, trusted_producer: bool = False
+) -> dict[str, Any]:
     """Retain the narrow source-owned metadata required by self-import producers."""
-    if not _is_locally_stamped_self_import(record, importer_source=importer_source):
+    if not trusted_producer or not _is_locally_stamped_self_import(record, importer_source=importer_source):
         return {}
     metadata = record.get("metadata")
     if not isinstance(metadata, dict):
@@ -1278,20 +1288,26 @@ def _trusted_self_import_metadata(record: dict[str, Any], *, importer_source: st
         value = _safe_import_identity(metadata.get("card_id"))
         if value is not None:
             retained["card_id"] = value
-        for key in ("card_file", "queue_path"):
-            value = _safe_self_import_path(metadata.get(key))
-            if value is not None:
-                retained[key] = value
+        value = _safe_self_import_path(metadata.get("card_file"))
+        if value is not None:
+            retained["card_file"] = value
+        value = _safe_self_import_path(metadata.get("queue_path"), target=target)
+        if value is not None:
+            retained["queue_path"] = value
         value = _safe_import_identity(metadata.get("refresh_reason"))
         if value is not None:
             retained["refresh_reason"] = value
     return retained
 
 
-def _sanitize_self_import_record(record: dict[str, Any], *, importer_source: str) -> dict[str, Any]:
+def _sanitize_self_import_record(
+    record: dict[str, Any], *, importer_source: str, target: Path | None = None, trusted_producer: bool = False
+) -> dict[str, Any]:
     """Sanitize a self-import, preserving only authenticated source-owned fields."""
     sanitized = _sanitize_untrusted_import_record(record, importer_source=importer_source)
-    trusted_metadata = _trusted_self_import_metadata(record, importer_source=importer_source)
+    trusted_metadata = _trusted_self_import_metadata(
+        record, importer_source=importer_source, target=target, trusted_producer=trusted_producer
+    )
     if trusted_metadata:
         sanitized["metadata"].update(trusted_metadata)
     return sanitized
@@ -1843,12 +1859,10 @@ def _append_import_records(
         if identity is not None and identity in existing_by_source:
             existing_item = existing_by_source[identity]
             canonical_migration = migrate_untrusted_identities and _has_canonical_untrusted_import_identity(record)
-            existing_canonical_without_proof = (
-                canonical_migration
-                and _has_canonical_untrusted_import_identity(existing_item)
-                and not _has_locally_stamped_import_proof(existing_item)
-            )
-            if existing_canonical_without_proof:
+            existing_migration_proof = _has_locally_stamped_import_proof(existing_item) and _import_content_identity(
+                existing_item
+            ) == _import_content_identity(record)
+            if canonical_migration and not existing_migration_proof:
                 pass
             elif existing_item.get("status") == "dismissed":
                 if _import_fingerprint(existing_item) == _import_fingerprint(record):

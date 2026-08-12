@@ -200,6 +200,40 @@ def _scanner_enrich_import_records(
     return enriched
 
 
+def _trusted_builtin_scanner(scanner: dict[str, Any]) -> bool:
+    """Return whether verifier-owned scanner configuration authorizes privileged fields."""
+    scanner_id = scanner.get("id")
+    scanner_source = scanner.get("source")
+    for trusted in constants.SCANNER_DEFAULTS:
+        if trusted.get("id") != scanner_id or trusted.get("source") != scanner_source:
+            continue
+        command = scanner.get("command")
+        return command is None or command == trusted.get("command")
+    return False
+
+
+def _raw_jsonl_rows(raw: bytes) -> list[bytes]:
+    return raw.splitlines(keepends=True)
+
+
+def _raw_row_object(raw: bytes) -> dict[str, Any] | None:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _reconcile_known_row(before: dict[str, Any], after: dict[str, Any], *, trusted_scanner: bool) -> bool:
+    """Allow only built-in lifecycle mutation of an existing local inbox row."""
+    if not trusted_scanner or before.get("id") != after.get("id"):
+        return False
+    lifecycle_keys = {"status", "updated_at", "dismissed_at", "dismiss_reason"}
+    return {key: value for key, value in before.items() if key not in lifecycle_keys} == {
+        key: value for key, value in after.items() if key not in lifecycle_keys
+    }
+
+
 def _scanner_stamp_new_imports(
     *,
     target: Path,
@@ -207,29 +241,69 @@ def _scanner_stamp_new_imports(
     run: dict[str, Any],
     before_ids: set[str],
     before_imports: list[dict[str, Any]],
+    before_raw: bytes | None = None,
 ) -> list[str]:
-    imports = ledger_mod._read_imports(target)
+    inbox_path = helpers._imports_path(target)
+    try:
+        imports_raw = inbox_path.read_bytes()
+    except OSError:
+        imports_raw = b""
+    if before_raw is None:
+        before_raw = b""
     stamped_ids: list[str] = []
     rejected = 0
     scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
+    trusted_scanner = _trusted_builtin_scanner(scanner)
     existing_identities = {
-        identity
+        identity: ledger_mod._import_fingerprint(item)
         for item in before_imports
         if isinstance(item, dict) and (identity := ledger_mod._import_source_identity(item)) is not None
     }
-    before_markers = Counter(json.dumps(item, sort_keys=True, separators=(",", ":")) for item in before_imports)
-    retained = list(before_imports)
-    for item in imports:
-        if not isinstance(item, dict):
+    before_rows = _raw_jsonl_rows(before_raw)
+    after_rows = _raw_jsonl_rows(imports_raw)
+    remaining_before = Counter(before_rows)
+    before_by_id: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, raw in enumerate(before_rows):
+        item = _raw_row_object(raw)
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            before_by_id.setdefault(item["id"], []).append((index, item))
+    replacements: dict[int, bytes] = {}
+    new_rows: list[bytes] = []
+    for raw in after_rows:
+        if remaining_before[raw]:
+            remaining_before[raw] -= 1
             continue
-        import_id = item.get("id")
-        if isinstance(import_id, str) and import_id in before_ids:
+        item = _raw_row_object(raw)
+        if item is not None and isinstance(item.get("id"), str):
+            candidates = before_by_id.get(item["id"], [])
+            matching_index = next(
+                (
+                    index
+                    for index, before_item in candidates
+                    if index not in replacements
+                    and _reconcile_known_row(before_item, item, trusted_scanner=trusted_scanner)
+                ),
+                None,
+            )
+            if candidates:
+                if matching_index is not None:
+                    replacements[matching_index] = raw
+                else:
+                    rejected += 1
+                continue
+        new_rows.append(raw)
+
+    final_rows: list[bytes] = []
+    for index, raw in enumerate(before_rows):
+        final_rows.append(replacements.get(index, raw))
+    for raw in new_rows:
+        item = _raw_row_object(raw)
+        if item is None:
+            rejected += 1
             continue
-        marker = json.dumps(item, sort_keys=True, separators=(",", ":"))
-        if before_markers[marker]:
-            before_markers[marker] -= 1
-            continue
-        trusted_local = ledger_mod._is_locally_stamped_self_import(item, importer_source=scanner_source)
+        trusted_local = trusted_scanner and ledger_mod._is_locally_stamped_self_import(
+            item, importer_source=scanner_source
+        )
         raw_record, errors = ledger_mod._validate_import_record(
             item,
             label="self-import",
@@ -238,9 +312,17 @@ def _scanner_stamp_new_imports(
         if errors or raw_record is None:
             rejected += 1
             continue
-        sanitized = ledger_mod._sanitize_self_import_record(raw_record, importer_source=scanner_source)
+        sanitized = ledger_mod._sanitize_self_import_record(
+            raw_record,
+            importer_source=scanner_source,
+            target=target,
+            trusted_producer=trusted_scanner,
+        )
         identity = ledger_mod._import_source_identity(sanitized)
-        if identity in existing_identities:
+        if identity in existing_identities and existing_identities[identity] == ledger_mod._import_fingerprint(
+            sanitized
+        ):
+            rejected += 1
             continue
         metadata = _scanner_import_provenance(target=target, scanner=scanner, run=run, record=sanitized)
         try:
@@ -258,11 +340,15 @@ def _scanner_stamp_new_imports(
         except ledger_mod._ImportProvenanceError:
             rejected += 1
             continue
-        retained.append(rebuilt)
-        existing_identities.add(identity)
+        if final_rows and not final_rows[-1].endswith((b"\n", b"\r")):
+            final_rows.append(b"\n")
+        final_rows.append(json.dumps(rebuilt, sort_keys=True).encode("utf-8") + b"\n")
+        existing_identities[identity] = ledger_mod._import_fingerprint(rebuilt)
         stamped_ids.append(str(rebuilt["id"]))
-    if retained != imports:
-        ledger_mod._write_imports(target, retained)
+    rendered = b"".join(final_rows)
+    if rendered != imports_raw:
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        inbox_path.write_bytes(rendered)
     if stamped_ids or rejected:
         run["self_import"] = {
             "created": len(stamped_ids),
@@ -1047,6 +1133,11 @@ def _scanners_run_payload(
     contexts: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for scanner in selected:
         before_imports = ledger_mod._read_imports(target)
+        inbox_path = helpers._imports_path(target)
+        try:
+            before_raw = inbox_path.read_bytes()
+        except OSError:
+            before_raw = b""
         before_ids = {
             str(item.get("id")) for item in before_imports if isinstance(item, dict) and isinstance(item.get("id"), str)
         }
@@ -1057,6 +1148,7 @@ def _scanners_run_payload(
             run=run,
             before_ids=before_ids,
             before_imports=before_imports,
+            before_raw=before_raw,
         )
         run["provenance_imports_stamped"] = len(stamped_ids)
         if stamped_ids:

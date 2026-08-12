@@ -227,6 +227,16 @@ def test_validate_rejects_unsafe_repository_revisions(revision):
 
 
 @pytest.mark.parametrize(
+    "revision", ["urn:brigade:release", "mailto:ops@example.test", "ssh:repo", "https://example.test/repo"]
+)
+def test_validate_rejects_all_uri_scheme_repository_revisions(revision):
+    env = _valid_envelope()
+    env["repository"]["revision"] = revision
+
+    assert "repository.revision must be a safe revision label" in provenance.validate_envelope(env)
+
+
+@pytest.mark.parametrize(
     ("name", "inbound_adapter", "label", "proof_assigned_by", "proof_label", "want_valid"),
     [
         ("inbound reviewed no proof", True, "reviewed", None, None, False),

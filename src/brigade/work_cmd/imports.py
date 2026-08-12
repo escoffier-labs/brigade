@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,13 @@ from . import services as services_mod
 def _ingest_metadata(record: dict[str, Any]) -> dict[str, Any]:
     """Return untrusted JSONL metadata with importer-owned identity fields."""
     return ledger_mod._sanitize_untrusted_import_record(record, importer_source="learning-loop")["metadata"]
+
+
+def _safe_cli_source(value: object) -> str | None:
+    source = ledger_mod._safe_import_identity(value)
+    if source is None or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", source):
+        return None
+    return source
 
 
 def import_add(
@@ -36,7 +44,10 @@ def import_add(
     if kind not in constants.IMPORT_KINDS:
         print(f"error: --kind must be one of: {', '.join(constants.IMPORT_KINDS)}", file=sys.stderr)
         return 2
-    source_text = source.strip() or "manual"
+    source_text = _safe_cli_source(source)
+    if source_text is None:
+        print("error: invalid import source", file=sys.stderr)
+        return 2
     try:
         parsed_metadata = ledger_mod._parse_metadata(metadata)
     except ValueError as exc:
@@ -101,7 +112,10 @@ def import_context(
         "source_chars": len(body),
         "truncated": len(body) > max_chars,
     }
-    source_text = source.strip() or "manual"
+    source_text = _safe_cli_source(source)
+    if source_text is None:
+        print("error: invalid import source", file=sys.stderr)
+        return 2
 
     imports = ledger_mod._read_imports(target)
     item = ledger_mod._make_import(framed, kind="context", source=source_text, metadata=metadata)

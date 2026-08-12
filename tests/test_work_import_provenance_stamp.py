@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from brigade import provenance
-from brigade.work_cmd import constants, ledger
+from brigade.work_cmd import constants, helpers, ledger
 
 
 def _envelope(item: dict[str, Any]) -> dict[str, Any]:
@@ -1150,6 +1150,65 @@ def test_batch_ingest_containment_opt_in_rejects_provenance_stamp_failure_and_co
     assert len(imported) == 1
     assert imported[0]["metadata"]["source_item_key"] == "valid:stamp:1"
     assert len(ledger._read_imports(tmp_path)) == 1
+
+
+def test_self_import_accepts_producer_stable_hash_fingerprint_and_normalizes_queue_path(tmp_path: Path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    queue = tmp_path / "memory" / "cards" / "decay" / "refresh-queue.json"
+    fingerprint = helpers._stable_hash({"producer": "memory-refresh"})
+    assert len(fingerprint) == 16
+    refresh = ledger._make_import(
+        "Refresh a memory card",
+        kind="task",
+        source="memory-refresh",
+        metadata={
+            "source_item_key": "memory-refresh:card-1",
+            "source_fingerprint": fingerprint,
+            "card_id": "card-1",
+            "card_file": "memory/cards/card-1.md",
+            "queue_path": str(queue),
+        },
+    )
+    ledger._write_imports(tmp_path, [refresh])
+
+    scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "memory-refresh", "source": "memory-refresh"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids=set(),
+        before_imports=[],
+    )
+
+    metadata = ledger._read_imports(tmp_path)[0]["metadata"]
+    assert metadata["source_fingerprint"] == fingerprint
+    assert metadata["queue_path"] == "memory/cards/decay/refresh-queue.json"
+
+
+def test_untrusted_identity_migration_does_not_carry_dismissal_from_noncanonical_row(tmp_path: Path):
+    record = {"text": "Trusted incoming text", "kind": "task", "source": "learning-loop", "metadata": {}}
+    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="learning-loop")
+    forged = {
+        "id": "attacker-row",
+        "status": "dismissed",
+        "text": "Attacker-selected text",
+        "kind": "task",
+        "source": "learning-loop",
+        "metadata": {
+            "source_item_key": incoming["metadata"]["source_item_key"],
+            "source_fingerprint": incoming["metadata"]["source_fingerprint"],
+        },
+    }
+    ledger._write_imports(tmp_path, [forged])
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path, [incoming], provenance_source="learning-loop", migrate_untrusted_identities=True
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
 
 
 @pytest.mark.parametrize(

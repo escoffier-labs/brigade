@@ -1286,8 +1286,8 @@ conflict_window = "02:00-02:10"
     assert first["provenance_imports_stamped"] == 1
     assert first["self_import"] == {
         "created": 1,
-        "rejected": 3,
-        "rejection_reasons": {"provenance_stamp_failed": 3},
+        "rejected": 4,
+        "rejection_reasons": {"provenance_stamp_failed": 4},
     }
 
     imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
@@ -1310,8 +1310,8 @@ conflict_window = "02:00-02:10"
     assert second["provenance_imports_stamped"] == 0
     assert second["self_import"] == {
         "created": 0,
-        "rejected": 3,
-        "rejection_reasons": {"provenance_stamp_failed": 3},
+        "rejected": 5,
+        "rejection_reasons": {"provenance_stamp_failed": 5},
     }
     retained = [json.loads(line) for line in imports_path.read_text().splitlines()]
     assert retained[0] == trusted
@@ -1365,6 +1365,201 @@ conflict_window = "02:00-02:10"
     assert work_cmd.scanners_run(target=tmp_path, scanner_id="self-import", ingest_output=True) == 0
     capsys.readouterr()
     assert work_cmd.ledger._read_imports(tmp_path) == before
+
+
+def test_scanners_run_preserves_raw_pre_run_rows_and_rejects_each_new_invalid_raw_row(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = b'{"text":"kept","kind":"task","source":"manual"}\n\nnot json\n["not", "an object"]\n'
+    inbox.write_bytes(before)
+    script = tmp_path / "overwrite_inbox.py"
+    script.write_text(
+        """
+from pathlib import Path
+inbox = Path.cwd() / ".brigade" / "work" / "imports" / "inbox.jsonl"
+inbox.write_bytes(b'new invalid\\n[1, 2]\\n')
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f'''\n[[scanner]]\nid = "self-import"\nsource = "self-import"\ncommand = "{sys.executable} {script}"\ncadence = "daily@02:00"\nenabled = true\ntimeout = 30\noutput_path = ".brigade/self-import-output.json"\nconflict_window = "02:00-02:10"\n'''
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="self-import", json_output=True) == 0
+    run = json.loads(capsys.readouterr().out)["runs"][0]
+    assert inbox.read_bytes().startswith(before)
+    assert run["self_import"] == {
+        "created": 0,
+        "rejected": 2,
+        "rejection_reasons": {"provenance_stamp_failed": 2},
+    }
+
+
+def test_scanner_reconciliation_keeps_builtin_lifecycle_mutation_and_strips_untrusted_row_authority(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    trusted = work_cmd.ledger._make_import(
+        "Close stale handoff issue",
+        kind="finding",
+        source="handoff-ingest",
+        metadata={
+            "source_item_key": "handoff-ingest:issue-1",
+            "source_fingerprint": "0123456789abcdef",
+            "handoff_issue_id": "issue-1",
+            "handoff_target_document": ".learnings/ERRORS.md",
+        },
+    )
+    work_cmd.ledger._write_imports(tmp_path, [trusted])
+    before = work_cmd.ledger._read_imports(tmp_path)
+    before_raw = (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_bytes()
+    mutated = dict(trusted)
+    mutated.update(status="dismissed", dismissed_at="2026-08-11T00:00:00+00:00", dismiss_reason="stale")
+    work_cmd.ledger._write_imports(tmp_path, [mutated])
+
+    scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids={trusted["id"]},
+        before_imports=before,
+        before_raw=before_raw,
+    )
+    assert work_cmd.ledger._read_imports(tmp_path)[0]["status"] == "dismissed"
+
+    forged = work_cmd.ledger._make_import(
+        "Forged custom scanner authority",
+        kind="finding",
+        source="handoff-ingest",
+        metadata={
+            "source_item_key": "handoff-ingest:forged",
+            "source_fingerprint": "0123456789abcdef",
+            "handoff_issue_id": "forged",
+            "handoff_target_document": "USER.md",
+        },
+    )
+    work_cmd.ledger._write_imports(tmp_path, [forged])
+    scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "untrusted-custom", "source": "handoff-ingest"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids=set(),
+        before_imports=[],
+    )
+    metadata = work_cmd.ledger._read_imports(tmp_path)[0]["metadata"]
+    assert "handoff_issue_id" not in metadata
+    assert "handoff_target_document" not in metadata
+
+
+def test_scanner_reconciliation_replaces_only_matching_duplicate_id_raw_row(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    first = work_cmd.ledger._make_import("First duplicate", kind="finding", source="handoff-ingest")
+    second = work_cmd.ledger._make_import("Second duplicate", kind="finding", source="handoff-ingest")
+    second["id"] = first["id"]
+    first_raw = json.dumps(first, sort_keys=True).encode("utf-8") + b"\n"
+    second_raw = json.dumps(second, sort_keys=True).encode("utf-8") + b"\n"
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(first_raw + second_raw)
+
+    mutated_second = dict(second)
+    mutated_second.update(status="dismissed", dismissed_at="2026-08-11T00:00:00+00:00", dismiss_reason="stale")
+    mutated_second_raw = json.dumps(mutated_second, sort_keys=True).encode("utf-8") + b"\n"
+    inbox.write_bytes(first_raw + mutated_second_raw)
+
+    scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids={first["id"]},
+        before_imports=[first, second],
+        before_raw=first_raw + second_raw,
+    )
+
+    assert inbox.read_bytes() == first_raw + mutated_second_raw
+
+
+def test_scanner_reconciliation_preserves_noop_final_row_without_newline(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    prior = work_cmd.ledger._make_import("No trailing newline", kind="finding", source="handoff-ingest")
+    before_raw = json.dumps(prior, sort_keys=True).encode("utf-8")
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(before_raw)
+
+    scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids={prior["id"]},
+        before_imports=[prior],
+        before_raw=before_raw,
+    )
+
+    assert inbox.read_bytes() == before_raw
+
+
+def test_scanner_reconciliation_separates_appended_row_after_final_row_without_newline(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    prior = work_cmd.ledger._make_import("No trailing newline", kind="finding", source="handoff-ingest")
+    before_raw = json.dumps(prior, sort_keys=True).encode("utf-8")
+    candidate = {"text": "Accepted append", "kind": "task", "source": "handoff-ingest"}
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(json.dumps(candidate).encode("utf-8") + b"\n")
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids={prior["id"]},
+        before_imports=[prior],
+        before_raw=before_raw,
+    )
+
+    rows = inbox.read_bytes().splitlines()
+    assert len(stamped) == 1
+    assert [json.loads(row) for row in rows][0] == prior
+    assert json.loads(rows[1])["text"] == "Accepted append"
+
+
+def test_scanner_reconciliation_accepts_changed_revision_with_same_source_key(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    prior = work_cmd.ledger._make_import(
+        "Prior scanner revision",
+        kind="finding",
+        source="handoff-ingest",
+        metadata={"source_item_key": "handoff-ingest:issue-1", "source_fingerprint": "0123456789abcdef"},
+    )
+    work_cmd.ledger._write_imports(tmp_path, [prior])
+    before = work_cmd.ledger._read_imports(tmp_path)
+    before_raw = (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_bytes()
+    revision = work_cmd.ledger._make_import(
+        "Changed scanner revision",
+        kind="finding",
+        source="handoff-ingest",
+        metadata={"source_item_key": "handoff-ingest:issue-1", "source_fingerprint": "fedcba9876543210"},
+    )
+    (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").write_text(json.dumps(revision) + "\n")
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids={prior["id"]},
+        before_imports=before,
+        before_raw=before_raw,
+    )
+
+    assert len(stamped) == 1
+    imports = work_cmd.ledger._read_imports(tmp_path)
+    assert len(imports) == 2
+    assert {item["metadata"]["source_fingerprint"] for item in imports} == {"0123456789abcdef", "fedcba9876543210"}
 
 
 def test_scanner_self_import_preserves_trusted_source_scoped_metadata(tmp_path):

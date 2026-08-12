@@ -5,6 +5,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from brigade import cli
 from brigade import chat_cmd
 from brigade import dogfood_cmd
@@ -3763,6 +3765,23 @@ def test_import_context_stores_framed_untrusted_import(tmp_path, capsys):
     assert metadata["needs_review"] is False
     assert metadata["injection_count"] == 0
     assert metadata["truncated"] is False
+
+
+@pytest.mark.parametrize("operation", ["add", "context"])
+@pytest.mark.parametrize(
+    "unsafe_source", ["file:///private/operator/workspace", "urn:brigade:private", "mailto:ops@example.test"]
+)
+def test_import_commands_reject_unsafe_source_without_echoing_it(tmp_path, capsys, operation, unsafe_source):
+    if operation == "add":
+        result = work_cmd.import_add(target=tmp_path, text="Safe text", source=unsafe_source)
+    else:
+        result = work_cmd.import_context(target=tmp_path, text="Safe context", source=unsafe_source)
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "error: invalid import source" in captured.err
+    assert unsafe_source not in captured.err
+    assert work_cmd._read_imports(tmp_path) == []
 
 
 def test_import_context_flags_injection_signal(tmp_path, capsys):
