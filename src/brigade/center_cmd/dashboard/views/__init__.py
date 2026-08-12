@@ -2,11 +2,11 @@
 
 Each view module exposes:
 
-- ``NAME: str`` — URL slug, e.g. ``"status"``
-- ``TITLE: str`` — navigation label, e.g. ``"Status"``
-- ``ORDER: int`` — navigation sort order
-- ``fetch(target: Path) -> dict`` — loads data via ``data.run_json`` only
-- ``render(payload: dict, nonce: str) -> str`` — returns an escaped HTML fragment
+- ``NAME: str`` - URL slug, e.g. ``"status"``
+- ``TITLE: str`` - navigation label, e.g. ``"Status"``
+- ``ORDER: int`` - navigation sort order
+- ``fetch(target: Path) -> dict`` - loads data via ``data.run_json`` only
+- ``render(payload: dict, nonce: str) -> str`` - returns an escaped HTML fragment
 """
 
 from __future__ import annotations

@@ -7,6 +7,7 @@ Contract-only: fetch via ``data.run_json`` for
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -42,10 +43,16 @@ def render(payload: dict, nonce: str) -> str:
     parts = [
         _stylesheet(nonce),
         _mode_tabs(),
-        '<div id="mo-topology" class="mo-panel" data-mo-panel="topology" role="tabpanel">',
+        (
+            '<div id="mo-topology" class="mo-panel" data-mo-panel="topology" '
+            'role="tabpanel" aria-labelledby="mo-tab-topology">'
+        ),
         _render_topology(topology),
         "</div>",
-        '<div id="mo-inventory" class="mo-panel" data-mo-panel="inventory" role="tabpanel" hidden>',
+        (
+            '<div id="mo-inventory" class="mo-panel" data-mo-panel="inventory" '
+            'role="tabpanel" aria-labelledby="mo-tab-inventory">'
+        ),
         _render_inventory(inventory),
         "</div>",
         _script(nonce),
@@ -58,9 +65,14 @@ def _fetch_inventory(target: Path) -> dict:
     offset = 0
     seen_offsets: set[int] = set()
     last_error: str | None = None
+    contract_total: int | None = None
+    partial = False
+    partial_reason: str | None = None
 
     while True:
         if offset in seen_offsets:
+            partial = True
+            partial_reason = "Inventory is partial: pagination repeated an offset."
             break
         seen_offsets.add(offset)
         page = data.run_json(
@@ -76,6 +88,12 @@ def _fetch_inventory(target: Path) -> dict:
         )
         if page.get("error"):
             last_error = str(page["error"])
+            if items:
+                partial = True
+                partial_reason = (
+                    f"Inventory is partial: page command failed after loading "
+                    f"{len(items)} item(s) ({last_error})."
+                )
             break
 
         page_items = page.get("items")
@@ -85,34 +103,75 @@ def _fetch_inventory(target: Path) -> dict:
                     items.append(item)
 
         pagination = page.get("pagination") if isinstance(page.get("pagination"), dict) else {}
+        total_val = pagination.get("total")
+        if isinstance(total_val, int):
+            contract_total = total_val
         has_more = bool(pagination.get("has_more"))
         if not has_more:
             break
         next_offset = pagination.get("next_offset")
         if not isinstance(next_offset, int) or next_offset <= offset:
+            partial = True
+            if isinstance(contract_total, int):
+                partial_reason = (
+                    f"Inventory is partial: loaded {len(items)} of {contract_total} "
+                    "(pagination did not advance)."
+                )
+            else:
+                partial_reason = (
+                    f"Inventory is partial: loaded {len(items)} item(s) "
+                    "(pagination did not advance)."
+                )
             break
         offset = next_offset
 
     result: dict[str, Any] = {
         "items": items,
-        "total": len(items),
     }
-    if last_error is not None and not items:
+    if isinstance(contract_total, int):
+        result["contract_total"] = contract_total
+        result["total"] = contract_total
+    elif not partial:
+        result["total"] = len(items)
+    else:
+        # Partial without a safe contract total: expose loaded count only as loaded.
+        result["loaded"] = len(items)
+
+    if partial:
+        result["partial"] = True
+        result["loaded"] = len(items)
+        if partial_reason:
+            result["warning"] = partial_reason
+        elif last_error is not None:
+            result["warning"] = (
+                f"Inventory is partial: loaded {len(items)} item(s) ({last_error})."
+            )
+        else:
+            result["warning"] = f"Inventory is partial: loaded {len(items)} item(s)."
+    elif last_error is not None and not items:
         result["error"] = last_error
     elif last_error is not None:
         result["warning"] = last_error
+        result["partial"] = True
+        result["loaded"] = len(items)
     return result
 
 
 def _mode_tabs() -> str:
     return (
-        '<div class="mo-modes" role="tablist" aria-label="' + html.esc("Memory Operations modes") + '">'
-        '<button type="button" class="mo-mode" role="tab" '
-        'data-mo-mode="topology" aria-selected="true" aria-controls="mo-topology">' + html.esc("Topology") + "</button>"
-        '<button type="button" class="mo-mode" role="tab" '
-        'data-mo-mode="inventory" aria-selected="false" aria-controls="mo-inventory">'
+        '<div class="mo-modes" role="tablist" aria-label="'
+        + html.esc("Memory Operations modes")
+        + '">'
+        '<a href="#mo-topology" id="mo-tab-topology" class="mo-mode" role="tab" '
+        'data-mo-mode="topology" aria-selected="true" aria-controls="mo-topology" '
+        'tabindex="0">'
+        + html.esc("Topology")
+        + "</a>"
+        '<a href="#mo-inventory" id="mo-tab-inventory" class="mo-mode" role="tab" '
+        'data-mo-mode="inventory" aria-selected="false" aria-controls="mo-inventory" '
+        'tabindex="-1">'
         + html.esc("Inventory")
-        + "</button>"
+        + "</a>"
         "</div>"
     )
 
@@ -133,7 +192,7 @@ def _render_topology(topology: dict) -> str:
     sections = [
         html.panel(html.esc("Health"), _health_table(health)),
         html.panel(html.esc("Flags"), _flags_block(flags)),
-        html.panel(html.esc("Harness paths"), _paths_block(paths)),
+        html.panel(html.esc("Harness paths"), _paths_block(paths, edges)),
         html.panel(html.esc("Flow"), _flow_graph(paths, nodes, edges)),
         html.panel(html.esc("Nodes"), _nodes_table(nodes)),
         html.panel(html.esc("Edges"), _edges_table(edges)),
@@ -201,84 +260,125 @@ def _flags_block(flags: list) -> str:
     return f'<ul class="mo-flags">{"".join(items)}</ul>'
 
 
-def _paths_block(paths: list) -> str:
+def _edge_lookup(edges: list) -> dict[str, dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for edge in edges:
+        if isinstance(edge, dict) and edge.get("id") is not None:
+            by_id[str(edge["id"])] = edge
+    return by_id
+
+
+def _path_edge_segments(path: dict, edge_by_id: dict[str, dict[str, Any]]) -> list[str]:
+    """Return display segments for a path from edge_ids only (never node_ids chains)."""
+    edge_ids = path.get("edge_ids") if isinstance(path.get("edge_ids"), list) else []
+    segments: list[str] = []
+    for edge_id in edge_ids:
+        key = str(edge_id)
+        edge = edge_by_id.get(key)
+        if edge is None:
+            segments.append(f"[{key}]")
+            continue
+        frm = edge.get("from") if edge.get("from") not in (None, "") else "-"
+        to = edge.get("to") if edge.get("to") not in (None, "") else "-"
+        segments.append(f"{frm} -> {to} [{key}]")
+    return segments
+
+
+def _paths_block(paths: list, edges: list) -> str:
     if not paths:
         return f"<p>{html.esc('No harness paths.')}</p>"
+    edge_by_id = _edge_lookup(edges)
     blocks: list[str] = []
     for path in paths:
         if not isinstance(path, dict):
             continue
         harness = html.esc(path.get("harness") or path.get("id") or "path")
-        node_ids = path.get("node_ids") if isinstance(path.get("node_ids"), list) else []
-        flow = " -> ".join(str(n) for n in node_ids) if node_ids else "-"
-        blocks.append(f'<li><strong>{harness}</strong>: <span class="mo-path-flow">{html.esc(flow)}</span></li>')
+        segments = _path_edge_segments(path, edge_by_id)
+        if segments:
+            flow = "; ".join(segments)
+        else:
+            flow = "-"
+        blocks.append(
+            f'<li><strong>{harness}</strong>: '
+            f'<span class="mo-path-flow">{html.esc(flow)}</span></li>'
+        )
     if not blocks:
         return f"<p>{html.esc('No harness paths.')}</p>"
     return f'<ul class="mo-paths">{"".join(blocks)}</ul>'
 
 
-def _flow_graph(paths: list, nodes: list, edges: list) -> str:
-    """Compact accessible flow: SVG lanes when paths exist, else node/edge counts."""
-    node_by_id = {str(node.get("id")): node for node in nodes if isinstance(node, dict) and node.get("id") is not None}
-    if not paths:
-        return f"<p>{html.esc('Nodes')}: {html.esc(len(nodes))}; {html.esc('Edges')}: {html.esc(len(edges))}</p>"
-
-    # Build ordered unique stages across paths for a compact SVG strip.
-    ordered: list[str] = []
+def _ordered_path_edges(paths: list, edge_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Unique edges in path order; edge_ids are the only connection authority."""
+    ordered: list[dict[str, Any]] = []
     seen: set[str] = set()
     for path in paths:
         if not isinstance(path, dict):
             continue
-        for node_id in path.get("node_ids") or []:
-            key = str(node_id)
-            if key not in seen:
-                seen.add(key)
-                ordered.append(key)
-    if not ordered:
+        edge_ids = path.get("edge_ids") if isinstance(path.get("edge_ids"), list) else []
+        for edge_id in edge_ids:
+            key = str(edge_id)
+            if key in seen:
+                continue
+            edge = edge_by_id.get(key)
+            if edge is None:
+                continue
+            seen.add(key)
+            ordered.append(edge)
+    return ordered
+
+
+def _flow_graph(paths: list, nodes: list, edges: list) -> str:
+    """Accessible compact flow list: every arrow is an actual edge.from -> edge.to."""
+    if not paths:
+        return (
+            f"<p>{html.esc('Nodes')}: {html.esc(len(nodes))}; "
+            f"{html.esc('Edges')}: {html.esc(len(edges))}</p>"
+        )
+
+    edge_by_id = _edge_lookup(edges)
+    used = _ordered_path_edges(paths, edge_by_id)
+    if not used:
+        # Fall back to all topology edges when paths omit edge_ids.
+        used = [e for e in edges if isinstance(e, dict)]
+    if not used:
         return f"<p>{html.esc('Nothing here.')}</p>"
 
-    box_w, box_h, gap, pad = 132, 44, 28, 16
-    width = pad * 2 + len(ordered) * box_w + max(0, len(ordered) - 1) * gap
-    height = pad * 2 + box_h + 24
-    parts = [
-        f'<svg class="mo-flow" viewBox="0 0 {width} {height}" '
-        f'role="img" aria-label="{html.esc("Harness to canonical memory flow")}">'
-    ]
-    for index, node_id in enumerate(ordered):
-        x = pad + index * (box_w + gap)
-        y = pad
-        node = node_by_id.get(node_id, {})
-        state = str(node.get("state") or "")
-        kind = str(node.get("kind") or "")
-        css = "mo-node"
-        if state == "canonical" or kind == "canonical":
-            css += " mo-node-canonical"
-        elif state == "disabled":
-            css += " mo-node-disabled"
-        elif kind in {"derived", "queue"}:
-            css += " mo-node-derived"
-        else:
-            css += " mo-node-active"
-        label = str(node.get("label") or node_id)
-        short = label if len(label) <= 18 else label[:17] + "..."
-        owner = str(node.get("owner") or "-")
-        parts.append(
-            f'<g class="{css}">'
-            f'<rect x="{x}" y="{y}" width="{box_w}" height="{box_h}" rx="3" ry="3"></rect>'
-            f'<text x="{x + 6}" y="{y + 18}">{html.esc(short)}</text>'
-            f'<text class="mo-sub" x="{x + 6}" y="{y + 34}">{html.esc(owner[:18])}</text>'
-            "</g>"
+    items: list[str] = []
+    for edge in used:
+        edge_id = str(edge.get("id") or "-")
+        frm = edge.get("from") if edge.get("from") not in (None, "") else "-"
+        to = edge.get("to") if edge.get("to") not in (None, "") else "-"
+        items.append(
+            "<li>"
+            f'<span class="mo-flow-edge">{html.esc(f"{frm} -> {to}")}</span> '
+            f'<span class="mo-muted">({html.esc(edge_id)})</span>'
+            "</li>"
         )
-        if index < len(ordered) - 1:
-            x1 = x + box_w
-            x2 = x + box_w + gap
-            mid = y + box_h / 2
-            parts.append(f'<line class="mo-edge-line" x1="{x1}" y1="{mid}" x2="{x2}" y2="{mid}"></line>')
-    parts.append("</svg>")
-    # Accessible text twin of the SVG flow.
-    text_flow = " -> ".join(ordered)
-    parts.append(f'<p class="mo-flow-text">{html.esc(text_flow)}</p>')
-    return "".join(parts)
+    return (
+        f'<ul class="mo-flow-list" aria-label="{html.esc("Harness to canonical memory flow")}">'
+        + "".join(items)
+        + "</ul>"
+    )
+
+
+def _display(value: Any) -> str:
+    """Render a scalar for ops tables; explicit nulls become '-', never 'None'."""
+    if value is None or value == "":
+        return "-"
+    return str(value)
+
+
+def _latest_run_fields(node: dict) -> tuple[str, str, str, str, str]:
+    latest = node.get("latest_run")
+    if not isinstance(latest, dict):
+        return ("-", "-", "-", "-", "-")
+    return (
+        _display(latest.get("status")),
+        _display(latest.get("run_id")),
+        _display(latest.get("completed_at")),
+        _display(latest.get("duration_seconds")),
+        _display(latest.get("evidence_state")),
+    )
 
 
 def _nodes_table(nodes: list) -> str:
@@ -293,18 +393,24 @@ def _nodes_table(nodes: list) -> str:
             schedule_text = "-" if schedule in (None, "") else str(schedule)
         counts = node.get("counts") if isinstance(node.get("counts"), dict) else {}
         count_text = ", ".join(f"{k}={v}" for k, v in counts.items()) if counts else "-"
+        run_status, run_id, completed_at, duration, evidence = _latest_run_fields(node)
         rows.append(
             [
-                html.esc(node.get("id", "-")),
-                html.esc(node.get("label", "-")),
-                html.esc(node.get("kind", "-")),
-                html.esc(node.get("state", "-")),
-                html.esc(node.get("owner", "-")),
-                html.esc(node.get("authority", "-")),
-                html.esc(node.get("path") or "-"),
+                html.esc(_display(node.get("id"))),
+                html.esc(_display(node.get("label"))),
+                html.esc(_display(node.get("kind"))),
+                html.esc(_display(node.get("state"))),
+                html.esc(_display(node.get("owner"))),
+                html.esc(_display(node.get("authority"))),
+                html.esc(_display(node.get("path"))),
                 html.esc(schedule_text),
                 html.esc(count_text),
-                html.esc(node.get("next_action") or "-"),
+                html.esc(run_status),
+                html.esc(run_id),
+                html.esc(completed_at),
+                html.esc(duration),
+                html.esc(evidence),
+                html.esc(_display(node.get("next_action"))),
             ]
         )
     if not rows:
@@ -322,6 +428,11 @@ def _nodes_table(nodes: list) -> str:
                 html.esc("Path"),
                 html.esc("Schedule"),
                 html.esc("Counts"),
+                html.esc("Run status"),
+                html.esc("Run id"),
+                html.esc("Completed"),
+                html.esc("Duration"),
+                html.esc("Evidence"),
                 html.esc("Next action"),
             ],
             rows,
@@ -339,18 +450,18 @@ def _edges_table(edges: list) -> str:
         enabled = "yes" if edge.get("enabled") else "no"
         rows.append(
             [
-                html.esc(edge.get("id", "-")),
-                html.esc(edge.get("from", "-")),
-                html.esc(edge.get("to", "-")),
-                html.esc(edge.get("flow", "-")),
-                html.esc(edge.get("authority", "-")),
-                html.esc(edge.get("writer_component") or "-"),
+                html.esc(_display(edge.get("id"))),
+                html.esc(_display(edge.get("from"))),
+                html.esc(_display(edge.get("to"))),
+                html.esc(_display(edge.get("flow"))),
+                html.esc(_display(edge.get("authority"))),
+                html.esc(_display(edge.get("writer_component"))),
                 html.esc(enabled),
-                html.esc(receipt.get("status") or "-"),
-                html.esc(receipt.get("run_id") or "-"),
-                html.esc(receipt.get("duration_seconds") if receipt.get("duration_seconds") is not None else "-"),
-                html.esc(receipt.get("evidence_state") or "-"),
-                html.esc(receipt.get("completed_at") or "-"),
+                html.esc(_display(receipt.get("status"))),
+                html.esc(_display(receipt.get("run_id"))),
+                html.esc(_display(receipt.get("duration_seconds"))),
+                html.esc(_display(receipt.get("evidence_state"))),
+                html.esc(_display(receipt.get("completed_at"))),
             ]
         )
     if not rows:
@@ -384,13 +495,19 @@ def _render_inventory(inventory: dict) -> str:
 
     items = inventory.get("items") if isinstance(inventory.get("items"), list) else []
     warning = inventory.get("warning")
+    partial = bool(inventory.get("partial"))
+    loaded = len(items)
+    contract_total = inventory.get("contract_total")
+    if not isinstance(contract_total, int):
+        raw_total = inventory.get("total")
+        contract_total = raw_total if isinstance(raw_total, int) and not partial else None
+
     if not items:
         inner = f"<p>{html.esc('Nothing here.')}</p>"
         if warning:
             inner = f'<p class="error">{html.esc(warning)}</p>' + inner
         return html.panel(html.esc("Inventory"), inner)
 
-    total = len(items)
     filter_bar = _inventory_filters(items)
     rows: list[list[str]] = []
     for item in items:
@@ -430,18 +547,42 @@ def _render_inventory(inventory: dict) -> str:
         body = body.replace("<tr>", '<tr data-mo-row="1">')
         table = head + "<tbody>" + body + "</tbody>" + tail
 
+    if partial and isinstance(contract_total, int):
+        pager_total = contract_total
+        total_attr = str(contract_total)
+    elif not partial:
+        pager_total = inventory.get("total") if isinstance(inventory.get("total"), int) else loaded
+        total_attr = str(pager_total)
+    else:
+        # Partial without safe contract total: do not advertise loaded as complete.
+        pager_total = loaded
+        total_attr = str(loaded)
+
     pager = (
         f'<div class="mo-pager" data-mo-page-size="{_CLIENT_PAGE_SIZE}" '
-        f'data-mo-total="{total}">'
+        f'data-mo-total="{html.esc(total_attr)}">'
         f'<button type="button" data-mo-page="prev" disabled>{html.esc("Prior")}</button>'
         f"<span data-mo-page-status>{html.esc('Page 1')}</span>"
         f'<button type="button" data-mo-page="next">{html.esc("Next")}</button>'
         "</div>"
     )
-    warn_html = f'<p class="error">{html.esc(warning)}</p>' if warning else ""
+    warn_bits: list[str] = []
+    if warning:
+        warn_bits.append(str(warning))
+    elif partial:
+        if isinstance(contract_total, int):
+            warn_bits.append(f"Inventory is partial: loaded {loaded} of {contract_total}.")
+        else:
+            warn_bits.append(f"Inventory is partial: loaded {loaded} item(s).")
+    warn_html = "".join(f'<p class="error">{html.esc(bit)}</p>' for bit in warn_bits)
+    meta = ""
+    if partial and isinstance(contract_total, int):
+        meta = (
+            f'<p class="mo-muted">{html.esc(f"Loaded {loaded} of {contract_total} (partial).")}</p>'
+        )
     return html.panel(
         html.esc("Inventory"),
-        warn_html + filter_bar + pager + f'<div class="mo-scroll">{table}</div>',
+        warn_html + meta + filter_bar + pager + f'<div class="mo-scroll">{table}</div>',
     )
 
 
@@ -505,68 +646,77 @@ def _inventory_filters(items: list) -> str:
     return f'<div class="mo-filters">{"".join(fields)}</div>'
 
 
+def _mutation_text(item: dict) -> str:
+    mutation = item.get("last_mutation") if isinstance(item.get("last_mutation"), dict) else None
+    if not mutation:
+        return "-"
+    receipt = mutation.get("receipt") if isinstance(mutation.get("receipt"), dict) else {}
+    workflow = _display(mutation.get("workflow"))
+    return (
+        f"{workflow} / "
+        f"evidence={_display(receipt.get('evidence_state'))} / "
+        f"status={_display(receipt.get('status'))} / "
+        f"run_id={_display(receipt.get('run_id'))} / "
+        f"completed_at={_display(receipt.get('completed_at'))} / "
+        f"duration_seconds={_display(receipt.get('duration_seconds'))}"
+    )
+
+
 def _inventory_row(item: dict) -> list[str]:
     tags = item.get("tags")
     if isinstance(tags, list):
-        tag_text = ", ".join(str(t) for t in tags if t not in (None, ""))
+        tag_list = [str(t) for t in tags if t not in (None, "")]
+        tag_text = ", ".join(tag_list)
     else:
+        tag_list = [] if tags in (None, "") else [str(tags)]
         tag_text = "" if tags in (None, "") else str(tags)
-    mutation = item.get("last_mutation") if isinstance(item.get("last_mutation"), dict) else None
-    if mutation:
-        receipt = mutation.get("receipt") if isinstance(mutation.get("receipt"), dict) else {}
-        mutation_text = (
-            f"{mutation.get('workflow') or '-'} / {receipt.get('status') or '-'} / {receipt.get('run_id') or '-'}"
-        )
-    else:
-        mutation_text = "-"
+    mutation_text = _mutation_text(item)
     care = item.get("care") if isinstance(item.get("care"), dict) else {}
     issues = care.get("issues") if isinstance(care.get("issues"), list) else []
     issue_text = ", ".join(str(i) for i in issues) if issues else "-"
     queued = care.get("queued_action")
     care_text = f"{issue_text}; queued={queued or '-'}"
 
-    # data attributes for client filters (escaped attribute values)
+    tags_json = json.dumps(tag_list, separators=(",", ":"))
     attrs = {
         "store_type": item.get("store_type") or "",
         "category": item.get("category") or "",
-        "tag": tag_text,
         "freshness": item.get("freshness") or "",
         "review_state": item.get("review_state") or "",
         "evidence_state": item.get("evidence_state") or "",
         "source_harness": item.get("source_harness") or "",
         "owning_workflow": item.get("owning_workflow") or "",
     }
-    # Stash filter attrs on the title cell wrapper so row replacement can keep them.
     title_cell = (
         f'<span data-mo-store_type="{html.esc(attrs["store_type"])}" '
         f'data-mo-category="{html.esc(attrs["category"])}" '
-        f'data-mo-tag="{html.esc(attrs["tag"])}" '
+        f'data-mo-tags="{html.esc(tags_json)}" '
         f'data-mo-freshness="{html.esc(attrs["freshness"])}" '
         f'data-mo-review_state="{html.esc(attrs["review_state"])}" '
         f'data-mo-evidence_state="{html.esc(attrs["evidence_state"])}" '
         f'data-mo-source_harness="{html.esc(attrs["source_harness"])}" '
         f'data-mo-owning_workflow="{html.esc(attrs["owning_workflow"])}">'
-        f"{html.esc(item.get('title') or '-')}"
+        f"{html.esc(_display(item.get('title')))}"
         "</span>"
     )
     return [
         title_cell,
-        html.esc(item.get("id") or "-"),
-        html.esc(item.get("canonical_path") or "-"),
-        html.esc(item.get("logical_destination") or "-"),
-        html.esc(item.get("store_type") or "-"),
-        html.esc(item.get("category") or "-"),
+        html.esc(_display(item.get("id"))),
+        html.esc(_display(item.get("canonical_path"))),
+        html.esc(_display(item.get("logical_destination"))),
+        html.esc(_display(item.get("store_type"))),
+        html.esc(_display(item.get("category"))),
         html.esc(tag_text or "-"),
-        html.esc(item.get("created_at") or "-"),
-        html.esc(item.get("updated_at") or "-"),
-        html.esc(item.get("last_reviewed") or "-"),
-        html.esc(item.get("fresh_until") or "-"),
-        html.esc(item.get("freshness") or "-"),
-        html.esc(item.get("review_state") or "-"),
-        html.esc(item.get("evidence_state") or "-"),
-        html.esc(item.get("source_harness") or "-"),
-        html.esc(item.get("source_handoff") or "-"),
-        html.esc(item.get("owning_workflow") or "-"),
+        html.esc(_display(item.get("created_at"))),
+        html.esc(_display(item.get("updated_at"))),
+        html.esc(_display(item.get("last_reviewed"))),
+        html.esc(_display(item.get("fresh_until"))),
+        html.esc(_display(item.get("freshness"))),
+        html.esc(_display(item.get("review_state"))),
+        html.esc(_display(item.get("evidence_state"))),
+        html.esc(_display(item.get("source_harness"))),
+        html.esc(_display(item.get("source_handoff"))),
+        html.esc(_display(item.get("owning_workflow"))),
         html.esc(mutation_text),
         html.esc(care_text),
     ]
@@ -588,6 +738,7 @@ def _stylesheet(nonce: str) -> str:
   background: #f8f8f8;
   color: #111;
   cursor: pointer;
+  text-decoration: none;
 }}
 .mo-mode:hover {{
   background: #eee;
@@ -655,7 +806,7 @@ def _stylesheet(nonce: str) -> str:
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }}
-.mo-flags, .mo-paths {{
+.mo-flags, .mo-paths, .mo-flow-list {{
   margin: 0;
   padding-left: 1.2rem;
 }}
@@ -663,52 +814,11 @@ def _stylesheet(nonce: str) -> str:
   color: #444;
   font-size: 0.9rem;
 }}
-.mo-flow {{
-  display: block;
-  max-width: 100%;
-  height: auto;
-  background: #fafafa;
-  border: 1px solid #ddd;
-}}
-.mo-flow-text {{
-  margin: 0.5rem 0 0;
-  font-size: 0.85rem;
-  color: #333;
+.mo-flow-edge {{
   word-break: break-word;
 }}
-.mo-node rect {{
-  fill: #ececec;
-  stroke: #666;
-}}
-.mo-node-canonical rect {{
-  fill: #d9f2e3;
-  stroke: #1a7f4b;
-}}
-.mo-node-active rect {{
-  fill: #e7f0fa;
-  stroke: #0066cc;
-}}
-.mo-node-derived rect {{
-  fill: #f3f0e8;
-  stroke: #666;
-}}
-.mo-node-disabled rect {{
-  fill: #f0f0f0;
-  stroke: #999;
-  stroke-dasharray: 3 2;
-}}
-.mo-node text {{
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 11px;
-  fill: #111;
-}}
-.mo-node .mo-sub {{
-  font-size: 10px;
-  fill: #333;
-}}
-.mo-edge-line {{
-  stroke: #333;
-  stroke-width: 1.5;
+.mo-panel[hidden] {{
+  display: none;
 }}
 @media (max-width: 720px) {{
   .mo-filters label {{
@@ -719,7 +829,10 @@ def _stylesheet(nonce: str) -> str:
     min-width: 100%;
   }}
 }}
-</style>"""
+</style>
+<noscript><style nonce="{html.esc(nonce)}">
+.mo-panel[hidden] {{ display: block !important; }}
+</style></noscript>"""
 
 
 def _script(nonce: str) -> str:
@@ -745,6 +858,7 @@ def _script(nonce: str) -> str:
     if (!t || !t.getAttribute) return;
     var mode = t.getAttribute("data-mo-mode");
     if (mode) {{
+      e.preventDefault();
       selectMode(mode);
       return;
     }}
@@ -795,13 +909,22 @@ def _script(nonce: str) -> str:
       var key = sel.getAttribute("data-mo-filter");
       var wanted = (sel.value || "").toLowerCase();
       if (!wanted) continue;
+      if (key === "tag") {{
+        var rawTags = span && span.getAttribute ? (span.getAttribute("data-mo-tags") || "[]") : "[]";
+        var parsed = [];
+        try {{ parsed = JSON.parse(rawTags); }} catch (err) {{ parsed = []; }}
+        var found = false;
+        for (var t = 0; t < parsed.length; t++) {{
+          if (String(parsed[t]).toLowerCase() === wanted) {{ found = true; break; }}
+        }}
+        if (!found) return false;
+        continue;
+      }}
       var actual = "";
       if (span && span.getAttribute) {{
         actual = (span.getAttribute("data-mo-" + key) || "").toLowerCase();
       }}
-      if (key === "tag") {{
-        if (actual.indexOf(wanted) === -1) return false;
-      }} else if (actual !== wanted) {{
+      if (actual !== wanted) {{
         return false;
       }}
     }}

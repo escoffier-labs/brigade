@@ -202,6 +202,45 @@ def _topology_payload(**overrides: object) -> dict:
                 "next_action": "write handoff",
             },
             {
+                "id": "inbox:claude",
+                "kind": "inbox",
+                "label": "claude handoff inbox",
+                "owner": "claude",
+                "authority": "queue_producer",
+                "state": "present",
+                "path": ".claude/memory-handoffs",
+                "schedule": None,
+                "counts": {},
+                "latest_run": None,
+                "next_action": None,
+            },
+            {
+                "id": "stage:lint",
+                "kind": "stage",
+                "label": "lint",
+                "owner": "brigade",
+                "authority": "read_only",
+                "state": "enabled",
+                "path": None,
+                "schedule": None,
+                "counts": {},
+                "latest_run": None,
+                "next_action": None,
+            },
+            {
+                "id": "stage:ingest",
+                "kind": "stage",
+                "label": "ingest",
+                "owner": "brigade",
+                "authority": "canonical_writer",
+                "state": "enabled",
+                "path": None,
+                "schedule": None,
+                "counts": {},
+                "latest_run": None,
+                "next_action": None,
+            },
+            {
                 "id": "canonical:cards",
                 "kind": "canonical",
                 "label": "Memory cards",
@@ -230,6 +269,36 @@ def _topology_payload(**overrides: object) -> dict:
         ],
         "edges": [
             {
+                "id": "edge:claude:emit",
+                "from": "harness:claude",
+                "to": "inbox:claude",
+                "flow": "emit",
+                "authority": "queue_producer",
+                "writer_component": None,
+                "enabled": True,
+                "latest_receipt": {"evidence_state": "missing"},
+            },
+            {
+                "id": "edge:claude:lint",
+                "from": "inbox:claude",
+                "to": "stage:lint",
+                "flow": "validate",
+                "authority": "read_only",
+                "writer_component": None,
+                "enabled": True,
+                "latest_receipt": {"evidence_state": "missing"},
+            },
+            {
+                "id": "edge:lint:ingest",
+                "from": "stage:lint",
+                "to": "stage:ingest",
+                "flow": "advance",
+                "authority": "read_only",
+                "writer_component": None,
+                "enabled": True,
+                "latest_receipt": {"evidence_state": "missing"},
+            },
+            {
                 "id": "edge:ingest:write:cards",
                 "from": "stage:ingest",
                 "to": "canonical:cards",
@@ -244,7 +313,7 @@ def _topology_payload(**overrides: object) -> dict:
                     "completed_at": "2026-01-04T00:00:00Z",
                     "duration_seconds": 2.25,
                 },
-            }
+            },
         ],
         "paths": [
             {
@@ -257,7 +326,12 @@ def _topology_payload(**overrides: object) -> dict:
                     "stage:ingest",
                     "canonical:cards",
                 ],
-                "edge_ids": ["edge:ingest:write:cards"],
+                "edge_ids": [
+                    "edge:claude:emit",
+                    "edge:claude:lint",
+                    "edge:lint:ingest",
+                    "edge:ingest:write:cards",
+                ],
             }
         ],
         "flags": [
@@ -691,3 +765,417 @@ def test_memory_operations_rendered_copy_has_no_em_en_dashes_or_inline_handlers(
     source = Path(view.__file__).read_text(encoding="utf-8")
     assert "\u2014" not in source and "\u2013" not in source
     assert "onclick=" not in source
+    registry = Path("src/brigade/center_cmd/dashboard/views/__init__.py").read_text(encoding="utf-8")
+    assert "\u2014" not in registry and "\u2013" not in registry
+
+
+def _fanout_topology_two_harnesses() -> dict:
+    """Two harnesses fan out to five canonical stores via real edge_ids only."""
+    canonical = ["cards", "rules", "tools", "user", "learnings"]
+    nodes = [
+        {
+            "id": "harness:claude",
+            "kind": "harness",
+            "label": "claude",
+            "owner": "claude",
+            "authority": "queue_producer",
+            "state": "present",
+            "path": None,
+            "schedule": None,
+            "counts": {},
+            "latest_run": {
+                "status": "LRSTAT_ok_sentinel",
+                "run_id": "LRRUN_claude_sentinel",
+                "completed_at": "LRDONE_2026-08-01T12:00:00Z_sentinel",
+                "duration_seconds": 3.25,
+                "evidence_state": "LREVID_present_sentinel",
+            },
+            "next_action": "write handoff",
+        },
+        {
+            "id": "inbox:claude",
+            "kind": "inbox",
+            "label": "claude inbox",
+            "owner": "claude",
+            "authority": "queue_producer",
+            "state": "present",
+            "path": ".claude/memory-handoffs",
+            "schedule": None,
+            "counts": {"pending": 1},
+            "latest_run": None,
+            "next_action": None,
+        },
+        {
+            "id": "harness:codex",
+            "kind": "harness",
+            "label": "codex",
+            "owner": "codex",
+            "authority": "queue_producer",
+            "state": "present",
+            "path": None,
+            "schedule": None,
+            "counts": {},
+            "latest_run": {
+                "status": None,
+                "run_id": None,
+                "completed_at": None,
+                "duration_seconds": None,
+                "evidence_state": None,
+            },
+            "next_action": None,
+        },
+        {
+            "id": "inbox:codex",
+            "kind": "inbox",
+            "label": "codex inbox",
+            "owner": "codex",
+            "authority": "queue_producer",
+            "state": "present",
+            "path": ".codex/memory-handoffs",
+            "schedule": None,
+            "counts": {},
+            "latest_run": None,
+            "next_action": None,
+        },
+        {
+            "id": "stage:lint",
+            "kind": "stage",
+            "label": "lint",
+            "owner": "brigade",
+            "authority": "read_only",
+            "state": "enabled",
+            "path": None,
+            "schedule": None,
+            "counts": {},
+            "latest_run": None,
+            "next_action": None,
+        },
+        {
+            "id": "stage:ingest",
+            "kind": "stage",
+            "label": "ingest",
+            "owner": "brigade",
+            "authority": "canonical_writer",
+            "state": "enabled",
+            "path": None,
+            "schedule": None,
+            "counts": {},
+            "latest_run": None,
+            "next_action": None,
+        },
+    ]
+    for key in canonical:
+        nodes.append(
+            {
+                "id": f"canonical:{key}",
+                "kind": "canonical",
+                "label": key,
+                "owner": "canonical memory system",
+                "authority": "canonical_writer",
+                "state": "canonical",
+                "path": f"memory/{key}",
+                "schedule": None,
+                "counts": {},
+                "latest_run": None,
+                "next_action": None,
+            }
+        )
+    edges = [
+        {
+            "id": "edge:claude:emit",
+            "from": "harness:claude",
+            "to": "inbox:claude",
+            "flow": "emit",
+            "authority": "queue_producer",
+            "writer_component": None,
+            "enabled": True,
+            "latest_receipt": {"evidence_state": "missing"},
+        },
+        {
+            "id": "edge:claude:lint",
+            "from": "inbox:claude",
+            "to": "stage:lint",
+            "flow": "validate",
+            "authority": "read_only",
+            "writer_component": None,
+            "enabled": True,
+            "latest_receipt": {"evidence_state": "missing"},
+        },
+        {
+            "id": "edge:codex:emit",
+            "from": "harness:codex",
+            "to": "inbox:codex",
+            "flow": "emit",
+            "authority": "queue_producer",
+            "writer_component": None,
+            "enabled": True,
+            "latest_receipt": {"evidence_state": "missing"},
+        },
+        {
+            "id": "edge:codex:lint",
+            "from": "inbox:codex",
+            "to": "stage:lint",
+            "flow": "validate",
+            "authority": "read_only",
+            "writer_component": None,
+            "enabled": True,
+            "latest_receipt": {"evidence_state": "missing"},
+        },
+        {
+            "id": "edge:lint:ingest",
+            "from": "stage:lint",
+            "to": "stage:ingest",
+            "flow": "advance",
+            "authority": "read_only",
+            "writer_component": None,
+            "enabled": True,
+            "latest_receipt": {"evidence_state": "missing"},
+        },
+    ]
+    for key in canonical:
+        edges.append(
+            {
+                "id": f"edge:ingest:write:{key}",
+                "from": "stage:ingest",
+                "to": f"canonical:{key}",
+                "flow": "write",
+                "authority": "canonical_writer",
+                "writer_component": "ingest",
+                "enabled": True,
+                "latest_receipt": {
+                    "evidence_state": "present",
+                    "status": "ok",
+                    "run_id": f"ingest-{key}",
+                    "completed_at": "2026-01-04T00:00:00Z",
+                    "duration_seconds": 1.0,
+                },
+            }
+        )
+    shared_edge_ids = ["edge:lint:ingest", *[f"edge:ingest:write:{key}" for key in canonical]]
+    claude_edge_ids = ["edge:claude:emit", "edge:claude:lint", *shared_edge_ids]
+    codex_edge_ids = ["edge:codex:emit", "edge:codex:lint", *shared_edge_ids]
+    # Contract path node_ids intentionally list fan-out destinations after ingest;
+    # joining them with arrows would invent phantom canonical->canonical edges.
+    node_ids_claude = [
+        "harness:claude",
+        "inbox:claude",
+        "stage:lint",
+        "stage:ingest",
+        *[f"canonical:{key}" for key in canonical],
+    ]
+    node_ids_codex = [
+        "harness:codex",
+        "inbox:codex",
+        "stage:lint",
+        "stage:ingest",
+        *[f"canonical:{key}" for key in canonical],
+    ]
+    return _topology_payload(
+        nodes=nodes,
+        edges=edges,
+        paths=[
+            {
+                "id": "path:claude",
+                "harness": "claude",
+                "node_ids": node_ids_claude,
+                "edge_ids": claude_edge_ids,
+            },
+            {
+                "id": "path:codex",
+                "harness": "codex",
+                "node_ids": node_ids_codex,
+                "edge_ids": codex_edge_ids,
+            },
+        ],
+    )
+
+
+def test_memory_operations_topology_paths_use_edges_not_node_id_chains(monkeypatch, tmp_target):
+    topology = _fanout_topology_two_harnesses()
+    _stub_memory_ops_json(monkeypatch, topology=topology)
+    view = view_by_name("memory")
+    assert view is not None
+    html = view.render(view.fetch(tmp_target), nonce="topo-fidelity")
+
+    # Actual edge endpoints / ids must appear (arrows may be HTML-escaped).
+    for frm, to, edge_id in (
+        ("harness:claude", "inbox:claude", "edge:claude:emit"),
+        ("inbox:claude", "stage:lint", "edge:claude:lint"),
+        ("harness:codex", "inbox:codex", "edge:codex:emit"),
+        ("stage:lint", "stage:ingest", "edge:lint:ingest"),
+        ("stage:ingest", "canonical:cards", "edge:ingest:write:cards"),
+        ("stage:ingest", "canonical:rules", "edge:ingest:write:rules"),
+        ("stage:ingest", "canonical:tools", "edge:ingest:write:tools"),
+        ("stage:ingest", "canonical:user", "edge:ingest:write:user"),
+        ("stage:ingest", "canonical:learnings", "edge:ingest:write:learnings"),
+    ):
+        plain = f"{frm} -> {to}"
+        escaped = f"{frm} -&gt; {to}"
+        assert plain in html or escaped in html or edge_id in html, (frm, to, edge_id)
+
+    # Phantom connections that node_id chaining invents must be absent.
+    for phantom in (
+        "canonical:cards -> canonical:rules",
+        "canonical:rules -> canonical:tools",
+        "canonical:tools -> canonical:user",
+        "canonical:user -> canonical:learnings",
+        "canonical:learnings -> harness:codex",
+        "canonical:learnings -> inbox:codex",
+        "harness:claude -> harness:codex",
+        "inbox:claude -> harness:codex",
+        "canonical:cards -> canonical:learnings",
+    ):
+        escaped = phantom.replace(" -> ", " -&gt; ")
+        assert phantom not in html and escaped not in html, phantom
+
+
+def test_memory_operations_renders_complete_latest_run_and_nulls_as_dash(monkeypatch, tmp_target):
+    topology = _fanout_topology_two_harnesses()
+    _stub_memory_ops_json(monkeypatch, topology=topology)
+    view = view_by_name("memory")
+    assert view is not None
+    html = view.render(view.fetch(tmp_target), nonce="latest-run")
+
+    for sentinel in (
+        "LRSTAT_ok_sentinel",
+        "LRRUN_claude_sentinel",
+        "LRDONE_2026-08-01T12:00:00Z_sentinel",
+        "3.25",
+        "LREVID_present_sentinel",
+    ):
+        assert sentinel in html, sentinel
+    # Explicit null latest_run fields on harness:codex must render as '-', never 'None'.
+    assert "None" not in html
+    assert "canonical memory system" in html
+    assert "write handoff" in html
+
+
+def test_memory_operations_renders_complete_last_mutation_receipt(monkeypatch, tmp_target):
+    item = _inventory_item(
+        7,
+        title="MUTTITLE_unique_sentinel",
+        last_mutation={
+            "workflow": "MUTWF_ingest_sentinel",
+            "receipt": {
+                "evidence_state": "MUTEVID_present_sentinel",
+                "status": "MUTSTAT_ok_sentinel",
+                "run_id": "MUTRUN_xyz_sentinel",
+                "completed_at": "MUTDONE_2026-08-02T00:00:00Z_sentinel",
+                "duration_seconds": 12.34,
+            },
+        },
+    )
+    inventory_pages = [
+        {
+            "items": [item],
+            "pagination": {
+                "offset": 0,
+                "limit": 500,
+                "total": 1,
+                "returned": 1,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
+    ]
+    _stub_memory_ops_json(monkeypatch, inventory_pages=inventory_pages)
+    view = view_by_name("memory")
+    assert view is not None
+    html = view.render(view.fetch(tmp_target), nonce="mutation")
+    assert "MUTTITLE_unique_sentinel" in html
+    for sentinel in (
+        "MUTWF_ingest_sentinel",
+        "MUTEVID_present_sentinel",
+        "MUTSTAT_ok_sentinel",
+        "MUTRUN_xyz_sentinel",
+        "MUTDONE_2026-08-02T00:00:00Z_sentinel",
+        "12.34",
+    ):
+        assert sentinel in html, sentinel
+
+
+def test_memory_operations_partial_inventory_warns_with_loaded_and_contract_total(monkeypatch, tmp_target):
+    view = view_by_name("memory")
+    assert view is not None
+
+    # Non-progress pagination with has_more=true: keep items, warn partial, keep contract total.
+    pages = [
+        {
+            "items": [
+                _inventory_item(0, title="PARTIAL_FIRST_kept_sentinel"),
+                _inventory_item(1, title="PARTIAL_SECOND_kept_sentinel"),
+            ],
+            "pagination": {
+                "offset": 0,
+                "limit": 500,
+                "total": 999,
+                "returned": 2,
+                "has_more": True,
+                "next_offset": 0,
+            },
+        }
+    ]
+    call_count = {"n": 0}
+
+    def fake_nonprogress(target, args, **kwargs):
+        del target, kwargs
+        argv = [str(part) for part in args]
+        if argv[:2] == ["memory", "topology"]:
+            return _topology_payload()
+        call_count["n"] += 1
+        if call_count["n"] > 5:
+            raise AssertionError("pagination loop did not stop on non-progress")
+        return pages[0]
+
+    monkeypatch.setattr(data, "run_json", fake_nonprogress)
+    payload = view.fetch(tmp_target)
+    html = view.render(payload, nonce="partial-warn")
+    assert "PARTIAL_FIRST_kept_sentinel" in html
+    assert "PARTIAL_SECOND_kept_sentinel" in html
+    assert "partial" in html.lower()
+    assert "2" in html
+    assert "999" in html
+    inv = payload["inventory"]
+    assert inv.get("partial") is True
+    assert inv.get("warning")
+    assert "partial" in str(inv.get("warning")).lower()
+    assert inv.get("contract_total") == 999
+    assert len(inv.get("items") or []) == 2
+    # Must not relabel loaded length as the complete contract total.
+    assert inv.get("total") != 2
+    assert 'data-mo-total="2"' not in html
+
+    # Explicit page command failure after partial results also warns.
+    page1 = {
+        "items": [_inventory_item(0, title="AFTERFAIL_kept_sentinel")],
+        "pagination": {
+            "offset": 0,
+            "limit": 500,
+            "total": 777,
+            "returned": 1,
+            "has_more": True,
+            "next_offset": 500,
+        },
+    }
+
+    def fake_second_page_error(target, args, **kwargs):
+        del target, kwargs
+        argv = [str(part) for part in args]
+        if argv[:2] == ["memory", "topology"]:
+            return _topology_payload()
+        offset = 0
+        if "--offset" in argv:
+            offset = int(argv[argv.index("--offset") + 1])
+        if offset == 0:
+            return page1
+        return {"error": "PAGEFAIL_inventory_sentinel"}
+
+    monkeypatch.setattr(data, "run_json", fake_second_page_error)
+    payload2 = view.fetch(tmp_target)
+    html2 = view.render(payload2, nonce="page-fail")
+    assert "AFTERFAIL_kept_sentinel" in html2
+    assert "PAGEFAIL_inventory_sentinel" in html2 or "partial" in html2.lower()
+    inv2 = payload2["inventory"]
+    assert len(inv2.get("items") or []) == 1
+    assert inv2.get("warning")
+    assert inv2.get("contract_total") == 777 or "777" in html2
