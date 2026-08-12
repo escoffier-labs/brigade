@@ -79,10 +79,76 @@ def register(sub: argparse._SubParsersAction) -> None:
         "topology",
         help="Read-only ownership and harness-to-canonical flow graph for local memory.",
     )
-    p_memory_topology.add_argument(
+    p_memory_topology.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_memory_topology.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_inventory = memory_sub.add_parser(
+        "inventory",
+        help="Paginated metadata inventory of canonical memory stores (no card bodies).",
+    )
+    p_memory_inventory.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
-    p_memory_topology.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_inventory.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Pagination offset (default: 0).",
+    )
+    p_memory_inventory.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Page size (default: 100, max: 500).",
+    )
+    p_memory_inventory.add_argument(
+        "--store-type",
+        action="append",
+        default=None,
+        help="Filter by store type (repeatable; OR; case-insensitive). Choices: card, rule, tools, user, learning.",
+    )
+    p_memory_inventory.add_argument(
+        "--category",
+        action="append",
+        default=None,
+        help="Filter by category (repeatable; OR; case-insensitive).",
+    )
+    p_memory_inventory.add_argument(
+        "--tag",
+        action="append",
+        default=None,
+        help="Filter by tag (repeatable; AND; case-insensitive).",
+    )
+    p_memory_inventory.add_argument(
+        "--freshness",
+        action="append",
+        default=None,
+        help="Filter by freshness (repeatable; OR; case-insensitive).",
+    )
+    p_memory_inventory.add_argument(
+        "--review-state",
+        action="append",
+        default=None,
+        help="Filter by review state (repeatable; OR; case-insensitive).",
+    )
+    p_memory_inventory.add_argument(
+        "--evidence-state",
+        action="append",
+        default=None,
+        help="Filter by evidence state (repeatable; OR; case-insensitive).",
+    )
+    p_memory_inventory.add_argument(
+        "--source-harness",
+        action="append",
+        default=None,
+        help="Filter by source harness (repeatable; OR; case-insensitive).",
+    )
+    p_memory_inventory.add_argument(
+        "--owning-workflow",
+        action="append",
+        default=None,
+        help="Filter by owning workflow (repeatable; OR; case-insensitive).",
+    )
+    p_memory_inventory.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_search = memory_sub.add_parser("search", help="Keyword-search local memory cards.")
     p_memory_search.add_argument("query", help="Search terms (matched against title, tags, summary, and body).")
     p_memory_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to search.")
@@ -169,6 +235,40 @@ def dispatch(args) -> int:
 
     if args.memory_command == "topology":
         return memory_operations.topology(target=args.target, json_output=args.json)
+    if args.memory_command == "inventory":
+        if args.offset < 0:
+            args._brigade_parser.error("--offset must be >= 0")
+        if args.limit < 1 or args.limit > 500:
+            args._brigade_parser.error("--limit must be between 1 and 500")
+        try:
+            store_type = memory_operations.normalize_inventory_enum_filter(
+                args.store_type, allowed=memory_operations.STORE_TYPES, flag="--store-type"
+            )
+            freshness = memory_operations.normalize_inventory_enum_filter(
+                args.freshness, allowed=memory_operations.FRESHNESS_VALUES, flag="--freshness"
+            )
+            review_state = memory_operations.normalize_inventory_enum_filter(
+                args.review_state, allowed=memory_operations.REVIEW_STATES, flag="--review-state"
+            )
+            evidence_state = memory_operations.normalize_inventory_enum_filter(
+                args.evidence_state, allowed=memory_operations.EVIDENCE_STATES, flag="--evidence-state"
+            )
+        except ValueError as exc:
+            args._brigade_parser.error(str(exc))
+        return memory_operations.inventory(
+            target=args.target,
+            json_output=args.json,
+            offset=args.offset,
+            limit=args.limit,
+            store_type=store_type,
+            category=args.category,
+            tag=args.tag,
+            freshness=freshness,
+            review_state=review_state,
+            evidence_state=evidence_state,
+            source_harness=args.source_harness,
+            owning_workflow=args.owning_workflow,
+        )
     if args.memory_command == "care":
         if args.memory_care_command == "init":
             return memory_cmd.init(

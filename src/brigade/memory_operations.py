@@ -1,6 +1,6 @@
 """Read-only memory operations contracts (issue #875).
 
-Assembles topology (and later inventory) JSON from existing health helpers.
+Assembles topology and inventory JSON from existing health helpers.
 No new dependencies, config, or durable state.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,24 @@ from .selection import WRITER_INBOXES
 
 SCHEMA_NAME = "memory-topology"
 SCHEMA_VERSION = 1
+
+INVENTORY_SCHEMA_NAME = "memory-inventory"
+INVENTORY_SCHEMA_VERSION = 1
+INVENTORY_DEFAULT_LIMIT = 100
+INVENTORY_MAX_LIMIT = 500
+
+STORE_TYPES = ("card", "rule", "tools", "user", "learning")
+FRESHNESS_VALUES = ("fresh", "stale", "missing", "unassessable", "not_applicable")
+REVIEW_STATES = ("reviewed", "missing")
+EVIDENCE_STATES = ("present", "missing", "unresolved")
+
+STORE_LOGICAL = {
+    "card": "cards",
+    "rule": "rules",
+    "tools": "tools",
+    "user": "user",
+    "learning": "learnings",
+}
 
 CANONICAL_OWNER = "canonical memory system"
 BRIGADE_OWNER = "brigade"
@@ -154,6 +172,120 @@ def topology(*, target: Path, json_output: bool = False) -> int:
         print("flags:")
         for flag in payload["flags"][:12]:
             print(f"- {flag.get('kind')}: {flag.get('detail') or flag.get('destination') or ''}".rstrip(": "))
+    return 0
+
+
+def _inventory_today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+def inventory_payload(
+    target: Path,
+    *,
+    offset: int = 0,
+    limit: int = INVENTORY_DEFAULT_LIMIT,
+    store_type: list[str] | None = None,
+    category: list[str] | None = None,
+    tag: list[str] | None = None,
+    freshness: list[str] | None = None,
+    review_state: list[str] | None = None,
+    evidence_state: list[str] | None = None,
+    source_harness: list[str] | None = None,
+    owning_workflow: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build the versioned memory-inventory JSON contract for *target*."""
+    target = target.expanduser().resolve()
+    filters = {
+        "store_type": _normalize_filter_values(store_type),
+        "category": _normalize_filter_values(category),
+        "tag": _normalize_filter_values(tag),
+        "freshness": _normalize_filter_values(freshness),
+        "review_state": _normalize_filter_values(review_state),
+        "evidence_state": _normalize_filter_values(evidence_state),
+        "source_harness": _normalize_filter_values(source_harness),
+        "owning_workflow": _normalize_filter_values(owning_workflow),
+    }
+    care_index = _load_care_index(target)
+    items = [
+        _inventory_item_from_source(target, source, care_index=care_index)
+        for source in _enumerate_inventory_sources(target)
+    ]
+    items.sort(key=lambda item: str(item.get("canonical_path") or ""))
+    filtered = [item for item in items if _item_matches_filters(item, filters)]
+    total = len(filtered)
+    page = filtered[offset : offset + limit]
+    returned = len(page)
+    has_more = offset + returned < total
+    return {
+        "schema_version": INVENTORY_SCHEMA_VERSION,
+        "schema": {"name": INVENTORY_SCHEMA_NAME, "version": INVENTORY_SCHEMA_VERSION},
+        "target": ".",
+        "generated_at": utc_now_iso_z(),
+        "pagination": {
+            "offset": offset,
+            "limit": limit,
+            "total": total,
+            "returned": returned,
+            "has_more": has_more,
+            "next_offset": (offset + returned) if has_more else None,
+        },
+        "filters": filters,
+        "items": page,
+    }
+
+
+def inventory(
+    *,
+    target: Path,
+    json_output: bool = False,
+    offset: int = 0,
+    limit: int = INVENTORY_DEFAULT_LIMIT,
+    store_type: list[str] | None = None,
+    category: list[str] | None = None,
+    tag: list[str] | None = None,
+    freshness: list[str] | None = None,
+    review_state: list[str] | None = None,
+    evidence_state: list[str] | None = None,
+    source_harness: list[str] | None = None,
+    owning_workflow: list[str] | None = None,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    try:
+        payload = inventory_payload(
+            target,
+            offset=offset,
+            limit=limit,
+            store_type=store_type,
+            category=category,
+            tag=tag,
+            freshness=freshness,
+            review_state=review_state,
+            evidence_state=evidence_state,
+            source_harness=source_harness,
+            owning_workflow=owning_workflow,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    page = payload["pagination"]
+    print(
+        "memory inventory: "
+        f"total={page['total']} offset={page['offset']} limit={page['limit']} "
+        f"returned={page['returned']}"
+    )
+    for item in payload["items"][:12]:
+        print(
+            f"- {item.get('canonical_path')} [{item.get('store_type')}] "
+            f"{item.get('title')} freshness={item.get('freshness')}"
+        )
+    if page["returned"] > 12:
+        print(f"... {page['returned'] - 12} more")
     return 0
 
 
@@ -1123,3 +1255,335 @@ def _detect_cycles(edges: list[dict[str, Any]]) -> list[list[str]]:
     for node in list(graph):
         dfs(node)
     return cycles
+
+
+def normalize_inventory_enum_filter(
+    values: list[str] | None,
+    *,
+    allowed: tuple[str, ...],
+    flag: str,
+) -> list[str] | None:
+    """Normalize case-insensitive enum filters; raise ValueError on unknown values."""
+    if not values:
+        return None
+    allowed_set = {item.lower(): item for item in allowed}
+    normalized: list[str] = []
+    for value in values:
+        key = str(value).strip().lower()
+        if key not in allowed_set:
+            raise ValueError(f"{flag} must be one of: {', '.join(allowed)}")
+        canonical = allowed_set[key]
+        if canonical not in normalized:
+            normalized.append(canonical)
+    return normalized
+
+
+def _normalize_filter_values(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    normalized: list[str] = []
+    for value in values:
+        text = str(value).strip().lower()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _enumerate_inventory_sources(target: Path) -> list[tuple[str, Path, str]]:
+    """Return (store_type, absolute_path, canonical_path) in path order."""
+    target = target.expanduser().resolve()
+    sources: list[tuple[str, Path, str]] = []
+    seen: set[str] = set()
+
+    try:
+        config = memory_cmd._config_or_default(target)
+    except ValueError:
+        config = memory_cmd.MemoryCareConfig()
+
+    for path in memory_cmd._iter_cards(target, config):
+        rel = _canonical_relpath(target, path)
+        if rel is None or rel in seen:
+            continue
+        seen.add(rel)
+        sources.append(("card", path, rel))
+
+    rules_dir = target / "rules"
+    if rules_dir.is_dir() and not rules_dir.is_symlink():
+        for path in sorted(rules_dir.glob("*.md")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            rel = _canonical_relpath(target, path)
+            if rel is None or rel in seen:
+                continue
+            seen.add(rel)
+            sources.append(("rule", path, rel))
+
+    for store_type, rel in (("tools", "TOOLS.md"), ("user", "USER.md")):
+        path = target / rel
+        if path.is_symlink() or not path.is_file():
+            continue
+        if rel in seen:
+            continue
+        if _canonical_relpath(target, path) is None:
+            continue
+        seen.add(rel)
+        sources.append((store_type, path, rel))
+
+    learnings = target / ".learnings"
+    if learnings.is_dir() and not learnings.is_symlink():
+        for path in sorted(learnings.glob("*.md")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            rel = _canonical_relpath(target, path)
+            if rel is None or rel in seen:
+                continue
+            seen.add(rel)
+            sources.append(("learning", path, rel))
+
+    sources.sort(key=lambda item: item[2])
+    return sources
+
+
+def _canonical_relpath(target: Path, path: Path) -> str | None:
+    try:
+        resolved = path.resolve()
+        rel = resolved.relative_to(target.resolve())
+    except (OSError, ValueError):
+        return None
+    if path.is_symlink():
+        return None
+    text = str(rel).replace("\\", "/")
+    if text.startswith("../") or text == ".." or "/../" in f"/{text}/":
+        return None
+    return text
+
+
+def _read_frontmatter_only(path: Path) -> dict[str, Any]:
+    try:
+        # Read whole file for the shared frontmatter splitter; body is discarded.
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    meta, _has = memory_cmd._parse_frontmatter(text)
+    return meta if isinstance(meta, dict) else {}
+
+
+def _inventory_item_from_source(
+    target: Path,
+    source: tuple[str, Path, str],
+    *,
+    care_index: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    store_type, path, canonical_path = source
+    meta = _read_frontmatter_only(path)
+    title_value = memory_cmd._frontmatter_value(meta, "title")
+    title = str(title_value).strip() if title_value not in (None, "") else path.stem
+    category_value = memory_cmd._frontmatter_value(meta, "category")
+    category = str(category_value).strip() if category_value not in (None, "") else None
+    tags = _inventory_tags(meta)
+    created_at = _explicit_date_string(meta, "created", "created_at")
+    updated_at = _explicit_date_string(meta, "updated", "updated_at")
+    last_reviewed = _explicit_date_string(meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
+    fresh_until_raw = memory_cmd._frontmatter_value(meta, "fresh_until", "expires_at", "expires")
+    fresh_until = None
+    freshness = _compute_freshness(store_type, fresh_until_raw)
+    if isinstance(fresh_until_raw, str) and fresh_until_raw.strip():
+        parsed = memory_cmd._parse_date(fresh_until_raw)
+        fresh_until = parsed.isoformat() if parsed is not None else fresh_until_raw.strip()
+    review_state = "reviewed" if last_reviewed is not None else "missing"
+    evidence_state = _compute_evidence_state(meta, canonical_path, care_index=care_index)
+    source_harness_value = memory_cmd._frontmatter_value(meta, "source_harness")
+    source_harness = str(source_harness_value).strip() if source_harness_value not in (None, "") else "unknown"
+    source_handoff_value = memory_cmd._frontmatter_value(meta, "source_handoff")
+    source_handoff = str(source_handoff_value).strip() if source_handoff_value not in (None, "") else None
+    owning_workflow_value = memory_cmd._frontmatter_value(meta, "owning_workflow")
+    owning_workflow = str(owning_workflow_value).strip() if owning_workflow_value not in (None, "") else "unknown"
+    return {
+        "id": f"{store_type}:{canonical_path}",
+        "title": title,
+        "canonical_path": canonical_path,
+        "logical_destination": STORE_LOGICAL[store_type],
+        "store_type": store_type,
+        "category": category,
+        "tags": tags,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "last_reviewed": last_reviewed,
+        "fresh_until": fresh_until,
+        "freshness": freshness,
+        "review_state": review_state,
+        "evidence_state": evidence_state,
+        "source_harness": source_harness,
+        "source_handoff": source_handoff,
+        "owning_workflow": owning_workflow,
+        "last_mutation": _inventory_last_mutation(meta),
+        "care": _care_for_path(canonical_path, care_index),
+    }
+
+
+def _inventory_tags(meta: dict[str, Any]) -> list[str]:
+    value = memory_cmd._frontmatter_value(meta, "tags", "tag")
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _explicit_date_string(meta: dict[str, Any], *keys: str) -> str | None:
+    value = memory_cmd._frontmatter_value(meta, *keys)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = memory_cmd._parse_date(value)
+    return parsed.isoformat() if parsed is not None else value.strip()
+
+
+def _compute_freshness(store_type: str, fresh_until_raw: Any) -> str:
+    if fresh_until_raw in (None, ""):
+        return "missing" if store_type == "card" else "not_applicable"
+    if not isinstance(fresh_until_raw, str):
+        return "unassessable"
+    parsed = memory_cmd._parse_date(fresh_until_raw)
+    if parsed is None:
+        return "unassessable"
+    today = _inventory_today()
+    if parsed < today:
+        return "stale"
+    return "fresh"
+
+
+def _compute_evidence_state(
+    meta: dict[str, Any],
+    canonical_path: str,
+    *,
+    care_index: dict[str, dict[str, Any]],
+) -> str:
+    if not memory_cmd._has_evidence(meta):
+        return "missing"
+    care = care_index.get(canonical_path) or {}
+    raw_issues = care.get("issues")
+    issues: list[str] = [str(item) for item in raw_issues] if isinstance(raw_issues, list) else []
+    if "missing-evidence-ref" in issues:
+        return "unresolved"
+    return "present"
+
+
+def _inventory_last_mutation(meta: dict[str, Any]) -> dict[str, Any] | None:
+    workflow = memory_cmd._frontmatter_value(meta, "last_mutation_workflow")
+    if workflow in (None, ""):
+        return None
+    status = memory_cmd._frontmatter_value(meta, "last_mutation_status")
+    run_id = memory_cmd._frontmatter_value(meta, "last_mutation_run_id")
+    completed_at = memory_cmd._frontmatter_value(meta, "last_mutation_completed_at")
+    evidence_state = memory_cmd._frontmatter_value(meta, "last_mutation_evidence_state")
+    duration_raw = memory_cmd._frontmatter_value(meta, "last_mutation_duration_seconds")
+    duration_seconds: float | int | None
+    if duration_raw in (None, ""):
+        duration_seconds = None
+    else:
+        try:
+            duration_seconds = float(duration_raw)
+            if duration_seconds.is_integer():
+                duration_seconds = int(duration_seconds)
+        except (TypeError, ValueError):
+            duration_seconds = None
+    receipt = {
+        "evidence_state": str(evidence_state).strip() if evidence_state not in (None, "") else "missing",
+        "status": str(status).strip() if status not in (None, "") else None,
+        "run_id": str(run_id).strip() if run_id not in (None, "") else None,
+        "completed_at": str(completed_at).strip() if completed_at not in (None, "") else None,
+        "duration_seconds": duration_seconds,
+    }
+    return {"workflow": str(workflow).strip(), "receipt": receipt}
+
+
+def _load_care_index(target: Path) -> dict[str, dict[str, Any]]:
+    """Join persisted care scan/queue facts by exact repo-relative path; fail open."""
+    index: dict[str, dict[str, Any]] = {}
+    try:
+        config = memory_cmd._config_or_default(target)
+    except ValueError:
+        config = memory_cmd.MemoryCareConfig()
+
+    scan_payload = _safe_json_object(memory_cmd._scan_path(target, config))
+    queue_payload = _safe_json_object(memory_cmd._queue_path(target, config))
+
+    for issue in _care_issue_rows(scan_payload):
+        path = str(issue.get("file") or issue.get("path") or issue.get("card_file") or "").replace("\\", "/")
+        if not path:
+            continue
+        entry = index.setdefault(path, {"issues": [], "queued_action": None})
+        issue_type = str(issue.get("issue_type") or "").strip()
+        if issue_type and issue_type not in entry["issues"]:
+            entry["issues"].append(issue_type)
+        action = issue.get("action")
+        if entry["queued_action"] is None and isinstance(action, str) and action.strip():
+            entry["queued_action"] = action.strip()
+
+    for card in _care_issue_rows(queue_payload, key="cards"):
+        path = str(card.get("file") or card.get("path") or card.get("card_file") or "").replace("\\", "/")
+        if not path:
+            continue
+        entry = index.setdefault(path, {"issues": [], "queued_action": None})
+        issue_type = str(card.get("issue_type") or card.get("refresh_reason") or "").strip()
+        if issue_type and issue_type not in entry["issues"]:
+            entry["issues"].append(issue_type)
+        action = card.get("action")
+        if entry["queued_action"] is None and isinstance(action, str) and action.strip():
+            entry["queued_action"] = action.strip()
+    return index
+
+
+def _safe_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _care_issue_rows(payload: dict[str, Any] | None, *, key: str = "issues") -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get(key)
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _care_for_path(canonical_path: str, care_index: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    entry = care_index.get(canonical_path) or {}
+    raw_issues = entry.get("issues")
+    issues = [str(item) for item in raw_issues if str(item).strip()] if isinstance(raw_issues, list) else []
+    queued = entry.get("queued_action")
+    return {
+        "issues": issues,
+        "queued_action": str(queued).strip() if isinstance(queued, str) and queued.strip() else None,
+    }
+
+
+def _item_matches_filters(item: dict[str, Any], filters: dict[str, list[str]]) -> bool:
+    if filters["store_type"] and str(item.get("store_type") or "").lower() not in filters["store_type"]:
+        return False
+    if filters["category"]:
+        category = str(item.get("category") or "").lower()
+        if category not in filters["category"]:
+            return False
+    if filters["tag"]:
+        tags = {str(tag).lower() for tag in (item.get("tags") or [])}
+        if not all(tag in tags for tag in filters["tag"]):
+            return False
+    if filters["freshness"] and str(item.get("freshness") or "").lower() not in filters["freshness"]:
+        return False
+    if filters["review_state"] and str(item.get("review_state") or "").lower() not in filters["review_state"]:
+        return False
+    if filters["evidence_state"] and str(item.get("evidence_state") or "").lower() not in filters["evidence_state"]:
+        return False
+    if filters["source_harness"] and str(item.get("source_harness") or "").lower() not in filters["source_harness"]:
+        return False
+    if filters["owning_workflow"] and str(item.get("owning_workflow") or "").lower() not in filters["owning_workflow"]:
+        return False
+    return True
