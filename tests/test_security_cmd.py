@@ -2988,6 +2988,102 @@ def test_security_finding_outputs_sanitize_hostile_strings(tmp_path, capsys):
     assert "\u202e" not in plain
 
 
+def test_security_finding_outputs_redact_private_url_token_and_path(tmp_path, capsys):
+    private_url = "https://agent.private.invalid/report?x=1"
+    token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    abs_path = "/home/privateuser/.openclaw/workspace/secrets.env"
+    fingerprint = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    safe_path = "notes/safe-relative.md"
+    rule_id = "secrets.example"
+    blob = f"hit {private_url} auth={token} path={abs_path}"
+    finding = {
+        "id": "security-leak",
+        "fingerprint": fingerprint,
+        "rule_id": rule_id,
+        "severity": "high",
+        "category": "secrets",
+        "path": safe_path,
+        "line": 3,
+        "surface": "file",
+        "confidence": "high",
+        "title": f"leak title {private_url}",
+        "evidence": blob,
+        "safe_excerpt": blob,
+        "suggestion": f"rotate at {abs_path}",
+        "remediation_hint": f"scrub {token}",
+        "response_options": [f"scrub {token} under {abs_path}"],
+    }
+    report = {
+        "target": str(tmp_path),
+        "generated_at": "2026-01-01T00:00:00Z",
+        "policy": "default",
+        "fail_on": "none",
+        "include_templates": False,
+        "scanned_file_count": 1,
+        "finding_count": 1,
+        "suppressed_count": 0,
+        "severity_counts": {"high": 1},
+        "findings": [finding],
+        "suppressed_findings": [],
+    }
+
+    projected = security_cmd._sanitize_finding_for_output(finding)
+    for surface in (
+        projected["title"],
+        projected["evidence"],
+        projected["suggestion"],
+        projected["remediation_hint"],
+        projected["response_options"][0],
+    ):
+        assert private_url not in surface
+        assert token not in surface
+        assert abs_path not in surface
+        assert "[REDACTED-URL]" in surface or "[REDACTED]" in surface or "[REDACTED-PATH]" in surface
+    assert projected["fingerprint"] == fingerprint
+    assert projected["rule_id"] == rule_id
+    assert projected["path"] == safe_path
+    assert "[REDACTED-URL]" in projected["evidence"]
+    assert "[REDACTED]" in projected["evidence"]
+    assert "[REDACTED-PATH]" in projected["evidence"]
+
+    markdown = security_cmd._render_markdown_report(report)
+    assert private_url not in markdown
+    assert token not in markdown
+    assert abs_path not in markdown
+    assert "agent.private.invalid" not in markdown
+    assert "[REDACTED-URL]" in markdown
+    assert "[REDACTED]" in markdown
+    assert "[REDACTED-PATH]" in markdown
+    assert fingerprint in markdown
+    assert security_cmd._escape_finding_markdown(safe_path) in markdown
+
+    sarif = security_cmd._sarif_report(report)
+    serialized = json.dumps(sarif)
+    assert private_url not in serialized
+    assert token not in serialized
+    assert abs_path not in serialized
+    assert "agent.private.invalid" not in serialized
+    assert "[REDACTED-URL]" in serialized
+    assert "[REDACTED]" in serialized
+    assert "[REDACTED-PATH]" in serialized
+    assert sarif["runs"][0]["results"][0]["ruleId"] == rule_id
+    assert sarif["runs"][0]["results"][0]["partialFingerprints"]["primaryLocationLineHash"] == fingerprint
+    assert sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == safe_path
+
+    output_dir = tmp_path / "bundle"
+    output_dir.mkdir()
+    (output_dir / "security-report.json").write_text(json.dumps(report))
+    assert security_cmd.review(target=tmp_path, output_dir=output_dir) == 0
+    plain = capsys.readouterr().out
+    assert private_url not in plain
+    assert token not in plain
+    assert abs_path not in plain
+    assert "agent.private.invalid" not in plain
+    assert fingerprint in plain
+    assert safe_path in plain
+    assert "[REDACTED-URL]" in plain or "[REDACTED]" in plain or "[REDACTED-PATH]" in plain
+
+
 def test_security_enrich_writes_local_enrichment_bundle(tmp_path, capsys):
     security_cmd.init(target=tmp_path)
     capsys.readouterr()
