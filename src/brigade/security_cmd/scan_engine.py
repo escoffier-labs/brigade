@@ -1159,22 +1159,24 @@ def _render_markdown_report(report: dict[str, Any]) -> str:
     if not report["findings"]:
         lines.append("No unsuppressed findings.")
     for finding in report["findings"]:
+        finding = _sanitize_finding_for_output(finding)
+        md = _escape_finding_markdown
         finding_lines = [
-            f"### {finding['id']} - {finding['title']}",
+            f"### {md(finding['id'])} - {md(finding['title'])}",
             "",
-            f"- fingerprint: `{finding['fingerprint']}`",
-            f"- severity: `{finding['severity']}`",
-            f"- category: `{finding['category']}`",
-            f"- path: `{finding['path']}:{finding['line']}`",
-            f"- surface: `{finding['surface']}`",
-            f"- confidence: `{finding['confidence']}`",
-            f"- evidence: `{finding['evidence']}`",
-            f"- suggestion: {finding['suggestion']}",
+            f"- fingerprint: `{md(finding['fingerprint'])}`",
+            f"- severity: `{md(finding['severity'])}`",
+            f"- category: `{md(finding['category'])}`",
+            f"- path: `{md(finding['path'])}:{md(finding['line'])}`",
+            f"- surface: `{md(finding['surface'])}`",
+            f"- confidence: `{md(finding['confidence'])}`",
+            f"- evidence: `{md(finding['evidence'])}`",
+            f"- suggestion: {md(finding['suggestion'])}",
         ]
         response_options = finding.get("response_options") or []
         if response_options:
             finding_lines.append("- response_options:")
-            finding_lines.extend(f"  - {item}" for item in response_options)
+            finding_lines.extend(f"  - {md(item)}" for item in response_options)
         finding_lines.append("")
         lines.extend(finding_lines)
     return "\n".join(lines).rstrip() + "\n"
@@ -1195,6 +1197,7 @@ def _sarif_report(report: dict[str, Any]) -> dict[str, Any]:
     for finding in report.get("findings", []):
         if not isinstance(finding, dict):
             continue
+        finding = _sanitize_finding_for_output(finding)
         rule_id = str(finding.get("rule_id") or finding.get("category") or "brigade.security")
         if rule_id not in rules:
             rules[rule_id] = {

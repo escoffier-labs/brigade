@@ -2928,6 +2928,66 @@ def test_security_scan_writes_redacted_evidence_bundle(tmp_path, capsys):
     assert release["evidence"]["security"]["evidence"]["sarif_ready"] is True
 
 
+def test_security_finding_outputs_sanitize_hostile_strings(tmp_path, capsys):
+    hostile = "safe\n## injected\x00\x1b[31m [link](javascript:alert(1)) `code` \u202e"
+    finding = {
+        "id": "security-hostile",
+        "fingerprint": "abc123",
+        "rule_id": "hostile\nrule",
+        "severity": "high\nforged",
+        "category": "category\rforged",
+        "path": "file.md\nFAKE:1",
+        "line": 1,
+        "surface": hostile,
+        "confidence": hostile,
+        "title": hostile,
+        "evidence": hostile,
+        "safe_excerpt": hostile,
+        "suggestion": hostile,
+        "remediation_hint": hostile,
+        "response_options": [hostile],
+    }
+    report = {
+        "target": str(tmp_path),
+        "generated_at": "2026-01-01T00:00:00Z",
+        "policy": "default",
+        "fail_on": "none",
+        "include_templates": False,
+        "scanned_file_count": 1,
+        "finding_count": 1,
+        "suppressed_count": 0,
+        "severity_counts": {"high": 1},
+        "findings": [finding],
+        "suppressed_findings": [],
+    }
+
+    markdown = security_cmd._render_markdown_report(report)
+    assert "\n## injected" not in markdown
+    assert "[link](javascript:alert(1))" not in markdown
+    assert "\\[link\\]\\(javascript:alert\\(1\\)\\)" in markdown
+    assert "\x00" not in markdown
+    assert "\x1b" not in markdown
+    assert "\u202e" not in markdown
+
+    sarif = security_cmd._sarif_report(report)
+    serialized = json.dumps(sarif)
+    assert "\\u0000" not in serialized
+    assert "\\u001b" not in serialized
+    assert "\\u202e" not in serialized
+    assert sarif["runs"][0]["results"][0]["ruleId"] == "hostile rule"
+    assert "\n" not in sarif["runs"][0]["results"][0]["message"]["text"]
+
+    output_dir = tmp_path / "bundle"
+    output_dir.mkdir()
+    (output_dir / "security-report.json").write_text(json.dumps(report))
+    assert security_cmd.review(target=tmp_path, output_dir=output_dir) == 0
+    plain = capsys.readouterr().out
+    assert "\n## injected" not in plain
+    assert "\x00" not in plain
+    assert "\x1b" not in plain
+    assert "\u202e" not in plain
+
+
 def test_security_enrich_writes_local_enrichment_bundle(tmp_path, capsys):
     security_cmd.init(target=tmp_path)
     capsys.readouterr()

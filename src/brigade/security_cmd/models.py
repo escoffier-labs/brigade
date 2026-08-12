@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,34 @@ from ..selection import WRITER_INBOXES
 from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
+
+
+def _sanitize_finding_text(value: object) -> str:
+    """Render a finding-controlled value as safe, single-line display text."""
+    text = str(value or "")
+    text = "".join(" " if unicodedata.category(char) in {"Cc", "Cf"} else char for char in text)
+    return " ".join(text.split())
+
+
+def _sanitize_finding_for_output(finding: dict[str, Any]) -> dict[str, Any]:
+    """Copy a finding while sanitizing every string at the output boundary."""
+
+    def sanitize(value: Any) -> Any:
+        if isinstance(value, str):
+            return _sanitize_finding_text(value)
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        if isinstance(value, dict):
+            return {key: sanitize(item) for key, item in value.items()}
+        return value
+
+    return {key: sanitize(value) for key, value in finding.items()}
+
+
+def _escape_finding_markdown(value: object) -> str:
+    """Escape sanitized finding text so it cannot introduce Markdown syntax."""
+    escaped = re.sub(r"([\\`*{}\[\]()<>#+.!_\-|])", r"\\\1", _sanitize_finding_text(value))
+    return escaped.replace(r"\[REDACTED\]", "[REDACTED]")
 
 
 SEVERITY_ORDER = {
