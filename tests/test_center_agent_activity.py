@@ -99,6 +99,19 @@ def test_session_discovery_bounds_directory_walks(tmp_path, monkeypatch):
     assert len(calls) == 200
 
 
+def test_cursor_session_discovery_prioritizes_transcript_directories(tmp_path):
+    root = tmp_path / "projects"
+    for index in range(300):
+        (root / f"project-{index:03}").mkdir(parents=True, exist_ok=True)
+    transcript = root / "project-000" / "agent-transcripts" / "active"
+    transcript.mkdir(parents=True)
+    (transcript / "session.jsonl").write_text("private transcript")
+
+    paths = activity_records._bounded_session_paths(root, "cursor")
+
+    assert paths == [transcript / "session.jsonl"]
+
+
 def test_agent_activity_view_uses_state_words_and_keeps_ids_in_details():
     fragment = agent_activity.render(
         {

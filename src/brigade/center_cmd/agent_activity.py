@@ -166,7 +166,13 @@ def _bounded_session_paths(root: Path, provider: str) -> list[Path]:
         entries = sorted(os.scandir(directory_path), key=lambda entry: entry.name)
         for entry in entries:
             if entry.is_dir(follow_symlinks=False):
-                pending.append(Path(entry.path))
+                child = Path(entry.path)
+                if provider == "cursor" and (
+                    entry.name == "agent-transcripts" or "agent-transcripts" in directory_path.parts
+                ):
+                    pending.appendleft(child)
+                else:
+                    pending.append(child)
                 continue
             if not entry.is_file(follow_symlinks=False):
                 continue
