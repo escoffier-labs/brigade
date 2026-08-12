@@ -490,7 +490,7 @@ def test_daily_plan_includes_handoff_memory_and_security_issues(tmp_path, capsys
 
 def test_daily_run_refuses_approval_required_import_and_promotes_when_approved(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)
-    imported, _, _ = work_cmd._append_import_records(
+    imported, _, _, _ = work_cmd._append_import_records(
         tmp_path,
         [
             {
@@ -549,7 +549,7 @@ def test_daily_approval_pauses_real_run_and_cli_resume_consumes_store_once(
     capsys,
 ):
     _seed_ready_repo(tmp_path, capsys)
-    imported, _, _ = work_cmd._append_import_records(
+    imported, _, _, _ = work_cmd._append_import_records(
         tmp_path,
         [
             {
@@ -815,7 +815,7 @@ def test_daily_rejected_pause_stays_rejected_after_store_is_approved(
 
 def test_daily_approvals_list_show_review_and_no_execution(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)
-    imported, _, _ = work_cmd._append_import_records(
+    imported, _, _, _ = work_cmd._append_import_records(
         tmp_path,
         [
             {
@@ -913,7 +913,7 @@ def test_daily_run_approval_lifecycle_and_idempotency(tmp_path, capsys):
 
 def test_daily_approval_refuses_stale_missing_and_changed_evidence(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)
-    imported, _, _ = work_cmd._append_import_records(
+    imported, _, _, _ = work_cmd._append_import_records(
         tmp_path,
         [
             {

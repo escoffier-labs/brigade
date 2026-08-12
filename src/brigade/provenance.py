@@ -22,6 +22,7 @@ TRUST_POLICY_SCHEMA = "brigade.trust-policy.v1"
 TRUST_POLICY_VERSION = 1
 LEGACY_DISPLAY = "UNKNOWN PROVENANCE - legacy item"
 MAX_COMPACT_BYTES = 4096
+MAX_REPOSITORY_REVISION_BYTES = 256
 
 ORIGINS = frozenset({"operator-input", "workspace", "agent-session", "external-service", "external-web", "unknown"})
 MODALITIES = frozenset({"human-written", "model-generated", "tool-output", "external-web", "mixed", "unknown"})
@@ -32,6 +33,55 @@ LOCATOR_KINDS = frozenset({"repo-relative", "uri"})
 CONTENT_SCOPES = frozenset({"item.text.utf8.v1", "message.text.utf8.v1"})
 RAW_SCOPE = "exact_bytes"
 HASH_ALGORITHM = "sha256"
+
+# Closed names derived from the build_envelope/validate_envelope schema. Inbound
+# adapters may retain only importer-owned identity aliases outside this set.
+_ENVELOPE_METADATA_FIELDS = {
+    "schema": ("schema", "schema_version"),
+    "source": ("source", "source_system", "source_kind", "source_producer"),
+    "origin": ("origin",),
+    "repository": ("repository", "repository_id", "repo_id", "repository_revision"),
+    "session": ("session", "session_id", "session_harness"),
+    "collection": ("collection_id", "item_id"),
+    "locator": ("locator", "locator_kind", "locator_value"),
+    "classification": ("attribution", "modality"),
+    "trust": (
+        "trust",
+        "trust_label",
+        "trust_assigned_by",
+        "trust_assigned_at",
+        "trust_policy",
+        "trust_policy_schema",
+        "trust_policy_schema_version",
+        "injection",
+        "injection_status",
+        "injection_count",
+        "injection_rules",
+    ),
+    "hashes": (
+        "hashes",
+        "content_algorithm",
+        "content_scope",
+        "content",
+        "content_hash",
+        "content_hash_algorithm",
+        "content_hash_scope",
+        "raw_algorithm",
+        "raw_scope",
+        "raw",
+        "raw_hash",
+        "raw_hash_algorithm",
+        "raw_hash_scope",
+        "content_sha256",
+        "raw_sha256",
+        "content_digest",
+        "raw_digest",
+    ),
+    "timestamps": ("captured_at", "ingested_at"),
+}
+ENVELOPE_METADATA_RESERVED_KEYS = frozenset(
+    key for field_keys in _ENVELOPE_METADATA_FIELDS.values() for key in field_keys
+)
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -63,13 +113,35 @@ def _is_absolute_locator(value: Any) -> bool:
         return False
     if value.startswith("/"):
         return True
-    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
+    if value.startswith("\\"):
         return True
-    if value.startswith("\\\\"):
+    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
         return True
     if value.lower().startswith("file:"):
         return True
     return False
+
+
+def is_safe_identity_label(value: Any) -> bool:
+    """Return whether an identity label cannot be interpreted as a locator."""
+    if not isinstance(value, str) or not value or value != value.strip() or "\\" in value:
+        return False
+    if _is_absolute_locator(value):
+        return False
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value):
+        return False
+    return ".." not in value.split("/")
+
+
+def is_safe_repository_revision(value: Any) -> bool:
+    """Return whether a repository revision is a bounded, non-locator label."""
+    if not isinstance(value, str) or not value or value != value.strip() or "\\" in value:
+        return False
+    if len(value.encode("utf-8")) > MAX_REPOSITORY_REVISION_BYTES or _is_absolute_locator(value):
+        return False
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value):
+        return False
+    return ".." not in value.split("/")
 
 
 def validate_envelope(
@@ -120,9 +192,13 @@ def validate_envelope(
         rid = repo.get("id")
         if not isinstance(rid, str) or not rid:
             errors.append("repository.id must be a non-empty string")
+        elif not is_safe_identity_label(rid):
+            errors.append("repository.id must be a safe identity label")
         rev = repo.get("revision")
         if rev is not None and not isinstance(rev, str):
             errors.append("repository.revision must be a string or null")
+        elif rev is not None and not is_safe_repository_revision(rev):
+            errors.append("repository.revision must be a safe revision label")
 
     session = env.get("session")
     if session is None:
@@ -134,9 +210,13 @@ def validate_envelope(
         sid = session.get("id")
         if sid is not None and not isinstance(sid, str):
             errors.append("session.id must be a string or null")
+        elif sid is not None and not is_safe_identity_label(sid):
+            errors.append("session.id must be a safe identity label")
         harness = session.get("harness")
         if harness is not None and not isinstance(harness, str):
             errors.append("session.harness must be a string or null")
+        elif harness is not None and not is_safe_identity_label(harness):
+            errors.append("session.harness must be a safe identity label")
 
     for key in ("collection_id", "item_id"):
         val = env.get(key)
@@ -145,6 +225,8 @@ def validate_envelope(
                 errors.append(f"{key} must be a string")
         elif not isinstance(val, str):
             errors.append(f"{key} must be a string or null")
+        elif not is_safe_identity_label(val):
+            errors.append(f"{key} must be a safe identity label")
 
     locator = env.get("locator")
     if locator is None:

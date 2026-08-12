@@ -5,6 +5,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from brigade import cli
 from brigade import chat_cmd
 from brigade import dogfood_cmd
@@ -27,6 +29,20 @@ from tests.work_cmd_test_helpers import (
     _write_chat_surfaces_config,
     _chat_finding,
 )
+
+
+def test_import_add_rejects_symlinked_inbox(tmp_path):
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside_before = b'{"outside":true}\n'
+    outside.write_bytes(outside_before)
+    inbox.symlink_to(outside)
+
+    result = work_cmd.import_add(target=tmp_path, text="must stay local")
+
+    assert result != 0
+    assert outside.read_bytes() == outside_before
 
 
 def test_tools_cmd_package_exposes_constants_facade_aliases():
@@ -401,8 +417,96 @@ def test_work_import_validate_and_ingest_jsonl(tmp_path, monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["imports"]) == 1
     assert payload["imports"][0]["kind"] == "finding"
-    assert payload["imports"][0]["source"] == "scanner"
+    assert payload["imports"][0]["source"] == "learning-loop"
+    assert payload["imports"][0]["metadata"]["declared_source"] == "scanner"
     assert payload["imports"][0]["metadata"]["thread"] == "abc123"
+
+
+def test_work_import_ingest_dedupes_canonical_existing_row_without_scanner_receipt(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Keep canonical ordinary import dedupe",
+                "kind": "finding",
+                "source": "external-scanner",
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    existing = first["imports"][0]
+    assert work_cmd.ledger._has_canonical_untrusted_import_identity(existing)
+    assert not work_cmd.ledger._has_locally_stamped_import_proof(existing, target=tmp_path)
+    assert work_cmd.ledger._has_persisted_import_proof(existing, target=tmp_path)
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    duplicate = json.loads(capsys.readouterr().out)
+    assert duplicate["created"] == 0
+    assert duplicate["skipped"] == 1
+
+
+def test_work_import_ingest_contains_stamp_failure_without_leaking_record_content(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    hostile_marker = "HOSTILE-PRIVATE-PAYLOAD-DO-NOT-LEAK"
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "text": hostile_marker,
+                        "kind": "task",
+                        "source": "hostile-stamp-source",
+                        "metadata": {
+                            "source_item_key": "hostile:stamp:1",
+                            "source_fingerprint": "fp-hostile-stamp-1",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "text": "Valid sibling import",
+                        "kind": "task",
+                        "source": "scanner",
+                        "metadata": {
+                            "source_item_key": "valid:stamp:1",
+                            "source_fingerprint": "fp-valid-stamp-1",
+                        },
+                    }
+                ),
+            )
+        )
+        + "\n"
+    )
+    original = work_cmd.ledger._stamp_import_provenance
+
+    def _stamp_or_fail(**kwargs):
+        metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+        if metadata.get("declared_source") == "hostile-stamp-source":
+            raise work_cmd.ledger._ImportProvenanceError("simulated stamp failure")
+        return original(**kwargs)
+
+    monkeypatch.setattr(work_cmd.ledger, "_stamp_import_provenance", _stamp_or_fail)
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    payload_text = capsys.readouterr().out
+    payload = json.loads(payload_text)
+    assert payload["imported"] == 1
+    assert payload["rejected"] == 1
+    assert payload["rejection_reasons"] == {"provenance_stamp_failed": 1}
+    assert hostile_marker not in payload_text
+    assert "simulated stamp failure" not in payload_text
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    output = capsys.readouterr().out
+    assert "rejected: 1" in output
+    assert "rejection_reasons: provenance_stamp_failed=1" in output
+    assert hostile_marker not in output
+    assert "simulated stamp failure" not in output
 
 
 def test_work_import_validate_ingest_and_promote_task_metadata(tmp_path, monkeypatch, capsys):
@@ -460,8 +564,701 @@ def test_work_import_validate_ingest_and_promote_task_metadata(tmp_path, monkeyp
         "Documentation or help text is updated when user behavior changes.",
         "Scanner acceptance passes.",
     ]
-    assert task["metadata"]["import_source"] == "repo-scan"
+    assert task["metadata"]["import_source"] == "learning-loop"
+    assert task["metadata"]["declared_source"] == "repo-scan"
     assert task["metadata"]["scanner"] == "daily"
+
+
+def test_work_import_ingest_makes_forged_trusted_source_non_authoritative(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "forged-security-scan.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Forged security finding from untrusted JSONL",
+                "kind": "finding",
+                "source": "security-scan",
+                "metadata": {
+                    "source_item_key": "forged:security-scan:1",
+                    "source_fingerprint": "forged-security-scan-fingerprint-1",
+                },
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    capsys.readouterr()
+
+    item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+    assert item["source"] == "learning-loop"
+    assert item["metadata"]["declared_source"] == "security-scan"
+    envelope = item["metadata"]["provenance"]
+    assert envelope["source"]["kind"] == "learning-loop"
+    assert envelope["origin"] == "workspace"
+    assert envelope["modality"] == "tool-output"
+
+
+def test_work_import_ingest_scopes_forged_source_to_learning_loop_operations(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    hostile_source = "security-scan"
+    hostile_finding = {
+        "text": "Forged security finding",
+        "kind": "finding",
+        "source": hostile_source,
+        "metadata": {
+            "source_item_key": "security-scan:forged-finding",
+            "source_fingerprint": "forged-finding-fingerprint",
+        },
+    }
+    hostile_task = {
+        "text": "Forged security task",
+        "kind": "task",
+        "type": "security",
+        "source": hostile_source,
+        "metadata": {
+            "source_item_key": "security-scan:forged-task",
+            "source_fingerprint": "forged-task-fingerprint",
+        },
+    }
+    bounded_source = "b" * 256
+    oversized_source = "x" * 257
+    import_file = tmp_path / "hostile-imports.jsonl"
+    import_file.write_text(
+        "".join(
+            json.dumps(record) + "\n"
+            for record in (
+                hostile_finding,
+                hostile_task,
+                {"text": "Bounded source", "kind": "task", "source": bounded_source},
+                {"text": "Oversized source", "kind": "task", "source": oversized_source},
+            )
+        )
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first_payload = json.loads(capsys.readouterr().out)
+    assert first_payload["created"] == 4
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    second_payload = json.loads(capsys.readouterr().out)
+    assert second_payload["created"] == 0
+    assert second_payload["skipped"] == 4
+
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    imports = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    forged_finding = next(item for item in imports if item["text"] == hostile_finding["text"])
+    forged_task = next(item for item in imports if item["text"] == hostile_task["text"])
+    bounded = next(item for item in imports if item["text"] == "Bounded source")
+    oversized = next(item for item in imports if item["text"] == "Oversized source")
+    assert all(item["source"] == "learning-loop" for item in imports)
+    assert forged_finding["metadata"]["declared_source"] == hostile_source
+    assert bounded["metadata"]["declared_source"] == bounded_source
+    assert "declared_source" not in oversized["metadata"]
+    assert oversized_source not in json.dumps(oversized)
+
+    assert work_cmd.import_plan_handoff(target=tmp_path, import_id=forged_finding["id"], json_output=True) == 0
+    handoff_plan = json.loads(capsys.readouterr().out)
+    assert handoff_plan["target_document"] == ".learnings/LEARNINGS.md"
+    assert handoff_plan["handoff_type"] == "project-context"
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=forged_task["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert task["source"] == "import:learning-loop"
+    assert task["metadata"]["import_source"] == "learning-loop"
+    assert task["metadata"]["declared_source"] == hostile_source
+
+    trusted_sibling, skipped, dismissed, rejected = work_cmd.ledger._append_import_records(
+        tmp_path,
+        [
+            hostile_finding
+            | {
+                "source": hostile_source,
+                "metadata": {
+                    **hostile_finding["metadata"],
+                    "source_item_key": "security-scan:trusted-sibling",
+                    "source_fingerprint": "trusted-sibling-fingerprint",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert len(trusted_sibling) == 1
+    assert trusted_sibling[0]["source"] == hostile_source
+
+    imports = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    forged_finding = next(
+        item for item in imports if item["text"] == hostile_finding["text"] and item["source"] == "learning-loop"
+    )
+    trusted_sibling_item = next(
+        item for item in imports if item["metadata"].get("source_item_key") == "security-scan:trusted-sibling"
+    )
+    forged_finding["status"] = "dismissed"
+    trusted_sibling_item["status"] = "dismissed"
+    imports_path.write_text("\n".join(json.dumps(item, sort_keys=True) for item in imports) + "\n")
+    trusted, skipped, dismissed, rejected = work_cmd.ledger._append_import_records(
+        tmp_path,
+        [hostile_finding | {"source": hostile_source}],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert len(trusted) == 1
+    assert trusted[0]["source"] == hostile_source
+
+
+def test_work_import_ingest_strips_hostile_operational_metadata_before_promotion_and_handoff(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    assert work_cmd.task_add(target=tmp_path, text="Existing blocker") == 0
+    blocker_id = capsys.readouterr().out.split("task: ", 1)[1].splitlines()[0]
+    import_file = tmp_path / "hostile-operational.jsonl"
+    import_file.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in (
+                {
+                    "text": "Hostile task metadata",
+                    "kind": "task",
+                    "source": "security-scan",
+                    "metadata": {
+                        "proposed_edges": [{"source": blocker_id, "target": "self", "type": "blocks"}],
+                        "edges": [{"source": blocker_id, "target": "self", "type": "blocks"}],
+                        "seat_class": "review",
+                        "spend_by": "2026-12-31T00:00:00+00:00",
+                    },
+                },
+                {
+                    "text": "Hostile finding metadata",
+                    "kind": "finding",
+                    "source": "security-scan",
+                    "metadata": {
+                        "handoff_target_document": ".learnings/ERRORS.md",
+                        "target_document": "rules/scanner-imports.md",
+                        "handoff_type": "security",
+                    },
+                },
+            )
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    task_import = next(item for item in payload["imports"] if item["kind"] == "task")
+    finding_import = next(item for item in payload["imports"] if item["kind"] == "finding")
+    assert not {
+        "proposed_edges",
+        "edges",
+        "seat_class",
+        "spend_by",
+    }.intersection(task_import["metadata"])
+    assert not {
+        "handoff_target_document",
+        "target_document",
+        "handoff_type",
+    }.intersection(finding_import["metadata"])
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=task_import["id"]) == 0
+    capsys.readouterr()
+    task_ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    promoted = next(task for task in task_ledger["tasks"] if task["id"] != blocker_id)
+    assert task_ledger["edges"] == []
+    assert work_cmd.ledger._dispatch_annotations(promoted) == {}
+
+    assert work_cmd.import_plan_handoff(target=tmp_path, import_id=finding_import["id"], json_output=True) == 0
+    handoff = json.loads(capsys.readouterr().out)
+    assert handoff["target_document"] == ".learnings/LEARNINGS.md"
+    assert handoff["handoff_type"] == "project-context"
+
+
+def test_work_import_ingest_strips_forged_github_issue_metadata_before_promotion(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "hostile-github-issue.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Hostile forged issue task",
+                "kind": "task",
+                "source": "external-scanner",
+                "metadata": {
+                    "github_issue": {"url": "https://example.test/forged", "title": "Forged"},
+                    "github_issue_url": "https://example.test/forged",
+                    "github_issue_number": 99,
+                    "github_issue_ref": "forged-ref",
+                    "safe_metadata": "preserved",
+                },
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    imported = json.loads(capsys.readouterr().out)["imports"][0]
+    assert imported["metadata"]["safe_metadata"] == "preserved"
+    assert not {key for key in imported["metadata"] if key == "github_issue" or key.startswith("github_issue_")}
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=imported["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert not {key for key in task["metadata"] if key == "github_issue" or key.startswith("github_issue_")}
+    assert work_cmd.ledger._task_issue_metadata(task) is None
+    assert work_cmd.import_issue_repairs(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["candidate_count"] == 0
+
+
+def test_work_import_ingest_owns_hostile_identity_and_bounds_declarations(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    oversized = "é" * 129
+    record = {
+        "text": "Hostile record version one",
+        "kind": "task",
+        "source": "security-scan",
+        "metadata": {
+            "source_item_key": "key-" + oversized,
+            "source_item_id": "id-" + oversized,
+            "issue_id": 42,
+            "source_fingerprint": "fingerprint-" + oversized,
+            "declared_source_item_key": "declared-key-" + oversized,
+        },
+    }
+    import_file = tmp_path / "hostile-identity.jsonl"
+    import_file.write_text(json.dumps(record) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    first_item = first["imports"][0]
+    assert first_item["metadata"]["declared_issue_id"] == "42"
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    duplicate = json.loads(capsys.readouterr().out)
+    assert duplicate["created"] == 0
+    assert duplicate["skipped"] == 1
+
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=first_item["id"], reason="test") == 0
+    capsys.readouterr()
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    dismissed = json.loads(capsys.readouterr().out)
+    assert dismissed["created"] == 0
+    assert dismissed["dismissed"] == 1
+
+    changed_hostile_identity = {
+        **record,
+        "source": "different-security-scan",
+        "metadata": {
+            **record["metadata"],
+            "source_item_key": "changed-key",
+            "source_item_id": "changed-id",
+            "source_fingerprint": "changed-fingerprint",
+        },
+    }
+    import_file.write_text(json.dumps(changed_hostile_identity) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    changed_identity_dismissed = json.loads(capsys.readouterr().out)
+    assert changed_identity_dismissed["created"] == 0
+    assert changed_identity_dismissed["dismissed"] == 1
+
+    changed = {**record, "text": "Hostile record version two"}
+    import_file.write_text(json.dumps(changed) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    changed_payload = json.loads(capsys.readouterr().out)
+    assert changed_payload["created"] == 1
+    changed_item = changed_payload["imports"][0]
+    assert changed_item["metadata"]["source_item_key"] != first_item["metadata"]["source_item_key"]
+    assert changed_item["metadata"]["source_fingerprint"] != first_item["metadata"]["source_fingerprint"]
+    serialized = json.dumps(changed_item, sort_keys=True)
+    assert oversized not in serialized
+    assert all(
+        len(str(value).encode("utf-8")) <= 256
+        for key, value in changed_item["metadata"].items()
+        if key.startswith("declared_source_")
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, dry_run=True, json_output=True) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["created"] == 0
+    assert dry_run["skipped"] == 1
+
+
+def test_work_import_ingest_owns_hostile_provenance_identity_end_to_end(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    reserved_raw_provenance_input_keys = frozenset(
+        {
+            "repository",
+            "repository_id",
+            "repo_id",
+            "repository_revision",
+            "session",
+            "session_id",
+            "session_harness",
+            "collection_id",
+            "item_id",
+            "locator_kind",
+            "locator_value",
+            "captured_at",
+            "ingested_at",
+            "schema",
+            "schema_version",
+            "source",
+            "source_system",
+            "source_kind",
+            "source_producer",
+            "origin",
+            "attribution",
+            "modality",
+            "trust",
+            "trust_label",
+            "trust_assigned_by",
+            "trust_assigned_at",
+            "trust_policy",
+            "trust_policy_schema",
+            "trust_policy_schema_version",
+            "injection",
+            "injection_status",
+            "injection_count",
+            "injection_rules",
+            "hashes",
+            "content_algorithm",
+            "content_scope",
+            "content",
+            "content_hash",
+            "content_hash_algorithm",
+            "content_hash_scope",
+            "raw_algorithm",
+            "raw_scope",
+            "raw",
+            "raw_hash",
+            "raw_hash_algorithm",
+            "raw_hash_scope",
+            "handoff_issue_id",
+        }
+    )
+    hostile_markers = {
+        "repository": "/private/rooted-repository",
+        "repository_nested_revision": "release/../nested-revision",
+        "repository_id": "file:///var/private/repository",
+        "repo_id": "../private/repository",
+        "repository_revision": "release/../revision",
+        "session": "raw-nested-session",
+        "session_nested_harness": "raw-nested-harness",
+        "session_id": "raw-session-id",
+        "session_harness": "raw-session-harness",
+        "collection_id": "raw-collection-id",
+        "item_id": "raw-item-id",
+        "locator_kind": "repo-relative",
+        "locator_value": "file:///var/private/locator.md",
+        "captured_at": "raw-captured-at",
+        "ingested_at": "raw-ingested-at",
+        "schema": "raw-schema",
+        "schema_version": "raw-schema-version",
+        "source": "raw-source",
+        "source_system": "raw-source-system",
+        "source_kind": "raw-source-kind",
+        "source_producer": "raw-source-producer",
+        "origin": "raw-origin",
+        "attribution": "raw-attribution",
+        "modality": "raw-modality",
+        "trust": "raw-trust",
+        "trust_label": "raw-trust-label",
+        "trust_assigned_by": "raw-trust-assigned-by",
+        "trust_assigned_at": "raw-trust-assigned-at",
+        "trust_policy": "raw-trust-policy",
+        "trust_policy_schema": "raw-trust-policy-schema",
+        "trust_policy_schema_version": "raw-trust-policy-schema-version",
+        "injection": "raw-injection",
+        "injection_status": "raw-injection-status",
+        "injection_count": "raw-injection-count",
+        "injection_rules": "raw-injection-rules",
+        "hashes": "raw-hashes",
+        "content_algorithm": "raw-content-algorithm",
+        "content_scope": "raw-content-scope",
+        "content": "raw-content",
+        "content_hash": "raw-content-hash",
+        "content_hash_algorithm": "raw-content-hash-algorithm",
+        "content_hash_scope": "raw-content-hash-scope",
+        "raw_algorithm": "raw-raw-algorithm",
+        "raw_scope": "raw-raw-scope",
+        "raw": "raw-raw",
+        "raw_hash": "raw-raw-hash",
+        "raw_hash_algorithm": "raw-raw-hash-algorithm",
+        "raw_hash_scope": "raw-raw-hash-scope",
+        "handoff_issue_id": "raw-handoff-issue-id",
+        "provenance": "raw-forged-provenance",
+    }
+    record = {
+        "text": "Hostile provenance identity record",
+        "kind": "task",
+        "source": "hostile-source",
+        "metadata": {
+            "repository": {
+                "id": hostile_markers["repository"],
+                "revision": hostile_markers["repository_nested_revision"],
+            },
+            "repository_id": hostile_markers["repository_id"],
+            "repo_id": hostile_markers["repo_id"],
+            "repository_revision": hostile_markers["repository_revision"],
+            "session": {
+                "id": hostile_markers["session"],
+                "harness": hostile_markers["session_nested_harness"],
+            },
+            "session_id": hostile_markers["session_id"],
+            "session_harness": hostile_markers["session_harness"],
+            "collection_id": hostile_markers["collection_id"],
+            "item_id": hostile_markers["item_id"],
+            "locator_kind": hostile_markers["locator_kind"],
+            "locator_value": hostile_markers["locator_value"],
+            "captured_at": hostile_markers["captured_at"],
+            "ingested_at": hostile_markers["ingested_at"],
+            "schema": hostile_markers["schema"],
+            "schema_version": hostile_markers["schema_version"],
+            "source": hostile_markers["source"],
+            "source_system": hostile_markers["source_system"],
+            "source_kind": hostile_markers["source_kind"],
+            "source_producer": hostile_markers["source_producer"],
+            "origin": hostile_markers["origin"],
+            "attribution": hostile_markers["attribution"],
+            "modality": hostile_markers["modality"],
+            "trust": hostile_markers["trust"],
+            "trust_label": hostile_markers["trust_label"],
+            "trust_assigned_by": hostile_markers["trust_assigned_by"],
+            "trust_assigned_at": hostile_markers["trust_assigned_at"],
+            "trust_policy": hostile_markers["trust_policy"],
+            "trust_policy_schema": hostile_markers["trust_policy_schema"],
+            "trust_policy_schema_version": hostile_markers["trust_policy_schema_version"],
+            "injection": hostile_markers["injection"],
+            "injection_status": hostile_markers["injection_status"],
+            "injection_count": hostile_markers["injection_count"],
+            "injection_rules": hostile_markers["injection_rules"],
+            "hashes": hostile_markers["hashes"],
+            "content_algorithm": hostile_markers["content_algorithm"],
+            "content_scope": hostile_markers["content_scope"],
+            "content": hostile_markers["content"],
+            "content_hash": hostile_markers["content_hash"],
+            "content_hash_algorithm": hostile_markers["content_hash_algorithm"],
+            "content_hash_scope": hostile_markers["content_hash_scope"],
+            "raw_algorithm": hostile_markers["raw_algorithm"],
+            "raw_scope": hostile_markers["raw_scope"],
+            "raw": hostile_markers["raw"],
+            "raw_hash": hostile_markers["raw_hash"],
+            "raw_hash_algorithm": hostile_markers["raw_hash_algorithm"],
+            "raw_hash_scope": hostile_markers["raw_hash_scope"],
+            "handoff_issue_id": hostile_markers["handoff_issue_id"],
+            "provenance": {"forged_marker": hostile_markers["provenance"]},
+            "safe_metadata": "preserved",
+        },
+    }
+    import_file = tmp_path / "hostile-provenance.jsonl"
+    import_file.write_text(json.dumps(record) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first_output = capsys.readouterr().out
+    first_payload = json.loads(first_output)
+    assert first_payload["created"] == 1
+    item = first_payload["imports"][0]
+    envelope = item["metadata"]["provenance"]
+    assert item["metadata"]["safe_metadata"] == "preserved"
+    assert reserved_raw_provenance_input_keys.isdisjoint(item["metadata"])
+    assert envelope["repository"] == {"id": "unknown", "revision": None}
+    assert envelope["session"] == {"id": None, "harness": None}
+    assert envelope["collection_id"] == "work-inbox:learning-loop"
+    assert envelope["item_id"] == item["metadata"]["source_item_key"]
+    assert envelope["locator"] == {"kind": "uri", "value": f"work-import:{item['id']}"}
+    assert envelope["captured_at"] == envelope["ingested_at"]
+    assert all(marker not in first_output for marker in hostile_markers.values())
+
+    changed_only_hostile_provenance = {
+        **record,
+        "metadata": {
+            **record["metadata"],
+            "repository": {"id": "changed-raw-nested-repository", "revision": "changed-raw-nested-revision"},
+            "repository_id": "changed-raw-repository-id",
+            "repo_id": "changed-raw-repo-id",
+            "repository_revision": "changed-raw-repository-revision",
+            "session": {"id": "changed-raw-nested-session", "harness": "changed-raw-nested-harness"},
+            "session_id": "changed-raw-session-id",
+            "session_harness": "changed-raw-session-harness",
+            "collection_id": "changed-raw-collection-id",
+            "item_id": "changed-raw-item-id",
+            "locator_kind": "changed-raw-locator-kind",
+            "locator_value": "changed-raw-locator-value",
+            "captured_at": "changed-raw-captured-at",
+            "ingested_at": "changed-raw-ingested-at",
+            "schema": "changed-raw-schema",
+            "schema_version": "changed-raw-schema-version",
+            "source": "changed-raw-source",
+            "source_system": "changed-raw-source-system",
+            "source_kind": "changed-raw-source-kind",
+            "source_producer": "changed-raw-source-producer",
+            "origin": "changed-raw-origin",
+            "attribution": "changed-raw-attribution",
+            "modality": "changed-raw-modality",
+            "trust": "changed-raw-trust",
+            "trust_label": "changed-raw-trust-label",
+            "trust_assigned_by": "changed-raw-trust-assigned-by",
+            "trust_assigned_at": "changed-raw-trust-assigned-at",
+            "trust_policy": "changed-raw-trust-policy",
+            "trust_policy_schema": "changed-raw-trust-policy-schema",
+            "trust_policy_schema_version": "changed-raw-trust-policy-schema-version",
+            "injection": "changed-raw-injection",
+            "injection_status": "changed-raw-injection-status",
+            "injection_count": "changed-raw-injection-count",
+            "injection_rules": "changed-raw-injection-rules",
+            "hashes": "changed-raw-hashes",
+            "content_algorithm": "changed-raw-content-algorithm",
+            "content_scope": "changed-raw-content-scope",
+            "content": "changed-raw-content",
+            "content_hash": "changed-raw-content-hash",
+            "content_hash_algorithm": "changed-raw-content-hash-algorithm",
+            "content_hash_scope": "changed-raw-content-hash-scope",
+            "raw_algorithm": "changed-raw-raw-algorithm",
+            "raw_scope": "changed-raw-raw-scope",
+            "raw": "changed-raw-raw",
+            "raw_hash": "changed-raw-raw-hash",
+            "raw_hash_algorithm": "changed-raw-raw-hash-algorithm",
+            "raw_hash_scope": "changed-raw-raw-hash-scope",
+            "handoff_issue_id": "changed-raw-handoff-issue-id",
+            "provenance": {"forged_marker": "changed-raw-forged-provenance"},
+        },
+    }
+    import_file.write_text(json.dumps(changed_only_hostile_provenance) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    duplicate_payload = json.loads(capsys.readouterr().out)
+    assert duplicate_payload["created"] == 0
+    assert duplicate_payload["skipped"] == 1
+
+    inbox_item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+    inbox_serialized = json.dumps(inbox_item, sort_keys=True)
+    assert reserved_raw_provenance_input_keys.isdisjoint(inbox_item["metadata"])
+    assert all(marker not in inbox_serialized for marker in hostile_markers.values())
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    task_serialized = json.dumps(task, sort_keys=True)
+    assert reserved_raw_provenance_input_keys.isdisjoint(task["metadata"])
+    assert all(marker not in task_serialized for marker in hostile_markers.values())
+
+    dismissal_target = tmp_path / "dismissal-target"
+    dismissal_target.mkdir()
+    dismissal_file = dismissal_target / "hostile-provenance.jsonl"
+    dismissal_file.write_text(json.dumps(record) + "\n")
+    assert work_cmd.import_ingest(target=dismissal_target, input_path=dismissal_file, json_output=True) == 0
+    dismissed_item = json.loads(capsys.readouterr().out)["imports"][0]
+    assert (
+        work_cmd.import_dismiss(target=dismissal_target, import_id=dismissed_item["id"], reason="not actionable") == 0
+    )
+    capsys.readouterr()
+    dismissal_file.write_text(json.dumps(changed_only_hostile_provenance) + "\n")
+    assert work_cmd.import_ingest(target=dismissal_target, input_path=dismissal_file, json_output=True) == 0
+    dismissed_payload = json.loads(capsys.readouterr().out)
+    assert dismissed_payload["created"] == 0
+    assert dismissed_payload["dismissed"] == 1
+
+
+def test_work_import_ingest_recursively_strips_hostile_metadata_and_hash_aliases(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    aliases = {"content_sha256", "raw_sha256", "content_digest", "raw_digest"}
+    hostile = {
+        "text": "Keep only safe nested scanner evidence",
+        "kind": "task",
+        "source": "hostile-scanner",
+        "metadata": {
+            **{alias: f"forged-{alias}" for alias in aliases},
+            "safe_evidence": {
+                "summary": "safe evidence survives",
+                "nested": {
+                    "handoff_issue_id": "forged-handoff",
+                    "github_issue_url": "https://example.test/forged",
+                    "declared_source": "forged-source",
+                    "content_digest": "forged-content-digest",
+                    "safe_value": "keep nested value",
+                },
+                "items": [
+                    {"raw_digest": "forged-raw-digest", "safe_list_value": "keep list value"},
+                    "keep scalar",
+                ],
+            },
+        },
+    }
+    import_file = tmp_path / "nested-hostile-import.jsonl"
+    import_file.write_text(json.dumps(hostile) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+    item = payload["imports"][0]
+    metadata = item["metadata"]
+    assert metadata["safe_evidence"] == {
+        "summary": "safe evidence survives",
+        "nested": {"safe_value": "keep nested value"},
+        "items": [{"safe_list_value": "keep list value"}, "keep scalar"],
+    }
+    serialized = json.dumps(item, sort_keys=True)
+    assert all(f"forged-{alias}" not in serialized for alias in aliases)
+    assert "forged-handoff" not in serialized
+    assert "https://example.test/forged" not in serialized
+    assert "forged-source" not in serialized
+
+    hostile["metadata"]["safe_evidence"]["nested"]["raw_sha256"] = "changed-forged-alias"
+    import_file.write_text(json.dumps(hostile) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    duplicate = json.loads(capsys.readouterr().out)
+    assert duplicate["created"] == 0
+    assert duplicate["skipped"] == 1
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert task["metadata"]["safe_evidence"] == metadata["safe_evidence"]
+    task_serialized = json.dumps(task, sort_keys=True)
+    assert all(alias not in task_serialized for alias in aliases)
+    assert "forged-handoff" not in task_serialized
+
+
+def test_work_import_ingest_metadata_changes_do_not_resurface_dismissed_record(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    record = {
+        "text": "Review scanner evidence retention",
+        "kind": "finding",
+        "source": "hostile-scanner",
+        "metadata": {
+            "scanner_run_id": "run-one",
+            "safe_metadata": {"evidence": "initial"},
+        },
+    }
+    import_file = tmp_path / "metadata-only-change.jsonl"
+    import_file.write_text(json.dumps(record) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    item = first["imports"][0]
+    assert item["metadata"]["scanner_run_id"] == "run-one"
+    assert item["metadata"]["safe_metadata"] == {"evidence": "initial"}
+
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=item["id"], reason="not actionable") == 0
+    capsys.readouterr()
+
+    metadata_only_change = {
+        **record,
+        "metadata": {
+            "scanner_run_id": "run-two",
+            "safe_metadata": {"evidence": "updated"},
+        },
+    }
+    import_file.write_text(json.dumps(metadata_only_change) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    dismissed = json.loads(capsys.readouterr().out)
+    assert dismissed["created"] == 0
+    assert dismissed["dismissed"] == 1
+
+    content_change = {**metadata_only_change, "text": "Review updated scanner evidence retention"}
+    import_file.write_text(json.dumps(content_change) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    changed = json.loads(capsys.readouterr().out)
+    assert changed["created"] == 1
+    assert changed["dismissed"] == 0
 
 
 def test_work_import_provenance_audits_cross_producer_contract(tmp_path, monkeypatch, capsys):
@@ -1899,7 +2696,8 @@ def test_work_import_plan_handoff_covers_durable_kinds(tmp_path, monkeypatch, ca
         payload = json.loads(capsys.readouterr().out)
         assert payload["handoff_ready"] is True
         assert payload["target_document"] == expected_targets[item["kind"]]
-        assert payload["provenance"]["source_fingerprint"] == f"fp-{item['kind']}"
+        assert payload["provenance"]["source_fingerprint"] == item["metadata"]["source_fingerprint"]
+        assert item["metadata"]["declared_source_fingerprint"] == f"fp-{item['kind']}"
 
 
 def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(tmp_path, monkeypatch, capsys):
@@ -1939,6 +2737,9 @@ def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
     capsys.readouterr()
     item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+    canonical_fingerprint = item["metadata"]["source_fingerprint"]
+    assert canonical_fingerprint != "fingerprint-one"
+    assert item["metadata"]["declared_source_fingerprint"] == "fingerprint-one"
 
     assert work_cmd.import_promote_handoff(target=tmp_path, import_id=item["id"], json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1946,7 +2747,8 @@ def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(
     assert handoff_path.parent == tmp_path / ".codex" / "memory-handoffs"
     assert handoff_cmd.lint_file(handoff_path).valid is True
     handoff = handoff_path.read_text()
-    assert "fingerprint-one" in handoff
+    assert canonical_fingerprint in handoff
+    assert "fingerprint-one" not in handoff
     assert "scanner_run_id" in handoff
     assert "sweep-1" in handoff
     assert "https://private.example" not in handoff
@@ -1956,7 +2758,7 @@ def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(
     assert promoted["status"] == "promoted"
     assert promoted["handoff_path"] == str(handoff_path)
     assert promoted["handoff_target_document"] == ".learnings/LEARNINGS.md"
-    assert promoted["handoff_source_fingerprint"] == "fingerprint-one"
+    assert promoted["handoff_source_fingerprint"] == canonical_fingerprint
     assert promoted["promoted_at"] == "2026-05-26T12:01:02+00:00"
 
 
@@ -2139,6 +2941,13 @@ def test_work_import_handoff_dedupe_respects_promoted_and_changed_fingerprints(t
     import_file.write_text(json.dumps(changed) + "\n")
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
     changed_payload = json.loads(capsys.readouterr().out)
+    assert changed_payload["created"] == 0
+    assert changed_payload["skipped"] == 1
+
+    changed["text"] = "Remember changed durable scanner preference"
+    import_file.write_text(json.dumps(changed) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    changed_payload = json.loads(capsys.readouterr().out)
     assert changed_payload["created"] == 1
     imports = [
         json.loads(line)
@@ -2183,7 +2992,7 @@ def test_work_import_promote_all_preserves_task_metadata(tmp_path, monkeypatch, 
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
     capsys.readouterr()
 
-    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="repo-scan", kind="task") == 0
+    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="learning-loop", kind="task") == 0
     out = capsys.readouterr().out
     assert "promoted: 2" in out
     assert "acceptance=1" in out
@@ -2222,7 +3031,7 @@ def test_work_run_uses_promoted_import_acceptance(tmp_path, monkeypatch, capsys)
         + "\n"
     )
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
-    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="repo-scan", kind="task") == 0
+    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="learning-loop", kind="task") == 0
     capsys.readouterr()
     seen = {}
 
@@ -2997,6 +3806,23 @@ def test_import_context_stores_framed_untrusted_import(tmp_path, capsys):
     assert metadata["needs_review"] is False
     assert metadata["injection_count"] == 0
     assert metadata["truncated"] is False
+
+
+@pytest.mark.parametrize("operation", ["add", "context"])
+@pytest.mark.parametrize(
+    "unsafe_source", ["file:///private/operator/workspace", "urn:brigade:private", "mailto:ops@example.test"]
+)
+def test_import_commands_reject_unsafe_source_without_echoing_it(tmp_path, capsys, operation, unsafe_source):
+    if operation == "add":
+        result = work_cmd.import_add(target=tmp_path, text="Safe text", source=unsafe_source)
+    else:
+        result = work_cmd.import_context(target=tmp_path, text="Safe context", source=unsafe_source)
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "error: invalid import source" in captured.err
+    assert unsafe_source not in captured.err
+    assert work_cmd._read_imports(tmp_path) == []
 
 
 def test_import_context_flags_injection_signal(tmp_path, capsys):

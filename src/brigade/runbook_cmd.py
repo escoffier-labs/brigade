@@ -1009,7 +1009,9 @@ def closeout(
         from .work_cmd import ledger as ledger_mod
 
         records = _failed_step_import_records(receipt, resolved_run_id)
-        imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+        imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(
+            target, records, dry_run=dry_run
+        )
         closeout_payload["import_issues"] = {
             "failed_step_count": len(records),
             "created": len(imported),

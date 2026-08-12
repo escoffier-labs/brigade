@@ -501,7 +501,7 @@ def readiness_import_issues(*, target: Path, dry_run: bool = False, json_output:
     skipped: list[dict[str, Any]] = []
     dismissed: list[dict[str, Any]] = []
     if not dry_run:
-        imported, skipped, dismissed = work_cmd._append_import_records(target, records)
+        imported, skipped, dismissed, _rejected = work_cmd._append_import_records(target, records)
     result = {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("center-readiness-import-issues"),

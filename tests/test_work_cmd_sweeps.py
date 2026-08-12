@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,55 @@ from tests.work_cmd_test_helpers import (
     _write_chat_surfaces_config,
     _chat_finding,
 )
+
+
+def _write_scanner_import_proof(tmp_path: Path, items: list[dict[str, object]], *, scanner: dict[str, object]) -> None:
+    """Bind legacy scanner rows to the external receipt that produced them."""
+    run_id = "legacy-repo-scan-proof"
+    for item in items:
+        metadata = item.setdefault("metadata", {})
+        assert isinstance(metadata, dict)
+        metadata.update({"scanner_id": scanner["id"], "scanner_run_id": run_id})
+    receipt = {
+        "run_id": run_id,
+        "scanner_id": scanner["id"],
+        "source": scanner["source"],
+        "command": scanner["command"],
+        "status": "completed",
+        "exit_code": 0,
+        "self_import_proofs": {
+            "scanner_id": scanner["id"],
+            "source": scanner["source"],
+            "scanner": scanner,
+            "imports": [
+                {
+                    "id": item["id"],
+                    "content_hash": work_cmd.ledger._locally_stamped_import_content_hash(item),
+                }
+                for item in items
+            ],
+        },
+    }
+    descriptor = work_cmd.ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(descriptor)
+    receipt_path = work_cmd.helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
+    receipt_path.parent.mkdir(parents=True)
+    descriptor = os.open(receipt_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        work_cmd.ledger._record_verifier_owned_directory(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", run_id),
+            directory=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+    receipt_path.write_text(json.dumps(receipt))
+    work_cmd.ledger._write_persisted_import_proofs(tmp_path, items, operation_id="0" * 32)
 
 
 def test_work_sweep_runs_due_scanners_ingests_output_and_reports(tmp_path, capsys):
@@ -201,20 +251,20 @@ conflict_window = "04:00-04:10"
 
 def test_work_sweep_records_skipped_and_dismissed_fingerprints(tmp_path, capsys):
     _init_git_repo(tmp_path)
+    scanner_source = "handoff-ingest"
     pending = work_cmd._make_import(
         "Existing pending",
         kind="task",
-        source="repo-scan",
+        source=scanner_source,
         metadata={"source_item_key": "same-pending", "source_fingerprint": "fp-pending"},
     )
     dismissed = work_cmd._make_import(
         "Existing dismissed",
         kind="task",
-        source="repo-scan",
+        source=scanner_source,
         metadata={"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
     )
     dismissed["status"] = "dismissed"
-    work_cmd._write_imports(tmp_path, [pending, dismissed])
     script = tmp_path / "scanner.py"
     script.write_text(
         """
@@ -224,14 +274,20 @@ from pathlib import Path
 records = [
     {
         "kind": "task",
-        "source": "repo-scan",
+        "source": "handoff-ingest",
         "text": "Existing pending",
         "metadata": {"source_item_key": "same-pending", "source_fingerprint": "fp-pending"},
     },
     {
         "kind": "task",
-        "source": "repo-scan",
+        "source": "handoff-ingest",
         "text": "Existing dismissed",
+        "metadata": {"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
+    },
+    {
+        "kind": "task",
+        "source": "handoff-ingest",
+        "text": "Existing dismissed, changed",
         "metadata": {"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
     },
 ]
@@ -242,12 +298,13 @@ path.write_text("\\n".join(json.dumps(record) for record in records) + "\\n")
     )
     config = tmp_path / ".brigade" / "scanners.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
+    command = f"{sys.executable} {script}"
     config.write_text(
         f"""
 [[scanner]]
 id = "repo-scan"
-source = "repo-scan"
-command = "{sys.executable} {script}"
+source = "handoff-ingest"
+command = "{command}"
 cadence = "daily@02:00"
 enabled = true
 timeout = 30
@@ -257,19 +314,41 @@ import_format = "jsonl"
 conflict_window = "02:00-02:10"
 """
     )
+    _write_scanner_import_proof(
+        tmp_path,
+        [pending, dismissed],
+        scanner=dict(next(item for item in work_cmd.constants.SCANNER_DEFAULTS if item["id"] == "handoff-ingest")),
+    )
+    work_cmd._write_imports(tmp_path, [pending, dismissed])
 
     assert work_cmd.sweep(target=tmp_path, scanner_id="repo-scan", json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
-    assert report["import_counts"] == {"created": 0, "dismissed": 1, "skipped": 1}
-    assert report["import_references"]["created_import_ids"] == []
-    assert report["import_references"]["skipped_source_fingerprints"] == ["fp-pending"]
-    assert report["import_references"]["dismissed_source_fingerprints"] == ["fp-dismissed"]
+    pending_fingerprint = work_cmd.ledger._untrusted_import_canonical_hash({"kind": "task", "text": "Existing pending"})
+    dismissed_fingerprint = work_cmd.ledger._untrusted_import_canonical_hash(
+        {"kind": "task", "text": "Existing dismissed"}
+    )
+    changed_fingerprint = work_cmd.ledger._untrusted_import_canonical_hash(
+        {"kind": "task", "text": "Existing dismissed, changed"}
+    )
+    assert report["import_counts"] == {"created": 1, "dismissed": 1, "skipped": 1}
+    assert len(report["import_references"]["created_import_ids"]) == 1
+    assert report["import_references"]["skipped_source_fingerprints"] == [pending_fingerprint]
+    assert report["import_references"]["dismissed_source_fingerprints"] == [dismissed_fingerprint]
+    assert changed_fingerprint not in report["import_references"]["skipped_source_fingerprints"]
+    assert changed_fingerprint not in report["import_references"]["dismissed_source_fingerprints"]
+    assert all(
+        not fingerprint.startswith("fp-")
+        for fingerprint in [
+            *report["import_references"]["skipped_source_fingerprints"],
+            *report["import_references"]["dismissed_source_fingerprints"],
+        ]
+    )
 
     assert work_cmd.sweep_review(target=tmp_path, sweep_id=report["sweep_id"], json_output=True) == 0
     review = json.loads(capsys.readouterr().out)
-    assert review["references"]["skipped_source_fingerprints"] == ["fp-pending"]
-    assert review["references"]["dismissed_source_fingerprints"] == ["fp-dismissed"]
-    assert any(check["name"] == "scanner_sweep_noisy_noop" and check["status"] == "warn" for check in review["checks"])
+    assert review["references"]["skipped_source_fingerprints"] == [pending_fingerprint]
+    assert review["references"]["dismissed_source_fingerprints"] == [dismissed_fingerprint]
+    assert any(check["name"] == "scanner_sweep_noisy_noop" and check["status"] != "warn" for check in review["checks"])
 
 
 def test_work_brief_and_doctor_include_scanner_sweep_health(tmp_path, monkeypatch, capsys):

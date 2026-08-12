@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,18 @@ from ..untrusted import scan_untrusted, wrap_untrusted
 from . import constants, helpers, ledger as ledger_mod
 from . import scanners as scanners_mod
 from . import services as services_mod
+
+
+def _ingest_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    """Return untrusted JSONL metadata with importer-owned identity fields."""
+    return ledger_mod._sanitize_untrusted_import_record(record, importer_source="learning-loop")["metadata"]
+
+
+def _safe_cli_source(value: object) -> str | None:
+    source = ledger_mod._safe_import_identity(value)
+    if source is None or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", source):
+        return None
+    return source
 
 
 def import_add(
@@ -31,7 +44,10 @@ def import_add(
     if kind not in constants.IMPORT_KINDS:
         print(f"error: --kind must be one of: {', '.join(constants.IMPORT_KINDS)}", file=sys.stderr)
         return 2
-    source_text = source.strip() or "manual"
+    source_text = _safe_cli_source(source)
+    if source_text is None:
+        print("error: invalid import source", file=sys.stderr)
+        return 2
     try:
         parsed_metadata = ledger_mod._parse_metadata(metadata)
     except ValueError as exc:
@@ -41,7 +57,11 @@ def import_add(
     imports = ledger_mod._read_imports(target)
     item = ledger_mod._make_import(rendered, kind=kind, source=source_text, metadata=parsed_metadata)
     imports.append(item)
-    ledger_mod._write_imports(target, imports)
+    try:
+        ledger_mod._write_imports(target, imports)
+    except OSError as exc:
+        print(f"error: import inbox persistence failed: {exc}", file=sys.stderr)
+        return 1
     print(f"import: {item['id']}")
     print(f"status: {item['status']}")
     print(f"kind: {item['kind']}")
@@ -96,7 +116,10 @@ def import_context(
         "source_chars": len(body),
         "truncated": len(body) > max_chars,
     }
-    source_text = source.strip() or "manual"
+    source_text = _safe_cli_source(source)
+    if source_text is None:
+        print("error: invalid import source", file=sys.stderr)
+        return 2
 
     imports = ledger_mod._read_imports(target)
     item = ledger_mod._make_import(framed, kind="context", source=source_text, metadata=metadata)
@@ -328,7 +351,20 @@ def import_ingest(
                 print(f"- {error}", file=sys.stderr)
         return 2
 
-    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+    importer_source = "learning-loop"
+    imported_records = [
+        ledger_mod._sanitize_untrusted_import_record(record, importer_source=importer_source) for record in records
+    ]
+
+    imported, skipped, skipped_dismissed, rejected = ledger_mod._append_import_records(
+        target,
+        imported_records,
+        dry_run=dry_run,
+        provenance_source=importer_source,
+        contain_provenance_errors=True,
+        migrate_untrusted_identities=True,
+    )
+    rejection_reasons = {"provenance_stamp_failed": len(rejected)} if rejected else {}
     payload = {
         "path": str(path),
         "imports_path": str(helpers._imports_path(target)),
@@ -339,6 +375,8 @@ def import_ingest(
         "skipped_duplicates": len(skipped),
         "dismissed": len(skipped_dismissed),
         "skipped_dismissed": len(skipped_dismissed),
+        "rejected": len(rejected),
+        "rejection_reasons": rejection_reasons,
         "invalid": 0,
         "imports": imported,
     }
@@ -350,6 +388,9 @@ def import_ingest(
     print(f"dry_run: {dry_run}")
     print(f"imported: {len(imported)}")
     print(f"skipped_duplicates: {len(skipped)}")
+    print(f"rejected: {len(rejected)}")
+    if rejection_reasons:
+        print("rejection_reasons: " + ", ".join(f"{reason}={count}" for reason, count in rejection_reasons.items()))
     if skipped_dismissed:
         print(f"skipped_dismissed: {len(skipped_dismissed)}")
     for item in imported:
@@ -370,7 +411,9 @@ def import_issue_repairs(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     records = ledger_mod._issue_repair_records(target)
-    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(
+        target, records, dry_run=dry_run
+    )
     payload = {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),
@@ -482,7 +525,9 @@ def import_chat_sweep(
                 print(f"error: {error}", file=sys.stderr)
         return 2
 
-    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(
+        target, records, dry_run=dry_run
+    )
     output = {
         "input": str(sweep_path),
         "imports_path": str(helpers._imports_path(target)),
@@ -529,7 +574,9 @@ def import_content_guard(
     effective_scan_target = scan_target.expanduser().resolve() if scan_target is not None else target
     result = scrub.run_scan(effective_scan_target, repo_target=target, policy=policy)
     records = services_mod._content_guard_import_records(result)
-    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(
+        target, records, dry_run=dry_run
+    )
     output = {
         "target": str(target),
         "scan_target": str(effective_scan_target),

@@ -779,7 +779,7 @@ def sweep_import_issues(*, target: Path, surface_id: str, json_output: bool = Fa
             for error in errors:
                 print(f"error: {error}", file=sys.stderr)
         return 2
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records)
     output = {
         "input": str(output_path),
         "imports_path": str(work_cmd._imports_path(target)),

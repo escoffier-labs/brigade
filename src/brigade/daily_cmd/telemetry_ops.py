@@ -586,7 +586,7 @@ def unblock_payload(target: Path, *, dry_run: bool = False) -> dict[str, Any]:
                 },
             }
         ]
-        created_imports, skipped, _ = work_cmd._append_import_records(target, records, dry_run=dry_run)
+        created_imports, skipped, _, _ = work_cmd._append_import_records(target, records, dry_run=dry_run)
     else:
         blockers.append("no daily run to unblock")
     unblock_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-daily-unblock-{uuid4().hex[:6]}"

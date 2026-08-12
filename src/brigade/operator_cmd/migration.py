@@ -154,7 +154,7 @@ def migration_import_issues(*, target: Path, dry_run: bool = False, json_output:
         return 2
     payload = migration_status_payload(target)
     records = _operator_migration_import_records(payload)
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     superseded = _supersede_stale_operator_migration_imports(target, records, dry_run=dry_run)
     superseded_sources = _supersede_stale_operator_source_imports(target, payload, dry_run=dry_run)
     result = {

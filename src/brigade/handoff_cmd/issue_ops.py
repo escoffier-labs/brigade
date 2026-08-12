@@ -78,7 +78,7 @@ def import_issues(
     records = [issue.as_import_record() for issue in found]
     from .. import work_cmd
 
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target": str(target),
         "imports_path": str(work_cmd._imports_path(target)),
@@ -125,7 +125,7 @@ def sync_issues(
     records = [issue.as_import_record() for issue in new_issues]
     from .. import work_cmd
 
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     stale = (
         _close_stale_local_issue_work(
             target,
@@ -564,12 +564,16 @@ def _known_local_issue_ids(target: Path) -> set[str]:
 
     known: set[str] = set()
     for item in work_cmd._read_imports(target):
+        if item.get("source") != "handoff-ingest":
+            continue
         issue_id = _handoff_issue_id(item)
         if issue_id:
             known.add(issue_id)
     ledger = work_cmd._read_task_ledger(target)
     for task in ledger.get("tasks", []):
-        issue_id = _handoff_issue_id(task) if isinstance(task, dict) else None
+        if not isinstance(task, dict) or task.get("source") != "import:handoff-ingest":
+            continue
+        issue_id = _handoff_issue_id(task)
         if issue_id:
             known.add(issue_id)
     return known

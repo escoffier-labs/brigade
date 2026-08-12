@@ -389,7 +389,7 @@ def import_issues(*, target: Path, dry_run: bool = False, json_output: bool = Fa
                 },
             }
         )
-    imported, skipped, dismissed = work_cmd._append_import_records(
+    imported, skipped, dismissed, _rejected = work_cmd._append_import_records(
         target.expanduser().resolve(), records, dry_run=dry_run
     )
     output = {
@@ -549,7 +549,7 @@ def import_learnings(
         for entry in _parse_learnings_entries(text, source_file=rel):
             parsed_entries += 1
             records.append(_learnings_record(entry))
-    imported, skipped, dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     output = {
         "target": str(target),
         "imports_path": str(work_cmd._imports_path(target)),

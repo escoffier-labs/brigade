@@ -223,7 +223,7 @@ def candidate_import_issues(
                 },
             }
         )
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target": str(target),
         "candidate_id": candidate.get("candidate_id"),

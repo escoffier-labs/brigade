@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
-from .. import provenance, runguard
+from .. import component_paths, provenance, runguard
 from ..untrusted import scan_handoff_injection_heuristics
 
 
@@ -337,14 +341,40 @@ def _stale_claim_payload(target: Path, *, stale_after_hours: float | None = None
 
 
 def _read_imports(target: Path) -> list[dict[str, Any]]:
-    path = helpers._imports_path(target)
-    if not path.exists():
-        return []
     imports: list[dict[str, Any]] = []
+    parent = -1
+    descriptor = -1
     try:
-        lines = path.read_text().splitlines()
-    except OSError:
+        parent, name = _open_import_inbox_parent(target, create=False)
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            return []
+        _validate_import_inbox_descriptor(descriptor)
+        before = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+        ):
+            return []
+        lines = b"".join(chunks).decode("utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
         return []
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        if parent != -1:
+            os.close(parent)
     for line in lines:
         if not line.strip():
             continue
@@ -358,10 +388,19 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
 
 
 def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
-    path = helpers._imports_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports)
-    path.write_text(rendered)
+    """Publish the inbox through its retained parent without following a link."""
+    parent, name, previous_raw, previous_exists = _snapshot_import_inbox(target)
+    rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
+    try:
+        _write_import_inbox_bytes_at(
+            parent,
+            name,
+            rendered,
+            previous_raw=previous_raw,
+            previous_exists=previous_exists,
+        )
+    finally:
+        os.close(parent)
 
 
 def _append_archived_imports(target: Path, imports: list[dict[str, Any]]) -> None:
@@ -1080,6 +1119,1264 @@ def _import_source_key(item: dict[str, Any]) -> str | None:
     return None
 
 
+_UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS = frozenset(
+    {
+        "proposed_edges",
+        "edges",
+        "seat_class",
+        "spend_by",
+        "handoff_target_document",
+        "target_document",
+        "handoff_type",
+        "category",
+        "issue_type",
+        "handoff_category",
+        "memory_target",
+        "reason",
+        "dispatch",
+        "dispatch_id",
+        "dispatch_status",
+        "handoff_id",
+        "handoff_issue_id",
+        "promotion",
+        "promoted_at",
+        "promoted_from",
+    }
+)
+_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS = (
+    "source_item_key",
+    "source_item_id",
+    "scanner_item_id",
+    "sweep_issue_id",
+    "issue_id",
+    "card_id",
+    "card_file",
+    "source_fingerprint",
+)
+_UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS = frozenset(
+    {
+        *_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS,
+        *provenance.ENVELOPE_METADATA_RESERVED_KEYS,
+        "provenance",
+    }
+)
+
+
+def _is_untrusted_import_metadata_key_allowed(key: object) -> bool:
+    return not (
+        key in _UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS
+        or key in _UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS
+        or (
+            isinstance(key, str)
+            and (key.startswith("declared_") or key == "github_issue" or key.startswith("github_issue_"))
+        )
+    )
+
+
+def _sanitize_untrusted_import_metadata(value: object) -> object:
+    """Recursively retain only non-authoritative untrusted import evidence."""
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_untrusted_import_metadata(item)
+            for key, item in value.items()
+            if _is_untrusted_import_metadata_key_allowed(key)
+        }
+    if isinstance(value, list):
+        return [_sanitize_untrusted_import_metadata(item) for item in value]
+    return value
+
+
+def _bound_declared_import_alias(value: object) -> str | None:
+    """Return a bounded display value for an untrusted declared identity alias."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return _bound_import_identity(value)
+    if isinstance(value, int):
+        return _bound_import_identity(str(value))
+    if isinstance(value, float) and math.isfinite(value):
+        return _bound_import_identity(str(value))
+    return None
+
+
+def _untrusted_import_canonical_hash(record: dict[str, Any]) -> str:
+    """Hash immutable import content, never record-controlled metadata or source."""
+    return helpers._stable_hash(
+        {
+            "text": record["text"],
+            "kind": record["kind"],
+            "type": record.get("type"),
+            "priority": record.get("priority"),
+            "template": record.get("template"),
+            "acceptance": record.get("acceptance"),
+        }
+    )
+
+
+def _sanitize_untrusted_import_record(record: dict[str, Any], *, importer_source: str) -> dict[str, Any]:
+    """Assign source and identity to hostile JSONL records at the import boundary."""
+    raw_metadata = record.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    stamped_metadata = {
+        key: _sanitize_untrusted_import_metadata(value)
+        for key, value in metadata.items()
+        if _is_untrusted_import_metadata_key_allowed(key)
+    }
+    canonical_hash = _untrusted_import_canonical_hash(record)
+    declared_source = _bound_import_identity(record.get("source"))
+    if declared_source is not None:
+        stamped_metadata["declared_source"] = declared_source
+    for key in _UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS:
+        declared_value = _bound_declared_import_alias(metadata.get(key))
+        if declared_value is not None:
+            stamped_metadata[f"declared_{key}"] = declared_value
+    stamped_metadata["source_item_key"] = f"{importer_source}:{canonical_hash}"
+    stamped_metadata["source_fingerprint"] = canonical_hash
+    sanitized = dict(record)
+    sanitized["source"] = importer_source
+    sanitized["metadata"] = stamped_metadata
+    return sanitized
+
+
+class _LocallyStampedImportProof:
+    """An in-memory verifier capability for one scanner-emitted immutable row."""
+
+    def __init__(self, *, importer_source: str, content_hash: str) -> None:
+        self.importer_source = importer_source
+        self.content_hash = content_hash
+
+
+def _locally_stamped_import_content_hash(record: dict[str, Any]) -> str:
+    """Hash every immutable import field, leaving lifecycle changes out of scope."""
+    immutable = {
+        key: value
+        for key, value in record.items()
+        if key
+        not in {
+            "status",
+            "updated_at",
+            "dismissed_at",
+            "dismiss_reason",
+            "promoted_at",
+            "task_id",
+            "handoff_path",
+            "handoff_target_document",
+            "handoff_source_fingerprint",
+        }
+    }
+    return provenance.content_sha256(json.dumps(immutable, sort_keys=True, separators=(",", ":"), default=str))
+
+
+def _make_locally_stamped_import_proof(record: dict[str, Any], *, importer_source: str) -> _LocallyStampedImportProof:
+    """Create the non-serialized capability used by the scanner verifier."""
+    return _LocallyStampedImportProof(
+        importer_source=importer_source,
+        content_hash=_locally_stamped_import_content_hash(record),
+    )
+
+
+def _is_locally_stamped_self_import(
+    record: dict[str, Any], *, importer_source: str, proof: _LocallyStampedImportProof | None = None
+) -> bool:
+    """Return whether a self-import was emitted by the local work-inbox producer."""
+    return (
+        _has_local_import_envelope(record, importer_source=importer_source)
+        and isinstance(proof, _LocallyStampedImportProof)
+        and proof.importer_source == importer_source
+        and proof.content_hash == _locally_stamped_import_content_hash(record)
+    )
+
+
+def _safe_self_import_document_target(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return value if _handoff_is_document_target(value) else None
+
+
+def _safe_self_import_path(value: object, *, target: Path | None = None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        if target is None:
+            return None
+        try:
+            return path.resolve(strict=False).relative_to(target.resolve()).as_posix()
+        except ValueError:
+            return None
+    return value if provenance.is_safe_identity_label(value) else None
+
+
+def _safe_self_import_source_item_key(value: object, *, importer_source: str) -> str | None:
+    value = _safe_import_identity(value)
+    prefix = f"{importer_source}:"
+    if value is None or not value.startswith(prefix) or len(value) == len(prefix):
+        return None
+    return value
+
+
+def _safe_stable_source_fingerprint(value: object) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{64})", value):
+        return None
+    return value
+
+
+def _trusted_self_import_metadata(
+    record: dict[str, Any],
+    *,
+    importer_source: str,
+    target: Path | None = None,
+    trusted_producer: bool = False,
+    proof: _LocallyStampedImportProof | None = None,
+) -> dict[str, Any]:
+    """Retain the narrow source-owned metadata required by self-import producers."""
+    if not trusted_producer or not _is_locally_stamped_self_import(
+        record, importer_source=importer_source, proof=proof
+    ):
+        return {}
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    retained: dict[str, Any] = {}
+    value = _safe_self_import_source_item_key(metadata.get("source_item_key"), importer_source=importer_source)
+    if value is not None:
+        retained["source_item_key"] = value
+    value = _safe_stable_source_fingerprint(metadata.get("source_fingerprint"))
+    if value is not None:
+        retained["source_fingerprint"] = value
+    if importer_source == "handoff-ingest":
+        for key in ("handoff_issue_id", "handoff_issue_category", "handoff_type"):
+            value = _safe_import_identity(metadata.get(key))
+            if value is not None:
+                retained[key] = value
+        for key in ("handoff_target_document", "target_document"):
+            value = _safe_self_import_document_target(metadata.get(key))
+            if value is not None:
+                retained[key] = value
+    elif importer_source == "memory-refresh":
+        value = _safe_import_identity(metadata.get("card_id"))
+        if value is not None:
+            retained["card_id"] = value
+        value = _safe_self_import_path(metadata.get("card_file"))
+        if value is not None:
+            retained["card_file"] = value
+        value = _safe_self_import_path(metadata.get("queue_path"), target=target)
+        if value is not None:
+            retained["queue_path"] = value
+        value = _safe_import_identity(metadata.get("refresh_reason"))
+        if value is not None:
+            retained["refresh_reason"] = value
+    return retained
+
+
+def _sanitize_self_import_record(
+    record: dict[str, Any],
+    *,
+    importer_source: str,
+    target: Path | None = None,
+    trusted_producer: bool = False,
+    proof: _LocallyStampedImportProof | None = None,
+) -> dict[str, Any]:
+    """Sanitize a self-import, preserving only authenticated source-owned fields."""
+    sanitized = _sanitize_untrusted_import_record(record, importer_source=importer_source)
+    if not trusted_producer:
+        for key in ("queue_path", "refresh_reason"):
+            sanitized["metadata"].pop(key, None)
+    trusted_metadata = _trusted_self_import_metadata(
+        record,
+        importer_source=importer_source,
+        target=target,
+        trusted_producer=trusted_producer,
+        proof=proof,
+    )
+    if trusted_metadata:
+        sanitized["metadata"].update(trusted_metadata)
+    return sanitized
+
+
+def _has_canonical_untrusted_import_identity(record: dict[str, Any]) -> bool:
+    """Return whether a sanitized record retains its importer-owned identity."""
+    source = record.get("source")
+    metadata = record.get("metadata")
+    if not isinstance(source, str) or not source or not isinstance(metadata, dict):
+        return False
+    canonical_hash = _untrusted_import_canonical_hash(record)
+    return (
+        metadata.get("source_item_key") == f"{source}:{canonical_hash}"
+        and metadata.get("source_fingerprint") == canonical_hash
+    )
+
+
+_IMPORT_PROOF_SCHEMA_VERSION = 1
+_IMPORT_PROOF_OPERATION_PATTERN = re.compile(r"[0-9a-f]{32}")
+_DIRECTORY_AUTHORITY_SCHEMA_VERSION = 1
+_EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION = 1
+
+
+def _import_proof_name(item_id: object) -> str | None:
+    """Return an opaque proof filename, never a path chosen by an import row."""
+    if not isinstance(item_id, str) or not item_id:
+        return None
+    return f"{helpers._stable_hash({'item_id': item_id})}.json"
+
+
+def _directory_authority_store_path(target: Path) -> Path:
+    """Return the verifier-owned authority record for one resolved workspace."""
+    resolved = str(target.expanduser().resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+    try:
+        data_root = Path(component_paths.data_root())
+    except ValueError as exc:
+        raise OSError("external directory authority storage is unavailable") from exc
+    return data_root / "brigade" / "directory-authority" / f"{digest}.json"
+
+
+def _directory_authority_scope(components: tuple[str, ...]) -> str:
+    return "/".join(components)
+
+
+def _directory_identity(descriptor: int) -> dict[str, int]:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise OSError("directory authority is not a directory")
+    return {"device": metadata.st_dev, "inode": metadata.st_ino}
+
+
+def _workspace_directory_identity(target: Path) -> dict[str, int]:
+    """Return the identity of the workspace root through a no-follow descriptor."""
+    descriptor = os.open(
+        target.expanduser().resolve(),
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        return _directory_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _require_workspace_directory_identity(target: Path, expected: dict[str, int]) -> None:
+    """Require a reopened workspace path to identify the originally held root."""
+    if _workspace_directory_identity(target) != expected:
+        raise OSError("workspace directory identity does not match expected identity")
+
+
+def _read_external_directory_authority_path(path: Path) -> dict[str, Any] | None:
+    """Read one external authority record without deriving authority from its path."""
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError("external directory authority record is not a single-link regular file")
+        payload = json.loads(os.read(descriptor, 1024 * 1024))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError("external directory authority record is malformed") from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(payload, dict):
+        raise OSError("external directory authority record is malformed")
+    return payload
+
+
+def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, Any] | None]:
+    path = _directory_authority_store_path(target)
+    return path, _read_external_directory_authority_path(path)
+
+
+def _write_external_directory_authority(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _record_external_directory_authority(
+    target: Path, components: tuple[str, ...], directory: int, *, workspace: dict[str, int]
+) -> None:
+    """Persist a directory identity in user-owned state, outside the workspace."""
+    _require_workspace_directory_identity(target, workspace)
+    path, existing = _read_external_directory_authority(target)
+    resolved = str(target.expanduser().resolve())
+    _require_workspace_directory_identity(target, workspace)
+    if existing is None:
+        payload: dict[str, Any] = {
+            "schema_version": _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION,
+            "target": resolved,
+            "workspace": workspace,
+            "directories": {},
+        }
+    else:
+        payload = existing
+        if (
+            payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+            or payload.get("target") != resolved
+            or payload.get("workspace") != workspace
+            or not isinstance(payload.get("directories"), dict)
+        ):
+            raise OSError("external directory authority record is malformed")
+    directories = payload["directories"]
+    assert isinstance(directories, dict)
+    scope = _directory_authority_scope(components)
+    identity = _directory_identity(directory)
+    existing_identity = directories.get(scope)
+    if existing_identity is not None:
+        if existing_identity != identity:
+            raise OSError("external directory authority record does not match directory")
+        return
+    directories[scope] = identity
+    _write_external_directory_authority(path, payload)
+
+
+def _reanchor_external_directory_authority(
+    target: Path, components: tuple[str, ...], directory: int, *, workspace: dict[str, int]
+) -> bool:
+    """Copy an external authority record only after exact root and directory identity matches."""
+    _require_workspace_directory_identity(target, workspace)
+    current_path = _directory_authority_store_path(target)
+    current_target = str(target.expanduser().resolve())
+    identity = _directory_identity(directory)
+    scope = _directory_authority_scope(components)
+    try:
+        candidates = list(current_path.parent.iterdir())
+    except FileNotFoundError:
+        return False
+    for candidate in candidates:
+        if candidate == current_path:
+            continue
+        try:
+            payload = _read_external_directory_authority_path(candidate)
+        except OSError:
+            continue
+        if payload is None:
+            continue
+        recorded_target = payload.get("target")
+        directories = payload.get("directories")
+        if (
+            not isinstance(recorded_target, str)
+            or recorded_target == current_target
+            or candidate.name != f"{hashlib.sha256(recorded_target.encode('utf-8')).hexdigest()}.json"
+            or payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+            or payload.get("workspace") != workspace
+            or not isinstance(directories, dict)
+            or directories.get(scope) != identity
+        ):
+            continue
+        _record_external_directory_authority(target, components, directory, workspace=workspace)
+        return True
+    return False
+
+
+def _validate_external_directory_authority(
+    target: Path, components: tuple[str, ...], directory: int, *, workspace: dict[str, int]
+) -> None:
+    _require_workspace_directory_identity(target, workspace)
+    _path, payload = _read_external_directory_authority(target)
+    if payload is None:
+        raise OSError("external directory authority record is missing")
+    directories = payload.get("directories")
+    if (
+        payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+        or payload.get("target") != str(target.expanduser().resolve())
+        or payload.get("workspace") != workspace
+        or not isinstance(directories, dict)
+        or directories.get(_directory_authority_scope(components)) != _directory_identity(directory)
+    ):
+        raise OSError("external directory authority record does not match directory")
+
+
+def _external_workspace_directory_identity(target: Path) -> dict[str, int]:
+    """Read and recheck the root identity already bound by an external authority record."""
+    _path, payload = _read_external_directory_authority(target)
+    if payload is None:
+        raise OSError("external directory authority record is missing")
+    workspace = payload.get("workspace")
+    if (
+        payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+        or payload.get("target") != str(target.expanduser().resolve())
+        or not isinstance(workspace, dict)
+        or set(workspace) != {"device", "inode"}
+        or not all(isinstance(value, int) and not isinstance(value, bool) for value in workspace.values())
+        or not isinstance(payload.get("directories"), dict)
+    ):
+        raise OSError("external directory authority record is malformed")
+    _require_workspace_directory_identity(target, workspace)
+    return workspace
+
+
+def _record_verifier_owned_directory(
+    target: Path, *, components: tuple[str, ...], directory: int, workspace: dict[str, int] | None = None
+) -> None:
+    """Record a child directory created by a verifier-owned producer."""
+    _record_external_directory_authority(
+        target,
+        components,
+        directory,
+        workspace=_external_workspace_directory_identity(target) if workspace is None else workspace,
+    )
+
+
+def _validate_verifier_owned_directory(
+    target: Path, *, components: tuple[str, ...], directory: int, workspace: dict[str, int] | None = None
+) -> None:
+    """Require that a directory still matches its verifier-owned external record."""
+    _validate_external_directory_authority(
+        target,
+        components,
+        directory,
+        workspace=_external_workspace_directory_identity(target) if workspace is None else workspace,
+    )
+
+
+def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *, anchor_name: str) -> None:
+    """Retain the old marker for released workspaces. It is never authority."""
+    identity = _directory_identity(directory)
+    payload = json.dumps(
+        {"schema_version": _DIRECTORY_AUTHORITY_SCHEMA_VERSION, **identity}, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    try:
+        descriptor = os.open(
+            anchor_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=anchor_parent,
+        )
+    except FileExistsError:
+        return
+    try:
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.fsync(anchor_parent)
+    finally:
+        os.close(descriptor)
+
+
+def _adopt_preexisting_scanner_run_directories(target: Path, root: int, *, workspace: dict[str, int]) -> None:
+    """Capture released scanner run directories by identity, never by receipt bytes."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    for run_id in os.listdir(root):
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", run_id):
+            continue
+        descriptor = -1
+        try:
+            descriptor = os.open(run_id, flags, dir_fd=root)
+            _record_external_directory_authority(
+                target,
+                (".brigade", "scanners", "runs", run_id),
+                descriptor,
+                workspace=workspace,
+            )
+        except OSError:
+            continue
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+
+
+def _open_legacy_scanner_runs_directory(target: Path) -> int:
+    """Adopt a released scanner-runs root without deriving trust from receipts."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(target.expanduser().resolve(), flags)
+    workspace = _directory_identity(descriptor)
+    anchor_parent = -1
+    try:
+        brigade = os.open(".brigade", flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = brigade
+        anchor_parent = os.dup(descriptor)
+        scanners = os.open("scanners", flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = scanners
+        runs = os.open("runs", flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = runs
+
+        _path, payload = _read_external_directory_authority(target)
+        scope = _directory_authority_scope((".brigade", "scanners", "runs"))
+        if payload is not None:
+            directories = payload.get("directories")
+            if (
+                payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+                or payload.get("target") != str(target.expanduser().resolve())
+                or payload.get("workspace") != workspace
+                or not isinstance(directories, dict)
+            ):
+                raise OSError("external directory authority record is malformed")
+            if scope in directories:
+                raise OSError("external directory authority record does not match directory")
+
+        _record_external_directory_authority(
+            target,
+            (".brigade", "scanners", "runs"),
+            descriptor,
+            workspace=workspace,
+        )
+        _adopt_preexisting_scanner_run_directories(target, descriptor, workspace=workspace)
+        _write_compatibility_directory_anchor(anchor_parent, descriptor, anchor_name=".runs.authority.json")
+        os.close(anchor_parent)
+        anchor_parent = -1
+        result = descriptor
+        descriptor = -1
+        return result
+    finally:
+        if anchor_parent != -1:
+            os.close(anchor_parent)
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...], anchor_name: str, create: bool) -> int:
+    """Open an externally bound directory through no-follow descriptors."""
+    if (
+        os.name != "posix"
+        or not getattr(os, "O_NOFOLLOW", 0)
+        or not getattr(os, "O_DIRECTORY", 0)
+        or os.open not in os.supports_dir_fd
+        or os.mkdir not in os.supports_dir_fd
+    ):
+        raise OSError("descriptor-relative directory authority operations are unavailable")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(target.expanduser().resolve(), flags)
+    workspace = _directory_identity(descriptor)
+    anchor_parent = -1
+    parent = -1
+    try:
+        for component in components[:-2]:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o700, dir_fd=descriptor)
+                child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        anchor_parent = descriptor
+        descriptor = -1
+        parent_name = components[-2]
+        try:
+            parent = os.open(parent_name, flags, dir_fd=anchor_parent)
+        except FileNotFoundError:
+            if not create:
+                raise
+            os.mkdir(parent_name, 0o700, dir_fd=anchor_parent)
+            parent = os.open(parent_name, flags, dir_fd=anchor_parent)
+        name = components[-1]
+        created = False
+        try:
+            child = os.open(name, flags, dir_fd=parent)
+        except FileNotFoundError:
+            if not create:
+                raise
+            os.mkdir(name, 0o700, dir_fd=parent)
+            child = os.open(name, flags, dir_fd=parent)
+            created = True
+        try:
+            _validate_external_directory_authority(target, components, child, workspace=workspace)
+        except OSError:
+            if created:
+                _record_external_directory_authority(target, components, child, workspace=workspace)
+            elif _reanchor_external_directory_authority(target, components, child, workspace=workspace):
+                _validate_external_directory_authority(target, components, child, workspace=workspace)
+            else:
+                raise
+        _write_compatibility_directory_anchor(anchor_parent, child, anchor_name=anchor_name)
+        os.close(parent)
+        parent = -1
+        os.close(anchor_parent)
+        anchor_parent = -1
+        return child
+    except BaseException:
+        if parent != -1:
+            os.close(parent)
+        if anchor_parent != -1:
+            os.close(anchor_parent)
+        if descriptor != -1:
+            os.close(descriptor)
+        raise
+
+
+def _open_import_proof_directory(target: Path, *, create: bool) -> int:
+    """Open the verifier-owned proof directory through no-follow descriptors."""
+    return _open_verifier_owned_directory(
+        target,
+        components=(".brigade", "work", "imports", "proofs"),
+        anchor_name=".proofs.authority.json",
+        create=create,
+    )
+
+
+def _validate_import_proof_descriptor(descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise OSError("import proof is not a single-link regular file")
+
+
+def _validate_import_proof_name_matches_descriptor(parent: int, name: str, descriptor: int) -> None:
+    """Require the published sidecar name to still identify its held descriptor."""
+    _validate_import_proof_descriptor(descriptor)
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or named.st_nlink != 1
+        or (named.st_dev, named.st_ino, named.st_mode, named.st_nlink)
+        != (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink)
+    ):
+        raise OSError("import proof name no longer matches its held descriptor")
+
+
+def _persisted_import_proof_payload(item: dict[str, Any], *, operation_id: str) -> dict[str, Any] | None:
+    item_id = item.get("id")
+    source = item.get("source")
+    if not isinstance(item_id, str) or not item_id or not isinstance(source, str) or not source:
+        return None
+    return {
+        "schema_version": _IMPORT_PROOF_SCHEMA_VERSION,
+        "item_id": item_id,
+        "importer_source": source,
+        "content_hash": _locally_stamped_import_content_hash(item),
+        "operation_id": operation_id,
+    }
+
+
+def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *, operation_id: str) -> None:
+    """Record verifier-owned proof only after the corresponding inbox write succeeds."""
+    parent = _open_import_proof_directory(target, create=True)
+    created: list[str] = []
+    try:
+        for item in items:
+            payload = _persisted_import_proof_payload(item, operation_id=operation_id)
+            name = _import_proof_name(item.get("id"))
+            if payload is None or name is None:
+                raise OSError("cannot persist import proof for malformed local item")
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=parent,
+            )
+            created.append(name)
+            try:
+                with os.fdopen(os.dup(descriptor), "wb") as handle:
+                    handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                _validate_import_proof_descriptor(descriptor)
+                _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
+            finally:
+                os.close(descriptor)
+        os.fsync(parent)
+    except BaseException:
+        for name in created:
+            try:
+                os.unlink(name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+        os.fsync(parent)
+        raise
+    finally:
+        os.close(parent)
+
+
+def _remove_persisted_import_proofs(target: Path, items: list[dict[str, Any]]) -> None:
+    """Remove sidecars created for a failed import publication transaction."""
+    try:
+        parent = _open_import_proof_directory(target, create=False)
+    except OSError:
+        return
+    try:
+        for item in items:
+            name = _import_proof_name(item.get("id"))
+            if name is None:
+                continue
+            try:
+                os.unlink(name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def _has_persisted_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
+    """Verify the external local-import proof without trusting row-controlled paths."""
+    if target is None:
+        return False
+    name = _import_proof_name(item.get("id"))
+    if name is None:
+        return False
+    try:
+        parent = _open_import_proof_directory(target, create=False)
+    except OSError:
+        return False
+    try:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        except OSError:
+            return False
+        try:
+            _validate_import_proof_descriptor(descriptor)
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 64 * 1024):
+                chunks.append(chunk)
+            payload = json.loads(b"".join(chunks))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+    if not isinstance(payload, dict):
+        return False
+    operation_id = payload.get("operation_id")
+    expected = _persisted_import_proof_payload(item, operation_id=operation_id if isinstance(operation_id, str) else "")
+    return (
+        expected is not None
+        and isinstance(operation_id, str)
+        and _IMPORT_PROOF_OPERATION_PATTERN.fullmatch(operation_id) is not None
+        and payload == expected
+    )
+
+
+def _import_content_identity(item: dict[str, Any]) -> tuple[str, str] | None:
+    """Return the immutable-content identity used to migrate sanitized imports."""
+    kind = item.get("kind")
+    if not isinstance(kind, str) or not kind:
+        return None
+    return kind, _untrusted_import_canonical_hash(item)
+
+
+def _has_local_import_envelope(item: dict[str, Any], *, importer_source: str) -> bool:
+    """Validate the immutable provenance envelope emitted by the local inbox writer."""
+    source = item.get("source")
+    text = item.get("text")
+    metadata = item.get("metadata")
+    if source != importer_source or not isinstance(text, str) or not isinstance(metadata, dict):
+        return False
+    envelope = metadata.get("provenance")
+    if provenance.validate_envelope(envelope):
+        return False
+    envelope_source = envelope.get("source") if isinstance(envelope, Mapping) else None
+    envelope_trust = envelope.get("trust") if isinstance(envelope, Mapping) else None
+    envelope_hashes = envelope.get("hashes") if isinstance(envelope, Mapping) else None
+    return (
+        isinstance(envelope_source, Mapping)
+        and envelope_source.get("system") == "work-inbox"
+        and envelope_source.get("kind") == importer_source
+        and envelope_source.get("producer") == "ledger._make_import"
+        and isinstance(envelope_trust, Mapping)
+        and envelope_trust.get("assigned_by") == "ingest:ledger._make_import"
+        and isinstance(envelope_hashes, Mapping)
+        and envelope_hashes.get("content") == provenance.content_sha256(text)
+    )
+
+
+def _trusted_builtin_scanner_configuration(scanner: object) -> bool:
+    """Require the exact built-in scanner record serialized into a local receipt."""
+    if not isinstance(scanner, dict):
+        return False
+    return any(scanner == trusted for trusted in constants.SCANNER_DEFAULTS)
+
+
+def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, Any] | None:
+    """Read one local scanner receipt through no-follow descriptor traversal."""
+    if (
+        os.name != "posix"
+        or not getattr(os, "O_NOFOLLOW", 0)
+        or not getattr(os, "O_DIRECTORY", 0)
+        or os.open not in os.supports_dir_fd
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", scanner_run_id)
+    ):
+        return None
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    root = -1
+    current = -1
+    receipt_descriptor = -1
+    try:
+        root = _open_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs"),
+            anchor_name=".runs.authority.json",
+            create=False,
+        )
+        current = os.open(scanner_run_id, directory_flags, dir_fd=root)
+        opened_run = os.fstat(current)
+        named_run = os.stat(scanner_run_id, dir_fd=root, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened_run.st_mode)
+            or not stat.S_ISDIR(named_run.st_mode)
+            or (opened_run.st_dev, opened_run.st_ino) != (named_run.st_dev, named_run.st_ino)
+        ):
+            return None
+        _validate_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs", scanner_run_id),
+            directory=current,
+        )
+        receipt_descriptor = os.open(
+            "receipt.json",
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=current,
+        )
+        before = os.fstat(receipt_descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            return None
+        chunks: list[bytes] = []
+        while chunk := os.read(receipt_descriptor, 64 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(receipt_descriptor)
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+        ):
+            return None
+        named_run = os.stat(scanner_run_id, dir_fd=root, follow_symlinks=False)
+        if not stat.S_ISDIR(named_run.st_mode) or (opened_run.st_dev, opened_run.st_ino) != (
+            named_run.st_dev,
+            named_run.st_ino,
+        ):
+            return None
+        _validate_verifier_owned_directory(
+            target,
+            components=(".brigade", "scanners", "runs", scanner_run_id),
+            directory=current,
+        )
+        payload = json.loads(b"".join(chunks))
+        if not isinstance(payload, dict) or payload.get("run_id") != scanner_run_id:
+            return None
+        return payload
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    finally:
+        if receipt_descriptor != -1:
+            os.close(receipt_descriptor)
+        if current != -1 and current != root:
+            os.close(current)
+        if root != -1:
+            os.close(root)
+
+
+def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
+    """Return whether a verifier-owned scanner receipt binds this exact row."""
+    if target is None:
+        return False
+    source = item.get("source")
+    metadata = item.get("metadata")
+    if not isinstance(source, str) or not source or not isinstance(metadata, dict):
+        return False
+    scanner_run_id = metadata.get("scanner_run_id")
+    scanner_id = metadata.get("scanner_id")
+    if not isinstance(scanner_run_id, str) or not scanner_run_id or not isinstance(scanner_id, str) or not scanner_id:
+        return False
+    if not _has_local_import_envelope(item, importer_source=source):
+        return False
+    receipt = _read_local_scanner_receipt(target, scanner_run_id)
+    if (
+        receipt is None
+        or receipt.get("run_id") != scanner_run_id
+        or receipt.get("status") != "completed"
+        or receipt.get("exit_code") != 0
+    ):
+        return False
+    proof = receipt.get("self_import_proofs")
+    if not isinstance(proof, dict) or proof.get("scanner_id") != scanner_id or proof.get("source") != source:
+        return False
+    scanner = proof.get("scanner")
+    if not _trusted_builtin_scanner_configuration(scanner):
+        return False
+    if (
+        receipt.get("scanner_id") != scanner_id
+        or receipt.get("source") != source
+        or receipt.get("command") != scanner.get("command")
+        or scanner.get("id") != scanner_id
+        or scanner.get("source") != source
+    ):
+        return False
+    content_hash = _locally_stamped_import_content_hash(item)
+    imports = proof.get("imports")
+    return isinstance(imports, list) and any(
+        isinstance(entry, dict) and entry.get("id") == item.get("id") and entry.get("content_hash") == content_hash
+        for entry in imports
+    )
+
+
+def _legacy_import_source_content_identity(
+    item: dict[str, Any], *, target: Path | None = None
+) -> tuple[str, str, str] | None:
+    """Return a legacy identity only when local provenance establishes its source."""
+    if not _has_locally_stamped_import_proof(item, target=target) or not _has_persisted_import_proof(
+        item, target=target
+    ):
+        return None
+    source = item["source"]
+    content_identity = _import_content_identity(item)
+    if content_identity is None:
+        return None
+    kind, content_hash = content_identity
+    return source, kind, content_hash
+
+
+def _open_import_inbox_parent(target: Path, *, create: bool) -> tuple[int, str]:
+    """Hold the inbox parent for an import/proof publication transaction."""
+    if (
+        os.name != "posix"
+        or not getattr(os, "O_NOFOLLOW", 0)
+        or not getattr(os, "O_DIRECTORY", 0)
+        or os.open not in os.supports_dir_fd
+        or os.mkdir not in os.supports_dir_fd
+    ):
+        raise OSError("descriptor-relative import inbox operations are unavailable")
+    target_root = target.expanduser().resolve()
+    inbox_path = helpers._imports_path(target_root)
+    try:
+        relative = inbox_path.relative_to(target_root)
+    except ValueError as exc:
+        raise OSError("import inbox escapes target") from exc
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    parent = os.open(target_root, flags)
+    try:
+        for component in relative.parts[:-1]:
+            try:
+                child = os.open(component, flags, dir_fd=parent)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o700, dir_fd=parent)
+                child = os.open(component, flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        return parent, relative.parts[-1]
+    except BaseException:
+        os.close(parent)
+        raise
+
+
+def _validate_import_inbox_descriptor(descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise OSError("import inbox is not a single-link regular file")
+
+
+def _validate_import_inbox_name_matches_descriptor(parent: int, name: str, descriptor: int) -> None:
+    """Ensure a directory entry still names the retained regular inbox object."""
+    if os.stat not in os.supports_dir_fd:
+        raise OSError("descriptor-relative import inbox validation is unavailable")
+    opened = os.fstat(descriptor)
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or named.st_nlink != 1
+        or (named.st_dev, named.st_ino, named.st_mode, named.st_nlink)
+        != (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink)
+    ):
+        raise OSError("import inbox name no longer matches its held descriptor")
+
+
+def _write_import_inbox_bytes_at(
+    parent: int,
+    name: str,
+    data: bytes,
+    *,
+    previous_raw: bytes | None = None,
+    previous_exists: bool | None = None,
+) -> None:
+    """Atomically publish import bytes through the transaction's held parent."""
+    existing = -1
+    descriptor = -1
+    temporary_name = f".{name}.{uuid4().hex}.tmp"
+    try:
+        try:
+            existing = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            _validate_import_inbox_descriptor(existing)
+            _validate_import_inbox_name_matches_descriptor(parent, name, existing)
+            if previous_raw is None:
+                chunks: list[bytes] = []
+                while chunk := os.read(existing, 1024 * 1024):
+                    chunks.append(chunk)
+                previous_raw = b"".join(chunks)
+            if previous_exists is None:
+                previous_exists = True
+        if previous_exists is None:
+            previous_exists = False
+        if previous_raw is None:
+            previous_raw = b""
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=parent,
+        )
+        _validate_import_inbox_descriptor(descriptor)
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _validate_import_inbox_descriptor(descriptor)
+        os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+        _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+        os.fsync(parent)
+    except BaseException:
+        try:
+            os.unlink(temporary_name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        _restore_import_inbox_snapshot(parent, name, previous_raw, previous_exists)
+        raise
+    finally:
+        if existing != -1:
+            os.close(existing)
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
+    """Capture exact inbox bytes while retaining authority to restore them."""
+    parent, name = _open_import_inbox_parent(target, create=True)
+    descriptor = -1
+    try:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            return parent, name, b"", False
+        _validate_import_inbox_descriptor(descriptor)
+        before = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+        ):
+            raise OSError("import inbox changed while snapshotting")
+        return parent, name, b"".join(chunks), True
+    except BaseException:
+        os.close(parent)
+        raise
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: bool) -> None:
+    """Restore an ordinary import transaction through its original parent."""
+    if not exists:
+        try:
+            os.unlink(name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.fsync(parent)
+        return
+    for _attempt in range(3):
+        temporary_name = f".{name}.{uuid4().hex}.tmp"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=parent,
+            )
+            with os.fdopen(os.dup(descriptor), "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _validate_import_inbox_descriptor(descriptor)
+            _validate_import_inbox_name_matches_descriptor(parent, temporary_name, descriptor)
+            os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+            temporary_name = ""
+            _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+            os.fsync(parent)
+            return
+        except OSError:
+            pass
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent,
+        )
+        _validate_import_inbox_descriptor(descriptor)
+        os.ftruncate(descriptor, 0)
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("import inbox rollback write made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
+        os.fsync(parent)
+        return
+    except OSError:
+        try:
+            os.unlink(name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.fsync(parent)
+        raise OSError("import inbox rollback could not restore its retained snapshot") from None
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
 # Central envelope stamps land under metadata.provenance after identity is fixed.
 # Exclude them from dedupe fingerprints so repeated imports stay idempotent.
 _IMPORT_FINGERPRINT_METADATA_SKIP = frozenset(
@@ -1141,20 +2438,59 @@ def _import_origin_modality(source: str) -> tuple[str, str]:
     return _IMPORT_SOURCE_ORIGIN_MODALITY.get(source, ("workspace", "tool-output"))
 
 
-def _repository_id_is_unsafe(value: str) -> bool:
-    if provenance._is_absolute_locator(value):
-        return True
-    # Same traversal-safe policy used for repo-relative locators.
-    return ".." in value.replace("\\", "/").split("/")
+_IMPORT_IDENTITY_MAX_LEN = 256
+_IMPORT_CAPTURED_AT_MAX_LEN = 64
 
 
-def _safe_repository_id(value: object) -> str | None:
+class _ImportProvenanceError(ValueError):
+    """Raised when local provenance stamping fails for one import record."""
+
+
+_IMPORT_PROVENANCE_REJECTION_REASON = "provenance_stamp_failed"
+
+
+def _bound_import_identity(value: object, *, max_len: int = _IMPORT_IDENTITY_MAX_LEN) -> str | None:
     if not isinstance(value, str):
         return None
     cleaned = value.strip()
-    if not cleaned or _repository_id_is_unsafe(cleaned):
+    if not cleaned or len(cleaned.encode("utf-8")) > max_len:
         return None
     return cleaned
+
+
+def _safe_import_identity(value: object, *, max_len: int = _IMPORT_IDENTITY_MAX_LEN) -> str | None:
+    if not isinstance(value, str) or value != value.strip():
+        return None
+    cleaned = _bound_import_identity(value, max_len=max_len)
+    if cleaned is None or not provenance.is_safe_identity_label(cleaned):
+        return None
+    return cleaned
+
+
+def _resolve_import_provenance_source(
+    record: dict[str, Any],
+    provenance_source: str | None,
+) -> str:
+    record_source = str(record.get("source") or "manual").strip() or "manual"
+    if provenance_source is None:
+        return record_source
+    return provenance_source.strip() or "learning-loop"
+
+
+def _repository_id_is_unsafe(value: str) -> bool:
+    return not provenance.is_safe_identity_label(value)
+
+
+def _safe_repository_id(value: object) -> str | None:
+    cleaned = _safe_import_identity(value)
+    if cleaned is None or _repository_id_is_unsafe(cleaned):
+        return None
+    return cleaned
+
+
+def _safe_repository_revision(value: object) -> str | None:
+    """Return a bounded revision label, never a platform-rooted locator."""
+    return value if provenance.is_safe_repository_revision(value) else None
 
 
 def _import_repository_fields(metadata: dict[str, Any]) -> tuple[str, str | None]:
@@ -1162,31 +2498,25 @@ def _import_repository_fields(metadata: dict[str, Any]) -> tuple[str, str | None
     if isinstance(repo, dict):
         repo_id = _safe_repository_id(repo.get("id"))
         if repo_id is not None:
-            revision = repo.get("revision")
-            return repo_id, revision if isinstance(revision, str) else None
+            revision = _safe_repository_revision(repo.get("revision"))
+            return repo_id, revision
     for key in ("repository_id", "repo_id"):
         repo_id = _safe_repository_id(metadata.get(key))
         if repo_id is not None:
-            revision = metadata.get("repository_revision")
-            return repo_id, revision if isinstance(revision, str) else None
+            revision = _safe_repository_revision(metadata.get("repository_revision"))
+            return repo_id, revision
     return "unknown", None
 
 
 def _import_session_fields(metadata: dict[str, Any]) -> tuple[str | None, str | None]:
     session = metadata.get("session")
     if isinstance(session, dict):
-        session_id = session.get("id")
-        harness = session.get("harness")
-        return (
-            session_id if isinstance(session_id, str) and session_id.strip() else None,
-            harness if isinstance(harness, str) and harness.strip() else None,
-        )
-    session_id = metadata.get("session_id")
-    harness = metadata.get("session_harness")
-    return (
-        session_id.strip() if isinstance(session_id, str) and session_id.strip() else None,
-        harness.strip() if isinstance(harness, str) and harness.strip() else None,
-    )
+        session_id = _safe_import_identity(session.get("id"))
+        harness = _safe_import_identity(session.get("harness"))
+        return session_id, harness
+    session_id = _safe_import_identity(metadata.get("session_id"))
+    harness = _safe_import_identity(metadata.get("session_harness"))
+    return session_id, harness
 
 
 def _locator_is_unsafe(kind: object, value: str) -> bool:
@@ -1210,7 +2540,55 @@ def _safe_locator_fields(
         or _locator_is_unsafe(locator_kind, locator_value.strip())
     ):
         return "uri", f"work-import:{fallback_item_id}"
-    return str(locator_kind), locator_value.strip()
+    bounded = _bound_import_identity(locator_value.strip())
+    if bounded is None:
+        return "uri", f"work-import:{fallback_item_id}"
+    return str(locator_kind), bounded
+
+
+def _sanitize_import_identity_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Drop locator-shaped identity hints before persisting importer metadata."""
+    sanitized = dict(metadata)
+    for key in ("repository_id", "repo_id"):
+        if key in sanitized and _safe_repository_id(sanitized[key]) is None:
+            sanitized.pop(key)
+    if "repository_revision" in sanitized and _safe_repository_revision(sanitized["repository_revision"]) is None:
+        sanitized.pop("repository_revision")
+    repository = sanitized.get("repository")
+    if isinstance(repository, dict):
+        repository_id = _safe_repository_id(repository.get("id"))
+        if repository_id is None:
+            sanitized.pop("repository", None)
+        else:
+            cleaned_repository = dict(repository)
+            cleaned_repository["id"] = repository_id
+            revision = _safe_repository_revision(cleaned_repository.get("revision"))
+            if cleaned_repository.get("revision") is not None and revision is None:
+                cleaned_repository.pop("revision", None)
+            sanitized["repository"] = cleaned_repository
+
+    for key in (
+        "session_id",
+        "session_harness",
+        "collection_id",
+        "item_id",
+        "source_item_key",
+        "source_item_id",
+        "scanner_item_id",
+    ):
+        if key in sanitized and _safe_import_identity(sanitized[key]) is None:
+            sanitized.pop(key)
+    session = sanitized.get("session")
+    if isinstance(session, dict):
+        cleaned_session = dict(session)
+        for key in ("id", "harness"):
+            if key in cleaned_session and _safe_import_identity(cleaned_session[key]) is None:
+                cleaned_session.pop(key)
+        if cleaned_session:
+            sanitized["session"] = cleaned_session
+        else:
+            sanitized.pop("session", None)
+    return sanitized
 
 
 def _import_injection_trust(text: str) -> tuple[str, str, int, list[str]]:
@@ -1265,12 +2643,12 @@ def _stamp_import_provenance(
         repo_obj = reusable["repository"]
         repository_id = _safe_repository_id(repo_obj.get("id")) or "unknown"
         revision = repo_obj.get("revision")
-        repository_revision = revision if repository_id != "unknown" and isinstance(revision, str) else None
+        repository_revision = _safe_repository_revision(revision) if repository_id != "unknown" else None
         session_obj = reusable["session"]
-        session_id = session_obj.get("id") if isinstance(session_obj.get("id"), str) else None
-        session_harness = session_obj.get("harness") if isinstance(session_obj.get("harness"), str) else None
-        collection_id = str(reusable["collection_id"])
-        envelope_item_id = str(reusable["item_id"])
+        session_id = _safe_import_identity(session_obj.get("id"))
+        session_harness = _safe_import_identity(session_obj.get("harness"))
+        collection_id = _safe_import_identity(reusable["collection_id"]) or f"work-inbox:{source}"
+        envelope_item_id = _safe_import_identity(reusable["item_id"]) or item_id
         locator_obj = reusable["locator"]
         locator_kind, locator_value = _safe_locator_fields(
             locator_kind=locator_obj.get("kind"),
@@ -1278,57 +2656,59 @@ def _stamp_import_provenance(
             fallback_item_id=item_id,
         )
         attribution = str(reusable["attribution"])
-        captured_at = reusable.get("captured_at")
-        if not isinstance(captured_at, str) or not captured_at.strip():
+        captured_at = _bound_import_identity(reusable.get("captured_at"), max_len=_IMPORT_CAPTURED_AT_MAX_LEN)
+        if captured_at is None:
             captured_at = ingested_at
     else:
         repository_id, repository_revision = _import_repository_fields(metadata)
         session_id, session_harness = _import_session_fields(metadata)
 
-        collection_id = metadata.get("collection_id")
-        if not isinstance(collection_id, str) or not collection_id.strip():
+        collection_id = _safe_import_identity(metadata.get("collection_id"))
+        if collection_id is None:
             collection_id = f"work-inbox:{source}"
-        else:
-            collection_id = collection_id.strip()
 
         envelope_item_id = _import_source_key({"metadata": metadata, "source": source}) or item_id
+        envelope_item_id = _safe_import_identity(envelope_item_id) or item_id
         locator_kind, locator_value = _safe_locator_fields(
             locator_kind=metadata.get("locator_kind"),
             locator_value=metadata.get("locator_value"),
             fallback_item_id=item_id,
         )
         attribution = "observed"
-        captured_at = metadata.get("captured_at")
-        if not isinstance(captured_at, str) or not captured_at.strip():
+        captured_at = _bound_import_identity(metadata.get("captured_at"), max_len=_IMPORT_CAPTURED_AT_MAX_LEN)
+        if captured_at is None:
             captured_at = ingested_at
 
-    return provenance.build_envelope(
-        source_system=source_system,
-        source_kind=source_kind,
-        source_producer=source_producer,
-        origin=origin,
-        repository_id=repository_id,
-        repository_revision=repository_revision,
-        session_id=session_id,
-        session_harness=session_harness,
-        collection_id=collection_id,
-        item_id=envelope_item_id,
-        locator_kind=locator_kind,
-        locator_value=locator_value,
-        attribution=attribution,
-        modality=modality,
-        trust_label=trust_label,
-        trust_assigned_by="ingest:ledger._make_import",
-        trust_assigned_at=ingested_at,
-        injection_status=injection_status,
-        injection_count=injection_count,
-        injection_rules=injection_rules,
-        text=text,
-        raw_bytes=None,
-        content_scope="item.text.utf8.v1",
-        captured_at=captured_at,
-        ingested_at=ingested_at,
-    )
+    try:
+        return provenance.build_envelope(
+            source_system=source_system,
+            source_kind=source_kind,
+            source_producer=source_producer,
+            origin=origin,
+            repository_id=repository_id,
+            repository_revision=repository_revision,
+            session_id=session_id,
+            session_harness=session_harness,
+            collection_id=collection_id,
+            item_id=envelope_item_id,
+            locator_kind=locator_kind,
+            locator_value=locator_value,
+            attribution=attribution,
+            modality=modality,
+            trust_label=trust_label,
+            trust_assigned_by="ingest:ledger._make_import",
+            trust_assigned_at=ingested_at,
+            injection_status=injection_status,
+            injection_count=injection_count,
+            injection_rules=injection_rules,
+            text=text,
+            raw_bytes=None,
+            content_scope="item.text.utf8.v1",
+            captured_at=captured_at,
+            ingested_at=ingested_at,
+        )
+    except ValueError as exc:
+        raise _ImportProvenanceError(str(exc)) from exc
 
 
 def _import_source_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
@@ -1342,7 +2722,12 @@ def _import_source_identity(item: dict[str, Any]) -> tuple[str, str, str] | None
     )
 
 
-def _validate_import_record(value: object, *, label: str) -> tuple[dict[str, Any] | None, list[str]]:
+def _validate_import_record(
+    value: object,
+    *,
+    label: str,
+    allow_non_task_fields: bool = False,
+) -> tuple[dict[str, Any] | None, list[str]]:
     errors: list[str] = []
     if not isinstance(value, dict):
         return None, [f"{label}: expected JSON object"]
@@ -1397,7 +2782,7 @@ def _validate_import_record(value: object, *, label: str) -> tuple[dict[str, Any
         }.items()
         if present
     }
-    if task_fields and kind != "task":
+    if task_fields and kind != "task" and not allow_non_task_fields:
         errors.append(f"{label}: task fields are only valid when kind is task")
 
     if errors:
@@ -1419,14 +2804,10 @@ def _validate_import_record(value: object, *, label: str) -> tuple[dict[str, Any
     return record, []
 
 
-def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+def _parse_import_jsonl(text: str) -> tuple[list[dict[str, Any]], list[str]]:
     records: list[dict[str, Any]] = []
     errors: list[str] = []
-    try:
-        lines = path.read_text().splitlines()
-    except OSError as exc:
-        return records, [f"{path}: {exc}"]
-    for line_number, line in enumerate(lines, start=1):
+    for line_number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         label = f"line {line_number}"
@@ -1442,61 +2823,149 @@ def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return records, errors
 
 
+def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        return [], [f"{path}: {exc}"]
+    return _parse_import_jsonl(text)
+
+
 def _append_import_records(
     target: Path,
     records: list[dict[str, Any]],
     *,
     dry_run: bool = False,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    imports = _read_imports(target)
+    provenance_source: str | None = None,
+    contain_provenance_errors: bool = False,
+    migrate_untrusted_identities: bool = False,
+    preserve_existing_raw: Callable[[bytes], None] | None = None,
+    restore_existing_raw: Callable[[bytes, bool], None] | None = None,
+    existing_imports: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    imports = existing_imports if existing_imports is not None else _read_imports(target)
     existing = {
         _import_record_key(item)
         for item in imports
         if isinstance(item, dict) and item.get("status", "pending") in {"pending", "promoted"}
     }
     existing_by_source: dict[tuple[str, str, str], dict[str, Any]] = {}
+    legacy_by_source_content: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in imports:
         if not isinstance(item, dict):
             continue
         identity = _import_source_identity(item)
         if identity is not None:
             existing_by_source[identity] = item
+        legacy_identity = _legacy_import_source_content_identity(item, target=target)
+        if legacy_identity is not None and not _has_canonical_untrusted_import_identity(item):
+            legacy_by_source_content[legacy_identity] = item
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     skipped_dismissed: list[dict[str, Any]] = []
+    rejected: list[str] = []
     for record in records:
         key = _import_record_key(record)
         identity = _import_source_identity(record)
         if identity is not None and identity in existing_by_source:
             existing_item = existing_by_source[identity]
-            if existing_item.get("status") == "dismissed":
+            canonical_existing_proof = _has_persisted_import_proof(existing_item, target=target)
+            canonical_existing_row = _has_canonical_untrusted_import_identity(existing_item)
+            canonical_incoming_row = _has_canonical_untrusted_import_identity(record)
+            canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row
+            existing_migration_proof = _has_locally_stamped_import_proof(
+                existing_item, target=target
+            ) and _import_content_identity(existing_item) == _import_content_identity(record)
+            if canonical_existing_row and canonical_incoming_row and not canonical_existing_proof:
+                pass
+            elif canonical_migration and not existing_migration_proof:
+                pass
+            elif existing_item.get("status") == "dismissed":
                 if _import_fingerprint(existing_item) == _import_fingerprint(record):
                     skipped_dismissed.append(record)
                     continue
             elif _import_fingerprint(existing_item) == _import_fingerprint(record):
                 skipped.append(record)
                 continue
-        elif key[2] and key in existing:
+        elif (
+            key[2]
+            and key in existing
+            and not (migrate_untrusted_identities and _has_canonical_untrusted_import_identity(record))
+        ):
             skipped.append(record)
             continue
-        item = _make_import(
-            str(record["text"]),
-            kind=str(record["kind"]),
-            source=str(record["source"]),
-            metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
-            task_type=record.get("type") if isinstance(record.get("type"), str) else None,
-            priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
-            acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
-            template=record.get("template") if isinstance(record.get("template"), str) else None,
-        )
+        elif migrate_untrusted_identities and _has_canonical_untrusted_import_identity(record):
+            content_identity = _import_content_identity(record)
+            legacy_identity = (str(record.get("source")), *content_identity) if content_identity is not None else None
+            existing_item = legacy_by_source_content.get(legacy_identity)
+            if existing_item is not None:
+                if existing_item.get("status") == "dismissed":
+                    skipped_dismissed.append(record)
+                    continue
+                if existing_item.get("status") in {"pending", "promoted"}:
+                    skipped.append(record)
+                    continue
+        try:
+            item = _make_import(
+                str(record["text"]),
+                kind=str(record["kind"]),
+                source=str(record["source"]),
+                metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
+                task_type=record.get("type") if isinstance(record.get("type"), str) else None,
+                priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
+                acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
+                template=record.get("template") if isinstance(record.get("template"), str) else None,
+                provenance_source=_resolve_import_provenance_source(record, provenance_source),
+            )
+        except _ImportProvenanceError:
+            if not contain_provenance_errors:
+                raise
+            rejected.append(_IMPORT_PROVENANCE_REJECTION_REASON)
+            continue
         imported.append(item)
         existing.add(key)
         if identity is not None:
             existing_by_source[identity] = item
     if imported and not dry_run:
-        imports.extend(imported)
-        _write_imports(target, imports)
-    return imported, skipped, skipped_dismissed
+        inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
+        published = False
+        try:
+            if preserve_existing_raw:
+                try:
+                    preserve_existing_raw(
+                        b"".join(json.dumps(item, sort_keys=True).encode("utf-8") + b"\n" for item in imported)
+                    )
+                except OSError:
+                    return [], [], [], ["inbox_persistence_failed"]
+                published = True
+            else:
+                imports.extend(imported)
+                published = True
+                rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
+                try:
+                    _write_import_inbox_bytes_at(inbox_parent, inbox_name, rendered)
+                except BaseException:
+                    _restore_import_inbox_snapshot(inbox_parent, inbox_name, previous_raw, previous_exists)
+                    raise
+            try:
+                _write_persisted_import_proofs(target, imported, operation_id=uuid4().hex)
+            except BaseException:
+                try:
+                    if published:
+                        if restore_existing_raw is not None:
+                            restore_existing_raw(previous_raw, previous_exists)
+                        else:
+                            _restore_import_inbox_snapshot(inbox_parent, inbox_name, previous_raw, previous_exists)
+                finally:
+                    try:
+                        _remove_persisted_import_proofs(target, imported)
+                    except BaseException:
+                        pass
+                raise
+        finally:
+            if inbox_parent != -1:
+                os.close(inbox_parent)
+    return imported, skipped, skipped_dismissed, rejected
 
 
 def _pending_tasks(target: Path) -> list[dict[str, Any]]:
@@ -2120,10 +3589,14 @@ def _make_import(
     priority: str | None = None,
     acceptance: list[str] | None = None,
     template: str | None = None,
+    provenance_source: str | None = None,
 ) -> dict[str, Any]:
     now = helpers._now()
     created = now.isoformat()
     source_text = source.strip() if isinstance(source, str) and source.strip() else "manual"
+    provenance_authority = (
+        provenance_source.strip() if isinstance(provenance_source, str) and provenance_source.strip() else source_text
+    )
     item_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(text)}-{uuid4().hex[:6]}"
     item: dict[str, Any] = {
         "id": item_id,
@@ -2147,9 +3620,10 @@ def _make_import(
     # are always recomputed. Inbound provenance is never authority.
     stamped_metadata = dict(metadata) if isinstance(metadata, dict) else {}
     inbound_provenance = stamped_metadata.pop("provenance", None)
+    stamped_metadata = _sanitize_import_identity_metadata(stamped_metadata)
     stamped_metadata["provenance"] = _stamp_import_provenance(
         text=text,
-        source=source_text,
+        source=provenance_authority,
         item_id=item_id,
         metadata=stamped_metadata,
         ingested_at=created,

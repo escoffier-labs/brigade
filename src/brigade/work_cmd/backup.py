@@ -119,7 +119,7 @@ def backup_import_issues(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     records = config_mod._backup_issue_records(target)
-    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records)
+    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(target, records)
     payload = {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),

@@ -448,7 +448,7 @@ def session_checkpoint_import_issues(
     if dry_run:
         created = records
     elif records:
-        created, skipped, dismissed = work_cmd._append_import_records(target, records)
+        created, skipped, dismissed, _rejected = work_cmd._append_import_records(target, records)
     payload = {
         "schema_version": constants.SCHEMA_VERSION,
         "schema": constants._schema("phase-ledger-session-checkpoint-import-issues"),

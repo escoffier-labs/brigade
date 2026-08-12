@@ -1505,7 +1505,7 @@ def actions_import_issues(*, target: Path, dry_run: bool = False, json_output: b
     if dry_run:
         created = records
     elif records:
-        created, skipped, dismissed = work_cmd._append_import_records(target, records)
+        created, skipped, dismissed, _rejected = work_cmd._append_import_records(target, records)
     payload = {
         "schema_version": constants.SCHEMA_VERSION,
         "schema": constants._schema("phase-ledger-action-import-issues"),
@@ -1775,7 +1775,7 @@ def import_issues(
     skipped: list[dict[str, Any]] = []
     dismissed: list[dict[str, Any]] = []
     if not dry_run and records:
-        created, skipped, dismissed = work_cmd._append_import_records(target, records)
+        created, skipped, dismissed, _rejected = work_cmd._append_import_records(target, records)
     elif dry_run:
         created = records
     payload = {

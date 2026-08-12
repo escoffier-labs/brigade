@@ -383,7 +383,7 @@ def surfaces_import_issues(*, target: Path, dry_run: bool = False, json_output: 
         return 2
     capture = _read_latest_surfaces_capture(target)
     records = _surface_import_records(capture) if capture is not None else []
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target": str(target),
         "source": "operator-surface",
