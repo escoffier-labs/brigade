@@ -1174,7 +1174,7 @@ def test_self_import_accepts_producer_stable_hash_fingerprint_and_normalizes_que
 
     scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner={"id": "memory-refresh", "source": "memory-refresh"},
+        scanner=dict(next(scanner for scanner in constants.SCANNER_DEFAULTS if scanner["id"] == "memory-refresh")),
         run={"run_id": "scanner-run", "output_after": {"path": "output"}},
         before_ids=set(),
         before_imports=[],

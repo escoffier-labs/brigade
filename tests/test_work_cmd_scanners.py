@@ -1,8 +1,12 @@
 import json
 import os
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from brigade import cli
 from brigade import dogfood_cmd
@@ -14,6 +18,12 @@ from tests.work_cmd_test_helpers import (
     _write_json,
     _init_git_repo,
 )
+
+
+def _builtin_scanner(scanner_id: str) -> dict[str, object]:
+    from brigade.work_cmd import constants
+
+    return dict(next(scanner for scanner in constants.SCANNER_DEFAULTS if scanner["id"] == scanner_id))
 
 
 def test_work_doctor_warns_for_scanner_queue_health(tmp_path, monkeypatch, capsys):
@@ -1420,7 +1430,7 @@ def test_scanner_reconciliation_keeps_builtin_lifecycle_mutation_and_strips_untr
 
     scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        scanner=_builtin_scanner("handoff-ingest"),
         run={"run_id": "scanner-run", "output_after": {"path": "output"}},
         before_ids={trusted["id"]},
         before_imports=before,
@@ -1471,7 +1481,7 @@ def test_scanner_reconciliation_replaces_only_matching_duplicate_id_raw_row(tmp_
 
     scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        scanner=_builtin_scanner("handoff-ingest"),
         run={"run_id": "scanner-run", "output_after": {"path": "output"}},
         before_ids={first["id"]},
         before_imports=[first, second],
@@ -1492,7 +1502,7 @@ def test_scanner_reconciliation_preserves_noop_final_row_without_newline(tmp_pat
 
     scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        scanner=_builtin_scanner("handoff-ingest"),
         run={"run_id": "scanner-run", "output_after": {"path": "output"}},
         before_ids={prior["id"]},
         before_imports=[prior],
@@ -1514,7 +1524,7 @@ def test_scanner_reconciliation_separates_appended_row_after_final_row_without_n
 
     stamped = scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        scanner=_builtin_scanner("handoff-ingest"),
         run={"run_id": "scanner-run", "output_after": {"path": "output"}},
         before_ids={prior["id"]},
         before_imports=[prior],
@@ -1549,7 +1559,7 @@ def test_scanner_reconciliation_accepts_changed_revision_with_same_source_key(tm
 
     stamped = scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        scanner=_builtin_scanner("handoff-ingest"),
         run={"run_id": "scanner-run", "output_after": {"path": "output"}},
         before_ids={prior["id"]},
         before_imports=before,
@@ -1560,6 +1570,385 @@ def test_scanner_reconciliation_accepts_changed_revision_with_same_source_key(tm
     imports = work_cmd.ledger._read_imports(tmp_path)
     assert len(imports) == 2
     assert {item["metadata"]["source_fingerprint"] for item in imports} == {"0123456789abcdef", "fedcba9876543210"}
+
+
+def test_trusted_builtin_scanner_requires_complete_normalized_configuration():
+    from brigade.work_cmd import constants
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanner = dict(constants.SCANNER_DEFAULTS[0])
+    assert scanners_mod._trusted_builtin_scanner(scanner) is True
+
+    for field, value in (
+        ("command", "brigade attacker --json"),
+        ("cadence", "daily@23:59"),
+        ("enabled", False),
+        ("timeout", 1),
+        ("output_path", ".brigade/attacker.json"),
+        ("conflict_window", "23:00-23:30"),
+    ):
+        changed = dict(scanner)
+        changed[field] = value
+        assert scanners_mod._trusted_builtin_scanner(changed) is False
+
+    for field, value in (("cwd", "."), ("import_path", ".brigade/imports.jsonl"), ("import_format", "jsonl")):
+        changed = dict(scanner)
+        changed[field] = value
+        assert scanners_mod._trusted_builtin_scanner(changed) is False
+
+
+def test_scanner_reconciliation_does_not_dedupe_against_unproven_pre_run_row(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    candidate = {"text": "Legitimate appended scanner work", "kind": "task", "source": "declared-source"}
+    sanitized = work_cmd.ledger._sanitize_self_import_record(candidate, importer_source="self-import")
+    forged_prior = {
+        "id": "unproven-prior",
+        "text": sanitized["text"],
+        "kind": sanitized["kind"],
+        "source": sanitized["source"],
+        "metadata": dict(sanitized["metadata"]),
+    }
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before_raw = json.dumps(forged_prior, sort_keys=True).encode("utf-8") + b"\n"
+    inbox.write_bytes(before_raw + json.dumps(candidate).encode("utf-8") + b"\n")
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "self-import", "source": "self-import"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids={forged_prior["id"]},
+        before_imports=[forged_prior],
+        before_raw=before_raw,
+    )
+
+    imports = work_cmd.ledger._read_imports(tmp_path)
+    assert len(stamped) == 1
+    assert len(imports) == 2
+    assert imports[0] == forged_prior
+    assert imports[1]["text"] == candidate["text"]
+    assert imports[1]["metadata"]["declared_source"] == "declared-source"
+
+
+def test_scanner_reconciliation_requires_matching_immutable_content_for_local_dedupe(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    stable_fingerprint = "0123456789abcdef"
+    prior = work_cmd.ledger._make_import(
+        "Earlier locally stamped scanner work",
+        kind="task",
+        source="handoff-ingest",
+        metadata={"source_item_key": "handoff-ingest:shared", "source_fingerprint": stable_fingerprint},
+    )
+    candidate = work_cmd.ledger._make_import(
+        "Changed locally stamped scanner work",
+        kind="task",
+        source="handoff-ingest",
+        metadata={"source_item_key": "handoff-ingest:shared", "source_fingerprint": stable_fingerprint},
+    )
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before_raw = json.dumps(prior, sort_keys=True).encode("utf-8") + b"\n"
+    inbox.write_bytes(before_raw + json.dumps(candidate, sort_keys=True).encode("utf-8") + b"\n")
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner=_builtin_scanner("handoff-ingest"),
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids={prior["id"]},
+        before_imports=[prior],
+        before_raw=before_raw,
+    )
+
+    imports = work_cmd.ledger._read_imports(tmp_path)
+    assert len(stamped) == 1
+    assert [item["text"] for item in imports] == [prior["text"], candidate["text"]]
+
+
+def test_scanners_run_ingest_output_preserves_all_raw_pre_run_rows(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    before = (
+        b'{"id":"duplicate","text":"first","kind":"task","source":"manual"}\n'
+        b'\nnot json\n["not an object"]\n'
+        b'{"id":"duplicate","text":"second","kind":"task","source":"manual"}'
+    )
+    inbox.write_bytes(before)
+    script = tmp_path / "write_scanner_import.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+path = Path.cwd() / ".brigade" / "scanner-imports.jsonl"
+path.write_text(json.dumps({"text": "Imported without rewriting inbox", "kind": "task", "source": "scanner-output"}) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.write_text(
+        f'''
+[[scanner]]
+id = "output-import"
+source = "output-import"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/output-import.json"
+conflict_window = "02:00-02:10"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+'''
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="output-import", ingest_output=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    after = inbox.read_bytes()
+    assert after[: len(before)] == before
+    assert after[len(before) :].startswith(b"\n")
+    assert payload["runs"][0]["ingest_output"]["created"] == 1
+    assert json.loads(after.splitlines()[-1])["text"] == "Imported without rewriting inbox"
+
+
+@pytest.mark.parametrize("no_follow", [None, 0], ids=["unavailable", "zero"])
+@pytest.mark.parametrize(
+    ("helper", "data"),
+    [
+        ("read", None),
+        ("rewrite", b'{"text":"replacement"}\n'),
+        ("append", b'{"text":"appended"}\n'),
+    ],
+)
+def test_scanner_inbox_helpers_reject_symlink_without_no_follow(tmp_path, monkeypatch, no_follow, helper, data):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    outside = tmp_path / "outside-inbox.jsonl"
+    outside.write_bytes(b'{"text":"outside"}\n')
+    inbox.symlink_to(outside)
+    if no_follow is None:
+        monkeypatch.delattr(scanners_mod.os, "O_NOFOLLOW", raising=False)
+    else:
+        monkeypatch.setattr(scanners_mod.os, "O_NOFOLLOW", no_follow)
+
+    with pytest.raises(OSError):
+        if helper == "read":
+            scanners_mod._scanner_inbox_bytes(tmp_path)
+        elif helper == "rewrite":
+            scanners_mod._write_scanner_inbox_bytes(tmp_path, data)
+        else:
+            scanners_mod._append_scanner_inbox_bytes(tmp_path, data)
+
+    assert outside.read_bytes() == b'{"text":"outside"}\n'
+
+
+@pytest.mark.parametrize(
+    ("helper", "data"),
+    [
+        ("read", None),
+        ("rewrite", b'{"text":"replacement"}\n'),
+        ("append", b'{"text":"appended"}\n'),
+    ],
+)
+def test_scanner_inbox_helpers_reject_hard_linked_outside_file_without_accessing_it(tmp_path, helper, data):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    outside = tmp_path / "outside-inbox.jsonl"
+    outside.write_bytes(b'{"text":"outside"}\n')
+    os.link(outside, inbox)
+
+    with pytest.raises(OSError):
+        if helper == "read":
+            scanners_mod._scanner_inbox_bytes(tmp_path)
+        elif helper == "rewrite":
+            scanners_mod._write_scanner_inbox_bytes(tmp_path, data)
+        else:
+            scanners_mod._append_scanner_inbox_bytes(tmp_path, data)
+
+    assert outside.read_bytes() == b'{"text":"outside"}\n'
+
+
+@pytest.mark.parametrize("no_follow", [None, 0], ids=["unavailable", "zero"])
+@pytest.mark.parametrize("identity", ["zero", "unavailable"])
+@pytest.mark.parametrize(
+    ("helper", "data"),
+    [
+        ("read", None),
+        ("rewrite", b'{"text":"replacement"}\n'),
+        ("append", b'{"text":"appended"}\n'),
+    ],
+)
+def test_scanner_inbox_helpers_reject_path_swap_without_no_follow(
+    tmp_path, monkeypatch, no_follow, identity, helper, data
+):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b'{"text":"inside"}\n')
+    outside = tmp_path / "outside-inbox.jsonl"
+    outside.write_bytes(b'{"text":"outside"}\n')
+    if no_follow is None:
+        monkeypatch.delattr(scanners_mod.os, "O_NOFOLLOW", raising=False)
+    else:
+        monkeypatch.setattr(scanners_mod.os, "O_NOFOLLOW", no_follow)
+
+    original_open = scanners_mod.os.open
+    original_fstat = scanners_mod.os.fstat
+
+    def swap_path_before_open(path, flags, mode=0o777):
+        if Path(path) == inbox:
+            inbox.unlink()
+            inbox.symlink_to(outside)
+        return original_open(path, flags, mode)
+
+    def platform_fstat(descriptor):
+        opened = original_fstat(descriptor)
+        if identity == "zero":
+            return SimpleNamespace(st_mode=opened.st_mode, st_dev=0, st_ino=0)
+        return SimpleNamespace(st_mode=opened.st_mode)
+
+    monkeypatch.setattr(scanners_mod.os, "open", swap_path_before_open)
+    monkeypatch.setattr(scanners_mod.os, "fstat", platform_fstat)
+
+    with pytest.raises(OSError):
+        if helper == "read":
+            scanners_mod._scanner_inbox_bytes(tmp_path)
+        elif helper == "rewrite":
+            scanners_mod._write_scanner_inbox_bytes(tmp_path, data)
+        else:
+            scanners_mod._append_scanner_inbox_bytes(tmp_path, data)
+
+    assert outside.read_bytes() == b'{"text":"outside"}\n'
+
+
+def test_scanner_inbox_path_uses_validated_resolved_parent(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    imports = tmp_path / ".brigade" / "work" / "imports"
+    contained = tmp_path / ".brigade" / "work" / "contained-imports"
+    contained.mkdir(parents=True)
+    imports.symlink_to(contained, target_is_directory=True)
+
+    assert scanners_mod._scanner_inbox_path(tmp_path) == contained.resolve() / "inbox.jsonl"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform does not support FIFOs")
+@pytest.mark.parametrize(
+    ("helper", "data"),
+    [
+        ("read", None),
+        ("rewrite", b'{"text":"replacement"}\n'),
+        ("append", b'{"text":"appended"}\n'),
+    ],
+)
+def test_scanner_inbox_helpers_reject_fifo_without_blocking(tmp_path, helper, data):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    os.mkfifo(inbox)
+
+    with pytest.raises(OSError):
+        if helper == "read":
+            scanners_mod._scanner_inbox_bytes(tmp_path)
+        elif helper == "rewrite":
+            scanners_mod._write_scanner_inbox_bytes(tmp_path, data)
+        else:
+            scanners_mod._append_scanner_inbox_bytes(tmp_path, data)
+
+    assert stat.S_ISFIFO(inbox.stat().st_mode)
+
+
+def test_scanner_reconciliation_rejects_symlinked_inbox_without_mutating_target(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("")
+    outside = tmp_path / "outside-inbox.jsonl"
+    outside.write_text('{"text":"outside","kind":"task","source":"attacker"}\n')
+    script = tmp_path / "replace_inbox.py"
+    script.write_text(
+        """
+from pathlib import Path
+
+inbox = Path.cwd() / ".brigade" / "work" / "imports" / "inbox.jsonl"
+inbox.unlink()
+inbox.symlink_to(Path.cwd() / "outside-inbox.jsonl")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.write_text(
+        f'''
+[[scanner]]
+id = "self-import"
+source = "self-import"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/self-import-output.json"
+conflict_window = "02:00-02:10"
+'''
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="self-import", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runs"][0]["provenance_imports_stamped"] == 0
+    assert inbox.is_symlink()
+    assert outside.read_text() == '{"text":"outside","kind":"task","source":"attacker"}\n'
+
+
+def test_scanners_run_ingest_output_rejects_symlinked_inbox_without_mutating_target(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("")
+    outside = tmp_path / "outside-inbox.jsonl"
+    outside.write_text('{"text":"outside","kind":"task","source":"attacker"}\n')
+    script = tmp_path / "replace_inbox_and_write_import.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+root = Path.cwd()
+inbox = root / ".brigade" / "work" / "imports" / "inbox.jsonl"
+inbox.unlink()
+inbox.symlink_to(root / "outside-inbox.jsonl")
+(root / ".brigade" / "scanner-imports.jsonl").write_text(
+    json.dumps({"text": "Valid scanner output", "kind": "task", "source": "scanner-output"}) + "\\n"
+)
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.write_text(
+        f'''
+[[scanner]]
+id = "output-import"
+source = "output-import"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/output-import.json"
+conflict_window = "02:00-02:10"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+'''
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="output-import", ingest_output=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert inbox.is_symlink()
+    assert outside.read_text() == '{"text":"outside","kind":"task","source":"attacker"}\n'
+    assert payload["runs"][0]["ingest_output"]["created"] == 0
+    assert payload["runs"][0]["ingest_output"]["rejected"] == 1
 
 
 def test_scanner_self_import_preserves_trusted_source_scoped_metadata(tmp_path):
@@ -1587,7 +1976,7 @@ def test_scanner_self_import_preserves_trusted_source_scoped_metadata(tmp_path):
     run = {"run_id": "scanner-run", "output_after": {"path": "output"}}
     stamped = scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        scanner=_builtin_scanner("handoff-ingest"),
         run=run,
         before_ids=set(),
         before_imports=[],
@@ -1630,7 +2019,7 @@ def test_scanner_self_import_preserves_trusted_memory_refresh_identity(tmp_path)
     work_cmd.ledger._write_imports(tmp_path, [refresh])
     stamped = scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner={"id": "memory-refresh", "source": "memory-refresh"},
+        scanner=_builtin_scanner("memory-refresh"),
         run={"run_id": "scanner-run", "output_after": {"path": "output"}},
         before_ids=set(),
         before_imports=[],
@@ -1644,6 +2033,39 @@ def test_scanner_self_import_preserves_trusted_memory_refresh_identity(tmp_path)
     assert metadata["queue_path"] == "memory/cards/decay/refresh-queue.json"
     assert metadata["source_item_key"] == "memory-refresh:decay-example"
     assert metadata["source_fingerprint"] == "53ff90f17a2d879497cec5c037ff74f2cf1a8fdc8482b66f395b729c32d06f05"
+
+
+def test_scanner_self_import_partial_memory_refresh_config_drops_privileged_metadata(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    refresh = work_cmd.ledger._make_import(
+        "Refresh memory card memory/cards/decay/example.md",
+        kind="task",
+        source="memory-refresh",
+        metadata={
+            "source_item_key": "memory-refresh:decay-example",
+            "source_fingerprint": "0123456789abcdef",
+            "card_id": "decay-example",
+            "card_file": "memory/cards/decay/example.md",
+            "refresh_reason": "missing-freshness",
+            "queue_path": "memory/cards/decay/refresh-queue.json",
+        },
+    )
+    work_cmd.ledger._write_imports(tmp_path, [refresh])
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "memory-refresh", "source": "memory-refresh"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids=set(),
+        before_imports=[],
+    )
+
+    assert len(stamped) == 1
+    metadata = work_cmd.ledger._read_imports(tmp_path)[0]["metadata"]
+    assert {"card_id", "card_file", "queue_path", "refresh_reason"}.isdisjoint(metadata)
+    assert metadata["source_item_key"] != "memory-refresh:decay-example"
+    assert metadata["source_fingerprint"] != "0123456789abcdef"
 
 
 def test_scanner_self_import_drops_wrong_source_operational_metadata(tmp_path):
@@ -1678,7 +2100,7 @@ def test_scanner_self_import_drops_wrong_source_operational_metadata(tmp_path):
     work_cmd.ledger._write_imports(tmp_path, [foreign, external])
     stamped = scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        scanner=_builtin_scanner("handoff-ingest"),
         run={"run_id": "scanner-run", "output_after": {"path": "output"}},
         before_ids=set(),
         before_imports=[],

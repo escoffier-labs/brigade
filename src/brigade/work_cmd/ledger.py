@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
 from .. import provenance, runguard
@@ -1305,6 +1305,9 @@ def _sanitize_self_import_record(
 ) -> dict[str, Any]:
     """Sanitize a self-import, preserving only authenticated source-owned fields."""
     sanitized = _sanitize_untrusted_import_record(record, importer_source=importer_source)
+    if not trusted_producer:
+        for key in ("queue_path", "refresh_reason"):
+            sanitized["metadata"].pop(key, None)
     trusted_metadata = _trusted_self_import_metadata(
         record, importer_source=importer_source, target=target, trusted_producer=trusted_producer
     )
@@ -1831,8 +1834,10 @@ def _append_import_records(
     provenance_source: str | None = None,
     contain_provenance_errors: bool = False,
     migrate_untrusted_identities: bool = False,
+    preserve_existing_raw: Callable[[bytes], None] | None = None,
+    existing_imports: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    imports = _read_imports(target)
+    imports = existing_imports if existing_imports is not None else _read_imports(target)
     existing = {
         _import_record_key(item)
         for item in imports
@@ -1911,8 +1916,16 @@ def _append_import_records(
         if identity is not None:
             existing_by_source[identity] = item
     if imported and not dry_run:
-        imports.extend(imported)
-        _write_imports(target, imports)
+        if preserve_existing_raw:
+            try:
+                preserve_existing_raw(
+                    b"".join(json.dumps(item, sort_keys=True).encode("utf-8") + b"\n" for item in imported)
+                )
+            except OSError:
+                return [], [], [], ["inbox_persistence_failed"]
+        else:
+            imports.extend(imported)
+            _write_imports(target, imports)
     return imported, skipped, skipped_dismissed, rejected
 
 
