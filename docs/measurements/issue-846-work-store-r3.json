@@ -1,0 +1,2202 @@
+{
+  "anonymous_metrics": "disabled_in_harness",
+  "capability_notes": {
+    "dolt_cli_per_command": {
+      "branch_diff_merge": "native_candidate",
+      "concurrent_cross_machine_claim": "not_by_cli_alone",
+      "concurrent_same_store_claim": "unmeasured_r3",
+      "dolt_commit_policy": "candidate mapping: claim CAS / graph apply / release / reassign would need an explicit CALL DOLT_COMMIT after SQL commit; readiness queries would not create Dolt commits",
+      "portable_sync": "clone_push_pull_candidate",
+      "row_locks": "unsupported_select_for_update",
+      "runtime_dependency": "forbidden_unless_later_issue_approves",
+      "sql_tx_vs_claim_cas": "SQL transaction success is not Brigade claim-CAS proof; cell-level merge can allow lost updates vs row-lock DBs"
+    },
+    "dolt_sql_server": {
+      "branch_diff_merge": "native_candidate",
+      "concurrent_cross_machine_claim": "possible_but_not_current_need",
+      "eligibility_gate": "eligible only if a later concurrent-claim requirement cannot meet measured correctness through file or replica candidates",
+      "extra_ops": "users_grants_backup_version_lifecycle_listener",
+      "listener_policy": "loopback_only_with_approval_or_no_listener",
+      "portable_sync": "central_service_candidate",
+      "row_locks": "unsupported_select_for_update",
+      "runtime_dependency": "forbidden_unless_later_issue_approves",
+      "status": "blocked_no_listener_in_r3"
+    },
+    "embedded_dolt": {
+      "branch_diff_merge": "native_candidate",
+      "concurrent_cross_machine_claim": "not_by_embed_alone",
+      "portable_sync": "local_replica_candidate",
+      "row_locks": "unsupported_select_for_update",
+      "runtime_dependency": "forbidden_unless_later_issue_approves",
+      "server_lifecycle": "none",
+      "status": "blocked_no_boundary_in_repo"
+    },
+    "json_ledger": {
+      "branch_diff_merge": "absent",
+      "concurrent_cross_machine_claim": "not_supported",
+      "concurrent_same_store_claim": "supported_via_dir_lock",
+      "dolt_commit_policy": "n/a",
+      "portable_sync": "absent_first_class",
+      "row_locks": "n/a_file_cas"
+    },
+    "sources": [
+      "https://www.dolthub.com/docs/sql-reference/sql-support/supported-statements/",
+      "https://www.dolthub.com/blog/2026-02-17-dolt-concurrency/",
+      "https://www.dolthub.com/docs/introduction/installation/application-server/",
+      "https://www.dolthub.com/docs/sql-reference/server/backups/",
+      "https://www.dolthub.com/docs/other/versioning/"
+    ],
+    "sqlite_wal": {
+      "branch_diff_merge": "absent",
+      "concurrent_cross_machine_claim": "not_safe_on_shared_network_fs",
+      "concurrent_same_store_claim": "supported_via_begin_immediate",
+      "dolt_commit_policy": "n/a",
+      "portable_sync": "file_copy_only",
+      "row_locks": "sqlite_transaction_locks",
+      "runtime_dependency": "forbidden_for_brigade_runtime"
+    }
+  },
+  "datasets": [
+    "chain_50",
+    "diamond_200",
+    "wide_500_1000"
+  ],
+  "decision": {
+    "backend_adoption": false,
+    "beads": "excluded_under_770",
+    "brigade_workstore_v1": false,
+    "concurrent_cross_machine_claims": "not_current_requirement",
+    "current_need": "sequential_portable_sync_plus_reviewable_branch_merge_proposals",
+    "dolt": "characterization_candidate_not_banned_not_selected",
+    "portable_sync": "adopt_as_follow_up_requirement_not_implemented_in_r3",
+    "shared_service_eligibility": "only_if_later_concurrent_claim_requirement_fails_file_or_replica_candidates",
+    "shared_store_conformance_fixture": "not_approved",
+    "sqlite": "optional_local_characterization_only_not_runtime_dependency",
+    "store_decision": "keep_machine_local_json_ledger"
+  },
+  "environment": {
+    "directory_fsync_supported": true,
+    "dolt_on_path": false,
+    "filesystem_type": "ext4",
+    "platform": "Linux-6.18.35-x86_64-with-glibc2.39",
+    "python_version": "3.14.4 (main, May  1 2026, 05:51:55) [GCC 13.3.0]",
+    "sqlite_version": "3.45.1"
+  },
+  "fixtures": {
+    "chain_50": {
+      "blocks_edges": 49,
+      "contains_hostnames": false,
+      "digest_sha256": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+      "edge_count": 49,
+      "expected": {
+        "blocks_edges": 49,
+        "edge_count": 49,
+        "parent_child_edges": 0,
+        "provenance_edges": 0,
+        "ready_count": 1,
+        "task_count": 50
+      },
+      "machine_neutral": true,
+      "name": "chain_50",
+      "parent_child_edges": 0,
+      "provenance_edges": 0,
+      "ready_count": 1,
+      "task_count": 50
+    },
+    "diamond_200": {
+      "blocks_edges": 396,
+      "contains_hostnames": false,
+      "digest_sha256": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+      "edge_count": 396,
+      "expected": {
+        "blocks_edges": 396,
+        "edge_count": 396,
+        "parent_child_edges": 0,
+        "provenance_edges": 0,
+        "ready_count": 1,
+        "task_count": 200
+      },
+      "machine_neutral": true,
+      "name": "diamond_200",
+      "parent_child_edges": 0,
+      "provenance_edges": 0,
+      "ready_count": 1,
+      "task_count": 200
+    },
+    "wide_500_1000": {
+      "blocks_edges": 0,
+      "contains_hostnames": false,
+      "digest_sha256": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+      "edge_count": 1000,
+      "expected": {
+        "blocks_edges": 0,
+        "edge_count": 1000,
+        "parent_child_edges": 0,
+        "provenance_edges": 1000,
+        "ready_count": 500,
+        "task_count": 500
+      },
+      "machine_neutral": true,
+      "name": "wide_500_1000",
+      "parent_child_edges": 0,
+      "provenance_edges": 1000,
+      "ready_count": 500,
+      "task_count": 500
+    }
+  },
+  "issue": 846,
+  "kind": "work-store-characterization",
+  "normative_anchors": {
+    "issue_737": "graph ready-set, chains, diamonds, cycles, provenance-only edges",
+    "issue_738": "claim CAS with one winner and exit 13 on lost race",
+    "issue_770": "BUILD native; Beads excluded"
+  },
+  "protocol_version": 3,
+  "results": [
+    {
+      "backup_restore": {
+        "backup_time_ns": 541489,
+        "branch_heads": {
+          "detail": "shape has no first-class branch heads",
+          "digest_sha256": null,
+          "status": "unsupported"
+        },
+        "claim_digest_after": "9d6532577ab4038767feac51dd6ce7e04c051a63e592217077d735873c4bdfc7",
+        "claim_digest_before": "9d6532577ab4038767feac51dd6ce7e04c051a63e592217077d735873c4bdfc7",
+        "config_digest_after": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "config_digest_before": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "pass": true,
+        "status": "measured",
+        "task_edge_digest_after": "36b99abd2b135a378185d8848ab2377d31cd185789c1098c9a50de8cc6843988",
+        "task_edge_digest_before": "36b99abd2b135a378185d8848ab2377d31cd185789c1098c9a50de8cc6843988"
+      },
+      "branch_diff_merge": {
+        "detail": "JSON ledger has no first-class branch/diff/merge path",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "status": "measured",
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "cold_start": {
+        "cold": true,
+        "cold_start_ns": 503811631,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 856249,
+        "inner_operation_timing_scope": "probe_read_after_import",
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured",
+        "task_count": 50
+      },
+      "crash_consistency": {
+        "mode": "before_replace",
+        "original_intact": true,
+        "pass": true,
+        "status": "measured"
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "digest_after": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+        "digest_before": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+        "pass": true,
+        "status": "measured"
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 49,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 1
+      },
+      "guard_and_empty_filter": {
+        "empty_filter": {
+          "exit_code": 2,
+          "pass": true,
+          "reason": "empty_filter"
+        },
+        "if_actor_mismatch": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "if_status_match": {
+          "exit_code": 0,
+          "pass": true,
+          "released": true
+        },
+        "if_status_mismatch": {
+          "exit_code": 13,
+          "expected": "pending",
+          "guard": "if_status",
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "pass": true,
+        "status": "measured",
+        "still_held_after_rejects": true
+      },
+      "install_footprint": {
+        "note": "JSON ledger is in-tree; no extra runtime dependency install",
+        "pass": true,
+        "runtime_dependency_bytes": 0,
+        "status": "measured",
+        "tasks_json_bytes": 24699,
+        "work_tree_bytes": 24699
+      },
+      "metrics_state": {
+        "anonymous_metrics_config": "disabled",
+        "brigade_anonymous_metrics_env": "0",
+        "claim_exit_code": 0,
+        "disable_telemetry_env": "1",
+        "metrics_artifacts": [],
+        "pass": true,
+        "status": "measured"
+      },
+      "mutation_latency": {
+        "max_ns": 17872818,
+        "min_ns": 4024282,
+        "p50_ns": 4872079,
+        "p95_ns": 10212118,
+        "samples": 100
+      },
+      "offline_divergence": {
+        "detail": "No portable sync primitive in current JSON ledger",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 1.0,
+        "p95_vs_json": 1.0
+      },
+      "resource_measurements": {
+        "claim_exit_code": 0,
+        "disk_bytes_after": 24939,
+        "disk_bytes_before": 24699,
+        "disk_growth_bytes": 240,
+        "pass": true,
+        "peak_rss_kib": 51324,
+        "peak_rss_mib": 50.12,
+        "rss_protocol": "popen_sample_child",
+        "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
+        "status": "measured",
+        "stdout_bytes": 280
+      },
+      "restart_recovery": {
+        "assignee": "lane-restart",
+        "claim_id": "claim-restart",
+        "claim_persisted": true,
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured"
+      },
+      "same_actor_and_retry": {
+        "idempotent_retry": {
+          "created_first": true,
+          "created_retry": false,
+          "idempotent": true
+        },
+        "pass": true,
+        "same_actor_rejection": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "already_claimed"
+        },
+        "status": "measured"
+      },
+      "schema_version_policy": {
+        "downgrade_coerced_on_read": true,
+        "downgrade_rejected": false,
+        "downgrade_version_after_read": 2,
+        "downgrade_version_written": 1,
+        "expected_version": 2,
+        "future_version_after_read": 2,
+        "future_version_coerced_on_read": true,
+        "future_version_rejected": false,
+        "future_version_written": 102,
+        "observed_policy": "ensure_ledger_edges_coerces_version_to_current",
+        "pass": true,
+        "status": "measured"
+      },
+      "secret_history_handling": {
+        "git_history": {
+          "ignore_path": ".brigade/work/",
+          "ignored_path_secret_absent_from_git": true,
+          "pass": true,
+          "status": "measured",
+          "synthetic_tracked_history": {
+            "deleted_secret_retained_in_history": true,
+            "pass": true,
+            "status": "measured",
+            "tracked_path": "synth/tracked-secret.txt"
+          },
+          "work_path_ignored": true
+        },
+        "live_and_backup_pass": true,
+        "live_retains_deleted_path": false,
+        "live_retains_deleted_secret": false,
+        "pass": true,
+        "post_delete_backup_retains_secret": false,
+        "pre_delete_backup_retains_secret": true,
+        "status": "measured",
+        "synthetic_secret_marker": "synth-secret-846-r3-TOKEN-not-a-real-credential"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "json_ledger",
+      "status": "measured"
+    },
+    {
+      "backup_restore": {
+        "backup_time_ns": 484708,
+        "branch_heads": {
+          "detail": "shape has no first-class branch heads",
+          "digest_sha256": null,
+          "status": "unsupported"
+        },
+        "claim_digest_after": "9d6532577ab4038767feac51dd6ce7e04c051a63e592217077d735873c4bdfc7",
+        "claim_digest_before": "9d6532577ab4038767feac51dd6ce7e04c051a63e592217077d735873c4bdfc7",
+        "config_digest_after": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "config_digest_before": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "pass": true,
+        "status": "measured",
+        "task_edge_digest_after": "50b78b56f8eec9a9008ee333eb847c60a7726d4f27d14e51f4330115fd480ce4",
+        "task_edge_digest_before": "50b78b56f8eec9a9008ee333eb847c60a7726d4f27d14e51f4330115fd480ce4"
+      },
+      "branch_diff_merge": {
+        "detail": "SQLite WAL adapter has no branch/diff/merge",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "status": "measured",
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "cold_start": {
+        "cold": true,
+        "cold_start_ns": 519258714,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 2334941,
+        "inner_operation_timing_scope": "probe_export_after_import",
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured",
+        "task_count": 50
+      },
+      "crash_consistency": {
+        "mode": "before_commit",
+        "original_intact": true,
+        "pass": true,
+        "status": "measured"
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "digest_after": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+        "digest_before": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+        "pass": true,
+        "status": "measured"
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 49,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 1
+      },
+      "guard_and_empty_filter": {
+        "claim_cleanup": {
+          "item_revision": 2,
+          "pass": true
+        },
+        "empty_filter": {
+          "exit_code": 2,
+          "pass": true,
+          "reason": "empty_filter"
+        },
+        "if_actor_mismatch": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "if_status_match": {
+          "exit_code": 0,
+          "pass": true,
+          "released": true
+        },
+        "if_status_mismatch": {
+          "exit_code": 13,
+          "guard": "if_status",
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "pass": true,
+        "status": "measured"
+      },
+      "install_footprint": {
+        "db_bytes": 57344,
+        "note": "stdlib sqlite3 only; not a Brigade runtime dependency",
+        "pass": true,
+        "runtime_dependency_bytes": 0,
+        "status": "measured"
+      },
+      "metrics_state": {
+        "anonymous_metrics_config": "disabled",
+        "brigade_anonymous_metrics_env": "0",
+        "claim_exit_code": 0,
+        "disable_telemetry_env": "1",
+        "metrics_artifacts": [],
+        "pass": true,
+        "scanned_store_path": "ws-sqlite-metrics-store-29fu5wy2",
+        "status": "measured"
+      },
+      "mutation_latency": {
+        "max_ns": 22230736,
+        "min_ns": 3972103,
+        "p50_ns": 4555931,
+        "p95_ns": 11411668,
+        "samples": 100
+      },
+      "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
+      "offline_divergence": {
+        "detail": "File copy only; no merge protocol in this adapter",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 0.9351102475965599,
+        "p95_vs_json": 1.1174633900626687
+      },
+      "resource_measurements": {
+        "claim_exit_code": 0,
+        "disk_bytes_after": 61440,
+        "disk_bytes_before": 57344,
+        "disk_growth_bytes": 4096,
+        "pass": true,
+        "peak_rss_kib": 39852,
+        "peak_rss_mib": 38.92,
+        "rss_protocol": "popen_sample_child",
+        "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
+        "status": "measured"
+      },
+      "restart_recovery": {
+        "assignee": "lane-restart",
+        "claim_id": "claim-restart",
+        "claim_persisted": true,
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured"
+      },
+      "same_actor_and_retry": {
+        "idempotent_retry": {
+          "created_first": true,
+          "created_retry": false,
+          "reason": "idempotent_retry"
+        },
+        "pass": true,
+        "same_actor_rejection": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "already_claimed"
+        },
+        "status": "measured"
+      },
+      "schema_version_policy": {
+        "downgrade_coerced_on_export": true,
+        "downgrade_rejected": false,
+        "downgrade_version_after_export": 2,
+        "downgrade_version_written": 1,
+        "expected_version": 2,
+        "future_version_after_export": 2,
+        "future_version_coerced_on_export": true,
+        "future_version_rejected": false,
+        "future_version_written": 102,
+        "observed_policy": "adapter_meta_preserves_written_version_export_coerces_via_ensure_ledger_edges",
+        "pass": true,
+        "status": "measured"
+      },
+      "secret_history_handling": {
+        "git_history": {
+          "pass": null,
+          "reason": "sqlite characterization adapter has no native VCS; JSON ledger measures synthetic git/ignore-path history",
+          "status": "unavailable"
+        },
+        "live_and_backup_pass": true,
+        "live_retains_deleted_secret": false,
+        "pass": true,
+        "post_delete_backup_retains_secret": false,
+        "pre_delete_backup_retains_secret": true,
+        "status": "measured",
+        "synthetic_secret_marker": "synth-secret-846-r3-TOKEN-not-a-real-credential"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "sqlite_wal",
+      "status": "measured"
+    },
+    {
+      "backup_restore": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "branch_diff_merge": {
+        "status": "blocked"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "cold_start": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "guard_and_empty_filter": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "install_footprint": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "metrics_state": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "blocked"
+      },
+      "pass": null,
+      "reason": "dolt binary not available on PATH; optional temporary CLI not supplied (--dolt-bin). Cell left unmeasured rather than fabricated",
+      "relative_to_json": null,
+      "resource_measurements": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "restart_recovery": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "same_actor_and_retry": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "schema_version_policy": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "secret_history_handling": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "dolt_cli_per_command",
+      "status": "blocked"
+    },
+    {
+      "backup_restore": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "branch_diff_merge": {
+        "status": "blocked"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "cold_start": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "guard_and_empty_filter": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "install_footprint": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "metrics_state": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "blocked"
+      },
+      "pass": null,
+      "reason": "No embedded Dolt boundary is checked into this repo; R3 does not build or persist a Go/Dolt dependency",
+      "relative_to_json": null,
+      "resource_measurements": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "restart_recovery": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "same_actor_and_retry": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "schema_version_policy": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "secret_history_handling": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "embedded_dolt",
+      "status": "blocked"
+    },
+    {
+      "backup_restore": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "branch_diff_merge": {
+        "status": "blocked"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "cold_start": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "guard_and_empty_filter": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "install_footprint": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "metrics_state": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "blocked"
+      },
+      "pass": null,
+      "reason": "R3 policy: harness must not start a network listener; operator-owned server characterization requires separate approval",
+      "relative_to_json": null,
+      "resource_measurements": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "restart_recovery": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "same_actor_and_retry": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "schema_version_policy": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "secret_history_handling": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "dolt_sql_server",
+      "status": "blocked"
+    },
+    {
+      "backup_restore": {
+        "backup_time_ns": 401021,
+        "branch_heads": {
+          "detail": "shape has no first-class branch heads",
+          "digest_sha256": null,
+          "status": "unsupported"
+        },
+        "claim_digest_after": "3248cf250f8c175e371bdb4e8852985a7642d4ea386c3c03f1f7ed48dfad4bae",
+        "claim_digest_before": "3248cf250f8c175e371bdb4e8852985a7642d4ea386c3c03f1f7ed48dfad4bae",
+        "config_digest_after": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "config_digest_before": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "pass": true,
+        "status": "measured",
+        "task_edge_digest_after": "2f06d09a748e89cb4aa4245ead29d28872d727454dadf8751aea4f8f5c5bcd44",
+        "task_edge_digest_before": "2f06d09a748e89cb4aa4245ead29d28872d727454dadf8751aea4f8f5c5bcd44"
+      },
+      "branch_diff_merge": {
+        "detail": "JSON ledger has no first-class branch/diff/merge path",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "status": "measured",
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "cold_start": {
+        "cold": true,
+        "cold_start_ns": 456334012,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 4586172,
+        "inner_operation_timing_scope": "probe_read_after_import",
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured",
+        "task_count": 200
+      },
+      "crash_consistency": {
+        "mode": "before_replace",
+        "original_intact": true,
+        "pass": true,
+        "status": "measured"
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "digest_after": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+        "digest_before": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+        "pass": true,
+        "status": "measured"
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 199,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 1
+      },
+      "guard_and_empty_filter": {
+        "empty_filter": {
+          "exit_code": 2,
+          "pass": true,
+          "reason": "empty_filter"
+        },
+        "if_actor_mismatch": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "if_status_match": {
+          "exit_code": 0,
+          "pass": true,
+          "released": true
+        },
+        "if_status_mismatch": {
+          "exit_code": 13,
+          "expected": "pending",
+          "guard": "if_status",
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "pass": true,
+        "status": "measured",
+        "still_held_after_rejects": true
+      },
+      "install_footprint": {
+        "note": "JSON ledger is in-tree; no extra runtime dependency install",
+        "pass": true,
+        "runtime_dependency_bytes": 0,
+        "status": "measured",
+        "tasks_json_bytes": 140737,
+        "work_tree_bytes": 140737
+      },
+      "metrics_state": {
+        "anonymous_metrics_config": "disabled",
+        "brigade_anonymous_metrics_env": "0",
+        "claim_exit_code": 0,
+        "disable_telemetry_env": "1",
+        "metrics_artifacts": [],
+        "pass": true,
+        "status": "measured"
+      },
+      "mutation_latency": {
+        "max_ns": 672487749,
+        "min_ns": 10122122,
+        "p50_ns": 11572495,
+        "p95_ns": 21166162,
+        "samples": 100
+      },
+      "offline_divergence": {
+        "detail": "No portable sync primitive in current JSON ledger",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 1.0,
+        "p95_vs_json": 1.0
+      },
+      "resource_measurements": {
+        "claim_exit_code": 0,
+        "disk_bytes_after": 140977,
+        "disk_bytes_before": 140737,
+        "disk_growth_bytes": 240,
+        "pass": true,
+        "peak_rss_kib": 52040,
+        "peak_rss_mib": 50.82,
+        "rss_protocol": "popen_sample_child",
+        "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
+        "status": "measured",
+        "stdout_bytes": 282
+      },
+      "restart_recovery": {
+        "assignee": "lane-restart",
+        "claim_id": "claim-restart",
+        "claim_persisted": true,
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured"
+      },
+      "same_actor_and_retry": {
+        "idempotent_retry": {
+          "created_first": true,
+          "created_retry": false,
+          "idempotent": true
+        },
+        "pass": true,
+        "same_actor_rejection": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "already_claimed"
+        },
+        "status": "measured"
+      },
+      "schema_version_policy": {
+        "downgrade_coerced_on_read": true,
+        "downgrade_rejected": false,
+        "downgrade_version_after_read": 2,
+        "downgrade_version_written": 1,
+        "expected_version": 2,
+        "future_version_after_read": 2,
+        "future_version_coerced_on_read": true,
+        "future_version_rejected": false,
+        "future_version_written": 102,
+        "observed_policy": "ensure_ledger_edges_coerces_version_to_current",
+        "pass": true,
+        "status": "measured"
+      },
+      "secret_history_handling": {
+        "git_history": {
+          "ignore_path": ".brigade/work/",
+          "ignored_path_secret_absent_from_git": true,
+          "pass": true,
+          "status": "measured",
+          "synthetic_tracked_history": {
+            "deleted_secret_retained_in_history": true,
+            "pass": true,
+            "status": "measured",
+            "tracked_path": "synth/tracked-secret.txt"
+          },
+          "work_path_ignored": true
+        },
+        "live_and_backup_pass": true,
+        "live_retains_deleted_path": false,
+        "live_retains_deleted_secret": false,
+        "pass": true,
+        "post_delete_backup_retains_secret": false,
+        "pre_delete_backup_retains_secret": true,
+        "status": "measured",
+        "synthetic_secret_marker": "synth-secret-846-r3-TOKEN-not-a-real-credential"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "json_ledger",
+      "status": "measured"
+    },
+    {
+      "backup_restore": {
+        "backup_time_ns": 799620,
+        "branch_heads": {
+          "detail": "shape has no first-class branch heads",
+          "digest_sha256": null,
+          "status": "unsupported"
+        },
+        "claim_digest_after": "3248cf250f8c175e371bdb4e8852985a7642d4ea386c3c03f1f7ed48dfad4bae",
+        "claim_digest_before": "3248cf250f8c175e371bdb4e8852985a7642d4ea386c3c03f1f7ed48dfad4bae",
+        "config_digest_after": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "config_digest_before": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "pass": true,
+        "status": "measured",
+        "task_edge_digest_after": "6390c7e86c78db8202867a46b02435951b7c67563966c224b1bd72e51d1f6765",
+        "task_edge_digest_before": "6390c7e86c78db8202867a46b02435951b7c67563966c224b1bd72e51d1f6765"
+      },
+      "branch_diff_merge": {
+        "detail": "SQLite WAL adapter has no branch/diff/merge",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "status": "measured",
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "cold_start": {
+        "cold": true,
+        "cold_start_ns": 488552600,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 11879047,
+        "inner_operation_timing_scope": "probe_export_after_import",
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured",
+        "task_count": 200
+      },
+      "crash_consistency": {
+        "mode": "before_commit",
+        "original_intact": true,
+        "pass": true,
+        "status": "measured"
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "digest_after": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+        "digest_before": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+        "pass": true,
+        "status": "measured"
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 199,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 1
+      },
+      "guard_and_empty_filter": {
+        "claim_cleanup": {
+          "item_revision": 2,
+          "pass": true
+        },
+        "empty_filter": {
+          "exit_code": 2,
+          "pass": true,
+          "reason": "empty_filter"
+        },
+        "if_actor_mismatch": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "if_status_match": {
+          "exit_code": 0,
+          "pass": true,
+          "released": true
+        },
+        "if_status_mismatch": {
+          "exit_code": 13,
+          "guard": "if_status",
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "pass": true,
+        "status": "measured"
+      },
+      "install_footprint": {
+        "db_bytes": 208896,
+        "note": "stdlib sqlite3 only; not a Brigade runtime dependency",
+        "pass": true,
+        "runtime_dependency_bytes": 0,
+        "status": "measured"
+      },
+      "metrics_state": {
+        "anonymous_metrics_config": "disabled",
+        "brigade_anonymous_metrics_env": "0",
+        "claim_exit_code": 0,
+        "disable_telemetry_env": "1",
+        "metrics_artifacts": [],
+        "pass": true,
+        "scanned_store_path": "ws-sqlite-metrics-store-es6hnf0m",
+        "status": "measured"
+      },
+      "mutation_latency": {
+        "max_ns": 72114209,
+        "min_ns": 4382316,
+        "p50_ns": 5524940,
+        "p95_ns": 18054008,
+        "samples": 100
+      },
+      "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
+      "offline_divergence": {
+        "detail": "File copy only; no merge protocol in this adapter",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 0.4774199513588038,
+        "p95_vs_json": 0.8529655966915495
+      },
+      "resource_measurements": {
+        "claim_exit_code": 0,
+        "disk_bytes_after": 212992,
+        "disk_bytes_before": 208896,
+        "disk_growth_bytes": 4096,
+        "pass": true,
+        "peak_rss_kib": 39956,
+        "peak_rss_mib": 39.02,
+        "rss_protocol": "popen_sample_child",
+        "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
+        "status": "measured"
+      },
+      "restart_recovery": {
+        "assignee": "lane-restart",
+        "claim_id": "claim-restart",
+        "claim_persisted": true,
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured"
+      },
+      "same_actor_and_retry": {
+        "idempotent_retry": {
+          "created_first": true,
+          "created_retry": false,
+          "reason": "idempotent_retry"
+        },
+        "pass": true,
+        "same_actor_rejection": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "already_claimed"
+        },
+        "status": "measured"
+      },
+      "schema_version_policy": {
+        "downgrade_coerced_on_export": true,
+        "downgrade_rejected": false,
+        "downgrade_version_after_export": 2,
+        "downgrade_version_written": 1,
+        "expected_version": 2,
+        "future_version_after_export": 2,
+        "future_version_coerced_on_export": true,
+        "future_version_rejected": false,
+        "future_version_written": 102,
+        "observed_policy": "adapter_meta_preserves_written_version_export_coerces_via_ensure_ledger_edges",
+        "pass": true,
+        "status": "measured"
+      },
+      "secret_history_handling": {
+        "git_history": {
+          "pass": null,
+          "reason": "sqlite characterization adapter has no native VCS; JSON ledger measures synthetic git/ignore-path history",
+          "status": "unavailable"
+        },
+        "live_and_backup_pass": true,
+        "live_retains_deleted_secret": false,
+        "pass": true,
+        "post_delete_backup_retains_secret": false,
+        "pre_delete_backup_retains_secret": true,
+        "status": "measured",
+        "synthetic_secret_marker": "synth-secret-846-r3-TOKEN-not-a-real-credential"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "sqlite_wal",
+      "status": "measured"
+    },
+    {
+      "backup_restore": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "branch_diff_merge": {
+        "status": "blocked"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "cold_start": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "guard_and_empty_filter": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "install_footprint": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "metrics_state": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "blocked"
+      },
+      "pass": null,
+      "reason": "dolt binary not available on PATH; optional temporary CLI not supplied (--dolt-bin). Cell left unmeasured rather than fabricated",
+      "relative_to_json": null,
+      "resource_measurements": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "restart_recovery": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "same_actor_and_retry": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "schema_version_policy": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "secret_history_handling": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "dolt_cli_per_command",
+      "status": "blocked"
+    },
+    {
+      "backup_restore": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "branch_diff_merge": {
+        "status": "blocked"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "cold_start": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "guard_and_empty_filter": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "install_footprint": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "metrics_state": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "blocked"
+      },
+      "pass": null,
+      "reason": "No embedded Dolt boundary is checked into this repo; R3 does not build or persist a Go/Dolt dependency",
+      "relative_to_json": null,
+      "resource_measurements": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "restart_recovery": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "same_actor_and_retry": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "schema_version_policy": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "secret_history_handling": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "embedded_dolt",
+      "status": "blocked"
+    },
+    {
+      "backup_restore": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "branch_diff_merge": {
+        "status": "blocked"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "cold_start": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "guard_and_empty_filter": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "install_footprint": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "metrics_state": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "blocked"
+      },
+      "pass": null,
+      "reason": "R3 policy: harness must not start a network listener; operator-owned server characterization requires separate approval",
+      "relative_to_json": null,
+      "resource_measurements": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "restart_recovery": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "same_actor_and_retry": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "schema_version_policy": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "secret_history_handling": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "dolt_sql_server",
+      "status": "blocked"
+    },
+    {
+      "backup_restore": {
+        "backup_time_ns": 948207,
+        "branch_heads": {
+          "detail": "shape has no first-class branch heads",
+          "digest_sha256": null,
+          "status": "unsupported"
+        },
+        "claim_digest_after": "dc738a64bd5c2ef993301fb027b239355207d06c9b20dfeb79ef5b28689f5644",
+        "claim_digest_before": "dc738a64bd5c2ef993301fb027b239355207d06c9b20dfeb79ef5b28689f5644",
+        "config_digest_after": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "config_digest_before": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "pass": true,
+        "status": "measured",
+        "task_edge_digest_after": "0a87f63fd2879b12a02580af0c6e33a4883c8030f078148ffa9d7e39d5aa831d",
+        "task_edge_digest_before": "0a87f63fd2879b12a02580af0c6e33a4883c8030f078148ffa9d7e39d5aa831d"
+      },
+      "branch_diff_merge": {
+        "detail": "JSON ledger has no first-class branch/diff/merge path",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "status": "measured",
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "cold_start": {
+        "cold": true,
+        "cold_start_ns": 461399046,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 12126627,
+        "inner_operation_timing_scope": "probe_read_after_import",
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured",
+        "task_count": 500
+      },
+      "crash_consistency": {
+        "mode": "before_replace",
+        "original_intact": true,
+        "pass": true,
+        "status": "measured"
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "digest_after": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+        "digest_before": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+        "pass": true,
+        "status": "measured"
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 0,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 500
+      },
+      "guard_and_empty_filter": {
+        "empty_filter": {
+          "exit_code": 2,
+          "pass": true,
+          "reason": "empty_filter"
+        },
+        "if_actor_mismatch": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "if_status_match": {
+          "exit_code": 0,
+          "pass": true,
+          "released": true
+        },
+        "if_status_mismatch": {
+          "exit_code": 13,
+          "expected": "pending",
+          "guard": "if_status",
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "pass": true,
+        "status": "measured",
+        "still_held_after_rejects": true
+      },
+      "install_footprint": {
+        "note": "JSON ledger is in-tree; no extra runtime dependency install",
+        "pass": true,
+        "runtime_dependency_bytes": 0,
+        "status": "measured",
+        "tasks_json_bytes": 353443,
+        "work_tree_bytes": 353443
+      },
+      "metrics_state": {
+        "anonymous_metrics_config": "disabled",
+        "brigade_anonymous_metrics_env": "0",
+        "claim_exit_code": 0,
+        "disable_telemetry_env": "1",
+        "metrics_artifacts": [],
+        "pass": true,
+        "status": "measured"
+      },
+      "mutation_latency": {
+        "max_ns": 805433481,
+        "min_ns": 18667255,
+        "p50_ns": 20766292,
+        "p95_ns": 36429784,
+        "samples": 100
+      },
+      "offline_divergence": {
+        "detail": "No portable sync primitive in current JSON ledger",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 1.0,
+        "p95_vs_json": 1.0
+      },
+      "resource_measurements": {
+        "claim_exit_code": 0,
+        "disk_bytes_after": 353683,
+        "disk_bytes_before": 353443,
+        "disk_growth_bytes": 240,
+        "pass": true,
+        "peak_rss_kib": 53384,
+        "peak_rss_mib": 52.13,
+        "rss_protocol": "popen_sample_child",
+        "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
+        "status": "measured",
+        "stdout_bytes": 279
+      },
+      "restart_recovery": {
+        "assignee": "lane-restart",
+        "claim_id": "claim-restart",
+        "claim_persisted": true,
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured"
+      },
+      "same_actor_and_retry": {
+        "idempotent_retry": {
+          "created_first": true,
+          "created_retry": false,
+          "idempotent": true
+        },
+        "pass": true,
+        "same_actor_rejection": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "already_claimed"
+        },
+        "status": "measured"
+      },
+      "schema_version_policy": {
+        "downgrade_coerced_on_read": true,
+        "downgrade_rejected": false,
+        "downgrade_version_after_read": 2,
+        "downgrade_version_written": 1,
+        "expected_version": 2,
+        "future_version_after_read": 2,
+        "future_version_coerced_on_read": true,
+        "future_version_rejected": false,
+        "future_version_written": 102,
+        "observed_policy": "ensure_ledger_edges_coerces_version_to_current",
+        "pass": true,
+        "status": "measured"
+      },
+      "secret_history_handling": {
+        "git_history": {
+          "ignore_path": ".brigade/work/",
+          "ignored_path_secret_absent_from_git": true,
+          "pass": true,
+          "status": "measured",
+          "synthetic_tracked_history": {
+            "deleted_secret_retained_in_history": true,
+            "pass": true,
+            "status": "measured",
+            "tracked_path": "synth/tracked-secret.txt"
+          },
+          "work_path_ignored": true
+        },
+        "live_and_backup_pass": true,
+        "live_retains_deleted_path": false,
+        "live_retains_deleted_secret": false,
+        "pass": true,
+        "post_delete_backup_retains_secret": false,
+        "pre_delete_backup_retains_secret": true,
+        "status": "measured",
+        "synthetic_secret_marker": "synth-secret-846-r3-TOKEN-not-a-real-credential"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "json_ledger",
+      "status": "measured"
+    },
+    {
+      "backup_restore": {
+        "backup_time_ns": 735948,
+        "branch_heads": {
+          "detail": "shape has no first-class branch heads",
+          "digest_sha256": null,
+          "status": "unsupported"
+        },
+        "claim_digest_after": "dc738a64bd5c2ef993301fb027b239355207d06c9b20dfeb79ef5b28689f5644",
+        "claim_digest_before": "dc738a64bd5c2ef993301fb027b239355207d06c9b20dfeb79ef5b28689f5644",
+        "config_digest_after": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "config_digest_before": "24e831dd06f47b03d6a3a8b558fdb5b822442d8d1f969b2e88146375448a01d9",
+        "pass": true,
+        "status": "measured",
+        "task_edge_digest_after": "c3bb2700b837962f29b679adc793a23f04b4cc5a1636599bbe38533ba0eb4a58",
+        "task_edge_digest_before": "c3bb2700b837962f29b679adc793a23f04b4cc5a1636599bbe38533ba0eb4a58"
+      },
+      "branch_diff_merge": {
+        "detail": "SQLite WAL adapter has no branch/diff/merge",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-a",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "status": "measured",
+        "winner_actor": "lane-a",
+        "winner_count": 1
+      },
+      "cold_start": {
+        "cold": true,
+        "cold_start_ns": 491832997,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 22051989,
+        "inner_operation_timing_scope": "probe_export_after_import",
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured",
+        "task_count": 500
+      },
+      "crash_consistency": {
+        "mode": "before_commit",
+        "original_intact": true,
+        "pass": true,
+        "status": "measured"
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "digest_after": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+        "digest_before": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+        "pass": true,
+        "status": "measured"
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 0,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 500
+      },
+      "guard_and_empty_filter": {
+        "claim_cleanup": {
+          "item_revision": 2,
+          "pass": true
+        },
+        "empty_filter": {
+          "exit_code": 2,
+          "pass": true,
+          "reason": "empty_filter"
+        },
+        "if_actor_mismatch": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "if_status_match": {
+          "exit_code": 0,
+          "pass": true,
+          "released": true
+        },
+        "if_status_mismatch": {
+          "exit_code": 13,
+          "guard": "if_status",
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "pass": true,
+        "status": "measured"
+      },
+      "install_footprint": {
+        "db_bytes": 458752,
+        "note": "stdlib sqlite3 only; not a Brigade runtime dependency",
+        "pass": true,
+        "runtime_dependency_bytes": 0,
+        "status": "measured"
+      },
+      "metrics_state": {
+        "anonymous_metrics_config": "disabled",
+        "brigade_anonymous_metrics_env": "0",
+        "claim_exit_code": 0,
+        "disable_telemetry_env": "1",
+        "metrics_artifacts": [],
+        "pass": true,
+        "scanned_store_path": "ws-sqlite-metrics-store-6j7vrshh",
+        "status": "measured"
+      },
+      "mutation_latency": {
+        "max_ns": 34203339,
+        "min_ns": 3158316,
+        "p50_ns": 3842630,
+        "p95_ns": 9657140,
+        "samples": 100
+      },
+      "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
+      "offline_divergence": {
+        "detail": "File copy only; no merge protocol in this adapter",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 0.18504170123390348,
+        "p95_vs_json": 0.2650891369545315
+      },
+      "resource_measurements": {
+        "claim_exit_code": 0,
+        "disk_bytes_after": 458752,
+        "disk_bytes_before": 458752,
+        "disk_growth_bytes": 0,
+        "pass": true,
+        "peak_rss_kib": 39848,
+        "peak_rss_mib": 38.91,
+        "rss_protocol": "popen_sample_child",
+        "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
+        "status": "measured"
+      },
+      "restart_recovery": {
+        "assignee": "lane-restart",
+        "claim_id": "claim-restart",
+        "claim_persisted": true,
+        "pass": true,
+        "process_boundary": "subprocess",
+        "status": "measured"
+      },
+      "same_actor_and_retry": {
+        "idempotent_retry": {
+          "created_first": true,
+          "created_retry": false,
+          "reason": "idempotent_retry"
+        },
+        "pass": true,
+        "same_actor_rejection": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "already_claimed"
+        },
+        "status": "measured"
+      },
+      "schema_version_policy": {
+        "downgrade_coerced_on_export": true,
+        "downgrade_rejected": false,
+        "downgrade_version_after_export": 2,
+        "downgrade_version_written": 1,
+        "expected_version": 2,
+        "future_version_after_export": 2,
+        "future_version_coerced_on_export": true,
+        "future_version_rejected": false,
+        "future_version_written": 102,
+        "observed_policy": "adapter_meta_preserves_written_version_export_coerces_via_ensure_ledger_edges",
+        "pass": true,
+        "status": "measured"
+      },
+      "secret_history_handling": {
+        "git_history": {
+          "pass": null,
+          "reason": "sqlite characterization adapter has no native VCS; JSON ledger measures synthetic git/ignore-path history",
+          "status": "unavailable"
+        },
+        "live_and_backup_pass": true,
+        "live_retains_deleted_secret": false,
+        "pass": true,
+        "post_delete_backup_retains_secret": false,
+        "pre_delete_backup_retains_secret": true,
+        "status": "measured",
+        "synthetic_secret_marker": "synth-secret-846-r3-TOKEN-not-a-real-credential"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "sqlite_wal",
+      "status": "measured"
+    },
+    {
+      "backup_restore": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "branch_diff_merge": {
+        "status": "blocked"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "cold_start": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "guard_and_empty_filter": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "install_footprint": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "metrics_state": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "blocked"
+      },
+      "pass": null,
+      "reason": "dolt binary not available on PATH; optional temporary CLI not supplied (--dolt-bin). Cell left unmeasured rather than fabricated",
+      "relative_to_json": null,
+      "resource_measurements": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "restart_recovery": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "same_actor_and_retry": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "schema_version_policy": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "secret_history_handling": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "dolt_cli_per_command",
+      "status": "blocked"
+    },
+    {
+      "backup_restore": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "branch_diff_merge": {
+        "status": "blocked"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "cold_start": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "guard_and_empty_filter": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "install_footprint": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "metrics_state": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "blocked"
+      },
+      "pass": null,
+      "reason": "No embedded Dolt boundary is checked into this repo; R3 does not build or persist a Go/Dolt dependency",
+      "relative_to_json": null,
+      "resource_measurements": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "restart_recovery": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "same_actor_and_retry": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "schema_version_policy": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "secret_history_handling": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "embedded_dolt",
+      "status": "blocked"
+    },
+    {
+      "backup_restore": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "branch_diff_merge": {
+        "status": "blocked"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "cold_start": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "guard_and_empty_filter": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "install_footprint": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "metrics_state": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "blocked"
+      },
+      "pass": null,
+      "reason": "R3 policy: harness must not start a network listener; operator-owned server characterization requires separate approval",
+      "relative_to_json": null,
+      "resource_measurements": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "restart_recovery": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "same_actor_and_retry": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "schema_version_policy": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "secret_history_handling": {
+        "pass": null,
+        "status": "blocked"
+      },
+      "server_auth_tls_permissions": {
+        "pass": null,
+        "reason": "requires network listener; pending separate operator approval",
+        "status": "blocked"
+      },
+      "shape": "dolt_sql_server",
+      "status": "blocked"
+    }
+  ],
+  "shapes": [
+    "json_ledger",
+    "sqlite_wal",
+    "dolt_cli_per_command",
+    "embedded_dolt",
+    "dolt_sql_server"
+  ],
+  "slice": "R3",
+  "timebox": "R3 bounded repair: correct the SQLite release characterization while retaining the accepted no-listener scope and residual cells. Dolt shapes stay optional characterization candidates and must not enter Brigade runtime dependencies. Server listeners, TLS, and permission cells that need a listener remain blocked pending separate operator approval and are never started here.",
+  "trials": 100,
+  "warmups": 10
+}

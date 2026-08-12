@@ -1,4 +1,4 @@
-"""Tests for scripts/measure_work_store.py (#846 R2 characterization harness)."""
+"""Tests for scripts/measure_work_store.py (#846 R3 characterization harness)."""
 
 from __future__ import annotations
 
@@ -76,8 +76,8 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
         trials=2,
     )
     assert report["issue"] == 846
-    assert report["slice"] == "R2"
-    assert report["protocol_version"] == 2
+    assert report["slice"] == "R3"
+    assert report["protocol_version"] == 3
     assert report["kind"] == "work-store-characterization"
     assert report["anonymous_metrics"] == "disabled_in_harness"
     assert {"environment", "fixtures", "results", "decision", "capability_notes"} <= set(report)
@@ -147,7 +147,9 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
     assert git_history["synthetic_tracked_history"]["deleted_secret_retained_in_history"] is True
     assert git_history["pass"] is True
     sqlite_result = next(item for item in report["results"] if item["shape"] == "sqlite_wal")
-    assert sqlite_result["guard_and_empty_filter"]["status"] == "unavailable"
+    assert sqlite_result["guard_and_empty_filter"]["status"] == "measured"
+    assert sqlite_result["guard_and_empty_filter"]["pass"] is True
+    assert sqlite_result["guard_and_empty_filter"]["claim_cleanup"] == {"item_revision": 2, "pass": True}
     assert sqlite_result["restart_recovery"]["process_boundary"] == "subprocess"
     assert sqlite_result["cold_start"]["process_boundary"] == "subprocess"
     assert sqlite_result["cold_start"]["cold"] is True
@@ -238,6 +240,21 @@ def test_json_guard_covers_if_status_match_and_mismatch(tmp_path):
     assert result["if_status_match"]["released"] is True
 
 
+def test_sqlite_release_rejects_unclaimed_pending_without_changing_export(tmp_path):
+    module = _load_module()
+    db_path = tmp_path / "release.db"
+    module._sqlite_load(db_path, module.build_fixture("chain_50"))
+    task_id = module._claim_target_id(module.build_fixture("chain_50"))
+    before = json.dumps(module._sqlite_export_ledger(db_path), sort_keys=True).encode()
+
+    code, payload = module._sqlite_release(db_path, task_id)
+
+    after = json.dumps(module._sqlite_export_ledger(db_path), sort_keys=True).encode()
+    assert code == 1
+    assert payload["reason"] == "not_claimed"
+    assert after == before
+
+
 def test_measure_matrix_marks_dolt_shapes_blocked(tmp_path):
     module = _load_module()
     report = module.measure_matrix(
@@ -308,7 +325,7 @@ def test_cli_writes_measurement_and_fixture_manifest(tmp_path):
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(output.read_text())
     assert payload["issue"] == 846
-    assert payload["slice"] == "R2"
+    assert payload["slice"] == "R3"
     assert len(payload["results"]) == 3
     statuses = {item["shape"]: item["status"] for item in payload["results"]}
     assert statuses["json_ledger"] == "measured"
@@ -317,7 +334,7 @@ def test_cli_writes_measurement_and_fixture_manifest(tmp_path):
     fixture_payload = json.loads(manifest.read_text())
     assert "chain_50" in fixture_payload["fixtures"]
     assert fixture_payload["fixtures"]["chain_50"]["task_count"] == 50
-    assert fixture_payload["slice"] == "R2"
+    assert fixture_payload["slice"] == "R3"
 
 
 def test_measure_matrix_rejects_nonpositive_trials(tmp_path):
