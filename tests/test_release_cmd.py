@@ -1449,3 +1449,36 @@ def test_release_readiness_content_guard_default_remediation_resolves(check_name
     )
     assert remediation == "brigade scrub"
     _assert_brigade_remediation_resolves(remediation)
+
+
+def test_release_security_reports_nested_projection_truncation(tmp_path, monkeypatch):
+    long_value = "x" * 500
+    monkeypatch.setattr(
+        security_cmd,
+        "health",
+        lambda target: {
+            "valid": True,
+            "issue_count": 1,
+            "open_finding_count": 1,
+            "raw_open_finding_count": 1,
+            "top_issue": {"status": "warn", "name": "security_open_findings", "detail": long_value},
+            "top_finding": {"id": "sec-1", "title": long_value, "remediation_hint": long_value},
+            "checks": [
+                {
+                    "status": "warn",
+                    "name": "security_open_findings",
+                    "detail": long_value,
+                    "remediation": long_value,
+                }
+            ],
+            "evidence": {"ready": True},
+        },
+    )
+
+    summary = release_cmd._security_summary(tmp_path)
+
+    assert summary["projection_truncated_count"] == 5
+    assert summary["checks"][0]["detail"].endswith("...")
+    assert summary["top_issue"]["detail"].endswith("...")
+    assert summary["top_finding"]["title"].endswith("...")
+    assert summary["top_finding"]["remediation_hint"].endswith("...")

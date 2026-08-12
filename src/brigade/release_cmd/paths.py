@@ -205,7 +205,9 @@ def _latest_closeout_json(root: Path) -> dict[str, Any] | None:
     return None
 
 
-def _release_report_safe_text(value: object, *, fallback: str = "", limit: int = 180) -> str:
+def _release_report_safe_text(
+    value: object, *, fallback: str = "", limit: int = 180, truncations: list[bool] | None = None
+) -> str:
     rendered = str(value if value is not None else fallback)
     rendered = RELEASE_REPORT_URL_RE.sub("[redacted-url]", rendered)
     rendered = RELEASE_REPORT_TOKEN_RE.sub("[redacted]", rendered)
@@ -215,22 +217,26 @@ def _release_report_safe_text(value: object, *, fallback: str = "", limit: int =
     rendered = " ".join(rendered.split())
     if len(rendered) <= limit:
         return rendered
+    if truncations is not None:
+        truncations.append(True)
     return rendered[: limit - 3].rstrip() + "..."
 
 
-def _release_safe_security_check(check: dict[str, Any]) -> dict[str, Any]:
+def _release_safe_security_check(check: dict[str, Any], *, truncations: list[bool] | None = None) -> dict[str, Any]:
     safe: dict[str, Any] = {
-        "status": _release_report_safe_text(check.get("status"), fallback="unknown", limit=16),
-        "name": _release_report_safe_text(check.get("name"), fallback="unnamed_check", limit=80),
-        "detail": _release_report_safe_text(check.get("detail"), limit=240),
+        "status": _release_report_safe_text(check.get("status"), fallback="unknown", limit=16, truncations=truncations),
+        "name": _release_report_safe_text(
+            check.get("name"), fallback="unnamed_check", limit=80, truncations=truncations
+        ),
+        "detail": _release_report_safe_text(check.get("detail"), limit=240, truncations=truncations),
     }
     for key in ("remediation", "suggested_next_command", "next_command"):
         if key in check:
-            safe[key] = _release_report_safe_text(check.get(key), limit=180)
+            safe[key] = _release_report_safe_text(check.get(key), limit=180, truncations=truncations)
     return safe
 
 
-def _release_safe_top_finding(value: object) -> dict[str, Any] | None:
+def _release_safe_top_finding(value: object, *, truncations: list[bool] | None = None) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     safe: dict[str, Any] = {}
@@ -243,39 +249,49 @@ def _release_safe_top_finding(value: object) -> dict[str, Any] | None:
     }
     for key, limit in limits.items():
         if key in value:
-            safe[key] = _release_report_safe_text(value.get(key), limit=limit)
+            safe[key] = _release_report_safe_text(value.get(key), limit=limit, truncations=truncations)
     line = value.get("line")
     if isinstance(line, int) and not isinstance(line, bool):
         safe["line"] = line
     elif line is not None:
-        safe["line"] = _release_report_safe_text(line, limit=32)
+        safe["line"] = _release_report_safe_text(line, limit=32, truncations=truncations)
     remediation = value.get("remediation_hint") or value.get("suggestion")
     if remediation is not None:
-        safe["remediation_hint"] = _release_report_safe_text(remediation, limit=220)
+        safe["remediation_hint"] = _release_report_safe_text(remediation, limit=220, truncations=truncations)
     return safe
 
 
 def _security_summary(target: Path) -> dict[str, Any]:
     health = security_cmd.health(target)
+    truncations: list[bool] = []
     checks = (
-        [_release_safe_security_check(item) for item in health.get("checks", []) if isinstance(item, dict)]
+        [
+            _release_safe_security_check(item, truncations=truncations)
+            for item in health.get("checks", [])
+            if isinstance(item, dict)
+        ]
         if isinstance(health, dict)
         else []
     )
     health_warning_checks = [
         item for item in checks if item.get("name") != "security_open_findings" and item.get("status") == WARN
     ]
+    top_issue = (
+        _release_safe_security_check(health["top_issue"], truncations=truncations)
+        if isinstance(health.get("top_issue"), dict)
+        else None
+    )
+    top_finding = _release_safe_top_finding(health.get("top_finding"), truncations=truncations)
     return {
         "valid": health.get("valid"),
         "issue_count": health.get("issue_count"),
         "open_finding_count": health.get("open_finding_count"),
         "raw_open_finding_count": health.get("raw_open_finding_count"),
         "health_warning_count": len(health_warning_checks),
+        "projection_truncated_count": len(truncations),
         "checks": checks,
-        "top_issue": _release_safe_security_check(health["top_issue"])
-        if isinstance(health.get("top_issue"), dict)
-        else None,
-        "top_finding": _release_safe_top_finding(health.get("top_finding")),
+        "top_issue": top_issue,
+        "top_finding": top_finding,
         "evidence": health.get("evidence"),
         "template_privacy": health.get("template_privacy"),
         "latest_closeout": health.get("latest_closeout"),
