@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ class CardDoc:
     tags: tuple[str, ...]
     summary: str
     body: str
+    aliases: tuple[str, ...] = ()
 
     @property
     def searchable_text(self) -> str:
@@ -67,15 +68,15 @@ def load_cards(target: Path) -> list[CardDoc]:
         fields = _card_search_fields(path, target)
         if not fields:
             continue
-        card_id = path.stem
         cards.append(
             CardDoc(
-                card_id=card_id,
+                card_id=str(fields["card_id"]),
                 path=fields["rel"],
                 title=str(fields["title"]),
                 tags=tuple(str(t) for t in fields["tags"]),
                 summary=str(fields["summary"]),
                 body=str(fields["body"]),
+                aliases=tuple(str(alias) for alias in fields["card_aliases"]),
             )
         )
     cards.sort(key=lambda c: c.card_id)
@@ -115,13 +116,22 @@ def load_queries(queries_path: Path) -> tuple[int, list[QuerySpec]]:
 
 def validate_gold(cards: list[CardDoc], queries: list[QuerySpec]) -> list[str]:
     """Return human-readable problems when gold ids are missing from the corpus."""
-    known = {c.card_id for c in cards}
+    known = {key for card in cards for key in (card.card_id, *card.aliases)}
     problems: list[str] = []
     for q in queries:
         missing = [g for g in q.gold if g not in known]
         if missing:
             problems.append(f"{q.query_id}: missing gold card ids: {', '.join(missing)}")
     return problems
+
+
+def resolve_gold_aliases(cards: list[CardDoc], queries: list[QuerySpec]) -> list[QuerySpec]:
+    """Translate legacy fixture keys to their explicit card IDs for scoring."""
+    aliases: dict[str, str] = {}
+    for card in cards:
+        for key in (card.card_id, *card.aliases):
+            aliases.setdefault(key, card.card_id)
+    return [replace(query, gold=tuple(aliases.get(gold, gold) for gold in query.gold)) for query in queries]
 
 
 def corpus_stats(cards: list[CardDoc], queries: list[QuerySpec]) -> dict[str, Any]:

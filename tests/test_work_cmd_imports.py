@@ -2403,8 +2403,9 @@ def test_work_import_memory_refresh_reads_candidates(tmp_path, monkeypatch, caps
         {
             "refresh_candidates": [
                 {
-                    "id": "tools-card",
+                    "id": "card-123e4567-e89b-42d3-a456-426614174000",
                     "file": "memory/cards/tools.md",
+                    "card_aliases": ["memory/cards/tools.md", "tools-card"],
                     "refresh_reason": "contradictory tool notes",
                     "confidence": "high",
                     "evidence_summary": "Two recent handoffs disagree.",
@@ -2423,7 +2424,8 @@ def test_work_import_memory_refresh_reads_candidates(tmp_path, monkeypatch, caps
     assert item["type"] == "docs"
     assert item["priority"] == "high"
     assert item["template"] == "docs"
-    assert item["metadata"]["card_id"] == "tools-card"
+    assert item["metadata"]["card_id"] == "card-123e4567-e89b-42d3-a456-426614174000"
+    assert item["metadata"]["card_aliases"] == ["memory/cards/tools.md", "tools-card"]
     assert item["metadata"]["card_file"] == "memory/cards/tools.md"
     assert item["metadata"]["refresh_reason"] == "contradictory tool notes"
     assert item["metadata"]["confidence"] == "high"

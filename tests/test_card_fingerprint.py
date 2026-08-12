@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from datetime import date
 from pathlib import Path
@@ -194,6 +195,16 @@ def test_reinforce_existing_card_updates_frontmatter(tmp_path: Path):
     assert "reinforcements: 1" in text
     assert "fingerprint:" in text
     assert "handoffs/example.md" in text
+
+
+def test_reinforce_preserves_existing_stable_card_id(tmp_path: Path):
+    path = tmp_path / "card.md"
+    card_id = "card-123e4567-e89b-42d3-a456-426614174000"
+    path.write_text(f"---\nid: {card_id}\ntopic: t\n---\n\nBody.\n")
+
+    reinforce_existing_card(path, today=date(2026, 5, 13), evidence_pointer="handoffs/example.md")
+
+    assert re.search(rf"^id: {re.escape(card_id)}$", path.read_text(), re.MULTILINE)
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")

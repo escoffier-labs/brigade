@@ -18,6 +18,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
+from .card_identity import mint_card_id, valid_card_id
+
 # Near-match threshold from issue #724 (~0.9 token Jaccard).
 NEAR_MATCH_THRESHOLD = 0.9
 
@@ -380,6 +382,15 @@ def ensure_fingerprint_frontmatter(content: str) -> str:
         # Keep an existing fingerprint even if stale; backfill owns repairs.
         return content
     return _insert_frontmatter_fields(content, {"fingerprint": fingerprint})
+
+
+def ensure_card_id_frontmatter(content: str, *, preserve_id: str | None = None) -> str:
+    """Insert a stable card ID, preserving a valid canonical identity when set."""
+    meta, has_frontmatter = _parse_frontmatter_lines(content)
+    if not has_frontmatter:
+        return content
+    card_id = valid_card_id(preserve_id) or valid_card_id(meta.get("id")) or valid_card_id(meta.get("card_id"))
+    return _upsert_frontmatter_fields(content, {"id": card_id or mint_card_id()})
 
 
 def reinforce_existing_card(

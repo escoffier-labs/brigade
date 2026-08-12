@@ -46,6 +46,21 @@ def test_fixture_corpus_size_and_gold_resolve():
     assert paraphrase > exact  # weighted toward hard cases
 
 
+def test_explicit_card_id_resolves_legacy_fixture_gold_alias(tmp_path: Path):
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True)
+    cards.joinpath("legacy-name.md").write_text(
+        "---\nid: card-123e4567-e89b-42d3-a456-426614174000\ntitle: Stable\n---\nunique retrieval term\n"
+    )
+    (tmp_path / "queries.json").write_text(
+        json.dumps({"k": 1, "queries": [{"id": "q", "query": "unique retrieval", "gold": ["legacy-name"]}]})
+    )
+
+    report = run_eval(fixture_root=tmp_path, adapters=["current", "grep"])
+    assert report["adapters"]["current"]["overall"]["hit_rate"] == 1.0
+    assert report["adapters"]["grep"]["overall"]["hit_rate"] == 1.0
+
+
 def test_paraphrase_slice_is_harder_than_exact_for_baselines():
     report = run_eval(adapters=["current", "grep"])
     for name in ("current", "grep"):

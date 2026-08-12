@@ -63,6 +63,9 @@ def _memory_refresh_cards(payload: dict[str, Any], *, queue_path: Path) -> tuple
             "reason": reason,
             "queue_path": str(queue_path),
         }
+        aliases = card.get("card_aliases")
+        if isinstance(aliases, list):
+            metadata["card_aliases"] = [str(alias) for alias in aliases if str(alias)]
         for key in (
             "confidence",
             "evidence_references",
