@@ -111,6 +111,30 @@ function Initialize-PipxBootstrap {
     return $bootstrapPython
 }
 
+function Invoke-RetryBrigadeSetup {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$SetupCommand,
+        [int]$MaxAttempts = 3
+    )
+    # Online setup downloads GitHub release assets. Windows runners periodically
+    # fail with `Remote end closed connection without response` in under a
+    # second; retry with exponential backoff so that transient drop does not
+    # fail the job. Offline setup is not retried (cache, no network).
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        & $SetupCommand
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        if ($attempt -eq $MaxAttempts) {
+            throw "brigade setup failed"
+        }
+        $delaySeconds = [int][Math]::Pow(2, $attempt)
+        Write-Host "brigade setup failed (attempt $attempt of $MaxAttempts); retrying in $delaySeconds seconds"
+        Start-Sleep -Seconds $delaySeconds
+    }
+}
+
 function Invoke-Pipx {
     param(
         [string]$BootstrapPython,
@@ -597,8 +621,7 @@ try {
         Write-Step "brigade setup (online)"
         # Standalone manifest + published_component_ids omits empty-asset entries
         # such as agent-notify; do not add flags that would request them.
-        & brigade setup --manifest-source standalone
-        if ($LASTEXITCODE -ne 0) { throw "brigade setup failed" }
+        Invoke-RetryBrigadeSetup -SetupCommand { & brigade setup --manifest-source standalone }
 
         Write-Step "brigade setup --offline"
         & brigade setup --offline --manifest-source standalone
@@ -606,8 +629,7 @@ try {
     }
     else {
         Write-Step "brigade setup (online)"
-        & brigade setup
-        if ($LASTEXITCODE -ne 0) { throw "brigade setup failed" }
+        Invoke-RetryBrigadeSetup -SetupCommand { & brigade setup }
 
         Write-Step "brigade setup --offline"
         & brigade setup --offline

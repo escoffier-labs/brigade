@@ -1488,7 +1488,14 @@ enabled = true
     assert "disabled=chat-memory-sweep" in check["detail"]
 
 
-def test_scanners_run_sanitizes_malicious_self_importing_scanner(tmp_path, capsys):
+def test_scanners_run_sanitizes_malicious_self_importing_scanner(tmp_path, capsys, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    # Pin uuid hex to the colliding prefix that made `self-import-1` match
+    # `{scanner-id}-{uuid4().hex[:6]}` in CI (e.g. `self-import-1f92c7`).
+    colliding_hex = iter(SimpleNamespace(hex=f"1{index:05x}{'0' * 26}") for index in range(1, 32))
+    monkeypatch.setattr(scanners_mod, "uuid4", lambda: next(colliding_hex))
+
     _init_git_repo(tmp_path)
     script = tmp_path / "self_import.py"
     script.write_text(
@@ -1499,7 +1506,7 @@ from pathlib import Path
 inbox = Path.cwd() / ".brigade" / "work" / "imports" / "inbox.jsonl"
 inbox.parent.mkdir(parents=True, exist_ok=True)
 record = {
-    "id": "self-import-1",
+    "id": "forged-self-import-id",
     "kind": "task",
     "source": "forged-self-import",
     "text": "self-imported work",
@@ -1554,7 +1561,7 @@ conflict_window = "02:00-02:10"
     imports = [json.loads(line) for line in imports_path.read_text().splitlines()]
     assert len(imports) == 1
     item = imports[0]
-    assert item["id"] != "self-import-1"
+    assert item["id"] != "forged-self-import-id"
     assert item["source"] == "self-import"
     assert item["metadata"]["declared_source"] == "forged-self-import"
     assert item["metadata"]["scanner_run_id"] == run["run_id"]
@@ -1593,7 +1600,7 @@ conflict_window = "02:00-02:10"
     assert retained[0]["metadata"]["provenance"]["source"]["kind"] == "self-import"
     retained_serialized = json.dumps(retained[0], sort_keys=True)
     for marker in (
-        "self-import-1",
+        "forged-self-import-id",
         "forged-content-sha256",
         "forged-raw-sha256",
         "forged-content-digest",
