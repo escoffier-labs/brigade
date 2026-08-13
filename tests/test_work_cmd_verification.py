@@ -2301,6 +2301,37 @@ def test_work_verify_graphtrail_delta_rejects_invalid_per_invocation_timeout_ove
     assert _count_verify_run_dirs(tmp_path) == 0
 
 
+def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    _seed_graphtrail_db(tmp_path)
+    graphtrail = _write_fake_graphtrail(tmp_path, sync_delay_seconds=0.2)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+
+    def timeout_backup(*args, **kwargs):
+        raise TimeoutError("timeout after 0.05s")
+
+    monkeypatch.setattr(graphtrail_delta, "_backup_sqlite", timeout_backup)
+
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=["python3 -c \"print('ok')\""],
+            graphtrail_timeout=0.05,
+            json_output=True,
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    compact_delta = receipt["code_graph_delta"]
+
+    assert receipt["status"] == "completed"
+    assert receipt["commands"][0]["status"] == "completed"
+    assert receipt["commands"][0]["exit_code"] == 0
+    assert compact_delta["ok"] is False
+    assert compact_delta["status"] == "sync_timed_out"
+    assert "timed out after 0.05s" in compact_delta["summary"]
+
+
 def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     _seed_graphtrail_db(tmp_path)
