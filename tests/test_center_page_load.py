@@ -170,6 +170,15 @@ def test_collect_does_not_live_probe_cloud_providers(tmp_path, monkeypatch):
     assert called == []
 
 
+def test_settled_page_polls_snapshot_every_15s_without_cache_bust():
+    html = render.page("Agent Activity - Brigade Center", "test-nonce", "<nav></nav>", "<p>body</p>", reload_ms=15000)
+    assert "15000" in html
+    assert "fetch(" in html
+    assert "location.pathname" in html
+    assert "Date.now()" not in html
+    assert "_=" not in html.split("<script", 1)[1]
+
+
 def test_status_view_renders_freshness_stamp(monkeypatch):
     from brigade.center_cmd.dashboard.views import status_grid
 

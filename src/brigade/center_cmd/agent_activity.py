@@ -12,10 +12,12 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
+from brigade import runguard
 from brigade.center_cmd.dashboard import timing as center_timing
 
 ACTIVITY_ENVELOPE_VERSION = 2
 _STALE_AFTER_SECONDS = 300
+_HEARTBEAT_STALE_SECONDS = 2 * 3600
 _DEFAULT_COMPLETED_WINDOW_SECONDS = 3600
 _SESSION_MTIME_WINDOW_SECONDS = 7 * 24 * 60 * 60
 _SESSION_READ_SIZE_CAP = 1_048_576
@@ -117,7 +119,13 @@ def _brigade_records(target: Path, now: datetime, local_host: str) -> list[dict[
         run_id = run_dir.name
         started_at = _timestamp(run.get("started_at"))
         updated_at = _timestamp(run.get("finished_at")) or _timestamp(run.get("status_started_at")) or started_at
-        state = _normalized_state(run.get("status"), updated_at, now, authoritative=True)
+        lock_state = runguard.run_lock_state(target, run_dir)
+        state = _reconcile_claimed_live(
+            _normalized_state(run.get("status"), updated_at, now, authoritative=True),
+            updated_at,
+            now,
+            lock_state,
+        )
         orchestrator_id = f"brigade:orchestrator:{run_id}"
         run_activity_id = f"brigade:run:{run_id}"
         source = _source("brigade-run-journal", "authoritative", now)
@@ -160,7 +168,9 @@ def _brigade_records(target: Path, now: datetime, local_host: str) -> list[dict[
             )
         )
         records.extend(
-            _worker_records(run_dir, run, run_activity_id, source, now, started_at, updated_at, state, local_host)
+            _worker_records(
+                run_dir, run, run_activity_id, source, now, started_at, updated_at, state, local_host, lock_state
+            )
         )
     return records
 
@@ -382,6 +392,7 @@ def _worker_records(
     updated_at: str | None,
     run_state: str,
     local_host: str,
+    lock_state: str,
 ) -> list[dict[str, Any]]:
     plan = _read_json(run_dir / "plan.json") or {}
     assignments = plan.get("assignments") if isinstance(plan.get("assignments"), list) else []
@@ -398,7 +409,9 @@ def _worker_records(
             continue
         worker = assignment["worker"]
         result = result_by_worker.get(worker, {})
-        raw_state: object = result.get("status") if result else ("running" if worker in active else run_state)
+        raw_state: object = (
+            result.get("status") if result else ("running" if worker in active else run.get("status") or run_state)
+        )
         if result and result.get("ok") is True:
             raw_state = "succeeded"
         records.append(
@@ -412,7 +425,12 @@ def _worker_records(
                 label=_safe_label(worker, "Worker"),
                 task_label=_safe_label(assignment.get("task_label"), "Worker assignment"),
                 model=_safe_model(assignment.get("model")),
-                state=_normalized_state(raw_state, updated_at, now, authoritative=True),
+                state=_reconcile_claimed_live(
+                    _normalized_state(raw_state, updated_at, now, authoritative=True),
+                    updated_at,
+                    now,
+                    lock_state,
+                ),
                 started_at=started_at,
                 updated_at=updated_at,
                 source=source,
@@ -545,6 +563,17 @@ def _record(
 
 def _source(name: str, authority: str, observed_at: datetime) -> dict[str, str]:
     return {"name": name, "authority": authority, "observed_at": observed_at.isoformat()}
+
+
+def _reconcile_claimed_live(state: str, updated_at: str | None, now: datetime, lock_state: str) -> str:
+    """Journal running/blocked is live only with a live lock and a fresh heartbeat."""
+    if state not in {"running", "blocked"}:
+        return state
+    parsed = _parse_time(updated_at)
+    heartbeat_stale = parsed is None or (now - parsed).total_seconds() > _HEARTBEAT_STALE_SECONDS
+    if lock_state != "live" or heartbeat_stale:
+        return "stale"
+    return state
 
 
 def _normalized_state(value: object, updated_at: str | None, now: datetime, *, authoritative: bool) -> str:
