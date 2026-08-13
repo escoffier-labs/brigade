@@ -25,10 +25,22 @@ Standalone GraphTrail or MiseLedger product installs are replaced by `brigade se
 
 Read in this order:
 
-1. `README.md` (agent-first install paste + product surface)
+1. `README.md` (short landing page)
 2. This file (`docs/agents-guide.md`)
 3. `docs/agent-assisted-setup.md` (boundaries and adaptation detail)
 4. `docs/new-user-quickstart.md` if the target is a first-time human skim
+
+### Paste-ready install prompt
+
+When a human pastes a short job into Claude Code, Codex, Cursor, OpenClaw, or any agent with shell access, use this exact brief:
+
+```text
+Read https://github.com/escoffier-labs/brigade and follow docs/agents-guide.md.
+Install brigade-cli with pipx if missing (or uv tool install brigade-cli).
+Run operator quickstart with --dry-run first and show the plan. Then apply,
+run brigade operator doctor, and report ready: yes. Keep existing memory
+layout. Do not touch remotes, do not commit, stop before anything destructive.
+```
 
 Brigade is local-first workspace wiring. Local-first means data on the operator-controlled machine first (laptop, workstation, or VPS) before any external service. Adapt the user's existing memory, handoff, and agent workflow. Do not replace a working layout with someone else's exact tree.
 
@@ -42,6 +54,7 @@ Always dry-run before write. Then apply. Then doctor.
 
 ```bash
 pipx install brigade-cli
+# alternative: uv tool install brigade-cli
 brigade setup
 brigade --version
 brigade operator quickstart --target . --harnesses <harness> --dry-run
@@ -89,6 +102,16 @@ brigade harness uninstall cursor --scope user --dry-run
 brigade harness uninstall cursor --scope user --write
 ```
 
+### Claude Code user-scope work hooks
+
+Instead of wiring repos one at a time, install the work-loop hooks once at user scope:
+
+```bash
+brigade work hooks install --scope user
+```
+
+From then on, every repo the agent opens gets the work brief injected at session start, and an unwired repo gets the exact `brigade init` command printed for the agent to run. Agents can wire new repos themselves and close the verified-work loop without another human command. Remove it with `brigade work hooks uninstall --scope user`. Only Brigade-owned hook entries are touched.
+
 ## After install: the agent work loop
 
 Once doctor is healthy, **you** (the coding agent) should prefer:
@@ -126,7 +149,7 @@ Usually safe to commit after review:
 
 - `AGENTS.md`, `MEMORY.md` and reviewed memory cards if this repo owns memory
 - `rules/`, `tools/`, public docs
-- the managed handoff template for each selected writer harness — for Claude Code, `.claude/memory-handoffs/TEMPLATE.md` (required for Claude onboarding; `verify-harness` fails readiness when a global exclude hides it); for other writers, the matching `<inbox>/TEMPLATE.md`
+- the managed handoff template for each selected writer harness. Claude onboarding requires `.claude/memory-handoffs/TEMPLATE.md`, and `verify-harness` fails readiness when a global exclude hides it. Other writers use the matching `<inbox>/TEMPLATE.md`
 
 Handoff inboxes stay local except each inbox's managed `TEMPLATE.md`. Session handoff files in those folders stay ignored.
 

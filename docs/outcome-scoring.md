@@ -2,6 +2,32 @@
 
 Outcome capture scores runs at read time from stored receipts. The score is not frozen when the receipt is written. Upgrading Brigade changes how `outcome capture` and `outcome rank` classify the same historical `run.json` and `worker-results.json` files.
 
+This is outcome-based skill scoring, promotion, and rollback from verification evidence. It is not autonomous reflective memory learning.
+
+## Workflow
+
+```bash
+brigade work verify run --target . --command "pytest -q" --capture brigade-work
+# or, after a verify without --capture:
+brigade outcome capture brigade-work --run-id latest --kind skill
+
+brigade outcome rank --target .
+brigade outcome score --target .
+brigade outcome reconcile --target .          # dry-run
+brigade outcome reconcile --target . --apply  # install or roll back
+brigade outcome explain <skill-or-card-id> --target .
+```
+
+| Command | Role |
+| --- | --- |
+| `outcome capture` | Bind a verify/run receipt's real result to the skill or card that did the work (`+1` / `0` / `-1`) |
+| `outcome rank` | Order artifacts by current score (Wilson lower bound) |
+| `outcome score` | Recompute and show scores from stored receipts |
+| `outcome reconcile` | Dry-run by default. `--apply` promotes a proven registry skill or rolls a regressed one back across harnesses |
+| `outcome explain` | Print the signal trail behind a score or reconcile decision |
+
+Capture against an id that actually guided the work. Invented skill names pollute the ranking. Capture failures too: a `-1` is how a bad skill gets rolled back. Ledger files live under `memory/outcome/` as plain JSON and markdown.
+
 ## Read-time recomputation
 
 `brigade outcome capture` loads the run receipt, worker results, and any linked verify receipt, then applies the current classifier in `worker_failure.py` and `outcome_cmd.py`. The `signal_value` on the outcome record reflects that read-time classification, not the wording stamped on the receipt at run completion.
@@ -20,7 +46,7 @@ Verifier failure on a completed verify receipt after the run started forces **-1
 
 ## Kind to domain to verdict
 
-Run-level classification uses `run_failure_is_infrastructure_at_read_time`. Worker-level classification uses `normalized_failure` / `worker_result_failure` and the `domain` field on structured failures. Capture consults run level first; when run level defers (`worker-failure` or no kind), it aggregates failed workers by domain.
+Run-level classification uses `run_failure_is_infrastructure_at_read_time`. Worker-level classification uses `normalized_failure` / `worker_result_failure` and the `domain` field on structured failures. Capture consults run level first. When run level defers (`worker-failure` or no kind), it aggregates failed workers by domain.
 
 ### Run-owned failure kinds (nested `failure.kind` or legacy top-level `failure_kind`)
 

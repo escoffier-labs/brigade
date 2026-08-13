@@ -1,307 +1,102 @@
 <p align="center">
-  <img src="docs/assets/brigade-kitchen-scene.jpg" alt="Brigade brand art: kitchen brigade at the pass (metaphor for coordinated agents)" width="900">
-</p>
-
-<h1 align="center">Brigade</h1>
-
-<p align="center">
-  <strong>One command to start. One command to keep it maintained.</strong>
+  <img src="docs/assets/brigade-wordmark.svg" alt="Brigade (by Escoffier Labs)" width="640">
 </p>
 
 <p align="center">
-  <strong>Built for coding agents to run end to end</strong> (install, setup, verify, handoffs), not as a human day-to-day terminal app.
-  When an agent says tests passed, you get a file with the real exit code, a <strong>code graph</strong> of what changed (<code>brigade code</code>), and an <strong>evidence log</strong> you can search later (<code>brigade evidence</code>).
-  Optional: one MCP and tools catalog across agents, and shared notes with a review gate.
-  Brigade owns the memory-care primitives and runbooks. An external scheduler (cron, systemd, CI, your agent cron) invokes them. Local files. No daemon. No lock-in.
-  Boundary: <a href="docs/execution-model.md">execution model</a>.
+  Brigade keeps coding-agent work trackable across tools, repos, and sessions: tasks, receipts, shared memory, and synced tools.
 </p>
 
 <p align="center">
-  <a href="https://brigade.tools">Website</a> · <a href="https://brigade.tools/docs">Docs</a> · <a href="#install">Install</a> · <a href="https://escoffierlabs.dev/cookbook/">Cookbook</a>
+  <a href="https://brigade.tools/docs/getting-started/install">Install</a> ·
+  <a href="https://brigade.tools/docs">Docs</a> ·
+  <a href="docs/comparison.md">Compare</a> ·
+  <a href="QUICKSTART.md">Quickstart</a>
 </p>
 
-<p align="center">
-  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?workflow=ci.yml&branch=main&label=ci&size=xs" alt="CI status">
-  <img src="https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs" alt="PyPI version">
-  <img src="https://shieldcn.dev/pypi/dm/brigade-cli.svg?size=xs" alt="PyPI downloads per month">
-  <img src="https://shieldcn.dev/badge/python-3.10+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.10+">
-  <img src="https://shieldcn.dev/badge/rust-code_graph-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: code graph engine">
-  <img src="https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: evidence log engine">
-  <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
-</p>
+Published **v0.26.1** is the stable install (`brigade-cli==0.26.1`). Current main / **0.27 beta** adds per-repo parallel-safe work waves, cross-repo ready-work campaigns, Memory Operations, activity and cloud status, code-graph views, bounded recall, and declared budgets. Cross-repo wave composition remains deferred. Cells below mark that split.
 
-<p align="center">
-  <img src="docs/assets/brigade-demo.svg" alt="Recording: an agent claims tests pass. A verify run writes a receipt with the real exit code, the code graph shows what the change touched, evidence search finds the run in the ledger, and outcome rank scores the skill that did the work" width="800">
-</p>
+## What it does
 
-<p align="center"><em>An agent said "tests pass." This is the claim becoming a record: receipt, code graph, evidence log, rank.</em></p>
+- **Ready work and claim safety.** Brigade lists unblocked tasks and uses atomic claims so two agents cannot take the same item. Stable in v0.26.1.
+- **Declared run limits and registered cloud activity.** Current main / 0.27 beta enforces declared wall-clock and worker-dispatch ceilings and reconciles registered cloud work against provider and GitHub state.
+- **Verification receipts.** A check run through Brigade writes the command, the real exit code, and the Git state. Stable in v0.26.1. Not every Brigade command writes a receipt.
+- **Owner-mediated handoffs and bounded recall.** Handoffs are linted and routed by the memory owner. Safe targeted notes may auto-file, while ambiguous or risky notes wait for review. Current main / 0.27 beta adds capped session-start recall.
+- **Explicit dry-run-first harness projection.** MCP servers, tools, and skills are previewed before Brigade writes them into a harness. Stable in v0.26.1.
 
-## The loop
-
-Every piece of work Brigade touches runs the same circuit:
-
-1. Intent and acceptance criteria go in.
-2. Prior evidence and code impact attach to the brief.
-3. Replaceable workers execute, bounded.
-4. Verification runs with a real exit code.
-5. The receipt, graph delta, and outcome land where the next run starts.
-
-Work enters as intent and leaves as evidence.
+Learning in Brigade is outcome-based skill scoring, promotion, and rollback from captured verification receipts. It is not autonomous reflective memory learning.
 
 ## Install
 
-**Default path: give the job to an agent.** Paste something like this into Claude Code, Codex, Cursor, OpenClaw, or any agent with shell access:
+Install with `pipx install brigade-cli` or `uv tool install brigade-cli`, then follow the [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), or give [first 10 minutes](docs/first-10-minutes.md) and [docs/agents-guide.md](docs/agents-guide.md) to your coding agent.
 
-```text
-Read https://github.com/escoffier-labs/brigade and follow AGENTS.md.
-Install brigade-cli with pipx if missing. Run operator quickstart with
---dry-run first and show the plan. Then apply, run brigade operator doctor,
-and report ready: yes. Keep existing memory layout. Do not touch remotes,
-do not commit, stop before anything destructive.
-```
+Stable channel: published v0.26.1. Preview channel: `brigade update --channel beta` for `0.27.0.devYYYYMMDD` wheels. Details: [update channels](docs/update-channels.md).
 
-The agent installs, runs `brigade setup`, wires harnesses, and leaves files on disk. You review when the gate is ambiguous or risky. You do not have to type the install path yourself.
+## How it compares
 
-**If you prefer a shell** (same commands the agent would run):
+Brigade overlaps several categories. Most adjacent projects specialize in one layer. Brigade connects those layers around trackable coding-agent work. Where a neighbor is stronger, that cell says so. Dated sources and longer notes: [docs/comparison.md](docs/comparison.md) (2026-08-13).
 
-```bash
-pipx install brigade-cli  # or: uv tool install brigade-cli
-pipx ensurepath           # then open a new shell so `brigade` is on PATH
-brigade setup             # install the verified native engines
-brigade operator quickstart --target ./my-repo --harnesses codex
-```
+### Work and orchestration
 
-**One and done (Claude Code).** Instead of wiring repos one at a time, install
-the work-loop hooks once at user scope:
+| Project | Ready work | Claim safety | Parallel and run control | Task-store boundary | Verification |
+| --- | --- | --- | --- | --- | --- |
+| [Brigade](https://github.com/escoffier-labs/brigade) | Stable ready set | Fail-closed CAS claims | 0.27: per-repo waves, cross-repo ready aggregation, declared limits | Local JSON files, no shared store | Command receipts |
+| [Beads](https://github.com/gastownhall/beads) | Built in | Atomic claim | Agent workflow + Dolt sync | Dolt-backed distributed store | Task history |
+| [Gas Town](https://github.com/gastownhall/gastown) | Beads-backed | Not documented | Multi-agent runtime | Beads ledger | Operational state |
+| [nWave](https://github.com/nWave-ai/nWave) | Wave artifacts | Not documented | 7 reviewed phases + TDD gates | Git-tracked artifacts | Phase validation |
+| [ActiveGraph](https://github.com/yoheinakajima/activegraph) | Reactive graph | Application-defined | Behaviors + runs | Append-only event log | Replay, fork, and diff |
 
-```bash
-brigade work hooks install --scope user
-```
+### Memory
 
-From then on, every repo the agent opens gets the work brief injected at
-session start, and an unwired repo gets the exact `brigade init` command
-printed for the agent to run - so agents wire new repos themselves and the
-verified-work loop closes everywhere without another human command. Remove it
-any time with `brigade work hooks uninstall --scope user`; only Brigade-owned
-hook entries are touched.
+| Project | Durable memory | Capture and recall | Care and operations | Learning | Provenance |
+| --- | --- | --- | --- | --- | --- |
+| [Brigade](https://github.com/escoffier-labs/brigade) | Shared files + cards | Handoffs. 0.27: bounded recall | Owner policy. 0.27: Memory Operations | Outcome score + promote + rollback | Work receipts + sources |
+| [Mem0 / OpenMemory](https://github.com/mem0ai/mem0) | User + agent + session | Automatic + hybrid search | History + metadata | Extraction + retrieval | Timestamps + entities |
+| [Letta](https://github.com/letta-ai/letta) | Agent state + blocks | Agent-managed tools | Editable state | Persistent agent runtime | Persistent agent state |
+| [agentmemory](https://github.com/rohitg00/agentmemory) | Shared coding-agent memory | Hooks + MCP + REST | Lifecycle + decay | Not documented | Searchable memory |
+| [Hindsight](https://github.com/vectorize-io/hindsight) | Facts + experiences + models | Retain + recall | Reflect + feedback | Reflective memory learning | Temporal + causal links |
+| [Built-in harness memory](https://code.claude.com/docs/en/memory) | Tool-specific | Rules + auto memories | Varies by harness | Harness-specific | Harness-specific |
+| [OpenClaw](https://docs.openclaw.ai/concepts/memory) | Plain files + index | Keyword + optional vector search | File-owned memory | Not documented | Files + source paths |
 
-Brigade prints a one-line notice when a new release is out. It checks at most
-once a day through an anonymous request. Set `BRIGADE_NO_UPDATE_CHECK=1` to
-disable it. Details are in [docs/update-channels.md](docs/update-channels.md).
+### Tools and configuration
 
-Two update channels exist and they are not interchangeable. **Stable** is the
-default: immutable, PyPI-published releases like `0.26.0`, pinned exactly -
-what production and operator machines should run. **Beta** is the intentional
-development-machine channel for the `0.27` preview line: it pins the newest
-non-yanked `brigade-cli==0.27.0.devYYYYMMDD` wheel from PyPI into the existing
-user-global pipx environment, not a mutable Git `main` SHA. Stable pinners may
-deliberately install an exact release with `pipx install brigade-cli==X.Y.Z`
-or refresh through `brigade update --channel stable`. Channel ownership, beta
-selection and rollback rules, and when to use `brigade update` are in
-[docs/update-channels.md](docs/update-channels.md).
+| Project | MCP | Reviewed rules and skills | Projection behavior | Source of truth | Audit and rollback |
+| --- | --- | --- | --- | --- | --- |
+| [Brigade](https://github.com/escoffier-labs/brigade) | MCP + tools catalog | Skills + adapters | Dry-run-first, then apply | Brigade catalog | Preserve + gate + rollback |
+| [add-mcp](https://github.com/neon-solutions/add-mcp) | MCP servers | Not documented | Maps fields into native files | Registry + native files | Warnings for dropped fields |
+| [Rulesync](https://github.com/dyoshikawa/rulesync) | Supported | Rules + skills + hooks | Per-target generation | Rulesync project | Generated outputs |
+| [config-sync](https://pypi.org/project/aiconfigsync/) | Not documented | Rules for 12 tools | Generated rule files | Single config | Generated outputs |
+| [chezmoi](https://www.chezmoi.io/) | As files | As files | Templates + apply | Git-backed source dir | Diff + templates + merge |
+| [agentsync](https://agentsync.cc/) | Many agent targets | Skills + hooks + commands | Native/lossy/skipped report | Canonical config | Native/lossy/skipped report |
 
-`brigade operator doctor --target ./my-repo --profile local-operator` prints `ready: yes` when the wiring is healthy (without the profile flag, doctor runs the stricter internal-dogfood checks and a fresh repo reports not ready). The default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview anything before it writes. Nothing leaves your machine.
+### Evidence and operations
 
-Per-OS setup (apt, Homebrew, Scoop, PowerShell), workspace depth, and multi-harness installs: [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), [first 10 minutes](docs/first-10-minutes.md). Homegrown setup already? `brigade operator adopt plan`.
+| Project | Receipts | Code impact | Agent activity | Cloud state | Learning / replay |
+| --- | --- | --- | --- | --- | --- |
+| [Brigade](https://github.com/escoffier-labs/brigade) | Command + Git + optional impact | Stable impact. 0.27: code-graph views | 0.27: center activity | 0.27: registered cloud status | Score + promote + rollback |
+| [ActiveGraph](https://github.com/yoheinakajima/activegraph) | Event trace | Not documented | Reactive behaviors | Not documented | Replay, fork, and diff |
+| [CocoIndex](https://github.com/cocoindex-io/cocoindex) | Data lineage | Not documented | Not documented | Not documented | Incremental recompute |
+| [Graphiti](https://github.com/getzep/graphiti) | Episode provenance | Not documented | Not documented | Not documented | Temporal fact updates |
+| [Hindsight](https://github.com/vectorize-io/hindsight) | Not documented | Not documented | Not documented | Not documented | Reflective memory learning |
+| [Neo4j Agent Memory](https://github.com/neo4j-labs/agent-memory) | Reasoning + tool traces | Not documented | Not documented | Not documented | Similar-task retrieval |
 
-**Contributing?** See [Your first PR](CONTRIBUTING.md#your-first-pr) in [CONTRIBUTING.md](CONTRIBUTING.md) for starter issues, the 48-hour claim convention, and local verification ([Local dev](CONTRIBUTING.md#local-dev): content-guard scan for docs-only changes; `./scripts/verify` for code).
+"Not documented" means the capability was not found in the project's official README or documentation on 2026-08-13. It is not proof that the capability is absent. An event trace, memory history, data lineage, and a command verification receipt answer different questions.
 
-## Auditable agents: every action leaves a receipt
+## Scope
 
-An agent that reports "tests pass, nothing else changed" is making a claim. Brigade turns the claim into a record. Run any check through Brigade and it writes a receipt: the command, the real exit code, the graph delta, the git state.
+Brigade is a local file-first control plane for coding agents. There is no Brigade daemon. Scheduling stays external, except optional operator-owned, target-scoped care registrations (`brigade care install`). The work ledger is machine-local JSON and is not a distributed task database. Ordinary runs have no hard run-budget unless one is declared. When declared, only wall-clock and worker-dispatch ceilings are enforced today. Model, tool, token, and cost dimensions stay observed unless an adapter owns an enforcement boundary. Campaigns aggregate ready work across repos, but do not yet compose parallel cross-repo waves. Center is read-only. External activity observations are best-effort. Cloud registry commands track work that another provider runs. Safe targeted handoffs may auto-file under owner policy. Ambiguous or risky notes wait for review.
 
-```bash
-brigade work verify run --target . --command "pytest -q" --capture brigade-work
-```
-
-```jsonc
-// .brigade/work/verify-runs/20260722-033355-work-verify-298ff5/receipt.json (abridged)
-{
-  "run_id": "20260722-033355-work-verify-298ff5",
-  "status": "completed",
-  "duration_seconds": 15.18,
-  "commands": { "check": { "argv": ["pytest", "-q"], "returncode": 0 } },
-  "code_graph_delta": { "changed_symbol_count": 0 },
-  "git": { "branch": "main", "dirty_files": 0 }
-}
-```
-
-Receipts land in the **evidence log** (`brigade evidence`), a Go engine installed by `brigade setup` (historically shipped as MiseLedger). Every consequential action elsewhere in Brigade (a memory write, a skill promotion, a sync) is logged the same way. `brigade evidence search` answers "what ran, when, and what did it change" from files, weeks later. Cross-model dispatches through `brigade run` carry the same paper trail. When someone asks what your agents did this week, the answer comes from receipts you can grep, not from scrollback. [Capability page](https://brigade.tools/evidence-memory).
-
-## Code graph, built in
-
-The `code_graph_delta` line in that receipt comes from the **code graph** (`brigade code`), a Rust engine installed by `brigade setup` (historically shipped as GraphTrail, digest-verified, no toolchain required). It indexes your repo once and keeps up incrementally. On this repository a sync pass over 652 files and 10,405 symbols reports in well under a second. A receipt names the exact symbols a change touched, and your agents stop grepping and start asking structural questions:
-
-```
-$ brigade code impact _write_receipt
-test_runbook_closeout_imports_failed_steps  --calls@31--> _write_receipt
-test_runbook_closeout_without_import_flag   --calls@45--> _write_receipt
-
-$ brigade code context "verify receipts"
-## Entry Points
-- function `_verify_receipts` at src/brigade/work_cmd/verification.py:185-192
-- function `_iter_verify_receipts` at src/brigade/workflow_cmd.py:142-167
-```
-
-The graph feeds the rest of Brigade instead of sitting idle: `brigade run` prepends a context pack when a graph exists, so a dispatched model starts from callers and blast radius instead of a cold grep, and an MCP server ships alongside so any harness can query the graph directly. [Capability page](https://brigade.tools/code-intelligence).
-
-## One MCP and tool catalog, synced into every tool
-
-Every agent tool reads its MCP servers from a different file in a different shape. The same servers wired across Claude Code, Cursor, Codex, VS Code, OpenCode, and Antigravity means hand-editing six configs and keeping them in sync forever. Brigade keeps one canonical catalog and merges it into each tool's native config for you.
-
-```bash
-brigade mcp init                  # scaffold .brigade/mcp.json
-brigade mcp add --name github --command npx \
-  --args "-y @modelcontextprotocol/server-github" \
-  --env GITHUB_AUTH_ENV=ref:BRIGADE_GITHUB_AUTH_ENV
-brigade mcp sync                  # dry-run: show the diff for every tool
-brigade mcp sync --write          # merge into each tool's config
-brigade mcp verify                # check initialize + tools/list at runtime
-```
-
-Run `brigade mcp sync` and you get the per-tool plan, server by server, before a single file changes:
-
-```
-brigade mcp sync (dry-run): ~/my-repo
-claude       github               missing        -> create
-claude       sentry               missing        -> create
-cursor       github               missing        -> create
-cursor       sentry               missing        -> create
-codex        github               missing        -> create
-codex        sentry               missing        -> create
-vscode       github               missing        -> create
-vscode       sentry               missing        -> create
-opencode     github               missing        -> create
-opencode     sentry               missing        -> create
-```
-
-| Tool | File it writes |
-|---|---|
-| Claude Code | `.mcp.json` |
-| Cursor | `.cursor/mcp.json` |
-| Codex CLI | `.codex/config.toml` (merged surgically, other tables preserved) |
-| Grok CLI | `.grok/config.toml` (same TOML shape as Codex) |
-| VS Code | `.vscode/mcp.json` (secrets become `inputs[]`) |
-| OpenCode | `opencode.json` |
-| Antigravity | `~/.gemini/config/mcp_config.json` (user-scoped) |
-
-Dry-run by default. Merges by server key, so servers you added by hand are never touched. Secrets are written as `${VAR}` references, never inlined. Ownership lives in a gitignored sidecar, so a fresh clone re-syncs without conflict. Tools and skills get the same treatment via `brigade tools sync`: one reviewed catalog, projected into each harness's native format. Full merge rules: [docs/mcp-sync.md](docs/mcp-sync.md). Evaluating options first? [The comparison page](https://brigade.tools/compare/sync-mcp-servers-across-coding-agents).
-
-## Shared memory and verified learning
-
-Writer harnesses leave handoff notes as they work. Brigade lints, guards, and classifies each one. Safe, targeted notes file themselves into durable memory. The ambiguous few wait for your review. Every consequential action is logged to a plain file you can grep, diff, and prune.
-
-<p align="center">
-  <img src="docs/assets/memory-workflow.svg" alt="Brigade memory workflow: writer handoffs pass through linting, guards, and classification before reaching durable memory or review" width="820">
-</p>
-
-Memory stays two layers deep: knowledge cards hold the detail, `MEMORY.md` stays a slim one-line-per-card index that loads every session. `brigade memory care scan` flags stale or contradictory cards instead of letting them rot, and `brigade evidence search` plus exported briefs mean the next session starts where this one stopped.
-
-Filing notes is the first loop. The second loop earns trust: Brigade promotes a learned skill only when a real signal proves it helped, and rolls it back the moment a signal says it broke. The model never grades its own work.
-
-```
-$ brigade outcome rank
-- brigade-work      score=0.692  helped=675  hurt=260
-- ultra-work-scout  score=0.563  helped=50   hurt=24
-- memory-handoff    score=0.490  helped=8    hurt=2
-```
-
-- `brigade outcome capture` records a verify run's real exit code against the skill that produced it.
-- `brigade outcome score` ranks by a Wilson lower bound, so two lucky passes never outrank twenty vetted runs.
-- `brigade outcome reconcile` is the gate: dry-run by default, `--apply` installs a skill that earned it or rolls a regressed one back.
-- `brigade outcome explain` prints the full signal trail behind any decision, so every promotion is as auditable as the runs that earned it.
-
-Scores are recomputed from the stored receipts every time you read them, so upgrading Brigade can move numbers with no new runs. Which failures count against a seat and which neutralize is in [docs/outcome-scoring.md](docs/outcome-scoring.md).
-
-The ledger is plain JSON and markdown under `memory/outcome/`, tracked in git, readable without Brigade. `brigade init` wires a `brigade-work` skill into each harness so agents run this loop without being told. With Claude Code it also installs project-scoped hooks that redirect raw test commands through verify runs.
-
-## Optional stations
-
-**Built in** (via `brigade setup`):
-
-| Surface | Commands | Notes |
-|---|---|---|
-| Code graph | `brigade code …` | Callers, impact, context. Formerly GraphTrail. |
-| Evidence log | `brigade evidence …` | Searchable ledger of runs and imports. Formerly MiseLedger. |
-| Content Guard | `brigade guard` / `brigade scrub` | Secrets and private detail before publish. |
-
-**Optional stations** (add when you need them). Core works with none installed. `brigade status` health-checks whatever is present.
-
-| Station | Install | Role |
-|---|---|---|
-| [Agent Pantry](https://github.com/escoffier-labs/agentpantry) | `brigade add pantry` | Encrypted browser-session and secret sync across machines |
-| [Token Glace](https://github.com/escoffier-labs/token-glace) | `brigade add tokens` | Compact noisy tool output before it burns context |
-| [Skillet](https://github.com/escoffier-labs/skillet) | optional roster | Portable skills that reconcile can promote or roll back |
-| [Bootstrap Doctor](https://github.com/escoffier-labs/bootstrap-doctor) | `brigade add bootstrap-doctor` | Audit OpenClaw bootstrap files (SOUL.md, TOOLS.md, AGENTS.md, IDENTITY.md, MEMORY.md, and the rest of the set) and trim oversize detail into cards |
-| Notifications | `brigade add notifications` | Optional `agent-notify` binary for Discord, Telegram, or Signal. Status and setup planning only until you wire hooks or pass an explicit `--send` |
-
-Upgrading from standalone GraphTrail or MiseLedger installs? `brigade setup` replaces both. The old `brigade add graphtrail` / `add evidence` paths remain as compatibility shims. Engine binaries and some paths still use the historical names. The operator surface is `brigade code` and `brigade evidence`. Details: [wiring guide](docs/wiring-graphtrail-miseledger.md), [station contract](docs/station-contract.md).
-
-Beyond the daily loop, the same review-and-receipt pattern covers cross-model runs (`brigade run` dispatches one bounded task across your roster), security scans, friction mining, research reports, and fleet health. All of it stays behind `brigade extras on` until you ask. The full tour: [docs/overview.md](docs/overview.md).
-
-## Why not something else?
-
-- **mem0, Letta, agentmemory, and friends** are memory layers for apps you are building, usually behind an API or a server. Brigade is for the agent CLIs you already run, and it is file-first: your memory is markdown in your repo, reviewable in git, readable without Brigade.
-- **add-mcp, chezmoi, and config-sync scripts** move MCP or dotfiles around, but they sync one thing with no review gate and no receipt. Brigade keeps MCP servers, tools, skills, and memory in one canonical source, shows the per-tool diff before any write, and leaves a receipt you can roll back.
-- **Native harness memory** is a per-tool silo. It does not cross harnesses, and it writes without review. Brigade gives every tool one shared format and one canonical owner, with a review gate in between.
-- **Already running Hermes, or any self-improving agent?** Keep it. Brigade is the verification layer on top: it promotes a skill only when a real signal confirms it, keeps every learned skill as portable markdown in your git, and runs one loop across your whole fleet.
-- **A plain CLAUDE.md / AGENTS.md** works great until it bloats past the context budget and goes stale. Brigade keeps bootstrap files slim, moves detail into indexed cards, and flags staleness instead of trusting last month's facts forever.
-- **A daemon or hosted service** would be simpler to demo and worse to trust. Brigade writes local files when you run a command, and that is all it does. See the [execution model](docs/execution-model.md).
-
-| | Across harnesses | MCP, tools, and memory in one source | Review gate + receipts | Local files, no daemon |
-|---|:---:|:---:|:---:|:---:|
-| **Brigade** | yes | yes | yes | yes |
-| mem0 / Letta / agentmemory | per-SDK | memory only | no | usually hosted or a server |
-| add-mcp / chezmoi / config-sync | partial | MCP or dotfiles only | no | yes |
-| Native harness memory | no | memory only | no | yes |
-
-## What Brigade is not
-
-Brigade is not a hosted memory service, a daemon, or an automatic release bot. It does not run in the background. Scheduling stays with the operator (see the [execution model](docs/execution-model.md)). It does not push to GitHub, publish packages, save every note automatically, or skip review for ambiguous, risky, or failed notes. `brigade work brief` and related status surfaces may report notification readiness or suggest installing the notifications station, but Brigade never sends a message unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`. That pause is the point: agent memory should be useful, not noisy.
-
-And it is not the other projects that share the name. This Brigade is the AI-agent operator CLI from [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), installed with `pipx install brigade-cli`. It is not the CNCF/Microsoft Brigade for Kubernetes event scripting (archived 2022), the Spinabot Brigade agent crew, or the 2017 `brigade` Python package that became Nornir.
-
-## Why I built this
-
-<p align="center">
-  <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade social banner: kitchen metaphor brand art" width="900">
-</p>
-
-I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. Every one of those tools wakes up empty, and whatever a session learned scattered across tool-specific folders and died there. Two incidents shaped the design: a "dreaming" job that promoted raw session fragments straight into memory bloated `MEMORY.md` past the bootstrap budget, so every session started truncated and nobody noticed for weeks. And 195 handoff notes sat unread across 35 repos because an ingester had a hardcoded allowlist and nothing warned about the gap. Silence is the failure mode. Every part of Brigade that lints, warns, or writes a receipt exists because something once failed in silence. The full production stack, now 482 cards across daily multi-agent work, is documented in the [Cookbook](https://escoffierlabs.dev/cookbook/).
-
-## Names (public vs historical)
-
-| What you type / say | Historical name | Notes |
-|---|---|---|
-| Code graph · `brigade code` | GraphTrail | Built in via `brigade setup` |
-| Evidence log · `brigade evidence` | MiseLedger | Built in via `brigade setup` |
-| Content Guard · `brigade guard` / `scrub` | content-guard | Embedded |
-| Bootstrap Doctor | same | Full OpenClaw bootstrap set: SOUL, TOOLS, AGENTS, IDENTITY, MEMORY, and related session-start files |
-
-Kitchen language (*brigade de cuisine*, *mise en place*, station nicknames) is brand and deep docs. Commands and product surfaces stay plain: receipt, code graph, evidence log, sync, handoff.
-
-**Who runs what:** agents install, set up, verify, and write handoffs. Humans set policy and review gates when something is ambiguous or risky. The CLI is the control plane the fleet drives, not a tool you are expected to operate by hand all day.
-
-## Harnesses
-
-Nineteen harnesses get handoff inboxes and ingest coverage, from Codex, Claude Code, and Cursor to Goose, Aider, and OpenHands. Most also get projected tools and skills in their native format. The per-harness matrix is in the [technical guide](docs/technical-guide.md).
-
-## Questions
-
-[@brigadeclaw](https://x.com/brigadeclaw) answers questions about Brigade on X. Every sentence it posts cites the pinned documentation it came from, and it stays silent rather than guessing. How it works, including the gates and the refusals: [brigade.tools/brigadeclaw](https://brigade.tools/brigadeclaw).
+Brigade is not a hosted memory service, automatic release bot, or full autonomous fleet runtime. It does not push to GitHub, publish packages, or send chat messages unless the operator uses an explicit send action. Name collisions: this is `brigade-cli` from [escoffier-labs/brigade](https://github.com/escoffier-labs/brigade), not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
 
 ## Docs
 
-- [First 10 minutes](docs/first-10-minutes.md) · [Overview](docs/overview.md) · [Technical guide](docs/technical-guide.md)
-- [Execution model](docs/execution-model.md) · [Memory care](docs/memory-care.md) · [MCP sync](docs/mcp-sync.md)
-- [Security and Content Guard](docs/security.md) · [Handoff promotion](docs/handoff-promotion.md)
-- [Command inventory](docs/command-inventory.md) · [Station contract](docs/station-contract.md)
-- [Maintainers](MAINTAINERS.md) · [Governance](GOVERNANCE.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md)
+- [First 10 minutes](docs/first-10-minutes.md) · [Overview](docs/overview.md) · [Technical guide](docs/technical-guide.md) · [Comparison](docs/comparison.md)
+- [Execution model](docs/execution-model.md) · [Work closeout](docs/work-closeout.md) · [Outcome scoring](docs/outcome-scoring.md)
+- [Memory care](docs/memory-care.md) · [Memory operations](docs/memory-operations.md) · [Code intelligence](docs/code-intelligence.md) · [MCP sync](docs/mcp-sync.md)
+- [Agents guide](docs/agents-guide.md) · [Agent-assisted setup](docs/agent-assisted-setup.md) · [README coverage](docs/readme-coverage.md)
+- [Security](docs/security.md) · [Command inventory](docs/command-inventory.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md)
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
 
-Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), command `brigade`. The product name comes from a kitchen line (*brigade de cuisine*): coordinated stations, prep before service. You do not need the kitchen glossary to install or run it. Set up rules, memory, tools, and receipts before the session gets expensive.
-
-It is early-stage and moving fast. If you hit a broken workflow, a confusing command, or a setup issue, [open an issue](https://github.com/escoffier-labs/brigade/issues) and I will get it fixed.
+Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), command `brigade`.

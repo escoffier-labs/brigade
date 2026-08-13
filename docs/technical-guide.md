@@ -4,7 +4,7 @@
 
 # Brigade Technical Guide
 
-This guide preserves the detailed command walkthroughs and operational notes that used to live on the project front page. The README now stays short; the nitty gritty lives here.
+This guide preserves the detailed command walkthroughs and operational notes that used to live on the project front page. The README stays short. Topic migration map: [readme-coverage](readme-coverage.md). Adjacent products: [comparison](comparison.md). Code map: [code-intelligence](code-intelligence.md). Memory Operations: [memory-operations](memory-operations.md).
 
 <h1 align="center">Brigade</h1>
 
@@ -114,7 +114,7 @@ The common rule is deliberate friction: Brigade writes local receipts and review
 
 The Agent Activity dashboard is visual-first: machine cards (rocinante / shadowfax / gandalf / cloud) group agent tiles, with the spreadsheet table retained as a secondary section. Completed items older than `completed_window_seconds` (configurable in the sources file, default 3600) collapse behind a per-card expander. The Cloud card is fed by the local cloud dispatch registry (`brigade run cloud status`); when empty it shows the #890 placeholder, and when the registry has entries it renders real cloud rows.
 
-Use `brigade run cloud register` / `adopt` (parser group `brigade run-cloud`) to record dispatches (Codex Cloud register-on-dispatch is automatic from `codex-cloud` seats; Cursor cloud remains an unwired source until an API key exists). `brigade run cloud status --json` joins the registry against best-effort provider state and GitHub branch/PR ground truth. `brigade run cloud sweep` writes a receipted report only — nothing is deleted automatically. Stale READY entries (threshold `stale_ready_hours`, default 6) surface in `brigade work brief`.
+Use `brigade run cloud register` / `adopt` (parser group `brigade run-cloud`) to record dispatches. Codex Cloud register-on-dispatch is automatic from `codex-cloud` seats. Cursor cloud remains an unwired source until an API key exists. `brigade run cloud status --json` joins the registry against best-effort provider state and GitHub branch/PR ground truth. `brigade run cloud sweep` writes a receipted report only. Nothing is deleted automatically. Stale READY entries (threshold `stale_ready_hours`, default 6) surface in `brigade work brief`.
 
 For a remote T3 controller journal already available locally, configure an alias and a repo-relative journal path in `.brigade/center/agent-activity-sources.json`:
 
@@ -249,8 +249,13 @@ Hard run-budget ceilings (`wall_clock_seconds`, `worker_dispatch_count`) apply
 only when a run persists `run_budget` or `verification_contract.budget` (#593).
 Ordinary `brigade run`, dogfood, and model-trial starts without those
 declarations stay unbounded for backward compatibility; per-agent
-`timeout_seconds` is not a run-budget declaration. See
-[`receipt-schemas.md`](receipt-schemas.md) (run budget lifecycle).
+`timeout_seconds` is not a run-budget declaration. Aggregate and split token
+budgets on a verification contract stay observed-only. Model, tool, token, and
+cost dimensions require an adapter-owned enforcement boundary. External
+activity and cloud-status observations are best-effort and do not invent hard
+run limits on their own.
+See [`receipt-schemas.md`](receipt-schemas.md) (run budget lifecycle) and
+[`work-closeout.md`](work-closeout.md).
 
 Plans may include integer `stage` values. Assignments in the same stage run in parallel, stages run from lowest to highest, and later-stage workers receive earlier-stage worker results in their prompt. Plans that omit `stage` remain compatible and run as stage 1.
 

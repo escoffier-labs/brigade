@@ -1,6 +1,33 @@
 # Brigade Overview
 
-The full tour: every station, diagram, and workflow. The [README](../README.md) covers the core memory loop and install. This document goes deeper. The detailed command walkthrough is in the [technical guide](technical-guide.md). Brigade runs only on explicit invocation: [execution model](execution-model.md).
+The full tour: every station, diagram, and workflow. The [README](../README.md) is the short landing page. This document goes deeper. The detailed command walkthrough is in the [technical guide](technical-guide.md). Adjacent-product matrices live in [comparison](comparison.md). Brigade runs only on explicit invocation: [execution model](execution-model.md).
+
+## Project identity
+
+| Surface | Value |
+| --- | --- |
+| GitHub | [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade) |
+| Website | [brigade.tools](https://brigade.tools) |
+| PyPI | [`brigade-cli`](https://pypi.org/project/brigade-cli/) |
+| Command | `brigade` |
+| Stable release | v0.26.1 |
+| Preview line | 0.27 beta (`0.27.0.devYYYYMMDD` wheels) |
+
+This Brigade is the AI-agent operator CLI from Escoffier Labs. It is not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
+
+## Verified-work loop
+
+A full Brigade work run can follow this circuit:
+
+1. Intent and acceptance criteria go in (`brigade work` tasks / brief).
+2. Prior evidence and code impact attach to the brief when available.
+3. Replaceable workers execute. Declared run budgets add hard wall-clock and worker-dispatch ceilings.
+4. Verification runs through `brigade work verify run` with a real exit code.
+5. The receipt, optional graph delta, and outcome land where the next run starts.
+
+Capture the outcome against the skill or card that did the work (`brigade outcome capture`), then rank and reconcile when you want promotion or rollback. The model never grades its own work. Details: [work closeout](work-closeout.md), [outcome scoring](outcome-scoring.md), [code intelligence](code-intelligence.md).
+
+Ordinary runs have no hard run-budget unless one is declared. When declared, only wall-clock and worker-dispatch ceilings are enforced today. External activity observations are best-effort.
 
 ## Stack At A Glance
 
@@ -16,7 +43,7 @@ The full tour: every station, diagram, and workflow. The [README](../README.md) 
 
 ## Why This Exists
 
-Agent tools are getting good enough that people use more than one of them. That creates a boring but important problem: each tool learns a little bit, but the learning is scattered.
+Agent tools are getting good enough that people use more than one of them. That creates a practical problem: each tool learns a little bit, but the learning is scattered.
 
 Brigade gives the setup a home base.
 
@@ -25,6 +52,13 @@ Brigade gives the setup a home base.
 - You can inspect and lint those notes before saving them.
 - Local receipts show what happened during work, scans, and reviews.
 - Risky actions stay manual.
+
+The first version came out of an always-on OpenClaw setup beside daily Codex and Claude Code sessions. Two failures set the design:
+
+- A "dreaming" job promoted raw session fragments into memory until `MEMORY.md` exceeded the bootstrap budget. New sessions started with truncated context for weeks.
+- An ingester used a hardcoded source allowlist. It left 195 handoff notes unread across 35 repos without raising an error.
+
+Brigade's handoff coverage checks, memory care, review queues, and receipts exist to make those failures visible while there is still time to fix them. The [Solo Cookbook](https://github.com/escoffier-labs/solos-cookbook) documents the larger setup this project came from.
 
 The goal is not to make a giant automation machine. The goal is to make agent memory understandable, reviewable, and portable across harnesses.
 
@@ -51,6 +85,7 @@ Install:
 
 ```bash
 pipx install brigade-cli
+# alternative: uv tool install brigade-cli
 brigade setup
 ```
 
@@ -511,8 +546,8 @@ brigade pantry expiry-alert          # preview near-expiry cookies
 brigade pantry expiry-alert --send   # optional agent-notify (install notifications first)
 ```
 
-- `brigade pantry status` / `brigade pantry doctor` — advisory health with next commands.
-- `brigade pantry setup plan` / `service plan` — review-only plans under `.brigade/pantry/plans/`.
+- `brigade pantry status` / `brigade pantry doctor`: advisory health with next commands.
+- `brigade pantry setup plan` / `service plan`: review-only plans under `.brigade/pantry/plans/`.
 - Pantry checks are advisory for workspace `doctor`. An unwired install warns but never fails a workspace run.
 
 ## Notifications
