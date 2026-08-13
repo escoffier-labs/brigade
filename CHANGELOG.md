@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Source and pipx-from-checkout installs now declare `0.27.0`, which PEP 440
+  sorts at or above the publish-dev `0.27.0.devYYYYMMDD` wheel line. The
+  previous `0.26.1` pin version-sorted below those wheels, so a current main
+  checkout looked stale to naive auditors. publish-dev stamps
+  `{pyproject}.devYYYYMMDD` on the declared line instead of the next minor.
 - `brigade init --profile` now merges repeatable `--include` values into the
   profile includes with first-seen de-duplication before `--full` appends
   `repo-extras`. Refs #494.

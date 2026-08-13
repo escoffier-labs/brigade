@@ -31,7 +31,9 @@ def next_minor_version(stable_version: str) -> str:
 def derive_dev_version(stable_version: str, date_suffix: str) -> str:
     if not DATE_SUFFIX.fullmatch(date_suffix):
         raise ValueError(f"date suffix must match YYYYMMDD, got {date_suffix!r}")
-    version = f"{next_minor_version(stable_version)}.dev{date_suffix}"
+    if not STABLE_VERSION.fullmatch(stable_version):
+        raise ValueError(f"stable version must be strict numeric X.Y.Z, got {stable_version!r}")
+    version = f"{stable_version}.dev{date_suffix}"
     if not DEV_VERSION.fullmatch(version):
         raise ValueError(f"derived development version is invalid: {version!r}")
     return version
@@ -67,7 +69,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--date-suffix",
-        help="UTC build date suffix (YYYYMMDD) used to derive the next minor X.Y.Z.devYYYYMMDD from pyproject.toml",
+        help="UTC build date suffix (YYYYMMDD) used to derive X.Y.Z.devYYYYMMDD from the declared pyproject version",
     )
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
