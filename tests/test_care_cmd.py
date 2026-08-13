@@ -598,7 +598,9 @@ def test_care_systemd_aggregate_status_malformed_beats_missing(tmp_path, monkeyp
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
 
     assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
-    service = home / ".config" / "systemd" / "user" / "brigade-daily-care.service"
+    # Unit names are target-namespaced (brigade-care-<identity>-...); pre-#898
+    # fixed names like brigade-daily-care.service no longer exist.
+    service = _daily_service(home, target)
     service.unlink()
     service.symlink_to(home / "missing.service")
 
