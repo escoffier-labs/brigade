@@ -404,8 +404,26 @@ def test_windows_native_acceptance_source_setup_uses_standalone_manifest_online_
     online_at = body.index('Write-Step "brigade setup (online)"')
     offline_at = body.index('Write-Step "brigade setup --offline"')
     assert unpublished_at < online_at < offline_at
-    assert "& brigade setup --manifest-source standalone" in body
+    assert "Invoke-RetryBrigadeSetup -SetupCommand { & brigade setup --manifest-source standalone }" in body
     assert "& brigade setup --offline --manifest-source standalone" in body
+
+
+def test_windows_native_acceptance_retries_online_setup_with_backoff():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    helper = _extract_powershell_function(text, "Invoke-RetryBrigadeSetup")
+    assert "$MaxAttempts = 3" in helper
+    assert "Start-Sleep -Seconds $delaySeconds" in helper
+    assert "[Math]::Pow(2, $attempt)" in helper
+    assert "Remote end closed connection without response" in helper
+
+    main = text[text.index("$acceptRoot = $null") :]
+    setup = main[main.index("[string[]]$unpublishedIds = @()") : main.index("$report = Get-ComponentReport")]
+    source_block = setup[setup.index('if ($InstallMode -eq "source") {') : setup.index("else {")]
+    pypi_block = setup[setup.index("else {") :]
+    assert source_block.count("Invoke-RetryBrigadeSetup") == 1
+    assert "Invoke-RetryBrigadeSetup -SetupCommand { & brigade setup --offline" not in source_block
+    assert pypi_block.count("Invoke-RetryBrigadeSetup") == 1
+    assert "Invoke-RetryBrigadeSetup -SetupCommand { & brigade setup --offline" not in pypi_block
 
 
 def test_windows_native_acceptance_pypi_setup_keeps_exact_manifest_default_and_digest_check():
@@ -417,7 +435,7 @@ def test_windows_native_acceptance_pypi_setup_keeps_exact_manifest_default_and_d
 
     published = re.search(r"else \{(?P<body>.*?)\n    \}", setup, re.DOTALL)
     assert published is not None
-    assert re.search(r"(?m)^        & brigade setup$", published.group("body"))
+    assert "Invoke-RetryBrigadeSetup -SetupCommand { & brigade setup }" in published.group("body")
     assert re.search(r"(?m)^        & brigade setup --offline$", published.group("body"))
     assert "--manifest-source standalone" not in published.group("body")
     assert "Assert-ManagedComponentDigests -Manifest $releaseManifest" in text
@@ -652,7 +670,7 @@ def test_windows_native_acceptance_source_mode_skips_only_bundled_unpublished_co
     assert source_block.index('Write-Step "brigade setup (online)"') < source_block.index(
         'Write-Step "brigade setup --offline"'
     )
-    assert "& brigade setup --manifest-source standalone" in source_block
+    assert "Invoke-RetryBrigadeSetup -SetupCommand { & brigade setup --manifest-source standalone }" in source_block
     assert "& brigade setup --offline --manifest-source standalone" in source_block
     assert "[string[]]$unpublishedIds = @()" in main
     assert "Assert-AllComponentsHealthy -Report $report -Skippable $unpublishedIds" in main
@@ -690,7 +708,7 @@ def test_windows_native_acceptance_source_setup_command_contract_omits_empty_ass
 
     main = script[script.index("$acceptRoot = $null") :]
     source_block = main[main.index('if ($InstallMode -eq "source") {') : main.index("$report = Get-ComponentReport")]
-    online_cmd = "& brigade setup --manifest-source standalone"
+    online_cmd = "Invoke-RetryBrigadeSetup -SetupCommand { & brigade setup --manifest-source standalone }"
     offline_cmd = "& brigade setup --offline --manifest-source standalone"
     assert source_block.count(online_cmd) == 1
     assert source_block.count(offline_cmd) == 1
@@ -712,7 +730,7 @@ def test_windows_native_acceptance_pypi_setup_command_contract_is_strict():
     published = re.search(r"else \{(?P<body>.*?)\n    \}", setup, re.DOTALL)
     assert published is not None
     body = published.group("body")
-    assert re.search(r"(?m)^        & brigade setup$", body)
+    assert "Invoke-RetryBrigadeSetup -SetupCommand { & brigade setup }" in body
     assert re.search(r"(?m)^        & brigade setup --offline$", body)
     assert "--manifest-source" not in body
     assert "Get-UnpublishedComponentIds" not in body
