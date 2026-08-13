@@ -161,3 +161,101 @@ def test_code_cmd_routes_export_json_to_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(code_export, "run_cli", fake_cli)
     assert code_cmd.run("export", ["--target", str(tmp_path), "--json"]) == 0
     assert called == ["cli"]
+
+
+def test_module_map_excludes_worktrees_and_dedupes_by_repo_path():
+    file_graph = {
+        "nodes": {
+            "src/brigade/cli.py": 10,
+            "./src/brigade/cli.py": 10,
+            ".worktrees/pr-906/src/brigade/cli.py": 99,
+            ".worktrees/pr-906/tests/test_cli.py": 80,
+            "tests/test_cli.py": 2,
+        },
+        "edges": [
+            ("src/brigade/cli.py", "tests/test_cli.py", 1),
+            (".worktrees/pr-906/src/brigade/cli.py", ".worktrees/pr-906/tests/test_cli.py", 50),
+        ],
+    }
+    module_map = code_export._build_module_map(file_graph, changed_files=[])
+    ids = [row["id"] for row in module_map["modules"]]
+    labels = [row["label"] for row in module_map["modules"]]
+    assert all(".worktrees" not in module_id for module_id in ids)
+    assert labels.count("tests") <= 1
+    assert (
+        sum(
+            row["symbol_count"]
+            for row in module_map["modules"]
+            if row["id"].endswith("brigade") or "brigade" in row["id"]
+        )
+        == 10
+    )
+
+
+def test_module_map_disambiguates_test_labels_by_parent_package():
+    file_graph = {
+        "nodes": {
+            "tests/test_cli.py": 1,
+            "engines/code-graph/tests/graph_tests.rs": 4,
+            "src/brigade/cli.py": 8,
+        },
+        "edges": [],
+    }
+    module_map = code_export._build_module_map(file_graph, changed_files=[])
+    labels = {row["id"]: row["label"] for row in module_map["modules"]}
+    test_labels = [label for label in labels.values() if "test" in label.lower()]
+    assert len(set(test_labels)) == len(test_labels)
+    assert any("code-graph" in label for label in test_labels)
+
+
+def test_module_map_defaults_to_top_modules_by_connectivity():
+    nodes = {f"src/iso{index}/file.py": 100 + index for index in range(20)}
+    nodes["src/hub/core.py"] = 3
+    nodes["src/spoke/a.py"] = 1
+    nodes["src/spoke/b.py"] = 1
+    edges = [
+        ("src/spoke/a.py", "src/hub/core.py", 9),
+        ("src/spoke/b.py", "src/hub/core.py", 8),
+    ]
+    for index in range(20):
+        edges.append((f"src/iso{index}/file.py", f"src/iso{index}/file.py", 1))
+    module_map = code_export._build_module_map({"nodes": nodes, "edges": edges}, changed_files=[])
+    ids = [row["id"] for row in module_map["modules"]]
+    assert len(ids) == code_export.MODULE_CAP
+    assert code_export.MODULE_CAP == 15
+    assert any(module_id.endswith("hub") or module_id == "src/hub" for module_id in ids)
+    trunc = module_map["truncation"]
+    assert trunc["hidden_modules"] == 7
+    note = (trunc.get("note") or "").lower()
+    assert "showing top 15 of" in note
+    assert "edges hidden" in note
+
+
+def test_module_map_insights_name_hub_isolated_and_change():
+    file_graph = {
+        "nodes": {
+            "src/brigade/cli.py": 2737,
+            "src/other/util.py": 2,
+            "src/lonely/x.py": 1,
+            "tests/test_cli.py": 4,
+        },
+        "edges": [
+            ("src/other/util.py", "src/brigade/cli.py", 6),
+            ("tests/test_cli.py", "src/brigade/cli.py", 2),
+        ],
+    }
+    module_map = code_export._build_module_map(
+        file_graph,
+        changed_files=["src/other/util.py"],
+    )
+    insights = module_map["insights"]
+    assert insights["total_modules"] == 4
+    assert insights["most_connected"]["inbound"] >= 2
+    assert "brigade" in insights["most_connected"]["label"]
+    assert insights["isolated_count"] >= 1
+    assert "other" in insights["biggest_change"]["label"]
+    hub = next(row for row in module_map["modules"] if "brigade" in row["id"])
+    assert hub["inbound_count"] >= 2
+    assert "other" in hub["dependents"] or "util" in " ".join(hub["dependents"]).lower()
+    assert hub["attributed_tests"]
+    assert hub["top_files"][0]["path"].endswith("cli.py")

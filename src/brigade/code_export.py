@@ -20,8 +20,10 @@ from .localio import utc_now_iso_z
 SCHEMA = "brigade.code-graph-export.v1"
 SCHEMA_VERSION = 1
 
-MODULE_CAP = 48
-EDGE_CAP = 96
+MODULE_CAP = 15
+EDGE_CAP = 24
+_TOP_FILES = 5
+_TEST_CAP = 8
 _SEARCH_LIMIT = 12
 _GRAPH_TIMEOUT = 30.0
 
@@ -202,16 +204,33 @@ def _load_file_graph(binary: str, db_path: Path, target: Path) -> dict[str, Any]
     return {"nodes": nodes, "edges": edges}
 
 
+def _canonical_file_path(file_path: str) -> str | None:
+    """Return a repo-relative POSIX path, or None to drop (worktrees / empty)."""
+    normalized = file_path.replace("\\", "/").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    parts = PurePosixPath(normalized).parts
+    if not parts or parts == (".",):
+        return None
+    if ".worktrees" in parts:
+        return None
+    return str(PurePosixPath(*parts))
+
+
 def _module_key(file_path: str) -> str:
-    parts = PurePosixPath(file_path.replace("\\", "/")).parts
+    canonical = _canonical_file_path(file_path)
+    if canonical is None:
+        return ""
+    parts = PurePosixPath(canonical).parts
     if not parts:
         return "(root)"
+    if "tests" in parts:
+        index = parts.index("tests")
+        return str(PurePosixPath(*parts[: index + 1]))
     if parts[0] == "src" and len(parts) >= 4:
         return str(PurePosixPath(*parts[:3]))
     if parts[0] == "src" and len(parts) == 3:
         return str(PurePosixPath(*parts[:2]))
-    if parts[0] == "tests":
-        return "tests" if len(parts) <= 2 else str(PurePosixPath(*parts[:2]))
     if parts[0] == "engines" and len(parts) >= 4:
         return str(PurePosixPath(*parts[:3]))
     if parts[0] == "engines" and len(parts) == 3:
@@ -222,8 +241,42 @@ def _module_key(file_path: str) -> str:
 
 
 def _module_label(module_id: str) -> str:
-    name = PurePosixPath(module_id).name
+    parts = PurePosixPath(module_id).parts
+    name = parts[-1] if parts else module_id
+    if name == "tests" and len(parts) >= 2:
+        return f"{parts[-2]} tests"
     return name or module_id
+
+
+def _package_group(module_id: str) -> str:
+    parts = PurePosixPath(module_id).parts
+    if not parts:
+        return "(root)"
+    if parts[0] == "src":
+        return parts[1] if len(parts) > 1 else "src"
+    if parts[0] == "engines":
+        return parts[1] if len(parts) > 1 else "engines"
+    if parts[-1] == "tests" and len(parts) >= 2:
+        return f"{parts[-2]} tests"
+    return parts[0]
+
+
+def _is_test_path(file_path: str) -> bool:
+    return "tests" in PurePosixPath(file_path).parts
+
+
+def _insight_ref(
+    module_id: str,
+    *,
+    symbol_count: int | None = None,
+    inbound: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"id": module_id, "label": _module_label(module_id)}
+    if symbol_count is not None:
+        payload["symbol_count"] = symbol_count
+    if inbound is not None:
+        payload["inbound"] = inbound
+    return payload
 
 
 def _build_module_map(file_graph: dict[str, Any], *, changed_files: list[str]) -> dict[str, Any]:
@@ -232,53 +285,129 @@ def _build_module_map(file_graph: dict[str, Any], *, changed_files: list[str]) -
     raw_edge_list = file_graph.get("edges")
     raw_edges: list[tuple[str, str, int]] = raw_edge_list if isinstance(raw_edge_list, list) else []
 
+    seen_files: set[str] = set()
     module_symbols: dict[str, int] = defaultdict(int)
     module_files: dict[str, int] = defaultdict(int)
-    changed_modules = {_module_key(path) for path in changed_files}
+    files_by_module: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    changed_modules = {key for path in changed_files if (key := _module_key(path))}
 
     for file_path, symbol_count in nodes.items():
-        module_id = _module_key(file_path)
-        module_symbols[module_id] += symbol_count
+        canonical = _canonical_file_path(str(file_path))
+        if canonical is None or canonical in seen_files:
+            continue
+        seen_files.add(canonical)
+        module_id = _module_key(canonical)
+        if not module_id:
+            continue
+        count = int(symbol_count) if isinstance(symbol_count, int) and symbol_count >= 0 else 0
+        module_symbols[module_id] += count
         module_files[module_id] += 1
+        files_by_module[module_id].append((canonical, count))
 
     module_edges: dict[tuple[str, str], int] = defaultdict(int)
+    tests_for_module: dict[str, set[str]] = defaultdict(set)
+    seen_edge_files: set[tuple[str, str]] = set()
     for source, target_file, weight in raw_edges:
-        source_mod = _module_key(source)
-        target_mod = _module_key(target_file)
-        if source_mod == target_mod:
+        source_path = _canonical_file_path(str(source))
+        target_path = _canonical_file_path(str(target_file))
+        if source_path is None or target_path is None:
             continue
-        module_edges[(source_mod, target_mod)] += weight
+        edge_key = (source_path, target_path)
+        if edge_key in seen_edge_files:
+            continue
+        seen_edge_files.add(edge_key)
+        source_mod = _module_key(source_path)
+        target_mod = _module_key(target_path)
+        if not source_mod or not target_mod or source_mod == target_mod:
+            continue
+        amount = int(weight) if isinstance(weight, int) and weight >= 0 else 1
+        module_edges[(source_mod, target_mod)] += amount
+        if _is_test_path(source_path) and not _is_test_path(target_path):
+            tests_for_module[target_mod].add(source_path)
+        elif _is_test_path(target_path) and not _is_test_path(source_path):
+            tests_for_module[source_mod].add(target_path)
 
-    modules_sorted = sorted(
-        module_symbols.items(),
-        key=lambda item: (-item[1], item[0]),
+    inbound_mods: dict[str, set[str]] = defaultdict(set)
+    outbound_mods: dict[str, set[str]] = defaultdict(set)
+    inbound_weight: dict[str, int] = defaultdict(int)
+    outbound_weight: dict[str, int] = defaultdict(int)
+    for (source_mod, target_mod), weight in module_edges.items():
+        inbound_mods[target_mod].add(source_mod)
+        outbound_mods[source_mod].add(target_mod)
+        inbound_weight[target_mod] += weight
+        outbound_weight[source_mod] += weight
+
+    def connectivity(module_id: str) -> tuple[int, int, int, str]:
+        degree = len(inbound_mods[module_id]) + len(outbound_mods[module_id])
+        weight = inbound_weight[module_id] + outbound_weight[module_id]
+        return (degree, weight, module_symbols[module_id], module_id)
+
+    ranked = sorted(
+        module_symbols,
+        key=lambda module_id: (
+            -connectivity(module_id)[0],
+            -connectivity(module_id)[1],
+            -connectivity(module_id)[2],
+            module_id,
+        ),
     )
-    total_modules = len(modules_sorted)
-    shown_modules = modules_sorted[:MODULE_CAP]
-    hidden_modules = max(0, total_modules - len(shown_modules))
-    shown_ids = {module_id for module_id, _ in shown_modules}
+    pinned = [module_id for module_id in ranked if module_id in changed_modules]
+    remainder = [module_id for module_id in ranked if module_id not in changed_modules]
+    shown_ids_list = (pinned + remainder)[:MODULE_CAP]
+    shown_ids = set(shown_ids_list)
+    total_modules = len(module_symbols)
+    hidden_modules = max(0, total_modules - len(shown_ids_list))
 
-    modules = [
-        {
+    modules = []
+    for module_id in shown_ids_list:
+        top_files = sorted(files_by_module[module_id], key=lambda item: (-item[1], item[0]))[:_TOP_FILES]
+        dependents = sorted(_module_label(other) for other in inbound_mods[module_id])
+        tests = sorted(tests_for_module[module_id])[:_TEST_CAP]
+        row: dict[str, Any] = {
             "id": module_id,
             "label": _module_label(module_id),
-            "symbol_count": count,
-            "file_count": module_files.get(module_id, 0),
-            **({"changed": True} if module_id in changed_modules else {}),
+            "symbol_count": module_symbols[module_id],
+            "file_count": module_files[module_id],
+            "package": _package_group(module_id),
+            "inbound_count": len(inbound_mods[module_id]),
+            "dependents": dependents,
+            "top_files": [{"path": path, "symbol_count": count} for path, count in top_files],
+            "attributed_tests": tests,
         }
-        for module_id, count in shown_modules
-    ]
+        if module_id in changed_modules:
+            row["changed"] = True
+        modules.append(row)
 
     edges_sorted = sorted(module_edges.items(), key=lambda item: (-item[1], item[0][0], item[0][1]))
-    filtered_edges = [(pair, weight) for pair, weight in edges_sorted if pair[0] in shown_ids and pair[1] in shown_ids]
-    total_edges = len(filtered_edges)
-    shown_edge_rows = filtered_edges[:EDGE_CAP]
-    hidden_edges = max(0, total_edges - len(shown_edge_rows))
-
+    visible_edges = [(pair, weight) for pair, weight in edges_sorted if pair[0] in shown_ids and pair[1] in shown_ids]
+    shown_edge_rows = visible_edges[:EDGE_CAP]
+    hidden_edges = max(0, len(module_edges) - len(shown_edge_rows))
     edges = [{"from": source, "to": target, "weight": weight} for (source, target), weight in shown_edge_rows]
 
+    core_id = max(module_symbols, key=lambda module_id: (module_symbols[module_id], module_id), default="")
+    hub_id = max(
+        module_symbols,
+        key=lambda module_id: (len(inbound_mods[module_id]), inbound_weight[module_id], module_id),
+        default="",
+    )
+    isolated_count = sum(
+        1 for module_id in module_symbols if not inbound_mods[module_id] and not outbound_mods[module_id]
+    )
+    insights: dict[str, Any] = {
+        "total_modules": total_modules,
+        "isolated_count": isolated_count,
+    }
+    if core_id:
+        insights["core"] = _insight_ref(core_id, symbol_count=module_symbols[core_id])
+    if hub_id:
+        insights["most_connected"] = _insight_ref(hub_id, inbound=len(inbound_mods[hub_id]))
+    changed_ranked = [module_id for module_id in ranked if module_id in changed_modules]
+    if changed_ranked:
+        change_id = changed_ranked[0]
+        insights["biggest_change"] = _insight_ref(change_id, inbound=len(inbound_mods[change_id]))
+
     trunc = _truncation_note(len(modules), hidden_modules, len(edges), hidden_edges)
-    return {"modules": modules, "edges": edges, "truncation": trunc}
+    return {"modules": modules, "edges": edges, "truncation": trunc, "insights": insights}
 
 
 def _truncation_note(
@@ -287,12 +416,14 @@ def _truncation_note(
     shown_edges: int,
     hidden_edges: int,
 ) -> dict[str, Any]:
+    total_modules = shown_modules + hidden_modules
     note_parts: list[str] = []
     if hidden_modules:
-        note_parts.append(f"showing top {shown_modules} modules, {hidden_modules} hidden")
-    if hidden_edges:
-        note_parts.append(f"showing top {shown_edges} edges, {hidden_edges} hidden")
-    note = "; ".join(note_parts) if note_parts else ""
+        note_parts.append(f"showing top {shown_modules} of {total_modules} modules")
+        note_parts.append(f"{hidden_edges} edges hidden")
+    elif hidden_edges:
+        note_parts.append(f"{hidden_edges} edges hidden")
+    note = ", ".join(note_parts)
     return {
         "shown_modules": shown_modules,
         "hidden_modules": hidden_modules,
