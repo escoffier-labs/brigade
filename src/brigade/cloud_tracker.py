@@ -82,7 +82,8 @@ def load_registry(target: Path) -> dict[str, Any]:
     data = localio.read_json_dict(path) or {}
     if data.get("schema") != REGISTRY_SCHEMA:
         # Soft-recover unknown/legacy payloads into the current schema shape.
-        entries = data.get("entries") if isinstance(data.get("entries"), list) else []
+        raw_entries = data.get("entries")
+        entries = raw_entries if isinstance(raw_entries, list) else []
         hours = data.get("stale_ready_hours", DEFAULT_STALE_READY_HOURS)
         try:
             stale_ready_hours = int(hours)
@@ -94,7 +95,8 @@ def load_registry(target: Path) -> dict[str, Any]:
             "stale_ready_hours": stale_ready_hours,
             "entries": [e for e in entries if isinstance(e, dict)],
         }
-    entries = data.get("entries") if isinstance(data.get("entries"), list) else []
+    raw_entries = data.get("entries")
+    entries = raw_entries if isinstance(raw_entries, list) else []
     try:
         stale_ready_hours = int(data.get("stale_ready_hours", DEFAULT_STALE_READY_HOURS))
     except (TypeError, ValueError):
@@ -267,7 +269,8 @@ def _classify_entry(
     merged = any(str(pr.get("state", "")).upper() == "MERGED" for pr in prs)
     open_pr = any(str(pr.get("state", "")).upper() == "OPEN" for pr in prs)
     branch_exists = bool(branch and branch in branches)
-    expected = entry.get("expected_artifact") if isinstance(entry.get("expected_artifact"), dict) else {}
+    raw_expected = entry.get("expected_artifact")
+    expected = raw_expected if isinstance(raw_expected, dict) else {}
     expects_branch = expected.get("kind") == "branch"
 
     evidence: dict[str, Any] = {
@@ -529,7 +532,8 @@ def _parse_codex_cloud_list(stdout: str) -> dict[str, Any]:
                     }
             return tasks
         if isinstance(data, dict):
-            items = data.get("tasks") if isinstance(data.get("tasks"), list) else [data]
+            raw_tasks = data.get("tasks")
+            items = raw_tasks if isinstance(raw_tasks, list) else [data]
             for item in items:
                 if isinstance(item, dict) and item.get("id"):
                     tasks[str(item["id"])] = {
