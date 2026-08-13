@@ -34,7 +34,7 @@ The mini and nano tiers also answer through harnesses that front the ChatGPT OAu
 
 ### Cursor subscription
 
-Flat-sub plans carry far more than the headline models. Verified answering on one Ultra plan: `composer-2.5`, `grok-4.5` tiers, `kimi-k2.7-code`, `glm-5.2-high`, `gemini-3.5-flash`, `claude-sonnet-5` tiers, and the `gpt-5.4-mini`/`nano` ladder. An open-weight worker at zero marginal cost:
+Flat-sub plans carry far more than the headline models. Verified answering on one Ultra plan: `composer-2.5`, `grok-4.5` tiers, `kimi-k2.7-code`, `glm-5.2-high`, `gemini-3.7-flash` tiers, `claude-sonnet-5` tiers, and the `gpt-5.4-mini`/`nano` ladder. An open-weight worker at zero marginal cost:
 
 ```toml
 [agents.kimi27]
@@ -86,14 +86,14 @@ role = "Light reviewer and worker for routine passes."
 
 Keep the flagship interactive model out of headless seats entirely: one operator machine logged 502 API calls in an evening after review seats defaulted to the top tier with internal subagent fan-out. One dispatch should be one flat pass. Parallelism belongs in `brigade run` workers, where each lane is metered and receipted.
 
-### Antigravity (free Google lane)
+### Antigravity (Google subscription lane)
 
 Often the most idle capacity an operator owns: two accounts can sit at 0-1% of weekly quota while paid lanes run hot. Route scans, summaries, research reads, and small changes here first.
 
 ```toml
 [agents.flash]
 cli = "antigravity"
-model = "Gemini 3.5 Flash (Low)"
+model = "Gemini 3.7 Flash (Low)"
 role = "Fast worker for research, summaries, scans, and small code changes."
 
 [agents.reviewer2]
@@ -101,6 +101,8 @@ cli = "antigravity"
 model = "Claude Sonnet 4.6 (Thinking)"
 role = "Cross-model reviewer on the Google lane; verify claims without spending the Claude subscription."
 ```
+
+Harness filters can change the result before inference. In author receipts, Antigravity served a Gemini 3.7 Flash security canary that Cursor rejected at the provider boundary. Record provider refusals separately from model output.
 
 Remember: every seat's `cli` value must appear in `limits.allow_models`, in the same edit. Brigade validates at roster load, not at edit time, and a missing entry fails every run against that roster.
 

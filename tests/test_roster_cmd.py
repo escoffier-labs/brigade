@@ -707,7 +707,9 @@ def test_roster_suggest_prints_every_seat_resolution_when_roots_satisfiable(tmp_
     resolved_path = tmp_target / "resolved-roster.toml"
     resolved_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_path.write_text(emitted)
-    assert roster.load_roster(resolved_path).orchestrator == "chef"
+    resolved = roster.load_roster(resolved_path)
+    assert resolved.orchestrator == "chef"
+    assert resolved.agents["reviewer_flash"].model == "Gemini 3.7 Flash (Low)"
 
 
 def test_roster_cli_registers_suggest_and_stats_commands(tmp_target):

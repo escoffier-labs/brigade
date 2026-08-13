@@ -22,13 +22,13 @@ caveats = ["Grok review quality varies by task complexity."]
 
 [agents.reviewer_flash]
 cli = "antigravity"
-model = "Gemini 3.5 Flash (Low)"
-role = "Fast non-security review and summary lane."
+model = "Gemini 3.7 Flash (Low)"
+role = "Fast routine review and summary lane."
 purpose = "Low-cost review and summary when premium lanes are saturated."
 requires = { cli = "antigravity" }
 fallback = []
-stats = { speed = "fast", source = "author-receipts-2026-07" }
-caveats = ["Refuses security-audit work; use grok or codex lanes for security review."]
+stats = { speed = "fast", source = "author-receipts-2026-08" }
+caveats = ["Use a stronger independent reviewer for high-risk or cross-file security decisions."]
 
 [agents.reviewer_cursor]
 cli = "cursor"
