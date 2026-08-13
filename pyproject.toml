@@ -59,6 +59,9 @@ brigade = ["py.typed", "templates/**/*", "guard/policies/*.json", "guard/example
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "care_host_integration: host-dependent memory-care scheduler integration tests",
+]
 
 [tool.ruff]
 line-length = 120

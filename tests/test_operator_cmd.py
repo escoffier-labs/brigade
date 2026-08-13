@@ -488,6 +488,8 @@ def test_operator_migration_consolidate_requires_rollup_import(tmp_path, capsys)
 
 
 def test_operator_surfaces_capture_lists_and_doctors_redacted_records(tmp_path, capsys, monkeypatch):
+    from brigade.operator_cmd import surfaces as surfaces_mod
+
     monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
 
     assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
@@ -519,11 +521,28 @@ def test_operator_surfaces_capture_lists_and_doctors_redacted_records(tmp_path, 
     assert "brigade-example-task" not in snapshot_text
     assert "/example/private" not in snapshot_text
 
+    assert hasattr(surfaces_mod, "surfaces_list_payload"), "public surfaces_list_payload required"
+    list_payload = surfaces_mod.surfaces_list_payload(tmp_path)
+    assert list_payload["status"] == "captured"
+    assert list_payload["record_count"] == 5
+    assert [record["record_label"] for record in list_payload["records"]] == [
+        "shell-crontab-001",
+        "openclaw-cron-001",
+        "openclaw-cron-002",
+        "pm2-001",
+        "pm2-002",
+    ]
+    assert all(record["raw_included"] is False for record in list_payload["records"])
+
     assert operator_cmd.surfaces_list(target=tmp_path, json_output=True) == 0
     listed = json.loads(capsys.readouterr().out)
     assert listed["status"] == "captured"
     assert listed["record_count"] == 5
     assert listed["records"][0]["record_label"] == "shell-crontab-001"
+    assert listed["records"] == list_payload["records"]
+    assert listed["status"] == list_payload["status"]
+    assert listed["record_count"] == list_payload["record_count"]
+    assert listed["surface_count"] == list_payload["surface_count"]
 
     assert operator_cmd.surfaces_doctor(target=tmp_path, json_output=True) == 1
     doctor = json.loads(capsys.readouterr().out)
