@@ -5,16 +5,16 @@ from brigade.center_cmd.dashboard.views import status_grid
 
 def test_fetch_uses_work_brief_json(monkeypatch, tmp_path):
     expected = {"handoff_issues": {"count": 2}}
-    calls: list[tuple[Path, list[str]]] = []
+    calls: list[tuple[Path, list[str], float | None]] = []
 
-    def fake_run_json(target: Path, args: list[str]) -> dict:
-        calls.append((target, args))
+    def fake_run_json(target: Path, args: list[str], *, timeout: float | None = None) -> dict:
+        calls.append((target, args, timeout))
         return expected
 
     monkeypatch.setattr("brigade.center_cmd.dashboard.data.run_json", fake_run_json)
 
     assert status_grid.fetch(tmp_path) == expected
-    assert calls == [(tmp_path, ["work", "brief"])]
+    assert calls == [(tmp_path, ["work", "brief"], 60.0)]
 
 
 def test_render_displays_status_signals():
