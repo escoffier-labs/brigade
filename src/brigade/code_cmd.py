@@ -81,6 +81,18 @@ def _rebrand(text: str) -> str:
 def run(verb: str, arguments: Sequence[str]) -> int:
     """Run one GraphTrail command and relay its output and exit status."""
 
+    target, forwarded, target_error = _extract_target(arguments)
+    if target_error is not None:
+        print(
+            f"error: {target_error} (usage: brigade code {verb} --target <dir> [engine arguments])",
+            file=sys.stderr,
+        )
+        return 2
+    if verb == "export" and "--json" in forwarded:
+        from . import code_export
+
+        return code_export.run_cli(target or Path("."), list(forwarded))
+
     timeout = _SHORT_OPERATION_TIMEOUT_SECONDS
     timeout_env = _LONG_OPERATION_TIMEOUT_ENVS.get(verb)
     if timeout_env is not None:
@@ -90,13 +102,6 @@ def run(verb: str, arguments: Sequence[str]) -> int:
             return 2
         timeout = configured_timeout
 
-    target, forwarded, target_error = _extract_target(arguments)
-    if target_error is not None:
-        print(
-            f"error: {target_error} (usage: brigade code {verb} --target <dir> [engine arguments])",
-            file=sys.stderr,
-        )
-        return 2
     cwd: Path | None = None
     if target is not None:
         cwd = target.expanduser()
