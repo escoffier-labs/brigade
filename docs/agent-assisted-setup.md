@@ -1,10 +1,20 @@
 # Agent-Assisted Setup
 
-Point a coding agent at the Brigade repository (or paste a short prompt from the README). **The agent installs and wires Brigade.** Humans often never type `pipx` or `brigade setup`.
+Point a coding agent at the Brigade repository (or paste the prompt below). **The agent installs and wires Brigade.** Humans often never type `pipx` or `brigade setup`.
 
 Root `AGENTS.md` is for **developing Brigade**. For install and adapt, agents follow **`docs/agents-guide.md`** (this doc is supporting detail).
 
-Brigade is designed so agents run the control plane (install, setup, verify, handoffs) and humans review when a gate is ambiguous or risky. Adapt an existing homegrown setup; do not replace it wholesale. Keep the user's memory owner, workspace or repo layout, harness choices, and local habits unless Brigade needs a small compatibility file or handoff inbox.
+## Paste-ready install prompt
+
+```text
+Read https://github.com/escoffier-labs/brigade and follow docs/agents-guide.md.
+Install brigade-cli with pipx if missing (or uv tool install brigade-cli).
+Run operator quickstart with --dry-run first and show the plan. Then apply,
+run brigade operator doctor, and report ready: yes. Keep existing memory
+layout. Do not touch remotes, do not commit, stop before anything destructive.
+```
+
+Brigade is designed so agents run the control plane (install, setup, verify, handoffs) and humans review when a gate is ambiguous or risky. Adapt an existing homegrown setup. Do not replace it wholesale. Keep the user's memory owner, workspace or repo layout, harness choices, and local habits unless Brigade needs a small compatibility file or handoff inbox.
 
 Treat setup as local workspace wiring, not as a release, deploy, or remote mutation. Local-first means data on the operator-controlled machine first (laptop, workstation, or VPS) before any external service.
 
@@ -23,6 +33,7 @@ Then work inside the **target** repo or operator workspace and run:
 
 ```bash
 pipx install brigade-cli
+# alternative: uv tool install brigade-cli
 brigade setup
 brigade --version
 brigade operator quickstart --target . --harnesses codex --dry-run
@@ -97,6 +108,16 @@ brigade operator quickstart --target . --depth workspace --harnesses openclaw,he
 ```
 
 OpenClaw and Hermes can act as memory owners or writer surfaces depending on the user's setup. If the agent is unsure, it should start with the harness the user is currently using and report the next command needed to add another surface later.
+
+## Claude Code user-scope work hooks
+
+Install the verified-work loop once at user scope instead of wiring every repo by hand:
+
+```bash
+brigade work hooks install --scope user
+```
+
+Session start then injects the work brief. An unwired repo prints the exact `brigade init` command for the agent to run. Uninstall with `brigade work hooks uninstall --scope user`. Only Brigade-owned hook entries are touched.
 
 ## Success Check
 

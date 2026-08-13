@@ -3,11 +3,14 @@
 The schedule belongs to the operator. Brigade only runs when invoked. Copy one
 of the recipes below into your own crontab, user timer, or CI job after
 `brigade init` wires the target, or explicitly opt in with
-`brigade care install --target .`. It installs systemd user timers on Linux or
-launchd agents on macOS and reports an unsupported scheduler elsewhere. Every
-registration is namespaced by a hash of the absolute target path, so status and
-uninstall operate only on that target; uninstalling a missing registration is
-a clear no-op. Brigade still does not own a daemon or background supervisor.
+`brigade care install --target .`. With the default `auto` backend it installs
+systemd user timers on Linux or launchd agents on macOS and reports an
+unsupported scheduler elsewhere. The public CLI does not install crontab
+entries. Use the manual crontab recipes on this page when cron is your trigger.
+Every registration is namespaced by a hash of the absolute target path, so
+status and uninstall operate only on that target. Uninstalling a missing
+registration is a clear no-op. Brigade still does not own a daemon or
+background supervisor.
 
 Prerequisites:
 
@@ -54,9 +57,8 @@ operator-approved runbook at `.brigade/memory-care/runbooks/<job-id>.json`; if
 that file is missing, install writes nothing and says why. Omitting `--entry`
 still installs the atomic five-recipe set above. Status and uninstall take the
 same selector, and namespaced backends still key registrations by
-`(target identity, job_id)`. The optional crontab backend stays one atomic
-managed block and rejects `--entry`; use systemd or launchd for per-job
-installs.
+`(target identity, job_id)`. Per-job installs use systemd or launchd. The
+crontab examples below remain operator-owned manual recipes.
 
 Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md), [execution model](execution-model.md).
 
