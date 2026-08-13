@@ -3,7 +3,8 @@
 ## Status
 
 - Design approved: 2026-08-13
-- Implementation: not started
+- Implementation: planned in
+  `docs/phase-first-class-multi-lane-research-implementation.md`
 - Dashboard: explicitly deferred to Phase 5
 - Supersedes the narrow scope in `docs/phase-oracle-browser-researcher.md`
   without removing that adapter or its history
@@ -238,6 +239,7 @@ New research runs live in the standard container:
   workers/
   logs/
   research.json
+  sources.json
   findings.json
   citation-audit.json
   report.md
@@ -257,6 +259,10 @@ as `kind = "work"`. Research runs use `kind = "research"`.
 - fallback and retry history
 - finding, citation, report, and handoff references
 - unresolved citation count and review result
+
+`sources.json` is the durable discovery checkpoint. It stores provenance
+envelopes and bounded source content so resume can reuse an accepted acquisition
+without contacting the source again.
 
 `findings.json` contains structured claims. Each claim links to source IDs,
 content digests, extraction lane, timestamps, and trust metadata.
