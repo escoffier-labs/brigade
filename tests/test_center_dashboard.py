@@ -137,6 +137,81 @@ def test_get_unknown_view_returns_404(dashboard_server):
     assert _status_code(response) == "404"
 
 
+@pytest.mark.parametrize(
+    ("legacy", "location"),
+    [
+        ("/view/graph", "/view/work#ready"),
+        ("/view/waves", "/view/work#ready"),
+        ("/view/claims", "/view/work#claims"),
+        ("/view/activity", "/view/work#recent"),
+    ],
+)
+def test_folded_work_routes_redirect_to_work_anchors(dashboard_server, legacy, location):
+    host, port = dashboard_server.server_address
+    response = _raw_request(dashboard_server, f"{host}:{port}", path=legacy)
+    assert _status_code(response) == "301"
+    headers, _body = _headers_and_body(response)
+    assert f"Location: {location}" in headers
+
+
+def test_work_view_browser_check_answers_operator_questions(dashboard_server, monkeypatch):
+    from brigade.center_cmd.dashboard.views import work as work_view
+
+    def fake_fetch(target):
+        del target
+        return {
+            "ready": {
+                "ready_count": 2,
+                "blocked_count": 0,
+                "ready": [
+                    {"id": "task-a", "text": "Browser check ready A", "status": "pending"},
+                    {"id": "task-b", "text": "Browser check ready B", "status": "pending"},
+                ],
+                "blocked": [],
+                "edges": [],
+                "waves": [
+                    {
+                        "index": 0,
+                        "exclusive": True,
+                        "tasks": [{"id": "task-a", "text": "Browser check ready A"}],
+                    },
+                    {
+                        "index": 1,
+                        "exclusive": True,
+                        "tasks": [{"id": "task-b", "text": "Browser check ready B"}],
+                    },
+                ],
+            },
+            "tasks": {"tasks": []},
+            "runs": {
+                "runs": [
+                    {
+                        "run_id": "run-browser",
+                        "status": "completed",
+                        "started_at": "2026-08-13T12:00:00Z",
+                        "commands": [{"command": "pytest -q", "exit_code": 0}],
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(work_view, "fetch", fake_fetch)
+    host, port = dashboard_server.server_address
+    response = _raw_request(dashboard_server, f"{host}:{port}", path="/view/work")
+    assert _status_code(response) == "200"
+    _, body = _headers_and_body(response)
+    assert "failed to render" not in body
+    assert ">Work<" in body
+    assert 'id="ready"' in body
+    assert 'id="claims"' in body
+    assert 'id="recent"' in body
+    assert "Browser check ready A" in body
+    assert "pytest -q" in body
+    assert ">Graph<" not in body
+    assert ">Waves<" not in body
+    assert ">Claims<" not in body
+
+
 def test_rendered_page_has_no_inline_handlers_and_nonce_matches(dashboard_server):
     host, port = dashboard_server.server_address
     response = _raw_request(dashboard_server, f"{host}:{port}", path="/view/status")
