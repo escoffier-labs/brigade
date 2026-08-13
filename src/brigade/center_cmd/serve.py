@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import inspect
 import secrets
 import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Sequence
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from brigade.center_cmd.dashboard import render
 from brigade.center_cmd.dashboard.views import all_views, render_nav, view_by_name
@@ -182,6 +183,11 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             return None
         return slug
 
+    def _parse_query(self) -> dict[str, str]:
+        parsed = urlparse(self.path)
+        raw = parse_qs(parsed.query, keep_blank_values=False)
+        return {key: values[0] for key, values in raw.items() if values}
+
     def _render_view(self, view_name: str, nonce: str) -> bytes:
         module = view_by_name(view_name)
         if module is None:
@@ -190,7 +196,12 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         # default error path would answer without the security headers and
         # would put a traceback on the page.
         try:
-            payload = module.fetch(self._target)
+            query = self._parse_query()
+            fetch = module.fetch
+            if "query" in inspect.signature(fetch).parameters:
+                payload = fetch(self._target, query=query)
+            else:
+                payload = fetch(self._target)
             fragment = module.render(payload, nonce)
         except Exception:  # noqa: BLE001 - one broken panel must not take the page down
             fragment = render.error_panel(module.TITLE, "This view failed to render.")

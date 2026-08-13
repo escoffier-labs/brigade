@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brigade.tools/schemas/code-graph-export.v1.schema.json",
+  "title": "Brigade code graph export v1",
+  "description": "Read-only Center/operator contract for module map, impact drill-down, and optional change overlay.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "target", "generated_at", "stats", "module_map"],
+  "properties": {
+    "schema": {"const": "brigade.code-graph-export.v1"},
+    "schema_version": {"const": 1},
+    "target": {"type": "string", "minLength": 1},
+    "generated_at": {"type": "string", "minLength": 1},
+    "stats": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "module_map": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modules", "edges", "truncation"],
+      "properties": {
+        "modules": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/module"}
+        },
+        "edges": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/module_edge"}
+        },
+        "truncation": {"$ref": "#/$defs/truncation"}
+      }
+    },
+    "impact": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "change_overlay": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "error": {"type": "string"}
+  },
+  "$defs": {
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "symbol_count", "file_count"],
+      "properties": {
+        "id": {"type": "string"},
+        "label": {"type": "string"},
+        "symbol_count": {"type": "integer", "minimum": 0},
+        "file_count": {"type": "integer", "minimum": 0},
+        "changed": {"type": "boolean"}
+      }
+    },
+    "module_edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "weight"],
+      "properties": {
+        "from": {"type": "string"},
+        "to": {"type": "string"},
+        "weight": {"type": "integer", "minimum": 0}
+      }
+    },
+    "truncation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shown_modules", "hidden_modules", "shown_edges", "hidden_edges"],
+      "properties": {
+        "shown_modules": {"type": "integer", "minimum": 0},
+        "hidden_modules": {"type": "integer", "minimum": 0},
+        "shown_edges": {"type": "integer", "minimum": 0},
+        "hidden_edges": {"type": "integer", "minimum": 0},
+        "note": {"type": "string"}
+      }
+    }
+  }
+}

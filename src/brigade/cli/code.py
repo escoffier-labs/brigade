@@ -20,7 +20,7 @@ ENGINE_VERBS: dict[str, str] = {
     "affected": "List tests statically attributed to changed files.",
     "evaluate": "Dry-run extraction: print what a sync would store, writing nothing.",
     "explain": "Explain how call edges between two symbols resolved.",
-    "export": "Export the graph as Graphviz dot, GraphML, or JSON Lines.",
+    "export": "Export the graph (dot/graphml/jsonl) or the Center JSON contract (--json).",
     "stats": "Show code graph statistics.",
     "doctor": "Check code graph engine health.",
     "diff": "Diff two indexed graph databases.",

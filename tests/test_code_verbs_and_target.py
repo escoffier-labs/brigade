@@ -15,6 +15,8 @@ from brigade import cli, completions, context_cmd, proc
 from brigade.cli.code import ENGINE_VERBS
 
 NEW_VERBS = sorted(set(ENGINE_VERBS) - {"sync", "context", "impact"})
+# `brigade code export --json` is the Center contract, not an engine passthrough.
+PASSTHROUGH_JSON_VERBS = [verb for verb in NEW_VERBS if verb != "export"]
 
 
 def _patch_graphtrail(monkeypatch, *, run_calls: list | None = None, stderr: str = ""):
@@ -35,7 +37,7 @@ def test_engine_verb_table_covers_required_surface():
     assert {"callers", "callees", "affected", "search"} <= set(ENGINE_VERBS)
 
 
-@pytest.mark.parametrize("verb", NEW_VERBS)
+@pytest.mark.parametrize("verb", PASSTHROUGH_JSON_VERBS)
 def test_new_verbs_forward_exact_argv(monkeypatch, verb):
     calls: list[dict] = []
     _patch_graphtrail(monkeypatch, run_calls=calls)
@@ -44,6 +46,17 @@ def test_new_verbs_forward_exact_argv(monkeypatch, verb):
 
     assert rc == 0
     assert calls[0]["args"] == ["/fake/graphtrail", verb, "some-symbol", "--json"]
+    assert calls[0]["kwargs"] == {}
+
+
+def test_export_without_json_still_forwards_to_engine(monkeypatch):
+    calls: list[dict] = []
+    _patch_graphtrail(monkeypatch, run_calls=calls)
+
+    rc = cli.main(["code", "export", "--format", "dot"])
+
+    assert rc == 0
+    assert calls[0]["args"] == ["/fake/graphtrail", "export", "--format", "dot"]
     assert calls[0]["kwargs"] == {}
 
 
