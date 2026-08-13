@@ -47,7 +47,17 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
         if sync.get("timed_out"):
             if db_existed_before_sync:
                 snapshot_path = run_dir / SNAPSHOT_NAME
-                _backup_sqlite(db_path, snapshot_path)
+                try:
+                    _backup_sqlite(db_path, snapshot_path, timeout=timeout)
+                except TimeoutError:
+                    return _status(
+                        "sync_timed_out",
+                        f"code graph delta unavailable: graphtrail {sync_stage} sync timed out after {timeout:g}s",
+                        binary=binary,
+                        db_path=str(db_path),
+                        sync=sync,
+                        graphtrail_timeout_seconds=timeout,
+                    )
                 return {
                     "ok": True,
                     "status": "captured",
@@ -87,7 +97,7 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
                 graphtrail_timeout_seconds=timeout,
             )
         snapshot_path = run_dir / SNAPSHOT_NAME
-        _backup_sqlite(db_path, snapshot_path)
+        _backup_sqlite(db_path, snapshot_path, timeout=timeout)
         return {
             "ok": True,
             "status": "captured",
@@ -152,7 +162,7 @@ def capture_after_and_diff(
             return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
 
         after_snapshot_path = run_dir / SNAPSHOT_AFTER_NAME
-        _backup_sqlite(db_path, after_snapshot_path)
+        _backup_sqlite(db_path, after_snapshot_path, timeout=timeout)
         after_snapshot_sha256 = _file_sha256(after_snapshot_path)
         diff = _run_graphtrail(
             binary,
@@ -359,13 +369,28 @@ def _command_result(
     return result
 
 
-def _backup_sqlite(source: Path, destination: Path) -> None:
+def _backup_sqlite(source: Path, destination: Path, *, timeout: float | None = None) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.unlink(missing_ok=True)
     source_uri = f"file:{source}?mode=ro"
-    with sqlite3.connect(source_uri, uri=True) as source_conn:
-        with sqlite3.connect(destination) as dest_conn:
-            source_conn.backup(dest_conn)
+    started = time.monotonic()
+
+    def progress(_status: int, _remaining: int, _total: int) -> None:
+        if timeout is not None and time.monotonic() - started >= timeout:
+            raise TimeoutError(f"timeout after {timeout:g}s")
+
+    try:
+        with sqlite3.connect(source_uri, uri=True) as source_conn:
+            with sqlite3.connect(destination) as dest_conn:
+                if timeout is None:
+                    source_conn.backup(dest_conn)
+                else:
+                    source_conn.backup(dest_conn, pages=32, progress=progress)
+                    if time.monotonic() - started >= timeout:
+                        raise TimeoutError(f"timeout after {timeout:g}s")
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 def _failure_payload(

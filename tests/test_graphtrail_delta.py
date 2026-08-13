@@ -1,3 +1,5 @@
+import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -41,6 +43,23 @@ def test_compact_summary_propagates_process_signals(signal_type):
 
     with pytest.raises(signal_type):
         graphtrail_delta._compact_summary(SignalMapping())
+
+
+def test_backup_sqlite_honors_timeout(tmp_path):
+    src = tmp_path / "src.db"
+    dst = tmp_path / "dst.db"
+    with sqlite3.connect(src) as con:
+        con.execute("create table t (b blob)")
+        blob = b"x" * (256 * 1024)
+        for _ in range(40):
+            con.execute("insert into t values (?)", (blob,))
+        con.commit()
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="timeout after"):
+        graphtrail_delta._backup_sqlite(src, dst, timeout=0.001)
+    assert time.monotonic() - started < 0.5
+    assert not dst.exists()
 
 
 def test_capture_before_still_fails_open_for_regular_exceptions(monkeypatch, tmp_path):

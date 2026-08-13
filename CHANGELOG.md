@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Graph snapshot copies during `brigade work verify run` now honor the same
+  `graphtrail_delta_timeout_seconds` cap as `graphtrail sync`. A snapshot that
+  exceeds that cap marks `code_graph_delta` `sync_timed_out` with a reason and
+  leaves the verification command result unchanged, so a slow graph cannot
+  reject a passing check. The 10s default and per-target `.brigade/config.json`
+  key are unchanged.
 - Source and pipx-from-checkout installs now declare `0.27.0`, which PEP 440
   sorts at or above the publish-dev `0.27.0.devYYYYMMDD` wheel line. The
   previous `0.26.1` pin version-sorted below those wheels, so a current main
