@@ -28,7 +28,8 @@
           "type": "array",
           "items": {"$ref": "#/$defs/module_edge"}
         },
-        "truncation": {"$ref": "#/$defs/truncation"}
+        "truncation": {"$ref": "#/$defs/truncation"},
+        "insights": {"$ref": "#/$defs/insights"}
       }
     },
     "impact": {
@@ -51,7 +52,53 @@
         "label": {"type": "string"},
         "symbol_count": {"type": "integer", "minimum": 0},
         "file_count": {"type": "integer", "minimum": 0},
-        "changed": {"type": "boolean"}
+        "changed": {"type": "boolean"},
+        "package": {"type": "string"},
+        "inbound_count": {"type": "integer", "minimum": 0},
+        "dependents": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "top_files": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/top_file"}
+        },
+        "attributed_tests": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "top_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "symbol_count"],
+      "properties": {
+        "path": {"type": "string"},
+        "symbol_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "insight_module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": {"type": "string"},
+        "label": {"type": "string"},
+        "symbol_count": {"type": "integer", "minimum": 0},
+        "inbound": {"type": "integer", "minimum": 0}
+      }
+    },
+    "insights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_modules", "isolated_count"],
+      "properties": {
+        "total_modules": {"type": "integer", "minimum": 0},
+        "isolated_count": {"type": "integer", "minimum": 0},
+        "core": {"$ref": "#/$defs/insight_module"},
+        "most_connected": {"$ref": "#/$defs/insight_module"},
+        "biggest_change": {"$ref": "#/$defs/insight_module"}
       }
     },
     "module_edge": {
