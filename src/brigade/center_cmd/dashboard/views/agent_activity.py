@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from brigade.center_cmd import agent_activity as activity_records
-from brigade.center_cmd.dashboard import data
 from brigade.center_cmd.dashboard import render as html
 
 NAME = "agents"
@@ -51,10 +50,16 @@ _MACHINE_KIND = {
 
 
 def fetch(target: Path) -> dict:
-    payload = data.run_json(target, ["center", "activity", "--limit", "100"])
-    if "error" not in payload:
-        payload.setdefault("completed_window_seconds", activity_records.completed_window_seconds(target))
-    return payload
+    # In-process collect: a fresh `python -m brigade center activity` subprocess
+    # paid ~15s of import tax on this host and made the view look hung.
+    records = activity_records.collect(target)
+    return {
+        "activity_envelope_version": activity_records.ACTIVITY_ENVELOPE_VERSION,
+        "agent_activity": records,
+        "agent_activity_count": len(records),
+        "agent_activity_summary": activity_records.summary(records),
+        "completed_window_seconds": activity_records.completed_window_seconds(target),
+    }
 
 
 def render(payload: dict, nonce: str) -> str:

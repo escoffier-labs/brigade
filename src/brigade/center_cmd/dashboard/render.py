@@ -5,6 +5,8 @@ from __future__ import annotations
 import html
 from collections.abc import Sequence
 
+from brigade.center_cmd.dashboard.snapshot import Snapshot
+
 
 def esc(value: object) -> str:
     """Escape a value for safe inclusion in HTML."""
@@ -21,6 +23,28 @@ def error_panel(title: str, message: str) -> str:
     return panel(esc(title), f'<p class="error">{esc(message)}</p>')
 
 
+def loading_panel(title: str) -> str:
+    """Render a shell panel while a snapshot is still being gathered."""
+    return panel(esc(title), f"<p>{esc('This view is still gathering data.')}</p>")
+
+
+def freshness_banner(snapshot: Snapshot, href: str) -> str:
+    """Render the explicit staleness stamp with a same-view refresh link."""
+    status = snapshot.status
+    if status == "loading":
+        return (
+            f'<p class="center-freshness" data-center-freshness="loading" data-center-loading="1">'
+            f'{esc("Loading live data.")} <a href="{esc(href)}">{esc("refresh")}</a></p>'
+        )
+    fetched_at = snapshot.fetched_at
+    clock = "--:--:--" if fetched_at is None else fetched_at.astimezone().strftime("%H:%M:%S")
+    text = f"data as of {clock} (stale)" if status == "stale" else f"data as of {clock}"
+    return (
+        f'<p class="center-freshness" data-center-freshness="{esc(status)}">'
+        f'{esc(text)}, <a href="{esc(href)}">{esc("refresh")}</a></p>'
+    )
+
+
 def table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     """Render a table. *headers* and every cell in *rows* must already be escaped."""
     head_cells = "".join(f"<th>{cell}</th>" for cell in headers)
@@ -32,9 +56,10 @@ def table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     return f'<table class="data-table"><thead><tr>{head_cells}</tr></thead><tbody>{body}</tbody></table>'
 
 
-def page(title: str, nonce: str, nav: str, body: str) -> str:
+def page(title: str, nonce: str, nav: str, body: str, *, reload_ms: int = 30000) -> str:
     """Render a full HTML document. *title*, *nav*, and *body* must already be escaped."""
     nonce_attr = esc(nonce)
+    reload_delay = max(500, int(reload_ms))
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -119,6 +144,11 @@ table.data-table td {{
 table.data-table th {{
   background: #f0f0f0;
 }}
+.center-freshness {{
+  margin: 0 0 1rem;
+  color: #333;
+  font-size: 0.9rem;
+}}
 </style>
 </head>
 <body>
@@ -129,7 +159,7 @@ table.data-table th {{
 <script nonce="{nonce_attr}">
 setTimeout(function () {{
   location.reload();
-}}, 30000);
+}}, {reload_delay});
 document.addEventListener("input", function (e) {{
   var input = e.target;
   if (!input || !input.getAttribute) return;

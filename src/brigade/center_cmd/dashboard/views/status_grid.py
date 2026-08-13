@@ -13,7 +13,7 @@ ORDER = 1
 
 
 def fetch(target: Path) -> dict:
-    return data.run_json(target, ["work", "brief"])
+    return data.run_json(target, ["work", "brief"], timeout=60.0)
 
 
 def render(payload: dict, nonce: str) -> str:

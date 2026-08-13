@@ -14,10 +14,19 @@ from typing import Sequence
 from urllib.parse import parse_qs, urlparse
 
 from brigade.center_cmd.dashboard import render
+from brigade.center_cmd.dashboard import timing as center_timing
+from brigade.center_cmd.dashboard.snapshot import SnapshotCache
 from brigade.center_cmd.dashboard.views import all_views, render_nav, view_by_name
 
 _DEFAULT_PORT = 8765
 _VIEW_PREFIX = "/view/"
+
+
+def _view_cache_key(view_name: str, query: dict[str, str]) -> str:
+    if not query:
+        return view_name
+    encoded = "&".join(f"{key}={value}" for key, value in sorted(query.items()))
+    return f"{view_name}?{encoded}"
 
 
 def _has_port(host: str) -> bool:
@@ -79,6 +88,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
     _allowed_exact: set[str] = set()
     _allowed_bare: set[str] = set()
     _target: Path = Path(".")
+    _snapshots: SnapshotCache | None = None
+    _snapshot_wait_ms: float = 2000.0
 
     def _write_response(
         self,
@@ -108,6 +119,9 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
+        timing_header = getattr(self, "_timing_header", None)
+        if isinstance(timing_header, str) and timing_header:
+            self.send_header("X-Brigade-Center-Timing", timing_header)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(data)
@@ -192,25 +206,41 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         module = view_by_name(view_name)
         if module is None:
             raise KeyError(view_name)
+        cache = self._snapshots if self._snapshots is not None else SnapshotCache()
         # A view that raises must degrade to an inline panel, not a 500. The
         # default error path would answer without the security headers and
         # would put a traceback on the page.
-        try:
+        with center_timing.request_timer(view_name) as timer:
             query = self._parse_query()
-            fetch = module.fetch
-            if "query" in inspect.signature(fetch).parameters:
-                payload = fetch(self._target, query=query)
-            else:
-                payload = fetch(self._target)
-            fragment = module.render(payload, nonce)
-        except Exception:  # noqa: BLE001 - one broken panel must not take the page down
-            fragment = render.error_panel(module.TITLE, "This view failed to render.")
-        title = render.esc(f"{module.TITLE} - Brigade Center")
-        heading = f'<h1 class="page-title">{render.esc(module.TITLE)}</h1>'
-        body = f"{heading}{fragment}"
-        nav = render_nav(view_name)
-        page = render.page(title, nonce, nav, body)
-        return page.encode("utf-8")
+            cache_key = _view_cache_key(view_name, query)
+
+            def loader() -> dict:
+                fetch = module.fetch
+                if "query" in inspect.signature(fetch).parameters:
+                    return fetch(self._target, query=query)
+                return fetch(self._target)
+
+            with center_timing.phase("fetch"):
+                snapshot = cache.get(cache_key, loader, wait_ms=self._snapshot_wait_ms)
+            with center_timing.phase("render"):
+                try:
+                    if snapshot.payload.get("_center_fetch_failed"):
+                        fragment = render.error_panel(module.TITLE, "This view failed to render.")
+                    elif snapshot.status == "loading":
+                        fragment = render.loading_panel(module.TITLE)
+                    else:
+                        fragment = module.render(snapshot.payload, nonce)
+                except Exception:  # noqa: BLE001 - one broken panel must not take the page down
+                    fragment = render.error_panel(module.TITLE, "This view failed to render.")
+            banner = render.freshness_banner(snapshot, f"/view/{view_name}")
+            title = render.esc(f"{module.TITLE} - Brigade Center")
+            heading = f'<h1 class="page-title">{render.esc(module.TITLE)}</h1>'
+            body = f"{heading}{banner}{fragment}"
+            nav = render_nav(view_name)
+            reload_ms = 1500 if snapshot.status == "loading" else 30000
+            page = render.page(title, nonce, nav, body, reload_ms=reload_ms)
+            self._timing_header = timer.header_value()
+            return page.encode("utf-8")
 
     def do_GET(self) -> None:
         view_name = self._parse_view_name(self.path)
@@ -260,6 +290,8 @@ def _make_server(
     class _BoundHandler(_DashboardHandler):
         _token = token
         _target = target if target is not None else Path(".")
+        _snapshots = SnapshotCache()
+        _snapshot_wait_ms = 2000.0
 
     host_lc = host.strip().lower()
     server = ThreadingHTTPServer((host, port), _BoundHandler)
