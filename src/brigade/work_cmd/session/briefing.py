@@ -528,7 +528,22 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "next": str(resolved["task"]),
         "suggested_command": suggested,
         "update": update_notify.available_update(),
+        "cloud_tracker": _cloud_tracker_for_brief(target),
     }
+
+
+def _cloud_tracker_for_brief(target: Path) -> dict[str, Any]:
+    try:
+        from ... import cloud_tracker
+
+        return cloud_tracker.stale_entries_for_brief(target)
+    except Exception as exc:  # noqa: BLE001 - brief stay fail-open
+        return {
+            "stale_count": 0,
+            "stale_entries": [],
+            "error": f"{type(exc).__name__}: {exc}",
+            "suggested_command": "brigade run cloud status --json",
+        }
 
 
 def _print_bootstrap_line(level: str, name: str, detail: object) -> None:
@@ -644,6 +659,21 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if top_notification:
             print(
                 f"notifications_top_issue: {top_notification.get('name')} {helpers._short(str(top_notification.get('detail', '')))}"
+            )
+
+    cloud = payload.get("cloud_tracker") if isinstance(payload.get("cloud_tracker"), dict) else {}
+    if cloud.get("stale_count"):
+        print(
+            f"cloud_stale: {cloud.get('stale_count')} ready beyond "
+            f"{cloud.get('stale_ready_hours', '?')}h "
+            f"(run `{cloud.get('suggested_command', 'brigade run cloud status --json')}`)"
+        )
+        for row in cloud.get("stale_entries") or []:
+            if not isinstance(row, dict):
+                continue
+            print(
+                f"  - {row.get('label')} provider={row.get('provider')} "
+                f"task={row.get('task_id')} branch={row.get('branch')}"
             )
 
     print(f"next_source: {payload['next_source']}")

@@ -66,6 +66,7 @@ from . import (
     research as _research_group,
     center as _center_group,
     run as _run_group,
+    run_cloud as _run_cloud_group,
     route as _route_group,
     roster as _roster_group,
     runs as _runs_group,
@@ -185,6 +186,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _register_extras(sub, "research", extras_enabled)
     _register_extras(sub, "center", extras_enabled)
     _run_group.register(sub)
+    _run_cloud_group.register(sub)
     _route_group.register(sub)
     _roster_group.register(sub)
 
@@ -217,8 +219,17 @@ def _peel_passthrough_engine_args(argv: list[str]) -> tuple[list[str], list[str]
     return argv[:2], argv[2:]
 
 
+def _rewrite_run_cloud_argv(argv: list[str]) -> list[str]:
+    """Map `brigade run cloud ...` onto the internal `run-cloud` command group."""
+
+    if len(argv) >= 2 and argv[0] == "run" and argv[1] == "cloud":
+        return ["run-cloud", *argv[2:]]
+    return argv
+
+
 def main(argv=None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    raw_argv = _rewrite_run_cloud_argv(raw_argv)
     parse_argv, engine_args = _peel_passthrough_engine_args(raw_argv)
     parser = _build_parser()
     if not parse_argv:

@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--force`. (#860)
 
 ### Added
+- Cloud dispatch registry (`brigade run cloud`): register-on-dispatch and adopt
+  paths, `status` JSON classification (pending / ready-to-land / landed / stale /
+  orphaned / needs-investigation), receipted report-only `sweep`, configurable
+  stale-READY threshold surfaced in `brigade work brief`, and Center Agent
+  Activity Cloud card rows when the registry has entries. Cursor cloud stays
+  unwired until an API key exists; GitHub is ground truth for branches/PRs.
+  (#890)
+
 - Bundled template-profile selection and render-hash snapshot for #494: named
   presets (`repo-claude`, `workspace-claude-codex`, `repo-claude-full`) via
   `brigade init --profile`, deterministic rendered-file digests checked by
