@@ -26,7 +26,11 @@ A scheduled invocation is still an explicit invocation: the same command runs wh
 own scheduler: namespaced systemd user timers on Linux or namespaced launchd
 agents on macOS. Other platforms report that managed scheduling is unsupported.
 Each registration includes a hash of the absolute target path, so status and
-uninstall can never select another target's entries.
+uninstall can never select another target's entries. Repeatable `--entry JOB_ID`
+installs, reports, or removes one named job without touching the others;
+omitting it still writes the atomic scheduled-care set. `memory-refresh` and
+`evidence-crawl` refuse to install when their operator-approved runbook is
+missing.
 `brigade care status` audits those entries and shows the latest runbook
 receipt for each recipe. `brigade care uninstall` removes only the
 hash-stamped Brigade block. The schedule still belongs to the operator:

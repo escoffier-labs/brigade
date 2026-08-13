@@ -38,7 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Activity Cloud card rows when the registry has entries. Cursor cloud stays
   unwired until an API key exists; GitHub is ground truth for branches/PRs.
   (#890)
-
+- `brigade care install|status|uninstall --entry JOB_ID` selects one
+  namespaced registration keyed by `(target identity, job_id)`. The five
+  maintainer memory jobs (`handoff-ingest`, `care-scan`, `memory-refresh`,
+  `evidence-crawl`, `memory-closeout`) are in the catalog; a job whose
+  operator-approved runbook is missing installs nothing and says why.
+  Omitting `--entry` still writes the atomic scheduled-care set. (#762)
 - Bundled template-profile selection and render-hash snapshot for #494: named
   presets (`repo-claude`, `workspace-claude-codex`, `repo-claude-full`) via
   `brigade init --profile`, deterministic rendered-file digests checked by

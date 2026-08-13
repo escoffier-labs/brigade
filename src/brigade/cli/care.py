@@ -34,6 +34,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Replace a hand-edited managed block instead of reporting a conflict.",
     )
     p_install.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_install.add_argument(
+        "--entry",
+        dest="entry_ids",
+        action="append",
+        metavar="JOB_ID",
+        help="Install one named care entry. Repeatable. Default: the atomic scheduled-care set.",
+    )
 
     p_status = care_sub.add_parser(
         "status",
@@ -47,6 +54,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Scheduler backend (default: systemd on Linux, launchd on macOS).",
     )
     p_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_status.add_argument(
+        "--entry",
+        dest="entry_ids",
+        action="append",
+        metavar="JOB_ID",
+        help="Report one named care entry. Repeatable. Default: the atomic scheduled-care set.",
+    )
 
     p_uninstall = care_sub.add_parser(
         "uninstall",
@@ -63,6 +77,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_uninstall.add_argument("--dry-run", action="store_true", help="Show the plan without writing.")
     p_uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_uninstall.add_argument(
+        "--entry",
+        dest="entry_ids",
+        action="append",
+        metavar="JOB_ID",
+        help="Remove one named care entry. Repeatable. Default: the atomic scheduled-care set.",
+    )
 
     p_care.set_defaults(func=dispatch)
 
@@ -77,15 +98,22 @@ def dispatch(args) -> int:
             dry_run=args.dry_run,
             adopt=args.adopt,
             json_output=args.json,
+            entry_ids=args.entry_ids,
         )
     if args.care_command == "status":
-        return care_cmd.status(target=args.target, backend=args.backend, json_output=args.json)
+        return care_cmd.status(
+            target=args.target,
+            backend=args.backend,
+            json_output=args.json,
+            entry_ids=args.entry_ids,
+        )
     if args.care_command == "uninstall":
         return care_cmd.uninstall(
             target=args.target,
             backend=args.backend,
             dry_run=args.dry_run,
             json_output=args.json,
+            entry_ids=args.entry_ids,
         )
     args._brigade_parser.error(f"unknown care command: {args.care_command}")
     return 2

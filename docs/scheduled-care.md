@@ -28,7 +28,9 @@ Replace `WORKSPACE` with the absolute path to your Brigade-wired repo or operato
 brigade memory care init --with-runbooks --target .
 brigade extras on   # runbook + center report are extras-gated
 brigade care install --target .
-brigade care status --target .
+brigade care install --target . --entry handoff-ingest --entry care-scan
+brigade care status --target . --entry care-scan
+# brigade care uninstall --target . --entry handoff-ingest
 # brigade care uninstall --target .
 ```
 
@@ -43,6 +45,18 @@ receipt; nightly ops calls
 `.brigade/runbooks/nightly-maintenance.json` (operator-authored). Entries live
 inside a `# BEGIN BRIGADE CARE ... hash:...` managed block so status can detect
 drift and uninstall can remove only Brigade's span.
+
+To install one job without the rest of that set, pass `--entry JOB_ID`
+(repeatable). The five maintainer memory jobs from the care-managed inventory
+are `handoff-ingest`, `care-scan`, `memory-refresh`, `evidence-crawl`, and
+`memory-closeout`. `memory-refresh` and `evidence-crawl` require an
+operator-approved runbook at `.brigade/memory-care/runbooks/<job-id>.json`; if
+that file is missing, install writes nothing and says why. Omitting `--entry`
+still installs the atomic five-recipe set above. Status and uninstall take the
+same selector, and namespaced backends still key registrations by
+`(target identity, job_id)`. The optional crontab backend stays one atomic
+managed block and rejects `--entry`; use systemd or launchd for per-job
+installs.
 
 Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md), [execution model](execution-model.md).
 

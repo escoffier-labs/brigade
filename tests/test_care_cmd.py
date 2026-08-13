@@ -736,3 +736,236 @@ def test_care_systemd_uninstall_skips_symlink_swap(tmp_path, monkeypatch):
     assert care_cmd.uninstall(target=target, backend="systemd", home=home) == 2
     assert secret.read_text(encoding="utf-8").startswith("[Unit]")
     assert service.is_symlink()
+
+
+def _unit_path(home: Path, target: Path, entry_id: str, suffix: str) -> Path:
+    identity = care_cmd._target_identity(target)
+    return home / ".config" / "systemd" / "user" / f"brigade-care-{identity}-{entry_id}{suffix}"
+
+
+def _write_operator_runbook(target: Path, name: str, runbook_id: str) -> Path:
+    path = target / ".brigade" / "memory-care" / "runbooks" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "id": runbook_id,
+                "description": f"Operator-approved {runbook_id} runbook.",
+                "allowed_commands": ["brigade"],
+                "steps": [{"id": "noop", "run": "brigade --version"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_memory_job_catalog_matches_design_doc():
+    by_id = {entry.entry_id: entry for entry in care_cmd.MEMORY_JOB_ENTRIES}
+    assert list(by_id) == [
+        "handoff-ingest",
+        "care-scan",
+        "memory-refresh",
+        "evidence-crawl",
+        "memory-closeout",
+    ]
+    assert by_id["handoff-ingest"].schedule == "*/30 * * * *"
+    assert by_id["handoff-ingest"].runbook_rel.endswith("ingest-sweep.json")
+    assert by_id["care-scan"].schedule == "15 6 * * *"
+    assert by_id["care-scan"].runbook_rel.endswith("daily-care-pass.json")
+    assert by_id["memory-refresh"].schedule == "0 7 * * *"
+    assert by_id["memory-refresh"].runbook_rel.endswith("memory-refresh.json")
+    assert by_id["memory-refresh"].requires_existing_runbook is True
+    assert by_id["evidence-crawl"].schedule == "0 8 * * *"
+    assert by_id["evidence-crawl"].runbook_rel.endswith("evidence-crawl.json")
+    assert by_id["evidence-crawl"].requires_existing_runbook is True
+    assert by_id["memory-closeout"].schedule == "0 9 * * *"
+    assert by_id["memory-closeout"].runbook_rel.endswith("memory-closeout.json")
+
+
+def test_care_install_one_entry_does_not_touch_sibling_or_other_target(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=first, backend="systemd", home=home, entry_ids=["handoff-ingest"]) == 0
+    assert care_cmd.install(target=first, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    assert care_cmd.install(target=second, backend="systemd", home=home, entry_ids=["handoff-ingest"]) == 0
+
+    assert _unit_path(home, first, "handoff-ingest", ".service").is_file()
+    assert _unit_path(home, first, "care-scan", ".timer").is_file()
+    assert _unit_path(home, second, "handoff-ingest", ".service").is_file()
+    assert not _unit_path(home, first, "daily-care", ".service").exists()
+    assert not _unit_path(home, first, "nightly-ops", ".timer").exists()
+    assert not _unit_path(home, second, "care-scan", ".service").exists()
+
+
+def test_care_uninstall_one_entry_does_not_touch_sibling_or_other_target(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=first, backend="systemd", home=home, entry_ids=["handoff-ingest"]) == 0
+    assert care_cmd.install(target=first, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    assert care_cmd.install(target=second, backend="systemd", home=home, entry_ids=["handoff-ingest"]) == 0
+
+    assert care_cmd.uninstall(target=first, backend="systemd", home=home, entry_ids=["handoff-ingest"]) == 0
+    assert not _unit_path(home, first, "handoff-ingest", ".service").exists()
+    assert not _unit_path(home, first, "handoff-ingest", ".timer").exists()
+    assert _unit_path(home, first, "care-scan", ".service").is_file()
+    assert _unit_path(home, second, "handoff-ingest", ".service").is_file()
+
+    capsys.readouterr()
+    assert care_cmd.uninstall(target=first, backend="systemd", home=home, entry_ids=["handoff-ingest"]) == 0
+    assert "no scheduler registration found" in capsys.readouterr().out
+    assert _unit_path(home, first, "care-scan", ".timer").is_file()
+    assert _unit_path(home, second, "handoff-ingest", ".timer").is_file()
+
+
+def test_care_status_reports_named_entry_without_requiring_atomic_set(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    capsys.readouterr()
+    assert care_cmd.status(target=target, backend="systemd", home=home, json_output=True, entry_ids=["care-scan"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "current"
+    assert [entry["id"] for entry in payload["entries"]] == ["care-scan"]
+    unit_names = {item["name"] for item in payload["units"]}
+    identity = care_cmd._target_identity(target)
+    assert f"brigade-care-{identity}-care-scan.service" in unit_names
+    assert f"brigade-care-{identity}-daily-care.service" not in unit_names
+
+
+def test_care_install_without_entry_still_writes_atomic_default_set(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home) == 0
+    for entry_id in ("daily-care", "ingest-sweep", "weekly-outcome-ratchet", "daily-observability", "nightly-ops"):
+        assert _unit_path(home, target, entry_id, ".timer").is_file()
+    for entry_id in ("handoff-ingest", "care-scan", "memory-refresh", "evidence-crawl", "memory-closeout"):
+        assert not _unit_path(home, target, entry_id, ".service").exists()
+
+
+def test_care_install_memory_refresh_without_runbook_refuses(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["memory-refresh"]) == 2
+    err = capsys.readouterr().err
+    assert "memory-refresh" in err
+    assert "runbook" in err.lower()
+    assert not _unit_path(home, target, "memory-refresh", ".service").exists()
+    assert not _unit_path(home, target, "memory-refresh", ".timer").exists()
+    assert not list((home / ".config" / "systemd" / "user").glob("brigade-care-*"))
+
+
+def test_care_install_memory_refresh_with_operator_runbook(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    _write_operator_runbook(target, "memory-refresh.json", "memory-refresh")
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["memory-refresh"]) == 0
+    service = _unit_path(home, target, "memory-refresh", ".service")
+    assert service.is_file()
+    text = service.read_text(encoding="utf-8")
+    assert "memory-refresh.json" in text
+    assert f"brigade-care-{care_cmd._target_identity(target)}-memory-refresh" in service.name
+
+
+def test_care_unknown_entry_is_error(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["not-a-job"]) == 2
+    assert "unknown care entry" in capsys.readouterr().err
+    assert not list((home / ".config" / "systemd" / "user").glob("brigade-care-*"))
+
+
+def test_care_launchd_uninstall_one_entry_preserves_sibling_and_other_target(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=first, backend="launchd", home=home, entry_ids=["handoff-ingest"]) == 0
+    assert care_cmd.install(target=first, backend="launchd", home=home, entry_ids=["care-scan"]) == 0
+    assert care_cmd.install(target=second, backend="launchd", home=home, entry_ids=["handoff-ingest"]) == 0
+
+    first_ingest = f"dev.brigade.care.{care_cmd._target_identity(first)}.handoff-ingest.plist"
+    first_scan = f"dev.brigade.care.{care_cmd._target_identity(first)}.care-scan.plist"
+    second_ingest = f"dev.brigade.care.{care_cmd._target_identity(second)}.handoff-ingest.plist"
+
+    assert care_cmd.uninstall(target=first, backend="launchd", home=home, entry_ids=["handoff-ingest"]) == 0
+    agents = care_cmd._launchd_dir(home)
+    assert not (agents / first_ingest).exists()
+    assert (agents / first_scan).is_file()
+    assert (agents / second_ingest).is_file()
+
+
+def test_care_cli_dispatch_passes_entry(monkeypatch, tmp_path):
+    seen: dict[str, dict] = {}
+
+    def fake_install(**kwargs):
+        seen["install"] = kwargs
+        return 0
+
+    def fake_status(**kwargs):
+        seen["status"] = kwargs
+        return 0
+
+    def fake_uninstall(**kwargs):
+        seen["uninstall"] = kwargs
+        return 0
+
+    monkeypatch.setattr("brigade.care_cmd.install", fake_install)
+    monkeypatch.setattr("brigade.care_cmd.status", fake_status)
+    monkeypatch.setattr("brigade.care_cmd.uninstall", fake_uninstall)
+
+    assert (
+        cli.main(
+            [
+                "care",
+                "install",
+                "--target",
+                str(tmp_path),
+                "--entry",
+                "handoff-ingest",
+                "--entry",
+                "care-scan",
+            ]
+        )
+        == 0
+    )
+    assert seen["install"]["entry_ids"] == ["handoff-ingest", "care-scan"]
+    assert cli.main(["care", "status", "--target", str(tmp_path), "--entry", "care-scan", "--json"]) == 0
+    assert seen["status"]["entry_ids"] == ["care-scan"]
+    assert cli.main(["care", "uninstall", "--target", str(tmp_path), "--entry", "handoff-ingest"]) == 0
+    assert seen["uninstall"]["entry_ids"] == ["handoff-ingest"]
