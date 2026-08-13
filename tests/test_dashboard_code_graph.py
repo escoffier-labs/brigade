@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import re
 
 from brigade import code_export
 from brigade.center_cmd.dashboard.views import code_graph
+
+_SVG_CHAR_EM = 0.62
+
+
+def _approx_label_width(text: str, font_size: int = 12) -> int:
+    return max(0, int(round(len(text) * max(6.0, font_size * _SVG_CHAR_EM))))
 
 
 def test_fetch_uses_code_export_contract(monkeypatch, tmp_path):
@@ -137,7 +144,8 @@ def _insight_payload() -> dict:
                 },
                 "insights": {
                     "total_modules": 48,
-                    "core": {"id": "src/brigade", "label": "brigade", "symbol_count": 2737},
+                    "core": {"id": "src/brigade", "label": "brigade", "symbol_count": 2741},
+                    "largest": {"id": "src/brigade", "label": "brigade", "symbol_count": 2737},
                     "most_connected": {
                         "id": "src/brigade",
                         "label": "brigade",
@@ -214,3 +222,101 @@ def test_code_view_warm_path_reuses_snapshot_cache(monkeypatch, tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _tests_as_core_payload() -> dict:
+    return {
+        "export": {
+            "stats": {"symbols": 8966, "files": 40},
+            "module_map": {
+                "modules": [
+                    {
+                        "id": "tests",
+                        "label": "tests",
+                        "symbol_count": 8966,
+                        "file_count": 200,
+                        "package": "tests",
+                    },
+                    {
+                        "id": "src/brigade",
+                        "label": "brigade",
+                        "symbol_count": 100,
+                        "file_count": 12,
+                        "package": "brigade",
+                    },
+                    {
+                        "id": "src/brigade/work_cmd",
+                        "label": "work_cmd",
+                        "symbol_count": 7,
+                        "file_count": 3,
+                        "package": "brigade",
+                    },
+                    {
+                        "id": "src/brigade/claude_hooks",
+                        "label": "claude_hooks",
+                        "symbol_count": 12,
+                        "file_count": 2,
+                        "package": "brigade",
+                    },
+                    {
+                        "id": "src/other",
+                        "label": "other",
+                        "symbol_count": 4,
+                        "file_count": 1,
+                        "package": "other",
+                        "changed": True,
+                    },
+                ],
+                "edges": [],
+                "insights": {
+                    "total_modules": 37,
+                    "core": {"id": "src/brigade", "label": "brigade", "symbol_count": 9089},
+                    "largest": {"id": "tests", "label": "tests", "symbol_count": 8966},
+                    "most_connected": {"id": "src/brigade", "label": "brigade", "inbound": 3},
+                    "isolated_count": 2,
+                    "biggest_change": {"id": "src/other", "label": "other"},
+                },
+            },
+        },
+        "symbol": None,
+    }
+
+
+def test_summary_names_package_not_tests_and_calls_out_largest():
+    fragment = code_graph.render(_tests_as_core_payload(), "nonce-package")
+    summary = fragment.split("data-cg-summary", 1)[1].split("</section>", 1)[0]
+    assert "core package" not in summary
+    assert "tests's" not in summary
+    assert "brigade:" in summary
+    assert "8,966" in summary or "8966" in summary
+    assert "across 37 modules" in summary
+    assert "largest:" in summary.lower()
+    assert "tests" in summary
+    assert "Most connected" in summary
+    assert "isolated" in summary
+
+
+def test_module_labels_fit_in_boxes_without_ok_chips():
+    fragment = code_graph.render(_tests_as_core_payload(), "nonce-labels")
+    assert re.search(r'cg-svg-chip-word">OK<', fragment) is None
+    assert re.search(r'cg-svg-chip-word">CHANGED<', fragment)
+    assert "<title>work_cmd (7)</title>" in fragment
+    assert "<title>claude_hooks (12)</title>" in fragment
+
+    for match in re.finditer(r'<g class="cg-module"[^>]*>(.*?)</g>', fragment, re.DOTALL):
+        box = match.group(1)
+        box_rect = re.search(r'<rect x="(\d+)" y="[^"]*" width="(\d+)" height="(\d+)"', box)
+        label = re.search(r'<text x="(\d+)" y="[^"]*" class="cg-svg-label">([^<]*)</text>', box)
+        assert box_rect is not None
+        assert label is not None
+        box_x = int(box_rect.group(1))
+        box_w = int(box_rect.group(2))
+        text_x = int(label.group(1))
+        visible = html_lib.unescape(label.group(2))
+        text_end = text_x + _approx_label_width(visible)
+        assert text_end <= box_x + box_w - 4
+        chip = re.search(r'<rect x="(\d+)" y="[^"]*" width="(\d+)" height="16"', box)
+        if chip:
+            chip_x = int(chip.group(1))
+            assert text_end <= chip_x
+            assert "CHANGED" in box

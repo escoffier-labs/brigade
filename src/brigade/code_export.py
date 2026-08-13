@@ -384,21 +384,34 @@ def _build_module_map(file_graph: dict[str, Any], *, changed_files: list[str]) -
     hidden_edges = max(0, len(module_edges) - len(shown_edge_rows))
     edges = [{"from": source, "to": target, "weight": weight} for (source, target), weight in shown_edge_rows]
 
-    core_id = max(module_symbols, key=lambda module_id: (module_symbols[module_id], module_id), default="")
+    production_ids = [module_id for module_id in module_symbols if not _is_test_path(module_id)]
+    insight_ids = production_ids or list(module_symbols)
+    package_symbols: dict[str, int] = defaultdict(int)
+    for module_id in insight_ids:
+        package_symbols[_package_group(module_id)] += module_symbols[module_id]
+    core_package = max(package_symbols, key=lambda name: (package_symbols[name], name), default="")
+    core_id = max(
+        (module_id for module_id in insight_ids if _package_group(module_id) == core_package),
+        key=lambda module_id: (module_symbols[module_id], module_id),
+        default="",
+    )
+    largest_id = max(module_symbols, key=lambda module_id: (module_symbols[module_id], module_id), default="")
     hub_id = max(
-        module_symbols,
+        insight_ids,
         key=lambda module_id: (len(inbound_mods[module_id]), inbound_weight[module_id], module_id),
         default="",
     )
-    isolated_count = sum(
-        1 for module_id in module_symbols if not inbound_mods[module_id] and not outbound_mods[module_id]
-    )
+    isolated_count = sum(1 for module_id in insight_ids if not inbound_mods[module_id] and not outbound_mods[module_id])
+    total_symbols = sum(module_symbols.values())
     insights: dict[str, Any] = {
         "total_modules": total_modules,
         "isolated_count": isolated_count,
+        "total_symbols": total_symbols,
     }
-    if core_id:
-        insights["core"] = _insight_ref(core_id, symbol_count=module_symbols[core_id])
+    if core_package:
+        insights["core"] = {"id": core_id, "label": core_package, "symbol_count": total_symbols}
+    if largest_id:
+        insights["largest"] = _insight_ref(largest_id, symbol_count=module_symbols[largest_id])
     if hub_id:
         insights["most_connected"] = _insight_ref(hub_id, inbound=len(inbound_mods[hub_id]))
     changed_ranked = [module_id for module_id in ranked if module_id in changed_modules]
@@ -527,12 +540,30 @@ def _git_changed_files(target: Path) -> list[str]:
     return sorted(files)
 
 
+_SVG_CHAR_EM = 0.62
+
+
+def svg_text_width(text: str, *, font_size: int = 12) -> int:
+    """Approximate rendered SVG text width in pixels for layout."""
+    return max(0, int(round(len(text) * max(6.0, font_size * _SVG_CHAR_EM))))
+
+
 def fit_svg_label(text: str, max_width: int, *, font_size: int = 12) -> tuple[str, str]:
     """Return (visible label, full label) with width-aware truncation for SVG."""
     full = text.strip() or "?"
-    approx_char = max(1, int(max_width / max(6.0, font_size * 0.62)))
-    if len(full) <= approx_char:
+    if svg_text_width(full, font_size=font_size) <= max_width:
         return full, full
-    if approx_char <= 1:
-        return "…", full
-    return full[: approx_char - 1] + "…", full
+    ellipsis = "…"
+    if svg_text_width(ellipsis, font_size=font_size) >= max_width:
+        return ellipsis, full
+    lo, hi = 0, len(full)
+    visible = ellipsis
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = full[:mid] + ellipsis
+        if svg_text_width(candidate, font_size=font_size) <= max_width:
+            visible = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return visible, full

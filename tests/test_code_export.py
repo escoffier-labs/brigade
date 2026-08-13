@@ -259,3 +259,35 @@ def test_module_map_insights_name_hub_isolated_and_change():
     assert "other" in hub["dependents"] or "util" in " ".join(hub["dependents"]).lower()
     assert hub["attributed_tests"]
     assert hub["top_files"][0]["path"].endswith("cli.py")
+
+
+def test_module_map_insights_name_package_not_largest_test_module():
+    file_graph = {
+        "nodes": {
+            "src/brigade/cli.py": 100,
+            "src/brigade/work_cmd/run.py": 40,
+            "src/other/util.py": 2,
+            "src/lonely/x.py": 1,
+            "tests/test_cli.py": 9000,
+            "engines/code-graph/tests/graph_tests.rs": 80,
+            "src/a/a.py": 1,
+            "src/b/b.py": 1,
+        },
+        "edges": [
+            ("src/other/util.py", "src/brigade/cli.py", 6),
+            ("src/brigade/work_cmd/run.py", "src/brigade/cli.py", 3),
+            ("tests/test_cli.py", "src/brigade/cli.py", 2),
+            ("src/a/a.py", "tests/test_cli.py", 4),
+            ("src/b/b.py", "tests/test_cli.py", 4),
+            ("src/other/util.py", "tests/test_cli.py", 4),
+        ],
+    }
+    insights = code_export._build_module_map(file_graph, changed_files=[])["insights"]
+    assert insights["core"]["label"] == "brigade"
+    assert "test" not in insights["core"]["label"].lower()
+    assert insights["largest"]["label"] == "tests"
+    assert insights["largest"]["symbol_count"] == 9000
+    assert insights["core"]["symbol_count"] == 9225
+    assert "brigade" in insights["most_connected"]["label"]
+    assert "test" not in insights["most_connected"]["label"].lower()
+    assert insights["isolated_count"] == 1
