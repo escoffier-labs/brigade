@@ -17,17 +17,14 @@ from typing import Protocol
 
 from brigade.center_cmd.dashboard import render
 from brigade.center_cmd.dashboard.views import (
-    activity_heatmap,
     agent_activity,
     code_graph,
-    dispatch_waves,
     handoff_inbox,
     memory_operations,
     outcome_rank,
-    ready_graph,
     run_timeline,
     status_grid,
-    task_claims,
+    work,
 )
 
 _VIEW_MODULES: tuple[ModuleType, ...] = (
@@ -36,12 +33,9 @@ _VIEW_MODULES: tuple[ModuleType, ...] = (
     memory_operations,
     outcome_rank,
     run_timeline,
-    activity_heatmap,
+    work,
     agent_activity,
     code_graph,
-    ready_graph,
-    dispatch_waves,
-    task_claims,
 )
 
 

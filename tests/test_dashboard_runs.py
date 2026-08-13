@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from brigade.center_cmd.dashboard.views import run_timeline
@@ -14,7 +15,11 @@ def test_fetch_uses_verify_runs_json(monkeypatch, tmp_path):
     monkeypatch.setattr("brigade.center_cmd.dashboard.data.run_json", fake_run_json)
 
     assert run_timeline.fetch(tmp_path) == expected
-    assert calls == [(tmp_path, ["work", "verify", "runs"])]
+    argv = calls[0][1]
+    assert argv[:3] == ["work", "verify", "runs"]
+    assert "--limit" in argv
+    limit = int(argv[argv.index("--limit") + 1])
+    assert limit >= 50
 
 
 def test_render_lists_runs_newest_first_with_bounded_receipts():
@@ -55,3 +60,32 @@ def test_render_error_and_empty_payloads_degrade_safely():
 
     assert "Nothing here." in run_timeline.render({}, "unused")
     assert "Nothing here." in run_timeline.render({"runs": []}, "unused")
+
+
+def test_render_paginates_with_prior_next_like_memory_inventory():
+    runs = []
+    for index in range(55):
+        runs.append(
+            {
+                "run_id": f"run-{index:04d}",
+                "status": "completed" if index % 2 == 0 else "failed",
+                "started_at": f"2026-08-01T{index % 24:02d}:00:00Z",
+                "duration_seconds": 1,
+                "commands": [{"command": f"check-{index:04d}", "exit_code": 0}],
+            }
+        )
+    fragment = run_timeline.render({"runs": runs}, "run-nonce")
+    assert '<style nonce="run-nonce">' in fragment or "data-mo-page=" in fragment
+    assert 'data-mo-page-size="50"' in fragment
+    assert 'data-mo-page="prev"' in fragment
+    assert 'data-mo-page="next"' in fragment
+    assert "data-mo-page-status" in fragment
+    assert "Prior" in fragment
+    assert "Next" in fragment
+    assert re.search(r'data-mo-page="prev"[^>]*disabled', fragment) is not None
+    next_btn = re.search(r'<button[^>]*data-mo-page="next"[^>]*>', fragment)
+    assert next_btn is not None
+    assert "disabled" not in next_btn.group(0)
+    assert 'data-mo-row="1"' in fragment
+    assert "check-0000" in fragment
+    assert "check-0054" in fragment

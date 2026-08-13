@@ -20,6 +20,12 @@ from brigade.center_cmd.dashboard.views import all_views, render_nav, view_by_na
 
 _DEFAULT_PORT = 8765
 _VIEW_PREFIX = "/view/"
+_LEGACY_VIEW_REDIRECTS = {
+    "graph": "/view/work#ready",
+    "waves": "/view/work#ready",
+    "claims": "/view/work#claims",
+    "activity": "/view/work#recent",
+}
 
 
 def _view_cache_key(view_name: str, query: dict[str, str]) -> str:
@@ -97,6 +103,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         body: bytes | str = b"",
         content_type: str = "text/plain; charset=utf-8",
         nonce: str | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         if nonce is None:
             nonce = secrets.token_urlsafe(16)
@@ -118,6 +125,9 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
+        if extra_headers:
+            for key, value in extra_headers.items():
+                self.send_header(key, value)
         self.send_header("Content-Length", str(len(data)))
         timing_header = getattr(self, "_timing_header", None)
         if isinstance(timing_header, str) and timing_header:
@@ -242,10 +252,21 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._timing_header = timer.header_value()
             return page.encode("utf-8")
 
+    def _legacy_redirect(self, view_name: str | None) -> bool:
+        if view_name is None:
+            return False
+        location = _LEGACY_VIEW_REDIRECTS.get(view_name)
+        if location is None:
+            return False
+        self._write_response(301, extra_headers={"Location": location})
+        return True
+
     def do_GET(self) -> None:
         view_name = self._parse_view_name(self.path)
         if view_name is None:
             self._write_response(404, "Not found.\n")
+            return
+        if self._legacy_redirect(view_name):
             return
         if view_by_name(view_name) is None:
             self._write_response(404, "Not found.\n")
@@ -256,6 +277,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         view_name = self._parse_view_name(self.path)
+        if self._legacy_redirect(view_name):
+            return
         if view_name is None or view_by_name(view_name) is None:
             self._write_response(404, b"")
             return
