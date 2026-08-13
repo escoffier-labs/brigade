@@ -43,6 +43,8 @@ from ..localio import (
 )
 from ..render import emit
 
+from . import agent_activity
+
 from . import schema_ops as _family_base
 
 globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
@@ -937,12 +939,18 @@ def schema(*, target: Path, json_output: bool = False) -> int:
 def activity(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
     target = target.expanduser().resolve()
     items = _activity(target)[:limit]
+    agents = agent_activity.collect(target)[:limit]
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("center-activity"),
+        "activity_envelope_version": agent_activity.ACTIVITY_ENVELOPE_VERSION,
         "target": str(target),
         "activity": items,
         "activity_count": len(items),
+        "agent_activity": agents,
+        "agent_activity_count": len(agents),
+        "agent_activity_summary": agent_activity.summary(agents),
+        "completed_window_seconds": agent_activity.completed_window_seconds(target),
     }
     if json_output:
         return emit(payload, json_output, [], 0)

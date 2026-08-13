@@ -113,9 +113,10 @@ def _receipt_reference_exists(target: Path, value: str) -> bool:
 
 
 def _schema(name: str) -> dict[str, Any]:
+    version = 2 if name == "center-activity" else SCHEMA_VERSION
     return {
         "name": name,
-        "version": SCHEMA_VERSION,
+        "version": version,
         "item_fields": [
             "subsystem",
             "id",
@@ -222,15 +223,37 @@ def _center_schema_manifest_schemas() -> list[dict[str, Any]]:
         {
             "id": "center-activity",
             "command": "brigade center activity --json",
-            "description": "Unified local receipt activity ledger.",
+            "description": "Version 2 additive activity envelope: legacy receipt ledger plus safe agent observations.",
             "top_level_fields": [
                 _schema_field("schema_version", "integer"),
                 _schema_field("schema", "object"),
+                _schema_field("activity_envelope_version", "integer"),
                 _schema_field("target", "string"),
                 _schema_field("activity", "array"),
                 _schema_field("activity_count", "integer"),
+                _schema_field("agent_activity", "array"),
+                _schema_field("agent_activity_count", "integer"),
+                _schema_field("agent_activity_summary", "array"),
+                _schema_field("completed_window_seconds", "integer", required=False),
             ],
             "item_fields": item_fields,
+            "agent_activity_fields": [
+                _schema_field("activity_id", "string"),
+                _schema_field("parent_activity_id", "string|null", required=False),
+                _schema_field("provider", "string"),
+                _schema_field("harness", "string"),
+                _schema_field("kind", "string"),
+                _schema_field("host", "string"),
+                _schema_field("label", "string"),
+                _schema_field("task_label", "string"),
+                _schema_field("model", "string|null", required=False),
+                _schema_field("state", "string"),
+                _schema_field("started_at", "string|null", required=False),
+                _schema_field("last_updated_at", "string|null", required=False),
+                _schema_field("elapsed_seconds", "integer|null", required=False),
+                _schema_field("source", "object"),
+                _schema_field("links", "object"),
+            ],
         },
         {
             "id": "center-reviews",
