@@ -76,6 +76,9 @@ def run_cloud_task(
     sleep=time.sleep,
     clock=time.monotonic,
     process_registry: proc.ProcessRegistry | None = None,
+    label: str | None = None,
+    register_target: Path | None = None,
+    session_id: str | None = None,
 ):
     """Submit, poll, and collect one Codex Cloud task. Mirrors run_agent's contract."""
     from .agents import AgentResult
@@ -116,6 +119,26 @@ def run_cloud_task(
     if task_id is None:
         head = submit.stdout.strip()[:150]
         return AgentResult(text="", ok=False, detail=f"could not parse cloud task id from: {head}")
+
+    # Register-on-dispatch (#890): hash only, never store prompt text.
+    registry_root = register_target or cwd
+    if registry_root is not None:
+        try:
+            from . import cloud_tracker
+
+            cloud_tracker.register(
+                Path(registry_root),
+                provider="codex-cloud",
+                task_id=task_id,
+                label=(label or task_id).strip() or task_id,
+                prompt_hash=cloud_tracker.prompt_hash(prompt),
+                session_id=session_id,
+                branch=branch,
+                expected_artifact=({"kind": "branch", "pattern": branch} if branch else {"kind": "diff"}),
+            )
+        except Exception:
+            # Registry must not block cloud dispatch; adopt path covers misses.
+            pass
 
     def remaining(floor: float = 5.0) -> float:
         return max(floor, deadline - clock())

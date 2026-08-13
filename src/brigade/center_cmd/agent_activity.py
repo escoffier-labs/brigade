@@ -37,11 +37,22 @@ def collect(target: Path, *, now: datetime | None = None) -> list[dict[str, Any]
     records = _brigade_records(target, observed_at, local_host)
     records.extend(_local_session_records(observed_at, local_host))
     records.extend(_configured_sources(target, observed_at))
+    records.extend(_cloud_tracker_records(target, observed_at))
     records.sort(
         key=lambda record: str(record.get("last_updated_at") or record.get("source", {}).get("observed_at") or ""),
         reverse=True,
     )
     return records[:100]
+
+
+def _cloud_tracker_records(target: Path, now: datetime) -> list[dict[str, Any]]:
+    """Feed the Cloud machine card from the local cloud dispatch registry (#890)."""
+    try:
+        from .. import cloud_tracker
+
+        return cloud_tracker.center_activity_records(target, now=now)
+    except Exception:
+        return []
 
 
 def summary(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
