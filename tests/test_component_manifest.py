@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import component_manifest
+from brigade import __version__, component_manifest
 
 MISELEDGER_BASE = "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/"
 GRAPHTRAIL_BASE = "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/"
@@ -322,7 +322,7 @@ def test_bundled_manifest_pins_miseledger_and_graphtrail_assets():
     manifest = component_manifest.load()
 
     assert manifest.schema_version == 1
-    assert manifest.brigade_version == "0.26.1"
+    assert manifest.brigade_version == __version__
     assert manifest.manifest_revision == "2026-07-19"
     assert manifest.supported_platforms == component_manifest.SUPPORTED_PLATFORMS
     assert set(manifest.components) == set(component_manifest.KNOWN_COMPONENT_IDS)

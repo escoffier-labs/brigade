@@ -1,8 +1,5 @@
 from pathlib import Path
 
-from brigade import __version__
-
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -13,11 +10,10 @@ def _release_changelog(version: str) -> str:
     return text[start:end]
 
 
-def test_current_release_has_expected_v0261_release_notes():
-    assert __version__ == "0.26.1"
+def test_v0261_release_notes_remain_complete():
     assert "no release has shipped from this entry" not in (ROOT / "CHANGELOG.md").read_text()
 
-    text = _release_changelog(__version__)
+    text = _release_changelog("0.26.1")
 
     assert text.count("### Added") == 1
     assert text.count("### Changed") == 1
