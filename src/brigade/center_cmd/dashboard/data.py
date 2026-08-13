@@ -14,20 +14,24 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from brigade.center_cmd.dashboard import timing as center_timing
+
 
 def run_json(target: Path, args: Sequence[str], *, timeout: float = 20.0) -> dict:
     """Run a brigade subcommand and return parsed JSON, or ``{"error": ...}``."""
     cmd = [sys.executable, "-m", "brigade", *args, "--target", str(target), "--json"]
     env = os.environ.copy()
     env["BRIGADE_EXTRAS"] = "1"
+    phase_name = "cli:" + " ".join(args)
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
+        with center_timing.phase(phase_name):
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
     except subprocess.TimeoutExpired:
         return {"error": "command timed out"}
     except OSError as exc:

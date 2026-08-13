@@ -12,9 +12,13 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
+from brigade.center_cmd.dashboard import timing as center_timing
+
 ACTIVITY_ENVELOPE_VERSION = 2
 _STALE_AFTER_SECONDS = 300
 _DEFAULT_COMPLETED_WINDOW_SECONDS = 3600
+_SESSION_MTIME_WINDOW_SECONDS = 7 * 24 * 60 * 60
+_SESSION_READ_SIZE_CAP = 1_048_576
 _UNKNOWN_TASK = "Unknown task"
 _DEFAULT_HOSTS = ("rocinante", "shadowfax", "gandalf")
 _RUNNING_STATUSES = {
@@ -34,10 +38,14 @@ def collect(target: Path, *, now: datetime | None = None) -> list[dict[str, Any]
     """Return bounded safe records without mutating local or provider state."""
     observed_at = now or datetime.now(timezone.utc)
     local_host = local_host_alias(target)
-    records = _brigade_records(target, observed_at, local_host)
-    records.extend(_local_session_records(observed_at, local_host))
-    records.extend(_configured_sources(target, observed_at))
-    records.extend(_cloud_tracker_records(target, observed_at))
+    with center_timing.phase("activity:brigade-runs"):
+        records = _brigade_records(target, observed_at, local_host)
+    with center_timing.phase("activity:local-sessions"):
+        records.extend(_local_session_records(observed_at, local_host))
+    with center_timing.phase("activity:configured-sources"):
+        records.extend(_configured_sources(target, observed_at))
+    with center_timing.phase("activity:cloud-tracker"):
+        records.extend(_cloud_tracker_records(target, observed_at))
     records.sort(
         key=lambda record: str(record.get("last_updated_at") or record.get("source", {}).get("observed_at") or ""),
         reverse=True,
@@ -46,11 +54,21 @@ def collect(target: Path, *, now: datetime | None = None) -> list[dict[str, Any]
 
 
 def _cloud_tracker_records(target: Path, now: datetime) -> list[dict[str, Any]]:
-    """Feed the Cloud machine card from the local cloud dispatch registry (#890)."""
+    """Feed the Cloud machine card from the local cloud dispatch registry (#890).
+
+    Live ``gh`` / ``codex cloud`` probes stay off the request path. Those can
+    hang for seconds; Center reads the local registry snapshot instead.
+    """
     try:
         from .. import cloud_tracker
 
-        return cloud_tracker.center_activity_records(target, now=now)
+        return cloud_tracker.center_activity_records(
+            target,
+            now=now,
+            provider_tasks={},
+            github={"branches": [], "prs": []},
+            cursor_wired=cloud_tracker.cursor_cloud_wired(),
+        )
     except Exception:
         return []
 
@@ -168,17 +186,26 @@ def _session_file_records(
         return []
     records: list[dict[str, Any]] = []
     try:
-        paths = _bounded_session_paths(root, provider)
-        paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        paths = paths[:25]
+        paths = _bounded_session_paths(root, provider, now=now)
     except OSError:
         return []
+    cutoff = now.timestamp() - _SESSION_MTIME_WINDOW_SECONDS
+    ranked: list[tuple[float, int, Path]] = []
     for path in paths:
         try:
-            updated_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+            stat_result = path.stat()
         except OSError:
             continue
-        task_label, model = _session_task_hints(path, provider)
+        if stat_result.st_mtime < cutoff:
+            continue
+        ranked.append((stat_result.st_mtime, stat_result.st_size, path))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    for mtime, size, path in ranked[:25]:
+        updated_at = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+        if size > _SESSION_READ_SIZE_CAP:
+            task_label, model = _UNKNOWN_TASK, None
+        else:
+            task_label, model = _session_task_hints(path, provider)
         records.append(
             _record(
                 activity_id=f"{provider}:session:{path.stem}",
@@ -270,7 +297,8 @@ def _text_from_content(value: object) -> str:
 
 def _head_json_objects(path: Path, *, max_lines: int = 40, max_bytes: int = 65_536) -> list[dict[str, Any]]:
     try:
-        raw = path.read_bytes()[:max_bytes]
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes)
     except OSError:
         return []
     objects: list[dict[str, Any]] = []
@@ -284,11 +312,12 @@ def _head_json_objects(path: Path, *, max_lines: int = 40, max_bytes: int = 65_5
     return objects
 
 
-def _bounded_session_paths(root: Path, provider: str) -> list[Path]:
+def _bounded_session_paths(root: Path, provider: str, *, now: datetime | None = None) -> list[Path]:
     """Find a bounded number of session files without scanning an entire home tree."""
     paths: list[Path] = []
     pending = deque([root])
     directories_seen = 0
+    cutoff = (now or datetime.now(timezone.utc)).timestamp() - _SESSION_MTIME_WINDOW_SECONDS
     while pending and directories_seen < 200 and len(paths) < 200:
         directory_path = pending.popleft()
         directories_seen += 1
@@ -310,10 +339,16 @@ def _bounded_session_paths(root: Path, provider: str) -> list[Path]:
             is_cursor_transcript = (
                 provider == "cursor" and "agent-transcripts" in directory_path.parts and filename.endswith(".jsonl")
             )
-            if is_codex_rollout or is_cursor_transcript:
-                paths.append(directory_path / filename)
-                if len(paths) >= 200:
-                    return paths
+            if not (is_codex_rollout or is_cursor_transcript):
+                continue
+            try:
+                if entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+            paths.append(directory_path / filename)
+            if len(paths) >= 200:
+                return paths
     return paths
 
 
