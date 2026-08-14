@@ -1,8 +1,12 @@
+# src/brigade/research/types.py
 from __future__ import annotations
-from dataclasses import dataclass, field, asdict
+
+import hashlib
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Protocol
 
-Trust = Literal["local", "web", "cli", "browser"]
+Trust = Literal["local", "web", "cli", "browser", "browser-ai"]
+Origin = Literal["local", "repository", "indexed-cli", "web", "browser-ai"]
 Status = Literal["running", "done", "cancelled", "error"]
 ResearchPhase = Literal[
     "planning", "discovery", "extraction", "synthesis", "review", "repair", "publishing"
@@ -10,6 +14,85 @@ ResearchPhase = Literal[
 
 
 @dataclass(frozen=True)
+class SourceEnvelope:
+    source_id: str
+    origin: Origin
+    provider: str
+    uri: str
+    content: str
+    content_digest: str
+    acquired_at: str
+    trust: Trust
+    producing_lane: str | None = None
+    requested_model: str | None = None
+    observed_model: str | None = None
+    parent_source_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        origin: Origin,
+        provider: str,
+        uri: str,
+        content: str,
+        trust: Trust,
+        acquired_at: str,
+        producing_lane: str | None = None,
+        requested_model: str | None = None,
+        observed_model: str | None = None,
+        parent_source_ids: tuple[str, ...] = (),
+    ) -> SourceEnvelope:
+        content_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        identity = "\0".join((origin, provider, uri, content_digest))
+        source_id = "src-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return cls(
+            source_id=source_id,
+            origin=origin,
+            provider=provider,
+            uri=uri,
+            content=content,
+            content_digest=content_digest,
+            acquired_at=acquired_at,
+            trust=trust,
+            producing_lane=producing_lane,
+            requested_model=requested_model,
+            observed_model=observed_model,
+            parent_source_ids=parent_source_ids,
+        )
+
+
+@dataclass(frozen=True)
+class Finding:
+    source_ids: tuple[str, ...]
+    title: str
+    summary: str
+    evidence: str
+    trust: Trust
+    extraction_lane: str
+    extracted_at: str
+    parent_source_ids: tuple[str, ...] = ()
+
+    @property
+    def source(self) -> str:
+        return self.source_ids[0]
+
+
+@dataclass(frozen=True)
+class CitationRecord:
+    token: str
+    source_ids: tuple[str, ...]
+    status: Literal["accepted", "rejected", "unresolved", "repaired"]
+
+
+@dataclass(frozen=True)
+class CitationAudit:
+    accepted: bool
+    citations: tuple[CitationRecord, ...]
+    unresolved: tuple[str, ...]
+
+
+@dataclass
 class ResearchProfile:
     name: str
     discovery: tuple[str, ...]
@@ -66,18 +149,6 @@ BUILTIN_PROFILES: Dict[str, ResearchProfile] = {
 
 
 @dataclass
-class Finding:
-    source: str
-    title: str
-    summary: str
-    evidence: str
-    trust: Trust
-
-    def as_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
 class Caps:
     max_rounds: int = 6
     min_rounds: int = 2
@@ -90,7 +161,7 @@ class Caps:
     synthesis_window: int = 10
 
     @classmethod
-    def build(cls, **overrides: Any) -> "Caps":
+    def build(cls, **overrides: Any) -> Caps:
         base = cls()
         for k, v in overrides.items():
             if v is not None and hasattr(base, k):

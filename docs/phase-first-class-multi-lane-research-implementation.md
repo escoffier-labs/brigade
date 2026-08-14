@@ -893,7 +893,7 @@ git commit -m "feat: store research in standard runs"
 - Test: `tests/test_research_provenance.py`
 - Test: `tests/test_research_extract.py`
 
-- [ ] Add failing tests for deterministic source IDs, wrapped synthesis input,
+- [x] Add failing tests for deterministic source IDs, wrapped synthesis input,
 and unresolved citations:
 
 ```python
@@ -968,7 +968,7 @@ def test_extract_finding_keeps_source_identity(fake_llm) -> None:
     assert finding.extraction_lane == "luna"
 ```
 
-- [ ] Run and observe missing provenance types:
+- [x] Run and observe missing provenance types:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_provenance.py","tests/test_research_extract.py"]' --capture brigade-work --capture-kind skill
@@ -976,7 +976,7 @@ brigade work verify run --target . --argv-json '["pytest","-q","tests/test_resea
 
 Expect import or signature failures.
 
-- [ ] Add immutable provenance types. `SourceEnvelope.build` computes
+- [x] Add immutable provenance types. `SourceEnvelope.build` computes
 `sha256(content)` and `source_id = "src-" + sha256(origin + "\0" + provider +
 "\0" + uri + "\0" + content_digest)[:16]`. Store these fields:
 
@@ -1069,7 +1069,7 @@ Extend `Trust` with `"browser-ai"`. Replace `Finding.source` with
 returns the first source ID so legacy report rendering continues during this
 task.
 
-- [ ] Implement citation tokens and audit in `provenance.py`:
+- [x] Implement citation tokens and audit in `provenance.py`:
 
 ```python
 CITATION_PATTERN = re.compile(r"\[source:(src-[a-f0-9]{16})\]")
@@ -1097,13 +1097,13 @@ def audit_citations(report: str, findings: Sequence[Finding]) -> CitationAudit:
 The audit rejects a report with no citations. `CitationRecord.status` allows
 `accepted`, `rejected`, `unresolved`, or `repaired`.
 
-- [ ] Change `extract_finding` to accept `source: SourceEnvelope` and
+- [x] Change `extract_finding` to accept `source: SourceEnvelope` and
 `extraction_lane: str = "luna"`. Pass `source.content` through
 `wrap_untrusted`, label `browser-ai` as `web`, and return a finding linked to
 the source ID and content digest. Never pass source text or a model summary to a
 later prompt without `wrap_untrusted`.
 
-- [ ] Run focused tests and capture:
+- [x] Run focused tests and capture:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_provenance.py","tests/test_research_extract.py"]' --capture brigade-work --capture-kind skill
@@ -1112,7 +1112,7 @@ brigade outcome capture brigade-work --run-id latest
 
 Expect both files to pass.
 
-- [ ] Commit Task 4:
+- [x] Commit Task 4:
 
 ```bash
 git add src/brigade/research/provenance.py src/brigade/research/types.py src/brigade/research/extract.py tests/test_research_provenance.py tests/test_research_extract.py

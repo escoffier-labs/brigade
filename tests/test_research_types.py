@@ -2,9 +2,21 @@ from brigade.research import types as t
 
 
 def test_finding_defaults_and_trust():
-    f = t.Finding(source="/notes/a.md", title="A", summary="s", evidence="e", trust="local")
+    f = t.Finding(
+        source_ids=("/notes/a.md",),
+        title="A",
+        summary="s",
+        evidence="e",
+        trust="local",
+        extraction_lane="luna",
+        extracted_at="2026-08-13T12:00:00+00:00",
+    )
     assert f.trust == "local"
-    assert f.as_dict()["source"] == "/notes/a.md"
+    assert f.source_ids == ("/notes/a.md",)
+    assert f.extraction_lane == "luna"
+    assert f.extracted_at == "2026-08-13T12:00:00+00:00"
+    assert f.parent_source_ids == ()
+    assert f.source == "/notes/a.md"
 
 
 def test_caps_from_overrides():
