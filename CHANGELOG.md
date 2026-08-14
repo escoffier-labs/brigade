@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade memory project-vault` writes a one-way Obsidian projection of
+  canonical memory into an existing vault: care-state frontmatter and tags,
+  wikilinks, category/harness maps, and a topology canvas. Vault writes use
+  the projection kernel, preserve manual edits via conflict copies, and keep
+  the operator vault path out of public status. (#888)
 - `--run-budget PATH` accepts one `brigade.run_budget.v1` JSON declaration on
   `brigade run`, dogfood, and model-trial starts. Brigade persists the supplied
   declaration in the run and plan receipts without mapping `timeout_seconds`

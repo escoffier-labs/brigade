@@ -154,6 +154,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Filter by owning workflow (repeatable; OR; case-insensitive).",
     )
     p_memory_inventory.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_project_vault = memory_sub.add_parser(
+        "project-vault",
+        help="Project canonical memory one-way into an Obsidian vault subfolder.",
+    )
+    p_memory_project_vault.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace with canonical memory."
+    )
+    p_memory_project_vault.add_argument("--vault", type=Path, required=True, help="Existing Obsidian vault directory.")
+    p_memory_project_vault.add_argument(
+        "--json", action="store_true", help="Print machine-readable projection receipt."
+    )
     p_memory_search = memory_sub.add_parser("search", help="Keyword-search local memory cards.")
     p_memory_search.add_argument("query", help="Search terms (matched against title, tags, summary, and body).")
     p_memory_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to search.")
@@ -274,6 +285,10 @@ def dispatch(args) -> int:
             source_harness=args.source_harness,
             owning_workflow=args.owning_workflow,
         )
+    if args.memory_command == "project-vault":
+        from .. import obsidian_vault
+
+        return obsidian_vault.project(target=args.target, vault=args.vault, json_output=args.json)
     if args.memory_command == "care":
         if args.memory_care_command == "init":
             return memory_cmd.init(

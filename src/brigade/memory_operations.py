@@ -105,6 +105,7 @@ def topology_payload(target: Path) -> dict[str, Any]:
     _add_manual_refresh_node(nodes)
     _add_care_nodes(nodes, care_entries, care_enabled=care_enabled, care_health=care_health)
     _add_evidence_node(nodes, evidence)
+    _add_obsidian_vault_node(nodes, target)
 
     active_harnesses, config_malformed = _active_writer_harnesses(target, handoff_health)
     ingest_receipt = _normalize_receipt(_latest_ingest_receipt(draft_queue))
@@ -125,6 +126,7 @@ def topology_payload(target: Path) -> dict[str, Any]:
     _add_unknown_adapter_nodes(nodes, edges, target)
     _add_external_scheduler_node(nodes, target)
     _add_care_and_evidence_edges(nodes, edges, care_entries, evidence=evidence, target=target)
+    _add_obsidian_vault_edge(nodes, edges, target)
 
     health = _health_blocks(
         care_health=care_health,
@@ -604,6 +606,50 @@ def _add_evidence_node(nodes: dict[str, dict[str, Any]], evidence: dict[str, Any
         next_action="brigade evidence status",
     )
     nodes["stage:evidence_projection"]["counts"]["status"] = status
+
+
+def _add_obsidian_vault_node(nodes: dict[str, dict[str, Any]], target: Path) -> None:
+    """Expose the optional external vault as a derived, never-canonical node."""
+    try:
+        from . import obsidian_vault
+
+        status = obsidian_vault.status_payload(target)
+    except Exception:  # noqa: BLE001 - topology remains read-only and fail-open
+        status = None
+    if status is None:
+        return
+    nodes["derived:obsidian_vault"] = _node(
+        node_id="derived:obsidian_vault",
+        kind="derived",
+        label="Obsidian vault projection",
+        owner=str(status.get("owner") or BRIGADE_OWNER),
+        authority="derived_writer",
+        state="derived",
+        path=str(status.get("path") or "redacted:operator-vault"),
+        counts={"drift_count": status.get("drift_count")},
+        latest_run=status.get("latest_run"),
+        next_action="brigade memory project-vault --vault <path>",
+    )
+
+
+def _add_obsidian_vault_edge(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], target: Path) -> None:
+    if "derived:obsidian_vault" not in nodes:
+        return
+    node = nodes["derived:obsidian_vault"]
+    latest_run = node.get("latest_run")
+    receipt = _normalize_receipt(latest_run if isinstance(latest_run, dict) else None)
+    edges.append(
+        _edge(
+            edge_id="edge:canonical:obsidian_vault",
+            frm="canonical:cards",
+            to="derived:obsidian_vault",
+            flow="project",
+            authority="derived_writer",
+            writer_component="obsidian-vault",
+            latest_receipt=receipt,
+            enabled=True,
+        )
+    )
 
 
 def _active_writer_harnesses(target: Path, handoff_health: Any) -> tuple[list[tuple[str, str, bool, int, int]], bool]:
