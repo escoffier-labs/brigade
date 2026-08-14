@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover <operation-id>`. Refs #911.
 
 ### Changed
+- Center Memory Operations Cards now shows corpus size, a chip cloud, compact
+  expandable rows, and 30-row paging. Handoffs is a sibling tab on that page;
+  `/view/handoffs` redirects there. Snapshot polling reloads the page so
+  nonce-scoped assets stay valid. (#903)
 - The shipped review-heavy `reviewer_flash` preset now uses Gemini 3.7 Flash Low
   on Antigravity. Security-sensitive or cross-file decisions still route to the
   independent `reviewer` or `reviewer_codex` seat. (#920)

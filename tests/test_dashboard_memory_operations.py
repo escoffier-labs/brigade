@@ -85,19 +85,17 @@ def test_render_mode_tabs_and_inventory_fields():
     fragment = memory_operations.render(payload, "unused-nonce")
 
     assert 'data-mo-mode="topology"' in fragment
-    assert 'data-mo-mode="inventory"' in fragment
+    assert 'data-mo-mode="cards"' in fragment
+    assert 'data-mo-mode="handoffs"' in fragment
     assert "Care scan" in fragment or "care scan" in fragment.lower()
     assert "Fixture Alpha Card" in fragment
     assert "memory/cards/fixture-alpha.md" in fragment
     assert 'class="mo-tag"' in fragment
     assert "alpha" in fragment and "fixture" in fragment
-    assert "2026-05-01" in fragment
-    assert "2026-12-01" in fragment
-    assert "<th>Title</th>" in fragment
-    assert "<th>Freshness</th>" in fragment
-    assert "<th>Evidence</th>" in fragment
-    # Id column is folded into the Title cell expander, not a standalone header.
-    assert "<th>Id</th>" not in fragment
+    assert 'class="mo-stat-chip"' in fragment
+    assert 'class="mo-filter-chip"' in fragment
+    assert 'class="mo-card-row"' in fragment
+    assert "<th>" not in fragment
 
 
 def test_render_summary_strip_and_pipeline_svg():
@@ -279,7 +277,7 @@ def test_render_inventory_tag_chips_hide_empty_columns_and_fold_id():
     assert "+1 more" in fragment or "+2 more" in fragment or "more" in fragment.lower()
     assert "<th>Id</th>" not in fragment
     assert "card:memory/cards/chip-row.md" in fragment  # still reachable via expander/details
-    assert "Created/Updated not tracked" in fragment or "not tracked" in fragment.lower()
+    assert 'class="mo-row-age">-</time>' in fragment
     assert "<th>Created</th>" not in fragment
     assert "<th>Updated</th>" not in fragment
 
@@ -429,13 +427,17 @@ def test_mode_tabs_expose_aria_and_js_disabled_anchors():
     )
     assert "ARIAROW_sentinel" in fragment
     assert 'id="mo-tab-topology"' in fragment
-    assert 'id="mo-tab-inventory"' in fragment
+    assert 'id="mo-tab-cards"' in fragment
+    assert 'id="mo-tab-handoffs"' in fragment
     assert 'aria-labelledby="mo-tab-topology"' in fragment
-    assert 'aria-labelledby="mo-tab-inventory"' in fragment
+    assert 'aria-labelledby="mo-tab-cards"' in fragment
+    assert 'aria-labelledby="mo-tab-handoffs"' in fragment
     assert 'aria-controls="mo-topology"' in fragment
-    assert 'aria-controls="mo-inventory"' in fragment
+    assert 'aria-controls="mo-cards"' in fragment
+    assert 'aria-controls="mo-handoffs"' in fragment
     assert 'href="#mo-topology"' in fragment
-    assert 'href="#mo-inventory"' in fragment
+    assert 'href="#mo-cards"' in fragment
+    assert 'href="#mo-handoffs"' in fragment
     assert 'tabindex="0"' in fragment
     assert 'tabindex="-1"' in fragment
     # Pagination/filter controls stay delegated + nonced (no inline handlers).
@@ -480,7 +482,7 @@ def test_inventory_pager_structure_exposes_second_page_item_and_prior_next():
     )
     assert "PAGEITEM_0000_SENTINEL" in fragment
     assert "PAGEITEM_0050_SENTINEL" in fragment
-    assert 'data-mo-page-size="50"' in fragment
+    assert 'data-mo-page-size="30"' in fragment
     assert 'data-mo-page="prev"' in fragment
     assert 'data-mo-page="next"' in fragment
     assert "data-mo-page-status" in fragment

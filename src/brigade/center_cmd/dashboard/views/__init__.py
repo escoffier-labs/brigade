@@ -19,7 +19,6 @@ from brigade.center_cmd.dashboard import render
 from brigade.center_cmd.dashboard.views import (
     agent_activity,
     code_graph,
-    handoff_inbox,
     memory_operations,
     outcome_rank,
     run_timeline,
@@ -29,7 +28,6 @@ from brigade.center_cmd.dashboard.views import (
 
 _VIEW_MODULES: tuple[ModuleType, ...] = (
     status_grid,
-    handoff_inbox,
     memory_operations,
     outcome_rank,
     run_timeline,

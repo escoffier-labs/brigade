@@ -231,6 +231,7 @@ def inventory_payload(
         "schema": {"name": INVENTORY_SCHEMA_NAME, "version": INVENTORY_SCHEMA_VERSION},
         "target": ".",
         "generated_at": utc_now_iso_z(),
+        "master_index": _master_index_payload(target),
         "pagination": {
             "offset": offset,
             "limit": limit,
@@ -1524,6 +1525,7 @@ def _inventory_item_from_source(
         "id": f"{store_type}:{canonical_path}",
         "title": title,
         "canonical_path": canonical_path,
+        "size_bytes": _safe_file_size(path),
         "logical_destination": STORE_LOGICAL[store_type],
         "store_type": store_type,
         "category": category,
@@ -1541,6 +1543,25 @@ def _inventory_item_from_source(
         "last_mutation": _inventory_last_mutation(meta),
         "care": _care_for_path(canonical_path, care_index),
     }
+
+
+def _master_index_payload(target: Path) -> dict[str, Any] | None:
+    """Return stat-only metadata for the optional top-level MEMORY.md index."""
+    path = target / "MEMORY.md"
+    if path.is_symlink() or not path.is_file() or _canonical_relpath(target, path) is None:
+        return None
+    size_bytes = _safe_file_size(path)
+    if size_bytes is None:
+        return None
+    return {"canonical_path": "MEMORY.md", "size_bytes": size_bytes}
+
+
+def _safe_file_size(path: Path) -> int | None:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    return size if isinstance(size, int) and size >= 0 else None
 
 
 def _split_inline_tag_sequence(value: str) -> list[str] | None:

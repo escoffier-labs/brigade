@@ -11,19 +11,22 @@ Operator-facing copy uses plain language; raw node/edge/receipt ids stay in
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from brigade.center_cmd.dashboard import data
 from brigade.center_cmd.dashboard import render as html
+from brigade.center_cmd.dashboard.views import handoff_inbox
 
 NAME = "memory"
 TITLE = "Memory Operations"
 ORDER = 3
 
 _INVENTORY_LIMIT = 500
-_CLIENT_PAGE_SIZE = 50
+_CLIENT_PAGE_SIZE = 30
 _TAG_CHIP_LIMIT = 5
+_TOKEN_ESTIMATE_BYTES = 4
 
 # Status palette (dataviz reserved): always paired with icon + word, never color alone.
 _STATUS_GOOD = "#0ca30c"
@@ -70,27 +73,32 @@ _FLAG_PLAIN = {
 def fetch(target: Path) -> dict:
     topology = data.run_json(target, ["memory", "topology"])
     inventory = _fetch_inventory(target)
-    return {"topology": topology, "inventory": inventory}
+    handoffs = data.run_json(target, ["handoff", "lint"])
+    return {"topology": topology, "inventory": inventory, "handoffs": handoffs}
 
 
 def render(payload: dict, nonce: str) -> str:
     topology = payload.get("topology") if isinstance(payload.get("topology"), dict) else {}
     inventory = payload.get("inventory") if isinstance(payload.get("inventory"), dict) else {}
+    handoffs = payload.get("handoffs") if isinstance(payload.get("handoffs"), dict) else {}
 
     parts = [
         _stylesheet(nonce),
         _mode_tabs(),
         (
             '<div id="mo-topology" class="mo-panel" data-mo-panel="topology" '
-            'role="tabpanel" aria-labelledby="mo-tab-topology">'
+            'role="tabpanel" aria-labelledby="mo-tab-topology" hidden>'
         ),
         _render_topology(topology, inventory),
         "</div>",
-        (
-            '<div id="mo-inventory" class="mo-panel" data-mo-panel="inventory" '
-            'role="tabpanel" aria-labelledby="mo-tab-inventory">'
-        ),
+        ('<div id="mo-cards" class="mo-panel" data-mo-panel="cards" role="tabpanel" aria-labelledby="mo-tab-cards">'),
         _render_inventory(inventory),
+        "</div>",
+        (
+            '<div id="mo-handoffs" class="mo-panel" data-mo-panel="handoffs" '
+            'role="tabpanel" aria-labelledby="mo-tab-handoffs" hidden>'
+        ),
+        handoff_inbox.render(handoffs, nonce),
         "</div>",
         _script(nonce),
     ]
@@ -103,6 +111,7 @@ def _fetch_inventory(target: Path) -> dict:
     seen_offsets: set[int] = set()
     last_error: str | None = None
     contract_total: int | None = None
+    master_index: dict[str, Any] | None = None
     partial = False
     partial_reason: str | None = None
 
@@ -138,6 +147,9 @@ def _fetch_inventory(target: Path) -> dict:
                 if isinstance(item, dict):
                     items.append(item)
 
+        if master_index is None and isinstance(page.get("master_index"), dict):
+            master_index = page["master_index"]
+
         pagination = page.get("pagination") if isinstance(page.get("pagination"), dict) else {}
         total_val = pagination.get("total")
         if isinstance(total_val, int):
@@ -160,6 +172,8 @@ def _fetch_inventory(target: Path) -> dict:
     result: dict[str, Any] = {
         "items": items,
     }
+    if master_index is not None:
+        result["master_index"] = master_index
     if isinstance(contract_total, int):
         result["contract_total"] = contract_total
         result["total"] = contract_total
@@ -190,11 +204,14 @@ def _mode_tabs() -> str:
     return (
         '<div class="mo-modes" role="tablist" aria-label="' + html.esc("Memory Operations modes") + '">'
         '<a href="#mo-topology" id="mo-tab-topology" class="mo-mode" role="tab" '
-        'data-mo-mode="topology" aria-selected="true" aria-controls="mo-topology" '
-        'tabindex="0">' + html.esc("Topology") + "</a>"
-        '<a href="#mo-inventory" id="mo-tab-inventory" class="mo-mode" role="tab" '
-        'data-mo-mode="inventory" aria-selected="false" aria-controls="mo-inventory" '
-        'tabindex="-1">' + html.esc("Inventory") + "</a>"
+        'data-mo-mode="topology" aria-selected="false" aria-controls="mo-topology" '
+        'tabindex="-1">' + html.esc("Topology") + "</a>"
+        '<a href="#mo-cards" id="mo-tab-cards" class="mo-mode" role="tab" '
+        'data-mo-mode="cards" aria-selected="true" aria-controls="mo-cards" '
+        'tabindex="0">' + html.esc("Cards") + "</a>"
+        '<a href="#mo-handoffs" id="mo-tab-handoffs" class="mo-mode" role="tab" '
+        'data-mo-mode="handoffs" aria-selected="false" aria-controls="mo-handoffs" '
+        'tabindex="-1">' + html.esc("Handoffs") + "</a>"
         "</div>"
     )
 
@@ -1142,6 +1159,195 @@ def _inventory_row(item: dict, columns: list[dict[str, Any]]) -> list[str]:
     return [values[col["key"]] for col in columns]
 
 
+def _render_inventory(inventory: dict) -> str:
+    """Render the card index as a compact, browsable memory corpus."""
+    if inventory.get("error"):
+        return html.error_panel("Cards", str(inventory["error"]))
+    items = [item for item in inventory.get("items", []) if isinstance(item, dict)]
+    if not items:
+        return html.panel(html.esc("Cards"), f"<p>{html.esc('Nothing here.')}</p>")
+
+    card_items = [item for item in items if item.get("store_type") == "card"]
+    corpus_items = card_items or items
+    warning = inventory.get("warning")
+    body = [
+        _corpus_stats(corpus_items),
+        _master_index_row(inventory.get("master_index")),
+        _card_filter_cloud(corpus_items),
+    ]
+    if warning:
+        body.append(f'<p class="error">{html.esc(warning)}</p>')
+    body.append(_card_sections(corpus_items))
+    body.append(_card_pager(len(corpus_items), inventory))
+    return html.panel(html.esc("Cards"), "".join(body))
+
+
+def _corpus_stats(items: list[dict[str, Any]]) -> str:
+    card_count = len(items)
+    category_count = len({str(item["category"]).strip() for item in items if item.get("category")})
+    total_bytes = sum(_item_size_bytes(item) for item in items)
+    token_estimate = (total_bytes + _TOKEN_ESTIMATE_BYTES - 1) // _TOKEN_ESTIMATE_BYTES
+    return (
+        '<div class="mo-corpus-stats" aria-label="Memory corpus statistics">'
+        f'<span class="mo-stat-chip">{html.esc(f"{card_count} cards")}</span>'
+        f'<span class="mo-stat-chip">{html.esc(f"{category_count} categories")}</span>'
+        f'<span class="mo-stat-chip">{html.esc(f"~{token_estimate:,} tokens")}</span>'
+        "</div>"
+    )
+
+
+def _item_size_bytes(item: dict[str, Any]) -> int:
+    value = item.get("size_bytes")
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _master_index_row(raw: object) -> str:
+    info = raw if isinstance(raw, dict) else {}
+    path = _display(info.get("canonical_path") or "MEMORY.md")
+    size = _format_size(info.get("size_bytes"))
+    return (
+        '<details class="mo-master-index">'
+        '<summary><span class="mo-row-title">' + html.esc(path) + "</span>"
+        '<span class="mo-row-kind">' + html.esc("Master index") + "</span>"
+        '<span class="mo-row-age">' + html.esc(size) + "</span></summary>"
+        '<div class="mo-card-detail"><p>'
+        + html.esc("The repository index maps the memory corpus without duplicating card content here.")
+        + "</p></div></details>"
+    )
+
+
+def _filter_counts(items: list[dict[str, Any]]) -> tuple[dict[str, int], dict[str, int]]:
+    categories: dict[str, int] = {}
+    tags: dict[str, int] = {}
+    for item in items:
+        category = str(item.get("category") or "Uncategorized").strip() or "Uncategorized"
+        categories[category] = categories.get(category, 0) + 1
+        raw_tags = item.get("tags")
+        if isinstance(raw_tags, list):
+            for raw_tag in raw_tags:
+                tag = str(raw_tag or "").strip()
+                if tag:
+                    tags[tag] = tags.get(tag, 0) + 1
+    return categories, tags
+
+
+def _card_filter_cloud(items: list[dict[str, Any]]) -> str:
+    categories, tags = _filter_counts(items)
+
+    def chip(kind: str, value: str, count: int, *, active: bool = False) -> str:
+        return (
+            f'<button type="button" class="mo-filter-chip" data-mo-filter-chip="{html.esc(kind)}" '
+            f'data-mo-filter-value="{html.esc(value)}" aria-pressed="{str(active).lower()}">'
+            f"{html.esc(f'{value} ({count})')}</button>"
+        )
+
+    category_chips = [chip("all", "All", len(items), active=True)]
+    category_chips.extend(
+        chip("category", label, count) for label, count in sorted(categories.items(), key=lambda x: x[0].casefold())
+    )
+    tag_chips = [chip("tag", label, count) for label, count in sorted(tags.items(), key=lambda x: x[0].casefold())]
+    return (
+        '<div class="mo-card-search"><label>'
+        + html.esc("Search cards")
+        + ' <input type="search" data-mo-filter-text placeholder="Search cards" aria-label="Search cards"></label></div>'
+        '<div class="mo-filter-cloud" aria-label="Card categories">' + "".join(category_chips) + "</div>"
+        '<div class="mo-filter-cloud mo-tag-cloud" aria-label="Card tags">' + "".join(tag_chips) + "</div>"
+    )
+
+
+def _card_sections(items: list[dict[str, Any]]) -> str:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        category = str(item.get("category") or "Uncategorized").strip() or "Uncategorized"
+        grouped.setdefault(category, []).append(item)
+    sections: list[str] = []
+    for category in sorted(grouped, key=str.casefold):
+        cards = sorted(grouped[category], key=lambda item: str(item.get("title") or "").casefold())
+        rows = "".join(_card_row(item) for item in cards)
+        sections.append(
+            '<section class="mo-category-section" data-mo-category-section="1">'
+            f"<h3>{html.esc(f'{category.upper()} ({len(cards)})')}</h3>{rows}</section>"
+        )
+    return '<div class="mo-card-sections">' + "".join(sections) + "</div>"
+
+
+def _card_row(item: dict[str, Any]) -> str:
+    tags = (
+        [str(tag) for tag in item.get("tags", []) if tag not in (None, "")]
+        if isinstance(item.get("tags"), list)
+        else []
+    )
+    tags_json = json.dumps(tags, separators=(",", ":"))
+    category = str(item.get("category") or "Uncategorized").strip() or "Uncategorized"
+    age = _human_age(item.get("updated_at") or item.get("created_at"))
+    tag_html = _tag_chips(tags)
+    detail = _card_detail(item)
+    return (
+        f'<details class="mo-card-row" data-mo-row="1" data-mo-category="{html.esc(category)}" '
+        f'data-mo-tags="{html.esc(tags_json)}">'
+        '<summary><span class="mo-row-title">'
+        + html.esc(_display(item.get("title")))
+        + "</span>"
+        + tag_html
+        + f'<time class="mo-row-age">{html.esc(age)}</time></summary>{detail}</details>'
+    )
+
+
+def _card_detail(item: dict[str, Any]) -> str:
+    fields = (
+        ("Path", _display(item.get("canonical_path"))),
+        ("Size", _format_size(item.get("size_bytes"))),
+        ("Type", _display(item.get("store_type"))),
+        ("Freshness", _display(item.get("freshness"))),
+        ("Reviewed", _display(item.get("last_reviewed"))),
+        ("Evidence", _display(item.get("evidence_state"))),
+        ("Source", _display(item.get("source_harness"))),
+        ("Workflow", _display(item.get("owning_workflow"))),
+    )
+    rows = "".join(f"<dt>{html.esc(label)}</dt><dd>{html.esc(value)}</dd>" for label, value in fields)
+    mutation = _mutation_text(item)
+    card_id = _display(item.get("id"))
+    return (
+        '<div class="mo-card-detail"><dl>' + rows + "</dl>"
+        '<details class="mo-debug"><summary>' + html.esc("Record details") + "</summary>"
+        f"<code>{html.esc(f'id={card_id}; {mutation}')}</code></details></div>"
+    )
+
+
+def _format_size(value: object) -> str:
+    if not isinstance(value, int) or value < 0:
+        return "-"
+    if value < 1024:
+        return f"{value} B"
+    return f"{value / 1024:.1f}".rstrip("0").rstrip(".") + " KiB"
+
+
+def _human_age(value: object, *, today: date | None = None) -> str:
+    if not isinstance(value, str):
+        return "-"
+    try:
+        when = date.fromisoformat(value[:10])
+    except ValueError:
+        return "-"
+    days = max(0, ((today or date.today()) - when).days)
+    if days < 7:
+        return "today" if days == 0 else f"{days}d"
+    if days < 365:
+        return f"{days // 7}w"
+    return f"{days // 365}y"
+
+
+def _card_pager(loaded: int, inventory: dict) -> str:
+    total = inventory.get("contract_total") if inventory.get("partial") else inventory.get("total")
+    total_attr = total if isinstance(total, int) else loaded
+    return (
+        f'<div class="mo-pager" data-mo-page-size="{_CLIENT_PAGE_SIZE}" data-mo-total="{html.esc(total_attr)}">'
+        f'<button type="button" data-mo-page="prev" disabled>{html.esc("Prior")}</button>'
+        f"<span data-mo-page-status>{html.esc('Page 1')}</span>"
+        f'<button type="button" data-mo-page="next">{html.esc("Next")}</button></div>'
+    )
+
+
 def _stylesheet(nonce: str) -> str:
     return f"""<style nonce="{html.esc(nonce)}">
 .mo-modes {{
@@ -1334,6 +1540,132 @@ def _stylesheet(nonce: str) -> str:
   overflow: hidden;
   vertical-align: middle;
 }}
+.mo-corpus-stats,
+.mo-filter-cloud {{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}}
+.mo-corpus-stats {{
+  margin: 0 0 0.75rem;
+}}
+.mo-stat-chip,
+.mo-filter-chip {{
+  border: 1px solid {_BORDER};
+  border-radius: 999px;
+  background: {_SURFACE};
+  color: {_TEXT_PRIMARY};
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.2;
+  padding: 0.28rem 0.55rem;
+}}
+.mo-stat-chip {{
+  font-weight: 600;
+}}
+.mo-filter-chip {{
+  cursor: pointer;
+}}
+.mo-filter-chip[aria-pressed="true"] {{
+  background: #0066cc;
+  border-color: #0066cc;
+  color: #fff;
+}}
+.mo-filter-chip:focus {{
+  outline: 2px solid #0066cc;
+  outline-offset: 2px;
+}}
+.mo-tag-cloud {{
+  margin-top: 0.35rem;
+}}
+.mo-card-search {{
+  margin: 0 0 0.55rem;
+}}
+.mo-card-search input {{
+  font: inherit;
+  min-width: 16rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid #666;
+  border-radius: 0.2rem;
+  background: #fff;
+  color: {_TEXT_PRIMARY};
+}}
+.mo-master-index,
+.mo-card-row {{
+  border: 1px solid {_BORDER};
+  border-radius: 0.28rem;
+  background: {_SURFACE};
+}}
+.mo-master-index {{
+  margin: 0 0 0.75rem;
+}}
+.mo-master-index summary,
+.mo-card-row summary {{
+  display: flex;
+  align-items: center;
+  min-height: 1.8rem;
+  gap: 0.5rem;
+  padding: 0.22rem 0.55rem;
+  cursor: pointer;
+}}
+.mo-row-title {{
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: {_TEXT_PRIMARY};
+}}
+.mo-row-kind,
+.mo-row-age {{
+  flex: 0 0 auto;
+  color: {_TEXT_SECONDARY};
+  font-size: 0.78rem;
+  white-space: nowrap;
+}}
+.mo-card-sections {{
+  margin-top: 0.75rem;
+}}
+.mo-category-section {{
+  margin: 0 0 0.7rem;
+}}
+.mo-category-section h3 {{
+  margin: 0 0 0.28rem;
+  color: {_TEXT_SECONDARY};
+  font-size: 0.74rem;
+  letter-spacing: 0.05em;
+}}
+.mo-card-row {{
+  display: block;
+  margin: 0 0 0.2rem;
+}}
+.mo-card-row .mo-tags {{
+  flex: 0 1 auto;
+  max-width: min(38vw, 24rem);
+}}
+.mo-card-detail {{
+  border-top: 1px solid {_BORDER};
+  padding: 0.5rem 0.75rem;
+  color: {_TEXT_SECONDARY};
+  font-size: 0.86rem;
+}}
+.mo-card-detail p {{
+  margin: 0;
+}}
+.mo-card-detail dl {{
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.22rem 0.75rem;
+  margin: 0;
+}}
+.mo-card-detail dt {{
+  font-weight: 600;
+}}
+.mo-card-detail dd {{
+  margin: 0;
+  overflow-wrap: anywhere;
+}}
 .mo-tag {{
   display: inline-block;
   padding: 0.1rem 0.4rem;
@@ -1374,6 +1706,18 @@ def _stylesheet(nonce: str) -> str:
   .mo-filters input[type="search"] {{
     min-width: 100%;
   }}
+  .mo-card-search input {{
+    min-width: 100%;
+  }}
+  .mo-card-row summary {{
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }}
+  .mo-card-row .mo-tags {{
+    order: 3;
+    width: 100%;
+    max-width: 100%;
+  }}
 }}
 </style>
 <noscript><style nonce="{html.esc(nonce)}">
@@ -1412,6 +1756,12 @@ def _script(nonce: str) -> str:
     if (pageDir) {{
       e.preventDefault();
       shiftPage(pageDir);
+      return;
+    }}
+    var chipKind = t.getAttribute("data-mo-filter-chip");
+    if (chipKind) {{
+      e.preventDefault();
+      selectChip(t);
     }}
   }});
 
@@ -1447,16 +1797,22 @@ def _script(nonce: str) -> str:
 
   var pageIndex = 0;
 
+  function selectChip(chip) {{
+    var chips = document.querySelectorAll("[data-mo-filter-chip]");
+    for (var i = 0; i < chips.length; i++) {{
+      chips[i].setAttribute("aria-pressed", chips[i] === chip ? "true" : "false");
+    }}
+    applyInventory();
+  }}
+
   function rowMatches(row) {{
-    var filters = document.querySelectorAll("[data-mo-filter]");
-    var span = row.querySelector("span[data-mo-store_type], td span");
-    for (var i = 0; i < filters.length; i++) {{
-      var sel = filters[i];
-      var key = sel.getAttribute("data-mo-filter");
-      var wanted = (sel.value || "").toLowerCase();
-      if (!wanted) continue;
-      if (key === "tag") {{
-        var rawTags = span && span.getAttribute ? (span.getAttribute("data-mo-tags") || "[]") : "[]";
+    var active = document.querySelector('[data-mo-filter-chip][aria-pressed="true"]');
+    if (active) {{
+      var kind = active.getAttribute("data-mo-filter-chip");
+      var wanted = (active.getAttribute("data-mo-filter-value") || "").toLowerCase();
+      if (kind === "category" && (row.getAttribute("data-mo-category") || "").toLowerCase() !== wanted) return false;
+      if (kind === "tag") {{
+        var rawTags = row.getAttribute("data-mo-tags") || "[]";
         var parsed = [];
         try {{ parsed = JSON.parse(rawTags); }} catch (err) {{ parsed = []; }}
         var found = false;
@@ -1464,14 +1820,6 @@ def _script(nonce: str) -> str:
           if (String(parsed[t]).toLowerCase() === wanted) {{ found = true; break; }}
         }}
         if (!found) return false;
-        continue;
-      }}
-      var actual = "";
-      if (span && span.getAttribute) {{
-        actual = (span.getAttribute("data-mo-" + key) || "").toLowerCase();
-      }}
-      if (actual !== wanted) {{
-        return false;
       }}
     }}
     var textInput = document.querySelector("[data-mo-filter-text]");
@@ -1498,7 +1846,7 @@ def _script(nonce: str) -> str:
     var pager = document.querySelector(".mo-pager");
     if (!pager) return;
     var size = parseInt(pager.getAttribute("data-mo-page-size") || "50", 10);
-    var rows = document.querySelectorAll("tr[data-mo-row]");
+    var rows = document.querySelectorAll("[data-mo-row]");
     var matched = [];
     for (var i = 0; i < rows.length; i++) {{
       if (rowMatches(rows[i])) matched.push(rows[i]);
@@ -1514,6 +1862,15 @@ def _script(nonce: str) -> str:
     for (var m = 0; m < matched.length; m++) {{
       matched[m].hidden = !(m >= start && m < end);
     }}
+    var sections = document.querySelectorAll("[data-mo-category-section]");
+    for (var s = 0; s < sections.length; s++) {{
+      var sectionRows = sections[s].querySelectorAll("[data-mo-row]");
+      var hasVisible = false;
+      for (var q = 0; q < sectionRows.length; q++) {{
+        if (!sectionRows[q].hidden) {{ hasVisible = true; break; }}
+      }}
+      sections[s].hidden = !hasVisible;
+    }}
     var status = pager.querySelector("[data-mo-page-status]");
     if (status) {{
       status.textContent = "Page " + (pageIndex + 1) + " of " + pages +
@@ -1525,7 +1882,9 @@ def _script(nonce: str) -> str:
     if (next) next.disabled = pageIndex >= pages - 1;
   }}
 
-  selectMode("topology");
+  var initialMode = (window.location.hash || "").replace("#mo-", "");
+  if (initialMode !== "topology" && initialMode !== "cards" && initialMode !== "handoffs") initialMode = "cards";
+  selectMode(initialMode);
   renderPage();
 }})();
 </script>"""

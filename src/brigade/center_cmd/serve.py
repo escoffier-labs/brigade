@@ -21,6 +21,7 @@ from brigade.center_cmd.dashboard.views import all_views, render_nav, view_by_na
 _DEFAULT_PORT = 8765
 _VIEW_PREFIX = "/view/"
 _LEGACY_VIEW_REDIRECTS = {
+    "handoffs": "/view/memory#handoffs",
     "graph": "/view/work#ready",
     "waves": "/view/work#ready",
     "claims": "/view/work#claims",
