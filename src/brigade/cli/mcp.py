@@ -55,6 +55,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_plan.add_argument("--user-scope", action="store_true", help="Include user-scoped targets (e.g. antigravity).")
     p_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    p_status = mcp_sub.add_parser("status", help="Show unfinished MCP projection recovery.")
+    _target(p_status)
+    p_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     p_sync = mcp_sub.add_parser("sync", help="Merge the catalog into each tool's config (dry-run unless --write).")
     _target(p_sync)
     p_sync.add_argument("--name", default=None, help="Sync a single server.")
@@ -91,6 +95,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_doctor = mcp_sub.add_parser("doctor", help="Validate the canonical catalog and report gaps.")
     _target(p_doctor)
     p_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    p_recover = mcp_sub.add_parser("recover", help="Restore destinations from an unfinished MCP projection.")
+    _target(p_recover)
+    p_recover.add_argument("operation_id", help="Projection operation id to recover.")
+    p_recover.add_argument("--force", action="store_true", help="Recover even if a destination changed after failure.")
+    p_recover.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     p_import = mcp_sub.add_parser("import", help="Read an existing tool's MCP config into the canonical catalog.")
     _target(p_import)
@@ -185,6 +195,8 @@ def dispatch(args) -> int:
             user_scope=args.user_scope,
             json_output=args.json,
         )
+    if args.mcp_command == "status":
+        return mcp_cmd.status(target=args.target, json_output=args.json)
     if args.mcp_command == "sync":
         return mcp_cmd.sync(
             target=args.target,
@@ -211,6 +223,10 @@ def dispatch(args) -> int:
         )
     if args.mcp_command == "doctor":
         return mcp_cmd.doctor(target=args.target, json_output=args.json)
+    if args.mcp_command == "recover":
+        return mcp_cmd.recover_operation(
+            target=args.target, operation_id=args.operation_id, force=args.force, json_output=args.json
+        )
     if args.mcp_command == "import":
         return mcp_cmd.import_servers(
             target=args.target,

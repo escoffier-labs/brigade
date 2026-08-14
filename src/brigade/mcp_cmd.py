@@ -10,14 +10,18 @@ unless ``--force``); orphans are removed only with ``--prune`` and only when sti
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import math
 import subprocess
 import sys
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import localio, mcp_adapters, mcp_runtime
+from . import localio, mcp_adapters, mcp_runtime, projection
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
 from .render import emit as _emit
 
@@ -729,7 +733,77 @@ def verify(
     return _emit(payload, json_output, lines, rc)
 
 
-def sync(
+@dataclass
+class McpSyncPlan:
+    target: Path
+    harnesses: list[str]
+    items: list[dict[str, Any]]
+    notes: list[str]
+    exposures: list[dict[str, Any]]
+    gated: set[str]
+    gate_error: str | None
+    gate_declined: bool
+    projection: Any | None
+    source_catalog: str
+    destination_files: list[str]
+    errors: list[str] = field(default_factory=list)
+    native_write_paths: list[Path] = field(default_factory=list)
+
+
+def _state_bytes(state: dict[str, Any]) -> bytes:
+    return (json.dumps(state, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _file_bytes(path: Path) -> bytes | None:
+    return path.read_bytes() if path.is_file() else None
+
+
+def _content_digest(data: bytes | None) -> str:
+    return projection.ABSENT if data is None else hashlib.sha256(data).hexdigest()
+
+
+def _mutation_for_path(
+    *,
+    dest: Path,
+    display_path: str,
+    before: bytes | None,
+    after: bytes | None,
+) -> Any | None:
+    if before == after:
+        return None
+    if before is None:
+        mutation_type = "create"
+    elif after is None:
+        mutation_type = "remove"
+    else:
+        mutation_type = "replace"
+    return projection.mutation(
+        destination=dest,
+        display_path=display_path,
+        mutation=mutation_type,
+        expected_before=_content_digest(before),
+        desired_after=_content_digest(after),
+        staged_bytes=after,
+    )
+
+
+def _recovery_records(target: Path) -> list[dict[str, Any]]:
+    records = []
+    for record in projection.unfinished_operations(target):
+        if not record.operation_id.startswith("mcp-"):
+            continue
+        records.append(
+            {
+                "operation_id": record.operation_id,
+                "terminal_state": "recovery-required",
+                "status": record.status,
+                "recovery_command": f"brigade mcp recover {record.operation_id}",
+            }
+        )
+    return records
+
+
+def build_sync_plan(
     *,
     target: Path,
     name: str | None = None,
@@ -741,25 +815,28 @@ def sync(
     user_scope: bool = False,
     allow_global_stdio: bool = False,
     interactive: bool | None = None,
-    verify_runtime: bool = False,
-    verify_timeout: float | None = None,
     json_output: bool = False,
-) -> int:
+) -> McpSyncPlan:
     target = target.expanduser().resolve()
-    if verify_runtime and not write:
-        message = "--verify requires --write"
-        return _emit({"errors": [message]}, json_output, [f"error: {message}"], 2)
-    timeout_error = _verify_timeout_error(verify_timeout, flag="--verify-timeout")
-    if timeout_error:
-        return _emit({"errors": [timeout_error]}, json_output, [f"error: {timeout_error}"], 2)
     servers, errors, _ = load_canonical(target)
+    notes: list[str] = []
     if errors:
-        return _emit({"errors": errors}, json_output, [f"error: {e}" for e in errors], 2)
+        return McpSyncPlan(
+            target=target,
+            harnesses=[],
+            items=[],
+            notes=[],
+            exposures=[],
+            gated=set(),
+            gate_error=None,
+            gate_declined=False,
+            projection=None,
+            source_catalog=str(canonical_path(target)),
+            destination_files=[],
+            errors=errors,
+        )
     harnesses, notes = active_targets(target, harness=harness, user_scope=user_scope)
-    state = _load_state(target)
-    all_items: list[dict[str, Any]] = []
-    files_written: list[str] = []
-
+    state = copy.deepcopy(_load_state(target))
     planned = [
         (h, _plan_for_harness(target, h, servers, state, force=force, prune=prune, adopt=adopt, name_filter=name))
         for h in harnesses
@@ -772,12 +849,6 @@ def sync(
         warning_lines = _stdio_exposure_lines(exposures)
         notes.extend(warning_lines)
         if write and not allow_global_stdio:
-            # A user-scoped stdio sync never completes silently: interactive runs
-            # confirm at the prompt, non-interactive runs need the explicit flag.
-            # Only the exposed user-scoped destinations gate; project-scoped
-            # harnesses in the same invocation still write. Callers that capture
-            # stdout (operator sync-mcp) pass `interactive` explicitly; the
-            # prompt stays on stderr so captured JSON is clean.
             is_interactive = interactive if interactive is not None else (not json_output and sys.stdin.isatty())
             if not is_interactive:
                 gated = {e["harness"] for e in exposures}
@@ -796,10 +867,13 @@ def sync(
                     gate_declined = True
                     notes.append("user-scoped stdio destinations skipped: not confirmed at the prompt")
 
+    all_items: list[dict[str, Any]] = []
+    mutations: list[Any] = []
+    native_write_paths: list[Path] = []
+    plan_errors: list[str] = []
+    desired_state = copy.deepcopy(state)
     for h, items in planned:
         if h in gated:
-            # Preserve the plan for visibility, but nothing in this destination
-            # is written and no ownership state changes.
             for item in items:
                 if item["action"] in ("create", "update", "remove"):
                     item["action"] = "skip"
@@ -810,10 +884,7 @@ def sync(
         all_items.extend(items)
         adapter = ADAPTERS[h]
         path = mcp_adapters.resolve_path(adapter, target)
-        owner_map = state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
-        # The write set is built strictly from plan items: create/update/current servers are
-        # (re)written; conflict/foreign/orphan-skip servers are omitted so their live value in
-        # the file is preserved by the merge. This is what protects a user-edited server.
+        owner_map = desired_state.get("ownership", {}).get(h, {}).get(adapter.path)
         to_write: dict[str, dict[str, Any]] = {}
         to_remove: set[str] = set()
         changed = False
@@ -821,6 +892,8 @@ def sync(
             server_name = item["server"]
             action, status = item["action"], item["status"]
             if action in ("create", "update"):
+                if owner_map is None:
+                    owner_map = desired_state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
                 to_write[server_name] = _project_server(target, h, servers[server_name])
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
@@ -829,51 +902,245 @@ def sync(
                 changed = True
             elif action == "remove":
                 to_remove.add(server_name)
-                owner_map.pop(server_name, None)
+                if owner_map is not None:
+                    owner_map.pop(server_name, None)
                 changed = True
             elif status == "current":
-                # Owned + matching (or reconciled after state loss): re-assert ownership and
-                # keep it present in the file. Identical content, so not a "change".
+                if owner_map is None:
+                    owner_map = desired_state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
                 to_write[server_name] = _project_server(target, h, servers[server_name])
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
                 }
-        if write and (changed or any(i.get("_reconciled") for i in items)):
+        if changed or any(i.get("_reconciled") for i in items):
             existing = path.read_text() if path.is_file() else None
             try:
                 new_text = adapter.write_file(existing, to_write, to_remove)
             except ValueError as exc:
-                message = f"{path}: {exc}"
-                return _emit({"errors": [message]}, json_output, [f"error: {message}"], 2)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(new_text)
-            files_written.append(str(path))
+                plan_errors.append(f"{path}: {exc}")
+                continue
+            mutation = _mutation_for_path(
+                dest=path,
+                display_path=adapter.path,
+                before=_file_bytes(path),
+                after=new_text.encode("utf-8"),
+            )
+            if mutation is not None:
+                mutations.append(mutation)
+                native_write_paths.append(path)
 
-    if write:
-        _save_state(target, state)
-    counts = _counts(all_items)
-    source_catalog = str(canonical_path(target))
-    destination_files = [str(mcp_adapters.resolve_path(ADAPTERS[h], target)) for h in harnesses]
+    ownership_path = state_path(target)
+    if ownership_path.is_file() or desired_state != state:
+        ownership_mutation = _mutation_for_path(
+            dest=ownership_path,
+            display_path=STATE_REL,
+            before=_file_bytes(ownership_path),
+            after=_state_bytes(desired_state),
+        )
+        if ownership_mutation is not None:
+            mutations.append(ownership_mutation)
+
+    canon = canonical_path(target)
+    source_digest = localio.file_sha256(canon) if canon.is_file() else "missing"
+    projection_plan = (
+        projection.build_plan(
+            operation_id=f"mcp-{uuid.uuid4().hex}",
+            projector="mcp",
+            source_fingerprint=source_digest,
+            mutations=mutations,
+            target=target,
+        )
+        if mutations
+        else None
+    )
+    return McpSyncPlan(
+        target=target,
+        harnesses=harnesses,
+        items=all_items,
+        notes=notes,
+        exposures=exposures,
+        gated=gated,
+        gate_error=gate_error,
+        gate_declined=gate_declined,
+        projection=projection_plan,
+        source_catalog=str(canon),
+        destination_files=[str(mcp_adapters.resolve_path(ADAPTERS[h], target)) for h in harnesses],
+        errors=plan_errors,
+        native_write_paths=native_write_paths,
+    )
+
+
+def status(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    recovery = _recovery_records(target)
     payload = {
         "target": str(target),
-        "source_catalog": source_catalog,
-        "destination_files": destination_files,
-        "harnesses": harnesses,
-        "wrote": write,
-        "files_written": files_written,
-        "notes": notes,
-        "stdio_exposures": exposures,
-        "items": _public_items(all_items),
-        "counts": counts,
+        "recovery": recovery,
+        "terminal_state": recovery[0]["terminal_state"] if recovery else "unchanged",
     }
+    lines = [f"brigade mcp status: {target}"]
+    if recovery:
+        for record in recovery:
+            lines.append(f"recovery-required: {record.get('operation_id')} ({record.get('recovery_command')})")
+    else:
+        lines.append("no unfinished projection recovery")
+    return _emit(payload, json_output, lines, 0)
+
+
+def recover_operation(*, target: Path, operation_id: str, force: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not operation_id.startswith("mcp-"):
+        message = "MCP recovery requires an MCP operation id"
+        return _emit({"errors": [message]}, json_output, [f"error: {message}"], 2)
+    try:
+        receipt = projection.recover(operation_id, target=target, force=force)
+    except projection.ProjectionError as exc:
+        return _emit({"errors": [str(exc)]}, json_output, [f"error: {exc}"], 2)
+    payload = receipt.to_dict()
+    payload["recovery_command"] = f"brigade mcp recover {operation_id}" if receipt.recovery_command else None
+    lines = [f"brigade mcp recover {operation_id}: {receipt.terminal_state}"]
+    rc = 0 if receipt.terminal_state == "restored" else 2
+    return _emit(payload, json_output, lines, rc)
+
+
+def sync(
+    *,
+    target: Path,
+    name: str | None = None,
+    harness: str | None = None,
+    write: bool = False,
+    force: bool = False,
+    prune: bool = False,
+    adopt: bool = False,
+    user_scope: bool = False,
+    allow_global_stdio: bool = False,
+    interactive: bool | None = None,
+    verify_runtime: bool = False,
+    verify_timeout: float | None = None,
+    json_output: bool = False,
+    inject_failure: str | None = None,
+) -> int:
+    target = target.expanduser().resolve()
+    if verify_runtime and not write:
+        message = "--verify requires --write"
+        return _emit({"errors": [message]}, json_output, [f"error: {message}"], 2)
+    timeout_error = _verify_timeout_error(verify_timeout, flag="--verify-timeout")
+    if timeout_error:
+        return _emit({"errors": [timeout_error]}, json_output, [f"error: {timeout_error}"], 2)
+    planned = build_sync_plan(
+        target=target,
+        name=name,
+        harness=harness,
+        write=write,
+        force=force,
+        prune=prune,
+        adopt=adopt,
+        user_scope=user_scope,
+        allow_global_stdio=allow_global_stdio,
+        interactive=interactive,
+        json_output=json_output,
+    )
+    if planned.errors and not planned.items:
+        return _emit({"errors": planned.errors}, json_output, [f"error: {e}" for e in planned.errors], 2)
+    if planned.errors:
+        return _emit({"errors": planned.errors}, json_output, [f"error: {e}" for e in planned.errors], 2)
+
+    files_written: list[str] = []
+    terminal_state = "planned"
+    operation_id: str | None = planned.projection.operation_id if planned.projection else None
+    projection_view: dict[str, Any] = {
+        "operation_id": operation_id,
+        "projector": "mcp",
+        "terminal_state": terminal_state,
+        "destinations": [
+            {"display_path": mutation.display_path, "mutation": mutation.mutation}
+            for mutation in (planned.projection.mutations if planned.projection else ())
+        ],
+    }
+    if write and planned.projection:
+        try:
+            receipt = projection.execute(
+                planned.projection,
+                target=target,
+                inject=projection.FailureInjector(boundary=inject_failure),
+            )
+        except projection.OverlapBlockedError as exc:
+            message = str(exc)
+            return _emit(
+                {
+                    "target": str(target),
+                    "errors": [message],
+                    "operation_id": operation_id,
+                    "terminal_state": "recovery-required",
+                    "recovery": _recovery_records(target),
+                },
+                json_output,
+                [f"error: {message}"],
+                2,
+            )
+        except projection.DriftError as exc:
+            message = str(exc)
+            return _emit(
+                {"target": str(target), "errors": [message], "operation_id": operation_id, "terminal_state": "planned"},
+                json_output,
+                [f"error: {message}"],
+                2,
+            )
+        terminal_state = receipt.terminal_state
+        operation_id = receipt.operation_id
+        projection_view = receipt.to_dict()
+        if terminal_state == "committed":
+            files_written = [str(path) for path in planned.native_write_paths]
+        elif terminal_state in {"restored", "recovery-required"}:
+            payload = {
+                "target": str(target),
+                "source_catalog": planned.source_catalog,
+                "destination_files": planned.destination_files,
+                "harnesses": planned.harnesses,
+                "wrote": False,
+                "files_written": [],
+                "notes": planned.notes,
+                "stdio_exposures": planned.exposures,
+                "items": _public_items(planned.items),
+                "counts": _counts(planned.items),
+                "operation_id": operation_id,
+                "terminal_state": terminal_state,
+                "projection": projection_view,
+                "errors": [f"projection {terminal_state}"],
+            }
+            return _emit(payload, json_output, [f"error: projection {terminal_state}"], 2)
+
+    if write and planned.projection is None:
+        terminal_state = "unchanged"
+        operation_id = None
+        projection_view["terminal_state"] = terminal_state
+        projection_view["operation_id"] = None
+    counts = _counts(planned.items)
+    payload = {
+        "target": str(target),
+        "source_catalog": planned.source_catalog,
+        "destination_files": planned.destination_files,
+        "harnesses": planned.harnesses,
+        "wrote": write and terminal_state == "committed",
+        "files_written": files_written,
+        "notes": planned.notes,
+        "stdio_exposures": planned.exposures,
+        "items": _public_items(planned.items),
+        "counts": counts,
+        "operation_id": None if terminal_state == "unchanged" else operation_id,
+        "terminal_state": terminal_state if write else "planned",
+        "projection": projection_view,
+    }
+    if write and terminal_state == "unchanged":
+        payload["operation_id"] = None
+        payload["projection"] = projection_view
+    servers, _, _ = load_canonical(target)
     if write and verify_runtime:
-        # Gated destinations were not written and their stdio servers were not
-        # acknowledged; never select them for verification (which would spawn
-        # the very processes the gate refused to configure).
-        verifiable = [h for h in harnesses if h not in gated]
+        verifiable = [h for h in planned.harnesses if h not in planned.gated]
         selected = _servers_for_verification(servers, verifiable, name_filter=name) if verifiable else {}
         if selected:
+            state = _load_state(target)
             config_current = _config_current_by_name(target, servers, verifiable, state, name_filter=name)
             verification_payload, verify_rc = mcp_runtime.run_verification(
                 target,
@@ -894,25 +1161,23 @@ def sync(
         verify_rc = 0
 
     verb = "wrote" if write else "would"
-    lines = [f"brigade mcp sync ({'write' if write else 'dry-run'}): {target}", f"source: {source_catalog}"]
-    lines += [f"destination: {path}" for path in destination_files]
-    lines += [f"{i['harness']:<12} {i['server']:<20} {i['status']:<14} -> {i['action']}" for i in all_items]
+    lines = [f"brigade mcp sync ({'write' if write else 'dry-run'}): {target}", f"source: {planned.source_catalog}"]
+    lines += [f"destination: {path}" for path in planned.destination_files]
+    lines += [f"{i['harness']:<12} {i['server']:<20} {i['status']:<14} -> {i['action']}" for i in planned.items]
     lines += [f"{verb}: {f}" for f in files_written]
     if write and verify_runtime and payload.get("verification"):
         lines.append(f"verification receipt: {payload['verification']['receipt_path']}")
-    lines += notes
+    lines += planned.notes
     rc = 1 if counts["conflict"] else 0
     if verify_rc != 0:
         rc = verify_rc
-    # The gate outcome wins over conflict and verification codes: an
-    # unacknowledged user-scoped stdio write is the error being reported.
-    if gate_error:
-        payload["errors"] = [gate_error]
-        payload["stdio_gated"] = sorted(gated)
-        lines.append(f"error: {gate_error}")
+    if planned.gate_error:
+        payload["errors"] = [planned.gate_error]
+        payload["stdio_gated"] = sorted(planned.gated)
+        lines.append(f"error: {planned.gate_error}")
         rc = 2
-    elif gate_declined:
-        payload["stdio_gated"] = sorted(gated)
+    elif planned.gate_declined:
+        payload["stdio_gated"] = sorted(planned.gated)
         rc = 1
     return _emit(payload, json_output, lines, rc)
 
@@ -925,6 +1190,14 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     for server in servers.values():
         for severity, message in mcp_adapters.validate_server(server):
             issues.append({"severity": severity, "message": message})
+    for record in _recovery_records(target):
+        command = record.get("recovery_command") or f"brigade mcp recover {record.get('operation_id')}"
+        issues.append(
+            {
+                "severity": "warn",
+                "message": f"projection recovery-required: {record.get('operation_id')}; run `{command}`",
+            }
+        )
     configured = _configured_harnesses(target)
     unsupported: list[str] = []
     if configured:
