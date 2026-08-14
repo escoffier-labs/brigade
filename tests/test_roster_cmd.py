@@ -711,9 +711,13 @@ def test_roster_suggest_prints_every_seat_resolution_when_roots_satisfiable(tmp_
     assert resolved.orchestrator == "chef"
     flash = resolved.agents["reviewer_flash"]
     assert flash.model == "Gemini 3.7 Flash (Low)"
-    assert "security-sensitive or cross-file decisions" in flash.role
-    assert "reviewer_codex" in flash.role
-    assert any("reviewer_codex" in caveat for caveat in flash.caveats)
+    assert flash.role == (
+        "Fast routine review and summary lane; route security-sensitive or "
+        "cross-file decisions to the reviewer or reviewer_codex seat."
+    )
+    assert flash.caveats == (
+        "Route security-sensitive or cross-file decisions to the reviewer or reviewer_codex lane.",
+    )
 
 
 def test_roster_cli_registers_suggest_and_stats_commands(tmp_target):
