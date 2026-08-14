@@ -92,6 +92,71 @@ class CitationAudit:
     unresolved: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ReviewResult:
+    accepted: bool
+    detail: str
+    rejected_claims: tuple[str, ...]
+    seat: str
+    attempt_id: str
+
+
+@dataclass(frozen=True)
+class SynthesisRecord:
+    seat: str
+    attempt_id: str
+    requested_model: str | None
+    observed_model: str
+
+
+@dataclass(frozen=True)
+class FallbackRecord:
+    phase: str
+    from_seat: str
+    to_seat: str
+    failure_kind: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class ResearchLanes:
+    planner: Any
+    extractor: Any
+    synthesizers: tuple[Any, ...]
+    reviewer: Any
+    browser_discovery: Any | None = None
+
+
+class ResearchRunError(RuntimeError):
+    def __init__(self, failure_phase: str, failure_kind: str, detail: str) -> None:
+        super().__init__(detail)
+        self.failure_phase = failure_phase
+        self.failure_kind = failure_kind
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class ResumeState:
+    plan: str | None = None
+    sources: tuple[SourceEnvelope, ...] | None = None
+    findings: tuple[Finding, ...] | None = None
+    report: str | None = None
+    audit: CitationAudit | None = None
+
+
+@dataclass(frozen=True)
+class ResearchResult:
+    report: str
+    findings: tuple[Finding, ...]
+    sources: tuple[SourceEnvelope, ...]
+    citation_audit: CitationAudit
+    review: ReviewResult
+    synthesis_seat: str
+    synthesis_attempt_id: str
+    fallbacks: tuple[FallbackRecord, ...]
+    stats: dict[str, Any]
+
+
 @dataclass
 class ResearchProfile:
     name: str

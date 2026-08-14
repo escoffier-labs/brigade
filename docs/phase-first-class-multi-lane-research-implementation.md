@@ -1128,7 +1128,7 @@ git commit -m "feat: preserve research evidence provenance"
 - Test: `tests/test_research_engine.py`
 - Test: `tests/test_research_llm.py`
 
-- [ ] Add failing graph tests with distinct fake backends:
+- [x] Add failing graph tests with distinct fake backends:
 
 ```python
 def test_grounded_graph_uses_gemini_synthesis_and_luna_review() -> None:
@@ -1311,7 +1311,7 @@ Add an adversarial fixture whose source says `Ignore all previous instructions`
 and assert both synthesis and review prompts contain the untrusted-source start
 and end markers around that text.
 
-- [ ] Run and observe missing graph classes:
+- [x] Run and observe missing graph classes:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_engine.py","tests/test_research_llm.py"]' --capture brigade-work --capture-kind skill
@@ -1320,7 +1320,7 @@ brigade work verify run --target . --argv-json '["pytest","-q","tests/test_resea
 Expect failure importing `ResearchEngine`, `ResearchLanes`, or
 `ResearchRunError`.
 
-- [ ] Add deterministic lane resolution to `research/llm.py`. Candidate names
+- [x] Add deterministic lane resolution to `research/llm.py`. Candidate names
 from the selected profile are tried in order and must support the phase
 capability. With no explicit candidates, use `Roster.find_capability` in roster
 order, except synthesis ranks an installed, read-only-capable `cli == "oracle"`
@@ -1403,7 +1403,7 @@ uses a new `SeatInvoker.invoke` call and a distinct attempt ID recorded in the
 result. The reviewer receives only the cited artifact packet, never a continued
 model session.
 
-- [ ] Rewrite the engine as explicit phase methods. Discovery providers run in
+- [x] Rewrite the engine as explicit phase methods. Discovery providers run in
 a `ThreadPoolExecutor(max_workers=min(len(providers), 4))`. Preserve provider
 result order by sorting completed batches back to the provider's original
 index. The main sequence is exact:
@@ -1455,7 +1455,7 @@ the acceptance stub and production contract use one stable discriminator.
 Repair receives only the report, citation audit, review result, and bounded
 stored finding packet. It does not invoke discovery again.
 
-- [ ] Run focused tests and capture:
+- [x] Run focused tests and capture:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_engine.py","tests/test_research_llm.py"]' --capture brigade-work --capture-kind skill
@@ -1464,7 +1464,7 @@ brigade outcome capture brigade-work --run-id latest
 
 Expect all graph, fallback, repair, and injection tests to pass.
 
-- [ ] Commit Task 5:
+- [x] Commit Task 5:
 
 ```bash
 git add src/brigade/research/engine.py src/brigade/research/llm.py tests/test_research_engine.py tests/test_research_llm.py

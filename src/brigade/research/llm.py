@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+import shutil
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, Dict, List, Literal, Optional
 from urllib import request as _req
 
+from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatInvoker, SeatResult
 
 
@@ -19,6 +23,14 @@ class ResearchSeatError(RuntimeError):
         self.failure_phase = result.failure_phase or "dispatch"
         self.failure_kind = result.failure_kind or "worker-failed"
         self.result = result
+
+
+@dataclass(frozen=True)
+class ResolvedLane:
+    phase: str
+    primary: str
+    fallbacks: tuple[str, ...]
+    resolution: Literal["profile", "capability", "compatibility"]
 
 
 class PhaseBackend:
@@ -43,6 +55,56 @@ class PhaseBackend:
         self.observed_model = result.observed_model
         self.last_attempt_id = result.attempt_id
         return result.text
+
+
+def resolve_lane(
+    roster: Roster,
+    *,
+    phase: str,
+    candidates: Sequence[str] = (),
+) -> ResolvedLane:
+    """Resolve a research phase to a primary seat and ordered fallbacks.
+
+    Profile candidates are tried in order and must support the phase capability.
+    With no candidates, use ``Roster.find_capability`` in roster order, except
+    synthesis ranks an installed, read-only-capable ``cli == "oracle"`` seat
+    first. Authentication is not checked at admission.
+    """
+    if candidates:
+        selected = tuple(
+            name for name in candidates if name in roster.agents and roster.agents[name].supports(phase)
+        )
+        if not selected:
+            raise NoResearcherError(f"no profile candidate supports {phase}")
+        return ResolvedLane(
+            phase=phase,
+            primary=selected[0],
+            fallbacks=selected[1:],
+            resolution="profile",
+        )
+
+    agents = roster.find_capability(phase)
+    if not agents:
+        raise NoResearcherError(f"no seat supports {phase}")
+    if phase == "research.synthesize":
+        agents = _rank_synthesis_agents(agents)
+    primary = agents[0]
+    resolution: Literal["capability", "compatibility"] = (
+        "capability" if phase in primary.capabilities else "compatibility"
+    )
+    names = tuple(agent.name for agent in agents)
+    return ResolvedLane(phase=phase, primary=names[0], fallbacks=names[1:], resolution=resolution)
+
+
+def _rank_synthesis_agents(agents: tuple[Agent, ...]) -> tuple[Agent, ...]:
+    preferred: list[Agent] = []
+    rest: list[Agent] = []
+    for agent in agents:
+        if agent.cli == "oracle" and agent.read_only_capable and shutil.which("oracle"):
+            preferred.append(agent)
+        else:
+            rest.append(agent)
+    return tuple(preferred + rest)
 
 
 def _http_post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: int) -> Dict[str, Any]:

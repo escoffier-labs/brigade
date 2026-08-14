@@ -73,8 +73,8 @@ def extract_finding(
     prompt = EXTRACTOR_PROMPT.format(untrusted_block=block)
     out = llm.complete([{"role": "user", "content": prompt}], max_tokens=1024, temperature=0.2, timeout=timeout)
     data = _parse_json(out)
-    if not data:
-        return None
+    if not isinstance(data, dict):
+        raise ValueError("extractor returned invalid JSON")
     summary = str(data.get("summary", ""))
     if is_low_quality(summary):
         return None

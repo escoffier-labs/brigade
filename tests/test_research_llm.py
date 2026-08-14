@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from brigade.research import llm
-from brigade.research.llm import PhaseBackend, ResearchSeatError
+from brigade.research.llm import PhaseBackend, ResearchSeatError, resolve_lane
 from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatResult
 
@@ -93,3 +93,103 @@ def test_resolve_http_backend(monkeypatch):
 def test_no_researcher_raises():
     with pytest.raises(llm.NoResearcherError):
         llm.resolve_backend(FakeRoster([]))
+
+
+def test_resolve_lane_uses_profile_candidates_in_order() -> None:
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "gemini_browser": Agent(
+                name="gemini_browser",
+                cli="oracle",
+                role="researcher",
+                capabilities=("research.synthesize",),
+            ),
+            "luna": Agent(
+                name="luna",
+                cli="codex",
+                role="researcher",
+                capabilities=("research.synthesize", "research.review"),
+            ),
+        },
+    )
+
+    resolved = resolve_lane(
+        roster,
+        phase="research.synthesize",
+        candidates=("gemini_browser", "luna"),
+    )
+
+    assert resolved.primary == "gemini_browser"
+    assert resolved.fallbacks == ("luna",)
+    assert resolved.resolution == "profile"
+
+
+def test_resolve_lane_capability_ranks_installed_oracle_first(monkeypatch) -> None:
+    monkeypatch.setattr(llm.shutil, "which", lambda name: "/usr/bin/oracle" if name == "oracle" else None)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "luna": Agent(
+                name="luna",
+                cli="codex",
+                role="researcher",
+                capabilities=("research.synthesize",),
+                read_only_capable=True,
+            ),
+            "gemini_browser": Agent(
+                name="gemini_browser",
+                cli="oracle",
+                role="researcher",
+                capabilities=("research.synthesize",),
+                read_only_capable=True,
+            ),
+        },
+    )
+
+    resolved = resolve_lane(roster, phase="research.synthesize", candidates=())
+
+    assert resolved.primary == "gemini_browser"
+    assert resolved.fallbacks == ("luna",)
+    assert resolved.resolution == "capability"
+
+
+def test_resolve_lane_compatibility_via_research_general() -> None:
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "legacy": Agent(name="legacy", cli="codex", role="researcher"),
+        },
+    )
+
+    resolved = resolve_lane(roster, phase="research.plan", candidates=())
+
+    assert resolved.primary == "legacy"
+    assert resolved.fallbacks == ()
+    assert resolved.resolution == "compatibility"
+
+
+def test_resolve_lane_resolution_follows_selected_primary_only() -> None:
+    """Mixed capability+compatibility candidates label from the primary alone."""
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "legacy": Agent(name="legacy", cli="codex", role="researcher"),
+            "specialist": Agent(
+                name="specialist",
+                cli="codex",
+                role="researcher",
+                capabilities=("research.plan",),
+            ),
+        },
+    )
+
+    resolved = resolve_lane(roster, phase="research.plan", candidates=())
+
+    assert resolved.primary == "legacy"
+    assert resolved.fallbacks == ("specialist",)
+    assert resolved.resolution == "compatibility"
