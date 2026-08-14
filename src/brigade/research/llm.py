@@ -1,24 +1,48 @@
 # src/brigade/research/llm.py
 from __future__ import annotations
+
 import json
 from typing import Any, Dict, List, Optional
 from urllib import request as _req
+
+from brigade.run_seat import SeatInvoker, SeatResult
 
 
 class NoResearcherError(RuntimeError):
     pass
 
 
-def _run_cli(
-    cli: str,
-    prompt: str,
-    timeout: int,
-    model: Optional[str] = None,
-    env: Optional[Dict[str, str]] = None,
-) -> str:
-    from brigade import agents  # same dispatch brigade run uses
+class ResearchSeatError(RuntimeError):
+    def __init__(self, result: SeatResult) -> None:
+        super().__init__(result.detail or result.failure_kind or "research seat failed")
+        self.seat = result.seat
+        self.failure_phase = result.failure_phase or "dispatch"
+        self.failure_kind = result.failure_kind or "worker-failed"
+        self.result = result
 
-    return agents.run_agent(cli, prompt, timeout=timeout, model=model, env=env).text
+
+class PhaseBackend:
+    def __init__(self, *, invoker: SeatInvoker, seat: str, phase: str) -> None:
+        self.invoker = invoker
+        self.seat = seat
+        self.phase = phase
+        self.requested_model = invoker.roster.agents[seat].model
+        self.observed_model = "unverified"
+        self.last_attempt_id: str | None = None
+
+    def complete(self, messages, *, max_tokens=2048, temperature=0.3, timeout=60) -> str:
+        del max_tokens, temperature
+        result = self.invoker.invoke(
+            seat=self.seat,
+            phase=self.phase,
+            prompt=_messages_to_prompt(messages),
+            timeout=timeout,
+        )
+        if not result.ok:
+            raise ResearchSeatError(result)
+        self.observed_model = result.observed_model
+        self.last_attempt_id = result.attempt_id
+        return result.text
 
 
 def _http_post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: int) -> Dict[str, Any]:
@@ -30,28 +54,6 @@ def _http_post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], 
 
 def _messages_to_prompt(messages: List[Dict[str, str]]) -> str:
     return "\n\n".join(m.get("content", "") for m in messages)
-
-
-class CliBackend:
-    def __init__(
-        self,
-        cli: str,
-        model: Optional[str] = None,
-        env: Optional[Dict[str, str]] = None,
-        min_timeout: Optional[int] = None,
-    ) -> None:
-        self.cli = cli
-        self.model = model
-        self.env = env
-        # The engine hardcodes short per-call timeouts (30s to plan, 60s
-        # default). A browser-driven seat cannot meet those, so the roster's
-        # timeout_seconds raises the floor without lowering anything.
-        self.min_timeout = min_timeout
-
-    def complete(self, messages, *, max_tokens=2048, temperature=0.3, timeout=60) -> str:
-        if self.min_timeout is not None:
-            timeout = max(timeout, self.min_timeout)
-        return _run_cli(self.cli, _messages_to_prompt(messages), timeout, model=self.model, env=self.env)
 
 
 class HttpBackend:
@@ -73,12 +75,4 @@ def resolve_backend(roster: Any):
         raise NoResearcherError("roster has no agent with role 'researcher'")
     if getattr(agent, "endpoint", None) and getattr(agent, "model", None):
         return HttpBackend(agent.endpoint, agent.model, getattr(agent, "headers", None))
-    if getattr(agent, "cli", None):
-        raw_timeout = getattr(agent, "timeout_seconds", None)
-        return CliBackend(
-            agent.cli,
-            getattr(agent, "model", None),
-            getattr(agent, "env", None),
-            min_timeout=int(raw_timeout) if raw_timeout else None,
-        )
     raise NoResearcherError("researcher agent needs either cli or endpoint+model")

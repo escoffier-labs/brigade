@@ -369,7 +369,7 @@ git commit -m "feat: resolve research seats by capability"
 - Test: `tests/test_run_seat.py`
 - Test: `tests/test_research_llm.py`
 
-- [ ] Add failing tests that exercise the public invoker, not
+- [x] Add failing tests that exercise the public invoker, not
 `agents.run_agent` directly:
 
 ```python
@@ -513,7 +513,7 @@ def test_seat_invoker_does_not_persist_raw_browser_auth_error(monkeypatch, tmp_p
     assert "browser session expired" not in receipt
 ```
 
-- [ ] Run and observe import failures:
+- [x] Run and observe import failures:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_run_seat.py","tests/test_research_llm.py"]' --capture brigade-work --capture-kind skill
@@ -521,7 +521,7 @@ brigade work verify run --target . --argv-json '["pytest","-q","tests/test_run_s
 
 Expect failure importing `brigade.run_seat` or `PhaseBackend`.
 
-- [ ] Create `src/brigade/run_seat.py` with this public surface:
+- [x] Create `src/brigade/run_seat.py` with this public surface:
 
 ```python
 from __future__ import annotations
@@ -645,7 +645,7 @@ def worker_payload_one(result: WorkerResult) -> dict[str, object]:
 The `workers/` receipt and any `logs/` references are written for successful
 and failed calls.
 
-- [ ] Replace the CLI-only backend in `research/llm.py` with a phase backend:
+- [x] Replace the CLI-only backend in `research/llm.py` with a phase backend:
 
 ```python
 class ResearchSeatError(RuntimeError):
@@ -684,7 +684,7 @@ class PhaseBackend:
 Remove `_run_cli` and `CliBackend`. Keep `HttpBackend` for compatibility with
 legacy research resume only. Do not catch `ResearchSeatError` in this module.
 
-- [ ] Run focused tests and capture:
+- [x] Run focused tests and capture:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_run_seat.py","tests/test_research_llm.py"]' --capture brigade-work --capture-kind skill
@@ -693,7 +693,7 @@ brigade outcome capture brigade-work --run-id latest
 
 Expect both files to pass.
 
-- [ ] Commit Task 2:
+- [x] Commit Task 2:
 
 ```bash
 git add src/brigade/run_seat.py src/brigade/run_receipts.py src/brigade/research/llm.py tests/test_run_seat.py tests/test_research_llm.py
