@@ -59,7 +59,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         dest="entry_ids",
         action="append",
         metavar="JOB_ID",
-        help="Report one named care entry. Repeatable. Default: the atomic scheduled-care set.",
+        help="Report one named care entry. Repeatable. Default: installed registrations for the target.",
     )
 
     p_uninstall = care_sub.add_parser(
