@@ -2960,9 +2960,7 @@ def test_cli_resume_lifecycle_receipt_failure_is_safe(monkeypatch, tmp_path: Pat
     assert (run_dir / "run.json").read_bytes() == before
 
 
-def test_cancellation_watcher_survives_unreadable_sidecar(tmp_path: Path) -> None:
-    import time
-
+def test_cancellation_watcher_survives_unreadable_sidecar(tmp_path: Path, monkeypatch) -> None:
     from brigade import localio, receipt_schema
 
     process_registry = RecordingProcessRegistry()
@@ -2976,6 +2974,19 @@ def test_cancellation_watcher_survives_unreadable_sidecar(tmp_path: Path) -> Non
     )
     research_path = registry.standard_run_dir(tmp_path, "watcher-corrupt") / registry.RESEARCH_ARTIFACT
     research_path.write_text("not-json\n", encoding="utf-8")
+    first_corrupt_read_done = Event()
+    real_read = registry.read_research
+    read_calls = {"n": 0}
+
+    def instrumented_read(target: Path, run_id: str):
+        try:
+            return real_read(target, run_id)
+        finally:
+            read_calls["n"] += 1
+            if read_calls["n"] == 1:
+                first_corrupt_read_done.set()
+
+    monkeypatch.setattr(registry, "read_research", instrumented_read)
     cancelled = Event()
     watcher = CancellationWatcher(
         target=tmp_path,
@@ -2985,7 +2996,7 @@ def test_cancellation_watcher_survives_unreadable_sidecar(tmp_path: Path) -> Non
         poll_seconds=0.01,
     )
     watcher.start()
-    time.sleep(0.05)
+    assert first_corrupt_read_done.wait(timeout=2)
     assert watcher.is_alive()
     localio.write_json(
         research_path,

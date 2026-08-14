@@ -126,7 +126,8 @@ class SearxngProvider:
         return max(1, int(remaining * 1000))
 
     def search(self, query: str, limit: int) -> List[Dict[str, str]]:
-        import json
+        import socket
+        import urllib.error
         from urllib import request
 
         try:
@@ -134,9 +135,31 @@ class SearxngProvider:
         except ProviderDeadlineExhausted:
             return []
         u = f"{self.base_url}/search?q={quote_plus(query)}&format=json"
-        with request.urlopen(u, timeout=max(1, timeout_ms / 1000)) as r:
-            data = json.loads(r.read().decode())
-        return [{"url": x.get("url", ""), "title": x.get("title", "")} for x in data.get("results", [])[:limit]]
+        # Pass the exact positive remaining budget (may be sub-second); do not floor to 1s.
+        timeout_s = timeout_ms / 1000.0
+        try:
+            with request.urlopen(u, timeout=timeout_s) as r:
+                data = json.loads(r.read().decode())
+        except (
+            OSError,
+            socket.timeout,
+            TimeoutError,
+            urllib.error.URLError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+        ):
+            return []
+        if not isinstance(data, dict):
+            return []
+        results = data.get("results", [])
+        if not isinstance(results, list):
+            return []
+        return [
+            {"url": str(item.get("url", "")), "title": str(item.get("title", ""))}
+            for item in results[:limit]
+            if isinstance(item, dict)
+        ]
 
     def fetch(self, url: str) -> Dict[str, Any]:
         try:

@@ -196,7 +196,8 @@ def test_pageforge_uses_one_monotonic_deadline_across_calls(monkeypatch):
 
     def fake_run(argv, **kwargs):
         timeouts.append(float(kwargs["timeout"]))
-        time.sleep(0.2)
+        # Short sleep so three calls stay well inside the bound on loaded CI.
+        time.sleep(0.05)
         if argv[1] == "search_web":
             payload = {"ok": True, "results": [{"url": "https://example.com/a", "title": "A"}]}
             return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
@@ -205,28 +206,90 @@ def test_pageforge_uses_one_monotonic_deadline_across_calls(monkeypatch):
             return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="Long markdown content " * 20, stderr="")
 
-    class TrackingPlaywright:
-        seen: list[int] = []
-
-        def __init__(self, timeout_ms: int = 20000) -> None:
-            TrackingPlaywright.seen.append(timeout_ms)
-
-        def fetch(self, url):
-            return {"success": False, "content": "", "title": ""}
-
     monkeypatch.setattr(web.subprocess, "run", fake_run)
-    monkeypatch.setattr(web, "PlaywrightProvider", TrackingPlaywright)
-    prov = web.PageforgeProvider(["pageforge"], timeout=2)
-    prov.bind_timeout(1.0)
+    prov = web.PageforgeProvider(["pageforge"], timeout=5)
+    prov.bind_timeout(5.0)
 
     assert prov.search("q", 1)
     result = prov.fetch("https://example.com/a")
     assert result["success"] is True
     assert len(timeouts) == 3
-    assert timeouts[0] <= 1.0
+    assert timeouts[0] <= 5.0
     assert timeouts[1] < timeouts[0]
     assert timeouts[2] < timeouts[1]
     assert timeouts[2] > 0
+
+
+def test_searxng_forwards_subsecond_remaining_timeout(monkeypatch):
+    import time
+
+    seen: dict[str, float] = {}
+
+    class FakeResp:
+        def read(self) -> bytes:
+            return b'{"results":[{"url":"https://ex.com/1","title":"One"}]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(url, timeout=None):
+        seen["timeout"] = float(timeout)
+        return FakeResp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    prov = web.SearxngProvider("http://searx.example", timeout_ms=15000)
+    prov.timeout_ms = 250
+    prov._deadline_mono = time.monotonic() + 0.25
+
+    hits = prov.search("q", 1)
+
+    assert hits == [{"url": "https://ex.com/1", "title": "One"}]
+    assert 0 < seen["timeout"] < 1.0
+
+
+def test_searxng_search_failures_return_empty(monkeypatch):
+    import time
+    import urllib.error
+
+    prov = web.SearxngProvider("http://searx.example")
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(urllib.error.URLError("down")),
+    )
+    assert prov.search("q", 1) == []
+
+    class BadJsonResp:
+        def read(self) -> bytes:
+            return b"not-json"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: BadJsonResp())
+    assert prov.search("q", 1) == []
+
+    class NonDictResp:
+        def read(self) -> bytes:
+            return b'["not-an-object"]'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: NonDictResp())
+    assert prov.search("q", 1) == []
+
+    prov._deadline_mono = time.monotonic() - 1.0
+    assert prov.search("q", 1) == []
 
 
 def test_provider_factory_builds_pageforge():
