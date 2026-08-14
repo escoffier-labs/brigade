@@ -202,11 +202,12 @@ def test_agent_activity_view_groups_hosts_nests_children_and_collapses_old_compl
 
     assert fragment.index("Parent task") < fragment.index("Finished hours ago")
     assert 'class="agent-tile agent-tile-child"' in fragment
-    assert "show 1 completed" in fragment.lower() or "Show 1 completed" in fragment
+    assert "show 1 older" in fragment.lower() or "Show 1 older" in fragment
     assert 'data-host="cloud"' in fragment
     assert "cloud tracking not wired" in fragment.lower()
     assert "#890" in fragment
-    assert "Cu" in fragment  # cursor monogram
+    assert 'data-mark="cursor"' in fragment
+    assert "<svg" in fragment
     for host in ("rocinante", "shadowfax", "gandalf", "cloud"):
         assert f'data-host="{host}"' in fragment
 
@@ -325,3 +326,250 @@ def test_external_sources_redact_journal_text_and_missing_local_sources_are_stal
     assert all(record["state"] == "stale" for record in records if record["kind"] == "source")
     assert "TOKEN=secret" not in json.dumps(records)
     assert all(record.get("task_label") != "Task unavailable" for record in records)
+
+
+def _view_record(**overrides):
+    now = datetime.now(timezone.utc)
+    record = {
+        "activity_id": "brigade:run:demo",
+        "parent_activity_id": None,
+        "provider": "brigade",
+        "harness": "brigade-run",
+        "kind": "run",
+        "host": "rocinante",
+        "label": "Brigade run",
+        "task_label": "Demo task",
+        "model": "gpt-5.6-terra",
+        "state": "running",
+        "started_at": now.isoformat(),
+        "last_updated_at": now.isoformat(),
+        "elapsed_seconds": 60,
+        "source": {"name": "brigade-run-journal", "authority": "authoritative"},
+        "links": {},
+    }
+    record.update(overrides)
+    return record
+
+
+def test_provider_badges_render_inline_svg_marks_not_monograms():
+    now = datetime.now(timezone.utc).isoformat()
+    records = [
+        _view_record(
+            activity_id="cursor:1",
+            provider="cursor",
+            harness="cursor-agent",
+            task_label="Cursor lane",
+            model="grok-4.5",
+            last_updated_at=now,
+            started_at=now,
+        ),
+        _view_record(
+            activity_id="codex:1",
+            provider="codex",
+            harness="codex-cli",
+            task_label="Codex lane",
+            model="gpt-5.6",
+            last_updated_at=now,
+            started_at=now,
+        ),
+        _view_record(
+            activity_id="claude:1",
+            provider="claude",
+            harness="claude-code",
+            task_label="Claude lane",
+            model="opus-4.8",
+            last_updated_at=now,
+            started_at=now,
+        ),
+        _view_record(
+            activity_id="t3:1",
+            provider="t3",
+            harness="t3-code",
+            task_label="T3 lane",
+            model="t3-code",
+            last_updated_at=now,
+            started_at=now,
+        ),
+        _view_record(
+            activity_id="brigade:1",
+            provider="brigade",
+            harness="brigade-run",
+            task_label="Brigade lane",
+            model="terra",
+            last_updated_at=now,
+            started_at=now,
+        ),
+    ]
+    fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
+
+    assert 'class="provider-glyph"' in fragment
+    for mark in ("cursor", "codex", "claude", "t3"):
+        assert f'data-mark="{mark}"' in fragment
+        tile = fragment.split(f'data-provider="{mark}"', 1)[1].split('data-provider="', 1)[0]
+        assert "<svg" in tile
+        assert "<img" not in tile
+    assert ">Cu<" not in fragment
+    assert ">Cx<" not in fragment
+    assert ">Cl<" not in fragment
+    assert ">Br<" in fragment
+    assert "#d97757" in fragment.lower()
+    assert "grok-4.5" in fragment
+    assert "gpt-5.6" in fragment
+    assert "opus-4.8" in fragment
+    assert "http://" not in fragment
+    assert "https://" not in fragment
+
+
+def test_zombie_running_run_without_lock_renders_stale_last_seen(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    started = now - timedelta(hours=45)
+    run = tmp_path / ".brigade" / "runs" / "zombie-run"
+    _write_json(
+        run / "run.json",
+        {
+            "task_label": "Zombie dispatch",
+            "orchestrator": "planner",
+            "status": "running",
+            "started_at": started.isoformat(),
+            "status_started_at": started.isoformat(),
+            "active_seats": ["worker-a"],
+        },
+    )
+    _write_json(run / "plan.json", {"assignments": [{"worker": "worker-a", "task_label": "Stuck worker"}]})
+
+    records = activity_records.collect(tmp_path, now=now)
+    run_record = next(record for record in records if record["kind"] == "run")
+    worker = next(record for record in records if record["kind"] == "worker")
+    assert run_record["state"] == "stale"
+    assert worker["state"] == "stale"
+
+    fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
+    assert "● running" not in fragment
+    assert "⌛" in fragment
+    assert "stale (last seen 45h ago)" in fragment
+
+
+def test_blocked_45h_run_is_older_history_not_live(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    started = now - timedelta(hours=45)
+    run = tmp_path / ".brigade" / "runs" / "blocked-old"
+    _write_json(
+        run / "run.json",
+        {
+            "task_label": "Ancient blocked run",
+            "orchestrator": "planner",
+            "status": "blocked",
+            "started_at": started.isoformat(),
+            "status_started_at": started.isoformat(),
+        },
+    )
+
+    records = activity_records.collect(tmp_path, now=now)
+    run_record = next(record for record in records if record["kind"] == "run")
+    assert run_record["state"] == "stale"
+
+    fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
+    live, collapsed = fragment.split("show ", 1) if "show " in fragment.lower() else (fragment, "")
+    live_section = fragment.split('class="completed-expander"', 1)[0]
+    assert "Ancient blocked run" not in live_section or "older" in fragment.lower()
+    assert "show " in fragment.lower() and "older" in fragment.lower()
+    assert "! blocked" not in live_section
+    collapsed_html = (
+        fragment.split('class="completed-expander"', 1)[1] if 'class="completed-expander"' in fragment else ""
+    )
+    assert "Ancient blocked run" in collapsed_html
+
+
+def test_recency_partition_hides_older_than_12h_and_floats_attention():
+    now = datetime.now(timezone.utc)
+    live_old = _view_record(
+        activity_id="live-old",
+        task_label="Needs attention still",
+        state="failed",
+        started_at=(now - timedelta(hours=30)).isoformat(),
+        last_updated_at=(now - timedelta(hours=30)).isoformat(),
+    )
+    recent_done = _view_record(
+        activity_id="recent-done",
+        task_label="Finished two hours ago",
+        state="succeeded",
+        started_at=(now - timedelta(hours=2)).isoformat(),
+        last_updated_at=(now - timedelta(hours=2)).isoformat(),
+    )
+    old_done = _view_record(
+        activity_id="old-done",
+        task_label="Finished yesterday",
+        state="succeeded",
+        started_at=(now - timedelta(hours=20)).isoformat(),
+        last_updated_at=(now - timedelta(hours=20)).isoformat(),
+    )
+    fragment = agent_activity.render(
+        {"agent_activity": [old_done, recent_done, live_old]},
+        "test-nonce",
+    )
+    live_section = fragment.split('class="completed-expander"', 1)[0]
+    collapsed = fragment.split('class="completed-expander"', 1)[1]
+    assert "Needs attention still" in live_section
+    assert "Finished two hours ago" in live_section
+    assert "Finished yesterday" not in live_section
+    assert "Finished yesterday" in collapsed
+    assert "show 1 older" in fragment.lower()
+    assert live_section.index("Needs attention still") < live_section.index("Finished two hours ago")
+
+
+def test_live_lock_keeps_recent_running_run(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setattr("brigade.runguard.run_lock_state", lambda workspace, run_dir: "live")
+    started = now - timedelta(minutes=4)
+    run = tmp_path / ".brigade" / "runs" / "live-run"
+    _write_json(
+        run / "run.json",
+        {
+            "task_label": "Live dispatch",
+            "orchestrator": "planner",
+            "status": "running",
+            "started_at": started.isoformat(),
+            "status_started_at": started.isoformat(),
+        },
+    )
+
+    records = activity_records.collect(tmp_path, now=now)
+    run_record = next(record for record in records if record["kind"] == "run")
+    assert run_record["state"] == "running"
+
+
+def test_heartbeat_over_two_hours_is_stale_even_with_live_lock(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setattr("brigade.runguard.run_lock_state", lambda workspace, run_dir: "live")
+    started = now - timedelta(hours=3)
+    run = tmp_path / ".brigade" / "runs" / "quiet-run"
+    _write_json(
+        run / "run.json",
+        {
+            "task_label": "Silent lock",
+            "orchestrator": "planner",
+            "status": "running",
+            "started_at": started.isoformat(),
+            "status_started_at": started.isoformat(),
+        },
+    )
+
+    records = activity_records.collect(tmp_path, now=now)
+    run_record = next(record for record in records if record["kind"] == "run")
+    assert run_record["state"] == "stale"

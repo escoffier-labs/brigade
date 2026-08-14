@@ -33,14 +33,9 @@ _LIVE_RANK = {
     "stale": 6,
     "succeeded": 9,
 }
-_PROVIDER_MONOGRAM = {
-    "cursor": "Cu",
-    "codex": "Cx",
-    "claude": "Cl",
-    "anthropic": "Cl",
-    "t3": "T3",
-    "brigade": "Br",
-}
+_NEEDS_ATTENTION = frozenset({"running", "awaiting approval", "blocked", "failed"})
+_RECENCY_WINDOW_SECONDS = 12 * 3600
+_ANTHROPIC_CORAL = "#d97757"
 _MACHINE_KIND = {
     "rocinante": "workstation",
     "shadowfax": "gpu",
@@ -67,11 +62,11 @@ def render(payload: dict, nonce: str) -> str:
         return html.error_panel(TITLE, str(payload["error"]))
     records = [item for item in payload.get("agent_activity", []) if isinstance(item, dict)]
     window = payload.get("completed_window_seconds")
-    if not isinstance(window, int) or window < 60:
-        window = 3600
+    if not isinstance(window, int) or window < _RECENCY_WINDOW_SECONDS:
+        window = _RECENCY_WINDOW_SECONDS
     now = datetime.now(timezone.utc)
     cards = _machine_cards_html(records, window, now)
-    table_panel = html.panel(html.esc("Table"), _table(records))
+    table_panel = html.panel(html.esc("Table"), _table(records, now))
     return _stylesheet(nonce) + cards + table_panel
 
 
@@ -99,16 +94,16 @@ def _machine_card(host: str, records: list[dict], window: int, now: datetime) ->
     live, completed = _partition_records(records, window, now)
     live_sorted = sorted(live, key=_sort_key)
     trees = _build_trees(live_sorted)
-    tiles = "".join(_tile(node, children, depth=0) for node, children in trees)
+    tiles = "".join(_tile(node, children, depth=0, now=now) for node, children in trees)
     if host == "cloud" and not records:
         tiles = f'<p class="cloud-placeholder">{html.esc("Cloud tracking not wired — see #890")}</p>'
     completed_block = ""
     if completed:
         completed_trees = _build_trees(sorted(completed, key=_sort_key))
-        completed_tiles = "".join(_tile(node, children, depth=0) for node, children in completed_trees)
+        completed_tiles = "".join(_tile(node, children, depth=0, now=now) for node, children in completed_trees)
         completed_block = (
             f'<details class="completed-expander">'
-            f"<summary>{html.esc(f'Show {len(completed)} completed')}</summary>"
+            f"<summary>{html.esc(f'Show {len(completed)} older')}</summary>"
             f'<div class="agent-tile-list">{completed_tiles}</div></details>'
         )
     return (
@@ -141,18 +136,43 @@ def _partition_records(records: list[dict], window: int, now: datetime) -> tuple
 
 
 def _is_collapsed_completed(record: dict, window: int, now: datetime) -> bool:
-    if str(record.get("state") or "") != "succeeded":
+    state = str(record.get("state") or "")
+    if state in _NEEDS_ATTENTION:
         return False
-    stamp = record.get("last_updated_at") or record.get("started_at")
-    if not isinstance(stamp, str):
+    parsed = _parse_stamp(record.get("last_updated_at") or record.get("started_at"))
+    if parsed is None:
         return True
+    return (now - parsed).total_seconds() > window
+
+
+def _parse_stamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
     try:
-        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return True
+        return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return (now - parsed).total_seconds() > window
+    return parsed
+
+
+def _hours_ago(record: dict, now: datetime) -> int | None:
+    parsed = _parse_stamp(record.get("last_updated_at") or record.get("started_at"))
+    if parsed is None:
+        return None
+    return max(0, int((now - parsed).total_seconds() // 3600))
+
+
+def _state_label(record: dict, now: datetime) -> str:
+    state = str(record.get("state") or "unknown")
+    icon = _STATE_ICON.get(state, "?")
+    if state != "stale":
+        return f"{icon} {state}"
+    hours = _hours_ago(record, now)
+    if hours is None:
+        return f"{icon} stale"
+    return f"{icon} stale (last seen {hours}h ago)"
 
 
 def _sort_key(record: dict) -> tuple[int, float]:
@@ -191,10 +211,10 @@ def _build_trees(records: list[dict]) -> list[tuple[dict, list]]:
     return [branch(root) for root in roots]
 
 
-def _tile(record: dict, children: list, *, depth: int) -> str:
+def _tile(record: dict, children: list, *, depth: int, now: datetime) -> str:
     state = str(record.get("state") or "unknown")
-    state_label = f"{_STATE_ICON.get(state, '?')} {state}"
-    monogram = _monogram(record)
+    state_label = _state_label(record, now)
+    mark, glyph = _provider_mark(record)
     model = record.get("model")
     model_html = (
         f'<div class="agent-tile-model" title="{html.esc(model)}">{html.esc(model)}</div>'
@@ -203,15 +223,16 @@ def _tile(record: dict, children: list, *, depth: int) -> str:
     )
     task = str(record.get("task_label") or "Unknown task")
     child_class = " agent-tile-child" if depth else ""
-    nested = "".join(_tile(child, grand, depth=depth + 1) for child, grand in children)
+    nested = "".join(_tile(child, grand, depth=depth + 1, now=now) for child, grand in children)
     nested_html = f'<div class="agent-tile-children">{nested}</div>' if nested else ""
     details = _details(record)
+    provider = str(record.get("provider") or "unknown")
     return (
-        f'<div class="agent-tile{child_class}" data-provider="{html.esc(record.get("provider") or "unknown")}">'
+        f'<div class="agent-tile{child_class}" data-provider="{html.esc(provider)}">'
         f'<div class="agent-tile-main">'
-        f'<div class="provider-badge" title="{html.esc(record.get("provider") or "unknown")}" '
-        f'aria-label="{html.esc(record.get("provider") or "unknown")}">'
-        f"<span>{html.esc(monogram)}</span>{model_html}</div>"
+        f'<div class="provider-badge" data-mark="{html.esc(mark)}" title="{html.esc(provider)}" '
+        f'aria-label="{html.esc(provider)}">'
+        f"{glyph}{model_html}</div>"
         f'<div class="agent-tile-body">'
         f'<div class="agent-tile-task" title="{html.esc(task)}">{html.esc(task)}</div>'
         f'<div class="agent-tile-meta">'
@@ -223,22 +244,73 @@ def _tile(record: dict, children: list, *, depth: int) -> str:
     )
 
 
-def _monogram(record: dict) -> str:
+def _provider_mark(record: dict) -> tuple[str, str]:
     provider = str(record.get("provider") or "").lower()
     harness = str(record.get("harness") or "").lower()
-    if provider in _PROVIDER_MONOGRAM:
-        return _PROVIDER_MONOGRAM[provider]
-    if "brigade" in harness:
-        return "Br"
-    if "cursor" in harness:
-        return "Cu"
-    if "codex" in harness:
-        return "Cx"
-    if "claude" in harness:
-        return "Cl"
-    if harness.startswith("t3"):
-        return "T3"
-    return (provider[:2] or "??").title()
+    if provider in {"cursor"} or "cursor" in harness:
+        return "cursor", _cursor_glyph()
+    if provider in {"codex", "openai"} or "codex" in harness:
+        return "codex", _codex_glyph()
+    if provider in {"claude", "anthropic"} or "claude" in harness:
+        return "claude", _anthropic_glyph()
+    if provider == "t3" or harness.startswith("t3"):
+        return "t3", _t3_glyph()
+    if provider == "brigade" or "brigade" in harness:
+        return "brigade", "<span>Br</span>"
+    fallback = html.esc((provider[:2] or "??").title())
+    return provider or "unknown", f"<span>{fallback}</span>"
+
+
+def _svg(body: str, *, view_box: str = "0 0 32 32") -> str:
+    return (
+        f'<svg class="provider-glyph" viewBox="{view_box}" width="26" height="26" '
+        f'aria-hidden="true" focusable="false">{body}</svg>'
+    )
+
+
+def _cursor_glyph() -> str:
+    """Isometric cube with a north-east arrow - Cursor's private-dashboard mark."""
+    return _svg(
+        '<polygon points="16,3 29,10.5 16,18 3,10.5" fill="#1a1a1a"/>'
+        '<polygon points="3,10.5 16,18 16,29 3,21.5" fill="#555"/>'
+        '<polygon points="16,18 29,10.5 29,21.5 16,29" fill="#111"/>'
+        '<path d="M13.5 18.5 L22 8.5 L22 13 L27 13 L18.5 23 Z" fill="#fff"/>'
+    )
+
+
+def _codex_glyph() -> str:
+    """OpenAI hexagonal knot, scaled to the badge box."""
+    return _svg(
+        '<path fill="#111" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>',
+        view_box="0 0 24 24",
+    )
+
+
+def _anthropic_glyph() -> str:
+    """Radial 8-arm asterisk in Anthropic coral."""
+    return _svg(
+        f'<g fill="{_ANTHROPIC_CORAL}" transform="translate(16 16)">'
+        '<rect x="-1.2" y="-13" width="2.4" height="8.6" rx="1.1"/>'
+        '<rect x="-1.2" y="4.4" width="2.4" height="8.6" rx="1.1"/>'
+        '<rect x="-13" y="-1.2" width="8.6" height="2.4" rx="1.1"/>'
+        '<rect x="4.4" y="-1.2" width="8.6" height="2.4" rx="1.1"/>'
+        '<g transform="rotate(45)">'
+        '<rect x="-1.2" y="-13" width="2.4" height="8.6" rx="1.1"/>'
+        '<rect x="-1.2" y="4.4" width="2.4" height="8.6" rx="1.1"/>'
+        '<rect x="-13" y="-1.2" width="8.6" height="2.4" rx="1.1"/>'
+        '<rect x="4.4" y="-1.2" width="8.6" height="2.4" rx="1.1"/>'
+        "</g></g>"
+    )
+
+
+def _t3_glyph() -> str:
+    """Geometric T3 wordmark - no font dependency."""
+    return _svg(
+        '<path fill="none" stroke="#111" stroke-width="2.6" stroke-linecap="round" '
+        'stroke-linejoin="round" d="M3 8.8h12.2M9.1 8.8v15"/>'
+        '<path fill="none" stroke="#111" stroke-width="2.6" stroke-linecap="round" '
+        'stroke-linejoin="round" d="M17.4 9.2h9.2a3.6 3.6 0 0 1 0 7.1H20.4m0 0h6.6a3.9 3.9 0 0 1 0 8.1H17.2"/>'
+    )
 
 
 def _count_strip(records: list[dict]) -> str:
@@ -258,17 +330,17 @@ def _count_strip(records: list[dict]) -> str:
     return f'<div class="state-strip">{"".join(chips)}</div>'
 
 
-def _table(records: list[dict]) -> str:
+def _table(records: list[dict], now: datetime) -> str:
     headers = ["Provider", "Host", "Task", "Model", "State", "Started", "Elapsed", "Last update", "Details"]
     return html.table(
         [html.esc(header) for header in headers],
-        [_row(item, records) for item in records],
+        [_row(item, records, now) for item in records],
     )
 
 
-def _row(record: dict, records: list[dict]) -> list[str]:
+def _row(record: dict, records: list[dict], now: datetime) -> list[str]:
     state = str(record.get("state") or "unknown")
-    state_label = f"{_STATE_ICON.get(state, '?')} {state}"
+    state_label = _state_label(record, now)
     task = f"{'↳ ' * _depth(record, records)}{record.get('task_label') or 'Unknown task'}"
     return [
         html.esc(f"{record.get('provider', 'unknown')} · {record.get('harness', 'observation')}"),
@@ -420,6 +492,14 @@ def _stylesheet(nonce: str) -> str:
   color: #111;
   font-weight: 700;
   font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}}
+.provider-glyph {{
+  display: block;
+  width: 1.65rem;
+  height: 1.65rem;
 }}
 .agent-tile-model {{
   margin-top: 0.15rem;

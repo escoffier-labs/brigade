@@ -247,7 +247,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             heading = f'<h1 class="page-title">{render.esc(module.TITLE)}</h1>'
             body = f"{heading}{banner}{fragment}"
             nav = render_nav(view_name)
-            reload_ms = 1500 if snapshot.status == "loading" else 30000
+            reload_ms = 1500 if snapshot.status == "loading" else 15000
             page = render.page(title, nonce, nav, body, reload_ms=reload_ms)
             self._timing_header = timer.header_value()
             return page.encode("utf-8")
