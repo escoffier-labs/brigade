@@ -39,6 +39,36 @@ def test_status_transitions(tmp_path: Path):
     assert rec["status"] == "done" and rec["stats"]["rounds"] == 3
 
 
+def test_update_research_fails_closed_on_corrupt_artifact(tmp_path: Path) -> None:
+    run_id = "r-corrupt"
+    path = registry.standard_run_dir(tmp_path, run_id) / registry.RESEARCH_ARTIFACT
+    path.parent.mkdir(parents=True)
+    path.write_text("{not-json", encoding="utf-8")
+
+    try:
+        registry.update_research(tmp_path, run_id, current_phase="extracting")
+    except ValueError as exc:
+        assert "unreadable" in str(exc) or "not an object" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for corrupt research.json")
+    assert path.read_text(encoding="utf-8") == "{not-json"
+
+
+def test_update_research_fails_closed_on_non_object_artifact(tmp_path: Path) -> None:
+    run_id = "r-non-object"
+    path = registry.standard_run_dir(tmp_path, run_id) / registry.RESEARCH_ARTIFACT
+    path.parent.mkdir(parents=True)
+    path.write_text("[]\n", encoding="utf-8")
+
+    try:
+        registry.update_research(tmp_path, run_id, current_phase="extracting")
+    except ValueError as exc:
+        assert "unreadable" in str(exc) or "not an object" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for non-object research.json")
+    assert path.read_text(encoding="utf-8") == "[]\n"
+
+
 def test_create_standard_research_run_and_dual_read(tmp_path: Path) -> None:
     roster = Roster(
         orchestrator="chef",

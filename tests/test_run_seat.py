@@ -134,6 +134,31 @@ def test_seat_invoker_keeps_per_invocation_log_paths(monkeypatch, tmp_path: Path
     assert (output_dir / second_payload["stderr_log"]).read_text(encoding="utf-8") == "second-stderr\n"
 
 
+def test_seat_invoker_empty_dispatch_returns_typed_failed_result(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("brigade.run_seat.run_transport.dispatch", lambda *_args, **_kwargs: [])
+    output_dir = tmp_path / ".brigade" / "runs" / "research-1"
+    invoker = SeatInvoker(
+        roster=_research_roster(),
+        cwd=tmp_path,
+        run_id="research-1",
+        process_registry=ProcessRegistry(),
+        output_dir=output_dir,
+    )
+
+    result = invoker.invoke(seat="luna", phase="research.plan", prompt="plan", timeout=91)
+
+    assert result.ok is False
+    assert result.failure_phase == "dispatch"
+    assert result.failure_kind == "unclassified"
+    assert "no worker" in result.detail.lower() or "empty" in result.detail.lower()
+    receipts = list((output_dir / "workers").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["ok"] is False
+    assert receipt["failure_kind"] == "unclassified"
+    assert receipt["attempt_id"] == "research-1:0001"
+
+
 def test_seat_invoker_does_not_persist_raw_browser_auth_error(monkeypatch, tmp_path: Path) -> None:
     nested = WorkerAttempt(
         kind="initial",

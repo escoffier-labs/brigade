@@ -1133,16 +1133,16 @@ def test_version_one_shadow_artifact_is_stale(enabled, tmp_path):
     assert fresh["last_compared_sequence"] != stale_seq
 
 
-def test_approval_semantics_v5_quarantines_old_v4_shadow_artifact(enabled, tmp_path):
+def test_approval_semantics_v6_quarantines_old_v5_shadow_artifact(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    assert run_projector.PROJECTOR_VERSION == 5
+    assert run_projector.PROJECTOR_VERSION == 6
 
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")
     artifact = run_shadow.shadow_artifact_path(run_dir)
     stale = json.loads(artifact.read_text())
-    stale["projector_version"] = 4
+    stale["projector_version"] = 5
     artifact.write_text(json.dumps(stale, indent=2, sort_keys=True) + "\n")
     stale_bytes = artifact.read_bytes()
 
@@ -1154,7 +1154,7 @@ def test_approval_semantics_v5_quarantines_old_v4_shadow_artifact(enabled, tmp_p
     assert quarantined
     assert quarantined[0].read_bytes() == stale_bytes
     fresh = json.loads(artifact.read_text())
-    assert fresh["projector_version"] == 5
+    assert fresh["projector_version"] == 6
     assert fresh["errors"] == 0
 
 

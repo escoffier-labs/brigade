@@ -176,7 +176,14 @@ def create_standard_run(
 
 def update_research(target: Path, run_id: str, **fields: Any) -> dict[str, Any]:
     path = standard_run_dir(target, run_id) / RESEARCH_ARTIFACT
-    current = _read_json(path) or {}
+    # Initialize only when the sidecar is absent. A present but unreadable or
+    # non-object research.json must fail closed rather than overwrite corruption.
+    if path.is_file():
+        current = _read_json(path)
+        if current is None:
+            raise ValueError(f"research artifact unreadable or not an object: {path}")
+    else:
+        current = {}
     fields.setdefault("updated_at", _now())
     current.update(fields)
     stamped = receipt_schema.stamp_research_sidecar(current)

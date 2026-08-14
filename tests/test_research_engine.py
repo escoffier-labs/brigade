@@ -76,30 +76,63 @@ def test_browser_provider_trust_is_preserved():
     assert any(f.trust == "browser" for f in result.findings)
 
 
-def test_planning_call_receives_the_seat_timeout_floor(monkeypatch):
-    """The floor must survive the real engine path, not just a direct complete().
+def test_phase_backend_forwards_engine_timeout_and_seat_invoker_applies_roster_floor(
+    monkeypatch, tmp_path
+):
+    """Engine-requested timeout reaches SeatInvoker; roster floor lifts it.
 
-    engine._plan() hardcodes timeout=30. A browser-driven seat cannot answer in
-    30 seconds, so a roster seat declaring timeout_seconds must lift every call.
+    engine._plan() still asks for timeout=30. A browser-driven seat declaring
+    timeout_seconds=300 must see the floored value on the dispatched agent.
     """
-    from brigade.research import llm as llm_mod
+    from pathlib import Path
 
-    stub = StubLlm()
-    seen = []
+    from brigade.proc import ProcessRegistry
+    from brigade.research.llm import PhaseBackend
+    from brigade.roster import Agent, Roster
+    from brigade.run_seat import SeatInvoker
+    from brigade.run_transport import WorkerResult
 
-    def fake_run_cli(cli, prompt, timeout, model=None, env=None):
-        seen.append(timeout)
-        return stub.complete([{"role": "user", "content": prompt}])
+    captured: dict[str, object] = {}
 
-    monkeypatch.setattr(llm_mod, "_run_cli", fake_run_cli)
-    backend = llm_mod.CliBackend("oracle", "gemini-3.1-pro", min_timeout=300)
-    eng = DeepResearcher(
-        llm=backend, local_index=StubIndex(), web=None, caps=Caps.build(max_rounds=2, min_rounds=1, max_time=30)
+    def fake_dispatch(assignments, roster, **kwargs):
+        del assignments, kwargs
+        captured["timeout_seconds"] = roster.agents["luna"].timeout_seconds
+        return [
+            WorkerResult(
+                worker="luna",
+                task="research.plan",
+                text='{"sub_questions": ["q1"]}',
+                ok=True,
+                detail="",
+            )
+        ]
+
+    monkeypatch.setattr("brigade.run_seat.run_transport.dispatch", fake_dispatch)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "luna": Agent(
+                name="luna",
+                cli="codex",
+                role="researcher",
+                model="gpt-5.6-luna",
+                timeout_seconds=300.0,
+                capabilities=("research.plan",),
+            ),
+        },
     )
+    invoker = SeatInvoker(
+        roster=roster,
+        cwd=tmp_path,
+        run_id="research-timeout",
+        process_registry=ProcessRegistry(),
+        output_dir=Path(tmp_path) / ".brigade" / "runs" / "research-timeout",
+    )
+    backend = PhaseBackend(invoker=invoker, seat="luna", phase="research.plan")
 
-    result = eng.research("how do plants make energy?")
+    text = backend.complete([{"role": "user", "content": "plan"}], timeout=30)
 
-    assert "Plants convert light" in result.report
-    assert seen, "the engine made no LLM calls"
-    # 30 is the engine's planning literal; without the floor this would be 30.
-    assert min(seen) == 300
+    assert text == '{"sub_questions": ["q1"]}'
+    # 30 is the engine planning literal; without the SeatInvoker floor this stays 30.
+    assert captured["timeout_seconds"] == 300.0

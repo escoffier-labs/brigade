@@ -88,7 +88,18 @@ class SeatInvoker:
                 run_id=self.run_id,
                 **{key: value for key, value in self.budget_callbacks.items() if value is not None},
             )
-        worker = results[0]
+        if not results:
+            worker = run_transport.WorkerResult(
+                worker=seat,
+                task=phase,
+                text="",
+                ok=False,
+                detail="dispatch returned no worker results",
+                failure_phase="dispatch",
+                failure_kind="unclassified",
+            )
+        else:
+            worker = results[0]
         if worker.failure_kind == "browser-auth":
             worker = replace(
                 worker,
