@@ -75,6 +75,7 @@ from . import (
     security as _security_group,
     tools as _tools_group,
     mcp as _mcp_group,
+    projection as _projection_group,
     handoff_template as _handoff_template_group,
     ingest as _ingest_group,
     openclaw_fragments as _openclaw_fragments_group,
@@ -196,6 +197,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _security_group.register(sub)
     _tools_group.register(sub)
     _mcp_group.register(sub)
+    _projection_group.register(sub)
     _handoff_template_group.register(sub)
     _ingest_group.register(sub)
     _register_extras(sub, "openclaw-fragments", extras_enabled)

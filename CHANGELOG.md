@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--force`. (#860)
 
 ### Added
+- Projection transaction kernel: an internal all-or-restored prepare/commit
+  engine, recovery journal, redacted receipts, injected-failure hooks, and a
+  reusable conformance fixture for multi-file projections, plus
+  `brigade projection recover <operation-id>`. Native stdlib implementation;
+  no production projector is migrated yet. (#910)
 - Cloud dispatch registry (`brigade run cloud`): register-on-dispatch and adopt
   paths, `status` JSON classification (pending / ready-to-land / landed / stale /
   orphaned / needs-investigation), receipted report-only `sweep`, configurable
