@@ -75,6 +75,9 @@ class MutationSpec:
     mode: int | None = None
     ownership: Mapping[str, Any] | None = None
     conflict: Mapping[str, Any] | None = None
+    writer: Callable[[Path, bytes], None] | None = None
+    remover: Callable[[Path], None] | None = None
+    propagate_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,9 @@ def mutation(
     mode: int | None = None,
     ownership: Mapping[str, Any] | None = None,
     conflict: Mapping[str, Any] | None = None,
+    writer: Callable[[Path, bytes], None] | None = None,
+    remover: Callable[[Path], None] | None = None,
+    propagate_error: bool = False,
 ) -> MutationSpec:
     return MutationSpec(
         destination=Path(destination),
@@ -157,6 +163,9 @@ def mutation(
         mode=mode,
         ownership=ownership,
         conflict=conflict,
+        writer=writer,
+        remover=remover,
+        propagate_error=propagate_error,
     )
 
 
@@ -235,6 +244,9 @@ def build_plan(
                 mode=spec.mode,
                 ownership=spec.ownership,
                 conflict=spec.conflict,
+                writer=spec.writer,
+                remover=spec.remover,
+                propagate_error=spec.propagate_error,
             )
         )
     return Plan(
@@ -376,8 +388,8 @@ def _prepare_and_commit(
             op_dir, receipt, journal_update={**journal, "status": "committed", "committed_indexes": committed}
         )
         return receipt
-    except (InjectedFailure, OSError):
-        return _restore_after_failure(
+    except (InjectedFailure, OSError) as error:
+        receipt = _restore_after_failure(
             plan,
             op_dir=op_dir,
             ordered=ordered,
@@ -386,6 +398,9 @@ def _prepare_and_commit(
             inject=inject,
             validator_results=validator_results,
         )
+        if receipt.terminal_state == "restored" and any(spec.propagate_error for spec in ordered):
+            raise error
+        return receipt
 
 
 def _restore_after_failure(
@@ -425,12 +440,18 @@ def _restore_after_failure(
 
 def _apply_mutation(spec: MutationSpec) -> None:
     if spec.mutation == "remove":
-        spec.destination.unlink()
+        if spec.remover is not None:
+            spec.remover(spec.destination)
+        else:
+            spec.destination.unlink()
         return
     if spec.staged_bytes is None:
         raise PlanError("staged bytes required")
     spec.destination.parent.mkdir(parents=True, exist_ok=True)
-    localio.write_bytes_atomic(spec.destination, spec.staged_bytes)
+    if spec.writer is not None:
+        spec.writer(spec.destination, spec.staged_bytes)
+    else:
+        localio.write_bytes_atomic(spec.destination, spec.staged_bytes)
     if spec.mode is not None:
         os.chmod(spec.destination, spec.mode)
 

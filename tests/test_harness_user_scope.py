@@ -151,6 +151,61 @@ def test_sync_state_write_failure_restores_every_profile_surface(tmp_path, monke
     assert _tree_snapshot(home) == before
 
 
+def test_uninstall_state_mutation_failure_restores_every_profile_surface(tmp_path, monkeypatch, capsys):
+    """A failed ownership-state removal cannot leave a partially uninstalled profile."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    _add_reviewed_skill(workspace)
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 0
+    capsys.readouterr()
+    state_path = home / ".codex" / "brigade" / "install-state.json"
+    before = _tree_snapshot(home)
+    original_apply = harness_profile_cmd.projection._apply_mutation
+
+    def fail_state_remove(spec):
+        if spec.destination == state_path:
+            raise OSError("injected profile state removal failure")
+        original_apply(spec)
+
+    monkeypatch.setattr(harness_profile_cmd.projection, "_apply_mutation", fail_state_remove)
+
+    with pytest.raises(OSError, match="injected profile state removal failure"):
+        cli.main(_uninstall_base(workspace) + ["--write", "--json"])
+
+    assert _tree_snapshot(home) == before
+
+
+def test_sync_preserves_instruction_symlink_swapped_after_preflight(tmp_path, monkeypatch, capsys):
+    """The commit-time kernel check must not replace a symlink introduced after planning."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    agents = home / ".codex" / "AGENTS.md"
+    outside = tmp_path / "outside"
+    outside.write_text("user content\n")
+    original = harness_profile_cmd._profile_mutation
+
+    def swap_instruction(path: Path, desired: bytes | None, **kwargs):
+        mutation = original(path, desired, **kwargs)
+        if path == agents and mutation is not None:
+            agents.parent.mkdir(parents=True, exist_ok=True)
+            agents.symlink_to(outside)
+        return mutation
+
+    monkeypatch.setattr(harness_profile_cmd, "_profile_mutation", swap_instruction)
+
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)["results"][0]
+    assert payload["status"] == "conflict"
+    assert agents.is_symlink()
+    assert agents.resolve() == outside
+    assert outside.read_text() == "user content\n"
+    assert not (home / ".codex" / "brigade" / "install-state.json").exists()
+
+
 def test_second_identical_sync_does_not_rewrite_state_or_receipt(tmp_path, monkeypatch, capsys):
     from brigade import cli
 
