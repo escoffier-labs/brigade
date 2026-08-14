@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--run-budget PATH` accepts one `brigade.run_budget.v1` JSON declaration on
+  `brigade run`, dogfood, and model-trial starts. Brigade persists the supplied
+  declaration in the run and plan receipts without mapping `timeout_seconds`
+  into a run budget. Budget cancellation receipts now carry bounded per-seat or
+  per-transport outcomes and the observed work that may still be active. (#885,
+  #886)
 - `brigade mcp sync --write` commits selected native configs and MCP ownership
   state through the projection transaction kernel. A failed write restores the
   selected destinations; unfinished operations are visible through `brigade

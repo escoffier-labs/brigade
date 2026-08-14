@@ -247,8 +247,9 @@ It is intentionally bounded: two orchestrator calls plus the worker calls in the
 
 Hard run-budget ceilings (`wall_clock_seconds`, `worker_dispatch_count`) apply
 only when a run persists `run_budget` or `verification_contract.budget` (#593).
-Ordinary `brigade run`, dogfood, and model-trial starts without those
-declarations stay unbounded for backward compatibility; per-agent
+Operators can supply a versioned JSON declaration with `--run-budget PATH` on
+`brigade run`, dogfood, and model-trial run or resume commands. Starts without
+that file stay unbounded for backward compatibility. Per-agent
 `timeout_seconds` is not a run-budget declaration. Aggregate and split token
 budgets on a verification contract stay observed-only. Model, tool, token, and
 cost dimensions require an adapter-owned enforcement boundary. External

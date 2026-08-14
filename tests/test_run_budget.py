@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -11,6 +12,14 @@ from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION
 
 RUN_ID = "20260810-210000-budget593"
 RECORDED_AT = "2026-08-10T21:00:00.000000Z"
+
+
+def _declaration_payload() -> dict[str, object]:
+    return {
+        "schema": "brigade.run_budget.v1",
+        "schema_version": 1,
+        "ceilings": {"wall_clock_seconds": 30, "worker_dispatch_count": 1},
+    }
 
 
 def _build_event(sequence: int, event_type: str, payload: dict, key: str, recorded_at: str, previous: str | None):
@@ -55,6 +64,72 @@ def test_run_budget_events_reject_raw_diagnostic_payload_keys():
         )
     assert "forbidden" in str(exc.value) or "unknown payload" in str(exc.value)
     assert len(str(exc.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_load_declaration_file_is_versioned_strict_and_canonical(tmp_path):
+    declaration_path = tmp_path / "budget.json"
+    declaration_path.write_text(json.dumps(_declaration_payload()))
+
+    assert run_budget.load_declaration_file(declaration_path) == _declaration_payload()
+
+    declaration_path.write_text(json.dumps({"schema": "brigade.run_budget.v1", "schema_version": True}))
+    with pytest.raises(run_budget.BudgetCompatibilityError):
+        run_budget.load_declaration_file(declaration_path)
+
+    declaration_path.write_text(json.dumps({"ceilings": {"unknown_dimension": 1}}))
+    with pytest.raises(run_budget.BudgetCompatibilityError):
+        run_budget.load_declaration_file(declaration_path)
+
+    for incomplete in (
+        {"schema_version": 1, "ceilings": {}},
+        {"schema": "brigade.run_budget.v1", "ceilings": {}},
+        {**_declaration_payload(), "unexpected": True},
+    ):
+        declaration_path.write_text(json.dumps(incomplete))
+        with pytest.raises(run_budget.BudgetCompatibilityError):
+            run_budget.load_declaration_file(declaration_path)
+
+
+def test_cancellation_report_preserves_mixed_seat_outcomes_and_replays_once():
+    declaration = run_budget.RunBudgetDeclaration(worker_dispatch_count=1)
+    calls = 0
+
+    def cancel() -> run_budget.CancellationReport:
+        nonlocal calls
+        calls += 1
+        return run_budget.CancellationReport(
+            outcomes=(
+                run_budget.CancelOutcome("coder", "interrupt", "interrupted"),
+                run_budget.CancelOutcome("reviewer", "none", "unsupported"),
+            ),
+            active_seats=("reviewer",),
+        )
+
+    coordinator = run_budget.BudgetCoordinator(declaration=declaration, append_event=lambda *_args: None)
+    receipt = coordinator.request_cancel(
+        request_id="mixed-cancel",
+        reason_class="budget_cancel",
+        transport_capability="mixed",
+        dimension="worker_dispatch_count",
+        cancel_fn=cancel,
+    )
+    replay = coordinator.request_cancel(
+        request_id="mixed-cancel",
+        reason_class="budget_cancel",
+        transport_capability="mixed",
+        dimension="worker_dispatch_count",
+        cancel_fn=lambda: (_ for _ in ()).throw(AssertionError("cancellation replayed")),
+    )
+
+    assert calls == 1
+    assert receipt == replay
+    assert receipt.transport_result == "partial"
+    assert receipt.active_remaining == 1
+    assert receipt.active_seats == ("reviewer",)
+    assert [(outcome.seat, outcome.transport_result) for outcome in receipt.outcomes] == [
+        ("coder", "interrupted"),
+        ("reviewer", "unsupported"),
+    ]
 
 
 def test_run_budget_events_are_status_neutral_in_projector():

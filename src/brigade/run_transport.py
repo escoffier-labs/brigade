@@ -467,6 +467,7 @@ def dispatch(
         ) -> agents.AgentResult:
             assert selected_agent.cli is not None
             cli_ref = selected_agent.cli
+            seat_process_registry = process_registry.for_seat(selected_agent.name)
             if selected_agent.transport == "acpx":
                 from . import acpx_adapter
 
@@ -477,7 +478,7 @@ def dispatch(
                     "version": selected_agent.transport_version or "",
                     "read_only": effective_read_only,
                     "writable_worktree": authorized_writable_worktree,
-                    "process_registry": process_registry,
+                    "process_registry": seat_process_registry,
                 }
                 worker_env = _with_orchestrator_run_id(
                     dict(selected_agent.env) if selected_agent.env is not None else None
@@ -497,7 +498,7 @@ def dispatch(
                     reasoning=selected_agent.reasoning,
                     env=dict(selected_agent.env) if selected_agent.env is not None else None,
                     resume_session_id=resume_session_id,
-                    process_registry=process_registry,
+                    process_registry=seat_process_registry,
                 )
             if selected_agent.env is not None:
                 # Env seats always dispatch through the direct CLI path. The
@@ -516,7 +517,7 @@ def dispatch(
                     cwd=cwd,
                     read_only=effective_read_only,
                     env=dict(selected_agent.env),
-                    process_registry=process_registry,
+                    process_registry=seat_process_registry,
                     **env_kwargs,
                 )
             if selected_agent.cli == "codex" and appserver is not None:
@@ -574,7 +575,7 @@ def dispatch(
                     timeout=timeout,
                     cwd=cwd,
                     read_only=effective_read_only,
-                    process_registry=process_registry,
+                    process_registry=seat_process_registry,
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is None:
                 return run_direct_agent(
@@ -584,7 +585,7 @@ def dispatch(
                     cwd=cwd,
                     read_only=effective_read_only,
                     sandbox=sandbox,
-                    process_registry=process_registry,
+                    process_registry=seat_process_registry,
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is None:
                 return run_direct_agent(
@@ -594,7 +595,7 @@ def dispatch(
                     cwd=cwd,
                     read_only=effective_read_only,
                     model=selected_agent.model,
-                    process_registry=process_registry,
+                    process_registry=seat_process_registry,
                 )
             if sandbox is None and selected_agent.model is None and selected_agent.reasoning is not None:
                 return run_direct_agent(
@@ -604,7 +605,7 @@ def dispatch(
                     cwd=cwd,
                     read_only=effective_read_only,
                     reasoning=selected_agent.reasoning,
-                    process_registry=process_registry,
+                    process_registry=seat_process_registry,
                 )
             if sandbox is not None and selected_agent.model is not None and selected_agent.reasoning is None:
                 return run_direct_agent(
@@ -615,7 +616,7 @@ def dispatch(
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     model=selected_agent.model,
-                    process_registry=process_registry,
+                    process_registry=seat_process_registry,
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is not None:
                 return run_direct_agent(
@@ -626,7 +627,7 @@ def dispatch(
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     reasoning=selected_agent.reasoning,
-                    process_registry=process_registry,
+                    process_registry=seat_process_registry,
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is not None:
                 return run_direct_agent(
@@ -637,7 +638,7 @@ def dispatch(
                     read_only=effective_read_only,
                     model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
-                    process_registry=process_registry,
+                    process_registry=seat_process_registry,
                 )
             assert sandbox is not None
             assert selected_agent.model is not None
@@ -651,7 +652,7 @@ def dispatch(
                 sandbox=sandbox,
                 model=selected_agent.model,
                 reasoning=selected_agent.reasoning,
-                process_registry=process_registry,
+                process_registry=seat_process_registry,
             )
 
         def invoke(

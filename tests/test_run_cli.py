@@ -158,6 +158,71 @@ role = "code"
     assert seen["fail_fast"] is True
 
 
+def test_run_cli_forwards_explicit_budget_file_before_dispatch(tmp_path, monkeypatch):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+    budget_path = tmp_path / "budget.json"
+    budget_payload = {
+        "schema": "brigade.run_budget.v1",
+        "schema_version": 1,
+        "ceilings": {"worker_dispatch_count": 1},
+    }
+    budget_path.write_text(json.dumps(budget_payload))
+    seen = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "do something",
+                "--roster",
+                str(roster_path),
+                "--cwd",
+                str(tmp_path),
+                "--output-dir",
+                str(tmp_path / "run"),
+                "--run-budget",
+                str(budget_path),
+            ]
+        )
+        == 0
+    )
+    assert seen["run_budget_payload"] == budget_payload
+
+
+def test_run_cli_rejects_invalid_budget_before_dispatch(tmp_path, monkeypatch, capsys):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+    budget_path = tmp_path / "budget.json"
+    budget_path.write_text(json.dumps({"schema": "brigade.run_budget.v1", "schema_version": True}))
+    monkeypatch.setattr(aboyeur, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dispatched")))
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "do something",
+                "--roster",
+                str(roster_path),
+                "--cwd",
+                str(tmp_path),
+                "--output-dir",
+                str(tmp_path / "run"),
+                "--run-budget",
+                str(budget_path),
+            ]
+        )
+        == 2
+    )
+    assert "budget" in capsys.readouterr().err
+
+
 def test_run_cli_keep_going_sets_fail_fast_false(tmp_path, monkeypatch):
     roster_path = tmp_path / "roster.toml"
     roster_path.write_text(

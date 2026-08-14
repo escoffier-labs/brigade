@@ -472,6 +472,26 @@ def test_dogfood_ordinary_path_does_not_declare_run_budget(tmp_path, monkeypatch
     assert "run_budget_payload" not in run_kwargs[0]
 
 
+def test_dogfood_cli_forwards_explicit_budget_file(tmp_path, monkeypatch):
+    budget_path = tmp_path / "budget.json"
+    budget_payload = {
+        "schema": "brigade.run_budget.v1",
+        "schema_version": 1,
+        "ceilings": {"worker_dispatch_count": 1},
+    }
+    _write_json(budget_path, budget_payload)
+    seen = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_run)
+
+    assert cli.main(["dogfood", "--target", str(tmp_path), "--run-budget", str(budget_path)]) == 0
+    assert seen["run_budget_payload"] == budget_payload
+
+
 def test_dogfood_latest_uses_configured_artifacts(tmp_path, monkeypatch):
     configured = tmp_path / "configured-runs"
     dogfood_cmd.init(target=tmp_path, artifacts_dir=configured)
