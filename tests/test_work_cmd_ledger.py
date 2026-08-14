@@ -752,6 +752,98 @@ def test_plan_artifact_rejects_missing_verified_audit_ref(tmp_path, capsys) -> N
     assert not json_path.is_file()
 
 
+def test_plan_artifact_rejects_report_path_outside_run_dir(tmp_path: Path, capsys) -> None:
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    rec = registry.show_run(tmp_path, run_id)
+    assert rec is not None
+    audit_ref = rec["artifact_refs"]["citation_audit"]
+    registry.update_research(
+        tmp_path,
+        run_id,
+        review_result="accepted",
+        artifacts={
+            "report_md": "../../outside_report.md",
+            "citation_audit": registry.CITATION_AUDIT_ARTIFACT,
+        },
+        artifact_refs={
+            "report_md": {"path": "../../outside_report.md", "digest": "fake"},
+            "citation_audit": audit_ref,
+        },
+    )
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "report" in err.lower() or "outside" in err.lower() or "not found" in err.lower()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
+
+
+def test_plan_artifact_rejects_nonexistent_report_path(tmp_path: Path, capsys) -> None:
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    report_file = registry.standard_run_dir(tmp_path, run_id) / "report.md"
+    if report_file.exists():
+        report_file.unlink()
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "missing" in err.lower() or "not found" in err.lower() or "report" in err.lower()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
+
+
+def test_plan_artifact_rejects_malformed_citation_audit_record(tmp_path: Path, capsys) -> None:
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    audit_payload = {
+        "accepted": "invalid-non-boolean",
+        "citations": "invalid-citations-structure",
+        "unresolved": None,
+    }
+    audit_ref = registry.write_citation_audit(tmp_path, run_id, audit_payload)
+    registry.update_research(
+        tmp_path,
+        run_id,
+        review_result="accepted",
+        artifacts={"report_md": registry.REPORT_MD_ARTIFACT, "citation_audit": registry.CITATION_AUDIT_ARTIFACT},
+        artifact_refs={"report_md": {"path": "report.md", "digest": "unused"}, "citation_audit": audit_ref},
+    )
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "malformed" in err.lower() or "invalid citation audit" in err.lower()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
+
+
 def test_plan_promote_accepted_writes_draft_proposal(tmp_path, capsys):
     _init_git_repo(tmp_path)
     task_id = _accepted_plan_task_id(tmp_path, capsys)

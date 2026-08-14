@@ -13,8 +13,10 @@ from brigade.research.engine import ResearchEngine
 from brigade.research.llm import PhaseBackend, ResearchSeatError
 from brigade.research.types import (
     Caps,
+    Finding,
     ResearchLanes,
     ResearchRunError,
+    ResumeState,
     SourceEnvelope,
 )
 from brigade.roster import Agent, Roster
@@ -990,3 +992,104 @@ def test_discovery_future_reraises_budget_policy_error() -> None:
             caps=Caps(max_rounds=1),
         ).run("q")
     assert caught.value.code == "budget_exhausted"
+
+
+def test_same_url_from_two_providers_in_one_round_is_collected_once() -> None:
+    shared_url = "https://example.test/shared"
+
+    class FirstProvider(FixedSourceProvider):
+        source_id = "provider-a"
+
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            del query, limit
+            return [{"url": shared_url, "title": "First", "trust": "web"}]
+
+        def fetch(self, url: str) -> dict[str, object]:
+            return {"success": True, "content": "shared fact", "title": "First", "url": url}
+
+    class SecondProvider(FixedSourceProvider):
+        source_id = "provider-b"
+
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            del query, limit
+            return [{"url": shared_url, "title": "Second", "trust": "web"}]
+
+        def fetch(self, url: str) -> dict[str, object]:
+            return {"success": True, "content": "shared fact", "title": "Second", "url": url}
+
+    engine = ResearchEngine(
+        lanes=fake_lanes([]),
+        sources=[FirstProvider(), SecondProvider()],
+        caps=Caps(max_rounds=1, max_urls_per_round=4),
+    )
+    sources = engine._discover("q", _plan_with_sub_questions("fact"))
+
+    matching = [source for source in sources if source.uri == shared_url]
+    assert len(matching) == 1
+    assert matching[0].provider == "provider-a"
+
+
+def test_repair_without_synthesis_seat_fails_cleanly() -> None:
+    envelope = SourceEnvelope.build(
+        origin="web",
+        provider="fixture-web",
+        uri="https://example.test/fact",
+        content="Verified fact",
+        trust="web",
+        acquired_at="2026-08-13T12:00:00+00:00",
+    )
+    finding = Finding(
+        source_ids=(envelope.source_id,),
+        title="Fact",
+        summary="Verified fact",
+        evidence="Verified fact",
+        trust="web",
+        extraction_lane="luna",
+        extracted_at="2026-08-13T12:01:00+00:00",
+    )
+    calls: list[tuple[str, str]] = []
+    lanes = ResearchLanes(
+        planner=ScriptedBackend(
+            seat="luna",
+            phase="planning",
+            calls=calls,
+            responses=['{"sub_questions":["fact"],"key_topics":["fact"],"success_criteria":"cite"}'],
+        ),
+        extractor=ScriptedBackend(
+            seat="luna",
+            phase="extraction",
+            calls=calls,
+            responses=['{"summary":"Verified fact","evidence":"Verified fact"}'],
+        ),
+        synthesizers=(),
+        reviewer=ScriptedBackend(
+            seat="luna",
+            phase="review",
+            calls=calls,
+            responses=[
+                json.dumps(
+                    {
+                        "accepted": False,
+                        "detail": "unsupported",
+                        "rejected_claims": ["unsupported"],
+                    }
+                )
+            ],
+        ),
+    )
+    resume = ResumeState(
+        plan='{"sub_questions":["fact"],"key_topics":["fact"],"success_criteria":"cite"}',
+        sources=(envelope,),
+        findings=(finding,),
+        report="Unsupported claim with no citations",
+    )
+
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run(
+            "q",
+            resume=resume,
+        )
+
+    assert caught.value.failure_kind in {"no-synthesizer", "review-rejected"}
+    assert caught.value.failure_phase in {"repair", "review"}
+    assert "synthesis" not in {phase for phase, _seat in calls}

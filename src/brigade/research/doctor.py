@@ -260,6 +260,7 @@ def doctor_payload(
     profile = cfg.profile(profile_name)
 
     lanes: list[dict[str, object]] = []
+    reasons: list[str] = []
     required_failures = False
     optional_warnings = False
     probe_cache: dict[str, dict[str, object]] = {}
@@ -435,6 +436,7 @@ def doctor_payload(
 
     if not profile.discovery:
         required_failures = True
+        reasons.append("discovery lane is not configured")
 
     if required_failures:
         overall = "fail"
@@ -443,10 +445,13 @@ def doctor_payload(
     else:
         overall = "ok"
 
-    return {
+    payload: dict[str, object] = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "status": overall,
         "profile": profile.name,
         "lanes": lanes,
     }
+    if reasons:
+        payload["reasons"] = reasons
+    return payload

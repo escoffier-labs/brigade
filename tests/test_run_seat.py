@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade.proc import ProcessRegistry
 from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatInvoker
@@ -21,6 +23,22 @@ def _research_roster() -> Roster:
                 role="researcher",
                 model="gpt-5.6-luna",
                 reasoning="medium",
+                capabilities=("research.plan",),
+            ),
+        },
+    )
+
+
+def _oracle_research_roster() -> Roster:
+    roster = _research_roster()
+    return Roster(
+        orchestrator=roster.orchestrator,
+        agents={
+            **roster.agents,
+            "oracle": Agent(
+                name="oracle",
+                cli="oracle",
+                role="researcher",
                 capabilities=("research.plan",),
             ),
         },
@@ -167,6 +185,42 @@ def test_seat_invoker_forwards_budget_callbacks(monkeypatch, tmp_path: Path) -> 
     assert captured["on_dispatch_observed"] is on_observed
     assert captured["on_dispatch_completed"] is on_completed
     assert captured["on_dispatch_failed"] is on_failed
+
+
+def test_oracle_gate_wait_is_bounded_and_returns_timeout(monkeypatch, tmp_path: Path) -> None:
+    class BusyGate:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+
+        def acquire(self, *, timeout: float) -> bool:
+            self.timeouts.append(timeout)
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("a gate that was not acquired must not be released")
+
+    gate = BusyGate()
+    monkeypatch.setattr("brigade.run_seat._ORACLE_GATE", gate)
+    monkeypatch.setattr(
+        "brigade.run_seat.run_transport.dispatch",
+        lambda *_args, **_kwargs: pytest.fail("dispatch must not run after the Oracle gate times out"),
+    )
+    invoker = SeatInvoker(
+        roster=_oracle_research_roster(),
+        cwd=tmp_path,
+        run_id="research-1",
+        process_registry=ProcessRegistry(),
+        output_dir=tmp_path / ".brigade" / "runs" / "research-1",
+    )
+
+    result = invoker.invoke(seat="oracle", phase="research.plan", prompt="plan", timeout=7)
+
+    assert gate.timeouts == [7.0]
+    assert result.ok is False
+    assert result.failure_phase == "dispatch"
+    assert result.failure_kind == "timeout"
+    assert "oracle" in result.detail.lower()
+    assert "wait" in result.detail.lower()
 
 
 def test_seat_invoker_keeps_per_invocation_log_paths(monkeypatch, tmp_path: Path) -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
@@ -81,12 +80,6 @@ class SeatInvoker:
         self.on_dispatch_observed = on_dispatch_observed
         self.on_dispatch_completed = on_dispatch_completed
         self.on_dispatch_failed = on_dispatch_failed
-        self.budget_callbacks = {
-            "on_dispatch_requested": on_dispatch_requested,
-            "on_dispatch_observed": on_dispatch_observed,
-            "on_dispatch_completed": on_dispatch_completed,
-            "on_dispatch_failed": on_dispatch_failed,
-        }
 
     def invoke(self, *, seat: str, phase: str, prompt: str, timeout: int) -> SeatResult:
         agent = self.roster.agents[seat]
@@ -94,7 +87,6 @@ class SeatInvoker:
         effective = replace(agent, timeout_seconds=effective_timeout)
         roster = replace(self.roster, agents={**self.roster.agents, seat: effective})
         assignment = run_transport.Assignment(worker=seat, task=phase, capabilities=(phase,))
-        gate = _ORACLE_GATE if agent.cli == "oracle" else nullcontext()
 
         def build_prompt(
             agent: Agent,
@@ -109,8 +101,8 @@ class SeatInvoker:
         ) -> str:
             return prompt
 
-        with gate:
-            results = run_transport.dispatch(
+        def dispatch() -> list[run_transport.WorkerResult]:
+            return run_transport.dispatch(
                 [assignment],
                 roster,
                 build_prompt=build_prompt,
@@ -128,18 +120,50 @@ class SeatInvoker:
                 on_dispatch_completed=self.on_dispatch_completed,
                 on_dispatch_failed=self.on_dispatch_failed,
             )
-        if not results:
-            worker = run_transport.WorkerResult(
-                worker=seat,
-                task=phase,
-                text="",
-                ok=False,
-                detail="dispatch returned no worker results",
-                failure_phase="dispatch",
-                failure_kind="unclassified",
-            )
+
+        if agent.cli == "oracle":
+            acquired = _ORACLE_GATE.acquire(timeout=effective_timeout)
+            if not acquired:
+                worker = run_transport.WorkerResult(
+                    worker=seat,
+                    task=phase,
+                    text="",
+                    ok=False,
+                    detail="timed out waiting for the Oracle dispatch gate",
+                    failure_phase="dispatch",
+                    failure_kind="timeout",
+                )
+            else:
+                try:
+                    results = dispatch()
+                finally:
+                    _ORACLE_GATE.release()
+                if not results:
+                    worker = run_transport.WorkerResult(
+                        worker=seat,
+                        task=phase,
+                        text="",
+                        ok=False,
+                        detail="dispatch returned no worker results",
+                        failure_phase="dispatch",
+                        failure_kind="unclassified",
+                    )
+                else:
+                    worker = results[0]
         else:
-            worker = results[0]
+            results = dispatch()
+            if not results:
+                worker = run_transport.WorkerResult(
+                    worker=seat,
+                    task=phase,
+                    text="",
+                    ok=False,
+                    detail="dispatch returned no worker results",
+                    failure_phase="dispatch",
+                    failure_kind="unclassified",
+                )
+            else:
+                worker = results[0]
         if worker.failure_kind == "browser-auth":
             worker = replace(
                 worker,

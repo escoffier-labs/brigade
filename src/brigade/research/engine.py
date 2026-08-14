@@ -103,6 +103,10 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _normalize_discovery_url(url: str) -> str:
+    return str(url or "").strip()
+
+
 class PhaseStartedCallback(Protocol):
     def __call__(
         self,
@@ -340,7 +344,7 @@ class ResearchEngine:
             for query in queries:
                 self._check_cancel("discovery")
                 for hit in provider.search(query, limit):
-                    url = str(hit.get("url") or "")
+                    url = _normalize_discovery_url(str(hit.get("url") or ""))
                     if not url or url in seen_urls or url in local_seen:
                         continue
                     local_seen.add(url)
@@ -390,9 +394,14 @@ class ResearchEngine:
                 except Exception as exc:
                     raise ResearchRunError("discovery", "provider-failed", str(exc)) from exc
         ordered.sort(key=lambda item: item[0])
-        envelopes = [envelope for _, batch in ordered for envelope in batch]
-        for envelope in envelopes:
-            seen_urls.add(envelope.uri)
+        envelopes: list[SourceEnvelope] = []
+        for _, batch in ordered:
+            for envelope in batch:
+                key = _normalize_discovery_url(envelope.uri)
+                if not key or key in seen_urls:
+                    continue
+                seen_urls.add(key)
+                envelopes.append(envelope)
         return envelopes
 
     @staticmethod
@@ -582,7 +591,11 @@ class ResearchEngine:
         review: ReviewResult,
     ) -> tuple[str, str]:
         self._phase_start("repair")
-        backend = self._synthesis_backend or self.lanes.synthesizers[0]
+        backend = self._synthesis_backend
+        if backend is None:
+            if not self.lanes.synthesizers:
+                raise ResearchRunError("repair", "no-synthesizer", "no synthesis seats configured")
+            backend = self.lanes.synthesizers[0]
         packet = self._finding_packet(question, findings)
         rejected_text = json.dumps(list(review.rejected_claims))
         prompt = REPAIR_PROMPT.format(

@@ -4367,11 +4367,6 @@ def _write_plan_artifact(
             return 1
         status = str(rec.get("status") or "")
         legacy = bool(rec.get("legacy"))
-        artifacts = rec.get("artifacts") if isinstance(rec.get("artifacts"), dict) else {}
-        report_rel = artifacts.get("report_md") or "report.md"
-        if isinstance(report_rel, dict):
-            report_rel = report_rel.get("path") or "report.md"
-        report_path = _plan_rel_path(target, registry.run_dir(target, from_research) / str(report_rel))
         if legacy:
             if status not in {"done", "completed"}:
                 print(
@@ -4379,6 +4374,35 @@ def _write_plan_artifact(
                     file=sys.stderr,
                 )
                 return 1
+        else:
+            if status != "completed":
+                print(
+                    f"error: research run is not completed: {from_research} ({status or 'active'})",
+                    file=sys.stderr,
+                )
+                return 1
+        artifacts = rec.get("artifacts") if isinstance(rec.get("artifacts"), dict) else {}
+        report_rel = artifacts.get("report_md") or "report.md"
+        if isinstance(report_rel, dict):
+            report_rel = report_rel.get("path") or "report.md"
+        run_directory = registry.run_dir(target, from_research).resolve()
+        try:
+            candidate_report_file = (run_directory / str(report_rel)).resolve()
+            candidate_report_file.relative_to(run_directory)
+        except (ValueError, RuntimeError):
+            print(
+                f"error: research report path outside run directory: {report_rel}",
+                file=sys.stderr,
+            )
+            return 1
+        if not candidate_report_file.is_file():
+            print(
+                f"error: research report file not found: {candidate_report_file}",
+                file=sys.stderr,
+            )
+            return 1
+        report_path = _plan_rel_path(target, candidate_report_file)
+        if legacy:
             research_entry = {
                 "run_id": from_research,
                 "question": str(rec.get("question") or ""),
@@ -4389,12 +4413,6 @@ def _write_plan_artifact(
             }
             research_sources.append(f"research:{from_research} (untrusted-web) -> {report_path}")
         else:
-            if status != "completed":
-                print(
-                    f"error: research run is not completed: {from_research} ({status or 'active'})",
-                    file=sys.stderr,
-                )
-                return 1
             artifact_refs = rec.get("artifact_refs") if isinstance(rec.get("artifact_refs"), dict) else {}
             audit_ref = artifact_refs.get("citation_audit")
             if audit_ref is None:
@@ -4403,10 +4421,22 @@ def _write_plan_artifact(
                 candidate = artifacts.get("citation_audit")
                 if isinstance(candidate, dict) and isinstance(candidate.get("digest"), str):
                     audit_ref = candidate
-            audit = registry.read_verified_artifact(target, from_research, audit_ref) if audit_ref else None
-            accepted = bool(getattr(audit, "accepted", False)) if audit is not None else False
-            unresolved = tuple(getattr(audit, "unresolved", ()) or ()) if audit is not None else ()
-            if audit is None or not accepted or unresolved:
+            if not audit_ref:
+                print(
+                    f"error: research run citation audit is missing or unverified: {from_research}",
+                    file=sys.stderr,
+                )
+                return 1
+            audit = registry.read_verified_artifact(target, from_research, audit_ref)
+            if audit is None:
+                print(
+                    f"error: research run citation audit is malformed or invalid: {from_research}",
+                    file=sys.stderr,
+                )
+                return 1
+            accepted = bool(getattr(audit, "accepted", False))
+            unresolved = tuple(getattr(audit, "unresolved", ()) or ())
+            if not accepted or unresolved:
                 print(
                     f"error: research run citation audit is not accepted: {from_research}",
                     file=sys.stderr,

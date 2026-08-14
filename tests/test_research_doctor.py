@@ -410,6 +410,40 @@ def test_doctor_redacts_secret_keys_recursively(monkeypatch, tmp_path: Path) -> 
     _assert_fixed_lanes(payload)
 
 
+def test_doctor_records_reason_when_discovery_unconfigured(monkeypatch, tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from brigade.research import doctor as doctor_mod
+    from brigade.research.types import BUILTIN_PROFILES
+
+    monkeypatch.setattr(doctor_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("brigade.research.llm.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    empty_discovery = replace(BUILTIN_PROFILES["grounded"], discovery=())
+
+    class FakeResearchConfig:
+        def profile(self, name: str | None = None) -> object:
+            return empty_discovery
+
+    monkeypatch.setattr(doctor_mod.rconfig, "load", lambda _target: FakeResearchConfig())
+
+    payload = doctor_payload(
+        tmp_path,
+        roster=doctor_roster(),
+        profile_name="grounded",
+        probe=lambda _agent: {
+            "auth_status": "authenticated",
+            "detail": "ok",
+            "executable": "/usr/bin/codex",
+        },
+    )
+
+    assert payload["status"] == "fail"
+    reasons = payload.get("reasons")
+    assert isinstance(reasons, list) and reasons
+    assert any("discovery" in reason.lower() for reason in reasons)
+
+
 def test_probe_agent_is_read_only_and_marks_oracle_unauth(monkeypatch) -> None:
     from brigade.research import doctor as doctor_mod
 

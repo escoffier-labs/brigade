@@ -7,6 +7,7 @@ from .. import toml_compat as tomllib
 from .types import BUILTIN_PROFILES, ResearchProfile
 
 _LANE_FIELDS = ("discovery", "planner", "extractor", "synthesizer", "reviewer")
+_ALLOWED_PROFILE_KEYS = frozenset(_LANE_FIELDS) | frozenset({"allow_synthesis_fallback", "browser_ai_research"})
 
 
 class ResearchConfig:
@@ -60,6 +61,11 @@ class ResearchConfig:
         if not isinstance(raw, dict):
             raise ValueError(f"[profiles.{name}] must be a TOML table")
 
+        unknown_keys = sorted(set(raw) - _ALLOWED_PROFILE_KEYS)
+        if unknown_keys:
+            joined = ", ".join(unknown_keys)
+            raise ValueError(f"profiles.{name} has unknown key(s): {joined}")
+
         overlays: Dict[str, Any] = {}
         for field in _LANE_FIELDS:
             if field not in raw:
@@ -69,7 +75,10 @@ class ResearchConfig:
                 raise ValueError(f"profiles.{name}.{field} must be a list of strings")
             if len(value) == 0:
                 raise ValueError(f"profiles.{name}.{field} must not be empty when configured")
-            overlays[field] = tuple(item.strip() for item in value)
+            stripped = tuple(item.strip() for item in value)
+            if any(not item for item in stripped):
+                raise ValueError(f"profiles.{name}.{field} must not contain blank entries")
+            overlays[field] = stripped
 
         if "allow_synthesis_fallback" in raw:
             fallback = raw["allow_synthesis_fallback"]
@@ -79,13 +88,13 @@ class ResearchConfig:
 
         # Browser-AI activation is reserved for the built-in browser-ai profile
         # and the explicit CLI flag. Repo overlays must not flip it on for other
-        # profiles (and cannot turn the built-in browser-ai profile off).
+        # profiles; the browser-ai profile may opt out explicitly.
         if "browser_ai_research" in raw:
             browser = raw["browser_ai_research"]
             if browser is not True and browser is not False:
                 raise ValueError(f"profiles.{name}.browser_ai_research must be true or false")
             if name == "browser-ai":
-                overlays["browser_ai_research"] = True
+                overlays["browser_ai_research"] = browser
             # else: ignore overlay; keep built-in False for grounded/local-only/luna-only
 
         return replace(base, **overlays)

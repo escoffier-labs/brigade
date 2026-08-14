@@ -55,3 +55,19 @@ def test_citation_audit_rejects_zero_citations() -> None:
     assert audit.accepted is False
     assert audit.citations == ()
     assert audit.unresolved == ()
+
+
+def test_finding_rejects_empty_source_ids() -> None:
+    import pytest
+
+    with pytest.raises((ValueError, TypeError), match="source_ids"):
+        Finding(
+            source_ids=(),
+            title="Empty sources",
+            summary="Invalid finding",
+            evidence="None",
+            trust="web",
+            extraction_lane="luna",
+            extracted_at="2026-08-13T12:02:00+00:00",
+            parent_source_ids=(),
+        )

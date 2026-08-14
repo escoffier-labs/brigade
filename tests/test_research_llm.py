@@ -172,8 +172,7 @@ def test_resolve_lane_compatibility_via_research_general() -> None:
     assert resolved.resolution == "compatibility"
 
 
-def test_resolve_lane_resolution_follows_selected_primary_only() -> None:
-    """Mixed capability+compatibility candidates label from the primary alone."""
+def test_resolve_lane_prefers_explicit_phase_capability_over_compatibility() -> None:
     roster = Roster(
         orchestrator="chef",
         agents={
@@ -190,6 +189,45 @@ def test_resolve_lane_resolution_follows_selected_primary_only() -> None:
 
     resolved = resolve_lane(roster, phase="research.plan", candidates=())
 
+    assert resolved.primary == "specialist"
+    assert resolved.fallbacks == ("legacy",)
+    assert resolved.resolution == "capability"
+
+
+def test_resolve_backend_error_describes_http_requirement_not_stale_cli_hint() -> None:
+    roster = FakeRoster([FakeAgent("legacy", cli="codex", role="researcher")])
+
+    with pytest.raises(llm.NoResearcherError) as caught:
+        llm.resolve_backend(roster)
+
+    message = str(caught.value)
+    assert "endpoint" in message.lower()
+    assert "model" in message.lower()
+    assert "either cli or" not in message.lower()
+
+
+def test_resolve_lane_resolution_follows_selected_primary_only() -> None:
+    """Profile-ordered candidates label resolution from the primary alone."""
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "legacy": Agent(name="legacy", cli="codex", role="researcher"),
+            "specialist": Agent(
+                name="specialist",
+                cli="codex",
+                role="researcher",
+                capabilities=("research.plan",),
+            ),
+        },
+    )
+
+    resolved = resolve_lane(
+        roster,
+        phase="research.plan",
+        candidates=("legacy", "specialist"),
+    )
+
     assert resolved.primary == "legacy"
     assert resolved.fallbacks == ("specialist",)
-    assert resolved.resolution == "compatibility"
+    assert resolved.resolution == "profile"

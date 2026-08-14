@@ -1069,40 +1069,6 @@ def run(
         browser_ai_research=browser_ai_enabled,
         browser_ai_provider=True if browser_ai_enabled else None,
     )
-    existing = registry.show_run(target, run_id)
-    if existing is None or existing.get("legacy"):
-        registry.create_standard_run(
-            target,
-            run_id=run_id,
-            question=question,
-            profile=research_profile.name,
-            caps=caps.__dict__.copy(),
-            roster=roster,
-        )
-    registry.update_research(
-        target,
-        run_id,
-        profile=research_profile.name,
-        browser_ai_research=browser_ai_enabled,
-        manifest=manifest,
-        caps=caps.__dict__.copy(),
-    )
-    _persist_category(target, run_id, category)
-
-    can_skip_sources = resume is not None and (resume.sources is not None or resume.findings is not None)
-    if not providers and not browser_ai_enabled and not can_skip_sources:
-        detail = "no local, CLI, web, or browser-AI source route available"
-        _terminate_standard_run(
-            target,
-            run_id,
-            status="failed",
-            failure_phase="admission",
-            failure_kind="no-source-route",
-            detail=detail,
-            blockers=blockers + [detail],
-        )
-        return run_id
-
     run_directory = registry.standard_run_dir(target, run_id)
     declaration = RunBudgetDeclaration(
         wall_clock_seconds=caps.max_time,
@@ -1125,6 +1091,40 @@ def run(
 
     try:
         with runguard.run_lock(target, run_dir=run_directory):
+            existing = registry.show_run(target, run_id)
+            if existing is None or existing.get("legacy"):
+                registry.create_standard_run(
+                    target,
+                    run_id=run_id,
+                    question=question,
+                    profile=research_profile.name,
+                    caps=caps.__dict__.copy(),
+                    roster=roster,
+                )
+            registry.update_research(
+                target,
+                run_id,
+                profile=research_profile.name,
+                browser_ai_research=browser_ai_enabled,
+                manifest=manifest,
+                caps=caps.__dict__.copy(),
+            )
+            _persist_category(target, run_id, category)
+
+            can_skip_sources = resume is not None and (resume.sources is not None or resume.findings is not None)
+            if not providers and not browser_ai_enabled and not can_skip_sources:
+                detail = "no local, CLI, web, or browser-AI source route available"
+                _terminate_standard_run(
+                    target,
+                    run_id,
+                    status="failed",
+                    failure_phase="admission",
+                    failure_kind="no-source-route",
+                    detail=detail,
+                    blockers=blockers + [detail],
+                )
+                return run_id
+
             if resume is not None or (existing is not None and existing.get("status") in {"failed", "cancelled"}):
                 try:
                     _reopen_standard_run(target, run_id)
@@ -1457,10 +1457,14 @@ def run(
         # and must not escape as a Python traceback from the CLI boundary.
         raise _receipt_write_command_failure(e, run_id=run_id) from e
     except runguard.RunGuardError as e:
-        return _fail("failed", "admission", "run-lock", _operator_safe_detail(str(e)))
+        raise ResearchCommandFailure(
+            run_id=run_id,
+            failure_kind="run-lock",
+            failure_phase="admission",
+            detail=_operator_safe_detail(str(e)),
+            exit_code=2,
+        ) from e
 
-    if category is not None:
-        _persist_category(target, run_id, category)
     return run_id
 
 

@@ -71,6 +71,10 @@ class Finding:
     extracted_at: str
     parent_source_ids: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not self.source_ids:
+            raise ValueError("Finding.source_ids cannot be empty")
+
     @property
     def source(self) -> str:
         return self.source_ids[0]

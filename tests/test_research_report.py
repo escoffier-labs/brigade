@@ -116,3 +116,59 @@ def test_markdown_includes_sources_block():
     assert "[browser-ai]" in md
     for source in sources:
         assert source.source_id not in md.split("## Sources", 1)[1]
+
+
+def test_render_escapes_hostile_source_metadata_in_html_and_markdown():
+    hostile_source = _envelope(
+        origin="web",
+        provider="playwright",
+        uri="https://example.com/search?q=<script>alert(1)</script>&x=1#\x00frag",
+        trust="web",
+        content="body with <script>evil()</script>",
+    )
+    hostile_finding = Finding(
+        source_ids=(hostile_source.source_id,),
+        title=(
+            'Evil <script>alert("xss")</script> <img src=x onerror=alert(1)> '
+            "[breakout](http://evil.com)\r\n## Injected Heading\x00"
+        ),
+        summary="Hostile summary <img src=x onerror=alert(1)> [link](javascript:alert(1))\x00",
+        evidence="evidence",
+        trust="web",
+        extraction_lane="luna\x00lane",
+        extracted_at="2026-08-13T12:00:00+00:00",
+    )
+
+    # HTML rendering must escape HTML tags, script injection, and attribute breakouts
+    html = report.render_html(
+        question="Hostile Q <script>alert('q')</script>",
+        markdown_report="## Report\nbody",
+        findings=[hostile_finding],
+        sources=[hostile_source],
+        stats={"rounds": 1},
+    )
+    assert "<script>" not in html
+    assert "<img src=x" not in html
+    assert "&lt;script&gt;" in html
+    assert "\x00" not in html
+
+    # Markdown rendering must escape/sanitize link breakouts, raw newlines injecting headings, and control chars
+    md = report.render_markdown(
+        question="Hostile Q",
+        markdown_report="## Report\nbody",
+        findings=[hostile_finding],
+        sources=[hostile_source],
+    )
+    # Check that injected heading does not appear as a top-level section in markdown
+    assert "\n## Injected Heading" not in md
+    assert "\x00" not in md
+    assert "\r" not in md
+    # Report body stays authored; only source-line metadata is neutralized.
+    assert "## Report\nbody" in md.split("## Sources", 1)[0]
+    sources_md = md.split("## Sources", 1)[1]
+    assert "<script>" not in sources_md
+    assert "<img" not in sources_md
+    assert "[breakout](http://evil.com)" not in sources_md
+    assert "Evil" in sources_md
+    assert "breakout" in sources_md
+    assert "example.com" in sources_md

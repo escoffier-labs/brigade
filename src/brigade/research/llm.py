@@ -84,14 +84,26 @@ def resolve_lane(
     agents = roster.find_capability(phase)
     if not agents:
         raise NoResearcherError(f"no seat supports {phase}")
-    if phase == "research.synthesize":
-        agents = _rank_synthesis_agents(agents)
+    agents = _rank_phase_agents(agents, phase)
     primary = agents[0]
     resolution: Literal["capability", "compatibility"] = (
         "capability" if phase in primary.capabilities else "compatibility"
     )
     names = tuple(agent.name for agent in agents)
     return ResolvedLane(phase=phase, primary=names[0], fallbacks=names[1:], resolution=resolution)
+
+
+def _rank_phase_agents(agents: tuple[Agent, ...], phase: str) -> tuple[Agent, ...]:
+    explicit: list[Agent] = []
+    compatibility: list[Agent] = []
+    for agent in agents:
+        if phase in agent.capabilities:
+            explicit.append(agent)
+        else:
+            compatibility.append(agent)
+    if phase == "research.synthesize":
+        return _rank_synthesis_agents(tuple(explicit)) + _rank_synthesis_agents(tuple(compatibility))
+    return tuple(explicit + compatibility)
 
 
 def _rank_synthesis_agents(agents: tuple[Agent, ...]) -> tuple[Agent, ...]:
@@ -135,4 +147,4 @@ def resolve_backend(roster: Any):
         raise NoResearcherError("roster has no agent with role 'researcher'")
     if getattr(agent, "endpoint", None) and getattr(agent, "model", None):
         return HttpBackend(agent.endpoint, agent.model, getattr(agent, "headers", None))
-    raise NoResearcherError("researcher agent needs either cli or endpoint+model")
+    raise NoResearcherError("researcher agent requires endpoint and model for HTTP backend")

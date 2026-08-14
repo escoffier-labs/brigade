@@ -423,7 +423,8 @@ def update_phase(
             if current is None:
                 raise ValueError(f"research artifact unreadable or not an object: {path}")
         else:
-            current = {}
+            current = {"run_id": run_id}
+        current.setdefault("run_id", run_id)
         phases = dict(current.get("phases") or {})
         for name in RESEARCH_PHASES:
             phases.setdefault(name, {"status": "pending"})
@@ -494,16 +495,14 @@ def request_cancel(target: Path, run_id: str, *, requested_by: str = "operator")
         path = run_directory / RESEARCH_ARTIFACT
         current = _read_json(path)
         if current is None:
-            if path.is_file():
-                raise ValueError(f"research artifact unreadable or not an object: {path}")
-            current = {}
+            raise ValueError(f"research artifact unreadable or not an object: {path}")
         run_payload = _read_json(run_directory / "run.json") or {}
         terminal_statuses = {"completed", "failed", "cancelled"}
         research_status = str(current.get("status") or "")
         run_status = str(run_payload.get("status") or "")
         if research_status in terminal_statuses or run_status in terminal_statuses:
             # Refuse to split receipts: terminal runs are a truthful no-op.
-            return current if current.get("run_id") else read_research(target, run_id)
+            return current
         if current.get("cancel_requested_at"):
             # Idempotent: keep the original stamp and requester.
             sidecar = current
@@ -513,20 +512,18 @@ def request_cancel(target: Path, run_id: str, *, requested_by: str = "operator")
             current["updated_at"] = now
             sidecar = receipt_schema.stamp_research_sidecar(current)
             localio.write_json(path, sidecar)
-    if not runguard.has_active_run_owner(target, run_directory):
-        # Re-check terminal under the same truthfulness rule after the stamp.
-        refreshed = read_research(target, run_id)
-        if str(refreshed.get("status") or "") in {"completed", "failed", "cancelled"}:
-            return refreshed
-        aboyeur.record_run_termination(
-            run_directory,
-            status="cancelled",
-            failure_phase=str(sidecar.get("current_phase") or "run"),
-            failure_kind="operator-cancelled",
-            detail="cancel requested with no live owner",
-        )
-        update_research(target, run_id, status="cancelled")
-    return read_research(target, run_id)
+        if not runguard.has_active_run_owner(target, run_directory):
+            if str(sidecar.get("status") or "") in terminal_statuses:
+                return sidecar
+            aboyeur.record_run_termination(
+                run_directory,
+                status="cancelled",
+                failure_phase=str(sidecar.get("current_phase") or "run"),
+                failure_kind="operator-cancelled",
+                detail="cancel requested with no live owner",
+            )
+            return update_research(target, run_id, status="cancelled")
+        return sidecar
 
 
 def _artifact_path_and_digest(artifact: Any) -> tuple[str | None, str | None]:

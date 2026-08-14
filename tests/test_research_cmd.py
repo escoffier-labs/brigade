@@ -2789,6 +2789,81 @@ def _patch_receipt_write_failure(monkeypatch, *, exc, persistent: bool) -> dict[
     return state
 
 
+def test_run_acquires_lock_before_creating_or_updating_run_state(monkeypatch, tmp_path: Path) -> None:
+    from contextlib import contextmanager
+    from brigade import runguard
+
+    (tmp_path / "a.md").write_text("plants use light")
+    patch_stub_lanes(monkeypatch)
+    writes: list[tuple[str, bool]] = []
+    lock_held = False
+    real_create = registry.create_standard_run
+    real_update = registry.update_research
+
+    @contextmanager
+    def observed_run_lock(*_args, **_kwargs):
+        nonlocal lock_held
+        lock_held = True
+        try:
+            yield tmp_path / ".brigade" / "run.lock"
+        finally:
+            lock_held = False
+
+    def create_standard_run(*args, **kwargs):
+        writes.append(("create_standard_run", lock_held))
+        return real_create(*args, **kwargs)
+
+    def update_research(*args, **kwargs):
+        writes.append(("update_research", lock_held))
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(runguard, "run_lock", observed_run_lock)
+    monkeypatch.setattr(registry, "create_standard_run", create_standard_run)
+    monkeypatch.setattr(registry, "update_research", update_research)
+
+    research_cmd.run(
+        target=tmp_path,
+        question="q",
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1},
+        run_id="lock-before-state",
+    )
+
+    assert writes
+    assert all(held for _operation, held in writes)
+
+
+def test_cli_run_prelock_receipt_failure_is_a_typed_cli_error(monkeypatch, tmp_path: Path, capsys) -> None:
+    from brigade import run_lifecycle
+    from brigade.research import registry as registry_mod
+
+    def fail_record_run_start(*_args, **_kwargs) -> None:
+        raise run_lifecycle.LifecycleJournalError("authoritative run prior gate not ready")
+
+    monkeypatch.setattr(research_cmd, "_new_run_id", lambda _question: "prelock-receipt-failure")
+    monkeypatch.setattr(registry_mod.aboyeur, "record_run_start", fail_record_run_start)
+
+    code = cli_run(
+        target=tmp_path,
+        question="q",
+        corpus=None,
+        sources=[],
+        web=False,
+        overrides={"max_rounds": 1},
+        json_output=True,
+    )
+
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert code == 1
+    assert payload["run_id"] == "prelock-receipt-failure"
+    assert payload["status"] == "failed"
+    assert payload["failure_phase"] == "admission"
+    assert payload["failure_kind"] == "lifecycle-journal"
+    assert "Traceback" not in output.out + output.err
+
+
 def test_cli_run_oneshot_lifecycle_receipt_failure_is_safe(monkeypatch, tmp_path: Path, capsys) -> None:
     from brigade import run_lifecycle
 
