@@ -8,9 +8,7 @@ from typing import Any, Dict, List, Literal, Protocol
 Trust = Literal["local", "web", "cli", "browser", "browser-ai"]
 Origin = Literal["local", "repository", "indexed-cli", "web", "browser-ai"]
 Status = Literal["running", "done", "cancelled", "error"]
-ResearchPhase = Literal[
-    "planning", "discovery", "extraction", "synthesis", "review", "repair", "publishing"
-]
+ResearchPhase = Literal["planning", "discovery", "extraction", "synthesis", "review", "repair", "publishing"]
 
 
 @dataclass(frozen=True)

@@ -76,6 +76,7 @@ Thumbs.db
 
 # scratch
 /scratch/
+/error.log
 *.bak
 *.tmp
 

@@ -26,9 +26,7 @@ def _provider(response: str) -> tuple[BrowserAiProvider, FakeBackend]:
 
 
 def test_browser_ai_provider_returns_untrusted_sources() -> None:
-    provider, _backend = _provider(
-        '[{"url":"https://example.test/a","title":"A","snippet":"Claim A"}]'
-    )
+    provider, _backend = _provider('[{"url":"https://example.test/a","title":"A","snippet":"Claim A"}]')
 
     hits = provider.search("query", limit=3)
     page = provider.fetch(hits[0]["url"])
@@ -40,9 +38,7 @@ def test_browser_ai_provider_returns_untrusted_sources() -> None:
 
 
 def test_fetch_does_not_call_backend_again() -> None:
-    provider, backend = _provider(
-        '[{"url":"https://example.test/a","title":"A","snippet":"Claim A"}]'
-    )
+    provider, backend = _provider('[{"url":"https://example.test/a","title":"A","snippet":"Claim A"}]')
 
     hits = provider.search("query", limit=1)
     assert backend.calls == 1
@@ -57,17 +53,20 @@ def test_fetch_does_not_call_backend_again() -> None:
         ("not-json", "invalid JSON"),
         ('{"url":"https://example.test/a"}', "invalid result count"),
         (
-            json.dumps(
-                [
-                    {"url": f"https://example.test/{i}", "title": "T", "snippet": "S"}
-                    for i in range(3)
-                ]
-            ),
+            json.dumps([{"url": f"https://example.test/{i}", "title": "T", "snippet": "S"} for i in range(3)]),
             "invalid result count",
         ),
         ('["not-an-object"]', "must be an object"),
         (
             '[{"url":"https://example.test/a","title":"A","snippet":""}]',
+            "missing url, title, or snippet",
+        ),
+        (
+            '[{"url":null,"title":"A","snippet":"S"}]',
+            "missing url, title, or snippet",
+        ),
+        (
+            '[{"url":"https://example.test/a","title":123,"snippet":"S"}]',
             "missing url, title, or snippet",
         ),
         (
@@ -83,9 +82,7 @@ def test_fetch_does_not_call_backend_again() -> None:
             "must use https",
         ),
         (
-            json.dumps(
-                [{"url": "https://example.test/a", "title": "A", "snippet": "x" * 12001}]
-            ),
+            json.dumps([{"url": "https://example.test/a", "title": "A", "snippet": "x" * 12001}]),
             "exceeds 12000",
         ),
     ],

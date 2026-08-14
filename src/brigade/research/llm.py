@@ -71,9 +71,7 @@ def resolve_lane(
     first. Authentication is not checked at admission.
     """
     if candidates:
-        selected = tuple(
-            name for name in candidates if name in roster.agents and roster.agents[name].supports(phase)
-        )
+        selected = tuple(name for name in candidates if name in roster.agents and roster.agents[name].supports(phase))
         if not selected:
             raise NoResearcherError(f"no profile candidate supports {phase}")
         return ResolvedLane(

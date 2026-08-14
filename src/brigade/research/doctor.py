@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .. import agents
+from .. import proc
 from .. import roster as roster_mod
 from ..roster import Agent, Roster
 from . import config as rconfig
@@ -16,6 +17,8 @@ from .llm import NoResearcherError, resolve_lane
 
 SCHEMA = "brigade.research.doctor.v1"
 SCHEMA_VERSION = 1
+_VERSION_PROBE_TIMEOUT = 2.0
+_VERSION_PROBE_MAX_LEN = 120
 
 FIXED_CAPABILITIES: tuple[str, ...] = (
     "research.plan",
@@ -86,6 +89,32 @@ def _redact_value(value: object) -> object:
     return value
 
 
+def _first_concise_line(text: str) -> str | None:
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if len(line) > _VERSION_PROBE_MAX_LEN:
+            line = line[:_VERSION_PROBE_MAX_LEN].rstrip()
+        return line or None
+    return None
+
+
+def _probe_executable_version(executable: str) -> str | None:
+    """Bounded read-only ``--version`` probe. Never raises; never hangs."""
+    try:
+        result = proc.run([executable, "--version"], timeout=_VERSION_PROBE_TIMEOUT)
+    except Exception:
+        return None
+    if result.code != 0:
+        return None
+    raw = _first_concise_line(result.stdout) or _first_concise_line(result.stderr)
+    if raw is None:
+        return None
+    redacted = _redact_text(raw).strip()
+    return redacted or None
+
+
 def probe_agent(agent: Agent) -> dict[str, object]:
     """Read-only executable and adapter health probe for one seat."""
     cli_ref = agent.cli or ""
@@ -103,6 +132,7 @@ def probe_agent(agent: Agent) -> dict[str, object]:
         auth_status = "missing"
         detail = f"{cli_ref} executable not found on PATH"
     else:
+        version = _probe_executable_version(executable)
         capability = roster_mod.HostCapabilityProbe().lookup(cli_ref)
         detail = capability.detail or capability.auth_detail or f"{cli_ref} via {command}"
         if capability.authenticated is True:

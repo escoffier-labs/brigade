@@ -32,11 +32,30 @@ def test_status_transitions(tmp_path: Path):
     rid = registry.create_run(tmp_path, question="q", run_id="20260602-100002-q", caps={})
     registry.set_status(tmp_path, rid, "cancelled")
     assert registry.show_run(tmp_path, rid)["status"] == "cancelled"
-    registry.finish_run(
-        tmp_path, rid, status="done", stats={"rounds": 3}, artifacts={"report_html": "report.html"}
-    )
+    registry.finish_run(tmp_path, rid, status="done", stats={"rounds": 3}, artifacts={"report_html": "report.html"})
     rec = registry.show_run(tmp_path, rid)
     assert rec["status"] == "done" and rec["stats"]["rounds"] == 3
+
+
+def test_update_phase_selective_reset_preserves_repair_and_clears_publishing(
+    tmp_path: Path,
+) -> None:
+    run_id = registry.create_run(tmp_path, question="q", run_id="phase-reset-repair", caps={})
+    registry.update_phase(tmp_path, run_id, "repair", status="completed", reset_downstream=False)
+    registry.update_phase(tmp_path, run_id, "publishing", status="completed", reset_downstream=False)
+
+    registry.update_phase(
+        tmp_path,
+        run_id,
+        "review",
+        status="running",
+        reset_downstream=["publishing"],
+    )
+
+    phases = registry.show_run(tmp_path, run_id)["phases"]
+    assert phases["repair"]["status"] == "completed"
+    assert phases["publishing"]["status"] == "pending"
+    assert phases["review"]["status"] == "running"
 
 
 def test_update_research_fails_closed_on_corrupt_artifact(tmp_path: Path) -> None:

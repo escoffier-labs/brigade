@@ -119,6 +119,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_research_resume.add_argument(
         "--max-time", type=int, default=None, dest="max_time", help="Wall-clock budget in seconds (max_time)."
     )
+    p_research_resume.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Keep at most the durable plan and repeat discovery plus downstream phases.",
+    )
     p_research_resume.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_research_open = research_sub.add_parser("open", help="Print the HTML report path for a local research run.")
     p_research_open.add_argument("run_id", help="Run id.")
@@ -222,7 +227,11 @@ def dispatch(args) -> int:
     if args.research_command == "resume":
         overrides = {"max_rounds": args.rounds, "max_time": args.max_time}
         return research_cmd.cli_resume(
-            target=args.target, run_id=args.run_id, overrides=overrides, json_output=args.json
+            target=args.target,
+            run_id=args.run_id,
+            overrides=overrides,
+            json_output=args.json,
+            refresh=bool(args.refresh),
         )
     if args.research_command == "open":
         return research_cmd.cli_open(target=args.target, run_id=args.run_id, json_output=args.json)

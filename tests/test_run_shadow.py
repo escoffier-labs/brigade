@@ -361,7 +361,7 @@ def test_unmapped_event_type_records_projection_error(enabled, tmp_path):
         run_journal.append_event(
             _journal_path(run_dir),
             run_id=_RUN_ID,
-            event_type="run.recovery.started",
+            event_type="run.recovery.completed",
             payload={"detail": "recovering"},
             idempotency_key="lifecycle:recovery-test",
             expected_previous_sequence=report.events[-1].sequence,

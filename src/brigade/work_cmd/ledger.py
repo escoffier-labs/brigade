@@ -4395,12 +4395,15 @@ def _write_plan_artifact(
                     file=sys.stderr,
                 )
                 return 1
-            audit_ref = artifacts.get("citation_audit")
-            audit = (
-                registry.read_verified_artifact(target, from_research, audit_ref)
-                if audit_ref
-                else None
-            )
+            artifact_refs = rec.get("artifact_refs") if isinstance(rec.get("artifact_refs"), dict) else {}
+            audit_ref = artifact_refs.get("citation_audit")
+            if audit_ref is None:
+                # Legacy/test shape may still store a digest ref under artifacts.
+                # Never pass a plain artifact name to read_verified_artifact.
+                candidate = artifacts.get("citation_audit")
+                if isinstance(candidate, dict) and isinstance(candidate.get("digest"), str):
+                    audit_ref = candidate
+            audit = registry.read_verified_artifact(target, from_research, audit_ref) if audit_ref else None
             accepted = bool(getattr(audit, "accepted", False)) if audit is not None else False
             unresolved = tuple(getattr(audit, "unresolved", ()) or ()) if audit is not None else ()
             if audit is None or not accepted or unresolved:

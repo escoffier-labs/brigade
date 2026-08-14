@@ -3,7 +3,7 @@
 ## Status
 
 - Design approved: 2026-08-13
-- Implementation: planned in
+- Implementation: complete in
   `docs/phase-first-class-multi-lane-research-implementation.md`
 - Dashboard: explicitly deferred to Phase 5
 - Supersedes the narrow scope in `docs/phase-oracle-browser-researcher.md`

@@ -427,8 +427,102 @@ def test_probe_agent_is_read_only_and_marks_oracle_unauth(monkeypatch) -> None:
 
     monkeypatch.setattr(doctor_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(doctor_mod.roster_mod, "HostCapabilityProbe", FakeProbe)
+    monkeypatch.setattr(
+        doctor_mod.proc,
+        "run",
+        lambda *_args, **_kwargs: doctor_mod.proc.Result(0, "oracle 9.9.9\n", ""),
+    )
     agent = Agent(name="gemini_browser", cli="oracle", role="browser researcher")
     result = doctor_mod.probe_agent(agent)
     assert result["auth_status"] == "unauthenticated"
     assert result["failure_kind"] == "browser-auth"
+    assert result["version"] == "oracle 9.9.9"
     assert calls == [("lookup", "oracle")]
+
+
+def test_probe_agent_reports_executable_version(monkeypatch) -> None:
+    from brigade.research import doctor as doctor_mod
+
+    class FakeCapability:
+        authenticated = True
+        detail = "codex ok"
+        auth_detail = ""
+
+    class FakeProbe:
+        def lookup(self, cli_ref: str):
+            return FakeCapability()
+
+    runs: list[object] = []
+
+    def fake_run(args, **kwargs):
+        runs.append((list(args), kwargs.get("timeout")))
+        return doctor_mod.proc.Result(0, "\n  codex-cli 1.2.3\nextra\n", "")
+
+    monkeypatch.setattr(doctor_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(doctor_mod.roster_mod, "HostCapabilityProbe", FakeProbe)
+    monkeypatch.setattr(doctor_mod.proc, "run", fake_run)
+    agent = Agent(name="luna", cli="codex", role="researcher")
+    result = doctor_mod.probe_agent(agent)
+    assert result["auth_status"] == "authenticated"
+    assert result["version"] == "codex-cli 1.2.3"
+    assert runs == [(["/usr/bin/codex", "--version"], doctor_mod._VERSION_PROBE_TIMEOUT)]
+
+
+def test_probe_agent_version_stays_none_when_probe_fails(monkeypatch) -> None:
+    from brigade.research import doctor as doctor_mod
+
+    class FakeCapability:
+        authenticated = True
+        detail = "codex ok"
+        auth_detail = ""
+
+    class FakeProbe:
+        def lookup(self, cli_ref: str):
+            return FakeCapability()
+
+    monkeypatch.setattr(doctor_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(doctor_mod.roster_mod, "HostCapabilityProbe", FakeProbe)
+    monkeypatch.setattr(
+        doctor_mod.proc,
+        "run",
+        lambda *_args, **_kwargs: doctor_mod.proc.Result(124, "", "timeout after 2.0s"),
+    )
+    agent = Agent(name="luna", cli="codex", role="researcher")
+    result = doctor_mod.probe_agent(agent)
+    assert result["auth_status"] == "authenticated"
+    assert result["version"] is None
+    assert "failure_kind" not in result
+
+
+def test_probe_agent_redacts_version_output(monkeypatch) -> None:
+    from brigade.research import doctor as doctor_mod
+
+    class FakeCapability:
+        authenticated = False
+        detail = "oracle probe"
+        auth_detail = "expired cookie"
+
+    class FakeProbe:
+        def lookup(self, cli_ref: str):
+            return FakeCapability()
+
+    monkeypatch.setattr(doctor_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(doctor_mod.roster_mod, "HostCapabilityProbe", FakeProbe)
+    monkeypatch.setattr(
+        doctor_mod.proc,
+        "run",
+        lambda *_args, **_kwargs: doctor_mod.proc.Result(
+            0,
+            "oracle /home/alice/.config/browser Bearer abcdef token=sekrit\n",
+            "",
+        ),
+    )
+    agent = Agent(name="gemini_browser", cli="oracle", role="browser researcher")
+    result = doctor_mod.probe_agent(agent)
+    assert result["auth_status"] == "unauthenticated"
+    assert result["failure_kind"] == "browser-auth"
+    version = str(result["version"])
+    assert "/home/" not in version
+    assert "Bearer " not in version
+    assert "sekrit" not in version
+    assert "[redacted]" in version

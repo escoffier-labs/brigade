@@ -47,7 +47,12 @@ class BrowserAiProvider:
             url = item.get("url")
             title = item.get("title")
             snippet = item.get("snippet")
-            if not all(isinstance(value, str) and value.strip() for value in (url, title, snippet)):
+            # Narrow each field individually so mypy sees str (all() does not narrow).
+            if not isinstance(url, str) or not url.strip():
+                raise BrowserAiDiscoveryError("browser AI discovery result is missing url, title, or snippet")
+            if not isinstance(title, str) or not title.strip():
+                raise BrowserAiDiscoveryError("browser AI discovery result is missing url, title, or snippet")
+            if not isinstance(snippet, str) or not snippet.strip():
                 raise BrowserAiDiscoveryError("browser AI discovery result is missing url, title, or snippet")
             parsed_url = urlparse(url)
             if parsed_url.scheme != "https" or not parsed_url.hostname:

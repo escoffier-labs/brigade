@@ -5,11 +5,12 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from ..run_budget import BudgetPolicyError
 from ..run_lifecycle import LifecycleJournalError
@@ -102,12 +103,21 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+class PhaseStartedCallback(Protocol):
+    def __call__(
+        self,
+        phase: str,
+        *,
+        reset_downstream: bool | Sequence[str] | None = None,
+    ) -> None: ...
+
+
 @dataclass
 class ResearchEngine:
     lanes: ResearchLanes
     sources: list[Any]
     caps: Caps
-    on_phase_started: Callable[[str], None] | None = None
+    on_phase_started: PhaseStartedCallback | None = None
     on_phase_completed: Callable[[str, dict[str, Any]], None] | None = None
     persist_sources: Callable[[tuple[SourceEnvelope, ...]], Any] | None = None
     persist_findings: Callable[[tuple[Finding, ...]], Any] | None = None
@@ -164,10 +174,19 @@ class ResearchEngine:
             self._check_cancel("review")
             if not audit.accepted or not review.accepted:
                 self._ensure_time("repair")
-                report = self._repair_once(question, report, findings, audit, review)
+                report, repair_attempt_id = self._repair_once(question, report, findings, audit, review)
                 self._check_cancel("repair")
                 audit = audit_citations(report, findings)
-                review = self._review(question, report, findings, audit, synthesis.attempt_id)
+                # Second review must stay independent of the repair generation and
+                # must not erase the completed repair phase entry.
+                review = self._review(
+                    question,
+                    report,
+                    findings,
+                    audit,
+                    repair_attempt_id,
+                    reset_downstream=("publishing",),
+                )
                 self._check_cancel("review")
         if not audit.accepted or not review.accepted:
             raise ResearchRunError("review", "review-rejected", review.detail or "citation audit or review rejected")
@@ -188,9 +207,7 @@ class ResearchEngine:
             return resume.plan
         return self._plan(question)
 
-    def _resume_or_discover(
-        self, question: str, plan: str, resume: ResumeState | None
-    ) -> tuple[SourceEnvelope, ...]:
+    def _resume_or_discover(self, question: str, plan: str, resume: ResumeState | None) -> tuple[SourceEnvelope, ...]:
         if resume is not None and resume.sources is not None:
             return resume.sources
         return self._discover(question, plan)
@@ -319,11 +336,7 @@ class ResearchEngine:
             envelopes: list[SourceEnvelope] = []
             local_seen: set[str] = set()
             trust_hint = self._normalize_trust(getattr(provider, "trust", "web"))
-            limit = (
-                self.caps.max_local_docs_per_round
-                if trust_hint == "local"
-                else self.caps.max_urls_per_round
-            )
+            limit = self.caps.max_local_docs_per_round if trust_hint == "local" else self.caps.max_urls_per_round
             for query in queries:
                 self._check_cancel("discovery")
                 for hit in provider.search(query, limit):
@@ -334,9 +347,7 @@ class ResearchEngine:
                     page = provider.fetch(url)
                     if not page.get("success") or not page.get("content"):
                         continue
-                    trust = self._normalize_trust(
-                        hit.get("trust") or getattr(provider, "trust", "web")
-                    )
+                    trust = self._normalize_trust(hit.get("trust") or getattr(provider, "trust", "web"))
                     # Bound before identity construction so source_id and
                     # content_digest describe exactly the stored content.
                     raw_content = str(page["content"])
@@ -359,10 +370,7 @@ class ResearchEngine:
         ordered: list[tuple[int, list[SourceEnvelope]]] = []
         workers = min(len(providers), 4)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(_provider_batch, index, provider): index
-                for index, provider in enumerate(providers)
-            }
+            futures = {pool.submit(_provider_batch, index, provider): index for index, provider in enumerate(providers)}
             for future in as_completed(futures):
                 self._check_cancel("discovery")
                 try:
@@ -435,9 +443,7 @@ class ResearchEngine:
         )
         return result
 
-    def _synthesize_with_fallback(
-        self, question: str, findings: tuple[Finding, ...]
-    ) -> tuple[str, SynthesisRecord]:
+    def _synthesize_with_fallback(self, question: str, findings: tuple[Finding, ...]) -> tuple[str, SynthesisRecord]:
         self._phase_start("synthesis")
         synthesizers = self.lanes.synthesizers
         if not synthesizers:
@@ -497,9 +503,11 @@ class ResearchEngine:
         report: str,
         findings: tuple[Finding, ...],
         audit: CitationAudit,
-        synthesis_attempt_id: str,
+        generation_attempt_id: str,
+        *,
+        reset_downstream: bool | Sequence[str] | None = None,
     ) -> ReviewResult:
-        self._phase_start("review")
+        self._phase_start("review", reset_downstream=reset_downstream)
         packet = self._finding_packet(question, findings)
         prompt = REVIEW_PROMPT.format(
             q=question,
@@ -530,11 +538,11 @@ class ResearchEngine:
         if not all(isinstance(item, (str, int, float, bool)) for item in rejected_raw):
             raise ResearchRunError("review", "invalid-json", "reviewer returned invalid JSON")
         attempt_id = getattr(self.lanes.reviewer, "last_attempt_id", None) or "review:unknown"
-        if attempt_id == synthesis_attempt_id:
+        if attempt_id == generation_attempt_id:
             raise ResearchRunError(
                 "review",
                 "same-attempt",
-                "review attempt_id must differ from synthesis attempt_id",
+                "review attempt_id must differ from the preceding generation attempt_id",
             )
         result = ReviewResult(
             accepted=accepted,
@@ -572,7 +580,7 @@ class ResearchEngine:
         findings: tuple[Finding, ...],
         audit: CitationAudit,
         review: ReviewResult,
-    ) -> str:
+    ) -> tuple[str, str]:
         self._phase_start("repair")
         backend = self._synthesis_backend or self.lanes.synthesizers[0]
         packet = self._finding_packet(question, findings)
@@ -596,11 +604,17 @@ class ResearchEngine:
             self._check_cancel("repair")
             raise ResearchRunError("repair", exc.failure_kind, str(exc)) from exc
         self._check_cancel("repair")
+        attempt_id = getattr(backend, "last_attempt_id", None) or f"{backend.seat}:repair"
         artifact: Any = "report.draft.md"
         if self.persist_draft_report is not None:
             artifact = self.persist_draft_report(repaired)
-        self._phase_done("repair", artifact=artifact, digest=_digest(repaired))
-        return repaired
+        self._phase_done(
+            "repair",
+            artifact=artifact,
+            digest=_digest(repaired),
+            attempt_id=attempt_id,
+        )
+        return repaired, attempt_id
 
     def _wrap_model_output(self, text: str) -> str:
         # Synthesized/reviewed model text must stay fully available for the next
@@ -618,9 +632,7 @@ class ResearchEngine:
             kind = _TRUST_KIND[finding.trust]
             summary = wrap_untrusted(finding.summary, source_kind=kind, goal=question)
             evidence = wrap_untrusted(finding.evidence, source_kind=kind, goal=question)
-            blocks.append(
-                f"{token}\nsummary:\n{summary}\nevidence:\n{evidence}"
-            )
+            blocks.append(f"{token}\nsummary:\n{summary}\nevidence:\n{evidence}")
         return "\n\n".join(blocks) if blocks else "(no findings)"
 
     def _discovery_queries(self, question: str, plan: str) -> list[str]:
@@ -661,18 +673,22 @@ class ResearchEngine:
         if self._cancelled or (self.cancelled is not None and self.cancelled.is_set()):
             raise ResearchRunError(phase, "cancelled", "research run cancelled")
 
-    def _phase_start(self, phase: str) -> None:
+    def _phase_start(
+        self,
+        phase: str,
+        *,
+        reset_downstream: bool | Sequence[str] | None = None,
+    ) -> None:
         self._active_phase = phase
-        if self.on_phase_started is not None:
-            self.on_phase_started(phase)
+        if self.on_phase_started is None:
+            return
+        self.on_phase_started(phase, reset_downstream=reset_downstream)
 
     def _phase_done(self, phase: str, **artifacts: Any) -> None:
         if self.on_phase_completed is not None:
             self.on_phase_completed(phase, artifacts)
 
-    def _stats(
-        self, findings: tuple[Finding, ...], sources: tuple[SourceEnvelope, ...]
-    ) -> dict[str, Any]:
+    def _stats(self, findings: tuple[Finding, ...], sources: tuple[SourceEnvelope, ...]) -> dict[str, Any]:
         return {
             "rounds": self._rounds,
             "findings": len(findings),

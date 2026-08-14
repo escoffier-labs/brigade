@@ -17,9 +17,7 @@ def _envelope(*, origin, provider, uri, trust, content="body") -> SourceEnvelope
 def test_handoff_is_standard_no_card_document_handoff(tmp_path):
     local = _envelope(origin="local", provider="local", uri="/n/a.md", trust="local")
     cli = _envelope(origin="indexed-cli", provider="cli", uri="cli://tool/abc", trust="cli")
-    browser = _envelope(
-        origin="web", provider="playwright", uri="https://browser.example", trust="browser"
-    )
+    browser = _envelope(origin="web", provider="playwright", uri="https://browser.example", trust="browser")
     web = _envelope(origin="web", provider="web", uri="http://e.com", trust="web")
     browser_ai = _envelope(
         origin="browser-ai",

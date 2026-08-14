@@ -560,16 +560,21 @@ def seed_completed_standard_research_run(target):
         ),
     )
     localio.write_text_atomic(registry.standard_run_dir(target, run_id) / "report.md", "# Report\n")
+    # Production completion shape: plain names in artifacts, digest refs in artifact_refs.
     registry.update_research(
         target,
         run_id,
         review_result="accepted",
-        artifacts={"report_md": "report.md", "citation_audit": audit_ref},
+        artifacts={
+            "report_md": registry.REPORT_MD_ARTIFACT,
+            "citation_audit": registry.CITATION_AUDIT_ARTIFACT,
+        },
+        artifact_refs={"report_md": {"path": "report.md", "digest": "unused"}, "citation_audit": audit_ref},
     )
     aboyeur.update_run_receipt(
         registry.standard_run_dir(target, run_id),
         status="completed",
-        artifacts={"report_md": "report.md"},
+        artifacts={"report_md": registry.REPORT_MD_ARTIFACT},
     )
     return run_id
 
@@ -593,6 +598,28 @@ def test_plan_artifact_accepts_completed_standard_research_run(tmp_path: Path, c
     assert artifact["kind"] == "research"
     assert artifact["trust"] == "mixed-provenance"
     assert artifact["citation_audit"] == "accepted"
+
+
+def test_plan_artifact_prefers_artifact_refs_over_plain_artifact_names(tmp_path: Path, capsys) -> None:
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    rec = registry.show_run(tmp_path, run_id)
+    assert rec is not None
+    assert rec["artifacts"]["citation_audit"] == registry.CITATION_AUDIT_ARTIFACT
+    assert isinstance(rec["artifact_refs"]["citation_audit"], dict)
+    assert "digest" in rec["artifact_refs"]["citation_audit"]
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    assert code == 0
+    capsys.readouterr()
 
 
 def test_plan_artifact_rejects_active_standard_research_run(tmp_path, capsys) -> None:

@@ -8,6 +8,7 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Sequence
 from threading import Event, Thread
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
@@ -34,6 +35,43 @@ from .research.types import (
 from .roster import Agent
 from .run_budget import BudgetCoordinator, BudgetPolicyError, RunBudgetDeclaration
 from .selection import WRITER_INBOXES
+
+
+class ResearchCommandFailure(Exception):
+    """Typed safe boundary for receipt-write lifecycle failures.
+
+    Raised instead of letting LifecycleJournalError / RetainRunLockError escape
+    to the CLI as a traceback. Callers must not mutate authoritative run.json
+    after the failed gate; diagnostics stay concise and path-safe.
+    """
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        failure_kind: str,
+        detail: str,
+        failure_phase: str = "admission",
+        status: str = "failed",
+        exit_code: int = 1,
+    ) -> None:
+        super().__init__(detail)
+        self.run_id = run_id
+        self.failure_kind = failure_kind
+        self.detail = detail
+        self.failure_phase = failure_phase
+        self.status = status
+        self.exit_code = exit_code
+
+    def diagnostic_payload(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "status": self.status,
+            "failure_kind": self.failure_kind,
+            "failure_phase": self.failure_phase,
+            "detail": self.detail,
+            "blockers": [self.detail],
+        }
 
 
 def _dict_or_empty(value: object) -> dict[str, Any]:
@@ -598,6 +636,7 @@ def _phase_graph_update(
     artifact: Any | None = None,
     value: Any | None = None,
     extra: dict[str, Any] | None = None,
+    reset_downstream: bool | Sequence[str] | None = None,
 ) -> None:
     registry.update_phase(
         target,
@@ -607,6 +646,7 @@ def _phase_graph_update(
         artifact=artifact,
         value=value,
         extra=extra,
+        reset_downstream=reset_downstream,
     )
 
 
@@ -705,7 +745,161 @@ def _resolve_lanes(
 def _operator_safe_detail(detail: str) -> str:
     from .worker_failure import safe_detail
 
-    return safe_detail(detail)
+    return _sanitize_projection_text(safe_detail(detail))
+
+
+def _receipt_write_command_failure(
+    exc: BaseException, *, run_id: str, phase: str = "admission"
+) -> ResearchCommandFailure:
+    """Convert a receipt-write lifecycle failure into a typed safe CLI boundary."""
+    from . import run_lifecycle, runguard
+
+    if isinstance(exc, runguard.RetainRunLockError):
+        kind = "run-lock"
+        detail = "research receipt write retained the run lock"
+    elif isinstance(exc, run_lifecycle.LifecycleJournalError):
+        kind = "lifecycle-journal"
+        detail = "research receipt write failed the lifecycle journal gate"
+    else:
+        kind = "lifecycle-journal"
+        detail = "research receipt write failed"
+    raw = _operator_safe_detail(str(exc))
+    if raw and raw not in detail:
+        detail = f"{detail}: {raw}"
+    return ResearchCommandFailure(
+        run_id=run_id,
+        failure_kind=kind,
+        failure_phase=phase,
+        detail=detail,
+        exit_code=1,
+    )
+
+
+def _emit_command_failure(failure: ResearchCommandFailure, *, json_output: bool) -> int:
+    payload = _sanitize_projection_value(failure.diagnostic_payload())
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"research command failed: {failure.run_id}")
+        print(f"status: {failure.status}")
+        print(f"failure_kind: {failure.failure_kind}")
+        print(f"detail: {failure.detail}")
+    return failure.exit_code
+
+
+def _backend_seat(backend: Any) -> str:
+    seat = getattr(backend, "seat", None)
+    if isinstance(seat, str) and seat:
+        return seat
+    lane = getattr(backend, "lane", None)
+    if isinstance(lane, str) and lane:
+        return lane
+    return str(backend)
+
+
+def _lane_projection(primary: Any, fallbacks: tuple[Any, ...] = ()) -> dict[str, Any]:
+    return {
+        "primary": _backend_seat(primary),
+        "fallbacks": [_backend_seat(item) for item in fallbacks],
+    }
+
+
+def _resolved_lanes_projection(lanes: ResearchLanes) -> dict[str, Any]:
+    synthesizers = lanes.synthesizers
+    if not synthesizers:
+        raise ResearchRunError("admission", "no-synthesizer", "no synthesis seats configured")
+    payload: dict[str, Any] = {
+        "planning": _lane_projection(lanes.planner),
+        "extraction": _lane_projection(lanes.extractor),
+        "synthesis": _lane_projection(synthesizers[0], synthesizers[1:]),
+        "review": _lane_projection(lanes.reviewer),
+    }
+    if lanes.browser_discovery is not None:
+        payload["browser_discovery"] = _lane_projection(lanes.browser_discovery)
+    return payload
+
+
+def _persist_resolved_lanes(target: Path, run_id: str, lanes: ResearchLanes) -> None:
+    registry.update_research(target, run_id, resolved_lanes=_resolved_lanes_projection(lanes))
+
+
+def _source_counts(sources: tuple[SourceEnvelope, ...]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for source in sources:
+        key = str(source.trust or source.origin)
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _discovery_mode(*, browser_ai_enabled: bool, sources: tuple[SourceEnvelope, ...]) -> str:
+    if any(source.trust == "browser-ai" or source.origin == "browser-ai" for source in sources):
+        return "browser-ai"
+    if browser_ai_enabled:
+        return "browser-ai"
+    if not sources:
+        return "none"
+    # Prefer the first source's trust for a stable single-mode label when mixed.
+    return str(sources[0].trust or sources[0].origin)
+
+
+def _outcome_projection(
+    *,
+    lanes: ResearchLanes,
+    result: ResearchResult,
+    browser_ai_enabled: bool,
+) -> dict[str, Any]:
+    selected = next(
+        (backend for backend in lanes.synthesizers if _backend_seat(backend) == result.synthesis_seat),
+        None,
+    )
+    if selected is None and lanes.synthesizers:
+        selected = lanes.synthesizers[0]
+    synthesis = {
+        "seat": result.synthesis_seat,
+        "attempt_id": result.synthesis_attempt_id,
+        "requested_model": getattr(selected, "requested_model", None) if selected is not None else None,
+        "observed_model": (
+            str(getattr(selected, "observed_model", "unverified")) if selected is not None else "unverified"
+        ),
+    }
+    fallbacks = [
+        {
+            "phase": record.phase,
+            "from_seat": record.from_seat,
+            "to_seat": record.to_seat,
+            "failure_kind": record.failure_kind,
+            "detail": _operator_safe_detail(record.detail),
+        }
+        for record in result.fallbacks
+    ]
+    return {
+        "synthesis": synthesis,
+        "fallbacks": fallbacks,
+        "discovery_mode": _discovery_mode(
+            browser_ai_enabled=browser_ai_enabled,
+            sources=result.sources,
+        ),
+        "source_counts": _source_counts(result.sources),
+    }
+
+
+def _persist_outcome_projection(
+    target: Path,
+    run_id: str,
+    *,
+    lanes: ResearchLanes,
+    result: ResearchResult,
+    browser_ai_enabled: bool,
+) -> None:
+    registry.update_research(
+        target,
+        run_id,
+        **_outcome_projection(
+            lanes=lanes,
+            result=result,
+            browser_ai_enabled=browser_ai_enabled,
+        ),
+    )
 
 
 def _resolve_sources(target: Path, corpus: Optional[str], sources: List[str]) -> List[str]:
@@ -789,6 +983,20 @@ def _manifest(
     }
 
 
+def _profile_allows_discovery(profile: ResearchProfile, kind: str) -> bool:
+    """Whether a profile's discovery tuple admits a source route kind."""
+    allowed = set(profile.discovery)
+    if kind in {"local", "repository"}:
+        return bool(allowed & {"local", "repository", "brigade"})
+    if kind in {"cli", "indexed-cli"}:
+        return bool(allowed & {"brigade", "cli", "indexed-cli"})
+    if kind in {"web", "browser", "playwright"}:
+        return bool(allowed & {"brigade", "web", "browser", "playwright"})
+    if kind == "browser-ai":
+        return "browser-ai" in allowed
+    return False
+
+
 def run(
     *,
     target: Path,
@@ -806,27 +1014,32 @@ def run(
     category: Optional[str] = None,
     resume: ResumeState | None = None,
 ) -> str:
-    from . import runguard
+    from . import run_lifecycle, runguard
     from .proc import ProcessRegistry
 
     cfg = rconfig.load(target)
     research_profile = cfg.profile(profile)
-    # Only the explicit CLI flag or the built-in browser-ai profile may activate
-    # browser-AI discovery. Repo overlays on other profiles cannot.
-    browser_ai_enabled = bool(browser_ai_research) or research_profile.name == "browser-ai"
+    allows_local = _profile_allows_discovery(research_profile, "local")
+    allows_cli = _profile_allows_discovery(research_profile, "cli")
+    allows_web = _profile_allows_discovery(research_profile, "web")
+    allows_browser_ai = _profile_allows_discovery(research_profile, "browser-ai")
+    # Explicit CLI flag or browser-ai profile may activate browser-AI discovery when
+    # the profile admits brigade or browser-ai routes. local-only never does.
+    requested_browser_ai = bool(browser_ai_research) or research_profile.name == "browser-ai"
+    browser_ai_enabled = requested_browser_ai and (allows_browser_ai or "brigade" in research_profile.discovery)
     caps_kwargs = {**cfg.caps_overrides(), **{k: v for k, v in overrides.items() if v is not None}}
     caps_kwargs.pop("_resume", None)
     caps = Caps.build(**caps_kwargs)
     run_id = run_id or _new_run_id(question)
-    paths = _resolve_sources(target, corpus, sources)
-    cli_providers = clisrc.build_providers(cfg.source_adapters(), target=target)
+    paths = _resolve_sources(target, corpus, sources) if allows_local else []
+    cli_providers = clisrc.build_providers(cfg.source_adapters(), target=target) if allows_cli else []
     blockers: List[str] = []
     roster = _load_roster(target)
 
     index = localsrc.build_index(paths) if paths else None
 
     web_provider = None
-    if web:
+    if web and allows_web:
         from .research.sources import web as webmod
 
         try:
@@ -971,6 +1184,12 @@ def run(
             )
             if persisted_budget is not None:
                 declaration = declaration_from_persisted_artifact(persisted_budget)
+                # Advertise the same enforceable caps BudgetCoordinator will use.
+                if declaration.wall_clock_seconds is not None:
+                    caps.max_time = int(declaration.wall_clock_seconds)
+                if declaration.worker_dispatch_count is not None:
+                    caps.max_dispatches = int(declaration.worker_dispatch_count)
+                registry.update_research(target, run_id, caps=caps.__dict__.copy())
 
             coordinator = BudgetCoordinator(declaration=declaration, append_event=append_event)
             if started_at is not None:
@@ -1023,6 +1242,8 @@ def run(
             except Exception as e:
                 return _fail("failed", "admission", "invalid-seat", _operator_safe_detail(str(e)))
 
+            _persist_resolved_lanes(target, run_id, lanes)
+
             if browser_ai_enabled and not can_skip_sources:
                 try:
                     browser_provider = _resolve_browser_ai_provider(target, run_id=run_id, invoker=seat_invoker)
@@ -1034,6 +1255,15 @@ def run(
                         _operator_safe_detail(str(e)),
                     )
                 providers.append(browser_provider)
+                discovery_backend = getattr(browser_provider, "backend", browser_provider)
+                lanes = ResearchLanes(
+                    planner=lanes.planner,
+                    extractor=lanes.extractor,
+                    synthesizers=lanes.synthesizers,
+                    reviewer=lanes.reviewer,
+                    browser_discovery=discovery_backend,
+                )
+                _persist_resolved_lanes(target, run_id, lanes)
                 manifest = _manifest(
                     target=target,
                     cfg=cfg,
@@ -1052,8 +1282,18 @@ def run(
                 detail = "no local, CLI, web, or browser-AI source route available"
                 return _fail("failed", "admission", "no-source-route", detail)
 
-            def on_phase_started(phase: str) -> None:
-                _phase_graph_update(target, run_id, phase, status="running")
+            def on_phase_started(
+                phase: str,
+                *,
+                reset_downstream: bool | Sequence[str] | None = None,
+            ) -> None:
+                _phase_graph_update(
+                    target,
+                    run_id,
+                    phase,
+                    status="running",
+                    reset_downstream=reset_downstream,
+                )
                 registry.append_event(target, run_id, {"phase": phase, "status": "started"})
                 _persist_budget_projection(
                     target,
@@ -1173,6 +1413,13 @@ def run(
                 try:
                     if cancelled.is_set():
                         raise ResearchRunError("publishing", "cancelled", "research run cancelled")
+                    _persist_outcome_projection(
+                        target,
+                        run_id,
+                        lanes=lanes,
+                        result=result,
+                        browser_ai_enabled=browser_ai_enabled,
+                    )
                     artifacts = _publish_final_artifacts(
                         target,
                         run_id,
@@ -1218,6 +1465,12 @@ def run(
             finally:
                 watcher.stop()
                 watcher.join(timeout=1)
+    except ResearchCommandFailure:
+        raise
+    except (run_lifecycle.LifecycleJournalError, runguard.RetainRunLockError) as e:
+        # Receipt-write gates must not terminalize run.json after failing closed,
+        # and must not escape as a Python traceback from the CLI boundary.
+        raise _receipt_write_command_failure(e, run_id=run_id) from e
     except runguard.RunGuardError as e:
         return _fail("failed", "admission", "run-lock", _operator_safe_detail(str(e)))
 
@@ -1336,13 +1589,21 @@ def resume_legacy(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> st
     return result
 
 
-def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
+def resume(
+    *,
+    target: Path,
+    run_id: str,
+    overrides: Dict[str, Any],
+    refresh: bool = False,
+) -> str:
     from . import runguard
 
     rec = registry.show_run(target, run_id)
     if not rec:
         raise SystemExit(f"no such run: {run_id}")
     if rec.get("legacy"):
+        if refresh:
+            raise SystemExit("cannot refresh a legacy research run")
         return resume_legacy(target=target, run_id=run_id, overrides=overrides)
 
     status = str(rec.get("status") or "")
@@ -1352,12 +1613,23 @@ def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
     if runguard.has_active_run_owner(target, run_directory):
         raise SystemExit("cannot resume while a live owner holds the run lock")
     if status in {"failed", "cancelled", "running", "started", "error"} or not rec.get("finished_at"):
+        persisted_caps = _dict_or_empty(rec.get("caps"))
+        for key in ("max_time", "max_dispatches"):
+            if key in overrides and overrides[key] is not None and key in persisted_caps:
+                if overrides[key] != persisted_caps[key]:
+                    raise SystemExit(f"cannot override {key} on resume")
         state = resume_state(target, run_id)
+        if refresh:
+            # Escape hatch: keep at most the durable plan; repeat discovery+.
+            state = ResumeState(plan=state.plan)
         manifest = _dict_or_empty(rec.get("manifest"))
-        restored_overrides: Dict[str, Any] = {}
-        if isinstance(rec.get("caps"), dict):
-            restored_overrides.update(rec["caps"])
+        restored_overrides: Dict[str, Any] = dict(persisted_caps)
         restored_overrides.update({k: v for k, v in overrides.items() if v is not None})
+        # Enforce original wall-clock / dispatch caps even if a caller passed equals.
+        if "max_time" in persisted_caps:
+            restored_overrides["max_time"] = persisted_caps["max_time"]
+        if "max_dispatches" in persisted_caps:
+            restored_overrides["max_dispatches"] = persisted_caps["max_dispatches"]
         return run(
             target=target,
             question=str(rec.get("question") or ""),
@@ -1856,9 +2128,15 @@ _RESEARCH_INIT_TEMPLATE = (
 )
 _BROWSER_PROFILE_KEY_RE = re.compile(r"(?i)browser[_-]?profile")
 _ABS_HOME_PATH_RE = re.compile(r"/(?:home|Users)/[^\s\"']+")
+_CITATION_TOKEN_RE = re.compile(r"^\[source:src-[a-f0-9]{16}\]$")
 _SECRET_KEY_RE = re.compile(
-    r"(?i)(headers?|env|cookie|token|authorization|password|secret|api[_-]?key|browser[_-]?profile)"
+    r"(?i)("
+    r"headers?|env|cookie|authorization|password|secret|api[_-]?key|"
+    r"access[_-]?token|auth[_-]?token|api[_-]?token|refresh[_-]?token|id[_-]?token|"
+    r"openai_api_key|browser[_-]?profile"
+    r")"
 )
+_BARE_TOKEN_KEY_RE = re.compile(r"(?i)^token$")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _COOKIE_ASSIGN_RE = re.compile(r"(?i)\bcookie\s*[=:]\s*[^\s,;]+")
 
@@ -1876,7 +2154,10 @@ def _pinned_research_exit_code(rec: Mapping[str, Any]) -> int:
 
 
 def _is_projection_secret_key(key: object) -> bool:
-    return bool(_SECRET_KEY_RE.search(str(key)))
+    text = str(key)
+    if _BARE_TOKEN_KEY_RE.fullmatch(text):
+        return True
+    return bool(_SECRET_KEY_RE.search(text))
 
 
 def _sanitize_projection_text(value: str) -> str:
@@ -1889,6 +2170,10 @@ def _sanitize_projection_text(value: str) -> str:
 def _sanitize_projection_value(value: object, *, key: str | None = None) -> object:
     if key is not None and _BROWSER_PROFILE_KEY_RE.search(key):
         return None
+    if key is not None and _BARE_TOKEN_KEY_RE.fullmatch(key):
+        if isinstance(value, str) and _CITATION_TOKEN_RE.fullmatch(value):
+            return value
+        return "[redacted]"
     if key is not None and _is_projection_secret_key(key):
         return "[redacted]"
     if isinstance(value, Mapping):
@@ -1897,7 +2182,12 @@ def _sanitize_projection_value(value: object, *, key: str | None = None) -> obje
             key_text = str(item_key)
             if _BROWSER_PROFILE_KEY_RE.search(key_text):
                 continue
-            if _is_projection_secret_key(key_text):
+            if _BARE_TOKEN_KEY_RE.fullmatch(key_text):
+                if isinstance(item_value, str) and _CITATION_TOKEN_RE.fullmatch(item_value):
+                    cleaned[key_text] = item_value
+                else:
+                    cleaned[key_text] = "[redacted]"
+            elif _is_projection_secret_key(key_text):
                 cleaned[key_text] = "[redacted]"
             else:
                 cleaned[key_text] = _sanitize_projection_value(item_value, key=key_text)
@@ -1917,7 +2207,7 @@ def _status_run_projection(rec: Mapping[str, Any]) -> dict[str, object]:
     return _sanitize_projection_value(projected)  # type: ignore[return-value]
 
 
-def _status_payload(*, target: Path, runs: list[Mapping[str, Any]]) -> dict[str, object]:
+def _status_payload(*, target: Path, runs: Sequence[Mapping[str, Any]]) -> dict[str, object]:
     return {
         "schema": "brigade.research.status.v1",
         "schema_version": 1,
@@ -1950,16 +2240,29 @@ def _show_payload(*, target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[
         findings = _load_json_artifact(target, run_id, registry.FINDINGS_ARTIFACT)
         citation_audit = _load_json_artifact(target, run_id, registry.CITATION_AUDIT_ARTIFACT)
         artifacts = rec.get("artifacts") if isinstance(rec.get("artifacts"), Mapping) else {}
-        if findings is None and isinstance(artifacts, Mapping) and "findings" in artifacts:
-            loaded = registry.read_verified_artifact(target, run_id, artifacts.get("findings"))
-            if loaded is not None:
-                findings = {"findings": list(loaded)} if isinstance(loaded, tuple) else loaded
-        if citation_audit is None and isinstance(artifacts, Mapping) and "citation_audit" in artifacts:
-            loaded = registry.read_verified_artifact(target, run_id, artifacts.get("citation_audit"))
-            if is_dataclass(loaded):
-                citation_audit = asdict(loaded)
-            elif loaded is not None:
-                citation_audit = loaded
+        artifact_refs = rec.get("artifact_refs") if isinstance(rec.get("artifact_refs"), Mapping) else {}
+        if findings is None:
+            findings_ref = None
+            if isinstance(artifact_refs, Mapping) and "findings" in artifact_refs:
+                findings_ref = artifact_refs.get("findings")
+            elif isinstance(artifacts, Mapping) and isinstance(artifacts.get("findings"), dict):
+                findings_ref = artifacts.get("findings")
+            if findings_ref is not None:
+                loaded = registry.read_verified_artifact(target, run_id, findings_ref)
+                if loaded is not None:
+                    findings = {"findings": list(loaded)} if isinstance(loaded, tuple) else loaded
+        if citation_audit is None:
+            audit_ref = None
+            if isinstance(artifact_refs, Mapping) and "citation_audit" in artifact_refs:
+                audit_ref = artifact_refs.get("citation_audit")
+            elif isinstance(artifacts, Mapping) and isinstance(artifacts.get("citation_audit"), dict):
+                audit_ref = artifacts.get("citation_audit")
+            if audit_ref is not None:
+                loaded = registry.read_verified_artifact(target, run_id, audit_ref)
+                if is_dataclass(loaded) and not isinstance(loaded, type):
+                    citation_audit = asdict(loaded)
+                elif loaded is not None:
+                    citation_audit = loaded
     return {
         "schema": "brigade.research.show.v1",
         "schema_version": 1,
@@ -1975,9 +2278,6 @@ def cli_init(*, target: Path, profile: Optional[str] = None, json_output: bool =
 
     target = target.expanduser().resolve()
     path = target / ".brigade" / "research.toml"
-    if path.exists():
-        print(f"error: research config already exists: {path}", file=sys.stderr)
-        return 2
     selected = "grounded"
     if profile is not None:
         if profile not in BUILTIN_PROFILES:
@@ -1986,7 +2286,12 @@ def cli_init(*, target: Path, profile: Optional[str] = None, json_output: bool =
         selected = profile
     body = _RESEARCH_INIT_TEMPLATE.replace('default_profile = "grounded"', f'default_profile = "{selected}"', 1)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(body)
+    except FileExistsError:
+        print(f"error: research config already exists: {path}", file=sys.stderr)
+        return 2
     payload = {"path": str(path), "default_profile": selected, "created": True}
     if json_output:
         print(_json.dumps(payload, indent=2, sort_keys=True))
@@ -2005,7 +2310,7 @@ def cli_doctor(*, target: Path, profile: Optional[str] = None, json_output: bool
         print(f"research doctor: {target}")
         print(f"status: {payload.get('status')}")
         print(f"profile: {payload.get('profile')}")
-        for lane in payload.get("lanes", []):
+        for lane in _list_or_empty(payload.get("lanes")):
             if not isinstance(lane, Mapping):
                 continue
             print(
@@ -2032,20 +2337,23 @@ def cli_run(
     category: Optional[str] = None,
     json_output: bool = False,
 ) -> int:
-    rid = run(
-        target=target,
-        question=question,
-        corpus=corpus,
-        sources=sources,
-        web=web,
-        overrides=overrides,
-        provider=provider,
-        browser_ai_research=browser_ai_research,
-        profile=profile,
-        synthesizer=synthesizer,
-        reviewer=reviewer,
-        category=category,
-    )
+    try:
+        rid = run(
+            target=target,
+            question=question,
+            corpus=corpus,
+            sources=sources,
+            web=web,
+            overrides=overrides,
+            provider=provider,
+            browser_ai_research=browser_ai_research,
+            profile=profile,
+            synthesizer=synthesizer,
+            reviewer=reviewer,
+            category=category,
+        )
+    except ResearchCommandFailure as failure:
+        return _emit_command_failure(failure, json_output=json_output)
     rec = registry.show_run(target, rid) or {"run_id": rid}
     if json_output:
         print(_json.dumps(_sanitize_projection_value(rec), indent=2, sort_keys=True))
@@ -2071,7 +2379,7 @@ def cli_status(
             print(_json.dumps(payload, indent=2, sort_keys=True))
             return 0
         print(f"research runs: {target}")
-        for r in payload["runs"]:
+        for r in _list_or_empty(payload.get("runs")):
             if not isinstance(r, Mapping):
                 continue
             legacy = " legacy" if r.get("legacy") else ""
@@ -2180,13 +2488,29 @@ def cli_cancel(*, target: Path, run_id: str, json_output: bool = False) -> int:
     return 0
 
 
-def cli_resume(*, target: Path, run_id: str, overrides: Dict[str, Any], json_output: bool = False) -> int:
+def cli_resume(
+    *,
+    target: Path,
+    run_id: str,
+    overrides: Dict[str, Any],
+    json_output: bool = False,
+    refresh: bool = False,
+) -> int:
     try:
-        resume(target=target, run_id=run_id, overrides=overrides)
+        resume(target=target, run_id=run_id, overrides=overrides, refresh=refresh)
+    except ResearchCommandFailure as failure:
+        return _emit_command_failure(failure, json_output=json_output)
     except SystemExit as e:
         message = str(e)
         print(message)
-        if "completed" in message or "live owner" in message:
+        lowered = message.lower()
+        if (
+            "completed" in lowered
+            or "live owner" in lowered
+            or "cannot override" in lowered
+            or "cannot refresh" in lowered
+            or "legacy" in lowered
+        ):
             return 2
         return 1
     rec = registry.show_run(target, run_id) or {"run_id": run_id}

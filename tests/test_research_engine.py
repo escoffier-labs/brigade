@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -104,7 +105,7 @@ def fake_lanes(
     gemini_error: Exception | None = None,
     luna_report: str = f"Fallback [source:{FIXTURE_SOURCE_ID}]",
     repair_report: str | None = None,
-    review: str = "accepted",
+    review: str | list[str] = "accepted",
     extractor_response: str | None = None,
     synth_prompts: list[str] | None = None,
     review_prompts: list[str] | None = None,
@@ -112,13 +113,17 @@ def fake_lanes(
     synthesis_responses = [gemini_report]
     if repair_report is not None:
         synthesis_responses.append(repair_report)
-    review_payload = json.dumps(
-        {
-            "accepted": review == "accepted",
-            "detail": review,
-            "rejected_claims": [] if review == "accepted" else ["unsupported"],
-        }
-    )
+    review_outcomes = [review, review] if isinstance(review, str) else list(review)
+    review_payloads = [
+        json.dumps(
+            {
+                "accepted": outcome == "accepted",
+                "detail": outcome,
+                "rejected_claims": [] if outcome == "accepted" else ["unsupported"],
+            }
+        )
+        for outcome in review_outcomes
+    ]
     return ResearchLanes(
         planner=ScriptedBackend(
             seat="luna",
@@ -130,10 +135,7 @@ def fake_lanes(
             seat="luna",
             phase="extraction",
             calls=calls,
-            responses=[
-                extractor_response
-                or '{"summary":"Verified fact","evidence":"Verified fact"}'
-            ],
+            responses=[extractor_response or '{"summary":"Verified fact","evidence":"Verified fact"}'],
         ),
         synthesizers=(
             ScriptedBackend(
@@ -156,7 +158,7 @@ def fake_lanes(
             seat="luna",
             phase="review",
             calls=calls,
-            responses=[review_payload, review_payload],
+            responses=review_payloads,
             prompts=review_prompts,
         ),
     )
@@ -211,6 +213,122 @@ def test_second_review_rejection_fails_closed() -> None:
 
     assert caught.value.failure_phase == "review"
     assert caught.value.failure_kind == "review-rejected"
+
+
+def test_repaired_path_preserves_completed_repair_phase(tmp_path: Path) -> None:
+    from brigade.research import registry
+
+    run_id = registry.create_run(tmp_path, question="q", run_id="repair-preserve", caps={})
+    citation = f"[source:{FIXTURE_SOURCE_ID}]"
+    lanes = fake_lanes(
+        [],
+        gemini_report=f"Bad {citation}",
+        repair_report=f"Repaired answer {citation}",
+        review=["rejected", "accepted"],
+    )
+
+    def on_phase_started(phase: str, *, reset_downstream: bool | Sequence[str] | None = None) -> None:
+        registry.update_phase(
+            tmp_path,
+            run_id,
+            phase,
+            status="running",
+            reset_downstream=reset_downstream,
+        )
+
+    def on_phase_completed(phase: str, detail: dict[str, object]) -> None:
+        registry.update_phase(
+            tmp_path,
+            run_id,
+            phase,
+            status="completed",
+            artifact=detail.get("artifact"),
+            value=detail.get("value"),
+            extra={k: v for k, v in detail.items() if k not in {"artifact", "value"}},
+            reset_downstream=False,
+        )
+
+    # Leave a stale publishing completion so the second review must clear it.
+    registry.update_phase(tmp_path, run_id, "publishing", status="completed", reset_downstream=False)
+
+    ResearchEngine(
+        lanes=lanes,
+        sources=[fixed_source_provider()],
+        caps=Caps(max_rounds=1),
+        on_phase_started=on_phase_started,
+        on_phase_completed=on_phase_completed,
+    ).run("q")
+
+    phases = registry.show_run(tmp_path, run_id)["phases"]
+    assert phases["repair"]["status"] == "completed"
+    assert phases["review"]["status"] == "completed"
+    assert phases["publishing"]["status"] == "pending"
+
+
+def test_second_review_independence_uses_repair_attempt_id() -> None:
+    citation = f"[source:{FIXTURE_SOURCE_ID}]"
+    synth_attempt = "generation-synthesis-1"
+    repair_attempt = "generation-repair-1"
+    calls: list[tuple[str, str]] = []
+
+    class FixedAttemptBackend(ScriptedBackend):
+        def __init__(self, *, attempt_ids: list[str], **kwargs: object) -> None:
+            super().__init__(**kwargs)  # type: ignore[arg-type]
+            self._attempt_ids = list(attempt_ids)
+
+        def complete(self, messages, **kwargs) -> str:  # type: ignore[no-untyped-def]
+            text = super().complete(messages, **kwargs)
+            self.last_attempt_id = self._attempt_ids.pop(0)
+            return text
+
+    class CollidingReviewBackend(ScriptedBackend):
+        def complete(self, messages, **kwargs) -> str:  # type: ignore[no-untyped-def]
+            text = super().complete(messages, **kwargs)
+            # First review is independent; second collides with the repair generation.
+            if self._attempt == 1:
+                self.last_attempt_id = "review-1"
+            else:
+                self.last_attempt_id = repair_attempt
+            return text
+
+    lanes = ResearchLanes(
+        planner=ScriptedBackend(
+            seat="luna",
+            phase="planning",
+            calls=calls,
+            responses=['{"sub_questions":["fact"],"key_topics":["fact"],"success_criteria":"cite"}'],
+        ),
+        extractor=ScriptedBackend(
+            seat="luna",
+            phase="extraction",
+            calls=calls,
+            responses=['{"summary":"Verified fact","evidence":"Verified fact"}'],
+        ),
+        synthesizers=(
+            FixedAttemptBackend(
+                seat="gemini_browser",
+                phase="synthesis",
+                calls=calls,
+                responses=[f"Bad {citation}", f"Repaired {citation}"],
+                attempt_ids=[synth_attempt, repair_attempt],
+            ),
+        ),
+        reviewer=CollidingReviewBackend(
+            seat="luna",
+            phase="review",
+            calls=calls,
+            responses=[
+                json.dumps({"accepted": False, "detail": "rejected", "rejected_claims": ["unsupported"]}),
+                json.dumps({"accepted": True, "detail": "accepted", "rejected_claims": []}),
+            ],
+        ),
+    )
+
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run("q")
+
+    assert caught.value.failure_phase == "review"
+    assert caught.value.failure_kind == "same-attempt"
 
 
 def test_adversarial_source_is_wrapped_in_synthesis_and_review() -> None:
@@ -276,9 +394,7 @@ def test_extract_malformed_json_becomes_extraction_invalid_json() -> None:
     lanes = fake_lanes(calls, extractor_response="not-json")
 
     with pytest.raises(ResearchRunError) as caught:
-        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run(
-            "q"
-        )
+        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run("q")
 
     assert caught.value.failure_phase == "extraction"
     assert caught.value.failure_kind == "invalid-json"
@@ -288,14 +404,10 @@ def test_extract_malformed_json_becomes_extraction_invalid_json() -> None:
 def test_review_string_false_accepted_is_invalid_json() -> None:
     calls: list[tuple[str, str]] = []
     lanes = fake_lanes(calls, gemini_report=f"Answer [source:{FIXTURE_SOURCE_ID}]")
-    lanes.reviewer.responses = [
-        json.dumps({"accepted": "false", "detail": "nope", "rejected_claims": []})
-    ]
+    lanes.reviewer.responses = [json.dumps({"accepted": "false", "detail": "nope", "rejected_claims": []})]
 
     with pytest.raises(ResearchRunError) as caught:
-        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run(
-            "q"
-        )
+        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run("q")
 
     assert caught.value.failure_phase == "review"
     assert caught.value.failure_kind == "invalid-json"
@@ -361,9 +473,7 @@ def test_synthesized_report_injection_is_fenced_in_review_and_repair() -> None:
         _assert_needle_only_inside_fences(prompt, injection)
 
 
-def test_phase_backend_forwards_engine_timeout_and_seat_invoker_applies_roster_floor(
-    monkeypatch, tmp_path
-):
+def test_phase_backend_forwards_engine_timeout_and_seat_invoker_applies_roster_floor(monkeypatch, tmp_path):
     """Engine-requested timeout reaches SeatInvoker; roster floor lifts it."""
     captured: dict[str, object] = {}
 
@@ -640,10 +750,7 @@ def test_max_local_docs_per_round_limits_local_provider() -> None:
 
         def search(self, query: str, limit: int) -> list[dict[str, str]]:
             seen.append(limit)
-            return [
-                {"url": f"/doc-{i}.md", "title": f"Doc {i}", "trust": "local"}
-                for i in range(limit)
-            ]
+            return [{"url": f"/doc-{i}.md", "title": f"Doc {i}", "trust": "local"} for i in range(limit)]
 
         def fetch(self, url: str) -> dict[str, object]:
             return {"success": True, "content": f"content for {url}", "title": url}
@@ -713,8 +820,7 @@ def test_synthesis_window_limits_finding_packet() -> None:
         def search(self, query: str, limit: int) -> list[dict[str, str]]:
             del query, limit
             return [
-                {"url": f"https://example.test/{index}", "title": f"T{index}", "trust": "web"}
-                for index in range(4)
+                {"url": f"https://example.test/{index}", "title": f"T{index}", "trust": "web"} for index in range(4)
             ]
 
         def fetch(self, url: str) -> dict[str, object]:
@@ -730,9 +836,7 @@ def test_synthesis_window_limits_finding_packet() -> None:
         review="accepted",
     )
     # extractor needs one response per source
-    lanes.extractor.responses = [
-        '{"summary":"fact","evidence":"e"}' for _ in range(4)
-    ]
+    lanes.extractor.responses = ['{"summary":"fact","evidence":"e"}' for _ in range(4)]
 
     ResearchEngine(
         lanes=lanes,

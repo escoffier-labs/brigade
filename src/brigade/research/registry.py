@@ -187,6 +187,7 @@ def bound_text(content: str, max_content_chars: int) -> str:
         return content
     return content[:max_content_chars]
 
+
 def _budget_payload_from_caps(caps: Mapping[str, Any]) -> dict[str, Any]:
     max_time = caps.get("max_time")
     max_dispatches = caps.get("max_dispatches", 24)
@@ -391,17 +392,30 @@ def update_phase(
     artifact: Any | None = None,
     value: Any | None = None,
     extra: Mapping[str, Any] | None = None,
-    reset_downstream: bool | None = None,
+    reset_downstream: bool | Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Sidecar-locked read-modify-write for one phase entry.
 
     When a phase is restarted (``status == "running"``), later phase entries
     are reset to pending so a subsequent resume cannot pick up stale completed
-    downstream work. Pass ``reset_downstream=False`` to keep later entries.
+    downstream work. Pass ``reset_downstream=False`` to keep later entries, or
+    a sequence of later phase names to reset only those (for example
+    ``["publishing"]`` after a completed repair so a second review does not
+    erase ``phases.repair``).
     """
     if phase not in RESEARCH_PHASES:
         raise ValueError(f"unknown research phase: {phase}")
-    should_reset = reset_downstream if reset_downstream is not None else status == "running"
+    index = RESEARCH_PHASES.index(phase)
+    later_phases = RESEARCH_PHASES[index + 1 :]
+    if reset_downstream is None:
+        to_reset: tuple[str, ...] = later_phases if status == "running" else ()
+    elif reset_downstream is False:
+        to_reset = ()
+    elif reset_downstream is True:
+        to_reset = later_phases
+    else:
+        allowed = set(later_phases)
+        to_reset = tuple(name for name in reset_downstream if name in allowed)
     path = standard_run_dir(target, run_id) / RESEARCH_ARTIFACT
     with research_sidecar_lock(target, run_id):
         if path.is_file():
@@ -421,10 +435,8 @@ def update_phase(
         if extra:
             entry.update(dict(extra))
         phases[phase] = entry
-        if should_reset:
-            index = RESEARCH_PHASES.index(phase)
-            for later in RESEARCH_PHASES[index + 1 :]:
-                phases[later] = {"status": "pending"}
+        for later in to_reset:
+            phases[later] = {"status": "pending"}
         current["phases"] = phases
         current["current_phase"] = phase
         current["updated_at"] = _now()

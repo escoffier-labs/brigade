@@ -4,10 +4,10 @@ from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
-from typing import Callable
+from typing import Any, Callable
 
-from . import localio, proc, run_receipts, run_transport
-from .roster import Roster
+from . import agents, localio, proc, run_control, run_receipts, run_transport
+from .roster import Agent, Roster
 
 
 _ORACLE_GATE = BoundedSemaphore(1)
@@ -27,11 +27,30 @@ class SeatResult:
     attempts: tuple[object, ...]
 
 
-def _unsupported_appserver(*_args: object, **_kwargs: object) -> None:
+def _unsupported_appserver(
+    appserver: object,
+    agent: Agent,
+    worker: str,
+    prompt: str,
+    *,
+    timeout: float,
+    cwd: Path | None,
+    read_only: bool,
+    sandbox: str | None,
+    registry: run_control.LiveTurnRegistry | None,
+    on_event: object = None,
+) -> agents.AgentResult:
     raise RuntimeError("single-seat research uses direct transport")
 
 
-def _no_events(*_args: object, **_kwargs: object) -> None:
+def _no_events(
+    events_dir: Path | None,
+    worker: str,
+    *,
+    verbose: bool = False,
+    workspace: Path | None = None,
+    correlation_marker: str | None = None,
+) -> Callable[[dict[str, Any]], None] | None:
     return None
 
 
@@ -45,10 +64,10 @@ class SeatInvoker:
         process_registry: proc.ProcessRegistry,
         output_dir: Path,
         events_dir: Path | None = None,
-        on_dispatch_requested: Callable | None = None,
-        on_dispatch_observed: Callable | None = None,
-        on_dispatch_completed: Callable | None = None,
-        on_dispatch_failed: Callable | None = None,
+        on_dispatch_requested: Callable[[Agent], int | None] | None = None,
+        on_dispatch_observed: Callable[[Agent, int], None] | None = None,
+        on_dispatch_completed: Callable[[Agent, int], None] | None = None,
+        on_dispatch_failed: Callable[[Agent, int], None] | None = None,
     ) -> None:
         self.roster = roster
         self.cwd = cwd
@@ -58,6 +77,10 @@ class SeatInvoker:
         self.events_dir = events_dir
         self._receipt_lock = Lock()
         self._receipt_sequence = 0
+        self.on_dispatch_requested = on_dispatch_requested
+        self.on_dispatch_observed = on_dispatch_observed
+        self.on_dispatch_completed = on_dispatch_completed
+        self.on_dispatch_failed = on_dispatch_failed
         self.budget_callbacks = {
             "on_dispatch_requested": on_dispatch_requested,
             "on_dispatch_observed": on_dispatch_observed,
@@ -72,11 +95,25 @@ class SeatInvoker:
         roster = replace(self.roster, agents={**self.roster.agents, seat: effective})
         assignment = run_transport.Assignment(worker=seat, task=phase, capabilities=(phase,))
         gate = _ORACLE_GATE if agent.cli == "oracle" else nullcontext()
+
+        def build_prompt(
+            agent: Agent,
+            assignment: run_transport.Assignment,
+            *,
+            prior_results: list[run_transport.WorkerResult] | None = None,
+            read_only: bool = False,
+            direct: bool = False,
+            code_graph: Any | None = None,
+            drift_impact: Any | None = None,
+            evidence: Any | None = None,
+        ) -> str:
+            return prompt
+
         with gate:
             results = run_transport.dispatch(
                 [assignment],
                 roster,
-                build_prompt=lambda _agent, _assignment, **_context: prompt,
+                build_prompt=build_prompt,
                 run_appserver_worker=_unsupported_appserver,
                 event_writer=_no_events,
                 cwd=self.cwd,
@@ -86,7 +123,10 @@ class SeatInvoker:
                 process_registry=self.process_registry,
                 events_dir=self.events_dir,
                 run_id=self.run_id,
-                **{key: value for key, value in self.budget_callbacks.items() if value is not None},
+                on_dispatch_requested=self.on_dispatch_requested,
+                on_dispatch_observed=self.on_dispatch_observed,
+                on_dispatch_completed=self.on_dispatch_completed,
+                on_dispatch_failed=self.on_dispatch_failed,
             )
         if not results:
             worker = run_transport.WorkerResult(
@@ -105,17 +145,13 @@ class SeatInvoker:
                 worker,
                 stdout="",
                 stderr="",
-                attempts=tuple(
-                    replace(attempt, stdout="", stderr="") for attempt in worker.attempts
-                ),
+                attempts=tuple(replace(attempt, stdout="", stderr="") for attempt in worker.attempts),
             )
         with self._receipt_lock:
             self._receipt_sequence += 1
             sequence = self._receipt_sequence
             attempt_id = f"{self.run_id}:{sequence:04d}"
-            receipt_path = self.output_dir / "workers" / (
-                f"{sequence:04d}-{phase.replace('.', '-')}-{seat}.json"
-            )
+            receipt_path = self.output_dir / "workers" / (f"{sequence:04d}-{phase.replace('.', '-')}-{seat}.json")
             # write_worker_logs indexes from 1 per call; stamp the worker name so
             # repeated SeatInvoker.invoke calls keep distinct log paths.
             labeled = replace(worker, worker=f"{worker.worker}-{sequence:04d}")

@@ -407,32 +407,6 @@ def test_build_argv_antigravity_writable_uses_current_cwd_when_cwd_omitted(tmp_p
     ]
 
 
-def test_research_antigravity_cli_uses_current_cwd_when_cwd_omitted(tmp_path, monkeypatch):
-    from brigade.research import llm
-
-    captured = {}
-
-    def fake_run(argv, **kw):
-        captured["argv"] = argv
-        captured["cwd"] = kw["cwd"]
-        return agents.proc.Result(0, "answer", "")
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
-    monkeypatch.setattr(agents.proc, "run", fake_run)
-
-    assert llm._run_cli("antigravity", "hi", 10) == "answer"
-    assert captured["cwd"] is None
-    assert captured["argv"] == [
-        "/x/agy",
-        "--add-dir",
-        str(tmp_path.resolve()),
-        "--dangerously-skip-permissions",
-        "--print",
-        "hi",
-    ]
-
-
 def test_build_argv_antigravity_read_only_keeps_sandbox_without_write_flags(tmp_path):
     assert agents.build_argv("antigravity", "hi", read_only=True, cwd=tmp_path) == [
         "agy",

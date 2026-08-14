@@ -2250,12 +2250,12 @@ git commit -m "feat: expose research operations and health"
 - Create: `docs/runbooks/research-live-acceptance.md`
 - Modify: `docs/phase-first-class-multi-lane-research.md:1-10`
 
-- [ ] Add hermetic `oracle` and `codex` executables under `tmp_path/bin` in the
-acceptance fixture. They read stdin. Oracle emits a cited report for synthesis,
-strict JSON for browser discovery, and a `browser-auth` error when
-`ORACLE_TEST_MODE=expired-cookie`. Codex emits strict planning, extraction,
-review, and fallback responses based on the prompt. Do not patch
-`research_cmd`, `SeatInvoker`, or `agents.run_agent` in these tests.
+- [x] Add hermetic `oracle` and `codex` executables under `tmp_path/bin` in the
+  acceptance fixture. They read stdin. Oracle emits a cited report for synthesis,
+  strict JSON for browser discovery, and a `browser-auth` error when
+  `ORACLE_TEST_MODE=expired-cookie`. Codex emits strict planning, extraction,
+  review, and fallback responses based on the prompt. Do not patch
+  `research_cmd`, `SeatInvoker`, or `agents.run_agent` in these tests.
 
 ```python
 def test_grounded_cli_creates_auditable_standard_run(tmp_path: Path) -> None:
@@ -2551,7 +2551,7 @@ def wait_for_phase(workspace: Path, phase: str, *, timeout: float) -> str:
     raise AssertionError(f"research run did not reach {phase}")
 ```
 
-- [ ] Run the hermetic acceptance file and capture:
+- [x] Run the hermetic acceptance file and capture:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_acceptance.py"]' --capture brigade-work --capture-kind skill
@@ -2560,8 +2560,12 @@ brigade outcome capture brigade-work --run-id latest
 
 Expect all acceptance cases to pass without network access or a real browser.
 
-- [ ] Write `docs/runbooks/research-live-acceptance.md` with these non-counted,
-operator-run checks and their required evidence:
+Passed 2026-08-14: 5 passed through the real CLI boundary with hermetic Oracle
+and Codex executables. Receipt:
+`20260814-044026-work-verify-61e7b8`.
+
+- [x] Write `docs/runbooks/research-live-acceptance.md` with these non-counted,
+  operator-run checks and their required evidence:
 
 ```bash
 brigade research doctor --profile grounded --json
@@ -2574,11 +2578,11 @@ version, requested model, observed model or `unverified`, run IDs, duration,
 citation audit, fallback state, and redacted doctor output. It explicitly says
 the hermetic stub does not prove live Oracle authentication or model identity.
 
-- [ ] Change the design status from `Implementation: planned` to
+- [x] Change the design status from `Implementation: planned` to
 `Implementation: complete`, retaining the link to this file. Leave
 `Dashboard: explicitly deferred to Phase 5` unchanged.
 
-- [ ] Run the focused research suite through Brigade:
+- [x] Run the focused research suite through Brigade:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_types.py","tests/test_research_config.py","tests/test_research_llm.py","tests/test_research_extract.py","tests/test_research_engine.py","tests/test_research_registry.py","tests/test_research_provenance.py","tests/test_research_browser_ai.py","tests/test_research_doctor.py","tests/test_research_cmd.py","tests/test_research_acceptance.py","tests/test_work_cmd_ledger.py","tests/test_run_seat.py","tests/test_run_projector.py","tests/test_agents_oracle.py"]' --capture brigade-work --capture-kind skill
@@ -2587,7 +2591,10 @@ brigade outcome capture brigade-work --run-id latest
 
 Expect zero failures.
 
-- [ ] Run the repository definition of done and capture it:
+Passed 2026-08-14: 302 passed in 20.97s. Receipt:
+`20260814-044053-work-verify-d9b5e3`.
+
+- [x] Run the repository definition of done and capture it:
 
 ```bash
 brigade work verify run --target . --command "./scripts/verify" --capture brigade-work --capture-kind skill
@@ -2599,14 +2606,26 @@ failure, record that failure receipt, run the smallest affected check again,
 and do not mark this task complete until the baseline is green or the owner
 accepts the named blocker.
 
-- [ ] Create and lint the required Memory Handoff:
+Passed 2026-08-14: 7,509 passed, 3 skipped, 68 subtests passed, with 83.49%
+coverage. Receipt: `20260814-050913-work-verify-d0bba4`.
+
+- [x] Create and lint the required Memory Handoff:
 
 ```bash
-brigade work verify run --target . --command "brigade memory handoff create --target . --agent codex --summary 'Implemented first-class multi-lane research on the standard run lifecycle' --finding 'Research runs now use standard run receipts, provenance sidecars, Gemini browser synthesis, Luna review, and explicit browser-AI discovery.' --file docs/phase-first-class-multi-lane-research.md --next-step 'Run the live Oracle acceptance runbook and attach its evidence receipt.' && brigade memory handoff lint --target ." --capture brigade-handoffs --capture-kind skill
-brigade outcome capture brigade-handoffs --run-id latest
+brigade handoff draft --target . --inbox codex --type decision \
+  --title "First-class multi-lane research lifecycle" \
+  --summary "Implemented first-class multi-lane research on the standard run lifecycle" \
+  --action create-card --target-card brigade-first-class-multi-lane-research.md \
+  --content-file <prepared-card.md> --guard
+brigade handoff lint --target . --content-guard --strict <created-handoff.md>
 ```
 
 Expect the handoff to be created and lint to exit 0.
+
+Passed 2026-08-14 using the supported top-level `brigade handoff` interface.
+The older `brigade memory handoff` form in the original plan is unavailable in
+this Brigade build. Draft receipt: `20260814-044346-work-verify-91aa89`; strict
+lint receipt: `20260814-044355-work-verify-08312b`.
 
 - [ ] Commit Task 9:
 

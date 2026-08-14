@@ -729,6 +729,48 @@ def test_sources_payload_typeless_adapter_does_not_misalign_routes(tmp_path: Pat
     assert route["status"] == "ok"
 
 
+def test_dict_and_list_or_empty_normalize_dynamic_json() -> None:
+    assert research_cmd._dict_or_empty(None) == {}
+    assert research_cmd._dict_or_empty("not-a-dict") == {}
+    assert research_cmd._dict_or_empty({"k": 1}) == {"k": 1}
+    assert research_cmd._list_or_empty(None) == []
+    assert research_cmd._list_or_empty("not-a-list") == []
+    assert research_cmd._list_or_empty([1, 2]) == [1, 2]
+
+
+def test_resume_normalizes_non_dict_caps(tmp_path: Path, monkeypatch) -> None:
+    from brigade.research.types import ResumeState
+
+    seen: dict[str, object] = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return kwargs["run_id"]
+
+    monkeypatch.setattr(research_cmd, "run", fake_run)
+    monkeypatch.setattr(
+        research_cmd.registry,
+        "show_run",
+        lambda *_a, **_k: {
+            "run_id": "caps-null",
+            "status": "failed",
+            "question": "q",
+            "caps": "broken",
+            "manifest": {"sources": ["a.md"], "web_enabled": False},
+            "finished_at": None,
+        },
+    )
+    monkeypatch.setattr(research_cmd, "resume_state", lambda *_a, **_k: ResumeState())
+    from brigade import runguard
+
+    monkeypatch.setattr(runguard, "has_active_run_owner", lambda *_a, **_k: False)
+
+    assert research_cmd.resume(target=tmp_path, run_id="caps-null", overrides={"max_rounds": 2}) == "caps-null"
+    assert seen["overrides"]["max_rounds"] == 2
+    assert "max_time" not in seen["overrides"]
+    assert seen["sources"] == ["a.md"]
+
+
 def test_repo_overlay_on_grounded_does_not_activate_browser_ai(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / ".brigade").mkdir()
     (tmp_path / "a.md").write_text("plants use light")
@@ -2125,3 +2167,678 @@ def test_research_status_rejects_id_and_all(capsys) -> None:
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "ambiguous" in err or "mutually" in err or "--all" in err
+
+
+def test_successful_primary_persists_resolved_lanes_and_synthesis_projection(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "a.md").write_text("plants use light")
+
+    planner = StubLlm(seat="luna", phase="research.plan")
+    extractor = StubLlm(seat="luna", phase="research.extract")
+    synthesizer = StubLlm(seat="gemini_browser", phase="research.synthesize")
+    synthesizer.requested_model = "gemini-3.1-pro"
+    synthesizer.observed_model = "gemini-3.1-pro"
+    synthesizer.last_attempt_id = "gemini_browser:1"
+    reviewer = StubLlm(seat="luna", phase="research.review")
+    reviewer.last_attempt_id = "luna:review-1"
+
+    original_complete = StubLlm.complete
+
+    def fake_complete(self, messages, **kw):
+        text = original_complete(self, messages, **kw)
+        if self.phase == "research.synthesize":
+            self.observed_model = "gemini-3.1-pro"
+            self.last_attempt_id = "gemini_browser:1"
+        if self.phase == "research.review":
+            self.last_attempt_id = "luna:review-1"
+        return text
+
+    monkeypatch.setattr(StubLlm, "complete", fake_complete)
+    monkeypatch.setattr(
+        research_cmd,
+        "_resolve_lanes",
+        lambda *_a, **_k: ResearchLanes(
+            planner=planner,
+            extractor=extractor,
+            synthesizers=(synthesizer,),
+            reviewer=reviewer,
+            browser_discovery=None,
+        ),
+    )
+    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        research_cmd,
+        "_load_roster",
+        lambda _t: Roster(
+            orchestrator="chef",
+            agents={"chef": Agent(name="chef", cli="codex", role="orchestrator")},
+        ),
+    )
+
+    rid = research_cmd.run(
+        target=tmp_path,
+        question="how do plants make energy?",
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1, "min_rounds": 1, "max_time": 30},
+        run_id="proj-primary",
+    )
+    research = registry.read_research(tmp_path, rid)
+    assert research["resolved_lanes"]["synthesis"]["primary"] == "gemini_browser"
+    assert research["resolved_lanes"]["review"]["primary"] == "luna"
+    assert research["resolved_lanes"]["synthesis"]["fallbacks"] == []
+    assert research["synthesis"]["seat"] == "gemini_browser"
+    assert research["synthesis"]["attempt_id"] == "gemini_browser:1"
+    assert research["synthesis"]["requested_model"] == "gemini-3.1-pro"
+    assert research["synthesis"]["observed_model"] == "gemini-3.1-pro"
+    assert research["fallbacks"] == []
+
+
+def test_synthesis_fallback_persists_fallbacks_projection(tmp_path: Path, monkeypatch) -> None:
+    from brigade.research.llm import ResearchSeatError
+    from brigade.run_seat import SeatResult
+
+    (tmp_path / "a.md").write_text("plants use light")
+
+    class SynthSeat:
+        def __init__(self, seat: str, *, fail_kind: str | None = None) -> None:
+            self.seat = seat
+            self.fail_kind = fail_kind
+            self.requested_model = f"{seat}-model"
+            self.observed_model = "unverified"
+            self.last_attempt_id: str | None = None
+
+        def complete(self, messages, **kw):
+            del kw
+            if self.fail_kind:
+                raise ResearchSeatError(
+                    SeatResult(
+                        seat=self.seat,
+                        attempt_id=f"{self.seat}:fail",
+                        text="",
+                        ok=False,
+                        failure_phase="synthesis",
+                        failure_kind=self.fail_kind,
+                        detail=f"{self.fail_kind} token=secret-value",
+                        requested_model=self.requested_model,
+                        observed_model="unverified",
+                        attempts=(),
+                    )
+                )
+            self.last_attempt_id = f"{self.seat}:1"
+            self.observed_model = f"{self.seat}-observed"
+            cite = re.search(r"\[source:[^\]]+\]", messages[0]["content"])
+            token = cite.group(0) if cite else ""
+            return f"## Report\nPlants use light. {token}".rstrip()
+
+    planner = StubLlm(seat="luna", phase="research.plan")
+    extractor = StubLlm(seat="luna", phase="research.extract")
+    primary = SynthSeat("gemini_browser", fail_kind="browser-auth")
+    fallback = SynthSeat("luna")
+    reviewer = StubLlm(seat="luna", phase="research.review")
+    reviewer.last_attempt_id = "luna:review-1"
+
+    original_complete = StubLlm.complete
+
+    def review_complete(self, messages, **kw):
+        text = original_complete(self, messages, **kw)
+        if self.phase == "research.review":
+            self.last_attempt_id = "luna:review-1"
+        return text
+
+    monkeypatch.setattr(StubLlm, "complete", review_complete)
+    monkeypatch.setattr(
+        research_cmd,
+        "_resolve_lanes",
+        lambda *_a, **_k: ResearchLanes(
+            planner=planner,
+            extractor=extractor,
+            synthesizers=(primary, fallback),
+            reviewer=reviewer,
+            browser_discovery=None,
+        ),
+    )
+    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        research_cmd,
+        "_load_roster",
+        lambda _t: Roster(
+            orchestrator="chef",
+            agents={"chef": Agent(name="chef", cli="codex", role="orchestrator")},
+        ),
+    )
+
+    rid = research_cmd.run(
+        target=tmp_path,
+        question="how do plants make energy?",
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1, "min_rounds": 1, "max_time": 30},
+        run_id="proj-fallback",
+    )
+    research = registry.read_research(tmp_path, rid)
+    assert research["status"] == "completed"
+    assert research["resolved_lanes"]["synthesis"]["primary"] == "gemini_browser"
+    assert research["resolved_lanes"]["synthesis"]["fallbacks"] == ["luna"]
+    assert research["synthesis"]["seat"] == "luna"
+    assert research["fallbacks"][0]["from_seat"] == "gemini_browser"
+    assert research["fallbacks"][0]["to_seat"] == "luna"
+    assert research["fallbacks"][0]["failure_kind"] == "browser-auth"
+    assert "secret-value" not in json.dumps(research["fallbacks"])
+
+
+def test_browser_ai_persists_discovery_mode_and_source_counts(tmp_path: Path, monkeypatch) -> None:
+    class FakeBrowser:
+        trust = "browser-ai"
+        source_type = "browser-ai"
+        source_id = "gemini-browser"
+        lane = "gemini_browser"
+        requested_model = "gemini-3.1-pro"
+        observed_model = "unverified"
+
+        def __init__(self) -> None:
+            self.backend = StubLlm(seat="gemini_browser", phase="research.browser-discover")
+
+        def search(self, query: str, limit: int):
+            del query, limit
+            return [
+                {
+                    "url": "https://example.com/plants",
+                    "title": "Plants",
+                    "trust": "browser-ai",
+                }
+            ]
+
+        def fetch(self, url: str):
+            del url
+            return {
+                "success": True,
+                "content": "plants use light from browser-ai discovery",
+                "title": "Plants",
+            }
+
+    browser = FakeBrowser()
+    planner = StubLlm(seat="luna", phase="research.plan")
+    extractor = StubLlm(seat="luna", phase="research.extract")
+    synthesizer = StubLlm(seat="gemini_browser", phase="research.synthesize")
+    synthesizer.requested_model = "gemini-3.1-pro"
+    synthesizer.last_attempt_id = "gemini_browser:1"
+    reviewer = StubLlm(seat="luna", phase="research.review")
+    reviewer.last_attempt_id = "luna:review-1"
+
+    original_complete = StubLlm.complete
+
+    def tagged_complete(self, messages, **kw):
+        text = original_complete(self, messages, **kw)
+        if self.phase == "research.synthesize":
+            self.last_attempt_id = "gemini_browser:1"
+            self.observed_model = "gemini-3.1-pro"
+        if self.phase == "research.review":
+            self.last_attempt_id = "luna:review-1"
+        return text
+
+    monkeypatch.setattr(StubLlm, "complete", tagged_complete)
+    monkeypatch.setattr(
+        research_cmd,
+        "_resolve_lanes",
+        lambda *_a, **_k: ResearchLanes(
+            planner=planner,
+            extractor=extractor,
+            synthesizers=(synthesizer,),
+            reviewer=reviewer,
+            browser_discovery=None,
+        ),
+    )
+    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: object())
+    monkeypatch.setattr(research_cmd, "_resolve_browser_ai_provider", lambda *_a, **_k: browser)
+    monkeypatch.setattr(
+        research_cmd,
+        "_load_roster",
+        lambda _t: Roster(
+            orchestrator="chef",
+            agents={"chef": Agent(name="chef", cli="codex", role="orchestrator")},
+        ),
+    )
+
+    rid = research_cmd.run(
+        target=tmp_path,
+        question="Find browser agents",
+        sources=[],
+        web=False,
+        overrides={"max_rounds": 1, "min_rounds": 1, "max_time": 30},
+        browser_ai_research=True,
+        profile="browser-ai",
+        run_id="proj-browser-ai",
+    )
+    research = registry.read_research(tmp_path, rid)
+    assert research["status"] == "completed"
+    assert research["resolved_lanes"]["browser_discovery"]["primary"] == "gemini_browser"
+    assert research["discovery_mode"] == "browser-ai"
+    assert research["source_counts"]["browser-ai"] == 1
+
+
+def test_failed_pre_execution_retains_resolved_lanes(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "a.md").write_text("plants use light")
+
+    lanes = ResearchLanes(
+        planner=StubLlm(seat="luna", phase="research.plan"),
+        extractor=StubLlm(seat="luna", phase="research.extract"),
+        synthesizers=(StubLlm(seat="gemini_browser", phase="research.synthesize"),),
+        reviewer=StubLlm(seat="luna", phase="research.review"),
+        browser_discovery=None,
+    )
+    monkeypatch.setattr(research_cmd, "_resolve_lanes", lambda *_a, **_k: lanes)
+    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        research_cmd,
+        "_load_roster",
+        lambda _t: Roster(
+            orchestrator="chef",
+            agents={"chef": Agent(name="chef", cli="codex", role="orchestrator")},
+        ),
+    )
+
+    def boom_run(self, question, *, resume=None):
+        del self, question, resume
+        raise research_cmd.ResearchRunError("planning", "worker-failed", "boom")
+
+    monkeypatch.setattr(research_cmd.ResearchEngine, "run", boom_run)
+
+    rid = research_cmd.run(
+        target=tmp_path,
+        question="q",
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1},
+        run_id="proj-retain-lanes",
+    )
+    research = registry.read_research(tmp_path, rid)
+    assert research["status"] == "failed"
+    assert research["resolved_lanes"]["synthesis"]["primary"] == "gemini_browser"
+    assert research["resolved_lanes"]["review"]["primary"] == "luna"
+    assert "synthesis" not in research or research.get("synthesis") is None
+
+
+def test_show_json_preserves_citation_audit_tokens(tmp_path: Path, capsys, monkeypatch) -> None:
+    citation = "[source:src-1111111111111111]"
+    toxic = {
+        "run_id": "tox-citation",
+        "status": "completed",
+        "legacy": False,
+        "access_token": "access-token-secret",
+        "auth_token": "auth-token-secret",
+        "API_TOKEN": "api-token-secret",
+        "OPENAI_API_KEY": "openai-key-secret",
+        "token": "bare-token-secret",
+    }
+    audit_blob = {
+        "accepted": True,
+        "citations": [{"token": citation, "source_ids": ["src-1111111111111111"], "status": "accepted"}],
+        "unresolved": [],
+        "access_token": "audit-access-secret",
+    }
+    monkeypatch.setattr(research_cmd.registry, "show_run", lambda _target, _run_id: toxic)
+    monkeypatch.setattr(research_cmd.registry, "read_research", lambda _target, _run_id: {"run_id": "tox-citation"})
+    monkeypatch.setattr(
+        research_cmd,
+        "_load_json_artifact",
+        lambda _target, _run_id, name: audit_blob if name == registry.CITATION_AUDIT_ARTIFACT else None,
+    )
+
+    code = cli_show(target=tmp_path, run_id="tox-citation", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    dumped = json.dumps(payload)
+
+    assert code == 0
+    assert payload["citation_audit"]["citations"][0]["token"] == citation
+    assert citation in dumped
+    assert "access-token-secret" not in dumped
+    assert "auth-token-secret" not in dumped
+    assert "api-token-secret" not in dumped
+    assert "openai-key-secret" not in dumped
+    assert "bare-token-secret" not in dumped
+    assert "audit-access-secret" not in dumped
+
+
+def test_local_only_rejects_web_and_cli_even_when_requested(tmp_path: Path, monkeypatch, capsys) -> None:
+    patch_stub_lanes(monkeypatch)
+    (tmp_path / ".brigade").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".brigade" / "research.toml").write_text(
+        "[[source]]\n"
+        'id = "egress-cli"\n'
+        'type = "cli"\n'
+        f'command = ["{sys.executable}", "-c", "print(\'should-not-run\')"]\n',
+        encoding="utf-8",
+    )
+
+    def boom_web(*_a, **_k):
+        raise AssertionError("local-only must not construct a web provider")
+
+    def boom_cli(*_a, **_k):
+        raise AssertionError("local-only must not construct CLI adapters")
+
+    def boom_browser(*_a, **_k):
+        raise AssertionError("local-only must not construct browser-AI providers")
+
+    monkeypatch.setattr("brigade.research.sources.web.build_provider", boom_web)
+    monkeypatch.setattr(research_cmd.clisrc, "build_providers", boom_cli)
+    monkeypatch.setattr(research_cmd, "_resolve_browser_ai_provider", boom_browser)
+
+    code = cli_run(
+        target=tmp_path,
+        question="q",
+        corpus=None,
+        sources=[],
+        web=True,
+        overrides={"max_rounds": 1},
+        browser_ai_research=True,
+        profile="local-only",
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["failure_kind"] == "no-source-route"
+    assert payload["status"] in {"failed", "error"}
+
+
+def test_local_only_with_local_source_skips_egress_providers(tmp_path: Path, monkeypatch) -> None:
+    patch_stub_lanes(monkeypatch)
+    (tmp_path / "a.md").write_text("plants use light", encoding="utf-8")
+    constructed: list[str] = []
+
+    def boom_web(*_a, **_k):
+        constructed.append("web")
+        raise AssertionError("local-only must not construct a web provider")
+
+    def boom_cli(*_a, **_k):
+        constructed.append("cli")
+        raise AssertionError("local-only must not construct CLI adapters")
+
+    monkeypatch.setattr("brigade.research.sources.web.build_provider", boom_web)
+    monkeypatch.setattr(research_cmd.clisrc, "build_providers", boom_cli)
+
+    rid = research_cmd.run(
+        target=tmp_path,
+        question="how do plants make energy?",
+        sources=[str(tmp_path / "*.md")],
+        web=True,
+        overrides={"max_rounds": 1, "min_rounds": 1, "max_time": 30},
+        profile="local-only",
+        browser_ai_research=True,
+        run_id="local-only-no-egress",
+    )
+    rec = registry.show_run(tmp_path, rid)
+    assert constructed == []
+    assert rec["status"] == "completed"
+    routes = {route["id"]: route for route in rec["manifest"]["routes"]}
+    assert routes["local"]["enabled"] is True
+    assert routes["configured-cli"]["enabled"] is False
+    assert routes[rec["manifest"]["provider"]]["enabled"] is False
+    assert routes["browser-ai"]["enabled"] is False
+
+
+def test_research_init_exclusive_create_is_race_safe(tmp_path: Path, capsys) -> None:
+    path = tmp_path / ".brigade" / "research.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = b"keep-exact-bytes = true\n"
+    path.write_bytes(original)
+
+    code = cli_init(target=tmp_path, profile="luna-only", json_output=False)
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "already exists" in err
+    assert path.read_bytes() == original
+
+
+def test_resume_refresh_keeps_plan_and_repeats_discovery(monkeypatch, tmp_path: Path) -> None:
+    patch_stub_lanes(monkeypatch)
+    (tmp_path / "a.md").write_text("plants use light", encoding="utf-8")
+    run_id = "refresh-me"
+    registry.create_standard_run(
+        tmp_path,
+        run_id=run_id,
+        question="q",
+        profile="grounded",
+        caps={"max_time": 300, "max_dispatches": 8, "max_rounds": 2},
+        roster=minimal_research_roster(),
+    )
+    run_dir = registry.standard_run_dir(tmp_path, run_id)
+    aboyeur.record_run_termination(
+        run_dir,
+        status="failed",
+        failure_phase="extraction",
+        failure_kind="worker-failed",
+        detail="boom",
+    )
+    registry.update_research(
+        tmp_path,
+        run_id,
+        status="failed",
+        manifest={"sources": [str(tmp_path / "*.md")], "web_enabled": False},
+        caps={"max_time": 300, "max_dispatches": 8, "max_rounds": 2},
+    )
+    registry.update_phase(tmp_path, run_id, "planning", status="completed", value='{"sub_questions":["q"]}')
+    source = SourceEnvelope.build(
+        origin="local",
+        provider="local",
+        uri="file://a.md",
+        content="plants use light",
+        trust="local",
+        acquired_at="2026-08-13T00:00:00+00:00",
+    )
+    source_ref = registry.write_sources(tmp_path, run_id, [source])
+    registry.update_phase(tmp_path, run_id, "discovery", status="completed", artifact=source_ref)
+
+    seen: dict[str, object] = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return kwargs["run_id"]
+
+    monkeypatch.setattr(research_cmd, "run", fake_run)
+    assert research_cmd.resume(target=tmp_path, run_id=run_id, overrides={}, refresh=True) == run_id
+    resume = seen["resume"]
+    assert resume.plan == '{"sub_questions":["q"]}'
+    assert resume.sources is None
+    assert resume.findings is None
+    assert resume.report is None
+    assert resume.audit is None
+    assert resume.review is None
+    assert resume.synthesis is None
+
+
+def test_resume_refresh_rejected_for_legacy(tmp_path: Path) -> None:
+    legacy = tmp_path / ".brigade" / "research" / "legacy-refresh"
+    legacy.mkdir(parents=True)
+    from brigade import localio
+
+    localio.write_json(
+        legacy / "run.json",
+        {"run_id": "legacy-refresh", "question": "Old", "status": "failed", "caps": {"max_time": 30}},
+    )
+    with pytest.raises(SystemExit, match="legacy"):
+        research_cmd.resume(target=tmp_path, run_id="legacy-refresh", overrides={}, refresh=True)
+
+
+def test_resume_rejects_budget_cap_overrides(tmp_path: Path, monkeypatch) -> None:
+    registry.create_standard_run(
+        tmp_path,
+        run_id="budget-lock",
+        question="q",
+        profile="grounded",
+        caps={"max_time": 120, "max_dispatches": 7, "max_rounds": 3},
+        roster=minimal_research_roster(),
+    )
+    run_dir = registry.standard_run_dir(tmp_path, "budget-lock")
+    aboyeur.record_run_termination(
+        run_dir,
+        status="failed",
+        failure_phase="discovery",
+        failure_kind="worker-failed",
+        detail="boom",
+    )
+    registry.update_research(
+        tmp_path,
+        run_id="budget-lock",
+        status="failed",
+        manifest={"sources": ["docs/*.md"], "web_enabled": False},
+        caps={"max_time": 120, "max_dispatches": 7, "max_rounds": 3},
+    )
+    monkeypatch.setattr(research_cmd, "run", lambda **_k: "budget-lock")
+
+    with pytest.raises(SystemExit, match="max_time"):
+        research_cmd.resume(target=tmp_path, run_id="budget-lock", overrides={"max_time": 999})
+    with pytest.raises(SystemExit, match="max_dispatches"):
+        research_cmd.resume(target=tmp_path, run_id="budget-lock", overrides={"max_dispatches": 99})
+
+    seen: dict[str, object] = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return kwargs["run_id"]
+
+    monkeypatch.setattr(research_cmd, "run", fake_run)
+    assert research_cmd.resume(target=tmp_path, run_id="budget-lock", overrides={"max_rounds": 1}) == "budget-lock"
+    assert seen["overrides"]["max_rounds"] == 1
+    assert seen["overrides"]["max_time"] == 120
+    assert seen["overrides"]["max_dispatches"] == 7
+
+
+def test_research_cli_parser_resume_refresh() -> None:
+    from brigade import cli
+
+    parser = cli._build_parser()
+    ns = parser.parse_args(["research", "resume", "run-123", "--refresh", "--rounds", "2", "--json"])
+    assert ns.research_command == "resume"
+    assert ns.run_id == "run-123"
+    assert ns.refresh is True
+    assert ns.rounds == 2
+
+
+def test_cli_resume_refresh_and_budget_override_exit_2(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setattr(
+        research_cmd,
+        "resume",
+        lambda **_k: (_ for _ in ()).throw(SystemExit("cannot override max_time on resume")),
+    )
+    code = cli_resume(target=tmp_path, run_id="x", overrides={"max_time": 1}, json_output=True)
+    assert code == 2
+    assert "max_time" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        research_cmd,
+        "resume",
+        lambda **_k: (_ for _ in ()).throw(SystemExit("cannot refresh a legacy research run")),
+    )
+    code = cli_resume(target=tmp_path, run_id="legacy", overrides={}, refresh=True, json_output=True)
+    assert code == 2
+    assert "legacy" in capsys.readouterr().out.lower()
+
+
+def _patch_receipt_write_failure(monkeypatch, *, exc, persistent: bool) -> dict[str, object]:
+    """Inject LifecycleJournalError/RetainRunLockError on aboyeur.update_run_receipt."""
+    from brigade import aboyeur as aboyeur_mod
+
+    state: dict[str, object] = {"calls": 0, "before": None}
+    real = aboyeur_mod.update_run_receipt
+
+    def flaky(output_dir, **fields):
+        state["calls"] = int(state["calls"]) + 1
+        path = Path(output_dir) / "run.json"
+        if path.is_file() and state["before"] is None:
+            state["before"] = path.read_bytes()
+        if persistent or int(state["calls"]) == 1:
+            raise exc
+        return real(output_dir, **fields)
+
+    monkeypatch.setattr(aboyeur_mod, "update_run_receipt", flaky)
+    return state
+
+
+def test_cli_run_oneshot_lifecycle_receipt_failure_is_safe(monkeypatch, tmp_path: Path, capsys) -> None:
+    from brigade import run_lifecycle
+
+    (tmp_path / "a.md").write_text("plants use light")
+    patch_stub_lanes(monkeypatch)
+    state = _patch_receipt_write_failure(
+        monkeypatch,
+        exc=run_lifecycle.LifecycleJournalError("authoritative run prior gate not ready: journal-ahead-of-evidence"),
+        persistent=False,
+    )
+    code = cli_run(
+        target=tmp_path,
+        question="q",
+        corpus=None,
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1},
+        json_output=True,
+    )
+    out = capsys.readouterr()
+    combined = out.out + out.err
+    assert code == 1
+    assert "Traceback" not in combined
+    assert "LifecycleJournalError" not in combined
+    payload = json.loads(out.out)
+    assert payload["status"] == "failed"
+    assert payload["failure_kind"] == "lifecycle-journal"
+    assert "home/" not in json.dumps(payload).lower()
+    run_id = payload["run_id"]
+    run_path = registry.standard_run_dir(tmp_path, run_id) / "run.json"
+    after = run_path.read_bytes()
+    if state["before"] is not None:
+        assert after == state["before"]
+    receipt = json.loads(after)
+    # Failed gate must not be terminalized by the safe CLI boundary.
+    assert receipt.get("finished_at") in (None, "")
+
+
+def test_cli_run_persistent_retain_lock_receipt_failure_is_safe(monkeypatch, tmp_path: Path, capsys) -> None:
+    from brigade import runguard
+
+    (tmp_path / "a.md").write_text("plants use light")
+    patch_stub_lanes(monkeypatch)
+    _patch_receipt_write_failure(
+        monkeypatch,
+        exc=runguard.RetainRunLockError("failed to write terminal run receipt: prior gate"),
+        persistent=True,
+    )
+    code = cli_run(
+        target=tmp_path,
+        question="q",
+        corpus=None,
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1},
+        json_output=False,
+    )
+    out = capsys.readouterr()
+    combined = out.out + out.err
+    assert code == 1
+    assert "Traceback" not in combined
+    assert "RetainRunLockError" not in combined
+    assert "failed" in combined.lower()
+    assert "/home/" not in combined
+
+
+def test_cli_resume_lifecycle_receipt_failure_is_safe(monkeypatch, tmp_path: Path, capsys) -> None:
+    from brigade import run_lifecycle
+
+    patch_stub_lanes(monkeypatch)
+    run_id = seed_cancelled_run_after_extraction(tmp_path)
+    run_dir = registry.standard_run_dir(tmp_path, run_id)
+    before = (run_dir / "run.json").read_bytes()
+    _patch_receipt_write_failure(
+        monkeypatch,
+        exc=run_lifecycle.LifecycleJournalError("authoritative run prior gate not ready: error-recorded"),
+        persistent=True,
+    )
+    code = cli_resume(target=tmp_path, run_id=run_id, overrides={}, json_output=True)
+    out = capsys.readouterr()
+    combined = out.out + out.err
+    assert code == 1
+    assert "Traceback" not in combined
+    payload = json.loads(out.out)
+    assert payload["run_id"] == run_id
+    assert payload["status"] == "failed"
+    assert payload["failure_kind"] == "lifecycle-journal"
+    assert (run_dir / "run.json").read_bytes() == before

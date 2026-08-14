@@ -91,12 +91,20 @@ def _git_env(repo: Path) -> dict:
         "GIT_COMMITTER_EMAIL": "t@example.com",
         "HOME": str(repo),
         "XDG_CONFIG_HOME": str(repo / ".config"),
+        # The embedded CLI starts a detached update refresh unless it is opted
+        # out. It inherits this test's temporary HOME, so letting it run can
+        # race TemporaryDirectory cleanup by creating .cache/brigade late.
+        "BRIGADE_NO_UPDATE_CHECK": "1",
     }
     # Put the editable-install brigade on PATH so the hook's `brigade` and
     # `brigade guard git` invocations resolve to this checkout.
     if _VENV_BIN.is_dir():
         env["PATH"] = f"{_VENV_BIN}:{env.get('PATH', '')}"
     return env
+
+
+def test_pre_push_hook_fixture_disables_background_update_checks(tmp_path: Path) -> None:
+    assert _git_env(tmp_path)["BRIGADE_NO_UPDATE_CHECK"] == "1"
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> str:

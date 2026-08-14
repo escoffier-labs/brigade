@@ -82,6 +82,93 @@ def test_seat_invoker_forwards_controls(monkeypatch, tmp_path: Path) -> None:
     assert assignment.task == "research.plan"
 
 
+def test_seat_invoker_build_prompt_returns_exact_prompt(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_dispatch(assignments, roster, **kwargs):
+        build_prompt = kwargs["build_prompt"]
+        captured["prompt"] = build_prompt(
+            roster.agents["luna"],
+            assignments[0],
+            prior_results=[],
+            read_only=True,
+            direct=True,
+            code_graph=object(),
+            drift_impact=object(),
+            evidence=object(),
+        )
+        return [
+            WorkerResult(
+                worker="luna",
+                task="research.plan",
+                text="ok",
+                ok=True,
+                detail="",
+            )
+        ]
+
+    monkeypatch.setattr("brigade.run_seat.run_transport.dispatch", fake_dispatch)
+    invoker = SeatInvoker(
+        roster=_research_roster(),
+        cwd=tmp_path,
+        run_id="research-1",
+        process_registry=ProcessRegistry(),
+        output_dir=tmp_path / ".brigade" / "runs" / "research-1",
+    )
+
+    invoker.invoke(seat="luna", phase="research.plan", prompt="exact-prompt-body", timeout=91)
+
+    assert captured["prompt"] == "exact-prompt-body"
+
+
+def test_seat_invoker_forwards_budget_callbacks(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def on_requested(agent: Agent) -> int | None:
+        return 1
+
+    def on_observed(agent: Agent, attempt: int) -> None:
+        return None
+
+    def on_completed(agent: Agent, attempt: int) -> None:
+        return None
+
+    def on_failed(agent: Agent, attempt: int) -> None:
+        return None
+
+    def fake_dispatch(assignments, roster, **kwargs):
+        captured.update(kwargs)
+        return [
+            WorkerResult(
+                worker="luna",
+                task="research.plan",
+                text="ok",
+                ok=True,
+                detail="",
+            )
+        ]
+
+    monkeypatch.setattr("brigade.run_seat.run_transport.dispatch", fake_dispatch)
+    invoker = SeatInvoker(
+        roster=_research_roster(),
+        cwd=tmp_path,
+        run_id="research-1",
+        process_registry=ProcessRegistry(),
+        output_dir=tmp_path / ".brigade" / "runs" / "research-1",
+        on_dispatch_requested=on_requested,
+        on_dispatch_observed=on_observed,
+        on_dispatch_completed=on_completed,
+        on_dispatch_failed=on_failed,
+    )
+
+    invoker.invoke(seat="luna", phase="research.plan", prompt="plan", timeout=91)
+
+    assert captured["on_dispatch_requested"] is on_requested
+    assert captured["on_dispatch_observed"] is on_observed
+    assert captured["on_dispatch_completed"] is on_completed
+    assert captured["on_dispatch_failed"] is on_failed
+
+
 def test_seat_invoker_keeps_per_invocation_log_paths(monkeypatch, tmp_path: Path) -> None:
     responses = [
         WorkerResult(

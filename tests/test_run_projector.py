@@ -688,9 +688,7 @@ def test_projector_preserves_research_kind() -> None:
 
 
 def test_projector_defaults_missing_kind_to_work() -> None:
-    projected = project_run_snapshot(
-        _minimal_base_snapshot(), [], journal_present=False
-    ).snapshot
+    projected = project_run_snapshot(_minimal_base_snapshot(), [], journal_present=False).snapshot
 
     assert projected["kind"] == "work"
 

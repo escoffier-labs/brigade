@@ -19,9 +19,7 @@ AGENT_TRANSPORT_CHOICES = ("direct", "acpx")
 ACPX_TRANSPORT_VERSION = "0.12.0"
 RosterSource = Literal["explicit", "workspace", "worktree-parent", "user"]
 
-RESEARCH_GENERAL_CAPABILITIES = frozenset(
-    {"research.plan", "research.extract", "research.synthesize"}
-)
+RESEARCH_GENERAL_CAPABILITIES = frozenset({"research.plan", "research.extract", "research.synthesize"})
 _CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+$")
 
 
@@ -225,9 +223,7 @@ def _as_capabilities(value: object, field: str) -> tuple[str, ...]:
     seen: set[str] = set()
     for item in capabilities:
         if not _CAPABILITY_RE.fullmatch(item):
-            raise ValueError(
-                f"{field} values must match [a-z][a-z0-9]*(\\.[a-z][a-z0-9-]*)+; got {item!r}"
-            )
+            raise ValueError(f"{field} values must match [a-z][a-z0-9]*(\\.[a-z][a-z0-9-]*)+; got {item!r}")
         if item in seen:
             raise ValueError(f"{field} must not contain duplicates; got {item!r}")
         seen.add(item)
