@@ -849,6 +849,48 @@ def test_care_status_reports_named_entry_without_requiring_atomic_set(tmp_path, 
     assert f"brigade-care-{identity}-daily-care.service" not in unit_names
 
 
+@pytest.mark.parametrize("backend", ["systemd", "launchd"])
+def test_care_bare_status_enumerates_per_entry_registrations_and_systemd_enablement(
+    tmp_path, monkeypatch, capsys, backend
+):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    entry_ids = ["handoff-ingest", "care-scan", "memory-closeout"]
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.status(target=target, backend=backend, home=home, json_output=True) == 0
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["status"] == "missing"
+    assert missing["entries"] == []
+
+    for entry_id in entry_ids:
+        assert care_cmd.install(target=target, backend=backend, home=home, entry_ids=[entry_id]) == 0
+
+    capsys.readouterr()
+    assert care_cmd.status(target=target, backend=backend, home=home, json_output=True) == 0
+    installed = json.loads(capsys.readouterr().out)
+    assert installed["status"] == "current"
+    assert [entry["id"] for entry in installed["entries"]] == entry_ids
+    if backend == "launchd":
+        return
+
+    assert installed["enabled"] is False
+
+    wants_dir = care_cmd._systemd_user_dir(home) / "timers.target.wants"
+    wants_dir.mkdir(parents=True)
+    for entry_id in entry_ids:
+        timer = _unit_path(home, target, entry_id, ".timer")
+        (wants_dir / timer.name).symlink_to(Path("..") / timer.name)
+
+    assert care_cmd.status(target=target, backend=backend, home=home, json_output=True) == 0
+    enabled = json.loads(capsys.readouterr().out)
+    assert enabled["status"] == "current"
+    assert enabled["enabled"] is True
+    assert [entry["id"] for entry in enabled["entries"]] == entry_ids
+
+
 def test_care_install_without_entry_still_writes_atomic_default_set(tmp_path, monkeypatch):
     home = tmp_path / "home"
     target = tmp_path / "ws"

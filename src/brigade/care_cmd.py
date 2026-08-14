@@ -620,6 +620,17 @@ def _launchd_plists(
     return result
 
 
+def _installed_launchd_entries(*, target: Path, home: Path | None) -> tuple[CareEntry, ...]:
+    """Return catalog entries with a target-namespaced LaunchAgent registration."""
+    directory = _launchd_dir(home)
+    installed: list[CareEntry] = []
+    for entry in _catalog_by_id().values():
+        name = next(iter(_launchd_plists(workspace=target, home=home, entries=(entry,))))
+        if _path_exists_or_is_symlink(directory / name):
+            installed.append(entry)
+    return tuple(installed)
+
+
 def _launchd_install(
     *,
     target: Path,
@@ -669,7 +680,9 @@ def _launchd_status(
         else:
             registration_status = "current" if path.read_bytes() == desired else "tampered"
         states.append({"name": name, "status": registration_status})
-    state = "current"
+    state = "missing"
+    if states and all(item["status"] == "current" for item in states):
+        state = "current"
     if any(item["status"] == "tampered" for item in states):
         state = "tampered"
     elif any(item["status"] == "missing" for item in states):
@@ -1145,6 +1158,33 @@ def _aggregate_systemd_status(unit_statuses: list[str]) -> str:
     return worst
 
 
+def _path_exists_or_is_symlink(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _installed_systemd_entries(*, target: Path, home: Path | None) -> tuple[CareEntry, ...]:
+    """Return catalog entries with at least one target-namespaced unit on disk."""
+    unit_dir = _systemd_user_dir(home)
+    identity = _target_identity(target)
+    installed: list[CareEntry] = []
+    for entry in _catalog_by_id().values():
+        prefix = f"brigade-care-{identity}-{entry.entry_id}"
+        if any(_path_exists_or_is_symlink(unit_dir / f"{prefix}{suffix}") for suffix in (".service", ".timer")):
+            installed.append(entry)
+    return tuple(installed)
+
+
+def _systemd_timer_is_enabled(*, unit_dir: Path, timer_name: str) -> bool:
+    enabled_link = unit_dir / "timers.target.wants" / timer_name
+    timer = unit_dir / timer_name
+    if not enabled_link.is_symlink() or not timer.is_file():
+        return False
+    try:
+        return enabled_link.resolve() == timer.resolve()
+    except OSError:
+        return False
+
+
 def _crontab_backend_status(
     *,
     target: Path,
@@ -1215,20 +1255,23 @@ def _systemd_backend_status(
     results: list[dict[str, Any]] = []
     unit_statuses: list[str] = []
     installed_workspace: Path | None = None
+    timer_enabled: list[bool] = []
     for name, desired_text in units.items():
         path = unit_dir / name
         if path.is_symlink():
             public_status = managed_block.STATUS_MALFORMED
-            results.append(
-                {
-                    "name": name,
-                    "path": str(path),
-                    "status": public_status,
-                    "recorded_hash": None,
-                    "live_hash": None,
-                    "desired_hash": None,
-                }
-            )
+            result: dict[str, Any] = {
+                "name": name,
+                "path": str(path),
+                "status": public_status,
+                "recorded_hash": None,
+                "live_hash": None,
+                "desired_hash": None,
+            }
+            if name.endswith(".timer"):
+                result["enabled"] = False
+                timer_enabled.append(False)
+            results.append(result)
             unit_statuses.append(public_status)
             continue
         if not path.is_file():
@@ -1261,10 +1304,14 @@ def _systemd_backend_status(
                 "desired_hash": assessment.desired_hash,
             }
         )
+        if name.endswith(".timer"):
+            timer_enabled.append(_systemd_timer_is_enabled(unit_dir=unit_dir, timer_name=name))
+            results[-1]["enabled"] = timer_enabled[-1]
         unit_statuses.append(public_status)
     return {
         "backend": "systemd",
         "status": _aggregate_systemd_status(unit_statuses),
+        "enabled": bool(timer_enabled) and all(timer_enabled),
         "target_match": _target_matches(installed_workspace, target),
         "error": None,
         "unit_dir": str(unit_dir),
@@ -1340,6 +1387,8 @@ def status(
         return 3
 
     if backend == "launchd":
+        if not entry_ids:
+            entries = _installed_launchd_entries(target=target, home=home)
         return _launchd_status(target=target, json_output=json_output, home=home, entries=entries)
 
     if backend == "crontab":
@@ -1363,6 +1412,8 @@ def status(
         _print_payload(crontab_payload, json_output=json_output)
         return 0 if public_status in {"current", managed_block.STATUS_MISSING} else 1
 
+    if not entry_ids:
+        entries = _installed_systemd_entries(target=target, home=home)
     systemd = _systemd_backend_status(target=target, home=home, entries=entries)
     payload = {
         "target": str(target),
