@@ -77,6 +77,18 @@ def _file_snapshot(root: Path) -> dict[Path, bytes]:
     return {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
+def _tree_snapshot(root: Path) -> dict[Path, tuple[str, bytes | None, int]]:
+    """Capture profile files, directories, and modes for transaction rollback assertions."""
+    records: dict[Path, tuple[str, bytes | None, int]] = {}
+    for path in root.rglob("*"):
+        mode = path.stat().st_mode & 0o777
+        if path.is_dir():
+            records[path.relative_to(root)] = ("directory", None, mode)
+        else:
+            records[path.relative_to(root)] = ("file", path.read_bytes(), mode)
+    return records
+
+
 def test_slice1_targets_resolve_only_claude_and_codex(tmp_path):
     home, workspace = tmp_path / "home", tmp_path / "workspace"
     workspace.mkdir()
@@ -113,6 +125,85 @@ def test_sync_write_then_resync_is_idempotent(tmp_path, monkeypatch, capsys):
     assert second["results"][0]["status"] == "current"
     assert second["results"][0]["files_written"] == []
     assert agents.read_text() == first_text
+
+
+def test_sync_state_write_failure_restores_every_profile_surface(tmp_path, monkeypatch, capsys):
+    """A failed ownership-state mutation cannot leave a partially synced profile."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    _add_reviewed_skill(workspace)
+    before = _tree_snapshot(home)
+
+    original_write_json = harness_profile_cmd.localio.write_json
+
+    def fail_state_write(path: Path, payload: dict) -> None:
+        if path.name == "install-state.json":
+            raise OSError("injected profile state failure")
+        original_write_json(path, payload)
+
+    monkeypatch.setattr(harness_profile_cmd.localio, "write_json", fail_state_write)
+
+    with pytest.raises(OSError, match="injected profile state failure"):
+        cli.main(_sync_base(workspace) + ["--write", "--json"])
+
+    assert _tree_snapshot(home) == before
+
+
+def test_uninstall_state_mutation_failure_restores_every_profile_surface(tmp_path, monkeypatch, capsys):
+    """A failed ownership-state removal cannot leave a partially uninstalled profile."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    _add_reviewed_skill(workspace)
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 0
+    capsys.readouterr()
+    state_path = home / ".codex" / "brigade" / "install-state.json"
+    before = _tree_snapshot(home)
+    original_apply = harness_profile_cmd.projection._apply_mutation
+
+    def fail_state_remove(spec):
+        if spec.destination == state_path:
+            raise OSError("injected profile state removal failure")
+        original_apply(spec)
+
+    monkeypatch.setattr(harness_profile_cmd.projection, "_apply_mutation", fail_state_remove)
+
+    with pytest.raises(OSError, match="injected profile state removal failure"):
+        cli.main(_uninstall_base(workspace) + ["--write", "--json"])
+
+    assert _tree_snapshot(home) == before
+
+
+def test_sync_preserves_instruction_symlink_swapped_after_preflight(tmp_path, monkeypatch, capsys):
+    """The commit-time kernel check must not replace a symlink introduced after planning."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    agents = home / ".codex" / "AGENTS.md"
+    outside = tmp_path / "outside"
+    outside.write_text("user content\n")
+    original = harness_profile_cmd._profile_mutation
+
+    def swap_instruction(path: Path, desired: bytes | None, **kwargs):
+        mutation = original(path, desired, **kwargs)
+        if path == agents and mutation is not None:
+            agents.parent.mkdir(parents=True, exist_ok=True)
+            agents.symlink_to(outside)
+        return mutation
+
+    monkeypatch.setattr(harness_profile_cmd, "_profile_mutation", swap_instruction)
+
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)["results"][0]
+    assert payload["status"] == "conflict"
+    assert agents.is_symlink()
+    assert agents.resolve() == outside
+    assert outside.read_text() == "user content\n"
+    assert not (home / ".codex" / "brigade" / "install-state.json").exists()
 
 
 def test_second_identical_sync_does_not_rewrite_state_or_receipt(tmp_path, monkeypatch, capsys):
