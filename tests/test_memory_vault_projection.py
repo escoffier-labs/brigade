@@ -19,7 +19,9 @@ def vault(tmp_path: Path) -> Path:
     return path
 
 
-def _write_card(target: Path, name: str, *, title: str, body: str, tags: list[str]) -> None:
+def _write_card(
+    target: Path, name: str, *, title: str, body: str, tags: list[str], category: str = "operations"
+) -> None:
     path = target / "memory" / "cards" / f"{name}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = {"alpha": "00000000000a", "beta": "00000000000b"}[name]
@@ -29,7 +31,7 @@ def _write_card(target: Path, name: str, *, title: str, body: str, tags: list[st
                 "---",
                 f"id: card-00000000-0000-4000-8000-{suffix}",
                 f"title: {title}",
-                "category: operations",
+                f"category: {category}",
                 f"tags: {json.dumps(tags)}",
                 "fresh_until: 2099-01-01",
                 "last_reviewed: 2026-08-14",
@@ -107,6 +109,22 @@ def test_project_vault_is_linked_redacted_idempotent_and_reports_drift(tmp_path:
     assert node["latest_run"] is not None
 
 
+def test_project_vault_redacts_basic_authorization_credentials(tmp_path: Path, vault: Path, capsys) -> None:
+    _write_card(
+        tmp_path,
+        "alpha",
+        title="Alpha",
+        tags=["operations"],
+        body="Authorization: Basic should-not-escape",
+    )
+
+    _project(tmp_path, vault, capsys)
+
+    text = (vault / "Brigade Memory" / "Cards" / "Alpha.md").read_text(encoding="utf-8")
+    assert "should-not-escape" not in text
+    assert "Authorization: [redacted]" in text
+
+
 def test_project_vault_restores_the_vault_when_a_transaction_fails(
     tmp_path: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -121,6 +139,7 @@ def test_project_vault_restores_the_vault_when_a_transaction_fails(
     result = obsidian_vault._project_payload(target=tmp_path, vault=vault)
 
     assert result["receipt"]["terminal_state"] == "restored"
+    assert result["written"] == 0
     projection = vault / "Brigade Memory"
     assert not [path for path in projection.rglob("*") if path.is_file()]
     assert not list((tmp_path / ".brigade" / "memory-vault").glob("*.json"))
@@ -139,6 +158,50 @@ def test_project_vault_writes_a_conflict_copy_without_clobbering_existing_vault_
     assert "untracked:Cards/Alpha.md" in receipt["drift"]
     assert existing.read_text(encoding="utf-8") == "operator-owned note\n"
     assert list(existing.parent.glob("Alpha.conflict-*.md"))
+
+
+def test_project_vault_preserves_directory_and_symlink_collisions(tmp_path: Path, vault: Path, capsys) -> None:
+    _write_card(tmp_path, "alpha", title="Alpha", tags=["operations"], body="Canonical alpha.")
+    _write_card(tmp_path, "beta", title="Beta", tags=["operations"], body="Canonical beta.")
+    root = vault / "Brigade Memory" / "Cards"
+    alpha = root / "Alpha.md"
+    beta = root / "Beta.md"
+    alpha.mkdir(parents=True)
+    operator_note = tmp_path / "operator-note.md"
+    operator_note.write_text("operator-owned note\n", encoding="utf-8")
+    beta.symlink_to(operator_note)
+
+    receipt = _project(tmp_path, vault, capsys)
+
+    assert "untracked:Cards/Alpha.md" in receipt["drift"]
+    assert "untracked:Cards/Beta.md" in receipt["drift"]
+    assert alpha.is_dir()
+    assert beta.is_symlink()
+    assert list(root.glob("Alpha.conflict-*.md"))
+    assert list(root.glob("Beta.conflict-*.md"))
+
+
+def test_project_vault_keeps_mocs_with_colliding_sanitized_names(tmp_path: Path, vault: Path, capsys) -> None:
+    _write_card(tmp_path, "alpha", title="Alpha", tags=["shared"], body="Alpha.", category="ops/a")
+    _write_card(tmp_path, "beta", title="Beta", tags=["shared"], body="Beta.", category="ops:a")
+
+    _project(tmp_path, vault, capsys)
+
+    maps = list((vault / "Brigade Memory" / "Maps" / "Categories").glob("ops-a*.md"))
+    assert len(maps) == 2
+    assert sorted(path.read_text(encoding="utf-8").count("[[") for path in maps) == [1, 1]
+
+
+def test_project_vault_escapes_wikilink_delimiters_in_titles(tmp_path: Path, vault: Path, capsys) -> None:
+    _write_card(tmp_path, "alpha", title="Alpha]]|Map", tags=["shared"], body="Alpha.")
+    _write_card(tmp_path, "beta", title="Beta", tags=["shared"], body="Beta.")
+
+    _project(tmp_path, vault, capsys)
+
+    root = vault / "Brigade Memory" / "Cards"
+    assert (root / "Alpha-Map.md").is_file()
+    beta = (root / "Beta.md").read_text(encoding="utf-8")
+    assert "[[Cards/Alpha-Map|Alpha\\]\\]\\|Map]]" in beta
 
 
 def test_project_vault_skips_a_manually_edited_conflict_copy_when_linking(tmp_path: Path, vault: Path, capsys) -> None:

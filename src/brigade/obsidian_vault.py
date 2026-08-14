@@ -20,6 +20,7 @@ PROJECTION_FOLDER = "Brigade Memory"
 LEDGER_DIR = ".brigade/memory-vault"
 LEDGER_SCHEMA = "brigade.obsidian-vault.ledger.v1"
 _BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+")
+_AUTHORIZATION_RE = re.compile(r"(?i)(\bauthorization\s*:\s*)[^\r\n]*")
 
 
 def project(*, target: Path, vault: Path, json_output: bool = False) -> int:
@@ -79,6 +80,13 @@ def _project_payload(*, target: Path, vault: Path) -> dict[str, Any]:
         expected = prior_files.get(relative)
         live = _digest(current)
         desired_digest = kernel.content_digest(content)
+        if _is_nonregular_destination(current):
+            drift.append(relative if expected is not None else f"untracked:{relative}")
+            conflict = _conflict_destination(relative, root=root, prior_files=prior_files)
+            current = root / conflict
+            relative = conflict
+            live = _digest(current)
+            expected = prior_files.get(relative)
         if expected is None and live != kernel.ABSENT:
             conflict = _conflict_destination(relative, root=root, prior_files=prior_files)
             current = root / conflict
@@ -196,7 +204,11 @@ def _project_payload(*, target: Path, vault: Path) -> dict[str, Any]:
         receipt["completed_at"] = ledger_receipt["completed_at"]
     return {
         "schema": "brigade.obsidian-vault.receipt.v1",
-        "written": sum(1 for item in receipt["destinations"] if item.get("mutation") != "remove"),
+        "written": (
+            sum(1 for item in receipt["destinations"] if item.get("mutation") != "remove")
+            if receipt["terminal_state"] == "committed"
+            else 0
+        ),
         "unchanged": unchanged,
         "drift": drift,
         "receipt": receipt,
@@ -212,10 +224,8 @@ def _render_projection(target: Path, *, root: Path, prior_files: dict[str, str])
     rendered: dict[str, bytes] = {}
     for record in records:
         rendered[record["path"]] = _render_note(record, links[record["id"]])
-    for category, members in _groups(records, "category").items():
-        rendered[f"Maps/Categories/{_safe_name(category)}.md"] = _render_map("category", category, members)
-    for harness, members in _groups(records, "source_harness").items():
-        rendered[f"Maps/Harnesses/{_safe_name(harness)}.md"] = _render_map("harness", harness, members)
+    _render_maps(rendered, "category", "Categories", _groups(records, "category"))
+    _render_maps(rendered, "harness", "Harnesses", _groups(records, "source_harness"))
     rendered["Brigade Memory.canvas"] = _render_canvas(target, records, links)
     return rendered
 
@@ -348,6 +358,25 @@ def _render_map(kind: str, name: str, members: list[dict[str, Any]]) -> bytes:
     return "\n".join(lines).encode()
 
 
+def _render_maps(rendered: dict[str, bytes], kind: str, folder: str, groups: dict[str, list[dict[str, Any]]]) -> None:
+    used: set[str] = set()
+    for name, members in groups.items():
+        stem = _unique_map_stem(name, used)
+        rendered[f"Maps/{folder}/{stem}.md"] = _render_map(kind, name, members)
+
+
+def _unique_map_stem(name: str, used: set[str]) -> str:
+    base = _safe_name(name)
+    candidate = base
+    attempt = 1
+    while candidate.lower() in used:
+        suffix = _sha256(name)[:8] if attempt == 1 else f"{_sha256(name)[:8]}-{attempt}"
+        candidate = f"{base}-{suffix}"
+        attempt += 1
+    used.add(candidate.lower())
+    return candidate
+
+
 def _render_canvas(target: Path, records: list[dict[str, Any]], links: dict[str, list[dict[str, Any]]]) -> bytes:
     topology = memory_operations.topology_payload(target)
     records_sorted = sorted(records, key=lambda item: item["id"])
@@ -425,7 +454,12 @@ def _groups(records: list[dict[str, Any]], field: str) -> dict[str, list[dict[st
 def _wikilink(record: dict[str, Any]) -> str:
     path = str(record.get("link_path") or record["path"])
     target = path.removesuffix(".md")
-    return f"[[{_redacted_scalar(target)}|{_redacted_scalar(record['title'])}]]"
+    return f"[[{_escape_wikilink(target)}|{_escape_wikilink(str(record['title']))}]]"
+
+
+def _escape_wikilink(value: str) -> str:
+    text = _redacted_scalar(value)
+    return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").replace("|", "\\|")
 
 
 def _references(frontmatter: dict[str, Any]) -> list[str]:
@@ -499,6 +533,14 @@ def _digest(path: Path) -> str:
         return kernel.ABSENT
 
 
+def _exists_or_symlink(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _is_nonregular_destination(path: Path) -> bool:
+    return _exists_or_symlink(path) and (path.is_symlink() or not path.is_file())
+
+
 def _conflict_destination(relative: str, *, root: Path, prior_files: dict[str, str]) -> str:
     """Allocate a generated conflict path without treating vault contents as trusted."""
     attempt = 1
@@ -506,7 +548,9 @@ def _conflict_destination(relative: str, *, root: Path, prior_files: dict[str, s
         candidate = _conflict_path(relative, _sha256(relative), attempt=attempt)
         expected = prior_files.get(candidate)
         live = _digest(root / candidate)
-        if (expected is None and live == kernel.ABSENT) or (expected is not None and live == expected):
+        if (expected is None and not _exists_or_symlink(root / candidate)) or (
+            expected is not None and live == expected
+        ):
             return candidate
         attempt += 1
 
@@ -518,7 +562,7 @@ def _conflict_path(relative: str, digest: str, *, attempt: int = 1) -> str:
 
 
 def _safe_name(value: str) -> str:
-    cleaned = re.sub(r"[\\/:*?\"<>|]+", "-", _redacted_scalar(value)).strip(" .")
+    cleaned = re.sub(r"[\\/:*?\"<>|\[\]]+", "-", _redacted_scalar(value)).strip(" .")
     return cleaned or "untitled"
 
 
@@ -527,8 +571,10 @@ def _redacted_scalar(value: object) -> str:
 
 
 def _redact(value: str) -> str:
-    """Apply the content guard and the bounded bearer-token rule used by projections."""
-    return _BEARER_RE.sub(r"\1 [redacted]", redact_text(value))
+    """Apply the content guard and remove credentials from authorization headers."""
+    redacted = redact_text(value)
+    redacted = _AUTHORIZATION_RE.sub(r"\1[redacted]", redacted)
+    return _BEARER_RE.sub(r"\1 [redacted]", redacted)
 
 
 def _yaml(value: object) -> str:
