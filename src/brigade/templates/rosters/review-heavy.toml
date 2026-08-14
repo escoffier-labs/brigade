@@ -28,7 +28,7 @@ purpose = "Low-cost review and summary when premium lanes are saturated."
 requires = { cli = "antigravity" }
 fallback = []
 stats = { speed = "fast", source = "author-receipts-2026-08" }
-caveats = ["Use a stronger independent reviewer for high-risk or cross-file security decisions."]
+caveats = ["Route security-sensitive or cross-file decisions to the reviewer or reviewer_codex lane."]
 
 [agents.reviewer_cursor]
 cli = "cursor"

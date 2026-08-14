@@ -17,7 +17,7 @@ Assign every seat one job. Mixed-purpose seats make outcome capture useless beca
 
 ## Lane recipes
 
-Model IDs drift. Every ID below was verified answering on 2026-07-17. Confirm against your harness's live inventory before wiring (see the validation pattern at the end, and issue #299 for making that check automatic).
+Model IDs drift. Every ID below was verified answering on 2026-07-17, with Gemini 3.7 Flash re-verified on 2026-08-13. Confirm against your harness's live inventory before wiring (see the validation pattern at the end, and issue #299 for making that check automatic).
 
 ### Codex / ChatGPT subscription
 
@@ -43,7 +43,7 @@ model = "kimi-k2.7-code"
 role = "Open-weight implementation worker on the flat sub; overflow relief for the primary worker."
 ```
 
-Known gap: Composer models return empty text in read-only plan mode (issue #206). Pin a non-composer model for read-only seats.
+Known gap: Composer models return empty text in read-only plan mode (issue #206). Pin a non-composer model for read-only seats. In the August author receipts, Cursor rejected the Gemini 3.7 Flash security canary at the provider boundary before inference. Do not use that harness-model pairing for security review.
 
 Mark direct Cursor Composer and Grok seats as incapable so the chef cannot route
 `--read-only` work to them:
@@ -94,7 +94,7 @@ Often the most idle capacity an operator owns: two accounts can sit at 0-1% of w
 [agents.flash]
 cli = "antigravity"
 model = "Gemini 3.7 Flash (Low)"
-role = "Fast worker for research, summaries, scans, and small code changes."
+role = "Fast worker for research, summaries, scans, and small code changes; retain a stronger independent reviewer for security-sensitive or cross-file decisions."
 
 [agents.reviewer2]
 cli = "antigravity"

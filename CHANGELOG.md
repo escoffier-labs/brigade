@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The shipped review-heavy `reviewer_flash` preset now uses Gemini 3.7 Flash Low
+  on Antigravity. Security-sensitive or cross-file decisions still route to the
+  independent `reviewer` or `reviewer_codex` seat. (#920)
+
 ### Fixed
 - Graph snapshot copies during `brigade work verify run` now honor the same
   `graphtrail_delta_timeout_seconds` cap as `graphtrail sync`. A snapshot that
