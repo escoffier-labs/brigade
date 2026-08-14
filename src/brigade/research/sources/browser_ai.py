@@ -49,8 +49,8 @@ class BrowserAiProvider:
             snippet = item.get("snippet")
             if not all(isinstance(value, str) and value.strip() for value in (url, title, snippet)):
                 raise BrowserAiDiscoveryError("browser AI discovery result is missing url, title, or snippet")
-            parsed = urlparse(url)
-            if parsed.scheme != "https" or not parsed.hostname:
+            parsed_url = urlparse(url)
+            if parsed_url.scheme != "https" or not parsed_url.hostname:
                 raise BrowserAiDiscoveryError("browser AI discovery URL must use https")
             if len(snippet) > 12_000:
                 raise BrowserAiDiscoveryError("browser AI discovery snippet exceeds 12000 characters")

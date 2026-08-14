@@ -77,11 +77,16 @@ class ResearchConfig:
                 raise ValueError(f"profiles.{name}.allow_synthesis_fallback must be true or false")
             overlays["allow_synthesis_fallback"] = fallback
 
+        # Browser-AI activation is reserved for the built-in browser-ai profile
+        # and the explicit CLI flag. Repo overlays must not flip it on for other
+        # profiles (and cannot turn the built-in browser-ai profile off).
         if "browser_ai_research" in raw:
             browser = raw["browser_ai_research"]
             if browser is not True and browser is not False:
                 raise ValueError(f"profiles.{name}.browser_ai_research must be true or false")
-            overlays["browser_ai_research"] = browser
+            if name == "browser-ai":
+                overlays["browser_ai_research"] = True
+            # else: ignore overlay; keep built-in False for grounded/local-only/luna-only
 
         return replace(base, **overlays)
 

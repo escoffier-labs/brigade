@@ -95,6 +95,23 @@ def _lanes_from_single_backend(
     )
 
 
+def _build_run_invoker(target: Path, *, run_id: str):
+    from . import roster as roster_mod
+    from .proc import ProcessRegistry
+    from .run_seat import SeatInvoker
+
+    roster = roster_mod.load_roster(roster_mod.resolve_roster_path(target))
+    output_dir = registry.run_dir(target, run_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return SeatInvoker(
+        roster=roster,
+        cwd=target,
+        run_id=run_id,
+        process_registry=ProcessRegistry(),
+        output_dir=output_dir,
+    )
+
+
 def _build_lanes_from_roster(
     target: Path,
     *,
@@ -102,22 +119,12 @@ def _build_lanes_from_roster(
     synthesizer: str | None,
     reviewer: str | None,
     run_id: str,
+    invoker: Any | None = None,
 ) -> ResearchLanes:
-    from . import roster as roster_mod
-    from .proc import ProcessRegistry
     from .research.llm import PhaseBackend, resolve_lane
-    from .run_seat import SeatInvoker
 
-    roster = roster_mod.load_roster(roster_mod.resolve_roster_path(target))
-    output_dir = registry.run_dir(target, run_id)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    invoker = SeatInvoker(
-        roster=roster,
-        cwd=target,
-        run_id=run_id,
-        process_registry=ProcessRegistry(),
-        output_dir=output_dir,
-    )
+    seat_invoker = invoker if invoker is not None else _build_run_invoker(target, run_id=run_id)
+    roster = seat_invoker.roster
     synth_candidates = (synthesizer,) if synthesizer else profile.synthesizer
     review_candidates = (reviewer,) if reviewer else profile.reviewer
     planner = resolve_lane(roster, phase="research.plan", candidates=profile.planner)
@@ -125,38 +132,35 @@ def _build_lanes_from_roster(
     synthesis = resolve_lane(roster, phase="research.synthesize", candidates=synth_candidates)
     review = resolve_lane(roster, phase="research.review", candidates=review_candidates)
     synthesizers = tuple(
-        PhaseBackend(invoker=invoker, seat=seat, phase="research.synthesize")
+        PhaseBackend(invoker=seat_invoker, seat=seat, phase="research.synthesize")
         for seat in (synthesis.primary, *synthesis.fallbacks)
     )
     if not profile.allow_synthesis_fallback:
         synthesizers = synthesizers[:1]
     return ResearchLanes(
-        planner=PhaseBackend(invoker=invoker, seat=planner.primary, phase="research.plan"),
-        extractor=PhaseBackend(invoker=invoker, seat=extractor.primary, phase="research.extract"),
+        planner=PhaseBackend(invoker=seat_invoker, seat=planner.primary, phase="research.plan"),
+        extractor=PhaseBackend(invoker=seat_invoker, seat=extractor.primary, phase="research.extract"),
         synthesizers=synthesizers,
-        reviewer=PhaseBackend(invoker=invoker, seat=review.primary, phase="research.review"),
+        reviewer=PhaseBackend(invoker=seat_invoker, seat=review.primary, phase="research.review"),
         browser_discovery=None,
     )
 
 
-def _resolve_browser_ai_provider(target: Path, *, run_id: str) -> BrowserAiProvider:
-    from . import roster as roster_mod
-    from .proc import ProcessRegistry
+def _resolve_browser_ai_provider(
+    target: Path,
+    *,
+    run_id: str,
+    invoker: Any | None = None,
+) -> BrowserAiProvider:
     from .research.llm import PhaseBackend, resolve_lane
-    from .run_seat import SeatInvoker
 
-    roster = roster_mod.load_roster(roster_mod.resolve_roster_path(target))
-    output_dir = registry.run_dir(target, run_id)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    invoker = SeatInvoker(
-        roster=roster,
-        cwd=target,
-        run_id=run_id,
-        process_registry=ProcessRegistry(),
-        output_dir=output_dir,
+    seat_invoker = invoker if invoker is not None else _build_run_invoker(target, run_id=run_id)
+    lane = resolve_lane(seat_invoker.roster, phase="research.browser-discover")
+    backend = PhaseBackend(
+        invoker=seat_invoker,
+        seat=lane.primary,
+        phase="research.browser-discover",
     )
-    lane = resolve_lane(roster, phase="research.browser-discover")
-    backend = PhaseBackend(invoker=invoker, seat=lane.primary, phase="research.browser-discover")
     return BrowserAiProvider(backend=backend, lane=lane.primary)
 
 
@@ -167,6 +171,7 @@ def _resolve_lanes(
     synthesizer: str | None,
     reviewer: str | None,
     run_id: str,
+    invoker: Any | None = None,
 ) -> ResearchLanes:
     # New runs always build PhaseBackend lanes from the roster/capability resolver.
     # HttpBackend/_CompatBackend remain available for the legacy-resume path only.
@@ -176,7 +181,14 @@ def _resolve_lanes(
         synthesizer=synthesizer,
         reviewer=reviewer,
         run_id=run_id,
+        invoker=invoker,
     )
+
+
+def _operator_safe_detail(detail: str) -> str:
+    from .worker_failure import safe_detail
+
+    return safe_detail(detail)
 
 
 def _persist_category(target: Path, run_id: str, category: str | None) -> None:
@@ -299,7 +311,9 @@ def run(
 ) -> str:
     cfg = rconfig.load(target)
     research_profile = cfg.profile(profile)
-    browser_ai_enabled = bool(browser_ai_research) or bool(research_profile.browser_ai_research)
+    # Only the explicit CLI flag or the built-in browser-ai profile may activate
+    # browser-AI discovery. Repo overlays on other profiles cannot.
+    browser_ai_enabled = bool(browser_ai_research) or research_profile.name == "browser-ai"
     caps_kwargs = {**cfg.caps_overrides(), **{k: v for k, v in overrides.items() if v is not None}}
     caps = Caps.build(**caps_kwargs)
     run_id = run_id or _new_run_id(question)
@@ -324,13 +338,8 @@ def run(
             blockers.append(str(e))
             web_provider = None
 
+    seat_invoker = None
     browser_provider = None
-    if browser_ai_enabled:
-        try:
-            browser_provider = _resolve_browser_ai_provider(target, run_id=run_id)
-        except Exception as e:
-            blockers.append(str(e))
-            browser_provider = None
 
     providers: List[Any] = []
     if index is not None and index.num_chunks > 0:
@@ -338,8 +347,6 @@ def run(
     providers.extend(cli_providers)
     if web_provider is not None:
         providers.append(web_provider)
-    if browser_provider is not None:
-        providers.append(browser_provider)
 
     manifest = _manifest(
         target=target,
@@ -351,7 +358,7 @@ def run(
         provider=provider,
         cli_providers=cli_providers,
         browser_ai_research=browser_ai_enabled,
-        browser_ai_provider=browser_provider,
+        browser_ai_provider=True if browser_ai_enabled else None,
     )
     registry.create_run(
         target,
@@ -362,6 +369,93 @@ def run(
     )
     registry.update_run(target, run_id, profile=research_profile.name, browser_ai_research=browser_ai_enabled)
     _persist_category(target, run_id, category)
+
+    if not providers and not browser_ai_enabled:
+        detail = "no local, CLI, web, or browser-AI source route available"
+        registry.finish_run(
+            target,
+            run_id,
+            status="error",
+            stats={},
+            artifacts={},
+            blockers=blockers + [detail],
+        )
+        registry.update_run(
+            target,
+            run_id,
+            failure_kind="no-source-route",
+            failure_phase="admission",
+            detail=detail,
+        )
+        return run_id
+
+    try:
+        seat_invoker = _build_run_invoker(target, run_id=run_id)
+        lanes = _resolve_lanes(
+            target,
+            profile=research_profile,
+            synthesizer=synthesizer,
+            reviewer=reviewer,
+            run_id=run_id,
+            invoker=seat_invoker,
+        )
+    except Exception as e:
+        detail = _operator_safe_detail(str(e))
+        registry.finish_run(
+            target,
+            run_id,
+            status="error",
+            stats={},
+            artifacts={},
+            blockers=blockers + [detail],
+        )
+        registry.update_run(
+            target,
+            run_id,
+            failure_kind="invalid-seat",
+            failure_phase="admission",
+            detail=detail,
+        )
+        return run_id
+
+    if browser_ai_enabled:
+        try:
+            browser_provider = _resolve_browser_ai_provider(
+                target, run_id=run_id, invoker=seat_invoker
+            )
+        except Exception as e:
+            detail = _operator_safe_detail(str(e))
+            registry.finish_run(
+                target,
+                run_id,
+                status="error",
+                stats={},
+                artifacts={},
+                blockers=blockers + [detail],
+            )
+            registry.update_run(
+                target,
+                run_id,
+                failure_kind="browser-ai-unavailable",
+                failure_phase="discovery",
+                detail=detail,
+            )
+            return run_id
+        providers.append(browser_provider)
+        # Refresh manifest enabled state now that the provider exists.
+        manifest = _manifest(
+            target=target,
+            cfg=cfg,
+            corpus=corpus,
+            sources=sources,
+            paths=paths,
+            web=web and web_provider is not None,
+            provider=provider,
+            cli_providers=cli_providers,
+            browser_ai_research=True,
+            browser_ai_provider=browser_provider,
+        )
+        registry.update_run(target, run_id, manifest=manifest)
 
     if not providers:
         detail = "no local, CLI, web, or browser-AI source route available"
@@ -382,18 +476,6 @@ def run(
         )
         return run_id
 
-    try:
-        lanes = _resolve_lanes(
-            target,
-            profile=research_profile,
-            synthesizer=synthesizer,
-            reviewer=reviewer,
-            run_id=run_id,
-        )
-    except Exception as e:
-        registry.finish_run(target, run_id, status="error", stats={}, artifacts={}, blockers=blockers + [str(e)])
-        return run_id
-
     eng = ResearchEngine(
         lanes=lanes,
         sources=providers,
@@ -406,27 +488,64 @@ def run(
     try:
         result = eng.run(question)
     except ResearchRunError as e:
-        registry.finish_run(target, run_id, status="error", stats={}, artifacts={}, blockers=blockers + [str(e)])
+        detail = _operator_safe_detail(e.detail)
+        registry.finish_run(
+            target,
+            run_id,
+            status="error",
+            stats={},
+            artifacts={},
+            blockers=blockers + [detail],
+        )
         registry.update_run(
             target,
             run_id,
             failure_kind=e.failure_kind,
             failure_phase=e.failure_phase,
-            detail=e.detail,
+            detail=detail,
         )
         return run_id
     except Exception as e:
-        registry.finish_run(target, run_id, status="error", stats={}, artifacts={}, blockers=blockers + [str(e)])
+        detail = _operator_safe_detail(str(e))
+        registry.finish_run(
+            target,
+            run_id,
+            status="error",
+            stats={},
+            artifacts={},
+            blockers=blockers + [detail],
+        )
+        registry.update_run(
+            target,
+            run_id,
+            failure_kind="worker-failed",
+            failure_phase="research",
+            detail=detail,
+        )
         return run_id
 
     findings = list(result.findings)
+    sources_list = list(result.sources)
     d = registry.run_dir(target, run_id)
-    md = reportmod.render_markdown(question=question, markdown_report=result.report, findings=findings)
+    md = reportmod.render_markdown(
+        question=question,
+        markdown_report=result.report,
+        findings=findings,
+        sources=sources_list,
+    )
     html = reportmod.render_html(
-        question=question, markdown_report=result.report, findings=findings, stats=result.stats
+        question=question,
+        markdown_report=result.report,
+        findings=findings,
+        sources=sources_list,
+        stats=result.stats,
     )
     ho = handoffmod.render_handoff(
-        question=question, markdown_report=result.report, findings=findings, stats=result.stats
+        question=question,
+        markdown_report=result.report,
+        findings=findings,
+        sources=sources_list,
+        stats=result.stats,
     )
     (d / "report.md").write_text(md, encoding="utf-8")
     (d / "report.html").write_text(html, encoding="utf-8")
@@ -978,8 +1097,8 @@ def cli_run(
         print(f"status: {rec.get('status')}")
         for b in rec.get("blockers", []):
             print(f"blocker: {b}")
-    if rec.get("failure_kind") == "no-source-route":
-        return 2
+    if rec.get("status") == "error":
+        return 2 if rec.get("failure_kind") == "no-source-route" else 1
     return 0
 
 

@@ -68,6 +68,11 @@ def patch_stub_lanes(monkeypatch) -> None:
         "_resolve_lanes",
         lambda *_args, **_kwargs: stub_lanes(),
     )
+    monkeypatch.setattr(
+        research_cmd,
+        "_build_run_invoker",
+        lambda *_args, **_kwargs: object(),
+    )
 
 
 def capture_run(monkeypatch) -> dict[str, object]:
@@ -261,12 +266,14 @@ def test_new_run_resolve_lanes_bypasses_resolve_backend_and_forwards_overrides(
         synthesizer: str | None,
         reviewer: str | None,
         run_id: str,
+        invoker=None,
     ) -> ResearchLanes:
         seen["target"] = target
         seen["profile"] = profile.name
         seen["synthesizer"] = synthesizer
         seen["reviewer"] = reviewer
         seen["run_id"] = run_id
+        seen["invoker"] = invoker
         return stub_lanes()
 
     monkeypatch.setattr(research_cmd, "_resolve_backend", boom)
@@ -288,6 +295,7 @@ def test_new_run_resolve_lanes_bypasses_resolve_backend_and_forwards_overrides(
         "synthesizer": "synth-seat",
         "reviewer": "review-seat",
         "run_id": "run-lanes",
+        "invoker": None,
     }
 
 
@@ -318,7 +326,7 @@ def test_run_does_not_construct_browser_provider_when_opt_in_false(
     patch_stub_lanes(monkeypatch)
     calls: list[object] = []
 
-    def boom(*, target: Path, run_id: str):
+    def boom(target: Path, *, run_id: str, invoker=None):
         calls.append((target, run_id))
         raise AssertionError("_resolve_browser_ai_provider must stay off by default")
 
@@ -706,3 +714,207 @@ def test_sources_payload_typeless_adapter_does_not_misalign_routes(tmp_path: Pat
     # Misalignment would pair research-cli's safe entry with the broken raw
     # adapter's missing executable and report fail.
     assert route["status"] == "ok"
+
+
+def test_repo_overlay_on_grounded_does_not_activate_browser_ai(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / "a.md").write_text("plants use light")
+    (tmp_path / ".brigade" / "research.toml").write_text(
+        "[profiles.grounded]\nbrowser_ai_research = true\n",
+        encoding="utf-8",
+    )
+    patch_stub_lanes(monkeypatch)
+    calls: list[object] = []
+
+    def boom(target: Path, *, run_id: str, invoker=None):
+        calls.append((target, run_id, invoker))
+        raise AssertionError("browser AI must stay off for grounded overlays")
+
+    monkeypatch.setattr(research_cmd, "_resolve_browser_ai_provider", boom)
+    rid = research_cmd.run(
+        target=tmp_path,
+        question="how do plants make energy?",
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1, "min_rounds": 1, "max_time": 30},
+        profile="grounded",
+        browser_ai_research=False,
+        run_id="20260602-120030-overlay",
+    )
+    assert calls == []
+    assert registry.show_run(tmp_path, rid)["status"] == "done"
+    assert registry.show_run(tmp_path, rid).get("browser_ai_research") is False
+
+
+def test_explicit_browser_ai_provider_failure_fails_truthfully(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    patch_stub_lanes(monkeypatch)
+
+    def boom(target: Path, *, run_id: str, invoker=None):
+        raise RuntimeError("browser seat unavailable token=secret-value")
+
+    monkeypatch.setattr(research_cmd, "_resolve_browser_ai_provider", boom)
+    code = cli_run(
+        target=tmp_path,
+        question="q",
+        corpus=None,
+        sources=[],
+        web=False,
+        overrides={"max_rounds": 1},
+        browser_ai_research=True,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code != 0
+    assert payload["status"] == "error"
+    assert payload["failure_phase"] == "discovery"
+    assert "secret-value" not in json.dumps(payload)
+
+
+def test_generic_failed_research_run_returns_nonzero(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    (tmp_path / "a.md").write_text("plants use light")
+
+    class BoomLanes:
+        def __call__(self, *_args, **_kwargs):
+            return stub_lanes()
+
+    patch_stub_lanes(monkeypatch)
+
+    def boom_run(*_args, **_kwargs):
+        raise research_cmd.ResearchRunError("review", "review-rejected", "unsupported")
+
+    monkeypatch.setattr(research_cmd.ResearchEngine, "run", boom_run)
+    code = cli_run(
+        target=tmp_path,
+        question="q",
+        corpus=None,
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1},
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code != 0
+    assert payload["status"] == "error"
+    assert payload["failure_kind"] == "review-rejected"
+
+
+def test_opt_in_browser_provider_included_and_manifest_enabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "a.md").write_text("plants use light")
+
+    class FakeBrowser:
+        trust = "browser-ai"
+        source_type = "browser-ai"
+        source_id = "gemini-browser"
+        lane = "gemini_browser"
+        requested_model = "gemini-3.1-pro"
+        observed_model = "unverified"
+
+        def search(self, query: str, limit: int):
+            del query, limit
+            return []
+
+        def fetch(self, url: str):
+            return {"success": False, "content": "", "title": ""}
+
+    shared: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_invoker(target: Path, *, run_id: str):
+        shared["built"] = (target, run_id)
+        return sentinel
+
+    def fake_lanes(target, *, profile, synthesizer, reviewer, run_id, invoker=None):
+        shared["lanes_invoker"] = invoker
+        return stub_lanes()
+
+    def fake_browser(target: Path, *, run_id: str, invoker=None):
+        shared["browser_invoker"] = invoker
+        return FakeBrowser()
+
+    monkeypatch.setattr(research_cmd, "_build_run_invoker", fake_invoker)
+    monkeypatch.setattr(research_cmd, "_build_lanes_from_roster", fake_lanes)
+    monkeypatch.setattr(research_cmd, "_resolve_browser_ai_provider", fake_browser)
+
+    rid = research_cmd.run(
+        target=tmp_path,
+        question="q",
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1, "min_rounds": 1},
+        browser_ai_research=True,
+        run_id="20260602-120031-browser",
+    )
+    rec = registry.show_run(tmp_path, rid)
+    route = next(r for r in rec["manifest"]["routes"] if r["id"] == "browser-ai")
+    assert route["enabled"] is True
+    assert rec["manifest"]["browser_ai_research"] is True
+    assert shared["lanes_invoker"] is shared["browser_invoker"]
+    assert shared["lanes_invoker"] is sentinel
+
+
+def test_shared_seat_invoker_built_once_for_browser_and_lanes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from brigade.proc import ProcessRegistry
+    from brigade.run_seat import SeatInvoker
+    from brigade.roster import Agent, Roster
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "luna": Agent(
+                name="luna",
+                cli="codex",
+                role="researcher",
+                capabilities=(
+                    "research.plan",
+                    "research.extract",
+                    "research.synthesize",
+                    "research.review",
+                    "research.browser-discover",
+                ),
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        "brigade.roster.load_roster", lambda _path: roster
+    )
+    monkeypatch.setattr(
+        "brigade.roster.resolve_roster_path", lambda _target: tmp_path / "roster.toml"
+    )
+
+    constructed: list[SeatInvoker] = []
+    real_init = SeatInvoker.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        constructed.append(self)
+
+    monkeypatch.setattr(SeatInvoker, "__init__", tracking_init)
+
+    invoker = research_cmd._build_run_invoker(tmp_path, run_id="shared-invoker")
+    lanes = research_cmd._build_lanes_from_roster(
+        tmp_path,
+        profile=rconfig.load(tmp_path).profile("browser-ai"),
+        synthesizer=None,
+        reviewer=None,
+        run_id="shared-invoker",
+        invoker=invoker,
+    )
+    provider = research_cmd._resolve_browser_ai_provider(
+        tmp_path, run_id="shared-invoker", invoker=invoker
+    )
+
+    assert len(constructed) == 1
+    assert lanes.planner.invoker is invoker
+    assert provider.backend.invoker is invoker
+    assert isinstance(invoker.process_registry, ProcessRegistry)

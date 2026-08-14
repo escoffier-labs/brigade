@@ -53,3 +53,34 @@ browser_ai_research = false
     assert profile.name == "grounded"
     assert profile.synthesizer == ("gemini_browser", "luna")
     assert profile.browser_ai_research is False
+
+
+def test_grounded_overlay_cannot_enable_browser_ai(tmp_path: Path) -> None:
+    path = tmp_path / ".brigade" / "research.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """
+[profiles.grounded]
+browser_ai_research = true
+planner = ["luna"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    profile = config.load(tmp_path).profile("grounded")
+
+    assert profile.name == "grounded"
+    assert profile.browser_ai_research is False
+    assert profile.planner == ("luna",)
+
+
+def test_research_profile_is_frozen() -> None:
+    from brigade.research.types import BUILTIN_PROFILES
+
+    profile = BUILTIN_PROFILES["grounded"]
+    try:
+        profile.browser_ai_research = True  # type: ignore[misc]
+    except Exception:
+        return
+    raise AssertionError("ResearchProfile must be frozen")

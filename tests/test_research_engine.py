@@ -408,3 +408,358 @@ def test_phase_backend_forwards_engine_timeout_and_seat_invoker_applies_roster_f
 
     assert text == '{"sub_questions": ["q1"]}'
     assert captured["timeout_seconds"] == 300.0
+
+
+def test_same_attempt_review_is_rejected() -> None:
+    calls: list[tuple[str, str]] = []
+    lanes = fake_lanes(calls, gemini_report=f"Answer [source:{FIXTURE_SOURCE_ID}]")
+
+    def complete(messages, **_kwargs):
+        lanes.reviewer.calls.append(("review", lanes.reviewer.seat))
+        lanes.reviewer.last_attempt_id = lanes.synthesizers[0].last_attempt_id
+        return json.dumps({"accepted": True, "detail": "ok", "rejected_claims": []})
+
+    lanes.reviewer.complete = complete  # type: ignore[method-assign]
+
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run("q")
+
+    assert caught.value.failure_phase == "review"
+    assert caught.value.failure_kind == "same-attempt"
+
+
+def test_zero_citation_audit_is_rejected() -> None:
+    lanes = fake_lanes(
+        [],
+        gemini_report="Answer with no citations",
+        repair_report="Still no citations",
+        review="accepted",
+    )
+
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run("q")
+
+    assert caught.value.failure_phase == "review"
+    assert caught.value.failure_kind == "review-rejected"
+
+
+def test_long_synthesized_report_is_fenced_without_truncation() -> None:
+    long_body = ("LONG-REPORT-MARKER " * 2000).strip()
+    assert len(long_body) > 15000
+    citation = f"[source:{FIXTURE_SOURCE_ID}]"
+    calls: list[tuple[str, str]] = []
+    review_prompts: list[str] = []
+    lanes = fake_lanes(
+        calls,
+        gemini_report=f"{long_body}\n{citation}",
+        review="accepted",
+        review_prompts=review_prompts,
+    )
+
+    ResearchEngine(
+        lanes=lanes,
+        sources=[fixed_source_provider()],
+        caps=Caps(max_rounds=1, max_content_chars=15000),
+    ).run("q")
+
+    assert review_prompts
+    assert "LONG-REPORT-MARKER" in review_prompts[0]
+    assert "... [truncated]" not in review_prompts[0]
+    assert long_body[:80] in review_prompts[0]
+
+
+def test_discovery_provider_failure_becomes_research_run_error() -> None:
+    from brigade.research.sources.browser_ai import BrowserAiDiscoveryError
+
+    class BoomProvider(FixedSourceProvider):
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            raise BrowserAiDiscoveryError("browser AI discovery returned invalid JSON")
+
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(
+            lanes=fake_lanes([]),
+            sources=[BoomProvider()],
+            caps=Caps(max_rounds=1),
+        ).run("q")
+
+    assert caught.value.failure_phase == "discovery"
+    assert caught.value.failure_kind == "invalid-json"
+
+
+def test_discovery_seat_failure_preserves_safe_failure_kind() -> None:
+    class SeatFailProvider(FixedSourceProvider):
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            raise ResearchSeatError(browser_auth_result())
+
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(
+            lanes=fake_lanes([]),
+            sources=[SeatFailProvider()],
+            caps=Caps(max_rounds=1),
+        ).run("q")
+
+    assert caught.value.failure_phase == "discovery"
+    assert caught.value.failure_kind == "browser-auth"
+
+
+def test_max_rounds_one_keeps_single_round_stats() -> None:
+    result = ResearchEngine(
+        lanes=fake_lanes([]),
+        sources=[fixed_source_provider()],
+        caps=Caps(max_rounds=1, min_rounds=1),
+    ).run("q")
+
+    assert result.stats["rounds"] == 1
+
+
+def _plan_with_sub_questions(*sub_questions: str) -> str:
+    return json.dumps(
+        {
+            "sub_questions": list(sub_questions),
+            "key_topics": [],
+            "success_criteria": "cite",
+        }
+    )
+
+
+def test_discovery_progresses_distinct_queries_across_rounds() -> None:
+    seen_queries: list[str] = []
+
+    class TrackingProvider(FixedSourceProvider):
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            del limit
+            seen_queries.append(query)
+            slug = re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-") or "q"
+            return [
+                {
+                    "url": f"https://example.test/{slug}",
+                    "title": query,
+                    "trust": "web",
+                }
+            ]
+
+    engine = ResearchEngine(
+        lanes=fake_lanes([]),
+        sources=[TrackingProvider()],
+        caps=Caps(max_rounds=3, min_rounds=1, max_urls_per_round=8),
+    )
+    sources = engine._discover("root-question", _plan_with_sub_questions("alpha", "beta", "gamma"))
+
+    assert seen_queries == ["root-question", "alpha", "beta"]
+    assert engine._rounds == 3
+    assert len(sources) == 3
+
+
+def test_max_rounds_stops_later_planned_queries() -> None:
+    seen_queries: list[str] = []
+
+    class TrackingProvider(FixedSourceProvider):
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            del limit
+            seen_queries.append(query)
+            slug = re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-") or "q"
+            return [
+                {
+                    "url": f"https://example.test/{slug}",
+                    "title": query,
+                    "trust": "web",
+                }
+            ]
+
+    engine = ResearchEngine(
+        lanes=fake_lanes([]),
+        sources=[TrackingProvider()],
+        caps=Caps(max_rounds=2, min_rounds=1, max_urls_per_round=8),
+    )
+    engine._discover(
+        "root-question",
+        _plan_with_sub_questions("alpha", "beta", "gamma", "delta"),
+    )
+
+    assert seen_queries == ["root-question", "alpha"]
+    assert "beta" not in seen_queries
+    assert "gamma" not in seen_queries
+    assert "delta" not in seen_queries
+    assert engine._rounds == 2
+
+
+def test_discovery_never_reissues_queries_for_min_rounds() -> None:
+    seen_queries: list[str] = []
+
+    class TrackingProvider(FixedSourceProvider):
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            del limit
+            seen_queries.append(query)
+            return [{"url": "https://example.test/only", "title": query, "trust": "web"}]
+
+    engine = ResearchEngine(
+        lanes=fake_lanes([]),
+        sources=[TrackingProvider()],
+        caps=Caps(max_rounds=4, min_rounds=3, max_urls_per_round=8, max_empty_rounds=2),
+    )
+    engine._discover("root-question", _plan_with_sub_questions("only-followup"))
+
+    assert seen_queries == ["root-question", "only-followup"]
+    assert len(seen_queries) == len(set(seen_queries))
+    # Queries exhausted after two distinct attempts; do not pad to min_rounds.
+    assert engine._rounds == 2
+
+
+def test_discovery_stops_after_max_empty_rounds() -> None:
+    seen_queries: list[str] = []
+
+    class EmptyProvider(FixedSourceProvider):
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            del limit
+            seen_queries.append(query)
+            return []
+
+    engine = ResearchEngine(
+        lanes=fake_lanes([]),
+        sources=[EmptyProvider()],
+        caps=Caps(max_rounds=6, min_rounds=1, max_urls_per_round=8, max_empty_rounds=2),
+    )
+    sources = engine._discover(
+        "root-question",
+        _plan_with_sub_questions("a", "b", "c", "d"),
+    )
+
+    assert seen_queries == ["root-question", "a"]
+    assert "b" not in seen_queries
+    assert engine._rounds == 2
+    assert sources == ()
+
+
+def test_max_local_docs_per_round_limits_local_provider() -> None:
+    seen: list[int] = []
+
+    class LocalProvider:
+        trust = "local"
+        source_id = "local"
+        source_type = "local"
+
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            seen.append(limit)
+            return [
+                {"url": f"/doc-{i}.md", "title": f"Doc {i}", "trust": "local"}
+                for i in range(limit)
+            ]
+
+        def fetch(self, url: str) -> dict[str, object]:
+            return {"success": True, "content": f"content for {url}", "title": url}
+
+    calls: list[tuple[str, str]] = []
+    extractor = ScriptedBackend(
+        seat="luna",
+        phase="extraction",
+        calls=calls,
+        responses=[
+            '{"summary":"local doc","evidence":"x"}',
+            '{"summary":"local doc","evidence":"x"}',
+        ],
+    )
+    lanes = ResearchLanes(
+        planner=ScriptedBackend(
+            seat="luna",
+            phase="planning",
+            calls=calls,
+            responses=['{"sub_questions":["q"],"key_topics":["t"],"success_criteria":"c"}'],
+        ),
+        extractor=extractor,
+        synthesizers=(
+            ScriptedBackend(
+                seat="luna",
+                phase="synthesis",
+                calls=calls,
+                responses=["Answer", "Answer"],
+            ),
+        ),
+        reviewer=ScriptedBackend(
+            seat="luna",
+            phase="review",
+            calls=calls,
+            responses=[
+                json.dumps({"accepted": False, "detail": "no cites", "rejected_claims": ["x"]}),
+                json.dumps({"accepted": False, "detail": "no cites", "rejected_claims": ["x"]}),
+            ],
+        ),
+    )
+    with pytest.raises(ResearchRunError):
+        ResearchEngine(
+            lanes=lanes,
+            sources=[LocalProvider()],
+            caps=Caps(max_rounds=1, max_local_docs_per_round=2, max_urls_per_round=9),
+        ).run("q")
+
+    assert seen
+    assert all(limit == 2 for limit in seen)
+
+
+def test_synthesis_window_limits_finding_packet() -> None:
+    synth_prompts: list[str] = []
+    source_ids: list[str] = []
+    for index in range(4):
+        envelope = SourceEnvelope.build(
+            origin="web",
+            provider="fixture-web",
+            uri=f"https://example.test/{index}",
+            content=f"fact-{index}",
+            trust="web",
+            acquired_at="2026-08-13T12:00:00+00:00",
+        )
+        source_ids.append(envelope.source_id)
+
+    class MultiProvider(FixedSourceProvider):
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            del query, limit
+            return [
+                {"url": f"https://example.test/{index}", "title": f"T{index}", "trust": "web"}
+                for index in range(4)
+            ]
+
+        def fetch(self, url: str) -> dict[str, object]:
+            index = url.rsplit("/", 1)[-1]
+            return {"success": True, "content": f"fact-{index}", "title": f"T{index}", "url": url}
+
+    calls: list[tuple[str, str]] = []
+    lanes = fake_lanes(
+        calls,
+        gemini_report=f"Answer [source:{source_ids[-1]}]",
+        extractor_response='{"summary":"fact","evidence":"e"}',
+        synth_prompts=synth_prompts,
+        review="accepted",
+    )
+    # extractor needs one response per source
+    lanes.extractor.responses = [
+        '{"summary":"fact","evidence":"e"}' for _ in range(4)
+    ]
+
+    ResearchEngine(
+        lanes=lanes,
+        sources=[MultiProvider()],
+        caps=Caps(max_rounds=1, max_urls_per_round=4, synthesis_window=2),
+    ).run("q")
+
+    packet = synth_prompts[0]
+    assert source_ids[-1] in packet
+    assert source_ids[-2] in packet
+    assert source_ids[0] not in packet
+    assert source_ids[1] not in packet
+
+
+def test_max_time_raises_timeout() -> None:
+    class SlowProvider(FixedSourceProvider):
+        def search(self, query: str, limit: int) -> list[dict[str, str]]:
+            import time
+
+            time.sleep(0.05)
+            return super().search(query, limit)
+
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(
+            lanes=fake_lanes([]),
+            sources=[SlowProvider()],
+            caps=Caps(max_rounds=1, max_time=0),
+        ).run("q")
+
+    assert caught.value.failure_kind == "timeout"

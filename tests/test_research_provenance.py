@@ -47,3 +47,11 @@ def test_citation_audit_rejects_unknown_source() -> None:
     assert audit.accepted is False
     assert audit.unresolved == ("src-2222222222222222",)
     assert [item.status for item in audit.citations] == ["accepted", "unresolved"]
+
+
+def test_citation_audit_rejects_zero_citations() -> None:
+    audit = audit_citations("Answer with prose and no tokens.", findings=[finding_for("src-1111111111111111")])
+
+    assert audit.accepted is False
+    assert audit.citations == ()
+    assert audit.unresolved == ()

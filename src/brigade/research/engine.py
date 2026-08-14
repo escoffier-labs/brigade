@@ -14,6 +14,7 @@ from ..untrusted import wrap_untrusted
 from . import extract as _extract
 from .llm import ResearchSeatError
 from .provenance import audit_citations, citation_token
+from .sources.browser_ai import BrowserAiDiscoveryError
 from .types import (
     Caps,
     CitationAudit,
@@ -117,18 +118,24 @@ class ResearchEngine:
     def run(self, question: str, *, resume: ResumeState | None = None) -> ResearchResult:
         self._start = time.time()
         self.fallbacks = []
+        self._ensure_time("planning")
         plan = self._resume_or_plan(question, resume)
+        self._ensure_time("discovery")
         sources = self._resume_or_discover(question, plan, resume)
+        self._ensure_time("extraction")
         findings = self._resume_or_extract(question, sources, resume)
+        self._ensure_time("synthesis")
         report, synthesis = self._synthesize_with_fallback(question, findings)
         audit = audit_citations(report, findings)
+        self._ensure_time("review")
         review = self._review(question, report, findings, audit, synthesis.attempt_id)
         if not audit.accepted or not review.accepted:
+            self._ensure_time("repair")
             report = self._repair_once(question, report, findings, audit, review)
             audit = audit_citations(report, findings)
             review = self._review(question, report, findings, audit, synthesis.attempt_id)
         if not audit.accepted or not review.accepted:
-            raise ResearchRunError("review", "review-rejected", review.detail)
+            raise ResearchRunError("review", "review-rejected", review.detail or "citation audit or review rejected")
         return ResearchResult(
             report=report,
             findings=findings,
@@ -182,17 +189,78 @@ class ResearchEngine:
         providers = list(self.sources)
         if not providers:
             self._phase_done("discovery", artifact="sources.json", digest=_digest("[]"), count=0)
+            self._rounds = 0
             return ()
 
+        seen_urls: set[str] = set()
+        collected: list[SourceEnvelope] = []
+        empty_rounds = 0
+        round_no = 0
+        query_index = 0
+        max_rounds = max(1, self.caps.max_rounds)
+        empty_limit = max(1, self.caps.max_empty_rounds)
+
+        # Progressive discovery: consume each planned query once, in stable order.
+        # Never reissue a query to pad min_rounds; stop on exhaustion, max_rounds,
+        # or consecutive empty rounds.
+        while round_no < max_rounds and query_index < len(queries):
+            self._ensure_time("discovery")
+            if self._cancelled:
+                break
+            round_queries = [queries[query_index]]
+            query_index += 1
+            round_no += 1
+            before = len(collected)
+            try:
+                round_sources = self._discover_round(round_queries, providers, seen_urls)
+            except ResearchSeatError as exc:
+                raise ResearchRunError("discovery", exc.failure_kind, str(exc)) from exc
+            except BrowserAiDiscoveryError as exc:
+                raise ResearchRunError(
+                    "discovery",
+                    self._discovery_failure_kind(exc),
+                    str(exc),
+                ) from exc
+            collected.extend(round_sources)
+            if len(collected) > before:
+                empty_rounds = 0
+            else:
+                empty_rounds += 1
+                if empty_rounds >= empty_limit:
+                    break
+
+        sources = tuple(collected)
+        payload = json.dumps([s.source_id for s in sources])
+        self._phase_done(
+            "discovery",
+            artifact="sources.json",
+            digest=_digest(payload),
+            count=len(sources),
+        )
+        self._rounds = round_no
+        return sources
+
+    def _discover_round(
+        self,
+        queries: list[str],
+        providers: list[Any],
+        seen_urls: set[str],
+    ) -> list[SourceEnvelope]:
         def _provider_batch(index: int, provider: Any) -> tuple[int, list[SourceEnvelope]]:
             envelopes: list[SourceEnvelope] = []
-            seen: set[str] = set()
+            local_seen: set[str] = set()
+            trust_hint = self._normalize_trust(getattr(provider, "trust", "web"))
+            limit = (
+                self.caps.max_local_docs_per_round
+                if trust_hint == "local"
+                else self.caps.max_urls_per_round
+            )
             for query in queries:
-                for hit in provider.search(query, self.caps.max_urls_per_round):
+                for hit in provider.search(query, limit):
                     url = str(hit.get("url") or "")
-                    if not url or url in seen:
+                    if not url or url in seen_urls or url in local_seen:
                         continue
-                    seen.add(url)
+                    local_seen.add(url)
                     page = provider.fetch(url)
                     if not page.get("success") or not page.get("content"):
                         continue
@@ -222,18 +290,26 @@ class ResearchEngine:
                 for index, provider in enumerate(providers)
             }
             for future in as_completed(futures):
-                ordered.append(future.result())
+                try:
+                    ordered.append(future.result())
+                except (ResearchSeatError, BrowserAiDiscoveryError):
+                    raise
+                except Exception as exc:
+                    raise ResearchRunError("discovery", "provider-failed", str(exc)) from exc
         ordered.sort(key=lambda item: item[0])
-        sources = tuple(envelope for _, batch in ordered for envelope in batch)
-        payload = json.dumps([s.source_id for s in sources])
-        self._phase_done(
-            "discovery",
-            artifact="sources.json",
-            digest=_digest(payload),
-            count=len(sources),
-        )
-        self._rounds = 1
-        return sources
+        envelopes = [envelope for _, batch in ordered for envelope in batch]
+        for envelope in envelopes:
+            seen_urls.add(envelope.uri)
+        return envelopes
+
+    @staticmethod
+    def _discovery_failure_kind(exc: BrowserAiDiscoveryError) -> str:
+        detail = str(exc).lower()
+        if "invalid json" in detail:
+            return "invalid-json"
+        if "https" in detail or "url" in detail:
+            return "invalid-url"
+        return "provider-failed"
 
     def _extract(self, question: str, sources: tuple[SourceEnvelope, ...]) -> tuple[Finding, ...]:
         self._phase_start("extraction")
@@ -274,12 +350,10 @@ class ResearchEngine:
         synthesizers = self.lanes.synthesizers
         if not synthesizers:
             raise ResearchRunError("synthesis", "no-synthesizer", "no synthesis seats configured")
-        last_error: ResearchSeatError | None = None
         for index, backend in enumerate(synthesizers):
             try:
                 report = self._synthesize(backend, question, findings)
             except ResearchSeatError as exc:
-                last_error = exc
                 if index + 1 >= len(synthesizers):
                     raise ResearchRunError("synthesis", exc.failure_kind, str(exc)) from exc
                 self.fallbacks.append(
@@ -308,8 +382,7 @@ class ResearchEngine:
                 attempt_id=record.attempt_id,
             )
             return report, record
-        assert last_error is not None
-        raise ResearchRunError("synthesis", last_error.failure_kind, str(last_error)) from last_error
+        raise ResearchRunError("synthesis", "no-synthesizer", "no synthesis seats configured")
 
     def _synthesize(self, backend: Any, question: str, findings: tuple[Finding, ...]) -> str:
         packet = self._finding_packet(question, findings)
@@ -410,15 +483,17 @@ class ResearchEngine:
         return repaired
 
     def _wrap_model_output(self, text: str) -> str:
+        # Synthesized/reviewed model text must stay fully available for the next
+        # seat. Cap applies to retrieved source content, not report fencing.
         return wrap_untrusted(
             text,
             source_kind="tool-output",
-            max_chars=self.caps.max_content_chars,
         )
 
     def _finding_packet(self, question: str, findings: tuple[Finding, ...]) -> str:
+        window = findings[-max(1, self.caps.synthesis_window) :]
         blocks: list[str] = []
-        for finding in findings:
+        for finding in window:
             token = citation_token(finding.source_ids[0])
             kind = _TRUST_KIND[finding.trust]
             summary = wrap_untrusted(finding.summary, source_kind=kind, goal=question)
@@ -436,15 +511,16 @@ class ResearchEngine:
                 values = data.get(key) or []
                 if isinstance(values, list):
                     queries.extend(str(item) for item in values if str(item).strip())
-        # Deduplicate while preserving order; cap to one discovery round's breadth.
+        # Deduplicate while preserving order; keep enough queries for progressive rounds.
         seen: set[str] = set()
         out: list[str] = []
+        budget = max(1, self.caps.max_rounds)
         for query in queries:
             if query in seen:
                 continue
             seen.add(query)
             out.append(query)
-            if len(out) >= max(1, self.caps.max_urls_per_round):
+            if len(out) >= budget:
                 break
         return out
 
@@ -454,6 +530,12 @@ class ResearchEngine:
         if trust not in _TRUST_KIND:
             return "web"
         return trust  # type: ignore[return-value]
+
+    def _ensure_time(self, phase: str) -> None:
+        if self._cancelled:
+            raise ResearchRunError(phase, "cancelled", "research run cancelled")
+        if self._start and (time.time() - self._start) >= self.caps.max_time:
+            raise ResearchRunError(phase, "timeout", "research run exceeded max_time")
 
     def _phase_start(self, phase: str) -> None:
         if self.on_phase_started is not None:

@@ -157,7 +157,7 @@ class ResearchResult:
     stats: dict[str, Any]
 
 
-@dataclass
+@dataclass(frozen=True)
 class ResearchProfile:
     name: str
     discovery: tuple[str, ...]
