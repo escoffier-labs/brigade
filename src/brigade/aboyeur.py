@@ -738,6 +738,21 @@ def _write_json_inner(path: Path, payload: object) -> None:
         status = payload.get("status")
         if isinstance(status, str) and status:
             transition_status = status
+            prior_status: str | None = None
+            prior_kind: str | None = None
+            if path.is_file():
+                try:
+                    prior_snapshot = json.loads(path.read_bytes())
+                except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+                    prior_snapshot = None
+                if isinstance(prior_snapshot, dict):
+                    raw_prior_status = prior_snapshot.get("status")
+                    if isinstance(raw_prior_status, str) and raw_prior_status:
+                        prior_status = raw_prior_status
+                    raw_prior_kind = prior_snapshot.get("kind")
+                    if isinstance(raw_prior_kind, str) and raw_prior_kind:
+                        prior_kind = raw_prior_kind
+            kind = payload.get("kind") if isinstance(payload.get("kind"), str) else prior_kind
             approval_reference = payload.get("approval_reference")
             if status == "running" and isinstance(approval_reference, Mapping):
                 decision_state = approval_reference.get("decision_state")
@@ -753,6 +768,24 @@ def _write_json_inner(path: Path, payload: object) -> None:
                     # run.resumed event that record_lifecycle_transition
                     # correctly suppresses.
                     transition_status = "approval-state-refresh"
+            elif status == "running" and kind == "research":
+                # Research reopen must not emit approval-gated run.resumed.
+                # Only a true terminal→running recovery is recorded; same-
+                # status research running refreshes stay status-neutral.
+                _research_terminal = {
+                    "failed",
+                    "cancelled",
+                    "canceled",
+                    "completed",
+                    "ok",
+                    "timeout",
+                    "incomplete",
+                    "dry-run",
+                }
+                if prior_status in _research_terminal:
+                    transition_status = "research-reopened"
+                else:
+                    transition_status = "research-state-refresh"
             run_dir = path.parent
             workspace = runguard.resolve_run_lock_workspace(payload, run_dir)
             # Cheap payload classification BEFORE the filesystem authority

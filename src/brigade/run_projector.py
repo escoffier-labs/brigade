@@ -63,6 +63,10 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "approval_reference",
         "verification_contract",
         "run_budget",
+        "run_budget_projection",
+        # Research receipt fields mirrored onto run.json
+        "category",
+        "provenance",
         # Timing
         "started_at",
         "status_started_at",
@@ -127,6 +131,8 @@ EVENT_STATUS: dict[str, str] = {
     # Current readers distinguish the wait through the approval reference.
     "run.paused": "running",
     "run.resumed": "running",
+    # Research reopen recovery (no approval reference) restores running.
+    "run.recovery.started": "running",
 }
 
 
@@ -172,9 +178,11 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
 # directly as the derived status (run.failed: "failed" vs "timeout").
 _PAYLOAD_STATUS_RULES: dict[str, tuple[frozenset[str], str | None]] = {
     "run.created": (frozenset({"started"}), "started"),
-    "run.completed": (frozenset({"ok", "dry-run"}), None),
+    "run.completed": (frozenset({"ok", "dry-run", "completed"}), None),
     "run.failed": (frozenset({"failed", "timeout", "incomplete"}), None),
-    "run.interrupted": (frozenset({"canceled"}), "canceled"),
+    # Payload status is preserved so canceled (brigade run) and cancelled
+    # (research) both project correctly without rewriting each other.
+    "run.interrupted": (frozenset({"canceled", "cancelled"}), None),
 }
 
 

@@ -763,3 +763,126 @@ def test_max_time_raises_timeout() -> None:
         ).run("q")
 
     assert caught.value.failure_kind == "timeout"
+
+
+def test_cancellation_event_stops_before_phase() -> None:
+    from threading import Event
+
+    cancelled = Event()
+    cancelled.set()
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(
+            lanes=fake_lanes([]),
+            sources=[fixed_source_provider()],
+            caps=Caps(max_rounds=1),
+            cancelled=cancelled,
+        ).run("q")
+
+    assert caught.value.failure_kind == "cancelled"
+    assert caught.value.failure_phase == "planning"
+
+
+def test_seat_error_while_cancelled_maps_to_cancelled() -> None:
+    from threading import Event
+
+    from brigade.research.llm import ResearchSeatError
+    from brigade.run_seat import SeatResult
+
+    cancelled = Event()
+
+    class BoomPlanner:
+        seat = "planner"
+        last_attempt_id = "planner:1"
+
+        def complete(self, messages, **kwargs):
+            cancelled.set()
+            raise ResearchSeatError(
+                SeatResult(
+                    seat="planner",
+                    attempt_id="planner:1",
+                    text="",
+                    ok=False,
+                    failure_phase="planning",
+                    failure_kind="worker-failed",
+                    detail="transport failed",
+                    requested_model=None,
+                    observed_model="unverified",
+                    attempts=(),
+                )
+            )
+
+    lanes = fake_lanes([])
+    lanes = type(lanes)(
+        planner=BoomPlanner(),
+        extractor=lanes.extractor,
+        synthesizers=lanes.synthesizers,
+        reviewer=lanes.reviewer,
+        browser_discovery=None,
+    )
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(
+            lanes=lanes,
+            sources=[fixed_source_provider()],
+            caps=Caps(max_rounds=1),
+            cancelled=cancelled,
+        ).run("q")
+    assert caught.value.failure_kind == "cancelled"
+    assert caught.value.failure_phase == "planning"
+
+
+def test_discovery_bounds_content_before_identity() -> None:
+    class LongProvider(FixedSourceProvider):
+        def fetch(self, url: str) -> dict[str, object]:
+            return {"success": True, "content": "Z" * 50, "title": "Fact", "url": url}
+
+    bounded = "Z" * 10
+    expected = SourceEnvelope.build(
+        origin="web",
+        provider="fixture-web",
+        uri="https://example.test/fact",
+        content=bounded,
+        trust="web",
+        acquired_at="2026-08-13T12:00:00+00:00",
+    )
+    calls: list[tuple[str, str]] = []
+    lanes = fake_lanes(
+        calls,
+        gemini_report=f"Answer [source:{expected.source_id}]",
+        review="accepted",
+    )
+    engine = ResearchEngine(
+        lanes=lanes,
+        sources=[LongProvider()],
+        caps=Caps(max_rounds=1, max_content_chars=10),
+    )
+    result = engine.run("q")
+    assert result.sources
+    assert len(result.sources[0].content) == 10
+    digest = __import__("hashlib").sha256(result.sources[0].content.encode()).hexdigest()
+    assert result.sources[0].content_digest == digest
+    assert result.sources[0].source_id == expected.source_id
+    assert all(expected.source_id in finding.source_ids for finding in result.findings)
+
+
+def test_discovery_future_reraises_budget_policy_error() -> None:
+    from brigade.run_budget import BudgetPolicyError
+
+    class BudgetBomb(FixedSourceProvider):
+        def search(self, query: str, limit: int):
+            raise BudgetPolicyError(
+                "dispatch budget exhausted",
+                code="budget_exhausted",
+                dimension="worker_dispatch_count",
+                exhausted=True,
+                request_id="test-discovery-budget",
+            )
+
+    calls: list[tuple[str, str]] = []
+    lanes = fake_lanes(calls, review="accepted")
+    with pytest.raises(BudgetPolicyError) as caught:
+        ResearchEngine(
+            lanes=lanes,
+            sources=[BudgetBomb()],
+            caps=Caps(max_rounds=1),
+        ).run("q")
+    assert caught.value.code == "budget_exhausted"

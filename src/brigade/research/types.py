@@ -142,6 +142,8 @@ class ResumeState:
     findings: tuple[Finding, ...] | None = None
     report: str | None = None
     audit: CitationAudit | None = None
+    review: ReviewResult | None = None
+    synthesis: SynthesisRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +220,7 @@ class Caps:
     max_rounds: int = 6
     min_rounds: int = 2
     max_time: int = 300  # wall-clock seconds
+    max_dispatches: int = 24
     max_urls_per_round: int = 3
     max_local_docs_per_round: int = 5
     max_content_chars: int = 15000

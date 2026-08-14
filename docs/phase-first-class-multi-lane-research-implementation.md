@@ -1683,7 +1683,7 @@ git commit -m "feat: add explicit browser AI discovery"
 - Test: `tests/test_research_engine.py`
 - Test: `tests/test_research_cmd.py`
 
-- [ ] Add failing tests for active cancellation and phase-bound resume:
+- [x] Add failing tests for active cancellation and phase-bound resume:
 
 ```python
 def test_cancellation_watcher_stops_registered_process(tmp_path: Path) -> None:
@@ -1816,7 +1816,7 @@ def test_second_research_dispatch_exhausts_budget() -> None:
     assert caught.value.code == "budget_exhausted"
 ```
 
-- [ ] Run and observe behavioral failures:
+- [x] Run and observe behavioral failures:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_engine.py","tests/test_research_cmd.py"]' --capture brigade-work --capture-kind skill
@@ -1825,7 +1825,7 @@ brigade work verify run --target . --argv-json '["pytest","-q","tests/test_resea
 Expect cancellation not to terminate the active process and resume to repeat
 discovery.
 
-- [ ] Add `Caps.max_dispatches: int = 24`. At run admission, create
+- [x] Add `Caps.max_dispatches: int = 24`. At run admission, create
 `RunBudgetDeclaration(wall_clock_seconds=caps.max_time,
 worker_dispatch_count=caps.max_dispatches)` and a `BudgetCoordinator`. Add this
 public adapter in `research_cmd.py`. It uses only the coordinator's public
@@ -1880,7 +1880,7 @@ Wrap the active run body in
 This makes `runguard.has_active_run_owner(target, run_dir)` the sole ownership
 check for cancel and resume. Do not introduce a research-specific PID file.
 
-- [ ] Start one daemon cancellation watcher per active run. It polls the
+- [x] Start one daemon cancellation watcher per active run. It polls the
 stamped sidecar every 250 milliseconds. When `cancel_requested_at` appears, it
 sets the engine cancellation event and calls the shared `ProcessRegistry.cancel`
 once. Stop and join the watcher in a `finally` block. The engine checks the
@@ -1924,7 +1924,7 @@ class CancellationWatcher(Thread):
 the run, as reported by `runguard.has_active_run_owner`. The live runner writes
 the final `cancelled` lifecycle event and exit code 130.
 
-- [ ] Define durable resume boundaries from stamped artifact digests:
+- [x] Define durable resume boundaries from stamped artifact digests:
 
 ```python
 @dataclass(frozen=True)
@@ -1957,7 +1957,7 @@ Resume is permitted only from `failed`, `cancelled`, or an incomplete active
 record with no live owner. A completed run returns exit code 2. Legacy resume
 continues through a renamed `resume_legacy` path using the old checkpoint.
 
-- [ ] Persist `sources.json` atomically when discovery completes, including the
+- [x] Persist `sources.json` atomically when discovery completes, including the
 source envelopes and bounded source content required for extraction replay.
 Do not include `sources.json` content in `status --json` or `show --json`.
 Publish `report.md`, `report.html`, `handoff.md`, `findings.json`, and
@@ -1968,7 +1968,7 @@ On failure, keep phase artifacts but do not write a final report. Persist
 Use `aboyeur.record_run_termination` for `failed` and `cancelled` outcomes so
 the standard terminal lifecycle event and finished timestamp are preserved.
 
-- [ ] Run focused tests and capture:
+- [x] Run focused tests and capture:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_engine.py","tests/test_research_cmd.py"]' --capture brigade-work --capture-kind skill
@@ -1977,7 +1977,7 @@ brigade outcome capture brigade-work --run-id latest
 
 Expect cancellation, resume, budget, publication, and failure tests to pass.
 
-- [ ] Commit Task 7:
+- [x] Commit Task 7:
 
 ```bash
 git add src/brigade/research/types.py src/brigade/research/registry.py src/brigade/research/engine.py src/brigade/research_cmd.py tests/test_research_engine.py tests/test_research_cmd.py

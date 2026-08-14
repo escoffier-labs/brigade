@@ -2851,3 +2851,82 @@ def test_owner_lifecycle_append_stale_retries_exhausted_blocks_run_json(enabled,
     )
     assert sleeps == [0.01, 0.02, 0.04], f"expected exponential backoff sleeps, got {sleeps}"
     assert (run_dir / "run.json").read_bytes() == run_json_before, "run.json must not advance past the bounded failure"
+
+
+def test_research_completed_and_cancelled_status_mappings():
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("completed") == "run.completed"
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("cancelled") == "run.interrupted"
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("research-reopened") == "run.recovery.started"
+    # Existing American spellings remain.
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("ok") == "run.completed"
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("canceled") == "run.interrupted"
+
+
+def test_status_neutral_research_metadata_refresh_does_not_error_record(tmp_path, monkeypatch):
+    """Authoritative research same-status metadata writes must stay gate-ready.
+
+    Research running refreshes remap to research-state-refresh (unmapped, no
+    paired status event). Writing research receipt fields such as
+    run_budget_projection must not leave shadow error-recorded and must not
+    declare a paired run.resumed that never emits.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="research metadata refresh",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=True,
+        kind="research",
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        # Activate authority while preserving kind=research from record_run_start.
+        existing = json.loads((run_dir / "run.json").read_text())
+        existing["status"] = "started"
+        aboyeur._write_json(run_dir / "run.json", _apply_authority_request(run_dir, existing))
+        aboyeur.record_run_termination(
+            run_dir,
+            status="failed",
+            failure_phase="synthesis",
+            failure_kind="worker-failed",
+            detail="prior",
+        )
+        aboyeur.update_run_receipt(
+            run_dir,
+            status="running",
+            finished_at=None,
+            duration_seconds=None,
+            failure=None,
+            failure_kind=None,
+            failure_phase=None,
+            error=None,
+        )
+        events_after_reopen = [e.event_type for e in _events(run_dir)]
+        assert "run.recovery.started" in events_after_reopen
+        assert "run.resumed" not in events_after_reopen
+        journal_len_before = len(_events(run_dir))
+        aboyeur.update_run_receipt(
+            run_dir,
+            run_budget_projection={"used": {"worker_dispatch_count": 0}},
+            category="ops",
+            provenance={"report.md": {"path": "report.md", "digest": "a" * 64}},
+        )
+    readiness = run_shadow.check_projection_readiness(run_dir)
+    assert readiness.ready is True, readiness.reasons
+    assert run_shadow.REASON_ERROR_RECORDED not in readiness.reasons
+    shadow = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert shadow.get("errors", 0) == 0
+    assert shadow.get("last_outcome") == run_shadow.OUTCOME_MATCH
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["status"] == "running"
+    assert meta["kind"] == "research"
+    assert meta["category"] == "ops"
+    assert meta["run_budget_projection"]["used"]["worker_dispatch_count"] == 0
+    # Status-neutral refresh may append a null-paired checkpoint, never run.resumed.
+    events_after = [e.event_type for e in _events(run_dir)]
+    assert "run.resumed" not in events_after
+    assert events_after.count("run.recovery.started") == 1
+    assert len(events_after) >= journal_len_before

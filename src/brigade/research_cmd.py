@@ -4,10 +4,23 @@ import hashlib
 import json as _json
 import shutil
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from threading import Event, Thread
+from typing import Any, Callable, Dict, List, Mapping, Optional
+
 from .research import registry, config as rconfig
-from .research.types import Caps, ResearchLanes, ResearchProfile, ResearchRunError
+from .research.types import (
+    Caps,
+    CitationAudit,
+    Finding,
+    ResearchLanes,
+    ResearchProfile,
+    ResearchResult,
+    ResearchRunError,
+    ResumeState,
+    SourceEnvelope,
+)
 from .research.engine import ResearchEngine
 from .research.sources import local as localsrc
 from .research.sources import cli as clisrc
@@ -15,6 +28,8 @@ from .research.sources.browser_ai import BrowserAiProvider
 from .research import report as reportmod, handoff as handoffmod
 from .selection import WRITER_INBOXES
 from .localio import utc_now_iso as _now
+from .run_budget import BudgetCoordinator, BudgetPolicyError, RunBudgetDeclaration
+from .roster import Agent
 
 
 def _dict_or_empty(value: object) -> dict[str, Any]:
@@ -95,7 +110,13 @@ def _lanes_from_single_backend(
     )
 
 
-def _build_run_invoker(target: Path, *, run_id: str):
+def _build_run_invoker(
+    target: Path,
+    *,
+    run_id: str,
+    process_registry: Any | None = None,
+    budget_callbacks: ResearchBudgetCallbacks | None = None,
+):
     from . import roster as roster_mod
     from .proc import ProcessRegistry
     from .run_seat import SeatInvoker
@@ -103,13 +124,507 @@ def _build_run_invoker(target: Path, *, run_id: str):
     roster = roster_mod.load_roster(roster_mod.resolve_roster_path(target))
     output_dir = registry.run_dir(target, run_id)
     output_dir.mkdir(parents=True, exist_ok=True)
+    registry_obj = process_registry if process_registry is not None else ProcessRegistry()
+    callback_kwargs: dict[str, Any] = {}
+    if budget_callbacks is not None:
+        callback_kwargs = {
+            "on_dispatch_requested": budget_callbacks.on_dispatch_requested,
+            "on_dispatch_observed": budget_callbacks.on_dispatch_observed,
+            "on_dispatch_completed": budget_callbacks.on_dispatch_completed,
+            "on_dispatch_failed": budget_callbacks.on_dispatch_failed,
+        }
     return SeatInvoker(
         roster=roster,
         cwd=target,
         run_id=run_id,
-        process_registry=ProcessRegistry(),
+        process_registry=registry_obj,
         output_dir=output_dir,
+        **callback_kwargs,
     )
+
+
+@dataclass
+class ResearchBudgetCallbacks:
+    coordinator: BudgetCoordinator
+    append_event: Callable[[str, dict[str, object], str], object]
+    attempts: dict[str, int] = field(default_factory=dict)
+
+    def _next_attempt(self, seat: str) -> int:
+        attempt = self.attempts.get(seat, 0) + 1
+        self.attempts[seat] = attempt
+        return attempt
+
+    def _record(self, event_type: str, seat: str, attempt: int) -> int:
+        self.append_event(
+            event_type,
+            {"seat": seat, "attempt": attempt},
+            f"{event_type}:{seat}:{attempt}",
+        )
+        return attempt
+
+    def on_dispatch_requested(self, agent: Agent) -> int | None:
+        return self.coordinator.reserve_and_record_dispatch(
+            seat=agent.name,
+            allocate_attempt=lambda: self._next_attempt(agent.name),
+            record_requested=lambda attempt: self._record(
+                "run.dispatch.requested", agent.name, attempt
+            ),
+        )
+
+    def on_dispatch_observed(self, agent: Agent, attempt: int) -> None:
+        self._record("run.dispatch.observed", agent.name, attempt)
+
+    def on_dispatch_completed(self, agent: Agent, attempt: int) -> None:
+        self._record("run.dispatch.completed", agent.name, attempt)
+
+    def on_dispatch_failed(self, agent: Agent, attempt: int) -> None:
+        self._record("run.dispatch.failed", agent.name, attempt)
+
+
+class CancellationWatcher(Thread):
+    def __init__(
+        self,
+        *,
+        target: Path,
+        run_id: str,
+        cancelled: Event,
+        process_registry: Any,
+        poll_seconds: float = 0.25,
+    ) -> None:
+        super().__init__(name=f"research-cancel-{run_id}", daemon=True)
+        self.target = target
+        self.run_id = run_id
+        self.cancelled = cancelled
+        self.process_registry = process_registry
+        self.poll_seconds = poll_seconds
+        self.stopped = Event()
+        self._cancel_fired = False
+
+    def stop(self) -> None:
+        self.stopped.set()
+
+    def _poll_once(self) -> bool:
+        try:
+            sidecar = registry.read_research(self.target, self.run_id)
+        except FileNotFoundError:
+            return False
+        if sidecar.get("cancel_requested_at"):
+            self.cancelled.set()
+            if not self._cancel_fired:
+                self._cancel_fired = True
+                self.process_registry.cancel()
+            return True
+        return False
+
+    def run(self) -> None:
+        # Observe a cancel requested before watcher startup immediately.
+        if self._poll_once():
+            return
+        while not self.stopped.wait(self.poll_seconds):
+            if self._poll_once():
+                return
+
+
+def resume_state(target: Path, run_id: str) -> ResumeState:
+    from .research.types import ReviewResult, SynthesisRecord
+
+    sidecar = registry.read_research(target, run_id)
+    phases = sidecar.get("phases") or {}
+    planning = phases.get("planning") or {}
+    discovery = phases.get("discovery") or {}
+    extraction = phases.get("extraction") or {}
+    synthesis = phases.get("synthesis") or {}
+    review = phases.get("review") or {}
+    sources = registry.read_verified_artifact(target, run_id, discovery.get("artifact"))
+    findings = registry.read_verified_artifact(target, run_id, extraction.get("artifact"))
+    report = registry.read_verified_artifact(target, run_id, synthesis.get("artifact"))
+    audit = registry.read_verified_artifact(target, run_id, review.get("artifact"))
+    review_meta = review.get("review") if isinstance(review.get("review"), dict) else None
+    review_result = None
+    if isinstance(review_meta, dict) and review.get("status") == "completed":
+        try:
+            review_result = ReviewResult(
+                accepted=bool(review_meta["accepted"]),
+                detail=str(review_meta.get("detail") or ""),
+                rejected_claims=tuple(str(item) for item in (review_meta.get("rejected_claims") or ())),
+                seat=str(review_meta["seat"]),
+                attempt_id=str(review_meta["attempt_id"]),
+            )
+        except (KeyError, TypeError):
+            review_result = None
+    synthesis_record = None
+    if synthesis.get("status") == "completed" and synthesis.get("seat") and synthesis.get("attempt_id"):
+        synthesis_record = SynthesisRecord(
+            seat=str(synthesis["seat"]),
+            attempt_id=str(synthesis["attempt_id"]),
+            requested_model=synthesis.get("requested_model")
+            if isinstance(synthesis.get("requested_model"), str)
+            else None,
+            observed_model=str(synthesis.get("observed_model") or "resumed"),
+        )
+
+    # Transitive invalidation: a missing/bad upstream artifact drops all later
+    # resume fields so stale completed phases cannot be reused alone.
+    plan = planning.get("value") if planning.get("status") == "completed" else None
+    sources_ok = discovery.get("status") == "completed" and sources is not None
+    findings_ok = sources_ok and extraction.get("status") == "completed" and findings is not None
+    report_ok = findings_ok and synthesis.get("status") == "completed" and report is not None
+    audit_ok = report_ok and review.get("status") == "completed" and audit is not None
+    review_ok = audit_ok and review_result is not None
+    return ResumeState(
+        plan=plan if isinstance(plan, str) else None,
+        sources=sources if sources_ok else None,
+        findings=findings if findings_ok else None,
+        report=report if report_ok else None,
+        audit=audit if audit_ok else None,
+        review=review_result if review_ok else None,
+        synthesis=synthesis_record if report_ok else None,
+    )
+
+
+def _load_roster(target: Path):
+    from . import roster as roster_mod
+
+    return roster_mod.load_roster(roster_mod.resolve_roster_path(target))
+
+
+def _budget_append_event(run_directory: Path, workspace: Path):
+    from . import run_lifecycle
+
+    def append_event(event_type: str, payload: dict[str, object], key: str) -> object:
+        # Lifecycle journal is authoritative; never fall back to a side event stream.
+        return run_lifecycle.record_lifecycle_event(
+            run_directory,
+            event_type=event_type,
+            payload=dict(payload),
+            idempotency_key=key,
+            workspace=workspace,
+        )
+
+    return append_event
+
+
+def _normalize_budget_failure(exc: BudgetPolicyError, *, phase: str) -> ResearchRunError:
+    kind = "budget-exhausted" if exc.code == "budget_exhausted" else "budget-denied"
+    return ResearchRunError(phase, kind, str(exc))
+
+
+def _reopen_standard_run(target: Path, run_id: str) -> None:
+    """Clear stale terminal receipt fields inside an acquired run lock.
+
+    Goes through the authoritative aboyeur writer so research reopen emits the
+    research-specific recovery transition (not approval-gated ``run.resumed``).
+    """
+    from . import aboyeur
+
+    run_directory = registry.standard_run_dir(target, run_id)
+    run_path = run_directory / "run.json"
+    if not run_path.is_file():
+        raise ResearchRunError("admission", "lifecycle-journal", "run.json missing during reopen")
+    try:
+        receipt = _json.loads(run_path.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError) as exc:
+        raise ResearchRunError(
+            "admission",
+            "lifecycle-journal",
+            "run.json unreadable during reopen",
+        ) from exc
+    if not isinstance(receipt, dict):
+        raise ResearchRunError("admission", "lifecycle-journal", "run.json is not an object during reopen")
+    aboyeur.update_run_receipt(
+        run_directory,
+        status="running",
+        finished_at=None,
+        duration_seconds=None,
+        failure=None,
+        failure_kind=None,
+        failure_phase=None,
+        error=None,
+    )
+    registry.update_research(
+        target,
+        run_id,
+        status="running",
+        failure_kind=None,
+        failure_phase=None,
+        detail=None,
+        blockers=[],
+        cancel_requested_at=None,
+        cancel_requested_by=None,
+    )
+
+
+def _persist_budget_projection(
+    target: Path,
+    run_id: str,
+    *,
+    declaration: RunBudgetDeclaration,
+    projection: dict[str, Any],
+) -> None:
+    from . import aboyeur
+
+    run_directory = registry.standard_run_dir(target, run_id)
+    budget_payload = declaration.to_payload()
+    registry.update_research(
+        target,
+        run_id,
+        run_budget=budget_payload,
+        run_budget_projection=projection,
+    )
+    run_path = run_directory / "run.json"
+    if not run_path.is_file():
+        raise ResearchRunError("admission", "lifecycle-journal", "run.json missing during budget projection")
+    try:
+        receipt = _json.loads(run_path.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError) as exc:
+        raise ResearchRunError(
+            "admission",
+            "lifecycle-journal",
+            "run.json unreadable during budget projection",
+        ) from exc
+    if not isinstance(receipt, dict):
+        raise ResearchRunError(
+            "admission",
+            "lifecycle-journal",
+            "run.json is not an object during budget projection",
+        )
+    aboyeur.update_run_receipt(
+        run_directory,
+        run_budget=budget_payload,
+        run_budget_projection=projection,
+    )
+
+
+def _terminate_standard_run(
+    target: Path,
+    run_id: str,
+    *,
+    status: str,
+    failure_phase: str,
+    failure_kind: str,
+    detail: str,
+    blockers: list[str] | None = None,
+) -> None:
+    from . import aboyeur
+
+    run_directory = registry.standard_run_dir(target, run_id)
+    run_path = run_directory / "run.json"
+    if run_path.is_file():
+        try:
+            receipt = _json.loads(run_path.read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError) as exc:
+            raise ResearchRunError(
+                failure_phase,
+                "lifecycle-journal",
+                "run.json unreadable during termination",
+            ) from exc
+        if not isinstance(receipt, dict):
+            raise ResearchRunError(
+                failure_phase,
+                "lifecycle-journal",
+                "run.json is not an object during termination",
+            )
+        # Clear prior finished_at so record_run_termination can replace details.
+        if receipt.get("finished_at"):
+            aboyeur.update_run_receipt(
+                run_directory,
+                finished_at=None,
+                duration_seconds=None,
+            )
+        aboyeur.record_run_termination(
+            run_directory,
+            status=status,
+            failure_phase=failure_phase,
+            failure_kind=failure_kind,
+            detail=detail,
+        )
+        aboyeur.update_run_receipt(
+            run_directory,
+            failure_kind=failure_kind,
+            failure_phase=failure_phase,
+            error=detail,
+        )
+    registry.update_research(
+        target,
+        run_id,
+        status=status,
+        failure_kind=failure_kind,
+        failure_phase=failure_phase,
+        detail=detail,
+        blockers=blockers or [],
+    )
+
+
+def _complete_standard_run(
+    target: Path,
+    run_id: str,
+    *,
+    stats: dict[str, Any],
+    artifacts: dict[str, Any],
+    blockers: list[str] | None = None,
+    budget_projection: dict[str, Any] | None = None,
+    artifact_refs: dict[str, Any] | None = None,
+) -> None:
+    from datetime import datetime, timezone
+
+    from . import aboyeur
+
+    run_directory = registry.standard_run_dir(target, run_id)
+    finished = datetime.now(timezone.utc)
+    finished_at = finished.isoformat()
+    fields: dict[str, Any] = {
+        "status": "completed",
+        "stats": stats,
+        "artifacts": artifacts,
+        "blockers": blockers or [],
+        "completed_at": finished_at,
+        "current_phase": "publishing",
+        "failure_kind": None,
+        "failure_phase": None,
+        "detail": None,
+    }
+    if budget_projection is not None:
+        fields["run_budget_projection"] = budget_projection
+    if artifact_refs is not None:
+        fields["artifact_refs"] = artifact_refs
+    registry.update_research(target, run_id, **fields)
+    run_path = run_directory / "run.json"
+    if not run_path.is_file():
+        raise ResearchRunError("publishing", "lifecycle-journal", "run.json missing during completion")
+    try:
+        receipt = _json.loads(run_path.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError) as exc:
+        raise ResearchRunError(
+            "publishing",
+            "lifecycle-journal",
+            "run.json unreadable during completion",
+        ) from exc
+    if not isinstance(receipt, dict):
+        raise ResearchRunError(
+            "publishing",
+            "lifecycle-journal",
+            "run.json is not an object during completion",
+        )
+    duration = None
+    started_raw = receipt.get("started_at")
+    if isinstance(started_raw, str):
+        try:
+            started = datetime.fromisoformat(started_raw)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            duration = max(0.0, round((finished - started).total_seconds(), 3))
+        except ValueError:
+            duration = None
+    update_fields: dict[str, Any] = {
+        "status": "completed",
+        "finished_at": finished_at,
+        "duration_seconds": duration,
+        "failure": None,
+        "failure_kind": None,
+        "failure_phase": None,
+        "error": None,
+        "artifacts": artifacts,
+        "provenance": artifact_refs or artifacts,
+    }
+    if budget_projection is not None:
+        update_fields["run_budget_projection"] = budget_projection
+    aboyeur.update_run_receipt(run_directory, **update_fields)
+
+
+def _publish_final_artifacts(
+    target: Path,
+    run_id: str,
+    *,
+    question: str,
+    result: ResearchResult,
+    cancelled: Event | None = None,
+) -> dict[str, Any]:
+    def _check() -> None:
+        if cancelled is not None and cancelled.is_set():
+            raise ResearchRunError("publishing", "cancelled", "research run cancelled")
+
+    _check()
+    findings = list(result.findings)
+    sources_list = list(result.sources)
+    finding_ref = registry.write_findings(target, run_id, findings)
+    _check()
+    # Citation audit was already persisted at review; refresh digest refs for finals.
+    audit_ref = registry.write_citation_audit(target, run_id, result.citation_audit)
+    _check()
+    md = reportmod.render_markdown(
+        question=question,
+        markdown_report=result.report,
+        findings=findings,
+        sources=sources_list,
+    )
+    html = reportmod.render_html(
+        question=question,
+        markdown_report=result.report,
+        findings=findings,
+        sources=sources_list,
+        stats=result.stats,
+    )
+    ho = handoffmod.render_handoff(
+        question=question,
+        markdown_report=result.report,
+        findings=findings,
+        sources=sources_list,
+        stats=result.stats,
+    )
+    _check()
+    report_md_ref = registry.write_text_artifact(target, run_id, registry.REPORT_MD_ARTIFACT, md)
+    _check()
+    report_html_ref = registry.write_text_artifact(target, run_id, registry.REPORT_HTML_ARTIFACT, html)
+    _check()
+    handoff_ref = registry.write_text_artifact(target, run_id, registry.HANDOFF_ARTIFACT, ho)
+    _check()
+    return {
+        "report_md": report_md_ref,
+        "report_html": report_html_ref,
+        "handoff": handoff_ref,
+        "findings": finding_ref,
+        "citation_audit": audit_ref,
+    }
+
+
+def _phase_graph_update(
+    target: Path,
+    run_id: str,
+    phase: str,
+    *,
+    status: str,
+    artifact: Any | None = None,
+    value: Any | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    registry.update_phase(
+        target,
+        run_id,
+        phase,
+        status=status,
+        artifact=artifact,
+        value=value,
+        extra=extra,
+    )
+
+
+def _persist_category(target: Path, run_id: str, category: str | None) -> None:
+    if category is None:
+        return
+    registry.update_research(target, run_id, category=category)
+    # Mirror into run.json for legacy readers via the authoritative writer.
+    from . import aboyeur
+
+    run_directory = registry.standard_run_dir(target, run_id)
+    if (run_directory / "run.json").is_file():
+        aboyeur.update_run_receipt(run_directory, category=category)
+    legacy_run = registry.legacy_run_dir(target, run_id) / "run.json"
+    if legacy_run.is_file():
+        # update_research may have created the standard dir for the sidecar;
+        # still mirror category onto the legacy receipt when that is the home.
+        registry._update_legacy(target, run_id, category=category)
+    else:
+        registry.update_run(target, run_id, category=category)
 
 
 def _build_lanes_from_roster(
@@ -189,27 +704,6 @@ def _operator_safe_detail(detail: str) -> str:
     from .worker_failure import safe_detail
 
     return safe_detail(detail)
-
-
-def _persist_category(target: Path, run_id: str, category: str | None) -> None:
-    if category is None:
-        return
-    from . import localio, receipt_schema
-
-    path = registry.run_dir(target, run_id) / registry.RESEARCH_ARTIFACT
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Initialize only when absent; fail closed if present but unreadable/non-object.
-    if path.is_file():
-        current = localio.read_json_dict(path)
-        if current is None:
-            raise ValueError(f"research artifact unreadable or not an object: {path}")
-    else:
-        current = {}
-    current["run_id"] = run_id
-    current["category"] = category
-    localio.write_json(path, receipt_schema.stamp_research_sidecar(current))
-    # Mirror into run.json for legacy readers.
-    registry.update_run(target, run_id, category=category)
 
 
 def _resolve_sources(target: Path, corpus: Optional[str], sources: List[str]) -> List[str]:
@@ -308,18 +802,24 @@ def run(
     synthesizer: Optional[str] = None,
     reviewer: Optional[str] = None,
     category: Optional[str] = None,
+    resume: ResumeState | None = None,
 ) -> str:
+    from . import runguard
+    from .proc import ProcessRegistry
+
     cfg = rconfig.load(target)
     research_profile = cfg.profile(profile)
     # Only the explicit CLI flag or the built-in browser-ai profile may activate
     # browser-AI discovery. Repo overlays on other profiles cannot.
     browser_ai_enabled = bool(browser_ai_research) or research_profile.name == "browser-ai"
     caps_kwargs = {**cfg.caps_overrides(), **{k: v for k, v in overrides.items() if v is not None}}
+    caps_kwargs.pop("_resume", None)
     caps = Caps.build(**caps_kwargs)
     run_id = run_id or _new_run_id(question)
     paths = _resolve_sources(target, corpus, sources)
     cli_providers = clisrc.build_providers(cfg.source_adapters(), target=target)
     blockers: List[str] = []
+    roster = _load_roster(target)
 
     index = localsrc.build_index(paths) if paths else None
 
@@ -360,221 +860,462 @@ def run(
         browser_ai_research=browser_ai_enabled,
         browser_ai_provider=True if browser_ai_enabled else None,
     )
-    registry.create_run(
-        target,
-        question=question,
-        run_id=run_id,
-        caps=caps.__dict__.copy(),
-        manifest=manifest,
-    )
-    registry.update_run(target, run_id, profile=research_profile.name, browser_ai_research=browser_ai_enabled)
-    _persist_category(target, run_id, category)
-
-    if not providers and not browser_ai_enabled:
-        detail = "no local, CLI, web, or browser-AI source route available"
-        registry.finish_run(
+    existing = registry.show_run(target, run_id)
+    if existing is None or existing.get("legacy"):
+        registry.create_standard_run(
             target,
-            run_id,
-            status="error",
-            stats={},
-            artifacts={},
-            blockers=blockers + [detail],
-        )
-        registry.update_run(
-            target,
-            run_id,
-            failure_kind="no-source-route",
-            failure_phase="admission",
-            detail=detail,
-        )
-        return run_id
-
-    try:
-        seat_invoker = _build_run_invoker(target, run_id=run_id)
-        lanes = _resolve_lanes(
-            target,
-            profile=research_profile,
-            synthesizer=synthesizer,
-            reviewer=reviewer,
             run_id=run_id,
-            invoker=seat_invoker,
+            question=question,
+            profile=research_profile.name,
+            caps=caps.__dict__.copy(),
+            roster=roster,
         )
-    except Exception as e:
-        detail = _operator_safe_detail(str(e))
-        registry.finish_run(
-            target,
-            run_id,
-            status="error",
-            stats={},
-            artifacts={},
-            blockers=blockers + [detail],
-        )
-        registry.update_run(
-            target,
-            run_id,
-            failure_kind="invalid-seat",
-            failure_phase="admission",
-            detail=detail,
-        )
-        return run_id
-
-    if browser_ai_enabled:
-        try:
-            browser_provider = _resolve_browser_ai_provider(
-                target, run_id=run_id, invoker=seat_invoker
-            )
-        except Exception as e:
-            detail = _operator_safe_detail(str(e))
-            registry.finish_run(
-                target,
-                run_id,
-                status="error",
-                stats={},
-                artifacts={},
-                blockers=blockers + [detail],
-            )
-            registry.update_run(
-                target,
-                run_id,
-                failure_kind="browser-ai-unavailable",
-                failure_phase="discovery",
-                detail=detail,
-            )
-            return run_id
-        providers.append(browser_provider)
-        # Refresh manifest enabled state now that the provider exists.
-        manifest = _manifest(
-            target=target,
-            cfg=cfg,
-            corpus=corpus,
-            sources=sources,
-            paths=paths,
-            web=web and web_provider is not None,
-            provider=provider,
-            cli_providers=cli_providers,
-            browser_ai_research=True,
-            browser_ai_provider=browser_provider,
-        )
-        registry.update_run(target, run_id, manifest=manifest)
-
-    if not providers:
-        detail = "no local, CLI, web, or browser-AI source route available"
-        registry.finish_run(
-            target,
-            run_id,
-            status="error",
-            stats={},
-            artifacts={},
-            blockers=blockers + [detail],
-        )
-        registry.update_run(
-            target,
-            run_id,
-            failure_kind="no-source-route",
-            failure_phase="admission",
-            detail=detail,
-        )
-        return run_id
-
-    eng = ResearchEngine(
-        lanes=lanes,
-        sources=providers,
-        caps=caps,
-        on_phase_started=lambda phase: registry.append_event(target, run_id, {"phase": phase, "status": "started"}),
-        on_phase_completed=lambda phase, d: registry.append_event(
-            target, run_id, {"phase": phase, "status": "completed", **d}
-        ),
-    )
-    try:
-        result = eng.run(question)
-    except ResearchRunError as e:
-        detail = _operator_safe_detail(e.detail)
-        registry.finish_run(
-            target,
-            run_id,
-            status="error",
-            stats={},
-            artifacts={},
-            blockers=blockers + [detail],
-        )
-        registry.update_run(
-            target,
-            run_id,
-            failure_kind=e.failure_kind,
-            failure_phase=e.failure_phase,
-            detail=detail,
-        )
-        return run_id
-    except Exception as e:
-        detail = _operator_safe_detail(str(e))
-        registry.finish_run(
-            target,
-            run_id,
-            status="error",
-            stats={},
-            artifacts={},
-            blockers=blockers + [detail],
-        )
-        registry.update_run(
-            target,
-            run_id,
-            failure_kind="worker-failed",
-            failure_phase="research",
-            detail=detail,
-        )
-        return run_id
-
-    findings = list(result.findings)
-    sources_list = list(result.sources)
-    d = registry.run_dir(target, run_id)
-    md = reportmod.render_markdown(
-        question=question,
-        markdown_report=result.report,
-        findings=findings,
-        sources=sources_list,
-    )
-    html = reportmod.render_html(
-        question=question,
-        markdown_report=result.report,
-        findings=findings,
-        sources=sources_list,
-        stats=result.stats,
-    )
-    ho = handoffmod.render_handoff(
-        question=question,
-        markdown_report=result.report,
-        findings=findings,
-        sources=sources_list,
-        stats=result.stats,
-    )
-    (d / "report.md").write_text(md, encoding="utf-8")
-    (d / "report.html").write_text(html, encoding="utf-8")
-    (d / "handoff.md").write_text(ho, encoding="utf-8")
-    registry.finish_run(
+    registry.update_research(
         target,
         run_id,
-        status="done",
-        stats=result.stats,
-        artifacts={"report_html": "report.html", "report_md": "report.md", "handoff": "handoff.md"},
-        blockers=blockers,
+        profile=research_profile.name,
+        browser_ai_research=browser_ai_enabled,
+        manifest=manifest,
+        caps=caps.__dict__.copy(),
     )
+    _persist_category(target, run_id, category)
+
+    can_skip_sources = resume is not None and (resume.sources is not None or resume.findings is not None)
+    if not providers and not browser_ai_enabled and not can_skip_sources:
+        detail = "no local, CLI, web, or browser-AI source route available"
+        _terminate_standard_run(
+            target,
+            run_id,
+            status="failed",
+            failure_phase="admission",
+            failure_kind="no-source-route",
+            detail=detail,
+            blockers=blockers + [detail],
+        )
+        return run_id
+
+    run_directory = registry.standard_run_dir(target, run_id)
+    declaration = RunBudgetDeclaration(
+        wall_clock_seconds=caps.max_time,
+        worker_dispatch_count=caps.max_dispatches,
+    )
+    cancelled = Event()
+    process_registry = ProcessRegistry()
+
+    def _fail(status: str, phase: str, kind: str, detail: str) -> str:
+        _terminate_standard_run(
+            target,
+            run_id,
+            status=status,
+            failure_phase=phase,
+            failure_kind=kind,
+            detail=detail,
+            blockers=blockers + [detail],
+        )
+        return run_id
+
+    try:
+        with runguard.run_lock(target, run_dir=run_directory):
+            if resume is not None or (existing is not None and existing.get("status") in {"failed", "cancelled"}):
+                try:
+                    _reopen_standard_run(target, run_id)
+                except ResearchRunError as e:
+                    return _fail(
+                        "failed",
+                        e.failure_phase,
+                        e.failure_kind,
+                        _operator_safe_detail(e.detail),
+                    )
+
+            from . import run_events, run_journal, run_lifecycle
+            from .run_budget import declaration_from_persisted_artifact
+
+            append_event = _budget_append_event(run_directory, target)
+            # Prefer the persisted declaration from the existing receipt when resuming.
+            persisted_budget = None
+            started_at = None
+            try:
+                receipt = _json.loads((run_directory / "run.json").read_text(encoding="utf-8"))
+            except (OSError, _json.JSONDecodeError) as exc:
+                return _fail(
+                    "failed",
+                    "admission",
+                    "lifecycle-journal",
+                    _operator_safe_detail(f"run.json unreadable: {exc}"),
+                )
+            if not isinstance(receipt, dict):
+                return _fail(
+                    "failed",
+                    "admission",
+                    "lifecycle-journal",
+                    "run.json is not an object",
+                )
+            if isinstance(receipt.get("run_budget"), dict):
+                persisted_budget = receipt["run_budget"]
+            started_raw = receipt.get("started_at")
+            if isinstance(started_raw, str):
+                from datetime import datetime, timezone
+
+                try:
+                    started_at = datetime.fromisoformat(started_raw)
+                    if started_at.tzinfo is None:
+                        started_at = started_at.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    started_at = None
+            run_lifecycle.prepare_lifecycle_journal(
+                run_directory,
+                workspace=target,
+                incoming_snapshot=receipt,
+            )
+            if persisted_budget is not None:
+                declaration = declaration_from_persisted_artifact(persisted_budget)
+
+            coordinator = BudgetCoordinator(declaration=declaration, append_event=append_event)
+            if started_at is not None:
+                coordinator.set_started_at(started_at)
+            journal_path = run_directory / "events" / "lifecycle.jsonl"
+            if journal_path.is_file():
+                try:
+                    report = run_journal.read_journal_bounded(journal_path)
+                except (OSError, run_journal.RunJournalError, run_events.CanonicalizationError) as exc:
+                    return _fail(
+                        "failed",
+                        "admission",
+                        "lifecycle-journal",
+                        _operator_safe_detail(str(exc)),
+                    )
+                if report.partial_tail is not None or report.chain_errors:
+                    return _fail(
+                        "failed",
+                        "admission",
+                        "lifecycle-journal",
+                        "lifecycle journal is corrupt or has a partial tail",
+                    )
+                coordinator.reload(report.events)
+            budget_callbacks = ResearchBudgetCallbacks(
+                coordinator=coordinator,
+                append_event=append_event,
+            )
+            _persist_budget_projection(
+                target,
+                run_id,
+                declaration=declaration,
+                projection=coordinator.projection.to_payload(),
+            )
+
+            try:
+                seat_invoker = _build_run_invoker(
+                    target,
+                    run_id=run_id,
+                    process_registry=process_registry,
+                    budget_callbacks=budget_callbacks,
+                )
+                lanes = _resolve_lanes(
+                    target,
+                    profile=research_profile,
+                    synthesizer=synthesizer,
+                    reviewer=reviewer,
+                    run_id=run_id,
+                    invoker=seat_invoker,
+                )
+            except Exception as e:
+                return _fail("failed", "admission", "invalid-seat", _operator_safe_detail(str(e)))
+
+            if browser_ai_enabled and not can_skip_sources:
+                try:
+                    browser_provider = _resolve_browser_ai_provider(
+                        target, run_id=run_id, invoker=seat_invoker
+                    )
+                except Exception as e:
+                    return _fail(
+                        "failed",
+                        "discovery",
+                        "browser-ai-unavailable",
+                        _operator_safe_detail(str(e)),
+                    )
+                providers.append(browser_provider)
+                manifest = _manifest(
+                    target=target,
+                    cfg=cfg,
+                    corpus=corpus,
+                    sources=sources,
+                    paths=paths,
+                    web=web and web_provider is not None,
+                    provider=provider,
+                    cli_providers=cli_providers,
+                    browser_ai_research=True,
+                    browser_ai_provider=browser_provider,
+                )
+                registry.update_research(target, run_id, manifest=manifest)
+
+            if not providers and not can_skip_sources:
+                detail = "no local, CLI, web, or browser-AI source route available"
+                return _fail("failed", "admission", "no-source-route", detail)
+
+            def on_phase_started(phase: str) -> None:
+                _phase_graph_update(target, run_id, phase, status="running")
+                registry.append_event(target, run_id, {"phase": phase, "status": "started"})
+                _persist_budget_projection(
+                    target,
+                    run_id,
+                    declaration=declaration,
+                    projection=coordinator.projection.to_payload(),
+                )
+
+            def on_phase_completed(phase: str, detail: dict[str, Any]) -> None:
+                artifact = detail.get("artifact")
+                value = detail.get("value")
+                _phase_graph_update(
+                    target,
+                    run_id,
+                    phase,
+                    status="completed",
+                    artifact=artifact,
+                    value=value,
+                    extra={k: v for k, v in detail.items() if k not in {"artifact", "value"}},
+                )
+                registry.append_event(target, run_id, {"phase": phase, "status": "completed", **detail})
+                _persist_budget_projection(
+                    target,
+                    run_id,
+                    declaration=declaration,
+                    projection=coordinator.projection.to_payload(),
+                )
+
+            def persist_sources(source_batch: tuple[SourceEnvelope, ...]) -> dict[str, str]:
+                return registry.write_sources(target, run_id, source_batch)
+
+            def persist_findings(finding_batch: tuple[Finding, ...]) -> dict[str, str]:
+                return registry.write_findings(target, run_id, finding_batch)
+
+            def persist_draft_report(text: str) -> dict[str, str]:
+                return registry.write_text_artifact(
+                    target, run_id, registry.DRAFT_REPORT_ARTIFACT, text
+                )
+
+            def persist_citation_audit(audit: CitationAudit) -> dict[str, str]:
+                return registry.write_citation_audit(target, run_id, audit)
+
+            watcher = CancellationWatcher(
+                target=target,
+                run_id=run_id,
+                cancelled=cancelled,
+                process_registry=process_registry,
+            )
+            watcher.start()
+            eng = ResearchEngine(
+                lanes=lanes,
+                sources=providers,
+                caps=caps,
+                cancelled=cancelled,
+                on_phase_started=on_phase_started,
+                on_phase_completed=on_phase_completed,
+                persist_sources=persist_sources,
+                persist_findings=persist_findings,
+                persist_draft_report=persist_draft_report,
+                persist_citation_audit=persist_citation_audit,
+            )
+            try:
+                try:
+                    result = eng.run(question, resume=resume)
+                except BudgetPolicyError as e:
+                    phase = eng.active_phase if eng.active_phase else "dispatch"
+                    normalized = _normalize_budget_failure(e, phase=phase)
+                    _phase_graph_update(
+                        target,
+                        run_id,
+                        normalized.failure_phase,
+                        status="failed",
+                        extra={"failure_kind": normalized.failure_kind},
+                    )
+                    return _fail(
+                        "failed",
+                        normalized.failure_phase,
+                        normalized.failure_kind,
+                        _operator_safe_detail(normalized.detail),
+                    )
+                except run_lifecycle.LifecycleJournalError as e:
+                    phase = eng.active_phase if eng.active_phase else "run"
+                    _phase_graph_update(
+                        target,
+                        run_id,
+                        phase,
+                        status="failed",
+                        extra={"failure_kind": "lifecycle-journal"},
+                    )
+                    return _fail(
+                        "failed",
+                        phase,
+                        "lifecycle-journal",
+                        _operator_safe_detail(str(e)),
+                    )
+                except ResearchRunError as e:
+                    status = "cancelled" if e.failure_kind == "cancelled" else "failed"
+                    kind = "operator-cancelled" if e.failure_kind == "cancelled" else e.failure_kind
+                    if e.failure_kind in {"budget_exhausted", "budget-exhausted"}:
+                        kind = "budget-exhausted"
+                    _phase_graph_update(
+                        target,
+                        run_id,
+                        e.failure_phase,
+                        status=status,
+                        extra={"failure_kind": kind},
+                    )
+                    return _fail(status, e.failure_phase, kind, _operator_safe_detail(e.detail))
+                except Exception as e:
+                    if cancelled.is_set():
+                        return _fail(
+                            "cancelled",
+                            eng.active_phase or "research",
+                            "operator-cancelled",
+                            "research run cancelled",
+                        )
+                    return _fail("failed", "research", "worker-failed", _operator_safe_detail(str(e)))
+
+                try:
+                    if cancelled.is_set():
+                        raise ResearchRunError("publishing", "cancelled", "research run cancelled")
+                    artifacts = _publish_final_artifacts(
+                        target,
+                        run_id,
+                        question=question,
+                        result=result,
+                        cancelled=cancelled,
+                    )
+                    if cancelled.is_set():
+                        raise ResearchRunError("publishing", "cancelled", "research run cancelled")
+                    _phase_graph_update(
+                        target,
+                        run_id,
+                        "publishing",
+                        status="completed",
+                        artifact=artifacts,
+                    )
+                    _complete_standard_run(
+                        target,
+                        run_id,
+                        stats=result.stats,
+                        artifacts={
+                            "report_html": registry.REPORT_HTML_ARTIFACT,
+                            "report_md": registry.REPORT_MD_ARTIFACT,
+                            "handoff": registry.HANDOFF_ARTIFACT,
+                            "findings": registry.FINDINGS_ARTIFACT,
+                            "citation_audit": registry.CITATION_AUDIT_ARTIFACT,
+                        },
+                        blockers=blockers,
+                        budget_projection=coordinator.projection.to_payload(),
+                        artifact_refs=artifacts,
+                    )
+                except ResearchRunError as e:
+                    status = "cancelled" if e.failure_kind == "cancelled" else "failed"
+                    kind = "operator-cancelled" if e.failure_kind == "cancelled" else e.failure_kind
+                    _phase_graph_update(
+                        target,
+                        run_id,
+                        e.failure_phase,
+                        status=status,
+                        extra={"failure_kind": kind},
+                    )
+                    return _fail(status, e.failure_phase, kind, _operator_safe_detail(e.detail))
+            finally:
+                watcher.stop()
+                watcher.join(timeout=1)
+    except runguard.RunGuardError as e:
+        return _fail("failed", "admission", "run-lock", _operator_safe_detail(str(e)))
+
     if category is not None:
         _persist_category(target, run_id, category)
     return run_id
 
 
-def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
+def _resume_state_from_legacy_checkpoint(
+    checkpoint: Mapping[str, Any],
+    *,
+    max_content_chars: int,
+) -> ResumeState:
+    """Convert a legacy checkpoint into bounded standard resume state."""
+    from .research.types import Finding
+
+    urls = [str(item) for item in (checkpoint.get("urls") or []) if item]
+    queries = [str(item) for item in (checkpoint.get("queries") or []) if item]
+    plan = None
+    if queries:
+        plan = _json.dumps({"sub_questions": queries, "key_topics": queries, "success_criteria": "cite"})
+    sources: list[SourceEnvelope] = []
+    for index, url in enumerate(urls):
+        content = registry.bound_text(f"legacy-source:{url}", max_content_chars)
+        sources.append(
+            SourceEnvelope.build(
+                origin="web" if url.startswith("http") else "local",
+                provider="legacy-checkpoint",
+                uri=url,
+                content=content,
+                trust="web" if url.startswith("http") else "local",
+                acquired_at="1970-01-01T00:00:00+00:00",
+            )
+        )
+    findings_raw = checkpoint.get("findings") or []
+    findings: list[Finding] = []
+    for item in findings_raw:
+        if not isinstance(item, Mapping):
+            continue
+        source_ids = item.get("source_ids") or item.get("sources") or ()
+        if not source_ids and sources:
+            source_ids = (sources[min(len(findings), len(sources) - 1)].source_id,)
+        if not source_ids:
+            continue
+        evidence = registry.bound_text(str(item.get("evidence") or item.get("summary") or ""), max_content_chars)
+        summary = registry.bound_text(str(item.get("summary") or evidence), max_content_chars)
+        findings.append(
+            Finding(
+                source_ids=tuple(str(sid) for sid in source_ids),
+                title=str(item.get("title") or "legacy finding"),
+                summary=summary,
+                evidence=evidence,
+                trust=item.get("trust") or ("web" if str(source_ids[0]).startswith("http") else "local"),  # type: ignore[arg-type]
+                extraction_lane=str(item.get("extraction_lane") or "legacy"),
+                extracted_at=str(item.get("extracted_at") or "1970-01-01T00:00:00+00:00"),
+                parent_source_ids=tuple(str(p) for p in (item.get("parent_source_ids") or ())),
+            )
+        )
+    report = checkpoint.get("report")
+    return ResumeState(
+        plan=plan,
+        sources=tuple(sources) if sources else None,
+        findings=tuple(findings) if findings else None,
+        report=str(report) if isinstance(report, str) and report else None,
+    )
+
+
+def resume_legacy(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
     rec = registry.show_run(target, run_id)
     if not rec:
         raise SystemExit(f"no such run: {run_id}")
+    # Load from the legacy tree before create_standard_run hides it behind run_dir().
+    legacy_cp = registry.load_checkpoint(target, run_id)
+    if legacy_cp is None:
+        legacy_path = registry.legacy_run_dir(target, run_id) / "checkpoint.json"
+        if legacy_path.is_file():
+            try:
+                legacy_cp = _json.loads(legacy_path.read_text(encoding="utf-8"))
+            except (OSError, _json.JSONDecodeError):
+                legacy_cp = None
+    caps_kwargs: Dict[str, Any] = {}
+    if isinstance(rec.get("caps"), dict):
+        caps_kwargs.update(rec["caps"])
+    caps_kwargs.update({k: v for k, v in overrides.items() if v is not None})
+    caps = Caps.build(**{k: v for k, v in caps_kwargs.items() if k != "_resume"})
+    resume = None
+    if isinstance(legacy_cp, dict):
+        resume = _resume_state_from_legacy_checkpoint(
+            legacy_cp,
+            max_content_chars=caps.max_content_chars,
+        )
     registry.set_status(target, run_id, "running")
     manifest = _dict_or_empty(rec.get("manifest"))
-    restored_overrides: Dict[str, Any] = {}
-    if isinstance(rec.get("caps"), dict):
-        restored_overrides.update(rec["caps"])
-    restored_overrides.update({k: v for k, v in overrides.items() if v is not None})
-    restored_overrides["_resume"] = True
-    return run(
+    restored_overrides: Dict[str, Any] = dict(caps_kwargs)
+    restored_overrides.pop("_resume", None)
+    result = run(
         target=target,
         question=rec["question"],
         sources=list(manifest.get("sources") or []),
@@ -586,11 +1327,64 @@ def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
         category=rec.get("category") if isinstance(rec.get("category"), str) else None,
         overrides=restored_overrides,
         run_id=run_id,
+        resume=resume,
     )
+    if isinstance(legacy_cp, dict):
+        registry.consume_checkpoint(target, run_id)
+        # Also drop a leftover legacy-tree checkpoint if create_standard_run raced.
+        leftover = registry.legacy_run_dir(target, run_id) / "checkpoint.json"
+        if leftover.is_file():
+            leftover.unlink()
+    return result
+
+
+def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
+    from . import runguard
+
+    rec = registry.show_run(target, run_id)
+    if not rec:
+        raise SystemExit(f"no such run: {run_id}")
+    if rec.get("legacy"):
+        return resume_legacy(target=target, run_id=run_id, overrides=overrides)
+
+    status = str(rec.get("status") or "")
+    if status == "completed":
+        raise SystemExit("cannot resume a completed research run")
+    run_directory = registry.standard_run_dir(target, run_id)
+    if runguard.has_active_run_owner(target, run_directory):
+        raise SystemExit("cannot resume while a live owner holds the run lock")
+    if status in {"failed", "cancelled", "running", "started", "error"} or not rec.get("finished_at"):
+        state = resume_state(target, run_id)
+        manifest = _dict_or_empty(rec.get("manifest"))
+        restored_overrides: Dict[str, Any] = {}
+        if isinstance(rec.get("caps"), dict):
+            restored_overrides.update(rec["caps"])
+        restored_overrides.update({k: v for k, v in overrides.items() if v is not None})
+        return run(
+            target=target,
+            question=str(rec.get("question") or ""),
+            sources=list(manifest.get("sources") or []),
+            web=bool(manifest.get("web_enabled")),
+            corpus=manifest.get("corpus") if isinstance(manifest.get("corpus"), str) else None,
+            provider=manifest.get("provider") if isinstance(manifest.get("provider"), str) else None,
+            browser_ai_research=bool(manifest.get("browser_ai_research")),
+            profile=rec.get("profile") if isinstance(rec.get("profile"), str) else None,
+            category=rec.get("category") if isinstance(rec.get("category"), str) else None,
+            overrides=restored_overrides,
+            run_id=run_id,
+            resume=state,
+        )
+    raise SystemExit(f"cannot resume run in status {status!r}")
 
 
 def cancel(*, target: Path, run_id: str) -> None:
-    registry.set_status(target, run_id, "cancelled")
+    rec = registry.show_run(target, run_id)
+    if not rec:
+        raise SystemExit(f"no such run: {run_id}")
+    if rec.get("legacy"):
+        registry.set_status(target, run_id, "cancelled")
+        return
+    registry.request_cancel(target, run_id, requested_by="operator")
 
 
 def _fingerprint_text(text: str) -> str:
@@ -701,7 +1495,7 @@ def export_handoff(
     blockers: list[str] = []
     if rec is None:
         return {"status": "blocked", "run_id": run_id, "blockers": [f"research run not found: {run_id}"]}
-    if rec.get("status") != "done":
+    if rec.get("status") not in {"done", "completed"}:
         blockers.append(f"research run is not complete: {rec.get('status')}")
     artifact_path = _run_handoff_path(target, rec)
     if artifact_path is None:
@@ -796,7 +1590,7 @@ def handoff_status_payload(*, target: Path) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for rec in runs:
         run_id = str(rec.get("run_id") or "")
-        if rec.get("status") != "done":
+        if rec.get("status") not in {"done", "completed"}:
             continue
         artifact_path = _run_handoff_path(target, rec)
         if artifact_path is None:
@@ -1097,8 +1891,14 @@ def cli_run(
         print(f"status: {rec.get('status')}")
         for b in rec.get("blockers", []):
             print(f"blocker: {b}")
-    if rec.get("status") == "error":
-        return 2 if rec.get("failure_kind") == "no-source-route" else 1
+    status = rec.get("status")
+    if status == "cancelled":
+        return 130
+    if status in {"failed", "error"}:
+        kind = rec.get("failure_kind")
+        if kind in {"invalid-seat", "run-lock", "no-source-route"}:
+            return 2
+        return 1
     return 0
 
 
@@ -1188,8 +1988,9 @@ def cli_cancel(*, target: Path, run_id: str, json_output: bool = False) -> int:
         print(f"no such run: {run_id}")
         return 1
     cancel(target=target, run_id=run_id)
+    rec = registry.show_run(target, run_id) or {"run_id": run_id, "status": "cancelled"}
     if json_output:
-        print(_json.dumps({"run_id": run_id, "status": "cancelled"}, indent=2, sort_keys=True))
+        print(_json.dumps({"run_id": run_id, "status": rec.get("status", "cancelled")}, indent=2, sort_keys=True))
         return 0
     print(f"cancelled: {run_id}")
     return 0
@@ -1199,14 +2000,22 @@ def cli_resume(*, target: Path, run_id: str, overrides: Dict[str, Any], json_out
     try:
         resume(target=target, run_id=run_id, overrides=overrides)
     except SystemExit as e:
-        print(str(e))
+        message = str(e)
+        print(message)
+        if "completed" in message or "live owner" in message:
+            return 2
         return 1
     rec = registry.show_run(target, run_id) or {"run_id": run_id}
     if json_output:
         print(_json.dumps(rec, indent=2, sort_keys=True))
-        return 0
-    print(f"resumed: {run_id}")
-    print(f"status: {rec.get('status')}")
+    else:
+        print(f"resumed: {run_id}")
+        print(f"status: {rec.get('status')}")
+    status = rec.get("status")
+    if status == "cancelled":
+        return 130
+    if status in {"failed", "error"}:
+        return 1
     return 0
 
 

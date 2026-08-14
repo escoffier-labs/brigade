@@ -108,14 +108,20 @@ STATUS_EVENT_TYPE: dict[str, str] = {
     "synthesizing": "run.synthesis.started",
     "handoff": "run.synthesis.completed",
     "ok": "run.completed",
+    # Research terminal success (does not replace ok/dry-run).
+    "completed": "run.completed",
     "failed": "run.failed",
     "canceled": "run.interrupted",
+    # Research terminal cancel (American spelling retained for brigade run).
+    "cancelled": "run.interrupted",
     "timeout": "run.failed",
     "dry-run": "run.completed",
     "incomplete": "run.failed",
     "artifact-collection": "run.artifact_collection.started",
     "paused": "run.paused",
     "running": "run.resumed",
+    # Research reopen from a terminal receipt without an approval reference.
+    "research-reopened": "run.recovery.started",
 }
 
 _CHECKPOINT_EVENT_PAIR_LOCK = threading.Lock()

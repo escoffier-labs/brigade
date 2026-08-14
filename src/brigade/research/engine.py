@@ -8,8 +8,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import Event
 from typing import Any, Callable
 
+from ..run_budget import BudgetPolicyError
+from ..run_lifecycle import LifecycleJournalError
 from ..untrusted import wrap_untrusted
 from . import extract as _extract
 from .llm import ResearchSeatError
@@ -106,34 +109,66 @@ class ResearchEngine:
     caps: Caps
     on_phase_started: Callable[[str], None] | None = None
     on_phase_completed: Callable[[str, dict[str, Any]], None] | None = None
+    persist_sources: Callable[[tuple[SourceEnvelope, ...]], Any] | None = None
+    persist_findings: Callable[[tuple[Finding, ...]], Any] | None = None
+    persist_draft_report: Callable[[str], Any] | None = None
+    persist_citation_audit: Callable[[CitationAudit], Any] | None = None
+    cancelled: Event | None = None
     fallbacks: list[FallbackRecord] = field(default_factory=list)
     _cancelled: bool = field(default=False, init=False)
     _start: float = field(default=0.0, init=False)
     _synthesis_backend: Any | None = field(default=None, init=False)
     _rounds: int = field(default=0, init=False)
+    _active_phase: str = field(default="planning", init=False)
 
     def cancel(self) -> None:
         self._cancelled = True
+        if self.cancelled is not None:
+            self.cancelled.set()
+
+    @property
+    def active_phase(self) -> str:
+        return self._active_phase
 
     def run(self, question: str, *, resume: ResumeState | None = None) -> ResearchResult:
         self._start = time.time()
         self.fallbacks = []
         self._ensure_time("planning")
         plan = self._resume_or_plan(question, resume)
+        self._check_cancel("planning")
         self._ensure_time("discovery")
         sources = self._resume_or_discover(question, plan, resume)
+        self._check_cancel("discovery")
         self._ensure_time("extraction")
         findings = self._resume_or_extract(question, sources, resume)
+        self._check_cancel("extraction")
         self._ensure_time("synthesis")
-        report, synthesis = self._synthesize_with_fallback(question, findings)
-        audit = audit_citations(report, findings)
-        self._ensure_time("review")
-        review = self._review(question, report, findings, audit, synthesis.attempt_id)
-        if not audit.accepted or not review.accepted:
-            self._ensure_time("repair")
-            report = self._repair_once(question, report, findings, audit, review)
+        report, synthesis = self._resume_or_synthesize(question, findings, resume)
+        self._check_cancel("synthesis")
+        if resume is not None and resume.audit is not None and resume.review is not None and resume.review.accepted:
+            audit = resume.audit
+            review = resume.review
+            self._phase_start("review")
+            self._phase_done(
+                "review",
+                artifact=None,
+                accepted=review.accepted,
+                attempt_id=review.attempt_id,
+                seat=review.seat,
+                resumed=True,
+            )
+        else:
             audit = audit_citations(report, findings)
+            self._ensure_time("review")
             review = self._review(question, report, findings, audit, synthesis.attempt_id)
+            self._check_cancel("review")
+            if not audit.accepted or not review.accepted:
+                self._ensure_time("repair")
+                report = self._repair_once(question, report, findings, audit, review)
+                self._check_cancel("repair")
+                audit = audit_citations(report, findings)
+                review = self._review(question, report, findings, audit, synthesis.attempt_id)
+                self._check_cancel("review")
         if not audit.accepted or not review.accepted:
             raise ResearchRunError("review", "review-rejected", review.detail or "citation audit or review rejected")
         return ResearchResult(
@@ -167,6 +202,29 @@ class ResearchEngine:
             return resume.findings
         return self._extract(question, sources)
 
+    def _resume_or_synthesize(
+        self, question: str, findings: tuple[Finding, ...], resume: ResumeState | None
+    ) -> tuple[str, SynthesisRecord]:
+        if resume is not None and resume.report is not None:
+            record = resume.synthesis or SynthesisRecord(
+                seat=str(getattr(self.lanes.synthesizers[0], "seat", "synthesizer"))
+                if self.lanes.synthesizers
+                else "synthesizer",
+                attempt_id="resumed-synthesis",
+                requested_model=None,
+                observed_model="resumed",
+            )
+            self._phase_start("synthesis")
+            self._phase_done(
+                "synthesis",
+                artifact=None,
+                seat=record.seat,
+                attempt_id=record.attempt_id,
+                resumed=True,
+            )
+            return resume.report, record
+        return self._synthesize_with_fallback(question, findings)
+
     def _plan(self, question: str) -> str:
         self._phase_start("planning")
         try:
@@ -176,7 +234,9 @@ class ResearchEngine:
                 timeout=30,
             )
         except ResearchSeatError as exc:
+            self._check_cancel("planning")
             raise ResearchRunError("planning", exc.failure_kind, str(exc)) from exc
+        self._check_cancel("planning")
         data = _parse_json(text)
         if not isinstance(data, dict):
             raise ResearchRunError("planning", "invalid-json", "planner returned invalid JSON")
@@ -188,7 +248,11 @@ class ResearchEngine:
         queries = self._discovery_queries(question, plan)
         providers = list(self.sources)
         if not providers:
-            self._phase_done("discovery", artifact="sources.json", digest=_digest("[]"), count=0)
+            empty: tuple[SourceEnvelope, ...] = ()
+            artifact: Any = "sources.json"
+            if self.persist_sources is not None:
+                artifact = self.persist_sources(empty)
+            self._phase_done("discovery", artifact=artifact, digest=_digest("[]"), count=0)
             self._rounds = 0
             return ()
 
@@ -205,8 +269,7 @@ class ResearchEngine:
         # or consecutive empty rounds.
         while round_no < max_rounds and query_index < len(queries):
             self._ensure_time("discovery")
-            if self._cancelled:
-                break
+            self._check_cancel("discovery")
             round_queries = [queries[query_index]]
             query_index += 1
             round_no += 1
@@ -214,6 +277,7 @@ class ResearchEngine:
             try:
                 round_sources = self._discover_round(round_queries, providers, seen_urls)
             except ResearchSeatError as exc:
+                self._check_cancel("discovery")
                 raise ResearchRunError("discovery", exc.failure_kind, str(exc)) from exc
             except BrowserAiDiscoveryError as exc:
                 raise ResearchRunError(
@@ -231,10 +295,14 @@ class ResearchEngine:
 
         sources = tuple(collected)
         payload = json.dumps([s.source_id for s in sources])
+        artifact = "sources.json"
+        digest = _digest(payload)
+        if self.persist_sources is not None:
+            artifact = self.persist_sources(sources)
         self._phase_done(
             "discovery",
-            artifact="sources.json",
-            digest=_digest(payload),
+            artifact=artifact,
+            digest=digest if isinstance(artifact, str) else None,
             count=len(sources),
         )
         self._rounds = round_no
@@ -247,6 +315,7 @@ class ResearchEngine:
         seen_urls: set[str],
     ) -> list[SourceEnvelope]:
         def _provider_batch(index: int, provider: Any) -> tuple[int, list[SourceEnvelope]]:
+            self._check_cancel("discovery")
             envelopes: list[SourceEnvelope] = []
             local_seen: set[str] = set()
             trust_hint = self._normalize_trust(getattr(provider, "trust", "web"))
@@ -256,6 +325,7 @@ class ResearchEngine:
                 else self.caps.max_urls_per_round
             )
             for query in queries:
+                self._check_cancel("discovery")
                 for hit in provider.search(query, limit):
                     url = str(hit.get("url") or "")
                     if not url or url in seen_urls or url in local_seen:
@@ -267,12 +337,16 @@ class ResearchEngine:
                     trust = self._normalize_trust(
                         hit.get("trust") or getattr(provider, "trust", "web")
                     )
+                    # Bound before identity construction so source_id and
+                    # content_digest describe exactly the stored content.
+                    raw_content = str(page["content"])
+                    content = raw_content[: self.caps.max_content_chars]
                     envelopes.append(
                         SourceEnvelope.build(
                             origin=_TRUST_ORIGIN[trust],  # type: ignore[arg-type]
                             provider=str(getattr(provider, "source_id", provider.__class__.__name__)),
                             uri=url,
-                            content=str(page["content"]),
+                            content=content,
                             trust=trust,
                             acquired_at=datetime.now(timezone.utc).isoformat(),
                             producing_lane=getattr(provider, "lane", None),
@@ -290,9 +364,20 @@ class ResearchEngine:
                 for index, provider in enumerate(providers)
             }
             for future in as_completed(futures):
+                self._check_cancel("discovery")
                 try:
                     ordered.append(future.result())
+                except BudgetPolicyError:
+                    raise
+                except LifecycleJournalError as exc:
+                    raise ResearchRunError(
+                        "discovery",
+                        "lifecycle-journal",
+                        str(exc),
+                    ) from exc
                 except (ResearchSeatError, BrowserAiDiscoveryError):
+                    raise
+                except ResearchRunError:
                     raise
                 except Exception as exc:
                     raise ResearchRunError("discovery", "provider-failed", str(exc)) from exc
@@ -317,6 +402,7 @@ class ResearchEngine:
         lane = getattr(self.lanes.extractor, "seat", "luna")
         try:
             for source in sources:
+                self._check_cancel("extraction")
                 finding = _extract.extract_finding(
                     self.lanes.extractor,
                     goal=question,
@@ -324,9 +410,11 @@ class ResearchEngine:
                     extraction_lane=str(lane),
                     max_content_chars=self.caps.max_content_chars,
                 )
+                self._check_cancel("extraction")
                 if finding is not None:
                     findings.append(finding)
         except ResearchSeatError as exc:
+            self._check_cancel("extraction")
             raise ResearchRunError("extraction", exc.failure_kind, str(exc)) from exc
         except ValueError as exc:
             raise ResearchRunError(
@@ -335,13 +423,17 @@ class ResearchEngine:
                 "extractor returned invalid JSON",
             ) from exc
         payload = json.dumps([f.source_ids for f in findings])
+        result = tuple(findings)
+        artifact: Any = "findings.json"
+        if self.persist_findings is not None:
+            artifact = self.persist_findings(result)
         self._phase_done(
             "extraction",
-            artifact="findings.json",
+            artifact=artifact,
             digest=_digest(payload),
             count=len(findings),
         )
-        return tuple(findings)
+        return result
 
     def _synthesize_with_fallback(
         self, question: str, findings: tuple[Finding, ...]
@@ -351,9 +443,11 @@ class ResearchEngine:
         if not synthesizers:
             raise ResearchRunError("synthesis", "no-synthesizer", "no synthesis seats configured")
         for index, backend in enumerate(synthesizers):
+            self._check_cancel("synthesis")
             try:
                 report = self._synthesize(backend, question, findings)
             except ResearchSeatError as exc:
+                self._check_cancel("synthesis")
                 if index + 1 >= len(synthesizers):
                     raise ResearchRunError("synthesis", exc.failure_kind, str(exc)) from exc
                 self.fallbacks.append(
@@ -366,6 +460,7 @@ class ResearchEngine:
                     )
                 )
                 continue
+            self._check_cancel("synthesis")
             attempt_id = getattr(backend, "last_attempt_id", None) or f"{backend.seat}:synthesis"
             record = SynthesisRecord(
                 seat=backend.seat,
@@ -374,12 +469,17 @@ class ResearchEngine:
                 observed_model=str(getattr(backend, "observed_model", "unverified")),
             )
             self._synthesis_backend = backend
+            artifact: Any = "report.draft.md"
+            if self.persist_draft_report is not None:
+                artifact = self.persist_draft_report(report)
             self._phase_done(
                 "synthesis",
-                artifact="report.md",
+                artifact=artifact,
                 digest=_digest(report),
                 seat=record.seat,
                 attempt_id=record.attempt_id,
+                requested_model=record.requested_model,
+                observed_model=record.observed_model,
             )
             return report, record
         raise ResearchRunError("synthesis", "no-synthesizer", "no synthesis seats configured")
@@ -415,7 +515,9 @@ class ResearchEngine:
                 temperature=0.1,
             )
         except ResearchSeatError as exc:
+            self._check_cancel("review")
             raise ResearchRunError("review", exc.failure_kind, str(exc)) from exc
+        self._check_cancel("review")
         data = _parse_json(text)
         if not isinstance(data, dict):
             raise ResearchRunError("review", "invalid-json", "reviewer returned invalid JSON")
@@ -441,12 +543,25 @@ class ResearchEngine:
             seat=str(getattr(self.lanes.reviewer, "seat", "reviewer")),
             attempt_id=attempt_id,
         )
+        artifact: Any = "citation-audit.json"
+        if self.persist_citation_audit is not None:
+            artifact = self.persist_citation_audit(audit)
         self._phase_done(
             "review",
-            artifact="citation-audit.json",
+            artifact=artifact,
             digest=_digest(text),
             accepted=result.accepted,
             attempt_id=result.attempt_id,
+            seat=result.seat,
+            detail=result.detail,
+            rejected_claims=list(result.rejected_claims),
+            review={
+                "accepted": result.accepted,
+                "detail": result.detail,
+                "rejected_claims": list(result.rejected_claims),
+                "seat": result.seat,
+                "attempt_id": result.attempt_id,
+            },
         )
         return result
 
@@ -478,8 +593,13 @@ class ResearchEngine:
                 max_tokens=self.caps.max_report_tokens,
             )
         except ResearchSeatError as exc:
+            self._check_cancel("repair")
             raise ResearchRunError("repair", exc.failure_kind, str(exc)) from exc
-        self._phase_done("repair", artifact="report.md", digest=_digest(repaired))
+        self._check_cancel("repair")
+        artifact: Any = "report.draft.md"
+        if self.persist_draft_report is not None:
+            artifact = self.persist_draft_report(repaired)
+        self._phase_done("repair", artifact=artifact, digest=_digest(repaired))
         return repaired
 
     def _wrap_model_output(self, text: str) -> str:
@@ -532,12 +652,17 @@ class ResearchEngine:
         return trust  # type: ignore[return-value]
 
     def _ensure_time(self, phase: str) -> None:
-        if self._cancelled:
-            raise ResearchRunError(phase, "cancelled", "research run cancelled")
+        self._active_phase = phase
+        self._check_cancel(phase)
         if self._start and (time.time() - self._start) >= self.caps.max_time:
             raise ResearchRunError(phase, "timeout", "research run exceeded max_time")
 
+    def _check_cancel(self, phase: str) -> None:
+        if self._cancelled or (self.cancelled is not None and self.cancelled.is_set()):
+            raise ResearchRunError(phase, "cancelled", "research run cancelled")
+
     def _phase_start(self, phase: str) -> None:
+        self._active_phase = phase
         if self.on_phase_started is not None:
             self.on_phase_started(phase)
 

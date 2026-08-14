@@ -538,7 +538,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 53
+    assert len(PRESERVED_FIELDS) == 56
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",
@@ -559,6 +559,7 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
         "run.artifact_collection.started": "artifact-collection",
         "run.paused": "running",
         "run.resumed": "running",
+        "run.recovery.started": "running",
     }
     projection = project_run_snapshot(base, [], journal_present=False)
     for field in PRESERVED_FIELDS:
@@ -817,3 +818,39 @@ def test_control_events_are_status_neutral_and_advance_chain_cursor(event_type):
     assert projection.status == "started"
     assert projection.last_sequence == 2
     assert projection.last_event_digest == control["event_digest"]
+
+
+def test_run_completed_derives_research_completed():
+    projection = project_run_snapshot(
+        _minimal_base_snapshot(),
+        _events_ending_with_completed(status="completed"),
+        journal_present=True,
+    )
+    assert projection.status == "completed"
+
+
+def test_run_interrupted_derives_research_cancelled():
+    projection = project_run_snapshot(
+        _minimal_base_snapshot(),
+        _events_ending_with_interrupted(status="cancelled"),
+        journal_present=True,
+    )
+    assert projection.status == "cancelled"
+
+
+def test_run_recovery_started_derives_running():
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    recovered = _build_event(
+        2,
+        "run.recovery.started",
+        {"detail": "research-reopened"},
+        "recover-1",
+        "2026-07-27T15:30:46.000000Z",
+        created["event_digest"],
+    )
+    projection = project_run_snapshot(
+        _minimal_base_snapshot(),
+        [created, recovered],
+        journal_present=True,
+    )
+    assert projection.status == "running"
