@@ -17,7 +17,7 @@ Assign every seat one job. Mixed-purpose seats make outcome capture useless beca
 
 ## Lane recipes
 
-Model IDs drift. Every ID below was verified answering on 2026-07-17, with Gemini 3.7 Flash re-verified on 2026-08-13. Confirm against your harness's live inventory before wiring (see the validation pattern at the end, and issue #299 for making that check automatic).
+Model IDs drift. Every ID below was verified answering on 2026-07-17, with Gemini 3.7 Flash re-verified on both Antigravity and Cursor on 2026-08-13. Confirm against your harness's live inventory before wiring (see the validation pattern at the end, and issue #299 for making that check automatic).
 
 ### Codex / ChatGPT subscription
 
@@ -102,7 +102,7 @@ model = "Claude Sonnet 4.6 (Thinking)"
 role = "Cross-model reviewer on the Google lane; verify claims without spending the Claude subscription."
 ```
 
-Harness filters can change the result before inference. In author receipts, Antigravity served a Gemini 3.7 Flash security canary that Cursor rejected at the provider boundary. Record provider refusals separately from model output.
+Harness filters can change the result before inference. In August 2026 author receipts, Antigravity served a Gemini 3.7 Flash security canary that Cursor rejected at the provider boundary. Record provider refusals separately from model output.
 
 Remember: every seat's `cli` value must appear in `limits.allow_models`, in the same edit. Brigade validates at roster load, not at edit time, and a missing entry fails every run against that roster.
 

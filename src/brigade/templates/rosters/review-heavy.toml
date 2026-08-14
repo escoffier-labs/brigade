@@ -23,7 +23,7 @@ caveats = ["Grok review quality varies by task complexity."]
 [agents.reviewer_flash]
 cli = "antigravity"
 model = "Gemini 3.7 Flash (Low)"
-role = "Fast routine review and summary lane."
+role = "Fast routine review and summary lane; route security-sensitive or cross-file decisions to the reviewer or reviewer_codex seat."
 purpose = "Low-cost review and summary when premium lanes are saturated."
 requires = { cli = "antigravity" }
 fallback = []

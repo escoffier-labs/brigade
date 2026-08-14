@@ -709,7 +709,11 @@ def test_roster_suggest_prints_every_seat_resolution_when_roots_satisfiable(tmp_
     resolved_path.write_text(emitted)
     resolved = roster.load_roster(resolved_path)
     assert resolved.orchestrator == "chef"
-    assert resolved.agents["reviewer_flash"].model == "Gemini 3.7 Flash (Low)"
+    flash = resolved.agents["reviewer_flash"]
+    assert flash.model == "Gemini 3.7 Flash (Low)"
+    assert "security-sensitive or cross-file decisions" in flash.role
+    assert "reviewer_codex" in flash.role
+    assert any("reviewer_codex" in caveat for caveat in flash.caveats)
 
 
 def test_roster_cli_registers_suggest_and_stats_commands(tmp_target):
