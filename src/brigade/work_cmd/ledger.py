@@ -4365,15 +4365,60 @@ def _write_plan_artifact(
         if rec is None:
             print(f"error: research run not found: {from_research}", file=sys.stderr)
             return 1
-        artifacts = rec.get("artifacts") or {}
+        status = str(rec.get("status") or "")
+        legacy = bool(rec.get("legacy"))
+        artifacts = rec.get("artifacts") if isinstance(rec.get("artifacts"), dict) else {}
         report_rel = artifacts.get("report_md") or "report.md"
-        report_path = _plan_rel_path(target, registry.run_dir(target, from_research) / report_rel)
-        research_entry = {
-            "run_id": from_research,
-            "question": str(rec.get("question") or ""),
-            "report_path": report_path,
-        }
-        research_sources.append(f"research:{from_research} (untrusted-web) -> {report_path}")
+        if isinstance(report_rel, dict):
+            report_rel = report_rel.get("path") or "report.md"
+        report_path = _plan_rel_path(target, registry.run_dir(target, from_research) / str(report_rel))
+        if legacy:
+            if status not in {"done", "completed"}:
+                print(
+                    f"error: research run is not completed: {from_research} ({status or 'unknown'})",
+                    file=sys.stderr,
+                )
+                return 1
+            research_entry = {
+                "run_id": from_research,
+                "question": str(rec.get("question") or ""),
+                "report_path": report_path,
+                "kind": "research",
+                "trust": "untrusted-web",
+                "legacy": True,
+            }
+            research_sources.append(f"research:{from_research} (untrusted-web) -> {report_path}")
+        else:
+            if status != "completed":
+                print(
+                    f"error: research run is not completed: {from_research} ({status or 'active'})",
+                    file=sys.stderr,
+                )
+                return 1
+            audit_ref = artifacts.get("citation_audit")
+            audit = (
+                registry.read_verified_artifact(target, from_research, audit_ref)
+                if audit_ref
+                else None
+            )
+            accepted = bool(getattr(audit, "accepted", False)) if audit is not None else False
+            unresolved = tuple(getattr(audit, "unresolved", ()) or ()) if audit is not None else ()
+            if audit is None or not accepted or unresolved:
+                print(
+                    f"error: research run citation audit is not accepted: {from_research}",
+                    file=sys.stderr,
+                )
+                return 1
+            research_entry = {
+                "run_id": from_research,
+                "question": str(rec.get("question") or ""),
+                "report_path": report_path,
+                "kind": "research",
+                "trust": "mixed-provenance",
+                "citation_audit": "accepted",
+                "legacy": False,
+            }
+            research_sources.append(f"research:{from_research} (mixed-provenance) -> {report_path}")
     existing = _read_plan_receipt(target, resolved_id, kind)
     now = helpers._now().isoformat()
     try:

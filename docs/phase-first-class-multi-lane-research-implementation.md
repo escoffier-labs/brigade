@@ -1996,7 +1996,7 @@ git commit -m "feat: make research runs durable"
 - Test: `tests/test_research_cmd.py`
 - Test: `tests/test_work_cmd_ledger.py`
 
-- [ ] Add failing contract tests:
+- [x] Add failing contract tests:
 
 ```python
 def test_doctor_reports_each_lane_without_profile_paths(monkeypatch, tmp_path: Path) -> None:
@@ -2149,7 +2149,7 @@ def seed_completed_standard_research_run(target: Path) -> str:
     return run_id
 ```
 
-- [ ] Run and observe missing commands and schema fields:
+- [x] Run and observe missing commands and schema fields:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_doctor.py","tests/test_research_cmd.py","tests/test_work_cmd_ledger.py"]' --capture brigade-work --capture-kind skill
@@ -2157,16 +2157,23 @@ brigade work verify run --target . --argv-json '["pytest","-q","tests/test_resea
 
 Expect missing `doctor_payload`, `cli_status`, or new source metadata.
 
-- [ ] Implement `doctor_payload` with schema
+- [x] Implement `doctor_payload` with schema
 `brigade.research.doctor.v1`. For each fixed capability report:
 `configured`, `seat`, `cli`, `executable`, `version`, `auth_status`,
 `requested_model`, `model_attestation`, `read_only`, `timeout_seconds`,
-`concurrency`, `last_live_smoke`, `status`, and `detail`. Oracle auth failures
-retain `failure_kind: "browser-auth"`. Redact home paths, profile paths, header
-values, environment values, cookies, tokens, and raw stderr. Overall status is
-`fail` when the selected profile lacks a required planner, extractor,
-synthesizer, reviewer, or source route. It is `warn` for an unavailable optional
-fallback or browser-discovery lane.
+`concurrency`, `last_live_smoke`, `status`, and `detail`. Lane resolution follows
+the selected `ResearchProfile` candidate order when supplied, otherwise
+`research.llm.resolve_lane` (synthesis prefers an installed read-only Oracle
+primary with Luna fallback under grounded). Probe each selected primary/fallback
+at most once. A failed primary with a healthy allowed fallback yields `warn`; no
+usable required route yields `fail`. Optional browser discovery unavailable
+yields `warn`; the browser-ai profile requires browser discovery as a source
+route. Oracle auth failures retain `failure_kind: "browser-auth"`. Redact values
+under secret/header/env/cookie/token/authorization/api-key/browser-profile keys
+recursively, plus home/profile paths and Bearer/cookie values, before lane
+records are built. Overall status is `fail` when the selected profile lacks a
+required planner, extractor, synthesizer, reviewer, or required source route.
+It is `warn` for an unavailable optional fallback or browser-discovery lane.
 
 Its signature is
 `doctor_payload(target: Path, *, roster: Roster | None = None,
@@ -2175,7 +2182,7 @@ probe_agent) -> dict[str, object]`. Tests inject `probe`. Production uses the
 read-only executable and adapter health probes. Sanitize probe output before it
 enters a lane record.
 
-- [ ] Register and implement these exact CLI contracts:
+- [x] Register and implement these exact CLI contracts:
 
 ```text
 brigade research init [--profile grounded] [--json]
@@ -2210,13 +2217,16 @@ are `null`. The projection sanitizes secrets and absolute browser-profile paths.
 Change `cli_run` and `cli_resume` to return the pinned exit code from terminal
 status and failure kind. Do not return zero for a failed record.
 
-- [ ] Update `_write_plan_artifact` to require a completed research run and an
+- [x] Update `_write_plan_artifact` to require a completed research run and an
 accepted citation audit. Read both legacy and standard runs through the
-registry. Standard runs use `trust: "mixed-provenance"`. Legacy runs retain
-`trust: "untrusted-web"` and `legacy: true`. Reject failed, active, cancelled,
-or unresolved standard runs.
+registry. Standard runs require status exactly `completed` and must validate the
+accepted citation audit through registry verified artifacts when a ref exists;
+do not trust a tampered direct audit file as a fallback. Standard runs use
+`trust: "mixed-provenance"`. Legacy runs retain `trust: "untrusted-web"` and
+`legacy: true`, and may accept `done` or `completed`. Reject failed, active,
+cancelled, or unresolved standard runs.
 
-- [ ] Run focused tests and capture:
+- [x] Run focused tests and capture:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_doctor.py","tests/test_research_cmd.py","tests/test_work_cmd_ledger.py"]' --capture brigade-work --capture-kind skill
@@ -2225,7 +2235,7 @@ brigade outcome capture brigade-work --run-id latest
 
 Expect all files to pass.
 
-- [ ] Commit Task 8:
+- [x] Commit Task 8:
 
 ```bash
 git add src/brigade/research/doctor.py src/brigade/research_cmd.py src/brigade/cli/research.py src/brigade/work_cmd/ledger.py tests/test_research_doctor.py tests/test_research_cmd.py tests/test_work_cmd_ledger.py

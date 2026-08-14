@@ -15,8 +15,12 @@ from brigade.research.types import Finding, ResearchLanes, SourceEnvelope
 from brigade.research_cmd import (
     CancellationWatcher,
     ResearchBudgetCallbacks,
+    cli_init,
+    cli_list,
     cli_resume,
     cli_run,
+    cli_show,
+    cli_status,
 )
 from brigade.roster import Agent, Roster
 from brigade.run_budget import BudgetCoordinator, BudgetPolicyError, RunBudgetDeclaration
@@ -143,9 +147,7 @@ def test_explicit_browser_ai_flag_adds_provider(monkeypatch, tmp_path: Path) -> 
     assert captured["browser_ai_research"] is True
 
 
-def test_cli_default_and_grounded_profiles_do_not_enable_browser_ai(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_cli_default_and_grounded_profiles_do_not_enable_browser_ai(monkeypatch, tmp_path: Path) -> None:
     captured = capture_run(monkeypatch)
 
     assert (
@@ -233,9 +235,7 @@ def test_cli_browser_ai_profile_enables_without_flag(monkeypatch, tmp_path: Path
     assert captured["profile"] == "browser-ai"
 
 
-def test_cli_forwards_category_synthesizer_reviewer_and_profile(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_cli_forwards_category_synthesizer_reviewer_and_profile(monkeypatch, tmp_path: Path) -> None:
     captured = capture_run(monkeypatch)
 
     assert (
@@ -267,9 +267,7 @@ def test_cli_forwards_category_synthesizer_reviewer_and_profile(
     assert captured["category"] == "ops"
 
 
-def test_new_run_resolve_lanes_bypasses_resolve_backend_and_forwards_overrides(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_new_run_resolve_lanes_bypasses_resolve_backend_and_forwards_overrides(monkeypatch, tmp_path: Path) -> None:
     seen: dict[str, object] = {}
 
     def boom(_target: Path) -> StubLlm:
@@ -315,9 +313,7 @@ def test_new_run_resolve_lanes_bypasses_resolve_backend_and_forwards_overrides(
     }
 
 
-def test_run_no_source_route_sets_failure_kind_and_cli_exits_2(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_run_no_source_route_sets_failure_kind_and_cli_exits_2(tmp_path: Path, monkeypatch, capsys) -> None:
     patch_stub_lanes(monkeypatch)
     code = cli_run(
         target=tmp_path,
@@ -335,9 +331,7 @@ def test_run_no_source_route_sets_failure_kind_and_cli_exits_2(
     assert payload["status"] in {"failed", "error"}
 
 
-def test_run_does_not_construct_browser_provider_when_opt_in_false(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_run_does_not_construct_browser_provider_when_opt_in_false(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "a.md").write_text("photosynthesis converts light to energy in plants")
     patch_stub_lanes(monkeypatch)
     calls: list[object] = []
@@ -735,9 +729,7 @@ def test_sources_payload_typeless_adapter_does_not_misalign_routes(tmp_path: Pat
     assert route["status"] == "ok"
 
 
-def test_repo_overlay_on_grounded_does_not_activate_browser_ai(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_repo_overlay_on_grounded_does_not_activate_browser_ai(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / ".brigade").mkdir()
     (tmp_path / "a.md").write_text("plants use light")
     (tmp_path / ".brigade" / "research.toml").write_text(
@@ -767,9 +759,7 @@ def test_repo_overlay_on_grounded_does_not_activate_browser_ai(
     assert registry.show_run(tmp_path, rid).get("browser_ai_research") is False
 
 
-def test_explicit_browser_ai_provider_failure_fails_truthfully(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_explicit_browser_ai_provider_failure_fails_truthfully(tmp_path: Path, monkeypatch, capsys) -> None:
     patch_stub_lanes(monkeypatch)
 
     def boom(target: Path, *, run_id: str, invoker=None):
@@ -793,9 +783,7 @@ def test_explicit_browser_ai_provider_failure_fails_truthfully(
     assert "secret-value" not in json.dumps(payload)
 
 
-def test_generic_failed_research_run_returns_nonzero(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_generic_failed_research_run_returns_nonzero(tmp_path: Path, monkeypatch, capsys) -> None:
     (tmp_path / "a.md").write_text("plants use light")
 
     class BoomLanes:
@@ -823,9 +811,7 @@ def test_generic_failed_research_run_returns_nonzero(
     assert payload["failure_kind"] == "review-rejected"
 
 
-def test_opt_in_browser_provider_included_and_manifest_enabled(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_opt_in_browser_provider_included_and_manifest_enabled(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "a.md").write_text("plants use light")
 
     class FakeBrowser:
@@ -887,9 +873,7 @@ def test_opt_in_browser_provider_included_and_manifest_enabled(
     assert shared["lanes_invoker"] is sentinel
 
 
-def test_shared_seat_invoker_built_once_for_browser_and_lanes(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_shared_seat_invoker_built_once_for_browser_and_lanes(tmp_path: Path, monkeypatch) -> None:
     from brigade.proc import ProcessRegistry
     from brigade.run_seat import SeatInvoker
     from brigade.roster import Agent, Roster
@@ -912,12 +896,8 @@ def test_shared_seat_invoker_built_once_for_browser_and_lanes(
             ),
         },
     )
-    monkeypatch.setattr(
-        "brigade.roster.load_roster", lambda _path: roster
-    )
-    monkeypatch.setattr(
-        "brigade.roster.resolve_roster_path", lambda _target: tmp_path / "roster.toml"
-    )
+    monkeypatch.setattr("brigade.roster.load_roster", lambda _path: roster)
+    monkeypatch.setattr("brigade.roster.resolve_roster_path", lambda _target: tmp_path / "roster.toml")
 
     constructed: list[SeatInvoker] = []
     real_init = SeatInvoker.__init__
@@ -937,9 +917,7 @@ def test_shared_seat_invoker_built_once_for_browser_and_lanes(
         run_id="shared-invoker",
         invoker=invoker,
     )
-    provider = research_cmd._resolve_browser_ai_provider(
-        tmp_path, run_id="shared-invoker", invoker=invoker
-    )
+    provider = research_cmd._resolve_browser_ai_provider(tmp_path, run_id="shared-invoker", invoker=invoker)
 
     assert len(constructed) == 1
     assert lanes.planner.invoker is invoker
@@ -1224,9 +1202,7 @@ def seed_cancelled_run_after_synthesis(target: Path) -> str:
 
     run_id = seed_cancelled_run_after_extraction(target)
     sidecar = registry.read_research(target, run_id)
-    sources = registry.read_verified_artifact(
-        target, run_id, sidecar["phases"]["discovery"]["artifact"]
-    )
+    sources = registry.read_verified_artifact(target, run_id, sidecar["phases"]["discovery"]["artifact"])
     assert sources
     token = citation_token(sources[0].source_id)
     draft = f"## Report\nVerified fact. {token}\n"
@@ -1356,10 +1332,7 @@ def test_read_verified_artifact_rejects_malformed_typed_payload(tmp_path: Path) 
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
     digest = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
     assert (
-        registry.read_verified_artifact(
-            tmp_path, run_id, {"path": registry.SOURCES_ARTIFACT, "digest": digest}
-        )
-        is None
+        registry.read_verified_artifact(tmp_path, run_id, {"path": registry.SOURCES_ARTIFACT, "digest": digest}) is None
     )
 
 
@@ -1453,9 +1426,7 @@ def test_budget_resume_preserves_consumed_dispatches(monkeypatch, tmp_path: Path
     assert used >= 1
 
 
-def test_phase_transition_persists_budget_projection_on_both_receipts(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_phase_transition_persists_budget_projection_on_both_receipts(monkeypatch, tmp_path: Path) -> None:
     (tmp_path / "a.md").write_text("plants use light")
     patch_stub_lanes(monkeypatch)
     rid = research_cmd.run(
@@ -1818,7 +1789,7 @@ def test_legacy_checkpoint_resume_preserves_discovery_and_consumes(monkeypatch, 
 
 
 def test_authoritative_research_journal_resume_dispatch_complete(monkeypatch, tmp_path: Path) -> None:
-    from brigade import run_journal, run_lifecycle, run_shadow, runguard
+    from brigade import run_journal, run_shadow, runguard
 
     patch_stub_lanes(monkeypatch)
     (tmp_path / "a.md").write_text("plants use light for energy")
@@ -1838,12 +1809,319 @@ def test_authoritative_research_journal_resume_dispatch_complete(monkeypatch, tm
     assert not report.chain_errors
     types = [e.event_type for e in report.events]
     assert "run.recovery.started" in types or "run.interrupted" in types
-    assert types.count("run.dispatch.requested") >= 2 or any(
-        e.event_type == "run.dispatch.completed" for e in report.events
-    ) or True  # stub lanes may not always emit two pairs in all environments
+    assert (
+        types.count("run.dispatch.requested") >= 2
+        or any(e.event_type == "run.dispatch.completed" for e in report.events)
+        or True
+    )  # stub lanes may not always emit two pairs in all environments
     # At least ensure completion landed through the authoritative writer.
     final = json.loads((run_dir / "run.json").read_text())
     assert final["status"] == "completed"
     readiness = run_shadow.check_projection_readiness(run_dir)
     # Shadow parity is clean when the journal is active and chain-valid.
     assert readiness.ready or "no_journal" in ",".join(sorted(readiness.reasons))
+
+
+def doctor_roster() -> Roster:
+    return Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "luna": Agent(
+                name="luna",
+                cli="codex",
+                role="researcher",
+                model="gpt-5.6-luna",
+                capabilities=(
+                    "research.plan",
+                    "research.extract",
+                    "research.synthesize",
+                    "research.review",
+                ),
+            ),
+            "gemini_browser": Agent(
+                name="gemini_browser",
+                cli="oracle",
+                role="browser researcher",
+                model="gemini-3.1-pro",
+                capabilities=("research.synthesize", "research.browser-discover"),
+            ),
+        },
+    )
+
+
+def seed_standard_and_legacy_runs(target: Path) -> None:
+    registry.create_standard_run(
+        target,
+        run_id="standard-run",
+        question="New",
+        profile="grounded",
+        caps={"max_time": 300, "max_dispatches": 8},
+        roster=doctor_roster(),
+    )
+    legacy = target / ".brigade" / "research" / "legacy-run"
+    legacy.mkdir(parents=True)
+    from brigade import localio
+
+    localio.write_json(
+        legacy / "run.json",
+        {"run_id": "legacy-run", "question": "Old", "status": "done"},
+    )
+
+
+def test_status_all_json_is_center_safe(tmp_path: Path, capsys) -> None:
+    seed_standard_and_legacy_runs(tmp_path)
+
+    code = cli_status(target=tmp_path, run_id=None, all_runs=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["schema"] == "brigade.research.status.v1"
+    assert payload["schema_version"] == 1
+    assert {run["legacy"] for run in payload["runs"]} == {True, False}
+    assert all("browser_profile" not in json.dumps(run) for run in payload["runs"])
+
+
+def _adversarial_secret_blob() -> dict[str, object]:
+    return {
+        "headers": {"Authorization": "Bearer " + "literal-bearer-secret"},
+        "env": {"OPENAI_API_KEY": "sk-literal-api-secret"},
+        "cookie": "evil-cookie-value",
+        "token": "token-literal-secret",
+        "authorization": "auth-literal-secret",
+        "password": "password-literal-secret",
+        "secret": "secret-literal-value",
+        "api_key": "api-key-literal",
+        "browser_profile": "/home/alice/.mozilla/firefox/research",
+        "nested": {
+            "env": {"OPENAI_API_KEY": "nested-openai-secret"},
+            "headers": {"X-Api-Key": "nested-header-secret"},
+            "items": [{"token": "list-token-secret", "label": "visible-label"}],
+        },
+        "detail": ("cookie=embedded-cookie-secret " + "Bearer " + "bearer-embedded-secret path=/home/alice/project"),
+        "safe_note": "visible-safe-note",
+        "question": "keep-question",
+    }
+
+
+def test_status_json_redacts_adversarial_secrets(tmp_path: Path, capsys, monkeypatch) -> None:
+    toxic = {
+        "run_id": "tox-status",
+        "status": "completed",
+        "legacy": False,
+        **_adversarial_secret_blob(),
+    }
+    monkeypatch.setattr(research_cmd.registry, "list_runs", lambda _target: [toxic])
+
+    code = cli_status(target=tmp_path, run_id=None, all_runs=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    dumped = json.dumps(payload)
+
+    assert code == 0
+    assert payload["schema"] == "brigade.research.status.v1"
+    assert payload["schema_version"] == 1
+    assert "literal-bearer-secret" not in dumped
+    assert "sk-literal-api-secret" not in dumped
+    assert "evil-cookie-value" not in dumped
+    assert "token-literal-secret" not in dumped
+    assert "auth-literal-secret" not in dumped
+    assert "password-literal-secret" not in dumped
+    assert "secret-literal-value" not in dumped
+    assert "api-key-literal" not in dumped
+    assert "nested-openai-secret" not in dumped
+    assert "nested-header-secret" not in dumped
+    assert "list-token-secret" not in dumped
+    assert "embedded-cookie-secret" not in dumped
+    assert "bearer-embedded-secret" not in dumped
+    assert "/home/alice" not in dumped
+    assert "browser_profile" not in dumped
+    assert "visible-safe-note" in dumped
+    assert "keep-question" in dumped
+    assert "visible-label" in dumped
+
+
+def test_show_json_redacts_adversarial_secrets(tmp_path: Path, capsys, monkeypatch) -> None:
+    toxic = {
+        "run_id": "tox-show",
+        "status": "completed",
+        "legacy": False,
+        **_adversarial_secret_blob(),
+    }
+    research_blob = {
+        "run_id": "tox-show",
+        "profile": "grounded",
+        **_adversarial_secret_blob(),
+        "safe_phase": "planning",
+    }
+    findings_blob = {
+        "findings": [
+            {
+                "claim": "visible-finding",
+                "headers": {"Authorization": "Bearer " + "findings-bearer-secret"},
+                "env": {"OPENAI_API_KEY": "findings-openai-secret"},
+            }
+        ]
+    }
+    monkeypatch.setattr(research_cmd.registry, "show_run", lambda _target, _run_id: toxic)
+    monkeypatch.setattr(research_cmd.registry, "read_research", lambda _target, _run_id: research_blob)
+    monkeypatch.setattr(
+        research_cmd,
+        "_load_json_artifact",
+        lambda _target, _run_id, name: findings_blob if name == registry.FINDINGS_ARTIFACT else None,
+    )
+
+    code = cli_show(target=tmp_path, run_id="tox-show", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    dumped = json.dumps(payload)
+
+    assert code == 0
+    assert payload["schema"] == "brigade.research.show.v1"
+    assert payload["schema_version"] == 1
+    assert set(payload) >= {"run", "research", "findings", "citation_audit"}
+    assert "literal-bearer-secret" not in dumped
+    assert "sk-literal-api-secret" not in dumped
+    assert "evil-cookie-value" not in dumped
+    assert "password-literal-secret" not in dumped
+    assert "nested-openai-secret" not in dumped
+    assert "findings-bearer-secret" not in dumped
+    assert "findings-openai-secret" not in dumped
+    assert "/home/alice" not in dumped
+    assert "visible-safe-note" in dumped
+    assert "keep-question" in dumped
+    assert "visible-finding" in dumped
+    assert "safe_phase" in dumped or payload["research"].get("safe_phase") == "planning"
+
+
+def test_list_json_is_status_all_compatibility_alias(tmp_path: Path, capsys) -> None:
+    seed_standard_and_legacy_runs(tmp_path)
+
+    status_code = cli_status(target=tmp_path, run_id=None, all_runs=True, json_output=True)
+    status_payload = json.loads(capsys.readouterr().out)
+    list_code = cli_list(target=tmp_path, json_output=True)
+    list_payload = json.loads(capsys.readouterr().out)
+
+    assert status_code == 0
+    assert list_code == 0
+    assert list_payload["schema"] == "brigade.research.status.v1"
+    assert list_payload["schema_version"] == 1
+    assert {run["run_id"] for run in list_payload["runs"]} == {run["run_id"] for run in status_payload["runs"]}
+
+
+def test_show_json_schema_nulls_absent_artifacts(tmp_path: Path, capsys) -> None:
+    seed_standard_and_legacy_runs(tmp_path)
+
+    code = cli_show(target=tmp_path, run_id="standard-run", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["schema"] == "brigade.research.show.v1"
+    assert payload["schema_version"] == 1
+    assert set(payload) >= {"run", "research", "findings", "citation_audit"}
+    assert payload["findings"] is None
+    assert payload["citation_audit"] is None
+    assert payload["run"]["run_id"] == "standard-run"
+    assert payload["research"] is not None
+
+
+def test_research_init_create_only_and_profile_substitution(tmp_path: Path, capsys) -> None:
+    code = cli_init(target=tmp_path, profile=None, json_output=True)
+    out = capsys.readouterr().out
+    path = tmp_path / ".brigade" / "research.toml"
+    text = path.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert 'default_profile = "grounded"' in text
+    assert "max_rounds = 6" in text
+    assert "max_time = 300" in text
+    assert "max_dispatches = 24" in text
+    payload = json.loads(out)
+    assert payload["path"].endswith("research.toml")
+
+    again = cli_init(target=tmp_path, profile="luna-only", json_output=False)
+    assert again == 2
+    assert path.read_text(encoding="utf-8") == text
+
+    path.unlink()
+    code = cli_init(target=tmp_path, profile="luna-only", json_output=False)
+    assert code == 0
+    assert 'default_profile = "luna-only"' in path.read_text(encoding="utf-8")
+    assert "max_rounds = 6" in path.read_text(encoding="utf-8")
+
+
+def test_cli_run_failed_status_never_returns_zero(monkeypatch, tmp_path: Path, capsys) -> None:
+    run_id = "failed-exit"
+    registry.create_standard_run(
+        tmp_path,
+        run_id=run_id,
+        question="q",
+        profile="grounded",
+        caps={"max_time": 300, "max_dispatches": 8},
+        roster=doctor_roster(),
+    )
+    aboyeur.update_run_receipt(
+        registry.standard_run_dir(tmp_path, run_id),
+        status="failed",
+        failure_kind="worker-failed",
+        failure_phase="synthesis",
+        detail="boom",
+    )
+    monkeypatch.setattr(research_cmd, "run", lambda **_kwargs: run_id)
+    code = cli_run(
+        target=tmp_path,
+        question="q",
+        corpus=None,
+        sources=[],
+        web=False,
+        overrides={},
+        json_output=True,
+    )
+    assert code == 1
+    assert code != 0
+
+
+def test_research_cli_parser_init_doctor_status_and_list() -> None:
+    from brigade import cli
+
+    parser = cli._build_parser()
+    init_ns = parser.parse_args(["research", "init", "--profile", "grounded", "--json"])
+    assert init_ns.research_command == "init"
+    assert init_ns.profile == "grounded"
+    assert init_ns.json is True
+
+    doctor_ns = parser.parse_args(["research", "doctor", "--profile", "luna-only", "--json"])
+    assert doctor_ns.research_command == "doctor"
+    assert doctor_ns.profile == "luna-only"
+
+    status_one = parser.parse_args(["research", "status", "run-123", "--json"])
+    assert status_one.research_command == "status"
+    assert status_one.run_id == "run-123"
+    assert status_one.all_runs is False
+
+    status_all = parser.parse_args(["research", "status", "--all", "--json"])
+    assert status_all.research_command == "status"
+    assert status_all.run_id is None
+    assert status_all.all_runs is True
+
+    list_ns = parser.parse_args(["research", "list", "--json"])
+    assert list_ns.research_command == "list"
+    assert list_ns.json is True
+
+
+def test_research_status_requires_id_or_all(capsys) -> None:
+    from brigade import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["research", "status"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "run-id" in err or "--all" in err
+
+
+def test_research_status_rejects_id_and_all(capsys) -> None:
+    from brigade import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["research", "status", "run-123", "--all"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "ambiguous" in err or "mutually" in err or "--all" in err

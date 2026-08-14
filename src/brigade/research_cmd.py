@@ -1,15 +1,25 @@
 # src/brigade/research_cmd.py
 from __future__ import annotations
+
 import hashlib
 import json as _json
-import shutil
 import re
+import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from .research import registry, config as rconfig
+from .localio import utc_now_iso as _now
+from .research import config as rconfig
+from .research import handoff as handoffmod
+from .research import registry
+from .research import report as reportmod
+from .research.engine import ResearchEngine
+from .research.sources import cli as clisrc
+from .research.sources import local as localsrc
+from .research.sources.browser_ai import BrowserAiProvider
 from .research.types import (
     Caps,
     CitationAudit,
@@ -21,15 +31,9 @@ from .research.types import (
     ResumeState,
     SourceEnvelope,
 )
-from .research.engine import ResearchEngine
-from .research.sources import local as localsrc
-from .research.sources import cli as clisrc
-from .research.sources.browser_ai import BrowserAiProvider
-from .research import report as reportmod, handoff as handoffmod
-from .selection import WRITER_INBOXES
-from .localio import utc_now_iso as _now
-from .run_budget import BudgetCoordinator, BudgetPolicyError, RunBudgetDeclaration
 from .roster import Agent
+from .run_budget import BudgetCoordinator, BudgetPolicyError, RunBudgetDeclaration
+from .selection import WRITER_INBOXES
 
 
 def _dict_or_empty(value: object) -> dict[str, Any]:
@@ -166,9 +170,7 @@ class ResearchBudgetCallbacks:
         return self.coordinator.reserve_and_record_dispatch(
             seat=agent.name,
             allocate_attempt=lambda: self._next_attempt(agent.name),
-            record_requested=lambda attempt: self._record(
-                "run.dispatch.requested", agent.name, attempt
-            ),
+            record_requested=lambda attempt: self._record("run.dispatch.requested", agent.name, attempt),
         )
 
     def on_dispatch_observed(self, agent: Agent, attempt: int) -> None:
@@ -1023,9 +1025,7 @@ def run(
 
             if browser_ai_enabled and not can_skip_sources:
                 try:
-                    browser_provider = _resolve_browser_ai_provider(
-                        target, run_id=run_id, invoker=seat_invoker
-                    )
+                    browser_provider = _resolve_browser_ai_provider(target, run_id=run_id, invoker=seat_invoker)
                 except Exception as e:
                     return _fail(
                         "failed",
@@ -1089,9 +1089,7 @@ def run(
                 return registry.write_findings(target, run_id, finding_batch)
 
             def persist_draft_report(text: str) -> dict[str, str]:
-                return registry.write_text_artifact(
-                    target, run_id, registry.DRAFT_REPORT_ARTIFACT, text
-                )
+                return registry.write_text_artifact(target, run_id, registry.DRAFT_REPORT_ARTIFACT, text)
 
             def persist_citation_audit(audit: CitationAudit) -> dict[str, str]:
                 return registry.write_citation_audit(target, run_id, audit)
@@ -1242,7 +1240,7 @@ def _resume_state_from_legacy_checkpoint(
     if queries:
         plan = _json.dumps({"sub_questions": queries, "key_topics": queries, "success_criteria": "cite"})
     sources: list[SourceEnvelope] = []
-    for index, url in enumerate(urls):
+    for _index, url in enumerate(urls):
         content = registry.bound_text(f"legacy-source:{url}", max_content_chars)
         sources.append(
             SourceEnvelope.build(
@@ -1852,6 +1850,171 @@ def sources_payload(*, target: Path) -> Dict[str, Any]:
 
 # --- CLI presentation helpers (return process exit codes) ---
 
+_ADMISSION_FAILURE_KINDS = frozenset({"invalid-seat", "run-lock", "no-source-route"})
+_RESEARCH_INIT_TEMPLATE = (
+    '[research]\ndefault_profile = "grounded"\n\n[caps]\nmax_rounds = 6\nmax_time = 300\nmax_dispatches = 24\n'
+)
+_BROWSER_PROFILE_KEY_RE = re.compile(r"(?i)browser[_-]?profile")
+_ABS_HOME_PATH_RE = re.compile(r"/(?:home|Users)/[^\s\"']+")
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(headers?|env|cookie|token|authorization|password|secret|api[_-]?key|browser[_-]?profile)"
+)
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_COOKIE_ASSIGN_RE = re.compile(r"(?i)\bcookie\s*[=:]\s*[^\s,;]+")
+
+
+def _pinned_research_exit_code(rec: Mapping[str, Any]) -> int:
+    status = rec.get("status")
+    if status == "cancelled":
+        return 130
+    if status in {"failed", "error"}:
+        kind = rec.get("failure_kind")
+        if kind in _ADMISSION_FAILURE_KINDS:
+            return 2
+        return 1
+    return 0
+
+
+def _is_projection_secret_key(key: object) -> bool:
+    return bool(_SECRET_KEY_RE.search(str(key)))
+
+
+def _sanitize_projection_text(value: str) -> str:
+    text = _ABS_HOME_PATH_RE.sub("[redacted]", value)
+    text = _BEARER_RE.sub("[redacted]", text)
+    text = _COOKIE_ASSIGN_RE.sub("cookie=[redacted]", text)
+    return text
+
+
+def _sanitize_projection_value(value: object, *, key: str | None = None) -> object:
+    if key is not None and _BROWSER_PROFILE_KEY_RE.search(key):
+        return None
+    if key is not None and _is_projection_secret_key(key):
+        return "[redacted]"
+    if isinstance(value, Mapping):
+        cleaned: dict[str, object] = {}
+        for item_key, item_value in value.items():
+            key_text = str(item_key)
+            if _BROWSER_PROFILE_KEY_RE.search(key_text):
+                continue
+            if _is_projection_secret_key(key_text):
+                cleaned[key_text] = "[redacted]"
+            else:
+                cleaned[key_text] = _sanitize_projection_value(item_value, key=key_text)
+        return cleaned
+    if isinstance(value, list):
+        return [_sanitize_projection_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_projection_value(item) for item in value]
+    if isinstance(value, str):
+        return _sanitize_projection_text(value)
+    return value
+
+
+def _status_run_projection(rec: Mapping[str, Any]) -> dict[str, object]:
+    projected = dict(rec)
+    projected.pop("browser_profile", None)
+    return _sanitize_projection_value(projected)  # type: ignore[return-value]
+
+
+def _status_payload(*, target: Path, runs: list[Mapping[str, Any]]) -> dict[str, object]:
+    return {
+        "schema": "brigade.research.status.v1",
+        "schema_version": 1,
+        "runs": [_status_run_projection(run) for run in runs],
+    }
+
+
+def _load_json_artifact(target: Path, run_id: str, name: str) -> dict[str, Any] | None:
+    path = registry.standard_run_dir(target, run_id) / name
+    if not path.is_file():
+        return None
+    try:
+        payload = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _show_payload(*, target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[str, object]:
+    from dataclasses import asdict, is_dataclass
+
+    research: dict[str, Any] | None = None
+    findings: object | None = None
+    citation_audit: object | None = None
+    if not rec.get("legacy"):
+        try:
+            research = registry.read_research(target, run_id)
+        except FileNotFoundError:
+            research = None
+        findings = _load_json_artifact(target, run_id, registry.FINDINGS_ARTIFACT)
+        citation_audit = _load_json_artifact(target, run_id, registry.CITATION_AUDIT_ARTIFACT)
+        artifacts = rec.get("artifacts") if isinstance(rec.get("artifacts"), Mapping) else {}
+        if findings is None and isinstance(artifacts, Mapping) and "findings" in artifacts:
+            loaded = registry.read_verified_artifact(target, run_id, artifacts.get("findings"))
+            if loaded is not None:
+                findings = {"findings": list(loaded)} if isinstance(loaded, tuple) else loaded
+        if citation_audit is None and isinstance(artifacts, Mapping) and "citation_audit" in artifacts:
+            loaded = registry.read_verified_artifact(target, run_id, artifacts.get("citation_audit"))
+            if is_dataclass(loaded):
+                citation_audit = asdict(loaded)
+            elif loaded is not None:
+                citation_audit = loaded
+    return {
+        "schema": "brigade.research.show.v1",
+        "schema_version": 1,
+        "run": _sanitize_projection_value(dict(rec)),
+        "research": _sanitize_projection_value(research) if research is not None else None,
+        "findings": _sanitize_projection_value(findings) if findings is not None else None,
+        "citation_audit": _sanitize_projection_value(citation_audit) if citation_audit is not None else None,
+    }
+
+
+def cli_init(*, target: Path, profile: Optional[str] = None, json_output: bool = False) -> int:
+    from .research.types import BUILTIN_PROFILES
+
+    target = target.expanduser().resolve()
+    path = target / ".brigade" / "research.toml"
+    if path.exists():
+        print(f"error: research config already exists: {path}", file=sys.stderr)
+        return 2
+    selected = "grounded"
+    if profile is not None:
+        if profile not in BUILTIN_PROFILES:
+            print(f"error: unknown research profile: {profile}", file=sys.stderr)
+            return 2
+        selected = profile
+    body = _RESEARCH_INIT_TEMPLATE.replace('default_profile = "grounded"', f'default_profile = "{selected}"', 1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    payload = {"path": str(path), "default_profile": selected, "created": True}
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"wrote research config: {path}")
+    return 0
+
+
+def cli_doctor(*, target: Path, profile: Optional[str] = None, json_output: bool = False) -> int:
+    from .research.doctor import doctor_payload
+
+    payload = doctor_payload(target, profile_name=profile)
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"research doctor: {target}")
+        print(f"status: {payload.get('status')}")
+        print(f"profile: {payload.get('profile')}")
+        for lane in payload.get("lanes", []):
+            if not isinstance(lane, Mapping):
+                continue
+            print(
+                f"- [{lane.get('status')}] {lane.get('capability')} "
+                f"seat={lane.get('seat')} auth={lane.get('auth_status')} - {lane.get('detail')}"
+            )
+    status = payload.get("status")
+    return 1 if status == "fail" else 0
+
 
 def cli_run(
     *,
@@ -1885,39 +2048,54 @@ def cli_run(
     )
     rec = registry.show_run(target, rid) or {"run_id": rid}
     if json_output:
-        print(_json.dumps(rec, indent=2, sort_keys=True))
+        print(_json.dumps(_sanitize_projection_value(rec), indent=2, sort_keys=True))
     else:
         print(f"research run: {rid}")
         print(f"status: {rec.get('status')}")
         for b in rec.get("blockers", []):
             print(f"blocker: {b}")
-    status = rec.get("status")
-    if status == "cancelled":
-        return 130
-    if status in {"failed", "error"}:
-        kind = rec.get("failure_kind")
-        if kind in {"invalid-seat", "run-lock", "no-source-route"}:
-            return 2
+    return _pinned_research_exit_code(rec)
+
+
+def cli_status(
+    *,
+    target: Path,
+    run_id: Optional[str] = None,
+    all_runs: bool = False,
+    json_output: bool = False,
+) -> int:
+    if all_runs or run_id is None:
+        runs = registry.list_runs(target)
+        payload = _status_payload(target=target, runs=runs)
+        if json_output:
+            print(_json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        print(f"research runs: {target}")
+        for r in payload["runs"]:
+            if not isinstance(r, Mapping):
+                continue
+            legacy = " legacy" if r.get("legacy") else ""
+            print(f"- {r.get('run_id')} [{r.get('status')}] {r.get('question')}{legacy}")
+        return 0
+
+    rec = registry.show_run(target, run_id)
+    if rec is None:
+        print(f"no such run: {run_id}")
         return 1
+    payload = _status_payload(target=target, runs=[rec])
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"run: {rec.get('run_id')}")
+    print(f"status: {rec.get('status')}")
+    print(f"question: {rec.get('question')}")
+    print(f"legacy: {bool(rec.get('legacy'))}")
     return 0
 
 
 def cli_list(*, target: Path, json_output: bool = False) -> int:
-    runs = registry.list_runs(target)
-    if json_output:
-        print(_json.dumps(runs, indent=2, sort_keys=True))
-        return 0
-    print(f"research runs: {target}")
-    status_by_run = {
-        item.get("run_id"): item
-        for item in handoff_status_payload(target=target).get("runs", [])
-        if isinstance(item, dict)
-    }
-    for r in runs:
-        handoff_state = status_by_run.get(r.get("run_id"))
-        suffix = f" handoff={handoff_state.get('status')}" if isinstance(handoff_state, dict) else ""
-        print(f"- {r.get('run_id')} [{r.get('status')}] {r.get('question')}{suffix}")
-    return 0
+    # Compatibility alias for `research status --all` for one release window.
+    return cli_status(target=target, run_id=None, all_runs=True, json_output=json_output)
 
 
 def cli_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
@@ -1926,14 +2104,20 @@ def cli_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
         print(f"no such run: {run_id}")
         return 1
     if json_output:
-        print(_json.dumps(rec, indent=2, sort_keys=True))
+        print(_json.dumps(_show_payload(target=target, run_id=run_id, rec=rec), indent=2, sort_keys=True))
         return 0
     print(f"run: {rec.get('run_id')}")
     print(f"status: {rec.get('status')}")
     print(f"question: {rec.get('question')}")
     artifacts = rec.get("artifacts", {})
-    for name, rel in artifacts.items():
-        print(f"{name}: {registry.run_dir(target, run_id) / rel}")
+    if isinstance(artifacts, Mapping):
+        for name, rel in artifacts.items():
+            if isinstance(rel, Mapping):
+                rel_path = rel.get("path")
+                if isinstance(rel_path, str):
+                    print(f"{name}: {registry.run_dir(target, run_id) / rel_path}")
+            elif isinstance(rel, str):
+                print(f"{name}: {registry.run_dir(target, run_id) / rel}")
     handoff_state = next(
         (
             item
@@ -2007,16 +2191,11 @@ def cli_resume(*, target: Path, run_id: str, overrides: Dict[str, Any], json_out
         return 1
     rec = registry.show_run(target, run_id) or {"run_id": run_id}
     if json_output:
-        print(_json.dumps(rec, indent=2, sort_keys=True))
+        print(_json.dumps(_sanitize_projection_value(rec), indent=2, sort_keys=True))
     else:
         print(f"resumed: {run_id}")
         print(f"status: {rec.get('status')}")
-    status = rec.get("status")
-    if status == "cancelled":
-        return 130
-    if status in {"failed", "error"}:
-        return 1
-    return 0
+    return _pinned_research_exit_code(rec)
 
 
 def cli_open(*, target: Path, run_id: str, json_output: bool = False) -> int:
