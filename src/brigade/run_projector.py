@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 
 from brigade import run_checkpoint, run_events, run_journal
 
-PROJECTOR_VERSION: int = 5
+PROJECTOR_VERSION: int = 6
 
 # Field ownership over the run.json contract. Every current run.json key is
 # in exactly one of these two sets; see the ownership inventory in
@@ -46,6 +46,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         # Identity and schema
         "schema",
         "schema_version",
+        "kind",
         "task",
         "orchestrator",
         "roster",
@@ -384,6 +385,8 @@ def project_run_snapshot(
     for field_name in PRESERVED_FIELDS:
         if field_name in base_snapshot:
             snapshot[field_name] = copy.deepcopy(base_snapshot[field_name])
+    if "kind" not in base_snapshot:
+        snapshot["kind"] = "work"
 
     last_sequence = 0
     last_event_digest: str | None = None

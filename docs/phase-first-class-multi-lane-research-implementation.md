@@ -711,7 +711,7 @@ git commit -m "refactor: share exact research seat dispatch"
 - Test: `tests/test_run_projector.py`
 - Test: `tests/test_research_registry.py`
 
-- [ ] Add failing tests for kind preservation and the sidecar store:
+- [x] Add failing tests for kind preservation and the sidecar store:
 
 ```python
 def test_projector_preserves_research_kind() -> None:
@@ -761,7 +761,7 @@ def test_create_standard_research_run_and_dual_read(tmp_path: Path) -> None:
     ]
 ```
 
-- [ ] Run and confirm failure:
+- [x] Run and confirm failure:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_run_projector.py","tests/test_research_registry.py"]' --capture brigade-work --capture-kind skill
@@ -770,7 +770,7 @@ brigade work verify run --target . --argv-json '["pytest","-q","tests/test_run_p
 Expect failure because `kind` is not projected and `create_standard_run` does
 not exist.
 
-- [ ] Add schema constants and stamp helpers in `receipt_schema.py`:
+- [x] Add schema constants and stamp helpers in `receipt_schema.py`:
 
 ```python
 RESEARCH_SIDECAR_SCHEMA = "brigade.research.v1"
@@ -803,7 +803,7 @@ def stamp_research_citation_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 ```
 
-- [ ] Add `kind: str = "work"` to `_run_payload` and `record_run_start`, write it
+- [x] Add `kind: str = "work"` to `_run_payload` and `record_run_start`, write it
 into the payload, and pass it through every internal call. Add `kind` to
 `PRESERVED_FIELDS` and increment `PROJECTOR_VERSION` from 5 to 6. When the input
 lacks `kind`, the projector must set `projected["kind"] = "work"` after
@@ -825,7 +825,7 @@ def update_run_receipt(output_dir: Path, **fields: object) -> dict[str, object]:
 Use the existing guarded JSON reader used by `record_run_start`. Do not add a
 second permissive parser.
 
-- [ ] Rewrite `research/registry.py` around a `RunRecord` projection. New writes
+- [x] Rewrite `research/registry.py` around a `RunRecord` projection. New writes
 use `localio.write_json` and `localio.write_text_atomic`. The exact paths are:
 
 ```python
@@ -866,7 +866,7 @@ checks standard first, then legacy. `list_runs` merges both stores, de-duplicate
 by run ID in favor of standard, adds `legacy: bool`, and sorts descending by
 `created_at`, then `run_id`.
 
-- [ ] Run focused tests and capture:
+- [x] Run focused tests and capture:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_run_projector.py","tests/test_research_registry.py"]' --capture brigade-work --capture-kind skill
@@ -876,7 +876,7 @@ brigade outcome capture brigade-work --run-id latest
 Expect both files to pass and no existing projector snapshot to change except
 for the new `kind: "work"` field.
 
-- [ ] Commit Task 3:
+- [x] Commit Task 3:
 
 ```bash
 git add src/brigade/receipt_schema.py src/brigade/aboyeur.py src/brigade/run_projector.py src/brigade/research/registry.py tests/test_run_projector.py tests/test_research_registry.py

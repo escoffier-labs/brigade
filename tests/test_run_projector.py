@@ -282,6 +282,7 @@ def test_golden_replay_matches_expected_bytes():
     base = json.loads(GOLDEN_BASE_PATH.read_text())
     expected_obj = json.loads(GOLDEN_EXPECTED_PATH.read_text())
     expected_obj["projector_version"] = PROJECTOR_VERSION
+    expected_obj["kind"] = "work"
     expected = encode_snapshot_bytes(expected_obj)
     projection = project_run_snapshot(base, _golden_events(), journal_present=True)
     assert projection.to_bytes() == expected
@@ -537,7 +538,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 52
+    assert len(PRESERVED_FIELDS) == 53
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",
@@ -676,14 +677,32 @@ def test_checkpoint_after_unmapped_status_preserves_last_mapped_status():
     assert projection.last_event_digest == unmapped_checkpoint["event_digest"]
 
 
-def test_projector_version_is_five_and_replaces_stale_v4():
+def test_projector_preserves_research_kind() -> None:
     base = _minimal_base_snapshot()
-    base["projector_version"] = 4
+    base["kind"] = "research"
+
+    projected = project_run_snapshot(base, [], journal_present=False).snapshot
+
+    assert projected["kind"] == "research"
+
+
+def test_projector_defaults_missing_kind_to_work() -> None:
+    projected = project_run_snapshot(
+        _minimal_base_snapshot(), [], journal_present=False
+    ).snapshot
+
+    assert projected["kind"] == "work"
+
+
+def test_projector_version_is_six_and_replaces_stale_v5():
+    base = _minimal_base_snapshot()
+    base["projector_version"] = 5
 
     projection = project_run_snapshot(base, [], journal_present=False)
 
-    assert PROJECTOR_VERSION == 5
-    assert projection.snapshot["projector_version"] == 5
+    assert PROJECTOR_VERSION == 6
+    assert projection.snapshot["projector_version"] == 6
+    assert projection.snapshot["kind"] == "work"
 
 
 def _events_ending_with_completed(*, status: str | None) -> list[dict]:
