@@ -164,21 +164,7 @@ table.data-table th {{
     return;
   }}
   setInterval(function () {{
-    fetch(location.pathname + location.search, {{
-      cache: "no-store",
-      headers: {{ Accept: "text/html" }}
-    }}).then(function (res) {{
-      if (!res.ok) throw new Error("poll");
-      return res.text();
-    }}).then(function (html) {{
-      var doc = new DOMParser().parseFromString(html, "text/html");
-      var nextMain = doc.querySelector("main.dashboard-main");
-      var curMain = document.querySelector("main.dashboard-main");
-      if (!nextMain || !curMain) throw new Error("missing main");
-      curMain.innerHTML = nextMain.innerHTML;
-    }}).catch(function () {{
-      location.reload();
-    }});
+    location.reload();
   }}, pollMs);
 }})();
 document.addEventListener("input", function (e) {{

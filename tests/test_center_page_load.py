@@ -173,8 +173,10 @@ def test_collect_does_not_live_probe_cloud_providers(tmp_path, monkeypatch):
 def test_settled_page_polls_snapshot_every_15s_without_cache_bust():
     html = render.page("Agent Activity - Brigade Center", "test-nonce", "<nav></nav>", "<p>body</p>", reload_ms=15000)
     assert "15000" in html
-    assert "fetch(" in html
-    assert "location.pathname" in html
+    # Reloading lets every snapshot issue a matching nonce for page-specific
+    # inline assets. Replacing main.innerHTML leaves those assets inert.
+    assert "location.reload()" in html
+    assert "fetch(" not in html
     assert "Date.now()" not in html
     assert "_=" not in html.split("<script", 1)[1]
 

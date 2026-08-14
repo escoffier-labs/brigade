@@ -6,6 +6,7 @@ import time
 import pytest
 
 from brigade.center_cmd.serve import _make_server, serve, validate_bind_security
+from brigade.center_cmd.dashboard import render
 
 
 _FAKE_TOKEN = "fake-token-placeholder"
@@ -210,6 +211,15 @@ def test_bound_host_does_not_match_a_different_port(no_token_server):
     host, port = no_token_server.server_address
     response = _raw_request(no_token_server, f"{host}:{port + 1}")
     assert _status_code(response) == "403"
+
+
+def test_dashboard_refresh_reloads_nonce_scoped_view_scripts():
+    page = render.page("Center", "nonce", "", "", reload_ms=1000)
+    refresh = page.split("setInterval(function ()", 1)[1].split("</script>", 1)[0]
+
+    assert "location.reload();" in refresh
+    assert "fetch(" not in refresh
+    assert "curMain.innerHTML" not in page
 
 
 def test_missing_host_header_is_rejected(no_token_server):
