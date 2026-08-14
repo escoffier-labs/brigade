@@ -72,22 +72,22 @@ RESEARCH_CITATION_AUDIT_VERSION = 1
 
 
 def stamp_research_sidecar(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {"schema": RESEARCH_SIDECAR_SCHEMA, "schema_version": RESEARCH_SIDECAR_VERSION, **payload}
+    return {**payload, "schema": RESEARCH_SIDECAR_SCHEMA, "schema_version": RESEARCH_SIDECAR_VERSION}
 
 
 def stamp_research_sources(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {"schema": RESEARCH_SOURCES_SCHEMA, "schema_version": RESEARCH_SOURCES_VERSION, **payload}
+    return {**payload, "schema": RESEARCH_SOURCES_SCHEMA, "schema_version": RESEARCH_SOURCES_VERSION}
 
 
 def stamp_research_findings(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {"schema": RESEARCH_FINDINGS_SCHEMA, "schema_version": RESEARCH_FINDINGS_VERSION, **payload}
+    return {**payload, "schema": RESEARCH_FINDINGS_SCHEMA, "schema_version": RESEARCH_FINDINGS_VERSION}
 
 
 def stamp_research_citation_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
+        **payload,
         "schema": RESEARCH_CITATION_AUDIT_SCHEMA,
         "schema_version": RESEARCH_CITATION_AUDIT_VERSION,
-        **payload,
     }
 
 

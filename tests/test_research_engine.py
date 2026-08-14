@@ -522,6 +522,56 @@ def test_phase_backend_forwards_engine_timeout_and_seat_invoker_applies_roster_f
     assert captured["timeout_seconds"] == 300.0
 
 
+def test_seat_invoker_deadline_ceiling_does_not_apply_roster_floor(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    def fake_dispatch(assignments, roster, **kwargs):
+        del assignments, kwargs
+        captured["timeout_seconds"] = roster.agents["luna"].timeout_seconds
+        return [
+            WorkerResult(
+                worker="luna",
+                task="research.discover",
+                text="[]",
+                ok=True,
+                detail="",
+            )
+        ]
+
+    monkeypatch.setattr("brigade.run_seat.run_transport.dispatch", fake_dispatch)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "luna": Agent(
+                name="luna",
+                cli="codex",
+                role="researcher",
+                model="gpt-5.6-luna",
+                timeout_seconds=300.0,
+                capabilities=("research.discover",),
+            ),
+        },
+    )
+    invoker = SeatInvoker(
+        roster=roster,
+        cwd=tmp_path,
+        run_id="research-deadline",
+        process_registry=ProcessRegistry(),
+        output_dir=Path(tmp_path) / ".brigade" / "runs" / "research-deadline",
+    )
+    backend = PhaseBackend(invoker=invoker, seat="luna", phase="research.discover")
+
+    text = backend.complete(
+        [{"role": "user", "content": "discover"}],
+        timeout=5,
+        deadline_ceiling=True,
+    )
+
+    assert text == "[]"
+    assert captured["timeout_seconds"] == 5.0
+
+
 def test_same_attempt_review_is_rejected() -> None:
     calls: list[tuple[str, str]] = []
     lanes = fake_lanes(calls, gemini_report=f"Answer [source:{FIXTURE_SOURCE_ID}]")
@@ -1090,6 +1140,277 @@ def test_repair_without_synthesis_seat_fails_cleanly() -> None:
             resume=resume,
         )
 
-    assert caught.value.failure_kind in {"no-synthesizer", "review-rejected"}
-    assert caught.value.failure_phase in {"repair", "review"}
+    assert caught.value.failure_kind == "no-synthesizer"
+    assert caught.value.failure_phase == "repair"
     assert "synthesis" not in {phase for phase, _seat in calls}
+
+
+def test_reviewer_without_attempt_id_fails_closed() -> None:
+    calls: list[tuple[str, str]] = []
+    lanes = fake_lanes(calls, gemini_report=f"Answer [source:{FIXTURE_SOURCE_ID}]")
+
+    def complete(messages, **_kwargs):
+        lanes.reviewer.calls.append(("review", lanes.reviewer.seat))
+        lanes.reviewer.last_attempt_id = None
+        return json.dumps({"accepted": True, "detail": "ok", "rejected_claims": []})
+
+    lanes.reviewer.complete = complete  # type: ignore[method-assign]
+
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run("q")
+
+    assert caught.value.failure_phase == "review"
+    assert caught.value.failure_kind == "missing-attempt-id"
+
+
+def test_discovery_daemon_workers_timeout_without_joining_forever() -> None:
+    import threading
+    import time
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class HungProvider:
+        trust = "web"
+        source_id = "hung"
+        timeouts: list[float] = []
+
+        def bind_timeout(self, seconds: float) -> None:
+            self.timeouts.append(seconds)
+
+        def search(self, query: str, limit: int):
+            del query, limit
+            started.set()
+            release.wait(timeout=30)
+            return [{"url": "https://example.com/hung", "title": "hung", "trust": "web"}]
+
+        def fetch(self, url: str):
+            del url
+            return {"success": True, "content": "hung", "title": "hung"}
+
+    provider = HungProvider()
+    lanes = ResearchLanes(
+        planner=ScriptedBackend(
+            seat="luna",
+            phase="planning",
+            calls=[],
+            responses=['{"sub_questions":["q"],"key_topics":["t"],"success_criteria":"c"}'],
+        ),
+        extractor=ScriptedBackend(seat="luna", phase="extraction", calls=[], responses=[]),
+        synthesizers=(ScriptedBackend(seat="luna", phase="synthesis", calls=[], responses=[]),),
+        reviewer=ScriptedBackend(seat="luna", phase="review", calls=[], responses=[]),
+    )
+    engine = ResearchEngine(lanes=lanes, sources=[provider], caps=Caps(max_rounds=1, max_time=1, min_rounds=1))
+    engine._start = time.time()
+    with pytest.raises(ResearchRunError) as caught:
+        engine._discover_round(["q"], [provider], set())
+    assert caught.value.failure_kind == "timeout"
+    assert started.wait(timeout=1)
+    assert provider.timeouts
+    release.set()
+
+
+def test_discovery_daemon_workers_capped_at_four_for_more_providers() -> None:
+    import threading
+    import time
+
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    entered = 0
+    four_running = threading.Event()
+    release = threading.Event()
+
+    class CountingProvider:
+        trust = "web"
+
+        def __init__(self, source_id: str) -> None:
+            self.source_id = source_id
+
+        def bind_timeout(self, seconds: float) -> None:
+            del seconds
+
+        def search(self, query: str, limit: int):
+            del query, limit
+            nonlocal active, max_active, entered
+            with lock:
+                active += 1
+                entered += 1
+                max_active = max(max_active, active)
+                if active >= 4:
+                    four_running.set()
+            assert four_running.wait(timeout=2)
+            release.wait(timeout=5)
+            with lock:
+                active -= 1
+            return [
+                {
+                    "url": f"https://example.test/{self.source_id}",
+                    "title": self.source_id,
+                    "trust": "web",
+                }
+            ]
+
+        def fetch(self, url: str):
+            return {"success": True, "content": self.source_id, "title": self.source_id, "url": url}
+
+    providers = [CountingProvider(f"p{i}") for i in range(6)]
+    lanes = ResearchLanes(
+        planner=ScriptedBackend(
+            seat="luna",
+            phase="planning",
+            calls=[],
+            responses=['{"sub_questions":["q"],"key_topics":["t"],"success_criteria":"c"}'],
+        ),
+        extractor=ScriptedBackend(seat="luna", phase="extraction", calls=[], responses=[]),
+        synthesizers=(ScriptedBackend(seat="luna", phase="synthesis", calls=[], responses=[]),),
+        reviewer=ScriptedBackend(seat="luna", phase="review", calls=[], responses=[]),
+    )
+    engine = ResearchEngine(
+        lanes=lanes,
+        sources=providers,
+        caps=Caps(max_rounds=1, max_time=30, min_rounds=1, max_urls_per_round=4),
+    )
+    engine._start = time.time()
+
+    def _release_after_cap() -> None:
+        assert four_running.wait(timeout=2)
+        # Hold the first wave long enough to prove a fifth concurrent search never starts.
+        time.sleep(0.2)
+        with lock:
+            observed = max_active
+        assert observed <= 4
+        release.set()
+
+    helper = threading.Thread(target=_release_after_cap, daemon=True)
+    helper.start()
+    envelopes = engine._discover_round(["q"], providers, set())
+    helper.join(timeout=5)
+    assert max_active == 4
+    assert entered == 6
+    assert len(envelopes) == 6
+    assert [envelope.provider for envelope in envelopes] == [f"p{i}" for i in range(6)]
+
+
+def test_blocked_provider_cannot_keep_process_alive_after_max_time() -> None:
+    import subprocess
+    import sys
+    import textwrap
+    import time
+
+    script = textwrap.dedent(
+        """
+        import threading
+        import time
+        from brigade.research.engine import ResearchEngine
+        from brigade.research.types import Caps, ResearchLanes, ResearchRunError
+
+        class Blocked:
+            trust = "web"
+            source_id = "blocked"
+            def bind_timeout(self, seconds):
+                pass
+            def search(self, query, limit):
+                threading.Event().wait()
+                return []
+            def fetch(self, url):
+                return {"success": False, "content": "", "title": ""}
+
+        class Backend:
+            seat = "luna"
+            phase = "x"
+            last_attempt_id = "a1"
+            requested_model = None
+            observed_model = "unverified"
+            def complete(self, messages, **kwargs):
+                return '{"sub_questions":["q"],"key_topics":["t"],"success_criteria":"c"}'
+
+        lanes = ResearchLanes(
+            planner=Backend(),
+            extractor=Backend(),
+            synthesizers=(Backend(),),
+            reviewer=Backend(),
+        )
+        engine = ResearchEngine(
+            lanes=lanes,
+            sources=[Blocked()],
+            caps=Caps(max_rounds=1, min_rounds=1, max_time=1),
+        )
+        started = time.monotonic()
+        try:
+            engine.run("q")
+        except ResearchRunError as exc:
+            assert exc.failure_kind in {"timeout", "cancelled", "provider-failed", "invalid-json"}
+        elapsed = time.monotonic() - started
+        assert elapsed < 5.0, elapsed
+        """
+    )
+    started = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0, proc.stderr
+    assert elapsed < 8.0, elapsed
+
+
+def test_review_rejects_stale_last_attempt_id() -> None:
+    citation = f"[source:{FIXTURE_SOURCE_ID}]"
+    calls: list[tuple[str, str]] = []
+
+    class StaleReviewBackend(ScriptedBackend):
+        def complete(self, messages, **kwargs) -> str:  # type: ignore[no-untyped-def]
+            # Leave last_attempt_id untouched so a cleared pre-call value stays None,
+            # or restore a stale id without minting a new attempt.
+            text = ScriptedBackend.complete(self, messages, **kwargs)
+            self.last_attempt_id = "stale-review-attempt"
+            # Simulate a buggy backend that never updates after the engine clears it:
+            # force the cleared-then-stale path by restoring an old id that was not
+            # produced by this call's invoker.
+            return text
+
+        def complete_without_refresh(self, messages, **kwargs) -> str:  # type: ignore[no-untyped-def]
+            self.calls.append((self.phase, self.seat))
+            self._attempt += 1
+            # Intentionally do not set last_attempt_id.
+            return self.responses.pop(0)
+
+    reviewer = StaleReviewBackend(
+        seat="luna",
+        phase="review",
+        calls=calls,
+        responses=[json.dumps({"accepted": True, "detail": "ok", "rejected_claims": []})],
+    )
+    reviewer.last_attempt_id = "stale-review-attempt"
+    reviewer.complete = reviewer.complete_without_refresh  # type: ignore[method-assign]
+
+    lanes = ResearchLanes(
+        planner=ScriptedBackend(
+            seat="luna",
+            phase="planning",
+            calls=calls,
+            responses=['{"sub_questions":["fact"],"key_topics":["fact"],"success_criteria":"cite"}'],
+        ),
+        extractor=ScriptedBackend(
+            seat="luna",
+            phase="extraction",
+            calls=calls,
+            responses=['{"summary":"Verified fact","evidence":"Verified fact"}'],
+        ),
+        synthesizers=(
+            ScriptedBackend(
+                seat="luna",
+                phase="synthesis",
+                calls=calls,
+                responses=[f"Answer {citation}"],
+            ),
+        ),
+        reviewer=reviewer,
+    )
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run("q")
+    assert caught.value.failure_kind == "missing-attempt-id"

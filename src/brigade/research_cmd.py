@@ -82,6 +82,23 @@ def _list_or_empty(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _require_cli_run_id(run_id: str) -> str:
+    """Convert invalid run_id Values into normal CLI SystemExit errors."""
+    try:
+        return registry.validate_run_id(run_id)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+
+
+def _emit_cli_run_id_error(exc: BaseException, *, json_output: bool) -> int:
+    message = str(exc)
+    if json_output:
+        print(_json.dumps({"error": message, "failure_kind": "invalid-run-id"}, indent=2, sort_keys=True))
+    else:
+        print(message)
+    return 2
+
+
 def _resolve_backend(target: Path):
     from . import roster as roster_mod
     from .research import llm
@@ -246,7 +263,8 @@ class CancellationWatcher(Thread):
     def _poll_once(self) -> bool:
         try:
             sidecar = registry.read_research(self.target, self.run_id)
-        except FileNotFoundError:
+        except (OSError, ValueError):
+            # A missing or momentarily unreadable sidecar must not kill the watcher.
             return False
         if sidecar.get("cancel_requested_at"):
             self.cancelled.set()
@@ -828,10 +846,8 @@ def _source_counts(sources: tuple[SourceEnvelope, ...]) -> dict[str, int]:
 def _discovery_mode(*, browser_ai_enabled: bool, sources: tuple[SourceEnvelope, ...]) -> str:
     if any(source.trust == "browser-ai" or source.origin == "browser-ai" for source in sources):
         return "browser-ai"
-    if browser_ai_enabled:
-        return "browser-ai"
     if not sources:
-        return "none"
+        return "browser-ai-empty" if browser_ai_enabled else "none"
     # Prefer the first source's trust for a stable single-mode label when mixed.
     return str(sources[0].trust or sources[0].origin)
 
@@ -1452,6 +1468,15 @@ def run(
                 watcher.join(timeout=1)
     except ResearchCommandFailure:
         raise
+    except ResearchRunError as e:
+        # A terminal-write failure must not escape as a traceback.
+        raise ResearchCommandFailure(
+            run_id=run_id,
+            failure_kind=e.failure_kind,
+            failure_phase=e.failure_phase,
+            detail=_operator_safe_detail(e.detail),
+            exit_code=1,
+        ) from e
     except (run_lifecycle.LifecycleJournalError, runguard.RetainRunLockError) as e:
         # Receipt-write gates must not terminalize run.json after failing closed,
         # and must not escape as a Python traceback from the CLI boundary.
@@ -2120,7 +2145,7 @@ _ABS_HOME_PATH_RE = re.compile(r"/(?:home|Users)/[^\s\"']+")
 _CITATION_TOKEN_RE = re.compile(r"^\[source:src-[a-f0-9]{16}\]$")
 _SECRET_KEY_RE = re.compile(
     r"(?i)("
-    r"headers?|env|cookie|authorization|password|secret|api[_-]?key|"
+    r"headers?|(?:^|[_-])env(?:$|[_-])|cookie|authorization|password|secret|api[_-]?key|"
     r"access[_-]?token|auth[_-]?token|api[_-]?token|refresh[_-]?token|id[_-]?token|"
     r"openai_api_key|browser[_-]?profile"
     r")"
@@ -2375,6 +2400,11 @@ def cli_status(
             print(f"- {r.get('run_id')} [{r.get('status')}] {r.get('question')}{legacy}")
         return 0
 
+    try:
+        run_id = _require_cli_run_id(run_id)
+    except SystemExit as exc:
+        return _emit_cli_run_id_error(exc, json_output=json_output)
+
     rec = registry.show_run(target, run_id)
     if rec is None:
         print(f"no such run: {run_id}")
@@ -2396,6 +2426,10 @@ def cli_list(*, target: Path, json_output: bool = False) -> int:
 
 
 def cli_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
+    try:
+        run_id = _require_cli_run_id(run_id)
+    except SystemExit as exc:
+        return _emit_cli_run_id_error(exc, json_output=json_output)
     rec = registry.show_run(target, run_id)
     if rec is None:
         print(f"no such run: {run_id}")
@@ -2442,6 +2476,10 @@ def cli_export_handoff(
     force: bool = False,
     json_output: bool = False,
 ) -> int:
+    try:
+        run_id = _require_cli_run_id(run_id)
+    except SystemExit as exc:
+        return _emit_cli_run_id_error(exc, json_output=json_output)
     payload = export_handoff(
         target=target,
         run_id=run_id,
@@ -2465,6 +2503,10 @@ def cli_export_handoff(
 
 
 def cli_cancel(*, target: Path, run_id: str, json_output: bool = False) -> int:
+    try:
+        run_id = _require_cli_run_id(run_id)
+    except SystemExit as exc:
+        return _emit_cli_run_id_error(exc, json_output=json_output)
     if registry.show_run(target, run_id) is None:
         print(f"no such run: {run_id}")
         return 1
@@ -2486,11 +2528,14 @@ def cli_resume(
     refresh: bool = False,
 ) -> int:
     try:
+        run_id = _require_cli_run_id(run_id)
         resume(target=target, run_id=run_id, overrides=overrides, refresh=refresh)
     except ResearchCommandFailure as failure:
         return _emit_command_failure(failure, json_output=json_output)
     except SystemExit as e:
         message = str(e)
+        if "invalid run_id" in message.lower():
+            return _emit_cli_run_id_error(e, json_output=json_output)
         print(message)
         lowered = message.lower()
         if (
@@ -2512,6 +2557,10 @@ def cli_resume(
 
 
 def cli_open(*, target: Path, run_id: str, json_output: bool = False) -> int:
+    try:
+        run_id = _require_cli_run_id(run_id)
+    except SystemExit as exc:
+        return _emit_cli_run_id_error(exc, json_output=json_output)
     rec = registry.show_run(target, run_id)
     if rec is None:
         print(f"no such run: {run_id}")

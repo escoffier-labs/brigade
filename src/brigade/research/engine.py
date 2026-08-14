@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import queue
 import re
+import threading
 import time
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event
@@ -33,6 +34,8 @@ from .types import (
     SynthesisRecord,
     Trust,
 )
+
+_DISCOVERY_MAX_WORKERS = 4
 
 PLAN_PROMPT = """You are a research strategist. Build a research plan for this question.
 **Question:** {q}
@@ -342,7 +345,7 @@ class ResearchEngine:
             trust_hint = self._normalize_trust(getattr(provider, "trust", "web"))
             limit = self.caps.max_local_docs_per_round if trust_hint == "local" else self.caps.max_urls_per_round
             for query in queries:
-                self._check_cancel("discovery")
+                self._ensure_time("discovery")
                 for hit in provider.search(query, limit):
                     url = _normalize_discovery_url(str(hit.get("url") or ""))
                     if not url or url in seen_urls or url in local_seen:
@@ -371,28 +374,66 @@ class ResearchEngine:
                     )
             return index, envelopes
 
-        ordered: list[tuple[int, list[SourceEnvelope]]] = []
-        workers = min(len(providers), 4)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_provider_batch, index, provider): index for index, provider in enumerate(providers)}
-            for future in as_completed(futures):
-                self._check_cancel("discovery")
+        if not providers:
+            return []
+
+        remaining = self._remaining_time()
+        if remaining <= 0:
+            raise ResearchRunError("discovery", "timeout", "research run exceeded max_time")
+        for provider in providers:
+            self._bind_provider_timeout(provider, remaining)
+
+        # Owned daemon worker queue capped at min(len(providers), 4). A permanently
+        # blocked provider must not keep the CLI alive at exit (non-daemon
+        # ThreadPoolExecutor would), and we must not spawn one thread per provider.
+        worker_count = min(len(providers), _DISCOVERY_MAX_WORKERS)
+        job_queue: queue.Queue[int] = queue.Queue()
+        result_queue: queue.Queue[tuple[str, int, Any]] = queue.Queue()
+        for index in range(len(providers)):
+            job_queue.put(index)
+
+        def _worker() -> None:
+            while True:
                 try:
-                    ordered.append(future.result())
-                except BudgetPolicyError:
-                    raise
-                except LifecycleJournalError as exc:
-                    raise ResearchRunError(
-                        "discovery",
-                        "lifecycle-journal",
-                        str(exc),
-                    ) from exc
-                except (ResearchSeatError, BrowserAiDiscoveryError):
-                    raise
-                except ResearchRunError:
-                    raise
-                except Exception as exc:
-                    raise ResearchRunError("discovery", "provider-failed", str(exc)) from exc
+                    job_index = job_queue.get_nowait()
+                except queue.Empty:
+                    return
+                job_provider = providers[job_index]
+                try:
+                    result_queue.put(("ok", job_index, _provider_batch(job_index, job_provider)))
+                except BaseException as exc:  # noqa: BLE001 - surface to scheduler
+                    result_queue.put(("err", job_index, exc))
+
+        for worker_id in range(worker_count):
+            threading.Thread(
+                target=_worker,
+                name=f"research-discovery-{worker_id}",
+                daemon=True,
+            ).start()
+
+        ordered: list[tuple[int, list[SourceEnvelope]]] = []
+        pending = set(range(len(providers)))
+        while pending:
+            self._check_cancel("discovery")
+            remaining = self._remaining_time()
+            if remaining <= 0:
+                raise ResearchRunError("discovery", "timeout", "research run exceeded max_time")
+            try:
+                status, index, payload = result_queue.get(timeout=min(remaining, 1.0))
+            except queue.Empty:
+                continue
+            pending.discard(index)
+            if status == "err":
+                exc = payload
+                if isinstance(exc, BudgetPolicyError):
+                    raise exc
+                if isinstance(exc, LifecycleJournalError):
+                    raise ResearchRunError("discovery", "lifecycle-journal", str(exc)) from exc
+                if isinstance(exc, (ResearchSeatError, BrowserAiDiscoveryError, ResearchRunError)):
+                    raise exc
+                raise ResearchRunError("discovery", "provider-failed", str(exc)) from exc
+            ordered.append(payload)
+
         ordered.sort(key=lambda item: item[0])
         envelopes: list[SourceEnvelope] = []
         for _, batch in ordered:
@@ -526,6 +567,9 @@ class ResearchEngine:
             packet=packet,
         )
         try:
+            # Reject stale attempt ids left on the backend from prior calls.
+            if hasattr(self.lanes.reviewer, "last_attempt_id"):
+                self.lanes.reviewer.last_attempt_id = None
             text = self.lanes.reviewer.complete(
                 [{"role": "user", "content": prompt}],
                 max_tokens=1024,
@@ -546,7 +590,13 @@ class ResearchEngine:
             raise ResearchRunError("review", "invalid-json", "reviewer returned invalid JSON")
         if not all(isinstance(item, (str, int, float, bool)) for item in rejected_raw):
             raise ResearchRunError("review", "invalid-json", "reviewer returned invalid JSON")
-        attempt_id = getattr(self.lanes.reviewer, "last_attempt_id", None) or "review:unknown"
+        attempt_id = getattr(self.lanes.reviewer, "last_attempt_id", None)
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise ResearchRunError(
+                "review",
+                "missing-attempt-id",
+                "reviewer did not report an attempt_id; independence cannot be verified",
+            )
         if attempt_id == generation_attempt_id:
             raise ResearchRunError(
                 "review",
@@ -675,6 +725,31 @@ class ResearchEngine:
         if trust not in _TRUST_KIND:
             return "web"
         return trust  # type: ignore[return-value]
+
+    def _remaining_time(self) -> float:
+        # Pre-run sentinel is 0.0 (field default); treat as "not started".
+        if not self._start:
+            return float(max(0, self.caps.max_time))
+        return max(0.0, float(self.caps.max_time) - (time.time() - self._start))
+
+    @staticmethod
+    def _bind_provider_timeout(provider: Any, remaining: float) -> None:
+        timeout_s = max(0.1, float(remaining))
+        timeout_ms = max(1, int(timeout_s * 1000))
+        binder = getattr(provider, "bind_timeout", None)
+        if callable(binder):
+            binder(timeout_s)
+            return
+        if hasattr(provider, "timeout_ms"):
+            current = getattr(provider, "timeout_ms", timeout_ms)
+            try:
+                provider.timeout_ms = min(int(current), timeout_ms)
+            except (TypeError, ValueError):
+                provider.timeout_ms = timeout_ms
+        if hasattr(provider, "timeout"):
+            current = provider.timeout
+            if isinstance(current, (int, float)) and current > 0:
+                provider.timeout = min(int(current), max(1, int(timeout_s)))
 
     def _ensure_time(self, phase: str) -> None:
         self._active_phase = phase

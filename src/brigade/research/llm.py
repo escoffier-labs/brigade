@@ -42,13 +42,22 @@ class PhaseBackend:
         self.observed_model = "unverified"
         self.last_attempt_id: str | None = None
 
-    def complete(self, messages, *, max_tokens=2048, temperature=0.3, timeout=60) -> str:
+    def complete(
+        self,
+        messages,
+        *,
+        max_tokens=2048,
+        temperature=0.3,
+        timeout=60,
+        deadline_ceiling: bool = False,
+    ) -> str:
         del max_tokens, temperature
         result = self.invoker.invoke(
             seat=self.seat,
             phase=self.phase,
             prompt=_messages_to_prompt(messages),
             timeout=timeout,
+            deadline_ceiling=deadline_ceiling,
         )
         if not result.ok:
             raise ResearchSeatError(result)
@@ -134,7 +143,10 @@ class HttpBackend:
         self.model = model
         self.headers = headers or {}
 
-    def complete(self, messages, *, max_tokens=2048, temperature=0.3, timeout=60) -> str:
+    def complete(
+        self, messages, *, max_tokens=2048, temperature=0.3, timeout=60, deadline_ceiling: bool = False
+    ) -> str:
+        del deadline_ceiling
         url = self.endpoint + "/chat/completions"
         payload = {"model": self.model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}
         resp = _http_post_json(url, payload, self.headers, timeout)

@@ -3,12 +3,27 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Protocol
+from typing import Any, Dict, List, Literal, Protocol, get_args
 
 Trust = Literal["local", "web", "cli", "browser", "browser-ai"]
 Origin = Literal["local", "repository", "indexed-cli", "web", "browser-ai"]
 Status = Literal["running", "done", "cancelled", "error"]
 ResearchPhase = Literal["planning", "discovery", "extraction", "synthesis", "review", "repair", "publishing"]
+
+VALID_TRUST: frozenset[str] = frozenset(get_args(Trust))
+VALID_ORIGIN: frozenset[str] = frozenset(get_args(Origin))
+
+
+def require_trust(value: Any) -> Trust:
+    if not isinstance(value, str) or value not in VALID_TRUST:
+        raise ValueError(f"invalid trust: {value!r}")
+    return value  # type: ignore[return-value]
+
+
+def require_origin(value: Any) -> Origin:
+    if not isinstance(value, str) or value not in VALID_ORIGIN:
+        raise ValueError(f"invalid origin: {value!r}")
+    return value  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)
@@ -26,6 +41,10 @@ class SourceEnvelope:
     observed_model: str | None = None
     parent_source_ids: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        require_origin(self.origin)
+        require_trust(self.trust)
+
     @classmethod
     def build(
         cls,
@@ -41,6 +60,8 @@ class SourceEnvelope:
         observed_model: str | None = None,
         parent_source_ids: tuple[str, ...] = (),
     ) -> SourceEnvelope:
+        origin = require_origin(origin)
+        trust = require_trust(trust)
         content_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         identity = "\0".join((origin, provider, uri, content_digest))
         source_id = "src-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
@@ -74,6 +95,7 @@ class Finding:
     def __post_init__(self) -> None:
         if not self.source_ids:
             raise ValueError("Finding.source_ids cannot be empty")
+        require_trust(self.trust)
 
     @property
     def source(self) -> str:

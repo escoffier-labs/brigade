@@ -2,11 +2,16 @@
 from __future__ import annotations
 import json
 import subprocess
+import time
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote_plus
 
 
 class PlaywrightUnavailable(RuntimeError):
+    pass
+
+
+class ProviderDeadlineExhausted(TimeoutError):
     pass
 
 
@@ -19,19 +24,26 @@ def _import_playwright():
         return None
 
 
-def _with_page(fn: Callable[[Any], Any]) -> Any:
+def _with_page(fn: Callable[[Any], Any], *, timeout_ms: int = 20000) -> Any:
     sp = _import_playwright()
     if sp is None:
         raise PlaywrightUnavailable(
             "Playwright not installed. Run: pip install 'brigade[research]' && playwright install chromium"
         )
+    timeout_ms = max(1, int(timeout_ms))
     with sp() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, timeout=timeout_ms)
         try:
             page = browser.new_page()
+            page.set_default_timeout(timeout_ms)
+            page.set_default_navigation_timeout(timeout_ms)
             return fn(page)
         finally:
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                # Close must not hang discovery past the engine deadline.
+                pass
 
 
 class PlaywrightProvider:
@@ -40,11 +52,32 @@ class PlaywrightProvider:
     SEARCH_URL = "https://duckduckgo.com/html/?q={q}"
     trust = "browser"
 
+    def __init__(self, timeout_ms: int = 20000) -> None:
+        self.timeout_ms = max(1, int(timeout_ms))
+        self._deadline_mono: float | None = None
+
+    def bind_timeout(self, seconds: float) -> None:
+        ms = max(1, int(float(seconds) * 1000))
+        self.timeout_ms = min(self.timeout_ms, ms)
+        self._deadline_mono = time.monotonic() + (self.timeout_ms / 1000.0)
+
+    def _remaining_ms(self) -> int:
+        if self._deadline_mono is None:
+            return self.timeout_ms
+        remaining = self._deadline_mono - time.monotonic()
+        if remaining <= 0:
+            raise ProviderDeadlineExhausted("playwright provider deadline exhausted")
+        return max(1, int(remaining * 1000))
+
     def search(self, query: str, limit: int) -> List[Dict[str, str]]:
+        try:
+            timeout_ms = self._remaining_ms()
+        except ProviderDeadlineExhausted:
+            return []
         url = self.SEARCH_URL.format(q=quote_plus(query))
 
         def _run(page):
-            page.goto(url, timeout=20000)
+            page.goto(url, timeout=timeout_ms)
             anchors = page.query_selector_all("a.result__a")
             out = []
             for a in anchors[:limit]:
@@ -53,15 +86,20 @@ class PlaywrightProvider:
                     out.append({"url": href, "title": a.inner_text()})
             return out
 
-        return _with_page(_run)
+        return _with_page(_run, timeout_ms=timeout_ms)
 
     def fetch(self, url: str) -> Dict[str, Any]:
+        try:
+            timeout_ms = self._remaining_ms()
+        except ProviderDeadlineExhausted as exc:
+            return {"success": False, "content": "", "title": "", "error": str(exc)}
+
         def _run(page):
-            page.goto(url, timeout=20000)
+            page.goto(url, timeout=timeout_ms)
             return {"success": True, "content": page.inner_text("body"), "title": ""}
 
         try:
-            return _with_page(_run)
+            return _with_page(_run, timeout_ms=timeout_ms)
         except Exception as e:
             return {"success": False, "content": "", "title": "", "error": str(e)}
 
@@ -69,20 +107,43 @@ class PlaywrightProvider:
 class SearxngProvider:
     trust = "web"
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, timeout_ms: int = 15000) -> None:
         self.base_url = base_url.rstrip("/")
+        self.timeout_ms = max(1, int(timeout_ms))
+        self._deadline_mono: float | None = None
+
+    def bind_timeout(self, seconds: float) -> None:
+        ms = max(1, int(float(seconds) * 1000))
+        self.timeout_ms = min(self.timeout_ms, ms)
+        self._deadline_mono = time.monotonic() + (self.timeout_ms / 1000.0)
+
+    def _remaining_ms(self) -> int:
+        if self._deadline_mono is None:
+            return self.timeout_ms
+        remaining = self._deadline_mono - time.monotonic()
+        if remaining <= 0:
+            raise ProviderDeadlineExhausted("searxng provider deadline exhausted")
+        return max(1, int(remaining * 1000))
 
     def search(self, query: str, limit: int) -> List[Dict[str, str]]:
         import json
         from urllib import request
 
+        try:
+            timeout_ms = self._remaining_ms()
+        except ProviderDeadlineExhausted:
+            return []
         u = f"{self.base_url}/search?q={quote_plus(query)}&format=json"
-        with request.urlopen(u, timeout=15) as r:
+        with request.urlopen(u, timeout=max(1, timeout_ms / 1000)) as r:
             data = json.loads(r.read().decode())
         return [{"url": x.get("url", ""), "title": x.get("title", "")} for x in data.get("results", [])[:limit]]
 
     def fetch(self, url: str) -> Dict[str, Any]:
-        return PlaywrightProvider().fetch(url)
+        try:
+            timeout_ms = self._remaining_ms()
+        except ProviderDeadlineExhausted as exc:
+            return {"success": False, "content": "", "title": "", "error": str(exc)}
+        return PlaywrightProvider(timeout_ms=timeout_ms).fetch(url)
 
 
 class PageforgeProvider:
@@ -94,8 +155,22 @@ class PageforgeProvider:
         self.command = list(command)
         self.db_path = db_path
         self.timeout = timeout
+        self._deadline_mono: float | None = None
+
+    def bind_timeout(self, seconds: float) -> None:
+        self.timeout = min(int(self.timeout), max(1, int(float(seconds))))
+        self._deadline_mono = time.monotonic() + float(self.timeout)
+
+    def _remaining_seconds(self) -> float:
+        if self._deadline_mono is None:
+            return float(self.timeout)
+        remaining = self._deadline_mono - time.monotonic()
+        if remaining <= 0:
+            raise ProviderDeadlineExhausted("pageforge provider deadline exhausted")
+        return remaining
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        remaining = self._remaining_seconds()
         argv = self.command + args
         if self.db_path:
             argv += ["--db", self.db_path]
@@ -103,7 +178,7 @@ class PageforgeProvider:
             argv,
             text=True,
             capture_output=True,
-            timeout=self.timeout,
+            timeout=remaining,
             check=False,
             shell=False,
         )
@@ -129,7 +204,15 @@ class PageforgeProvider:
                 for item in results[:limit]
                 if isinstance(item, dict) and item.get("url")
             ]
-        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        except (
+            OSError,
+            subprocess.TimeoutExpired,
+            ProviderDeadlineExhausted,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
             return []
 
     def fetch(self, url: str) -> Dict[str, Any]:
@@ -167,13 +250,24 @@ class PageforgeProvider:
                     "error": self._error(proc, "pageforge get failed"),
                 }
             result: Dict[str, Any] = {"success": True, "content": proc.stdout, "title": title}
-        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, TypeError, ValueError) as exc:
+        except (
+            OSError,
+            subprocess.TimeoutExpired,
+            ProviderDeadlineExhausted,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             return {"success": False, "content": "", "title": "", "error": str(exc)}
 
         if len(str(result["content"])) >= 200:
             return result
         try:
-            fallback = PlaywrightProvider().fetch(url)
+            remaining = self._remaining_seconds()
+        except ProviderDeadlineExhausted:
+            return result
+        try:
+            fallback = PlaywrightProvider(timeout_ms=max(1, int(remaining * 1000))).fetch(url)
         except Exception:
             return result
         if fallback.get("success") and len(str(fallback.get("content") or "")) >= 200:

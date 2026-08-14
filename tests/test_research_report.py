@@ -172,3 +172,17 @@ def test_render_escapes_hostile_source_metadata_in_html_and_markdown():
     assert "Evil" in sources_md
     assert "breakout" in sources_md
     assert "example.com" in sources_md
+
+
+def test_html_stats_render_middle_dot_without_double_escape() -> None:
+    findings, sources = _findings_and_sources()
+    html = report.render_html(
+        question="Q",
+        markdown_report="body",
+        findings=findings[:1],
+        sources=sources[:1],
+        stats={"rounds": 2, "findings": "<b>1</b>"},
+    )
+    assert "&middot;" in html
+    assert "&amp;middot;" not in html
+    assert "&lt;b&gt;1&lt;/b&gt;" in html

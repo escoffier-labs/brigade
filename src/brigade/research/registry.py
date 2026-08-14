@@ -17,6 +17,8 @@ from brigade.roster import Roster
 from brigade.run_budget import RunBudgetDeclaration
 
 from .types import (
+    VALID_ORIGIN,
+    VALID_TRUST,
     CitationAudit,
     CitationRecord,
     Finding,
@@ -51,14 +53,28 @@ REPORT_MD_ARTIFACT = "report.md"
 REPORT_HTML_ARTIFACT = "report.html"
 HANDOFF_ARTIFACT = "handoff.md"
 _SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_RUN_ID_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
+
+
+def validate_run_id(run_id: str) -> str:
+    """Reject anything that is not a single relative path segment."""
+    if not isinstance(run_id, str) or not _RUN_ID_SEGMENT_RE.fullmatch(run_id):
+        raise ValueError(f"invalid run_id: {run_id!r}")
+    if run_id in {".", ".."}:
+        raise ValueError(f"invalid run_id: {run_id!r}")
+    return run_id
+
+
+def _validate_run_id(run_id: str) -> str:
+    return validate_run_id(run_id)
 
 
 def standard_run_dir(target: Path, run_id: str) -> Path:
-    return target / ".brigade" / "runs" / run_id
+    return target / ".brigade" / "runs" / _validate_run_id(run_id)
 
 
 def legacy_run_dir(target: Path, run_id: str) -> Path:
-    return target / ".brigade" / "research" / run_id
+    return target / ".brigade" / "research" / _validate_run_id(run_id)
 
 
 def run_dir(target: Path, run_id: str) -> Path:
@@ -549,15 +565,21 @@ def _source_from_dict(payload: Mapping[str, Any]) -> SourceEnvelope:
     parent_ids = payload.get("parent_source_ids") or ()
     if not isinstance(parent_ids, (list, tuple)):
         raise ValueError("source envelope parent_source_ids must be a list")
+    origin = payload["origin"]
+    trust = payload["trust"]
+    if not isinstance(origin, str) or origin not in VALID_ORIGIN:
+        raise ValueError(f"source envelope invalid origin: {origin!r}")
+    if not isinstance(trust, str) or trust not in VALID_TRUST:
+        raise ValueError(f"source envelope invalid trust: {trust!r}")
     return SourceEnvelope(
         source_id=str(payload["source_id"]),
-        origin=payload["origin"],  # type: ignore[arg-type]
+        origin=origin,  # type: ignore[arg-type]
         provider=str(payload["provider"]),
         uri=str(payload["uri"]),
         content=str(payload["content"]),
         content_digest=str(payload["content_digest"]),
         acquired_at=str(payload["acquired_at"]),
-        trust=payload["trust"],  # type: ignore[arg-type]
+        trust=trust,  # type: ignore[arg-type]
         producing_lane=payload.get("producing_lane") if isinstance(payload.get("producing_lane"), str) else None,
         requested_model=payload.get("requested_model") if isinstance(payload.get("requested_model"), str) else None,
         observed_model=payload.get("observed_model") if isinstance(payload.get("observed_model"), str) else None,
@@ -574,12 +596,15 @@ def _finding_from_dict(payload: Mapping[str, Any]) -> Finding:
     parent_ids = payload.get("parent_source_ids") or ()
     if not isinstance(source_ids, (list, tuple)) or not isinstance(parent_ids, (list, tuple)):
         raise ValueError("finding id lists must be sequences")
+    trust = payload.get("trust") or "web"
+    if not isinstance(trust, str) or trust not in VALID_TRUST:
+        raise ValueError(f"finding invalid trust: {trust!r}")
     return Finding(
         source_ids=tuple(str(item) for item in source_ids),
         title=str(payload.get("title") or ""),
         summary=str(payload.get("summary") or ""),
         evidence=str(payload.get("evidence") or ""),
-        trust=payload.get("trust") or "web",  # type: ignore[arg-type]
+        trust=trust,  # type: ignore[arg-type]
         extraction_lane=str(payload.get("extraction_lane") or ""),
         extracted_at=str(payload.get("extracted_at") or ""),
         parent_source_ids=tuple(str(item) for item in parent_ids),
@@ -708,6 +733,10 @@ def list_runs(target: Path) -> list[dict[str, Any]]:
         for child in legacy_root.iterdir():
             if not child.is_dir():
                 continue
+            try:
+                validate_run_id(child.name)
+            except ValueError:
+                continue
             record = _project_legacy_record(target, child.name)
             if record is not None:
                 by_id[child.name] = record
@@ -715,6 +744,10 @@ def list_runs(target: Path) -> list[dict[str, Any]]:
     if standard_root.is_dir():
         for child in standard_root.iterdir():
             if not child.is_dir():
+                continue
+            try:
+                validate_run_id(child.name)
+            except ValueError:
                 continue
             research_path = child / RESEARCH_ARTIFACT
             run_path = child / "run.json"

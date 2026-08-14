@@ -118,13 +118,15 @@ def render_html(
 ) -> str:
     clean_question = _sanitize_text(question)
     body = _md_to_html(_sanitize_text(markdown_report))
-    stat_line = " &middot; ".join(f"{_sanitize_text(str(k))}: {_sanitize_text(str(v))}" for k, v in stats.items())
+    stat_line = " &middot; ".join(
+        f"{_html.escape(_sanitize_text(str(k)))}: {_html.escape(_sanitize_text(str(v)))}" for k, v in stats.items()
+    )
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_html.escape(clean_question)}</title><style>{_CSS}</style></head>
 <body><h1>{_html.escape(clean_question)}</h1>
-<p class="stats">{_html.escape(stat_line)}</p>
+<p class="stats">{stat_line}</p>
 {body}
 {_sources_section(findings, sources)}
 </body></html>"""

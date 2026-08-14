@@ -81,9 +81,22 @@ class SeatInvoker:
         self.on_dispatch_completed = on_dispatch_completed
         self.on_dispatch_failed = on_dispatch_failed
 
-    def invoke(self, *, seat: str, phase: str, prompt: str, timeout: int) -> SeatResult:
+    def invoke(
+        self,
+        *,
+        seat: str,
+        phase: str,
+        prompt: str,
+        timeout: int,
+        deadline_ceiling: bool = False,
+    ) -> SeatResult:
         agent = self.roster.agents[seat]
-        effective_timeout = max(float(timeout), agent.timeout_seconds or 0.0)
+        # Normal phase calls keep the roster timeout floor. Discovery/run-deadline
+        # callers pass deadline_ceiling=True so remaining budget is a hard cap.
+        if deadline_ceiling:
+            effective_timeout = float(timeout)
+        else:
+            effective_timeout = max(float(timeout), agent.timeout_seconds or 0.0)
         effective = replace(agent, timeout_seconds=effective_timeout)
         roster = replace(self.roster, agents={**self.roster.agents, seat: effective})
         assignment = run_transport.Assignment(worker=seat, task=phase, capabilities=(phase,))

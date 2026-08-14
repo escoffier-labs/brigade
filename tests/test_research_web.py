@@ -35,7 +35,7 @@ def test_playwright_search_parses_results(monkeypatch):
         def inner_text(self, sel):
             return "page body text"
 
-    monkeypatch.setattr(web, "_with_page", lambda fn: fn(FakePage()))
+    monkeypatch.setattr(web, "_with_page", lambda fn, **_kwargs: fn(FakePage()))
     prov = web.PlaywrightProvider()
     hits = prov.search("q", 2)
     assert hits[0]["url"] == "https://ex.com/1" and hits[0]["title"] == "Result One"
@@ -149,6 +149,9 @@ def test_pageforge_fetch_uses_playwright_for_thin_content(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, stdout="short", stderr="")
 
     class FakePlaywright:
+        def __init__(self, timeout_ms: int = 20000) -> None:
+            self.timeout_ms = timeout_ms
+
         def fetch(self, url):
             return {"success": True, "content": "Fallback content " * 20, "title": "Fallback"}
 
@@ -171,6 +174,9 @@ def test_pageforge_fetch_keeps_thin_pageforge_success_when_fallback_fails(monkey
         return subprocess.CompletedProcess(argv, 0, stdout="short", stderr="")
 
     class FakePlaywright:
+        def __init__(self, timeout_ms: int = 20000) -> None:
+            self.timeout_ms = timeout_ms
+
         def fetch(self, url):
             raise web.PlaywrightUnavailable("missing")
 
@@ -181,6 +187,46 @@ def test_pageforge_fetch_keeps_thin_pageforge_success_when_fallback_fails(monkey
     result = prov.fetch("https://example.com")
 
     assert result == {"success": True, "content": "short", "title": "Short"}
+
+
+def test_pageforge_uses_one_monotonic_deadline_across_calls(monkeypatch):
+    import time
+
+    timeouts: list[float] = []
+
+    def fake_run(argv, **kwargs):
+        timeouts.append(float(kwargs["timeout"]))
+        time.sleep(0.2)
+        if argv[1] == "search_web":
+            payload = {"ok": True, "results": [{"url": "https://example.com/a", "title": "A"}]}
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+        if argv[1] == "ingest_url":
+            payload = {"ok": True, "pageId": "p1", "page": {"title": "T"}}
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="Long markdown content " * 20, stderr="")
+
+    class TrackingPlaywright:
+        seen: list[int] = []
+
+        def __init__(self, timeout_ms: int = 20000) -> None:
+            TrackingPlaywright.seen.append(timeout_ms)
+
+        def fetch(self, url):
+            return {"success": False, "content": "", "title": ""}
+
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    monkeypatch.setattr(web, "PlaywrightProvider", TrackingPlaywright)
+    prov = web.PageforgeProvider(["pageforge"], timeout=2)
+    prov.bind_timeout(1.0)
+
+    assert prov.search("q", 1)
+    result = prov.fetch("https://example.com/a")
+    assert result["success"] is True
+    assert len(timeouts) == 3
+    assert timeouts[0] <= 1.0
+    assert timeouts[1] < timeouts[0]
+    assert timeouts[2] < timeouts[1]
+    assert timeouts[2] > 0
 
 
 def test_provider_factory_builds_pageforge():

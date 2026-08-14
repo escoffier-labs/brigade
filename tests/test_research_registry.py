@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from brigade import receipt_schema
 from brigade.research import registry
+from brigade.research.types import VALID_ORIGIN, VALID_TRUST
 from brigade.roster import Agent, Roster
 
 
@@ -187,3 +189,134 @@ def test_request_cancel_missing_sidecar_raises_typed_error(tmp_path: Path) -> No
 
     assert not isinstance(caught.value, FileNotFoundError)
     assert not (run_directory / registry.RESEARCH_ARTIFACT).is_file()
+
+
+def test_research_schema_stamps_override_stale_schema_keys() -> None:
+    stale = {"schema": "stale.schema", "schema_version": 0, "run_id": "r1"}
+    stamped = receipt_schema.stamp_research_sidecar(stale)
+    assert stamped["schema"] == receipt_schema.RESEARCH_SIDECAR_SCHEMA
+    assert stamped["schema_version"] == receipt_schema.RESEARCH_SIDECAR_VERSION
+    assert stamped["run_id"] == "r1"
+
+    sources = receipt_schema.stamp_research_sources({"schema_version": 99, "sources": []})
+    assert sources["schema"] == receipt_schema.RESEARCH_SOURCES_SCHEMA
+    assert sources["schema_version"] == receipt_schema.RESEARCH_SOURCES_VERSION
+
+    findings = receipt_schema.stamp_research_findings({"schema": "old", "findings": []})
+    assert findings["schema"] == receipt_schema.RESEARCH_FINDINGS_SCHEMA
+    assert findings["schema_version"] == receipt_schema.RESEARCH_FINDINGS_VERSION
+
+    audit = receipt_schema.stamp_research_citation_audit({"schema_version": -1, "accepted": True})
+    assert audit["schema"] == receipt_schema.RESEARCH_CITATION_AUDIT_SCHEMA
+    assert audit["schema_version"] == receipt_schema.RESEARCH_CITATION_AUDIT_VERSION
+
+
+def test_run_id_must_be_one_safe_path_segment(tmp_path: Path) -> None:
+    for bad in ("../escape", "a/b", "a\\b", "", ".", "..", "has space"):
+        with pytest.raises(ValueError, match="invalid run_id"):
+            registry.standard_run_dir(tmp_path, bad)
+        with pytest.raises(ValueError, match="invalid run_id"):
+            registry.legacy_run_dir(tmp_path, bad)
+        with pytest.raises(ValueError, match="invalid run_id"):
+            with registry.research_sidecar_lock(tmp_path, bad):
+                pass
+
+
+def test_source_and_finding_deserialize_reject_invalid_trust_origin() -> None:
+    good_source = {
+        "source_id": "src-1",
+        "origin": "web",
+        "provider": "web",
+        "uri": "https://example.com",
+        "content": "body",
+        "content_digest": "a" * 64,
+        "acquired_at": "2026-08-13T12:00:00+00:00",
+        "trust": "web",
+    }
+    assert registry._source_from_dict(good_source).trust == "web"
+
+    bad_origin = dict(good_source, origin="not-an-origin")
+    with pytest.raises(ValueError, match="invalid origin"):
+        registry._source_from_dict(bad_origin)
+
+    bad_trust = dict(good_source, trust="not-a-trust")
+    with pytest.raises(ValueError, match="invalid trust"):
+        registry._source_from_dict(bad_trust)
+
+    finding = {
+        "source_ids": ["src-1"],
+        "title": "t",
+        "summary": "s",
+        "evidence": "e",
+        "trust": "local",
+        "extraction_lane": "luna",
+        "extracted_at": "2026-08-13T12:00:00+00:00",
+    }
+    assert registry._finding_from_dict(finding).trust == "local"
+    with pytest.raises(ValueError, match="invalid trust"):
+        registry._finding_from_dict(dict(finding, trust="mystery"))
+
+    assert "local" in VALID_TRUST and "repository" in VALID_ORIGIN
+
+
+def test_source_deserialize_rejects_unhashable_origin_trust() -> None:
+    good_source = {
+        "source_id": "src-1",
+        "origin": "web",
+        "provider": "web",
+        "uri": "https://example.com",
+        "content": "body",
+        "content_digest": "a" * 64,
+        "acquired_at": "2026-08-13T12:00:00+00:00",
+        "trust": "web",
+    }
+    with pytest.raises(ValueError, match="invalid origin"):
+        registry._source_from_dict(dict(good_source, origin={"nested": True}))
+    with pytest.raises(ValueError, match="invalid trust"):
+        registry._source_from_dict(dict(good_source, trust=["web"]))
+    with pytest.raises(ValueError, match="invalid trust"):
+        registry._finding_from_dict(
+            {
+                "source_ids": ["src-1"],
+                "title": "t",
+                "summary": "s",
+                "evidence": "e",
+                "trust": {"x": 1},
+                "extraction_lane": "luna",
+                "extracted_at": "2026-08-13T12:00:00+00:00",
+            }
+        )
+
+
+def test_list_runs_skips_invalid_directory_names(tmp_path: Path) -> None:
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent(name="chef", cli="codex", role="orchestrator")},
+    )
+    record = registry.create_standard_run(
+        tmp_path,
+        run_id="r-valid",
+        question="ok",
+        profile="grounded",
+        caps={"max_time": 30, "max_dispatches": 2},
+        roster=roster,
+    )
+    assert record["run_id"] == "r-valid"
+    bad_legacy = tmp_path / ".brigade" / "research" / "has space"
+    bad_legacy.mkdir(parents=True)
+    (bad_legacy / "run.json").write_text(
+        json.dumps({"run_id": "has space", "question": "bad", "status": "completed"}),
+        encoding="utf-8",
+    )
+    bad_standard = tmp_path / ".brigade" / "runs" / "bad name"
+    bad_standard.mkdir(parents=True)
+    (bad_standard / "research.json").write_text(
+        json.dumps({"run_id": "bad name", "question": "bad", "status": "completed", "kind": "research"}),
+        encoding="utf-8",
+    )
+
+    listed = registry.list_runs(tmp_path)
+    ids = {item["run_id"] for item in listed}
+    assert "r-valid" in ids
+    assert "has space" not in ids
+    assert "bad name" not in ids

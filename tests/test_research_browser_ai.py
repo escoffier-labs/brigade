@@ -91,3 +91,23 @@ def test_browser_ai_provider_rejects_invalid_payloads(response: str, match: str)
     provider, _backend = _provider(response)
     with pytest.raises(BrowserAiDiscoveryError, match=match):
         provider.search("query", limit=2)
+
+
+def test_browser_ai_bind_timeout_caps_backend_request_with_deadline_ceiling() -> None:
+    class RecordingBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__('[{"url":"https://example.test/a","title":"A","snippet":"Claim A"}]')
+            self.kwargs: dict[str, object] = {}
+
+        def complete(self, _messages, **kwargs) -> str:
+            self.kwargs = dict(kwargs)
+            return super().complete(_messages, **kwargs)
+
+    backend = RecordingBackend()
+    provider = BrowserAiProvider(backend=backend, lane="gemini_browser", timeout=180)
+    provider.bind_timeout(7.4)
+    provider.search("query", limit=1)
+
+    assert provider.timeout == 7
+    assert backend.kwargs["timeout"] == 7
+    assert backend.kwargs["deadline_ceiling"] is True

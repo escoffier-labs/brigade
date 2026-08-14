@@ -33,8 +33,11 @@ class StubLlm:
         self.requested_model: str | None = None
         self.observed_model = "unverified"
         self.last_attempt_id: str | None = None
+        self._attempt = 0
 
     def complete(self, messages, **kw):
+        self._attempt += 1
+        self.last_attempt_id = f"{self.seat}:{self.phase}:{self._attempt}"
         p = messages[0]["content"]
         lower = p.lower()
         if "research plan" in lower or "research strategist" in lower:
@@ -2841,6 +2844,9 @@ def test_cli_run_prelock_receipt_failure_is_a_typed_cli_error(monkeypatch, tmp_p
     def fail_record_run_start(*_args, **_kwargs) -> None:
         raise run_lifecycle.LifecycleJournalError("authoritative run prior gate not ready")
 
+    # Hermetic to roster discovery so CI hosts without ~/.brigade/roster.toml
+    # still reach the intended pre-lock receipt failure.
+    patch_stub_lanes(monkeypatch)
     monkeypatch.setattr(research_cmd, "_new_run_id", lambda _question: "prelock-receipt-failure")
     monkeypatch.setattr(registry_mod.aboyeur, "record_run_start", fail_record_run_start)
 
@@ -2952,3 +2958,151 @@ def test_cli_resume_lifecycle_receipt_failure_is_safe(monkeypatch, tmp_path: Pat
     assert payload["status"] == "failed"
     assert payload["failure_kind"] == "lifecycle-journal"
     assert (run_dir / "run.json").read_bytes() == before
+
+
+def test_cancellation_watcher_survives_unreadable_sidecar(tmp_path: Path) -> None:
+    import time
+
+    from brigade import localio, receipt_schema
+
+    process_registry = RecordingProcessRegistry()
+    registry.create_standard_run(
+        tmp_path,
+        run_id="watcher-corrupt",
+        question="q",
+        profile="grounded",
+        caps={"max_time": 30, "max_dispatches": 2},
+        roster=minimal_research_roster(),
+    )
+    research_path = registry.standard_run_dir(tmp_path, "watcher-corrupt") / registry.RESEARCH_ARTIFACT
+    research_path.write_text("not-json\n", encoding="utf-8")
+    cancelled = Event()
+    watcher = CancellationWatcher(
+        target=tmp_path,
+        run_id="watcher-corrupt",
+        cancelled=cancelled,
+        process_registry=process_registry,
+        poll_seconds=0.01,
+    )
+    watcher.start()
+    time.sleep(0.05)
+    assert watcher.is_alive()
+    localio.write_json(
+        research_path,
+        receipt_schema.stamp_research_sidecar(
+            {
+                "run_id": "watcher-corrupt",
+                "status": "running",
+                "cancel_requested_at": "2026-08-14T00:00:00+00:00",
+                "phases": {},
+            }
+        ),
+    )
+    assert cancelled.wait(timeout=2)
+    watcher.stop()
+    watcher.join(timeout=1)
+    assert process_registry.cancel_calls >= 1
+
+
+def test_discovery_mode_reports_observed_sources() -> None:
+    local = SourceEnvelope.build(
+        origin="local",
+        provider="local",
+        uri="/tmp/a.md",
+        content="local body",
+        trust="local",
+        acquired_at="2026-08-13T12:00:00+00:00",
+    )
+    assert research_cmd._discovery_mode(browser_ai_enabled=True, sources=(local,)) == "local"
+    assert research_cmd._discovery_mode(browser_ai_enabled=True, sources=()) == "browser-ai-empty"
+    assert research_cmd._discovery_mode(browser_ai_enabled=False, sources=()) == "none"
+    browser_ai = SourceEnvelope.build(
+        origin="browser-ai",
+        provider="gemini-browser",
+        uri="https://example.com/doc",
+        content="browser ai",
+        trust="browser-ai",
+        acquired_at="2026-08-13T12:00:00+00:00",
+    )
+    assert research_cmd._discovery_mode(browser_ai_enabled=False, sources=(browser_ai,)) == "browser-ai"
+
+
+def test_projection_secret_key_matches_env_segments_not_events() -> None:
+    assert research_cmd._is_projection_secret_key("env")
+    assert research_cmd._is_projection_secret_key("ENV")
+    assert research_cmd._is_projection_secret_key("process_env")
+    assert research_cmd._is_projection_secret_key("env_var")
+    assert not research_cmd._is_projection_secret_key("events")
+    assert not research_cmd._is_projection_secret_key("event_type")
+    assert not research_cmd._is_projection_secret_key("environment_label")
+    sanitized = research_cmd._sanitize_projection_value(
+        {
+            "env": "SECRET",
+            "ENV": "SECRET",
+            "events": [{"event_type": "run.started"}],
+            "event_type": "run.started",
+            "environment_label": "ci",
+        }
+    )
+    assert sanitized["env"] == "[redacted]"
+    assert sanitized["ENV"] == "[redacted]"
+    assert sanitized["events"] == [{"event_type": "run.started"}]
+    assert sanitized["event_type"] == "run.started"
+    assert sanitized["environment_label"] == "ci"
+
+
+def test_corrupt_run_json_termination_becomes_typed_command_failure(monkeypatch, tmp_path: Path) -> None:
+    patch_stub_lanes(monkeypatch)
+    run_id = "corrupt-on-fail"
+    monkeypatch.setattr(research_cmd, "_new_run_id", lambda _question: run_id)
+
+    original_create = registry.create_standard_run
+
+    def create_then_corrupt(*args: object, **kwargs: object):
+        out = original_create(*args, **kwargs)
+        path = registry.standard_run_dir(tmp_path, run_id) / "run.json"
+        path.write_text("not-json\n", encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(registry, "create_standard_run", create_then_corrupt)
+
+    with pytest.raises(research_cmd.ResearchCommandFailure) as caught:
+        research_cmd.run(
+            target=tmp_path,
+            question="q",
+            sources=[],
+            web=False,
+            overrides={"max_rounds": 1},
+            run_id=run_id,
+        )
+
+    assert caught.value.run_id == run_id
+    assert caught.value.failure_kind == "lifecycle-journal"
+    assert caught.value.failure_phase == "admission"
+
+
+@pytest.mark.parametrize(
+    "cli_call",
+    [
+        lambda target, run_id, json_output: cli_status(target=target, run_id=run_id, json_output=json_output),
+        lambda target, run_id, json_output: cli_show(target=target, run_id=run_id, json_output=json_output),
+        lambda target, run_id, json_output: research_cmd.cli_export_handoff(
+            target=target, run_id=run_id, inbox="codex", handoff_inbox=None, json_output=json_output
+        ),
+        lambda target, run_id, json_output: research_cmd.cli_cancel(
+            target=target, run_id=run_id, json_output=json_output
+        ),
+        lambda target, run_id, json_output: cli_resume(
+            target=target, run_id=run_id, overrides={}, json_output=json_output
+        ),
+        lambda target, run_id, json_output: research_cmd.cli_open(
+            target=target, run_id=run_id, json_output=json_output
+        ),
+    ],
+)
+def test_cli_invalid_run_id_is_typed_usage_error(tmp_path: Path, capsys, cli_call) -> None:
+    code = cli_call(tmp_path, "../escape", True)
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failure_kind"] == "invalid-run-id"
+    assert "invalid run_id" in payload["error"]
