@@ -37,7 +37,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
-- `brigade mcp`: 12 command path(s)
+- `brigade mcp`: 14 command path(s)
 - `brigade memory`: 17 command path(s)
 - `brigade model`: 7 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
@@ -238,6 +238,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade mcp pi-bridge install`
 - `brigade mcp pi-bridge uninstall`
 - `brigade mcp plan`
+- `brigade mcp recover`
+- `brigade mcp status`
 - `brigade mcp sync`
 - `brigade mcp verify`
 - `brigade memory care backfill`

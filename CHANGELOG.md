@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `brigade mcp sync --write` commits selected native configs and MCP ownership
+  state through the projection transaction kernel. A failed write restores the
+  selected destinations; unfinished operations are visible through `brigade
+  mcp status` and `brigade mcp doctor`, and can be recovered with `brigade mcp
+  recover <operation-id>`. Refs #911.
+
 ### Changed
 - The shipped review-heavy `reviewer_flash` preset now uses Gemini 3.7 Flash Low
   on Antigravity. Security-sensitive or cross-file decisions still route to the
