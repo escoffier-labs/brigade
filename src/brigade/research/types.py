@@ -4,6 +4,65 @@ from typing import Any, Dict, List, Literal, Protocol
 
 Trust = Literal["local", "web", "cli", "browser"]
 Status = Literal["running", "done", "cancelled", "error"]
+ResearchPhase = Literal[
+    "planning", "discovery", "extraction", "synthesis", "review", "repair", "publishing"
+]
+
+
+@dataclass(frozen=True)
+class ResearchProfile:
+    name: str
+    discovery: tuple[str, ...]
+    planner: tuple[str, ...]
+    extractor: tuple[str, ...]
+    synthesizer: tuple[str, ...]
+    reviewer: tuple[str, ...]
+    allow_synthesis_fallback: bool
+    browser_ai_research: bool
+
+
+BUILTIN_PROFILES: Dict[str, ResearchProfile] = {
+    "grounded": ResearchProfile(
+        name="grounded",
+        discovery=("brigade",),
+        planner=(),
+        extractor=(),
+        synthesizer=(),
+        reviewer=(),
+        allow_synthesis_fallback=True,
+        browser_ai_research=False,
+    ),
+    "browser-ai": ResearchProfile(
+        name="browser-ai",
+        discovery=("brigade", "browser-ai"),
+        planner=(),
+        extractor=(),
+        synthesizer=(),
+        reviewer=(),
+        allow_synthesis_fallback=True,
+        browser_ai_research=True,
+    ),
+    "local-only": ResearchProfile(
+        name="local-only",
+        discovery=("local", "repository"),
+        planner=(),
+        extractor=(),
+        synthesizer=(),
+        reviewer=(),
+        allow_synthesis_fallback=False,
+        browser_ai_research=False,
+    ),
+    "luna-only": ResearchProfile(
+        name="luna-only",
+        discovery=("brigade",),
+        planner=(),
+        extractor=(),
+        synthesizer=(),
+        reviewer=(),
+        allow_synthesis_fallback=False,
+        browser_ai_research=False,
+    ),
+}
 
 
 @dataclass

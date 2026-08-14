@@ -1,8 +1,12 @@
 from __future__ import annotations
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List
 
 from .. import toml_compat as tomllib
+from .types import BUILTIN_PROFILES, ResearchProfile
+
+_LANE_FIELDS = ("discovery", "planner", "extractor", "synthesizer", "reviewer")
 
 
 class ResearchConfig:
@@ -26,6 +30,60 @@ class ResearchConfig:
         if not isinstance(adapters, list):
             return []
         return [dict(item) for item in adapters if isinstance(item, dict)]
+
+    def profile(self, name: str | None) -> ResearchProfile:
+        research = self._data.get("research", {})
+        if research is None:
+            research = {}
+        if not isinstance(research, dict):
+            raise ValueError("[research] must be a TOML table")
+
+        if name is None:
+            default = research.get("default_profile", "grounded")
+            if not isinstance(default, str) or not default.strip():
+                raise ValueError("research.default_profile must be a non-empty string")
+            name = default.strip()
+
+        base = BUILTIN_PROFILES.get(name)
+        if base is None:
+            raise ValueError(f"unknown research profile: {name!r}")
+
+        profiles = self._data.get("profiles", {})
+        if profiles is None:
+            profiles = {}
+        if not isinstance(profiles, dict):
+            raise ValueError("[profiles] must be a TOML table")
+
+        raw = profiles.get(name)
+        if raw is None:
+            return base
+        if not isinstance(raw, dict):
+            raise ValueError(f"[profiles.{name}] must be a TOML table")
+
+        overlays: Dict[str, Any] = {}
+        for field in _LANE_FIELDS:
+            if field not in raw:
+                continue
+            value = raw[field]
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValueError(f"profiles.{name}.{field} must be a list of strings")
+            if len(value) == 0:
+                raise ValueError(f"profiles.{name}.{field} must not be empty when configured")
+            overlays[field] = tuple(item.strip() for item in value)
+
+        if "allow_synthesis_fallback" in raw:
+            fallback = raw["allow_synthesis_fallback"]
+            if not isinstance(fallback, bool):
+                raise ValueError(f"profiles.{name}.allow_synthesis_fallback must be true or false")
+            overlays["allow_synthesis_fallback"] = fallback
+
+        if "browser_ai_research" in raw:
+            browser = raw["browser_ai_research"]
+            if browser is not True and browser is not False:
+                raise ValueError(f"profiles.{name}.browser_ai_research must be true or false")
+            overlays["browser_ai_research"] = browser
+
+        return replace(base, **overlays)
 
 
 def load(target: Path) -> ResearchConfig:

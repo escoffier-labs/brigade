@@ -121,7 +121,7 @@ impact set to the implementation run.
 - Test: `tests/test_roster.py`
 - Test: `tests/test_research_config.py`
 
-- [ ] Sync the code graph and record the exact blast radius before editing:
+- [x] Sync the code graph and record the exact blast radius before editing:
 
 ```bash
 brigade code sync .
@@ -133,7 +133,7 @@ brigade code affected src/brigade/research/config.py
 Expect all three commands to succeed. Copy the reported symbol and test names
 into the active Brigade run's code-graph brief before changing a file.
 
-- [ ] Add failing roster and config tests:
+- [x] Add failing roster and config tests:
 
 ```python
 def test_load_roster_parses_research_capabilities(tmp_path: Path) -> None:
@@ -207,7 +207,7 @@ browser_ai_research = false
     assert profile.browser_ai_research is False
 ```
 
-- [ ] Run the tests and confirm the new APIs are absent:
+- [x] Run the tests and confirm the new APIs are absent:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_roster.py","tests/test_research_config.py"]' --capture brigade-work --capture-kind skill
@@ -216,7 +216,7 @@ brigade work verify run --target . --argv-json '["pytest","-q","tests/test_roste
 Expect failure naming `Agent.capabilities`, `Roster.find_capability`, or
 `ResearchConfig.profile`.
 
-- [ ] Add these concrete contracts to `src/brigade/roster.py`:
+- [x] Add these concrete contracts to `src/brigade/roster.py`:
 
 ```python
 RESEARCH_GENERAL_CAPABILITIES = frozenset(
@@ -274,7 +274,7 @@ domains can use the same roster contract. Pass the parsed tuple through the
 named `capabilities=` constructor argument and include it in the persisted
 roster payload in `aboyeur.py`.
 
-- [ ] Add these types and built-in profiles to `src/brigade/research/types.py`:
+- [x] Add these types and built-in profiles to `src/brigade/research/types.py`:
 
 ```python
 ResearchPhase = Literal[
@@ -343,7 +343,7 @@ the matching built-in profile, with `grounded` as the default. Parse all lane
 lists as ordered tuples. Reject an unknown profile, an empty configured lane
 list, and any browser discovery value other than explicit `true` or `false`.
 
-- [ ] Run the focused tests to green and capture the outcome:
+- [x] Run the focused tests to green and capture the outcome:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_roster.py","tests/test_research_config.py"]' --capture brigade-work --capture-kind skill
@@ -352,7 +352,7 @@ brigade outcome capture brigade-work --run-id latest
 
 Expect both files to pass.
 
-- [ ] Commit only Task 1 files:
+- [x] Commit only Task 1 files:
 
 ```bash
 git add src/brigade/roster.py src/brigade/aboyeur.py src/brigade/research/types.py src/brigade/research/config.py tests/test_roster.py tests/test_research_config.py

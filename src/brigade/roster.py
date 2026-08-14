@@ -19,6 +19,11 @@ AGENT_TRANSPORT_CHOICES = ("direct", "acpx")
 ACPX_TRANSPORT_VERSION = "0.12.0"
 RosterSource = Literal["explicit", "workspace", "worktree-parent", "user"]
 
+RESEARCH_GENERAL_CAPABILITIES = frozenset(
+    {"research.plan", "research.extract", "research.synthesize"}
+)
+_CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+$")
+
 
 @dataclass(frozen=True)
 class RosterResolution:
@@ -47,6 +52,20 @@ class Agent:
     fallback: tuple[str, ...] = ()
     stats: dict[str, str] | None = None
     caveats: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
+
+    def effective_capabilities(self) -> tuple[str, ...]:
+        if self.capabilities:
+            return self.capabilities
+        if self.role == "researcher":
+            return ("research.general",)
+        return ()
+
+    def supports(self, capability: str) -> bool:
+        effective = self.effective_capabilities()
+        return capability in effective or (
+            "research.general" in effective and capability in RESEARCH_GENERAL_CAPABILITIES
+        )
 
 
 @dataclass(frozen=True)
@@ -66,6 +85,9 @@ class Roster:
 
     def find_role(self, role: str) -> Agent | None:
         return next((a for a in self.agents.values() if a.role == role), None)
+
+    def find_capability(self, capability: str) -> tuple[Agent, ...]:
+        return tuple(agent for agent in self.agents.values() if agent.supports(capability))
 
 
 @dataclass(frozen=True)
@@ -194,6 +216,22 @@ def _as_string_list(value: object, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{field} must be a list of strings")
     return tuple(_as_str(item, field) for item in value)
+
+
+def _as_capabilities(value: object, field: str) -> tuple[str, ...]:
+    capabilities = _as_string_list(value, field)
+    if not capabilities:
+        return ()
+    seen: set[str] = set()
+    for item in capabilities:
+        if not _CAPABILITY_RE.fullmatch(item):
+            raise ValueError(
+                f"{field} values must match [a-z][a-z0-9]*(\\.[a-z][a-z0-9-]*)+; got {item!r}"
+            )
+        if item in seen:
+            raise ValueError(f"{field} must not contain duplicates; got {item!r}")
+        seen.add(item)
+    return capabilities
 
 
 def _as_sandbox(value: object) -> str | None:
@@ -434,6 +472,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
         fallback = _as_string_list(raw_agent.get("fallback"), f"agents.{agent_name}.fallback")
         stats = _as_stats(raw_agent.get("stats"), agent_name)
         caveats = _as_string_list(raw_agent.get("caveats"), f"agents.{agent_name}.caveats")
+        capabilities = _as_capabilities(raw_agent.get("capabilities"), f"agents.{agent_name}.capabilities")
 
         cli_raw = raw_agent.get("cli")
         has_endpoint = endpoint is not None and model is not None
@@ -495,6 +534,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             fallback=fallback,
             stats=stats,
             caveats=caveats,
+            capabilities=capabilities,
         )
 
     if orchestrator not in parsed_agents:

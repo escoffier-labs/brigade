@@ -2939,6 +2939,7 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
                 # values (enforced at roster load), so persisting them for
                 # resume is safe.
                 "env": dict(agent.env) if agent.env is not None else None,
+                "capabilities": list(agent.capabilities),
             }
             for name, agent in roster.agents.items()
         },

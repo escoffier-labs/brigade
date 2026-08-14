@@ -1588,3 +1588,44 @@ def test_load_accepts_oracle_researcher(tmp_path):
     loaded = roster_mod.load_roster(_write(tmp_path, text))
     assert loaded.agents["coder"].cli == "oracle"
     assert loaded.find_role("researcher").cli == "oracle"
+
+
+def test_load_roster_parses_research_capabilities(tmp_path: Path) -> None:
+    # Plan fixture used [orchestrator] name=...; roster parser expects a string key.
+    path = tmp_path / "roster.toml"
+    path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "orchestrator"
+
+[agents.luna]
+cli = "codex"
+role = "researcher"
+capabilities = ["research.plan", "research.extract", "research.review"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    roster = roster_mod.load_roster(path)
+
+    assert roster.agents["luna"].capabilities == (
+        "research.plan",
+        "research.extract",
+        "research.review",
+    )
+    assert [agent.name for agent in roster.find_capability("research.review")] == ["luna"]
+
+
+def test_legacy_researcher_has_general_capability_only() -> None:
+    agent = roster_mod.Agent(name="legacy", cli="codex", role="researcher")
+
+    assert agent.effective_capabilities() == ("research.general",)
+    assert agent.supports("research.plan") is True
+    assert agent.supports("research.extract") is True
+    assert agent.supports("research.synthesize") is True
+    assert agent.supports("research.review") is False
+    assert agent.supports("research.browser-discover") is False
