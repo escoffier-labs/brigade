@@ -11,9 +11,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from . import aboyeur, localio, runguard
+from . import aboyeur, localio, run_budget, runguard
 from .roster import Roster
 
 MANIFEST_SCHEMA = "brigade.eval_manifest.v1"
@@ -629,7 +629,14 @@ def execute(
     workspace: Path,
     output_dir: Path,
     resume: bool,
+    run_budget_payload: Mapping[str, Any] | None = None,
 ) -> int:
+    if run_budget_payload is not None:
+        try:
+            run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
+        except run_budget.BudgetCompatibilityError as exc:
+            print(f"error: invalid run budget declaration: {exc}", file=sys.stderr)
+            return 2
     workspace = workspace.expanduser().resolve()
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -689,26 +696,36 @@ def execute(
                 return 2
         try:
             read_only = cell.execution_mode == "read-only"
+            start_kwargs: dict[str, Any] = {
+                "task": cell.prompt,
+                "cwd": cell_workspace,
+                "roster": roster,
+                "read_only": read_only,
+                "worker": cell.seat,
+                "lock_workspace": workspace,
+            }
+            if run_budget_payload is not None:
+                start_kwargs["run_budget_payload"] = run_budget_payload
             aboyeur.record_run_start(
                 run_dir,
-                task=cell.prompt,
-                cwd=cell_workspace,
-                roster=roster,
-                read_only=read_only,
-                worker=cell.seat,
-                lock_workspace=workspace,
+                **start_kwargs,
             )
             with runguard.run_lock(workspace, run_dir=run_dir):
+                run_kwargs: dict[str, Any] = {
+                    "worker": cell.seat,
+                    "cwd": cell_workspace,
+                    "output_dir": run_dir,
+                    "route_enabled": False,
+                    "read_only": read_only,
+                    "authorized_writable_worktree": cell.execution_mode == "writable-worktree",
+                    "lock_workspace": workspace,
+                }
+                if run_budget_payload is not None:
+                    run_kwargs["run_budget_payload"] = run_budget_payload
                 rc = aboyeur.run(
                     cell.prompt,
                     roster,
-                    worker=cell.seat,
-                    cwd=cell_workspace,
-                    output_dir=run_dir,
-                    route_enabled=False,
-                    read_only=read_only,
-                    authorized_writable_worktree=cell.execution_mode == "writable-worktree",
-                    lock_workspace=workspace,
+                    **run_kwargs,
                 )
             try:
                 text = (run_dir / "final.txt").read_text()

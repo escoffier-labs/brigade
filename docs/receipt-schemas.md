@@ -366,7 +366,7 @@ projector; the coordinator applies terminal policy via `run.failed` /
 | `run_budget.reservation_denied` | `dimension`, `mode`, `declared`, `used`, `remaining`, `request_id`, `reason_class` | Emitted before new work starts |
 | `run_budget.exhausted` | `dimension`, `mode`, `declared`, `used`, `remaining`, `reason_class` | Enforceable ceiling reached |
 | `run_budget.cancel_requested` | `request_id`, `reason_class`, `transport_capability`, `dimension` | Best-effort cancel request |
-| `run_budget.cancelled` | `request_id`, `reason_class`, `transport_capability`, `transport_result`, `active_remaining`, `dimension` | Cancel receipt; names work that could not be interrupted |
+| `run_budget.cancelled` | `request_id`, `reason_class`, `transport_capability`, `transport_result`, `active_remaining`, `active_seats`, `outcomes`, `dimension` | Cancel receipt with bounded per-seat or per-transport outcomes and observed work that may remain active |
 | `run_budget.usage_reconciled` | `dimension`, `mode`, `usage_source`, `estimated_used`, `provider_used`, `used`, `request_id`, `reason_class` | Estimated and provider values stay distinct |
 
 Enforceable dimensions: `wall_clock_seconds`, `worker_dispatch_count`.

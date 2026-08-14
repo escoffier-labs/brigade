@@ -263,6 +263,52 @@ def test_model_trial_ordinary_path_does_not_declare_run_budget(tmp_path, monkeyp
     assert "run_budget_payload" not in run_kwargs[0]
 
 
+def test_model_trial_forwards_explicit_budget_payload(tmp_path, monkeypatch):
+    manifest = _manifest()
+    manifest["trials"] = 1
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    root = tmp_path / "results"
+    budget_payload = {
+        "schema": "brigade.run_budget.v1",
+        "schema_version": 1,
+        "ceilings": {"worker_dispatch_count": 1},
+    }
+    start_kwargs: list[dict] = []
+    run_kwargs: list[dict] = []
+
+    def fake_record_run_start(output_dir, **kwargs):
+        start_kwargs.append(dict(kwargs))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "run.json").write_text(json.dumps({"status": "started"}))
+
+    def fake_run(_task, _roster, **kwargs):
+        run_kwargs.append(dict(kwargs))
+        out = kwargs["output_dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "final.txt").write_text("hello\n")
+        (out / "run.json").write_text(json.dumps({"status": "ok", "duration_seconds": 0.5}))
+        return 0
+
+    monkeypatch.setattr(model_trials.aboyeur, "record_run_start", fake_record_run_start)
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    monkeypatch.setattr(model_trials.runguard, "run_lock", lambda *a, **k: nullcontext())
+
+    assert (
+        model_trials.execute(
+            manifest_path,
+            _roster(),
+            workspace=tmp_path,
+            output_dir=root,
+            resume=False,
+            run_budget_payload=budget_payload,
+        )
+        == 0
+    )
+    assert start_kwargs[0]["run_budget_payload"] == budget_payload
+    assert run_kwargs[0]["run_budget_payload"] == budget_payload
+
+
 def test_resume_does_not_skip_running_cells(tmp_path, monkeypatch):
     manifest_path = tmp_path / "eval.json"
     manifest_path.write_text(json.dumps(_manifest()))

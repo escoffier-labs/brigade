@@ -2761,6 +2761,55 @@ def _build_budget_coordinator(
     return coordinator
 
 
+def _observed_budget_cancellation(
+    process_registry: proc.ProcessRegistry,
+    control_registry: run_control.LiveTurnRegistry | None,
+    active_seats: tuple[str, ...],
+) -> run_budget.CancellationReport:
+    """Cancel both transports and preserve only observed per-seat state."""
+    outcomes: list[run_budget.CancelOutcome] = []
+    active: list[str] = []
+    represented: set[str] = set()
+    if control_registry is not None:
+        interrupted, still_active = control_registry.interrupt_observed(active_seats)
+        outcomes.extend(run_budget.CancelOutcome(seat, "interrupt", result) for seat, result in interrupted)
+        represented.update(seat for seat, _result in interrupted)
+        represented.update(still_active)
+        active.extend(still_active)
+
+    try:
+        observed_processes = process_registry.cancel()
+    except Exception:
+        unobserved = tuple(seat for seat in active_seats if seat not in represented)
+        outcomes.extend(run_budget.CancelOutcome(seat, "process_cancel", "error") for seat in unobserved)
+        active.extend(unobserved)
+        return run_budget.CancellationReport(
+            outcomes=tuple(outcomes),
+            active_seats=tuple(dict.fromkeys(active)),
+        )
+
+    process_results: dict[str, str] = {}
+    priority = {"interrupted": 0, "still_active": 1, "error": 2}
+    for process in observed_processes:
+        seat = process.seat or "process"
+        existing = process_results.get(seat)
+        if existing is None or priority[process.result] > priority[existing]:
+            process_results[seat] = process.result
+    for seat, result in process_results.items():
+        outcomes.append(run_budget.CancelOutcome(seat, "process_cancel", result))
+        represented.add(seat)
+        if result in {"still_active", "error"}:
+            active.append(seat)
+
+    for seat in active_seats:
+        if seat not in represented:
+            outcomes.append(run_budget.CancelOutcome(seat, "none", "unsupported"))
+    return run_budget.CancellationReport(
+        outcomes=tuple(outcomes),
+        active_seats=tuple(dict.fromkeys(active)),
+    )
+
+
 def record_approval_pause(output_dir: Path, approval_reference: Mapping[str, Any]) -> None:
     """Commit an approval wait and refresh its compatibility snapshot.
 
@@ -3135,6 +3184,8 @@ def record_run_start(
     field survives a startup failure.
     """
 
+    if run_budget_payload is not None:
+        run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
     output_dir = output_dir.expanduser().resolve()
     started_at = started_at or datetime.now(timezone.utc)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3584,6 +3635,8 @@ def run(
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
 ) -> int:
+    if run_budget_payload is not None:
+        run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
     started_at = datetime.now(timezone.utc)
     process_registry = proc.ProcessRegistry()
     transport_for_payload = codex_transport or roster.codex_transport
@@ -4071,6 +4124,16 @@ def run(
                 contract_for_plan = dict(run_raw["verification_contract"])
         if isinstance(contract_for_plan, Mapping):
             plan_doc["verification_contract"] = dict(contract_for_plan)
+        budget_for_plan = run_budget_payload
+        if budget_for_plan is None:
+            try:
+                run_raw = json.loads((output_dir / "run.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                run_raw = None
+            if isinstance(run_raw, dict) and isinstance(run_raw.get("run_budget"), dict):
+                budget_for_plan = dict(run_raw["run_budget"])
+        if isinstance(budget_for_plan, Mapping):
+            plan_doc["run_budget"] = dict(budget_for_plan)
         _write_json(output_dir / "plan.json", plan_doc)
 
     if cwd is not None and output_dir is not None:
@@ -4104,6 +4167,10 @@ def run(
             plan_doc["verification_contract"] = dict(prior_plan["verification_contract"])
         elif isinstance(verification_contract_payload, Mapping):
             plan_doc["verification_contract"] = dict(verification_contract_payload)
+        if isinstance(prior_plan, dict) and isinstance(prior_plan.get("run_budget"), dict):
+            plan_doc["run_budget"] = dict(prior_plan["run_budget"])
+        elif isinstance(run_budget_payload, Mapping):
+            plan_doc["run_budget"] = dict(run_budget_payload)
         _write_json(output_dir / "plan.json", plan_doc)
         if plan_attempts is not None:
             attempts_payload = {"attempts": plan_attempts or []}
@@ -4298,14 +4365,9 @@ def run(
 
     budget_coordinator: run_budget.BudgetCoordinator | None = None
 
-    def _budget_cancel_fn() -> tuple[str, int]:
-        """Best-effort cancel of in-flight worker processes for budget/policy stops."""
-        if process_registry is None:
-            return "unsupported", len(active_seats)
-        process_registry.cancel()
-        # Cancellation is best effort; transports that cannot interrupt leave
-        # active_remaining as the count of seats that may still finish.
-        return "partial", max(0, len(active_seats) - 1)
+    def _budget_cancel_fn() -> run_budget.CancellationReport:
+        """Record observed per-seat interruption state without raw transport data."""
+        return _observed_budget_cancellation(process_registry, control_registry, active_seats)
 
     def _append_budget_event(event_type: str, payload: Mapping[str, Any], idempotency_key: str) -> Any:
         assert output_dir is not None
@@ -4357,7 +4419,7 @@ def run(
                 budget_coordinator.request_cancel(
                     request_id="opcancel:live-ctrl-c",
                     reason_class="operator_cancel",
-                    transport_capability="process_cancel" if process_registry is not None else "none",
+                    transport_capability="mixed",
                     dimension="wall_clock_seconds",
                     cancel_fn=_budget_cancel_fn,
                 )
@@ -4409,7 +4471,7 @@ def run(
                     budget_coordinator.request_cancel(
                         request_id=f"budgetcancel:{exc.dimension}",
                         reason_class="budget_cancel",
-                        transport_capability="process_cancel" if process_registry is not None else "none",
+                        transport_capability="mixed",
                         dimension=exc.dimension,
                         cancel_fn=_budget_cancel_fn,
                     )
