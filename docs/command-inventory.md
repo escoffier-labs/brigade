@@ -38,7 +38,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
-- `brigade memory`: 17 command path(s)
+- `brigade memory`: 18 command path(s)
 - `brigade model`: 7 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade openclaw-fragments` (extras): 1 command path(s)
@@ -254,6 +254,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory init-git`
 - `brigade memory inventory`
 - `brigade memory lint`
+- `brigade memory project-vault`
 - `brigade memory recall`
 - `brigade memory search`
 - `brigade memory serve-mcp`
