@@ -86,6 +86,24 @@ def test_restore_failure_returns_recovery_required_and_recover_is_idempotent(tmp
     assert _snapshot(workspace) == before
 
 
+def test_manual_recovery_failure_keeps_recovery_material(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, plan = mixed_workspace(tmp_path)
+    projection.execute(
+        plan,
+        target=workspace,
+        inject=projection.FailureInjector(boundary="commit:1:after", restore_boundary="restore:0:before"),
+    )
+
+    def boom(*_args, **_kwargs):
+        raise OSError("restore failed")
+
+    monkeypatch.setattr(projection.localio, "write_bytes_atomic", boom)
+    receipt = projection.recover(plan.operation_id, target=workspace)
+    assert receipt.terminal_state == "recovery-required"
+    assert receipt.recovery_command == f"brigade projection recover {plan.operation_id}"
+    assert (projection.operation_dir(workspace, plan.operation_id) / "before").is_dir()
+
+
 def test_destination_drift_between_plan_and_prepare_fails_closed(tmp_path: Path) -> None:
     workspace, plan = mixed_workspace(tmp_path)
     before = _snapshot(workspace)
@@ -135,6 +153,27 @@ def test_plan_rejects_symlink_duplicate_and_parent_child(tmp_path: Path) -> None
                     expected_before=_digest(b"ok\n"),
                     desired_after=_digest(b"new\n"),
                     staged_bytes=b"new\n",
+                )
+            ],
+            target=workspace,
+        )
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    directory_link = workspace / "directory-link"
+    directory_link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(projection.PlanError, match="symlink"):
+        projection.build_plan(
+            operation_id="op-parent-symlink",
+            projector="fixture",
+            source_fingerprint="src",
+            mutations=[
+                projection.mutation(
+                    destination=directory_link / "outside.txt",
+                    mutation="create",
+                    expected_before=projection.ABSENT,
+                    desired_after=_digest(b"new\\n"),
+                    staged_bytes=b"new\\n",
                 )
             ],
             target=workspace,

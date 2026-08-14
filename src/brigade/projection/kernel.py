@@ -205,7 +205,9 @@ def build_plan(
     physical: list[tuple[MutationSpec, Path]] = []
     seen: dict[str, Path] = {}
     for spec in specs:
-        dest = _physical(spec.destination if spec.destination.is_absolute() else target / spec.destination)
+        requested = spec.destination if spec.destination.is_absolute() else target / spec.destination
+        _reject_parent_symlink(requested)
+        dest = _physical(requested)
         key = dest.as_posix()
         if key in seen:
             raise PlanError("duplicate destination")
@@ -287,8 +289,20 @@ def recover(operation_id: str, *, target: Path, force: bool = False) -> Receipt:
                 f"destination {spec.display_path} changed after the failed operation; pass --force to restore anyway"
             )
     _write_journal(op_dir, {**journal, "status": "restoring"})
-    for spec in reversed(mutations):
-        _restore_one(op_dir, spec)
+    try:
+        for spec in reversed(mutations):
+            _restore_one(op_dir, spec)
+    except OSError:
+        receipt = _build_receipt(
+            plan_from_journal(journal, mutations), terminal_state="recovery-required", validator_results=()
+        )
+        _persist_receipt(
+            op_dir,
+            receipt,
+            journal_update={**journal, "status": "recovery-required"},
+            keep_before=True,
+        )
+        return receipt
     receipt = _build_receipt(plan_from_journal(journal, mutations), terminal_state="restored", validator_results=())
     _persist_receipt(op_dir, receipt, journal_update={**journal, "status": "restored", "committed_indexes": []})
     return receipt
@@ -660,12 +674,15 @@ def _reject_symlink_and_type(path: Path, kind: MutationKind) -> None:
 
 def _reject_parent_symlink(path: Path) -> None:
     parent = path.parent
-    try:
-        status = os.lstat(parent)
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(status.st_mode):
-        raise PlanError("unsafe symlink destination")
+    while parent != parent.parent:
+        try:
+            status = os.lstat(parent)
+        except FileNotFoundError:
+            parent = parent.parent
+            continue
+        if stat.S_ISLNK(status.st_mode):
+            raise PlanError("unsafe symlink destination")
+        parent = parent.parent
 
 
 def _parent_child(left: Path, right: Path) -> bool:
