@@ -1481,7 +1481,7 @@ git commit -m "feat: orchestrate multi-lane research"
 - Test: `tests/test_research_browser_ai.py`
 - Test: `tests/test_research_cmd.py`
 
-- [ ] Add failing provider and CLI opt-in tests:
+- [x] Add failing provider and CLI opt-in tests:
 
 ```python
 def test_browser_ai_provider_returns_untrusted_sources() -> None:
@@ -1569,7 +1569,7 @@ def capture_run(monkeypatch) -> dict[str, object]:
     return captured
 ```
 
-- [ ] Run and observe the missing provider and argument:
+- [x] Run and observe the missing provider and argument:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_browser_ai.py","tests/test_research_cmd.py"]' --capture brigade-work --capture-kind skill
@@ -1577,7 +1577,7 @@ brigade work verify run --target . --argv-json '["pytest","-q","tests/test_resea
 
 Expect import or unexpected-keyword failures.
 
-- [ ] Implement `BrowserAiProvider` with a strict JSON-array prompt. Reject
+- [x] Implement `BrowserAiProvider` with a strict JSON-array prompt. Reject
 non-HTTPS URLs, non-list JSON, more than `limit` items, entries without URL,
 title, or snippet, and snippets longer than 12,000 characters. Cache accepted
 snippets by URL so `fetch` performs no second browser call. Set
@@ -1643,7 +1643,7 @@ class BrowserAiProvider:
         return dict(self._pages.get(url, {"success": False, "content": "", "title": ""}))
 ```
 
-- [ ] Add `--browser-ai-research` to `research run`, `--profile` with built-in
+- [x] Add `--browser-ai-research` to `research run`, `--profile` with built-in
 choices, and `--synthesizer` plus `--reviewer` seat-name overrides. Pass all
 four values to `cli_run`. The flag is false by default. A selected `browser-ai`
 profile sets it true even when the flag is absent. No other profile may activate
@@ -1656,7 +1656,7 @@ a `research.browser-discover` seat. Add it to the provider list and manifest
 with `origin: "browser-ai"`. A run with no local, CLI, web, or browser-AI route
 fails admission with `failure_kind: "no-source-route"` and exit code 2.
 
-- [ ] Run focused tests and capture:
+- [x] Run focused tests and capture:
 
 ```bash
 brigade work verify run --target . --argv-json '["pytest","-q","tests/test_research_browser_ai.py","tests/test_research_cmd.py"]' --capture brigade-work --capture-kind skill
@@ -1665,7 +1665,7 @@ brigade outcome capture brigade-work --run-id latest
 
 Expect both files to pass.
 
-- [ ] Commit Task 6:
+- [x] Commit Task 6:
 
 ```bash
 git add src/brigade/research/sources/browser_ai.py src/brigade/research_cmd.py src/brigade/cli/research.py tests/test_research_browser_ai.py tests/test_research_cmd.py

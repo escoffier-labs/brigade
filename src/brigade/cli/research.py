@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ..research.types import BUILTIN_PROFILES
+
 
 def register(sub: argparse._SubParsersAction) -> None:
     # research
@@ -19,6 +21,19 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--source", action="append", default=[], dest="source", help="Glob path of trusted local sources (repeatable)."
     )
     p_research_run.add_argument("--web", action="store_true", help="Enable the opt-in untrusted web tier.")
+    p_research_run.add_argument(
+        "--browser-ai-research",
+        action="store_true",
+        help="Enable explicit Gemini browser-AI discovery (untrusted).",
+    )
+    p_research_run.add_argument(
+        "--profile",
+        choices=tuple(BUILTIN_PROFILES),
+        default=None,
+        help="Built-in research profile.",
+    )
+    p_research_run.add_argument("--synthesizer", default=None, help="Override synthesis seat name.")
+    p_research_run.add_argument("--reviewer", default=None, help="Override review seat name.")
     p_research_run.add_argument("--rounds", type=int, default=None, help="Max research rounds (max_rounds).")
     p_research_run.add_argument(
         "--max-time", type=int, default=None, dest="max_time", help="Wall-clock budget in seconds (max_time)."
@@ -131,6 +146,9 @@ def dispatch(args) -> int:
 
     if args.research_command == "run":
         overrides = {"max_rounds": args.rounds, "max_time": args.max_time}
+        browser_ai_research = bool(args.browser_ai_research)
+        if args.profile == "browser-ai":
+            browser_ai_research = True
         return research_cmd.cli_run(
             target=args.target,
             question=args.question,
@@ -139,6 +157,11 @@ def dispatch(args) -> int:
             web=args.web,
             overrides=overrides,
             provider=args.provider,
+            browser_ai_research=browser_ai_research,
+            profile=args.profile,
+            synthesizer=args.synthesizer,
+            reviewer=args.reviewer,
+            category=args.category,
             json_output=args.json,
         )
     if args.research_command == "list":

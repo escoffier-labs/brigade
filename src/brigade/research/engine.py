@@ -207,6 +207,9 @@ class ResearchEngine:
                             content=str(page["content"]),
                             trust=trust,
                             acquired_at=datetime.now(timezone.utc).isoformat(),
+                            producing_lane=getattr(provider, "lane", None),
+                            requested_model=getattr(provider, "requested_model", None),
+                            observed_model=getattr(provider, "observed_model", None),
                         )
                     )
             return index, envelopes

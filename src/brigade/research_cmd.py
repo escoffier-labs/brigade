@@ -7,10 +7,11 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from .research import registry, config as rconfig
-from .research.types import Caps
-from .research.engine import DeepResearcher
+from .research.types import Caps, ResearchLanes, ResearchProfile, ResearchRunError
+from .research.engine import ResearchEngine
 from .research.sources import local as localsrc
 from .research.sources import cli as clisrc
+from .research.sources.browser_ai import BrowserAiProvider
 from .research import report as reportmod, handoff as handoffmod
 from .selection import WRITER_INBOXES
 from .localio import utc_now_iso as _now
@@ -30,6 +31,173 @@ def _resolve_backend(target: Path):
 
     r = roster_mod.load_roster(roster_mod.resolve_roster_path(target))
     return llm.resolve_backend(r)
+
+
+class _CompatBackend:
+    def __init__(self, inner: Any, *, seat: str, phase: str) -> None:
+        self._inner = inner
+        self.seat = seat
+        self.phase = phase
+        self.requested_model = getattr(inner, "requested_model", None)
+        self.observed_model = getattr(inner, "observed_model", None) or "unverified"
+        self.last_attempt_id: str | None = None
+
+    def complete(self, messages, **kwargs) -> str:
+        text = self._inner.complete(messages, **kwargs)
+        self.observed_model = getattr(self._inner, "observed_model", None) or self.observed_model
+        self.last_attempt_id = getattr(self._inner, "last_attempt_id", None) or f"{self.seat}:{self.phase}:compat"
+        return text
+
+
+class _LocalIndexProvider:
+    trust = "local"
+    source_type = "local"
+    source_id = "local"
+
+    def __init__(self, index: Any) -> None:
+        self._index = index
+        self._pages: dict[str, dict[str, Any]] = {}
+
+    def search(self, query: str, limit: int) -> list[dict[str, str]]:
+        hits: list[dict[str, str]] = []
+        for hit in self._index.search(query, limit=limit):
+            url = str(hit.get("source") or "")
+            if not url:
+                continue
+            title = str(hit.get("title") or url)
+            self._pages[url] = {
+                "success": True,
+                "content": str(hit.get("text") or ""),
+                "title": title,
+            }
+            hits.append({"url": url, "title": title, "trust": self.trust})
+        return hits
+
+    def fetch(self, url: str) -> dict[str, Any]:
+        return dict(self._pages.get(url, {"success": False, "content": "", "title": ""}))
+
+
+def _lanes_from_single_backend(
+    backend: Any,
+    *,
+    synthesizer: str | None = None,
+    reviewer: str | None = None,
+    browser_discovery: Any | None = None,
+) -> ResearchLanes:
+    synth_seat = synthesizer or "researcher"
+    review_seat = reviewer or "researcher"
+    return ResearchLanes(
+        planner=_CompatBackend(backend, seat="researcher", phase="planning"),
+        extractor=_CompatBackend(backend, seat="researcher", phase="extraction"),
+        synthesizers=(_CompatBackend(backend, seat=synth_seat, phase="synthesis"),),
+        reviewer=_CompatBackend(backend, seat=review_seat, phase="review"),
+        browser_discovery=browser_discovery,
+    )
+
+
+def _build_lanes_from_roster(
+    target: Path,
+    *,
+    profile: ResearchProfile,
+    synthesizer: str | None,
+    reviewer: str | None,
+    run_id: str,
+) -> ResearchLanes:
+    from . import roster as roster_mod
+    from .proc import ProcessRegistry
+    from .research.llm import PhaseBackend, resolve_lane
+    from .run_seat import SeatInvoker
+
+    roster = roster_mod.load_roster(roster_mod.resolve_roster_path(target))
+    output_dir = registry.run_dir(target, run_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    invoker = SeatInvoker(
+        roster=roster,
+        cwd=target,
+        run_id=run_id,
+        process_registry=ProcessRegistry(),
+        output_dir=output_dir,
+    )
+    synth_candidates = (synthesizer,) if synthesizer else profile.synthesizer
+    review_candidates = (reviewer,) if reviewer else profile.reviewer
+    planner = resolve_lane(roster, phase="research.plan", candidates=profile.planner)
+    extractor = resolve_lane(roster, phase="research.extract", candidates=profile.extractor)
+    synthesis = resolve_lane(roster, phase="research.synthesize", candidates=synth_candidates)
+    review = resolve_lane(roster, phase="research.review", candidates=review_candidates)
+    synthesizers = tuple(
+        PhaseBackend(invoker=invoker, seat=seat, phase="research.synthesize")
+        for seat in (synthesis.primary, *synthesis.fallbacks)
+    )
+    if not profile.allow_synthesis_fallback:
+        synthesizers = synthesizers[:1]
+    return ResearchLanes(
+        planner=PhaseBackend(invoker=invoker, seat=planner.primary, phase="research.plan"),
+        extractor=PhaseBackend(invoker=invoker, seat=extractor.primary, phase="research.extract"),
+        synthesizers=synthesizers,
+        reviewer=PhaseBackend(invoker=invoker, seat=review.primary, phase="research.review"),
+        browser_discovery=None,
+    )
+
+
+def _resolve_browser_ai_provider(target: Path, *, run_id: str) -> BrowserAiProvider:
+    from . import roster as roster_mod
+    from .proc import ProcessRegistry
+    from .research.llm import PhaseBackend, resolve_lane
+    from .run_seat import SeatInvoker
+
+    roster = roster_mod.load_roster(roster_mod.resolve_roster_path(target))
+    output_dir = registry.run_dir(target, run_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    invoker = SeatInvoker(
+        roster=roster,
+        cwd=target,
+        run_id=run_id,
+        process_registry=ProcessRegistry(),
+        output_dir=output_dir,
+    )
+    lane = resolve_lane(roster, phase="research.browser-discover")
+    backend = PhaseBackend(invoker=invoker, seat=lane.primary, phase="research.browser-discover")
+    return BrowserAiProvider(backend=backend, lane=lane.primary)
+
+
+def _resolve_lanes(
+    target: Path,
+    *,
+    profile: ResearchProfile,
+    synthesizer: str | None,
+    reviewer: str | None,
+    run_id: str,
+) -> ResearchLanes:
+    # New runs always build PhaseBackend lanes from the roster/capability resolver.
+    # HttpBackend/_CompatBackend remain available for the legacy-resume path only.
+    return _build_lanes_from_roster(
+        target,
+        profile=profile,
+        synthesizer=synthesizer,
+        reviewer=reviewer,
+        run_id=run_id,
+    )
+
+
+def _persist_category(target: Path, run_id: str, category: str | None) -> None:
+    if category is None:
+        return
+    from . import localio, receipt_schema
+
+    path = registry.run_dir(target, run_id) / registry.RESEARCH_ARTIFACT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Initialize only when absent; fail closed if present but unreadable/non-object.
+    if path.is_file():
+        current = localio.read_json_dict(path)
+        if current is None:
+            raise ValueError(f"research artifact unreadable or not an object: {path}")
+    else:
+        current = {}
+    current["run_id"] = run_id
+    current["category"] = category
+    localio.write_json(path, receipt_schema.stamp_research_sidecar(current))
+    # Mirror into run.json for legacy readers.
+    registry.update_run(target, run_id, category=category)
 
 
 def _resolve_sources(target: Path, corpus: Optional[str], sources: List[str]) -> List[str]:
@@ -72,6 +240,8 @@ def _manifest(
     web: bool,
     provider: Optional[str],
     cli_providers: List[Any],
+    browser_ai_research: bool = False,
+    browser_ai_provider: Any | None = None,
 ) -> Dict[str, Any]:
     web_provider = str(provider or cfg.search_settings().get("research_search_provider") or "playwright").strip()
     routes = [
@@ -83,6 +253,13 @@ def _manifest(
             "enabled": bool(web),
             "trust": "browser" if web_provider in {"playwright", "browser", ""} else "web",
         },
+        {
+            "id": "browser-ai",
+            "type": "browser-ai",
+            "enabled": bool(browser_ai_provider),
+            "trust": "browser-ai",
+            "origin": "browser-ai",
+        },
     ]
     return {
         "target": str(target),
@@ -90,6 +267,7 @@ def _manifest(
         "sources": list(sources),
         "local_paths": list(paths),
         "web_enabled": bool(web),
+        "browser_ai_research": bool(browser_ai_research),
         "provider": web_provider,
         "source_adapters": _safe_source_adapters(cfg.source_adapters()),
         "cli_sources": [
@@ -113,24 +291,20 @@ def run(
     corpus: Optional[str] = None,
     provider: Optional[str] = None,
     run_id: Optional[str] = None,
+    browser_ai_research: bool = False,
+    profile: Optional[str] = None,
+    synthesizer: Optional[str] = None,
+    reviewer: Optional[str] = None,
+    category: Optional[str] = None,
 ) -> str:
     cfg = rconfig.load(target)
+    research_profile = cfg.profile(profile)
+    browser_ai_enabled = bool(browser_ai_research) or bool(research_profile.browser_ai_research)
     caps_kwargs = {**cfg.caps_overrides(), **{k: v for k, v in overrides.items() if v is not None}}
     caps = Caps.build(**caps_kwargs)
     run_id = run_id or _new_run_id(question)
     paths = _resolve_sources(target, corpus, sources)
     cli_providers = clisrc.build_providers(cfg.source_adapters(), target=target)
-    manifest = _manifest(
-        target=target,
-        cfg=cfg,
-        corpus=corpus,
-        sources=sources,
-        paths=paths,
-        web=web,
-        provider=provider,
-        cli_providers=cli_providers,
-    )
-    registry.create_run(target, question=question, run_id=run_id, caps=caps.__dict__.copy(), manifest=manifest)
     blockers: List[str] = []
 
     index = localsrc.build_index(paths) if paths else None
@@ -150,35 +324,109 @@ def run(
             blockers.append(str(e))
             web_provider = None
 
-    try:
-        backend = _resolve_backend(target)
-    except Exception as e:
-        registry.finish_run(target, run_id, status="error", stats={}, artifacts={}, blockers=blockers + [str(e)])
-        return run_id
+    browser_provider = None
+    if browser_ai_enabled:
+        try:
+            browser_provider = _resolve_browser_ai_provider(target, run_id=run_id)
+        except Exception as e:
+            blockers.append(str(e))
+            browser_provider = None
 
-    eng = DeepResearcher(
-        llm=backend,
-        local_index=index,
-        web=web_provider,
-        caps=caps,
-        external_sources=cli_providers,
-        on_checkpoint=lambda cp: registry.save_checkpoint(target, run_id, cp),
-        on_event=lambda phase, d: registry.append_event(target, run_id, {"phase": phase, **d}),
+    providers: List[Any] = []
+    if index is not None and index.num_chunks > 0:
+        providers.append(_LocalIndexProvider(index))
+    providers.extend(cli_providers)
+    if web_provider is not None:
+        providers.append(web_provider)
+    if browser_provider is not None:
+        providers.append(browser_provider)
+
+    manifest = _manifest(
+        target=target,
+        cfg=cfg,
+        corpus=corpus,
+        sources=sources,
+        paths=paths,
+        web=web and web_provider is not None,
+        provider=provider,
+        cli_providers=cli_providers,
+        browser_ai_research=browser_ai_enabled,
+        browser_ai_provider=browser_provider,
     )
-    prior = registry.load_checkpoint(target, run_id) if overrides.get("_resume") else None
+    registry.create_run(
+        target,
+        question=question,
+        run_id=run_id,
+        caps=caps.__dict__.copy(),
+        manifest=manifest,
+    )
+    registry.update_run(target, run_id, profile=research_profile.name, browser_ai_research=browser_ai_enabled)
+    _persist_category(target, run_id, category)
+
+    if not providers:
+        detail = "no local, CLI, web, or browser-AI source route available"
+        registry.finish_run(
+            target,
+            run_id,
+            status="error",
+            stats={},
+            artifacts={},
+            blockers=blockers + [detail],
+        )
+        registry.update_run(
+            target,
+            run_id,
+            failure_kind="no-source-route",
+            failure_phase="admission",
+            detail=detail,
+        )
+        return run_id
+
     try:
-        result = eng.research(question, prior=prior)
+        lanes = _resolve_lanes(
+            target,
+            profile=research_profile,
+            synthesizer=synthesizer,
+            reviewer=reviewer,
+            run_id=run_id,
+        )
     except Exception as e:
         registry.finish_run(target, run_id, status="error", stats={}, artifacts={}, blockers=blockers + [str(e)])
         return run_id
 
+    eng = ResearchEngine(
+        lanes=lanes,
+        sources=providers,
+        caps=caps,
+        on_phase_started=lambda phase: registry.append_event(target, run_id, {"phase": phase, "status": "started"}),
+        on_phase_completed=lambda phase, d: registry.append_event(
+            target, run_id, {"phase": phase, "status": "completed", **d}
+        ),
+    )
+    try:
+        result = eng.run(question)
+    except ResearchRunError as e:
+        registry.finish_run(target, run_id, status="error", stats={}, artifacts={}, blockers=blockers + [str(e)])
+        registry.update_run(
+            target,
+            run_id,
+            failure_kind=e.failure_kind,
+            failure_phase=e.failure_phase,
+            detail=e.detail,
+        )
+        return run_id
+    except Exception as e:
+        registry.finish_run(target, run_id, status="error", stats={}, artifacts={}, blockers=blockers + [str(e)])
+        return run_id
+
+    findings = list(result.findings)
     d = registry.run_dir(target, run_id)
-    md = reportmod.render_markdown(question=question, markdown_report=result.report, findings=result.findings)
+    md = reportmod.render_markdown(question=question, markdown_report=result.report, findings=findings)
     html = reportmod.render_html(
-        question=question, markdown_report=result.report, findings=result.findings, stats=result.stats
+        question=question, markdown_report=result.report, findings=findings, stats=result.stats
     )
     ho = handoffmod.render_handoff(
-        question=question, markdown_report=result.report, findings=result.findings, stats=result.stats
+        question=question, markdown_report=result.report, findings=findings, stats=result.stats
     )
     (d / "report.md").write_text(md, encoding="utf-8")
     (d / "report.html").write_text(html, encoding="utf-8")
@@ -191,6 +439,8 @@ def run(
         artifacts={"report_html": "report.html", "report_md": "report.md", "handoff": "handoff.md"},
         blockers=blockers,
     )
+    if category is not None:
+        _persist_category(target, run_id, category)
     return run_id
 
 
@@ -212,6 +462,9 @@ def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
         web=bool(manifest.get("web_enabled")),
         corpus=manifest.get("corpus") if isinstance(manifest.get("corpus"), str) else None,
         provider=manifest.get("provider") if isinstance(manifest.get("provider"), str) else None,
+        browser_ai_research=bool(manifest.get("browser_ai_research")),
+        profile=rec.get("profile") if isinstance(rec.get("profile"), str) else None,
+        category=rec.get("category") if isinstance(rec.get("category"), str) else None,
         overrides=restored_overrides,
         run_id=run_id,
     )
@@ -696,6 +949,11 @@ def cli_run(
     web: bool,
     overrides: Dict[str, Any],
     provider: Optional[str] = None,
+    browser_ai_research: bool = False,
+    profile: Optional[str] = None,
+    synthesizer: Optional[str] = None,
+    reviewer: Optional[str] = None,
+    category: Optional[str] = None,
     json_output: bool = False,
 ) -> int:
     rid = run(
@@ -706,15 +964,22 @@ def cli_run(
         web=web,
         overrides=overrides,
         provider=provider,
+        browser_ai_research=browser_ai_research,
+        profile=profile,
+        synthesizer=synthesizer,
+        reviewer=reviewer,
+        category=category,
     )
     rec = registry.show_run(target, rid) or {"run_id": rid}
     if json_output:
         print(_json.dumps(rec, indent=2, sort_keys=True))
-        return 0
-    print(f"research run: {rid}")
-    print(f"status: {rec.get('status')}")
-    for b in rec.get("blockers", []):
-        print(f"blocker: {b}")
+    else:
+        print(f"research run: {rid}")
+        print(f"status: {rec.get('status')}")
+        for b in rec.get("blockers", []):
+            print(f"blocker: {b}")
+    if rec.get("failure_kind") == "no-source-route":
+        return 2
     return 0
 
 
