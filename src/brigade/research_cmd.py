@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from threading import Event, Thread
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from .localio import utc_now_iso as _now
+from .localio import parse_iso_datetime, utc_now_iso as _now
 from .research import config as rconfig
 from .research import handoff as handoffmod
 from .research import registry
@@ -546,15 +546,9 @@ def _complete_standard_run(
             "run.json is not an object during completion",
         )
     duration = None
-    started_raw = receipt.get("started_at")
-    if isinstance(started_raw, str):
-        try:
-            started = datetime.fromisoformat(started_raw)
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
-            duration = max(0.0, round((finished - started).total_seconds(), 3))
-        except ValueError:
-            duration = None
+    started = parse_iso_datetime(receipt.get("started_at"))
+    if started is not None:
+        duration = max(0.0, round((finished - started).total_seconds(), 3))
     update_fields: dict[str, Any] = {
         "status": "completed",
         "finished_at": finished_at,
@@ -1167,16 +1161,7 @@ def run(
                 )
             if isinstance(receipt.get("run_budget"), dict):
                 persisted_budget = receipt["run_budget"]
-            started_raw = receipt.get("started_at")
-            if isinstance(started_raw, str):
-                from datetime import datetime, timezone
-
-                try:
-                    started_at = datetime.fromisoformat(started_raw)
-                    if started_at.tzinfo is None:
-                        started_at = started_at.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    started_at = None
+            started_at = parse_iso_datetime(receipt.get("started_at"))
             run_lifecycle.prepare_lifecycle_journal(
                 run_directory,
                 workspace=target,

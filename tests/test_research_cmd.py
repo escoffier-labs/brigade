@@ -1494,6 +1494,33 @@ def test_phase_transition_persists_budget_projection_on_both_receipts(monkeypatc
     assert (run_dir / "report.md").is_file()
 
 
+def test_complete_standard_run_parses_trailing_z_started_at(tmp_path: Path) -> None:
+    run_id = "z-started-at"
+    registry.create_standard_run(
+        tmp_path,
+        run_id=run_id,
+        question="q",
+        profile="grounded",
+        caps={"max_time": 30},
+        roster=minimal_research_roster(),
+    )
+    run_dir = registry.standard_run_dir(tmp_path, run_id)
+    run_path = run_dir / "run.json"
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    payload["started_at"] = "2026-01-01T00:00:00Z"
+    run_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    research_cmd._complete_standard_run(
+        tmp_path,
+        run_id,
+        stats={},
+        artifacts={},
+    )
+    updated = json.loads(run_path.read_text(encoding="utf-8"))
+    assert updated["duration_seconds"] is not None
+    assert updated["duration_seconds"] >= 0
+
+
 def test_resume_reopens_failed_receipt_and_completes(monkeypatch, tmp_path: Path) -> None:
     patch_stub_lanes(monkeypatch)
     run_id = seed_cancelled_run_after_extraction(tmp_path)
@@ -1759,6 +1786,14 @@ def test_cli_cancel_terminal_completed_is_truthful_noop(tmp_path: Path, capsys) 
 
 def test_cli_run_admission_failures_exit_2(monkeypatch, tmp_path: Path) -> None:
     (tmp_path / "a.md").write_text("plants use light")
+    monkeypatch.setattr(
+        research_cmd,
+        "_load_roster",
+        lambda _target: Roster(
+            orchestrator="chef",
+            agents={"chef": Agent(name="chef", cli="codex", role="orchestrator")},
+        ),
+    )
     monkeypatch.setattr(
         research_cmd,
         "_resolve_lanes",
