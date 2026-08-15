@@ -356,3 +356,128 @@ def test_seat_invoker_does_not_persist_raw_browser_auth_error(monkeypatch, tmp_p
     assert receipt["failure_kind"] == "browser-auth"
     assert receipt["detail"] == "browser authentication failed; run research doctor"
     assert receipt["attempts"][0]["failure_kind"] == "browser-auth"
+
+
+def test_oracle_gate_wait_passes_remaining_timeout_to_dispatch(monkeypatch, tmp_path: Path) -> None:
+    """Finding 6: gate wait must not leave dispatch with a full fresh deadline_ceiling."""
+    import brigade.run_seat as run_seat_mod
+
+    clock = {"now": 1000.0}
+
+    def fake_monotonic() -> float:
+        return clock["now"]
+
+    class PartialWaitGate:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+
+        def acquire(self, *, timeout: float) -> bool:
+            self.timeouts.append(timeout)
+            # Deterministic clock model: gate wait consumes half the budget.
+            clock["now"] += timeout / 2.0
+            return True
+
+        def release(self) -> None:
+            return None
+
+    captured: dict[str, object] = {}
+
+    def fake_dispatch(_assignments, roster, **_kwargs):
+        # Roster agent timeout is what SeatInvoker stamped after the gate wait.
+        captured["dispatch_timeout"] = roster.agents["oracle"].timeout_seconds
+        return [
+            WorkerResult(
+                worker="oracle",
+                task="research.plan",
+                text='{"sub_questions": []}',
+                ok=True,
+                detail="",
+            )
+        ]
+
+    gate = PartialWaitGate()
+    # raising=False so the RED pin still works before production imports time.
+    monkeypatch.setattr(
+        run_seat_mod,
+        "time",
+        type("T", (), {"monotonic": staticmethod(fake_monotonic)})(),
+        raising=False,
+    )
+    monkeypatch.setattr("brigade.run_seat._ORACLE_GATE", gate)
+    monkeypatch.setattr("brigade.run_seat.run_transport.dispatch", fake_dispatch)
+    invoker = SeatInvoker(
+        roster=_oracle_research_roster(),
+        cwd=tmp_path,
+        run_id="research-1",
+        process_registry=ProcessRegistry(),
+        output_dir=tmp_path / ".brigade" / "runs" / "research-1",
+    )
+
+    result = invoker.invoke(
+        seat="oracle",
+        phase="research.plan",
+        prompt="plan",
+        timeout=10,
+        deadline_ceiling=True,
+    )
+
+    assert result.ok is True
+    assert gate.timeouts == [10.0]
+    # Desired: dispatch receives remaining time after gate wait, not another full 10s.
+    assert captured["dispatch_timeout"] == pytest.approx(5.0)
+
+
+def test_oracle_gate_exhaustion_does_not_dispatch(monkeypatch, tmp_path: Path) -> None:
+    """Finding A: gate wait that consumes the whole deadline must not dispatch with 0s."""
+    import brigade.run_seat as run_seat_mod
+
+    clock = {"now": 1000.0}
+
+    def fake_monotonic() -> float:
+        return clock["now"]
+
+    class ExhaustingGate:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+
+        def acquire(self, *, timeout: float) -> bool:
+            self.timeouts.append(timeout)
+            # Deterministic: waiting for the gate burns the entire remaining budget.
+            clock["now"] += timeout
+            return True
+
+        def release(self) -> None:
+            return None
+
+    gate = ExhaustingGate()
+    monkeypatch.setattr(
+        run_seat_mod,
+        "time",
+        type("T", (), {"monotonic": staticmethod(fake_monotonic)})(),
+        raising=False,
+    )
+    monkeypatch.setattr("brigade.run_seat._ORACLE_GATE", gate)
+    monkeypatch.setattr(
+        "brigade.run_seat.run_transport.dispatch",
+        lambda *_args, **_kwargs: pytest.fail("dispatch must not run after deadline exhaustion"),
+    )
+    invoker = SeatInvoker(
+        roster=_oracle_research_roster(),
+        cwd=tmp_path,
+        run_id="research-1",
+        process_registry=ProcessRegistry(),
+        output_dir=tmp_path / ".brigade" / "runs" / "research-1",
+    )
+
+    result = invoker.invoke(
+        seat="oracle",
+        phase="research.plan",
+        prompt="plan",
+        timeout=10,
+        deadline_ceiling=True,
+    )
+
+    assert gate.timeouts == [10.0]
+    assert result.ok is False
+    assert result.failure_phase == "dispatch"
+    assert result.failure_kind == "timeout"

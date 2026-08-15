@@ -1406,3 +1406,56 @@ def test_review_rejects_stale_last_attempt_id() -> None:
     with pytest.raises(ResearchRunError) as caught:
         ResearchEngine(lanes=lanes, sources=[fixed_source_provider()], caps=Caps(max_rounds=1)).run("q")
     assert caught.value.failure_kind == "missing-attempt-id"
+
+
+def test_discovery_provider_error_does_not_start_queued_jobs(monkeypatch) -> None:
+    """Finding 2 (engine): after a provider error, workers must not dequeue more jobs."""
+    import threading
+
+    import brigade.research.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "_DISCOVERY_MAX_WORKERS", 1)
+    real_thread = threading.Thread
+
+    def sync_thread(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        # Run discovery workers inline so dequeue-after-error is deterministic.
+        thread.start = thread.run  # type: ignore[method-assign]
+        return thread
+
+    monkeypatch.setattr(engine_mod.threading, "Thread", sync_thread)
+    started: list[int] = []
+
+    class OrderedProvider:
+        trust = "web"
+
+        def __init__(self, index: int) -> None:
+            self.index = index
+            self.source_id = f"p{index}"
+
+        def bind_timeout(self, seconds: float) -> None:
+            del seconds
+
+        def search(self, query: str, limit: int):
+            del query, limit
+            started.append(self.index)
+            if self.index == 0:
+                raise RuntimeError("provider-0 failed")
+            return []
+
+        def fetch(self, url: str):
+            del url
+            return {"success": False, "content": "", "title": ""}
+
+    providers = [OrderedProvider(0), OrderedProvider(1)]
+    engine = ResearchEngine(
+        lanes=fake_lanes([]),
+        sources=providers,
+        caps=Caps(max_rounds=1, min_rounds=1, max_time=30),
+    )
+    engine._start = __import__("time").time()
+
+    with pytest.raises(ResearchRunError) as caught:
+        engine._discover_round(["q"], providers, set())
+    assert caught.value.failure_kind == "provider-failed"
+    assert started == [0]

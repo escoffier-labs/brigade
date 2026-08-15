@@ -386,14 +386,17 @@ class ResearchEngine:
         # Owned daemon worker queue capped at min(len(providers), 4). A permanently
         # blocked provider must not keep the CLI alive at exit (non-daemon
         # ThreadPoolExecutor would), and we must not spawn one thread per provider.
+        # Shared stop event: after the first provider error or deadline/cancel stop,
+        # workers must not dequeue another provider.
         worker_count = min(len(providers), _DISCOVERY_MAX_WORKERS)
         job_queue: queue.Queue[int] = queue.Queue()
         result_queue: queue.Queue[tuple[str, int, Any]] = queue.Queue()
+        stop = threading.Event()
         for index in range(len(providers)):
             job_queue.put(index)
 
         def _worker() -> None:
-            while True:
+            while not stop.is_set():
                 try:
                     job_index = job_queue.get_nowait()
                 except queue.Empty:
@@ -403,6 +406,8 @@ class ResearchEngine:
                     result_queue.put(("ok", job_index, _provider_batch(job_index, job_provider)))
                 except BaseException as exc:  # noqa: BLE001 - surface to scheduler
                     result_queue.put(("err", job_index, exc))
+                    stop.set()
+                    return
 
         for worker_id in range(worker_count):
             threading.Thread(
@@ -413,26 +418,36 @@ class ResearchEngine:
 
         ordered: list[tuple[int, list[SourceEnvelope]]] = []
         pending = set(range(len(providers)))
-        while pending:
-            self._check_cancel("discovery")
-            remaining = self._remaining_time()
-            if remaining <= 0:
-                raise ResearchRunError("discovery", "timeout", "research run exceeded max_time")
-            try:
-                status, index, payload = result_queue.get(timeout=min(remaining, 1.0))
-            except queue.Empty:
-                continue
-            pending.discard(index)
-            if status == "err":
-                exc = payload
-                if isinstance(exc, BudgetPolicyError):
-                    raise exc
-                if isinstance(exc, LifecycleJournalError):
-                    raise ResearchRunError("discovery", "lifecycle-journal", str(exc)) from exc
-                if isinstance(exc, (ResearchSeatError, BrowserAiDiscoveryError, ResearchRunError)):
-                    raise exc
-                raise ResearchRunError("discovery", "provider-failed", str(exc)) from exc
-            ordered.append(payload)
+        try:
+            while pending:
+                try:
+                    self._check_cancel("discovery")
+                except ResearchRunError:
+                    stop.set()
+                    raise
+                remaining = self._remaining_time()
+                if remaining <= 0:
+                    stop.set()
+                    raise ResearchRunError("discovery", "timeout", "research run exceeded max_time")
+                try:
+                    status, index, payload = result_queue.get(timeout=min(remaining, 1.0))
+                except queue.Empty:
+                    continue
+                pending.discard(index)
+                if status == "err":
+                    stop.set()
+                    exc = payload
+                    if isinstance(exc, BudgetPolicyError):
+                        raise exc
+                    if isinstance(exc, LifecycleJournalError):
+                        raise ResearchRunError("discovery", "lifecycle-journal", str(exc)) from exc
+                    if isinstance(exc, (ResearchSeatError, BrowserAiDiscoveryError, ResearchRunError)):
+                        raise exc
+                    raise ResearchRunError("discovery", "provider-failed", str(exc)) from exc
+                ordered.append(payload)
+        except BaseException:
+            stop.set()
+            raise
 
         ordered.sort(key=lambda item: item[0])
         envelopes: list[SourceEnvelope] = []

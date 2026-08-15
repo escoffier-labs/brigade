@@ -99,6 +99,115 @@ def _emit_cli_run_id_error(exc: BaseException, *, json_output: bool) -> int:
     return 2
 
 
+def _emit_missing_run_error(run_id: str, *, json_output: bool) -> int:
+    message = f"no such run: {run_id}"
+    if json_output:
+        print(
+            _json.dumps(
+                {
+                    "error": message,
+                    "run_id": run_id,
+                    "failure_kind": "no-such-run",
+                    "failure_phase": "admission",
+                    "detail": message,
+                    "status": "failed",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(message)
+    return 1
+
+
+def _invalid_config_failure(*, detail: str, run_id: str = "") -> ResearchCommandFailure:
+    return ResearchCommandFailure(
+        run_id=run_id,
+        failure_kind="invalid-config",
+        failure_phase="admission",
+        detail=_operator_safe_detail(detail) or "invalid research configuration",
+        exit_code=2,
+    )
+
+
+def _admission_failure(*, run_id: str, detail: str, failure_kind: str = "admission") -> ResearchCommandFailure:
+    return ResearchCommandFailure(
+        run_id=run_id,
+        failure_kind=failure_kind,
+        failure_phase="admission",
+        detail=_operator_safe_detail(detail) or detail,
+        exit_code=2,
+    )
+
+
+def _research_run_exists(target: Path, run_id: str) -> bool:
+    return registry.standard_run_dir(target, run_id).is_dir() or registry.legacy_run_dir(target, run_id).is_dir()
+
+
+def _unique_research_run_id(target: Path, question: str, preferred: str) -> str:
+    """Return preferred when free; otherwise mint a collision-safe sibling id."""
+    if not _research_run_exists(target, preferred):
+        return preferred
+    import secrets
+    from datetime import datetime, timezone
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    base = registry.slug(question)
+    for _ in range(64):
+        candidate = f"{stamp}-{base}-{secrets.token_hex(3)}"
+        if not _research_run_exists(target, candidate):
+            return candidate
+    raise ResearchCommandFailure(
+        run_id=preferred,
+        failure_kind="admission",
+        detail="unable to allocate a unique research run id",
+        exit_code=2,
+    )
+
+
+def _wall_clock_resume_refusal(target: Path, run_id: str) -> ResearchCommandFailure | None:
+    """Refuse resume when persisted wall-clock budget is already exhausted.
+
+    Must run before ``_reopen_standard_run`` mutates the receipt or journal.
+    """
+    from datetime import datetime, timezone
+
+    from .run_budget import declaration_from_persisted_artifact
+
+    run_directory = registry.standard_run_dir(target, run_id)
+    run_path = run_directory / "run.json"
+    if not run_path.is_file():
+        return None
+    try:
+        receipt = _json.loads(run_path.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError):
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    budget = receipt.get("run_budget")
+    if not isinstance(budget, dict):
+        return None
+    try:
+        declaration = declaration_from_persisted_artifact(budget)
+    except Exception:  # noqa: BLE001 - malformed budget is not a silent resume gate
+        return None
+    wall = declaration.wall_clock_seconds
+    if wall is None:
+        return None
+    started_at = parse_iso_datetime(receipt.get("started_at"))
+    if started_at is None:
+        return None
+    elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+    if elapsed < float(wall):
+        return None
+    return _admission_failure(
+        run_id=run_id,
+        failure_kind="budget-exhausted",
+        detail="run wall-clock budget exhausted; resume refused",
+    )
+
+
 def _resolve_backend(target: Path):
     from . import roster as roster_mod
     from .research import llm
@@ -344,6 +453,15 @@ def _load_roster(target: Path):
     from . import roster as roster_mod
 
     return roster_mod.load_roster(roster_mod.resolve_roster_path(target))
+
+
+def _load_research_config(target: Path, profile: Optional[str] = None):
+    try:
+        cfg = rconfig.load(target)
+        research_profile = cfg.profile(profile)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        raise _invalid_config_failure(detail=str(exc)) from exc
+    return cfg, research_profile
 
 
 def _budget_append_event(run_directory: Path, workspace: Path):
@@ -1027,8 +1145,7 @@ def run(
     from . import run_lifecycle, runguard
     from .proc import ProcessRegistry
 
-    cfg = rconfig.load(target)
-    research_profile = cfg.profile(profile)
+    cfg, research_profile = _load_research_config(target, profile)
     allows_local = _profile_allows_discovery(research_profile, "local")
     allows_cli = _profile_allows_discovery(research_profile, "cli")
     allows_web = _profile_allows_discovery(research_profile, "web")
@@ -1040,11 +1157,17 @@ def run(
     caps_kwargs = {**cfg.caps_overrides(), **{k: v for k, v in overrides.items() if v is not None}}
     caps_kwargs.pop("_resume", None)
     caps = Caps.build(**caps_kwargs)
+    requested_run_id = run_id
     run_id = run_id or _new_run_id(question)
+    if resume is None and requested_run_id is None:
+        run_id = _unique_research_run_id(target, question, run_id)
     paths = _resolve_sources(target, corpus, sources) if allows_local else []
     cli_providers = clisrc.build_providers(cfg.source_adapters(), target=target) if allows_cli else []
     blockers: List[str] = []
-    roster = _load_roster(target)
+    try:
+        roster = _load_roster(target)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        raise _invalid_config_failure(detail=str(exc), run_id=run_id) from exc
 
     index = localsrc.build_index(paths) if paths else None
 
@@ -1094,6 +1217,7 @@ def run(
     process_registry = ProcessRegistry()
 
     def _fail(status: str, phase: str, kind: str, detail: str) -> str:
+        process_registry.cancel()
         _terminate_standard_run(
             target,
             run_id,
@@ -1117,6 +1241,12 @@ def run(
                     caps=caps.__dict__.copy(),
                     roster=roster,
                 )
+
+            if resume is not None or (existing is not None and existing.get("status") in {"failed", "cancelled"}):
+                refusal = _wall_clock_resume_refusal(target, run_id)
+                if refusal is not None:
+                    raise refusal
+
             registry.update_research(
                 target,
                 run_id,
@@ -1130,16 +1260,7 @@ def run(
             can_skip_sources = resume is not None and (resume.sources is not None or resume.findings is not None)
             if not providers and not browser_ai_enabled and not can_skip_sources:
                 detail = "no local, CLI, web, or browser-AI source route available"
-                _terminate_standard_run(
-                    target,
-                    run_id,
-                    status="failed",
-                    failure_phase="admission",
-                    failure_kind="no-source-route",
-                    detail=detail,
-                    blockers=blockers + [detail],
-                )
-                return run_id
+                return _fail("failed", "admission", "no-source-route", detail)
 
             if resume is not None or (existing is not None and existing.get("status") in {"failed", "cancelled"}):
                 try:
@@ -1466,6 +1587,7 @@ def run(
             finally:
                 watcher.stop()
                 watcher.join(timeout=1)
+                process_registry.cancel()
     except ResearchCommandFailure:
         raise
     except ResearchRunError as e:
@@ -1489,6 +1611,9 @@ def run(
             detail=_operator_safe_detail(str(e)),
             exit_code=2,
         ) from e
+    finally:
+        # Terminal exits (success or failure) must stop any still-registered workers.
+        process_registry.cancel()
 
     return run_id
 
@@ -1622,43 +1747,55 @@ def resume(
 
     status = str(rec.get("status") or "")
     if status == "completed":
-        raise SystemExit("cannot resume a completed research run")
+        raise _admission_failure(run_id=run_id, detail="cannot resume a completed research run")
     run_directory = registry.standard_run_dir(target, run_id)
     if runguard.has_active_run_owner(target, run_directory):
-        raise SystemExit("cannot resume while a live owner holds the run lock")
-    if status in {"failed", "cancelled", "running", "started", "error"} or not rec.get("finished_at"):
-        persisted_caps = _dict_or_empty(rec.get("caps"))
-        for key in ("max_time", "max_dispatches"):
-            if key in overrides and overrides[key] is not None and key in persisted_caps:
-                if overrides[key] != persisted_caps[key]:
-                    raise SystemExit(f"cannot override {key} on resume")
-        state = resume_state(target, run_id)
-        if refresh:
-            # Escape hatch: keep at most the durable plan; repeat discovery+.
-            state = ResumeState(plan=state.plan)
-        manifest = _dict_or_empty(rec.get("manifest"))
-        restored_overrides: Dict[str, Any] = dict(persisted_caps)
-        restored_overrides.update({k: v for k, v in overrides.items() if v is not None})
-        # Enforce original wall-clock / dispatch caps even if a caller passed equals.
-        if "max_time" in persisted_caps:
-            restored_overrides["max_time"] = persisted_caps["max_time"]
-        if "max_dispatches" in persisted_caps:
-            restored_overrides["max_dispatches"] = persisted_caps["max_dispatches"]
-        return run(
-            target=target,
-            question=str(rec.get("question") or ""),
-            sources=list(manifest.get("sources") or []),
-            web=bool(manifest.get("web_enabled")),
-            corpus=manifest.get("corpus") if isinstance(manifest.get("corpus"), str) else None,
-            provider=manifest.get("provider") if isinstance(manifest.get("provider"), str) else None,
-            browser_ai_research=bool(manifest.get("browser_ai_research")),
-            profile=rec.get("profile") if isinstance(rec.get("profile"), str) else None,
-            category=rec.get("category") if isinstance(rec.get("category"), str) else None,
-            overrides=restored_overrides,
+        raise _admission_failure(
             run_id=run_id,
-            resume=state,
+            detail="cannot resume while a live owner holds the run lock",
         )
-    raise SystemExit(f"cannot resume run in status {status!r}")
+    resumable = status in {"failed", "cancelled", "running", "started", "error"} or not rec.get("finished_at")
+    if not resumable:
+        raise _admission_failure(
+            run_id=run_id,
+            detail=f"cannot resume run in status {status!r}",
+        )
+
+    refusal = _wall_clock_resume_refusal(target, run_id)
+    if refusal is not None:
+        raise refusal
+
+    persisted_caps = _dict_or_empty(rec.get("caps"))
+    for key in ("max_time", "max_dispatches"):
+        if key in overrides and overrides[key] is not None and key in persisted_caps:
+            if overrides[key] != persisted_caps[key]:
+                raise SystemExit(f"cannot override {key} on resume")
+    state = resume_state(target, run_id)
+    if refresh:
+        # Escape hatch: keep at most the durable plan; repeat discovery+.
+        state = ResumeState(plan=state.plan)
+    manifest = _dict_or_empty(rec.get("manifest"))
+    restored_overrides: Dict[str, Any] = dict(persisted_caps)
+    restored_overrides.update({k: v for k, v in overrides.items() if v is not None})
+    # Enforce original wall-clock / dispatch caps even if a caller passed equals.
+    if "max_time" in persisted_caps:
+        restored_overrides["max_time"] = persisted_caps["max_time"]
+    if "max_dispatches" in persisted_caps:
+        restored_overrides["max_dispatches"] = persisted_caps["max_dispatches"]
+    return run(
+        target=target,
+        question=str(rec.get("question") or ""),
+        sources=list(manifest.get("sources") or []),
+        web=bool(manifest.get("web_enabled")),
+        corpus=manifest.get("corpus") if isinstance(manifest.get("corpus"), str) else None,
+        provider=manifest.get("provider") if isinstance(manifest.get("provider"), str) else None,
+        browser_ai_research=bool(manifest.get("browser_ai_research")),
+        profile=rec.get("profile") if isinstance(rec.get("profile"), str) else None,
+        category=rec.get("category") if isinstance(rec.get("category"), str) else None,
+        overrides=restored_overrides,
+        run_id=run_id,
+        resume=state,
+    )
 
 
 def cancel(*, target: Path, run_id: str) -> None:
@@ -2317,7 +2454,10 @@ def cli_init(*, target: Path, profile: Optional[str] = None, json_output: bool =
 def cli_doctor(*, target: Path, profile: Optional[str] = None, json_output: bool = False) -> int:
     from .research.doctor import doctor_payload
 
-    payload = doctor_payload(target, profile_name=profile)
+    try:
+        payload = doctor_payload(target, profile_name=profile)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return _emit_command_failure(_invalid_config_failure(detail=str(exc)), json_output=json_output)
     if json_output:
         print(_json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -2407,8 +2547,7 @@ def cli_status(
 
     rec = registry.show_run(target, run_id)
     if rec is None:
-        print(f"no such run: {run_id}")
-        return 1
+        return _emit_missing_run_error(run_id, json_output=json_output)
     payload = _status_payload(target=target, runs=[rec])
     if json_output:
         print(_json.dumps(payload, indent=2, sort_keys=True))
@@ -2432,8 +2571,7 @@ def cli_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
         return _emit_cli_run_id_error(exc, json_output=json_output)
     rec = registry.show_run(target, run_id)
     if rec is None:
-        print(f"no such run: {run_id}")
-        return 1
+        return _emit_missing_run_error(run_id, json_output=json_output)
     if json_output:
         print(_json.dumps(_show_payload(target=target, run_id=run_id, rec=rec), indent=2, sort_keys=True))
         return 0
@@ -2508,8 +2646,7 @@ def cli_cancel(*, target: Path, run_id: str, json_output: bool = False) -> int:
     except SystemExit as exc:
         return _emit_cli_run_id_error(exc, json_output=json_output)
     if registry.show_run(target, run_id) is None:
-        print(f"no such run: {run_id}")
-        return 1
+        return _emit_missing_run_error(run_id, json_output=json_output)
     cancel(target=target, run_id=run_id)
     rec = registry.show_run(target, run_id) or {"run_id": run_id, "status": "cancelled"}
     if json_output:
@@ -2536,17 +2673,27 @@ def cli_resume(
         message = str(e)
         if "invalid run_id" in message.lower():
             return _emit_cli_run_id_error(e, json_output=json_output)
-        print(message)
-        lowered = message.lower()
-        if (
-            "completed" in lowered
-            or "live owner" in lowered
-            or "cannot override" in lowered
-            or "cannot refresh" in lowered
-            or "legacy" in lowered
-        ):
-            return 2
-        return 1
+        if message.startswith("no such run:"):
+            return _emit_missing_run_error(run_id, json_output=json_output)
+        # Typed admission path owns non-resumable statuses; leftover SystemExit stays exit 2.
+        if json_output:
+            print(
+                _json.dumps(
+                    {
+                        "run_id": run_id,
+                        "status": "failed",
+                        "failure_kind": "admission",
+                        "failure_phase": "admission",
+                        "detail": message,
+                        "blockers": [message],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(message)
+        return 2
     rec = registry.show_run(target, run_id) or {"run_id": run_id}
     if json_output:
         print(_json.dumps(_sanitize_projection_value(rec), indent=2, sort_keys=True))
@@ -2563,11 +2710,27 @@ def cli_open(*, target: Path, run_id: str, json_output: bool = False) -> int:
         return _emit_cli_run_id_error(exc, json_output=json_output)
     rec = registry.show_run(target, run_id)
     if rec is None:
-        print(f"no such run: {run_id}")
-        return 1
+        return _emit_missing_run_error(run_id, json_output=json_output)
     rel = rec.get("artifacts", {}).get("report_html")
     if not rel:
-        print(f"no report for run: {run_id}")
+        message = f"no report for run: {run_id}"
+        if json_output:
+            print(
+                _json.dumps(
+                    {
+                        "run_id": run_id,
+                        "status": "failed",
+                        "failure_kind": "missing-artifact",
+                        "failure_phase": "admission",
+                        "detail": message,
+                        "error": message,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(message)
         return 1
     path = registry.run_dir(target, run_id) / rel
     if json_output:

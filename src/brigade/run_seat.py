@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
@@ -135,6 +136,7 @@ class SeatInvoker:
             )
 
         if agent.cli == "oracle":
+            gate_started = time.monotonic()
             acquired = _ORACLE_GATE.acquire(timeout=effective_timeout)
             if not acquired:
                 worker = run_transport.WorkerResult(
@@ -148,21 +150,52 @@ class SeatInvoker:
                 )
             else:
                 try:
-                    results = dispatch()
+                    # Gate wait counts against deadline_ceiling; pass only remaining time.
+                    if deadline_ceiling:
+                        elapsed = time.monotonic() - gate_started
+                        remaining = max(0.0, effective_timeout - elapsed)
+                        if remaining <= 0.0:
+                            worker = run_transport.WorkerResult(
+                                worker=seat,
+                                task=phase,
+                                text="",
+                                ok=False,
+                                detail="timed out waiting for the Oracle dispatch gate",
+                                failure_phase="dispatch",
+                                failure_kind="timeout",
+                            )
+                        else:
+                            effective = replace(agent, timeout_seconds=remaining)
+                            roster = replace(self.roster, agents={**self.roster.agents, seat: effective})
+                            results = dispatch()
+                            if not results:
+                                worker = run_transport.WorkerResult(
+                                    worker=seat,
+                                    task=phase,
+                                    text="",
+                                    ok=False,
+                                    detail="dispatch returned no worker results",
+                                    failure_phase="dispatch",
+                                    failure_kind="unclassified",
+                                )
+                            else:
+                                worker = results[0]
+                    else:
+                        results = dispatch()
+                        if not results:
+                            worker = run_transport.WorkerResult(
+                                worker=seat,
+                                task=phase,
+                                text="",
+                                ok=False,
+                                detail="dispatch returned no worker results",
+                                failure_phase="dispatch",
+                                failure_kind="unclassified",
+                            )
+                        else:
+                            worker = results[0]
                 finally:
                     _ORACLE_GATE.release()
-                if not results:
-                    worker = run_transport.WorkerResult(
-                        worker=seat,
-                        task=phase,
-                        text="",
-                        ok=False,
-                        detail="dispatch returned no worker results",
-                        failure_phase="dispatch",
-                        failure_kind="unclassified",
-                    )
-                else:
-                    worker = results[0]
         else:
             results = dispatch()
             if not results:
