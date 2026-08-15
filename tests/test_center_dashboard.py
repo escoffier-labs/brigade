@@ -1,6 +1,7 @@
 import re
 import subprocess
 import threading
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -674,7 +675,7 @@ def test_memory_operations_cards_density_matches_inventory_contract(monkeypatch,
                     title="Architecture card",
                     category="architecture",
                     tags=["system", "design"],
-                    updated_at="2026-08-11",
+                    updated_at=(date.today() - timedelta(days=3)).isoformat(),
                     size_bytes=401,
                 ),
                 _inventory_item(
@@ -725,8 +726,6 @@ def test_memory_operations_cards_density_matches_inventory_contract(monkeypatch,
 
 
 def test_memory_operations_humanizes_card_age():
-    from datetime import date
-
     from brigade.center_cmd.dashboard.views import memory_operations
 
     assert memory_operations._human_age("2026-08-11", today=date(2026, 8, 14)) == "3d"
