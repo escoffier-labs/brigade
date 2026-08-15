@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -273,6 +274,54 @@ def test_seat_invoker_keeps_per_invocation_log_paths(monkeypatch, tmp_path: Path
     assert (output_dir / first_payload["stderr_log"]).read_text(encoding="utf-8") == "first-stderr\n"
     assert (output_dir / second_payload["stdout_log"]).read_text(encoding="utf-8") == "second-stdout\n"
     assert (output_dir / second_payload["stderr_log"]).read_text(encoding="utf-8") == "second-stderr\n"
+
+
+def test_seat_invoker_drops_late_worker_receipt_after_close_holds_receipt_lock_boundary(
+    monkeypatch, tmp_path: Path
+) -> None:
+    entered_dispatch = Event()
+    release_dispatch = Event()
+
+    def fake_dispatch(*_args, **_kwargs):
+        entered_dispatch.set()
+        assert release_dispatch.wait(timeout=1)
+        return [WorkerResult(worker="luna", task="research.discover", text="[]", ok=True, detail="")]
+
+    monkeypatch.setattr("brigade.run_seat.run_transport.dispatch", fake_dispatch)
+    receipt_admission = Event()
+    receipt_admission.set()
+    output_dir = tmp_path / ".brigade" / "runs" / "research-1"
+    invoker = SeatInvoker(
+        roster=_research_roster(),
+        cwd=tmp_path,
+        run_id="research-1",
+        process_registry=ProcessRegistry(),
+        output_dir=output_dir,
+        receipt_admission=receipt_admission,
+    )
+    result_box = {}
+    worker = Thread(
+        target=lambda: result_box.setdefault(
+            "result",
+            invoker.invoke(seat="luna", phase="research.discover", prompt="discover", timeout=91),
+        )
+    )
+    worker.start()
+    assert entered_dispatch.wait(timeout=1)
+
+    invoker._receipt_lock.acquire()
+    closer = Thread(target=invoker.close_receipts)
+    closer.start()
+    invoker._receipt_lock.release()
+    closer.join(timeout=1)
+    assert not closer.is_alive()
+
+    release_dispatch.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert result_box["result"].attempt_id == "research-1:discarded"
+    assert not (output_dir / "workers").exists()
 
 
 def test_seat_invoker_empty_dispatch_returns_typed_failed_result(monkeypatch, tmp_path: Path) -> None:

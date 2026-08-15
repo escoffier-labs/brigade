@@ -4361,6 +4361,11 @@ def _write_plan_artifact(
     research_entry: dict[str, Any] | None = None
     research_sources = list(sources or [])
     if from_research is not None:
+        try:
+            registry.validate_run_id(from_research)
+        except ValueError:
+            print(f"error: research run not found: {from_research}", file=sys.stderr)
+            return 1
         rec = registry.show_run(target, from_research)
         if rec is None:
             print(f"error: research run not found: {from_research}", file=sys.stderr)

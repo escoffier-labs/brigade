@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from threading import BoundedSemaphore, Lock
+from threading import BoundedSemaphore, Event, Lock
 from typing import Any, Callable
 
 from . import agents, localio, proc, run_control, run_receipts, run_transport
@@ -68,6 +68,7 @@ class SeatInvoker:
         on_dispatch_observed: Callable[[Agent, int], None] | None = None,
         on_dispatch_completed: Callable[[Agent, int], None] | None = None,
         on_dispatch_failed: Callable[[Agent, int], None] | None = None,
+        receipt_admission: Event | None = None,
     ) -> None:
         self.roster = roster
         self.cwd = cwd
@@ -81,6 +82,12 @@ class SeatInvoker:
         self.on_dispatch_observed = on_dispatch_observed
         self.on_dispatch_completed = on_dispatch_completed
         self.on_dispatch_failed = on_dispatch_failed
+        self._receipts_open = receipt_admission is None or receipt_admission.is_set()
+
+    def close_receipts(self) -> None:
+        """Atomically prevent later worker receipts from being written."""
+        with self._receipt_lock:
+            self._receipts_open = False
 
     def invoke(
         self,
@@ -218,6 +225,19 @@ class SeatInvoker:
                 attempts=tuple(replace(attempt, stdout="", stderr="") for attempt in worker.attempts),
             )
         with self._receipt_lock:
+            if not self._receipts_open:
+                return SeatResult(
+                    seat=seat,
+                    attempt_id=f"{self.run_id}:discarded",
+                    text=worker.text,
+                    ok=worker.ok,
+                    failure_phase=worker.failure_phase,
+                    failure_kind=worker.failure_kind,
+                    detail=worker.detail,
+                    requested_model=worker.requested_model or agent.model,
+                    observed_model=worker.effective_model or "unverified",
+                    attempts=tuple(worker.attempts),
+                )
             self._receipt_sequence += 1
             sequence = self._receipt_sequence
             attempt_id = f"{self.run_id}:{sequence:04d}"

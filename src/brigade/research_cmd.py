@@ -33,7 +33,7 @@ from .research.types import (
     SourceEnvelope,
 )
 from .roster import Agent
-from .run_budget import BudgetCoordinator, BudgetPolicyError, RunBudgetDeclaration
+from .run_budget import BudgetCompatibilityError, BudgetCoordinator, BudgetPolicyError, RunBudgetDeclaration
 from .selection import WRITER_INBOXES
 
 
@@ -131,6 +131,27 @@ def _invalid_config_failure(*, detail: str, run_id: str = "") -> ResearchCommand
     )
 
 
+def _invalid_sidecar_failure(*, run_id: str, detail: str) -> ResearchCommandFailure:
+    return ResearchCommandFailure(
+        run_id=run_id,
+        failure_kind="invalid-sidecar",
+        failure_phase="admission",
+        detail=_operator_safe_detail(detail) or "research sidecar is missing or invalid",
+        exit_code=2,
+    )
+
+
+def _build_validated_caps(**overrides: Any) -> Caps:
+    cap_fields = Caps.__dataclass_fields__
+    caps = Caps.build(**{name: value for name, value in overrides.items() if name in cap_fields})
+    for name, value in vars(caps).items():
+        zero_allowed = name in {"min_rounds", "max_empty_rounds", "synthesis_window"}
+        if isinstance(value, bool) or not isinstance(value, int) or (value < 0 if zero_allowed else value <= 0):
+            requirement = "a non-negative integer" if zero_allowed else "a positive integer"
+            raise ValueError(f"caps.{name} must be {requirement}")
+    return caps
+
+
 def _admission_failure(*, run_id: str, detail: str, failure_kind: str = "admission") -> ResearchCommandFailure:
     return ResearchCommandFailure(
         run_id=run_id,
@@ -208,30 +229,6 @@ def _wall_clock_resume_refusal(target: Path, run_id: str) -> ResearchCommandFail
     )
 
 
-def _resolve_backend(target: Path):
-    from . import roster as roster_mod
-    from .research import llm
-
-    r = roster_mod.load_roster(roster_mod.resolve_roster_path(target))
-    return llm.resolve_backend(r)
-
-
-class _CompatBackend:
-    def __init__(self, inner: Any, *, seat: str, phase: str) -> None:
-        self._inner = inner
-        self.seat = seat
-        self.phase = phase
-        self.requested_model = getattr(inner, "requested_model", None)
-        self.observed_model = getattr(inner, "observed_model", None) or "unverified"
-        self.last_attempt_id: str | None = None
-
-    def complete(self, messages, **kwargs) -> str:
-        text = self._inner.complete(messages, **kwargs)
-        self.observed_model = getattr(self._inner, "observed_model", None) or self.observed_model
-        self.last_attempt_id = getattr(self._inner, "last_attempt_id", None) or f"{self.seat}:{self.phase}:compat"
-        return text
-
-
 class _LocalIndexProvider:
     trust = "local"
     source_type = "local"
@@ -260,30 +257,13 @@ class _LocalIndexProvider:
         return dict(self._pages.get(url, {"success": False, "content": "", "title": ""}))
 
 
-def _lanes_from_single_backend(
-    backend: Any,
-    *,
-    synthesizer: str | None = None,
-    reviewer: str | None = None,
-    browser_discovery: Any | None = None,
-) -> ResearchLanes:
-    synth_seat = synthesizer or "researcher"
-    review_seat = reviewer or "researcher"
-    return ResearchLanes(
-        planner=_CompatBackend(backend, seat="researcher", phase="planning"),
-        extractor=_CompatBackend(backend, seat="researcher", phase="extraction"),
-        synthesizers=(_CompatBackend(backend, seat=synth_seat, phase="synthesis"),),
-        reviewer=_CompatBackend(backend, seat=review_seat, phase="review"),
-        browser_discovery=browser_discovery,
-    )
-
-
 def _build_run_invoker(
     target: Path,
     *,
     run_id: str,
     process_registry: Any | None = None,
     budget_callbacks: ResearchBudgetCallbacks | None = None,
+    receipt_admission: Event | None = None,
 ):
     from . import roster as roster_mod
     from .proc import ProcessRegistry
@@ -307,6 +287,7 @@ def _build_run_invoker(
         run_id=run_id,
         process_registry=registry_obj,
         output_dir=output_dir,
+        receipt_admission=receipt_admission,
         **callback_kwargs,
     )
 
@@ -860,8 +841,7 @@ def _resolve_lanes(
     run_id: str,
     invoker: Any | None = None,
 ) -> ResearchLanes:
-    # New runs always build PhaseBackend lanes from the roster/capability resolver.
-    # HttpBackend/_CompatBackend remain available for the legacy-resume path only.
+    # Research lanes always resolve through the roster/capability resolver.
     return _build_lanes_from_roster(
         target,
         profile=profile,
@@ -1156,7 +1136,10 @@ def run(
     browser_ai_enabled = requested_browser_ai and (allows_browser_ai or "brigade" in research_profile.discovery)
     caps_kwargs = {**cfg.caps_overrides(), **{k: v for k, v in overrides.items() if v is not None}}
     caps_kwargs.pop("_resume", None)
-    caps = Caps.build(**caps_kwargs)
+    try:
+        caps = _build_validated_caps(**caps_kwargs)
+    except ValueError as exc:
+        raise _invalid_config_failure(detail=str(exc), run_id=run_id or "") from exc
     requested_run_id = run_id
     run_id = run_id or _new_run_id(question)
     if resume is None and requested_run_id is None:
@@ -1214,9 +1197,18 @@ def run(
         worker_dispatch_count=caps.max_dispatches,
     )
     cancelled = Event()
+    receipt_admission = Event()
+    receipt_admission.set()
     process_registry = ProcessRegistry()
 
+    def _close_receipts() -> None:
+        if seat_invoker is None:
+            receipt_admission.clear()
+        else:
+            seat_invoker.close_receipts()
+
     def _fail(status: str, phase: str, kind: str, detail: str) -> str:
+        _close_receipts()
         process_registry.cancel()
         _terminate_standard_run(
             target,
@@ -1305,7 +1297,10 @@ def run(
                 incoming_snapshot=receipt,
             )
             if persisted_budget is not None:
-                declaration = declaration_from_persisted_artifact(persisted_budget)
+                try:
+                    declaration = declaration_from_persisted_artifact(persisted_budget)
+                except BudgetCompatibilityError as exc:
+                    return _fail("failed", "admission", "invalid-config", _operator_safe_detail(exc.diagnostic))
                 # Advertise the same enforceable caps BudgetCoordinator will use.
                 if declaration.wall_clock_seconds is not None:
                     caps.max_time = int(declaration.wall_clock_seconds)
@@ -1352,6 +1347,7 @@ def run(
                     run_id=run_id,
                     process_registry=process_registry,
                     budget_callbacks=budget_callbacks,
+                    receipt_admission=receipt_admission,
                 )
                 lanes = _resolve_lanes(
                     target,
@@ -1585,6 +1581,7 @@ def run(
                     )
                     return _fail(status, e.failure_phase, kind, _operator_safe_detail(e.detail))
             finally:
+                _close_receipts()
                 watcher.stop()
                 watcher.join(timeout=1)
                 process_registry.cancel()
@@ -1613,6 +1610,7 @@ def run(
         ) from e
     finally:
         # Terminal exits (success or failure) must stop any still-registered workers.
+        _close_receipts()
         process_registry.cancel()
 
     return run_id
@@ -1694,7 +1692,10 @@ def resume_legacy(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> st
     if isinstance(rec.get("caps"), dict):
         caps_kwargs.update(rec["caps"])
     caps_kwargs.update({k: v for k, v in overrides.items() if v is not None})
-    caps = Caps.build(**{k: v for k, v in caps_kwargs.items() if k != "_resume"})
+    try:
+        caps = _build_validated_caps(**{k: v for k, v in caps_kwargs.items() if k != "_resume"})
+    except ValueError as exc:
+        raise _invalid_config_failure(detail=str(exc), run_id=run_id) from exc
     resume = None
     if isinstance(legacy_cp, dict):
         resume = _resume_state_from_legacy_checkpoint(
@@ -1770,7 +1771,13 @@ def resume(
         if key in overrides and overrides[key] is not None and key in persisted_caps:
             if overrides[key] != persisted_caps[key]:
                 raise SystemExit(f"cannot override {key} on resume")
-    state = resume_state(target, run_id)
+    try:
+        state = resume_state(target, run_id)
+    except (OSError, ValueError) as exc:
+        raise _invalid_sidecar_failure(
+            run_id=run_id,
+            detail=f"research sidecar is missing or invalid: {exc}",
+        ) from exc
     if refresh:
         # Escape hatch: keep at most the durable plan; repeat discovery+.
         state = ResumeState(plan=state.plan)
@@ -2647,7 +2654,13 @@ def cli_cancel(*, target: Path, run_id: str, json_output: bool = False) -> int:
         return _emit_cli_run_id_error(exc, json_output=json_output)
     if registry.show_run(target, run_id) is None:
         return _emit_missing_run_error(run_id, json_output=json_output)
-    cancel(target=target, run_id=run_id)
+    try:
+        cancel(target=target, run_id=run_id)
+    except (OSError, ValueError) as exc:
+        return _emit_command_failure(
+            _invalid_sidecar_failure(run_id=run_id, detail=f"research sidecar is missing or invalid: {exc}"),
+            json_output=json_output,
+        )
     rec = registry.show_run(target, run_id) or {"run_id": run_id, "status": "cancelled"}
     if json_output:
         print(_json.dumps({"run_id": run_id, "status": rec.get("status", "cancelled")}, indent=2, sort_keys=True))

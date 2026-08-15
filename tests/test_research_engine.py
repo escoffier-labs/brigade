@@ -921,6 +921,51 @@ def test_max_time_raises_timeout() -> None:
     assert caught.value.failure_kind == "timeout"
 
 
+def test_extraction_checks_wall_clock_before_each_source(monkeypatch) -> None:
+    import brigade.research.engine as engine_mod
+
+    calls: list[tuple[str, str]] = []
+    lanes = fake_lanes(calls)
+    lanes.extractor.responses = [
+        '{"summary":"first","evidence":"first"}',
+        '{"summary":"second","evidence":"second"}',
+    ]
+    source_one = SourceEnvelope.build(
+        origin="local",
+        provider="fixture",
+        uri="docs/one.md",
+        content="first",
+        trust="local",
+        acquired_at="2026-08-14T00:00:00+00:00",
+    )
+    source_two = SourceEnvelope.build(
+        origin="local",
+        provider="fixture",
+        uri="docs/two.md",
+        content="second",
+        trust="local",
+        acquired_at="2026-08-14T00:00:00+00:00",
+    )
+    engine = ResearchEngine(lanes=lanes, sources=[], caps=Caps(max_time=1))
+    engine._start = 10.0
+    now = {"value": 10.0}
+    monkeypatch.setattr(engine_mod.time, "time", lambda: now["value"])
+
+    original_complete = lanes.extractor.complete
+
+    def complete_then_expire(*args, **kwargs):
+        value = original_complete(*args, **kwargs)
+        now["value"] = 11.0
+        return value
+
+    lanes.extractor.complete = complete_then_expire
+
+    with pytest.raises(ResearchRunError, match="exceeded max_time"):
+        engine._extract("q", (source_one, source_two))
+
+    assert calls == [("extraction", "luna")]
+
+
 def test_cancellation_event_stops_before_phase() -> None:
     from threading import Event
 

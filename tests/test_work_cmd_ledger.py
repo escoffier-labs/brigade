@@ -475,6 +475,18 @@ def test_task_plan_write_from_research_unknown_returns_1_and_writes_nothing(tmp_
     assert not json_path.is_file()
 
 
+@pytest.mark.parametrize("unsafe_run_id", ["../outside", "nested/run"])
+def test_task_plan_write_from_research_unsafe_id_matches_not_found(tmp_path, capsys, unsafe_run_id):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, from_research=unsafe_run_id) == 1
+
+    assert capsys.readouterr().err == f"error: research run not found: {unsafe_run_id}\n"
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
+
+
 def test_task_plan_write_without_research_has_empty_runs_and_no_section(tmp_path, capsys):
     _init_git_repo(tmp_path)
     task_id = _plan_task_id(tmp_path, capsys)

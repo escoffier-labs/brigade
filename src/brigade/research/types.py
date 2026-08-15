@@ -255,8 +255,9 @@ class Caps:
     @classmethod
     def build(cls, **overrides: Any) -> Caps:
         base = cls()
+        fields = cls.__dataclass_fields__
         for k, v in overrides.items():
-            if v is not None and hasattr(base, k):
+            if v is not None and k in fields:
                 setattr(base, k, v)
         return base
 

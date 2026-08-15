@@ -59,6 +59,11 @@ class StubLlm:
         return f"## Report\nPlants use light. {token}".rstrip()
 
 
+class StubInvoker:
+    def close_receipts(self) -> None:
+        pass
+
+
 def stub_lanes(llm: StubLlm | None = None) -> ResearchLanes:
     if llm is not None:
         return ResearchLanes(
@@ -86,7 +91,7 @@ def patch_stub_lanes(monkeypatch) -> None:
     monkeypatch.setattr(
         research_cmd,
         "_build_run_invoker",
-        lambda *_args, **_kwargs: object(),
+        lambda *_args, **_kwargs: StubInvoker(),
     )
     monkeypatch.setattr(
         research_cmd,
@@ -270,11 +275,8 @@ def test_cli_forwards_category_synthesizer_reviewer_and_profile(monkeypatch, tmp
     assert captured["category"] == "ops"
 
 
-def test_new_run_resolve_lanes_bypasses_resolve_backend_and_forwards_overrides(monkeypatch, tmp_path: Path) -> None:
+def test_new_run_resolves_lanes_from_roster_and_forwards_overrides(monkeypatch, tmp_path: Path) -> None:
     seen: dict[str, object] = {}
-
-    def boom(_target: Path) -> StubLlm:
-        raise AssertionError("_resolve_backend must not be used for new runs")
 
     def fake_build(
         target: Path,
@@ -293,7 +295,6 @@ def test_new_run_resolve_lanes_bypasses_resolve_backend_and_forwards_overrides(m
         seen["invoker"] = invoker
         return stub_lanes()
 
-    monkeypatch.setattr(research_cmd, "_resolve_backend", boom)
     monkeypatch.setattr(research_cmd, "_build_lanes_from_roster", fake_build)
 
     profile = rconfig.load(tmp_path).profile("grounded")
@@ -875,9 +876,12 @@ def test_opt_in_browser_provider_included_and_manifest_enabled(tmp_path: Path, m
             return {"success": False, "content": "", "title": ""}
 
     shared: dict[str, object] = {}
-    sentinel = object()
+    sentinel = StubInvoker()
 
-    def fake_invoker(target: Path, *, run_id: str, process_registry=None, budget_callbacks=None):
+    def fake_invoker(
+        target: Path, *, run_id: str, process_registry=None, budget_callbacks=None, receipt_admission=None
+    ):
+        del process_registry, budget_callbacks, receipt_admission
         shared["built"] = (target, run_id)
         return sentinel
 
@@ -2242,7 +2246,7 @@ def test_successful_primary_persists_resolved_lanes_and_synthesis_projection(tmp
             browser_discovery=None,
         ),
     )
-    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: object())
+    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: StubInvoker())
     monkeypatch.setattr(
         research_cmd,
         "_load_roster",
@@ -2335,7 +2339,7 @@ def test_synthesis_fallback_persists_fallbacks_projection(tmp_path: Path, monkey
             browser_discovery=None,
         ),
     )
-    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: object())
+    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: StubInvoker())
     monkeypatch.setattr(
         research_cmd,
         "_load_roster",
@@ -2426,7 +2430,7 @@ def test_browser_ai_persists_discovery_mode_and_source_counts(tmp_path: Path, mo
             browser_discovery=None,
         ),
     )
-    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: object())
+    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: StubInvoker())
     monkeypatch.setattr(research_cmd, "_resolve_browser_ai_provider", lambda *_a, **_k: browser)
     monkeypatch.setattr(
         research_cmd,
@@ -2465,7 +2469,7 @@ def test_failed_pre_execution_retains_resolved_lanes(tmp_path: Path, monkeypatch
         browser_discovery=None,
     )
     monkeypatch.setattr(research_cmd, "_resolve_lanes", lambda *_a, **_k: lanes)
-    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: object())
+    monkeypatch.setattr(research_cmd, "_build_run_invoker", lambda *_a, **_k: StubInvoker())
     monkeypatch.setattr(
         research_cmd,
         "_load_roster",
@@ -2934,6 +2938,138 @@ def test_cli_run_persistent_retain_lock_receipt_failure_is_safe(monkeypatch, tmp
     assert "RetainRunLockError" not in combined
     assert "failed" in combined.lower()
     assert "/home/" not in combined
+
+
+@pytest.mark.parametrize("field", ["min_rounds", "max_empty_rounds", "synthesis_window"])
+def test_validated_caps_preserve_zero_for_clamped_fields(field: str) -> None:
+    caps = research_cmd._build_validated_caps(**{field: 0})
+
+    assert getattr(caps, field) == 0
+
+
+@pytest.mark.parametrize("field", ["min_rounds", "max_empty_rounds", "synthesis_window"])
+def test_validated_caps_reject_negative_clamped_fields(field: str) -> None:
+    with pytest.raises(ValueError, match=rf"caps\.{field} must be a non-negative integer"):
+        research_cmd._build_validated_caps(**{field: -1})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "max_rounds",
+        "max_time",
+        "max_dispatches",
+        "max_urls_per_round",
+        "max_local_docs_per_round",
+        "max_content_chars",
+        "max_report_tokens",
+    ],
+)
+def test_validated_caps_require_positive_engine_and_budget_fields(field: str) -> None:
+    with pytest.raises(ValueError, match=rf"caps\.{field} must be a positive integer"):
+        research_cmd._build_validated_caps(**{field: 0})
+
+
+def test_validated_caps_ignores_unknown_and_hostile_override_keys() -> None:
+    caps = research_cmd._build_validated_caps(__class__="hostile", unknown_cap=1)
+
+    assert caps == research_cmd.Caps()
+
+
+def test_cli_run_reports_bad_known_cap_config_as_typed_json(monkeypatch, tmp_path: Path, capsys) -> None:
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "research.toml").write_text("[caps]\nmax_time = 'bad'\n", encoding="utf-8")
+    monkeypatch.setattr(research_cmd, "_load_roster", lambda _target: minimal_research_roster())
+    monkeypatch.setattr(
+        registry,
+        "create_standard_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("run must not be created")),
+    )
+
+    code = cli_run(
+        target=tmp_path,
+        question="q",
+        corpus=None,
+        sources=[],
+        web=False,
+        overrides={},
+        json_output=True,
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failure_kind"] == "invalid-config"
+    assert payload["failure_phase"] == "admission"
+
+
+@pytest.mark.parametrize("operation", ["cancel", "resume"])
+@pytest.mark.parametrize("sidecar_state", ["missing", "corrupt"])
+def test_cli_cancel_and_resume_report_invalid_sidecars_as_typed_json(
+    tmp_path: Path, capsys, operation: str, sidecar_state: str
+) -> None:
+    run_id = seed_cancelled_run_after_extraction(tmp_path)
+    research_path = registry.standard_run_dir(tmp_path, run_id) / registry.RESEARCH_ARTIFACT
+    if sidecar_state == "missing":
+        research_path.unlink()
+    else:
+        research_path.write_text("not-json\n", encoding="utf-8")
+
+    if operation == "cancel":
+        code = research_cmd.cli_cancel(target=tmp_path, run_id=run_id, json_output=True)
+    else:
+        code = cli_resume(target=tmp_path, run_id=run_id, overrides={}, json_output=True)
+
+    out = capsys.readouterr()
+    assert code == 2
+    assert "Traceback" not in out.out + out.err
+    payload = json.loads(out.out)
+    assert payload["run_id"] == run_id
+    assert payload["failure_kind"] == "invalid-sidecar"
+    assert payload["failure_phase"] == "admission"
+
+
+def test_cli_resume_does_not_misclassify_resumed_publish_oserror(monkeypatch, tmp_path: Path) -> None:
+    run_id = seed_cancelled_run_after_extraction(tmp_path)
+
+    def publishing_failure(**_kwargs):
+        raise OSError("resumed publishing failed")
+
+    monkeypatch.setattr(research_cmd, "run", publishing_failure)
+
+    with pytest.raises(OSError, match="resumed publishing failed"):
+        cli_resume(target=tmp_path, run_id=run_id, overrides={}, json_output=True)
+
+
+def _corrupt_persisted_run_budget(target: Path, run_id: str) -> None:
+    run_path = registry.standard_run_dir(target, run_id) / "run.json"
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    payload["run_budget"] = {"schema": "unsupported"}
+    run_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_resume_maps_corrupt_persisted_budget_to_invalid_config(monkeypatch, tmp_path: Path) -> None:
+    run_id = seed_cancelled_run_after_extraction(tmp_path)
+    _corrupt_persisted_run_budget(tmp_path, run_id)
+    patch_stub_lanes(monkeypatch)
+
+    assert research_cmd.resume(target=tmp_path, run_id=run_id, overrides={}) == run_id
+    rec = registry.show_run(tmp_path, run_id)
+    assert rec["failure_kind"] == "invalid-config"
+    assert rec["failure_phase"] == "admission"
+
+
+def test_cli_resume_maps_corrupt_persisted_budget_to_invalid_config_json(monkeypatch, tmp_path: Path, capsys) -> None:
+    run_id = seed_cancelled_run_after_extraction(tmp_path)
+    _corrupt_persisted_run_budget(tmp_path, run_id)
+    patch_stub_lanes(monkeypatch)
+
+    code = cli_resume(target=tmp_path, run_id=run_id, overrides={}, json_output=True)
+
+    assert code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failure_kind"] == "invalid-config"
+    assert payload["failure_phase"] == "admission"
 
 
 def test_cli_resume_lifecycle_receipt_failure_is_safe(monkeypatch, tmp_path: Path, capsys) -> None:

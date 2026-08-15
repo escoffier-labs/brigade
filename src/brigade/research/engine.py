@@ -409,12 +409,15 @@ class ResearchEngine:
                     stop.set()
                     return
 
+        workers: list[threading.Thread] = []
         for worker_id in range(worker_count):
-            threading.Thread(
+            worker = threading.Thread(
                 target=_worker,
                 name=f"research-discovery-{worker_id}",
                 daemon=True,
-            ).start()
+            )
+            worker.start()
+            workers.append(worker)
 
         ordered: list[tuple[int, list[SourceEnvelope]]] = []
         pending = set(range(len(providers)))
@@ -448,6 +451,18 @@ class ResearchEngine:
         except BaseException:
             stop.set()
             raise
+        finally:
+            stop.set()
+            # A provider call can outlive the deadline. Join only briefly so
+            # normal teardown observes finished workers without extending the
+            # run's wall-clock budget; late SeatInvoker results are discarded
+            # by the per-run receipt-admission gate.
+            join_budget = min(0.05, self._remaining_time())
+            if join_budget > 0:
+                per_worker = join_budget / len(workers)
+                for worker in workers:
+                    if worker.is_alive():
+                        worker.join(timeout=per_worker)
 
         ordered.sort(key=lambda item: item[0])
         envelopes: list[SourceEnvelope] = []
@@ -475,6 +490,7 @@ class ResearchEngine:
         lane = getattr(self.lanes.extractor, "seat", "luna")
         try:
             for source in sources:
+                self._ensure_time("extraction")
                 self._check_cancel("extraction")
                 finding = _extract.extract_finding(
                     self.lanes.extractor,
