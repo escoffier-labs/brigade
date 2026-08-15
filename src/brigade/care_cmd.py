@@ -1325,9 +1325,13 @@ def status_payload(*, target: Path, home: Path | None = None) -> dict[str, Any]:
     Topology and other read-only consumers should use this instead of scraping
     crontab text or private markers. ``enabled`` is true when either backend has
     a Brigade care block installed for *target* (current, stale, or tampered).
+
+    Systemd discovery matches bare ``brigade care status``: when a target has
+    per-entry registrations (including the #762 memory-job inventory), report
+    those entries instead of treating the absent atomic CARE_ENTRIES set as a
+    missing install.
     """
     target = target.expanduser().resolve()
-    entries = [_entry_status(target, entry) for entry in CARE_ENTRIES]
     if _is_windows():
         return {
             "enabled": False,
@@ -1335,17 +1339,23 @@ def status_payload(*, target: Path, home: Path | None = None) -> dict[str, Any]:
                 "crontab": {"backend": "crontab", "status": "unsupported-backend", "error": None},
                 "systemd": {"backend": "systemd", "status": "unsupported-backend", "error": None},
             },
-            "entries": entries,
+            "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
         }
     crontab = _crontab_backend_status(target=target, home=home)
-    systemd = _systemd_backend_status(target=target, home=home)
+    installed_systemd = _installed_systemd_entries(target=target, home=home)
+    systemd_entries = installed_systemd if installed_systemd else CARE_ENTRIES
+    systemd = _systemd_backend_status(target=target, home=home, entries=systemd_entries)
     crontab_enabled = _backend_is_installed(str(crontab.get("status"))) and bool(crontab.get("target_match"))
     systemd_enabled = _backend_is_installed(str(systemd.get("status"))) and bool(systemd.get("target_match"))
+    if installed_systemd:
+        selected_entries = installed_systemd
+    else:
+        selected_entries = CARE_ENTRIES
     return {
         "enabled": crontab_enabled or systemd_enabled,
         "target_match": bool(crontab.get("target_match")) or bool(systemd.get("target_match")),
         "backends": {"crontab": crontab, "systemd": systemd},
-        "entries": entries,
+        "entries": [_entry_status(target, entry) for entry in selected_entries],
     }
 
 

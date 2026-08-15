@@ -180,6 +180,43 @@ def test_care_status_payload_reports_crontab_and_systemd_enabled(tmp_path, monke
     assert systemd_enabled["backends"]["systemd"]["status"] == "current"
 
 
+def test_care_status_payload_discovers_per_entry_memory_jobs(tmp_path, monkeypatch):
+    """#762 cutover installs MEMORY_JOB entries, not the atomic CARE_ENTRIES set.
+
+    Topology and Center read status_payload; if that helper still evaluates only
+    the default five recipes, a successful per-entry migration looks disabled.
+    """
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
+
+    assert (
+        care_cmd.install(
+            target=target,
+            backend="systemd",
+            home=home,
+            entry_ids=["handoff-ingest", "care-scan", "memory-closeout"],
+        )
+        == 0
+    )
+
+    payload = care_cmd.status_payload(target=target, home=home)
+    assert payload["enabled"] is True
+    assert payload["target_match"] is True
+    assert payload["backends"]["systemd"]["status"] == "current"
+    assert payload["backends"]["systemd"]["target_match"] is True
+    assert [entry["id"] for entry in payload["entries"]] == [
+        "handoff-ingest",
+        "care-scan",
+        "memory-closeout",
+    ]
+    for default_id in ("daily-care", "ingest-sweep", "nightly-ops"):
+        assert default_id not in {entry["id"] for entry in payload["entries"]}
+
+
 def test_care_crontab_install_status_uninstall_round_trip(tmp_path, monkeypatch):
     store = {"text": "# keep-me\n0 2 * * * /usr/bin/true\n"}
     before = store["text"]
