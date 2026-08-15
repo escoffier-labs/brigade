@@ -330,7 +330,7 @@ def _scanner_read_receipt(path: Path) -> dict[str, Any] | None:
     """Compatibility reader that still requires the runs-root authority anchor."""
     run_path = path.parent if path.name == "receipt.json" else path
     try:
-        target = run_path.parents[2]
+        target = run_path.parents[3]
     except IndexError:
         return None
     try:

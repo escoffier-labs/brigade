@@ -3036,3 +3036,33 @@ def test_scanner_self_import_drops_wrong_source_operational_metadata(tmp_path):
         assert metadata["source_item_key"] not in forged_source_keys
         assert metadata["source_fingerprint"] not in forged_fingerprints
         assert metadata["source_fingerprint"] == work_cmd.ledger._untrusted_import_canonical_hash(item)
+
+
+def test_scanner_read_receipt_derives_target_from_correct_parent(tmp_path: Path) -> None:
+    """_scanner_read_receipt must use parents[3] (the workspace root) not parents[2]."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    run_id = "compat-run"
+    run_dir = helpers._scanner_runs_root(tmp_path) / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(json.dumps({"run_id": run_id, "status": "completed"}))
+    _record_scanner_run_authority(tmp_path, run_id)
+
+    receipt = scanners_mod._scanner_read_receipt(run_dir / "receipt.json")
+    assert receipt is not None
+    assert receipt["run_id"] == run_id
+
+
+def test_scanner_read_receipt_accepts_run_directory_path(tmp_path: Path) -> None:
+    """_scanner_read_receipt should also accept a run directory (not just receipt.json)."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    run_id = "compat-run-dir"
+    run_dir = helpers._scanner_runs_root(tmp_path) / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(json.dumps({"run_id": run_id, "status": "completed"}))
+    _record_scanner_run_authority(tmp_path, run_id)
+
+    receipt = scanners_mod._scanner_read_receipt(run_dir)
+    assert receipt is not None
+    assert receipt["run_id"] == run_id
