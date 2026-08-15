@@ -1,4 +1,7 @@
-"""Code Graph dashboard view — module map, impact drill-down, change overlay.
+"""Code Graph dashboard view: module map, impact drill-down, change overlay.
+
+Operator question: What parts of the codebase matter, which module is the hub,
+and what breaks if I touch a changed file?
 
 Contract-only: ``brigade code export --json`` (and ``--symbol`` for impact).
 No direct graph database reads.
@@ -6,6 +9,7 @@ No direct graph database reads.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +21,7 @@ NAME = "code"
 TITLE = "Code Graph"
 ORDER = 6.25
 
-_STATUS_GOOD = "#0ca30c"
 _STATUS_WARNING = "#fab219"
-_STATUS_SERIOUS = "#ec835a"
-_STATUS_CRITICAL = "#d03b3b"
 _TEXT_PRIMARY = "#0b0b0b"
 _TEXT_SECONDARY = "#52514e"
 _SURFACE = "#fcfcfb"
@@ -30,13 +31,19 @@ _BOX_STROKE = "#c3c2b7"
 _CHANGED_FILL = "#fff4e0"
 _CHANGED_STROKE = "#fab219"
 
-_COLS = 6
-_BOX_W = 132
+_COLS = 5
+_BOX_MIN_W = 96
+_BOX_MAX_W = 220
 _BOX_MIN_H = 36
-_BOX_MAX_H = 88
+_BOX_MAX_H = 72
+_BOX_PAD_X = 8
+_CHIP_GAP = 6
+_CHIP_H = 16
 _GAP_X = 28
-_GAP_Y = 22
+_GAP_Y = 36
 _PAD = 20
+_LABEL_W = 96
+_MAX_ROW_X = _PAD + _LABEL_W + _COLS * (132 + _GAP_X)
 
 
 def fetch(target: Path, query: dict[str, str] | None = None) -> dict[str, Any]:
@@ -86,33 +93,55 @@ def _mode_tabs(impact_active: bool) -> str:
 def _summary_strip(export: dict) -> str:
     stats = export.get("stats") if isinstance(export.get("stats"), dict) else {}
     module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
-    trunc = module_map.get("truncation") if isinstance(module_map.get("truncation"), dict) else {}
-    modules = module_map.get("modules") if isinstance(module_map.get("modules"), list) else []
-    overlay = export.get("change_overlay") if isinstance(export.get("change_overlay"), dict) else {}
+    insights = module_map.get("insights") if isinstance(module_map.get("insights"), dict) else {}
+    modules = [row for row in module_map.get("modules", []) if isinstance(row, dict)]
 
-    symbols = stats.get("symbols")
-    files = stats.get("files")
-    sentences: list[str] = []
-    if isinstance(symbols, int) and isinstance(files, int):
-        sentences.append(f"This graph indexes {symbols:,} symbols across {files:,} files.")
-    else:
-        sentences.append("This graph summarizes how code is connected in the repository.")
+    core = insights.get("core") if isinstance(insights.get("core"), dict) else {}
+    hub = insights.get("most_connected") if isinstance(insights.get("most_connected"), dict) else {}
+    change = insights.get("biggest_change") if isinstance(insights.get("biggest_change"), dict) else {}
+    largest = insights.get("largest") if isinstance(insights.get("largest"), dict) else {}
+    isolated = insights.get("isolated_count")
+    total = insights.get("total_modules")
+    if not isinstance(total, int):
+        total = len(modules)
 
-    changed = overlay.get("changed_modules") if isinstance(overlay.get("changed_modules"), list) else []
-    if changed:
-        sentences.append(f"{len(changed)} module(s) include files changed on this branch.")
-    elif modules:
-        top = max(modules, key=lambda row: int(row.get("symbol_count") or 0) if isinstance(row, dict) else 0)
-        if isinstance(top, dict):
-            sentences.append(f"Largest module by symbol count: {top.get('label') or top.get('id')}.")
+    core_label = str(core.get("label") or "this repository")
+    core_symbols = core.get("symbol_count")
+    if not isinstance(core_symbols, int):
+        core_symbols = stats.get("symbols") if isinstance(stats.get("symbols"), int) else 0
+    largest_label = str(largest.get("label") or "")
+    largest_n = largest.get("symbol_count") if isinstance(largest.get("symbol_count"), int) else 0
+    if not largest_label and modules:
+        top = max(modules, key=lambda row: int(row.get("symbol_count") or 0))
+        largest_label = str(top.get("label") or "")
+        largest_n = int(top.get("symbol_count") or 0)
+    hub_label = str(hub.get("label") or core_label)
+    hub_id = str(hub.get("id") or "")
+    hub_in = hub.get("inbound") if isinstance(hub.get("inbound"), int) else 0
+    isolated_n = isolated if isinstance(isolated, int) else 0
+    change_label = str(change.get("label") or "none on this branch")
+    change_id = str(change.get("id") or "")
 
-    note = trunc.get("note")
-    if isinstance(note, str) and note.strip():
-        sentences.append(note.strip())
-
-    body = " ".join(sentences[:3])
+    largest_clause = ""
+    if largest_label:
+        largest_clause = f"; largest: {html.esc(largest_label)} ({largest_n:,})"
+    s1 = (
+        f'<a href="#cg-map" data-cg-jump="map">'
+        f"{html.esc(core_label)}: {core_symbols:,} symbols "
+        f"across {total} modules{largest_clause}.</a>"
+    )
+    s2 = (
+        f'<a href="#cg-hub" data-cg-jump="{html.esc(hub_id)}">'
+        f"Most connected: {html.esc(hub_label)} (imported by {hub_in} others).</a>"
+    )
+    s3 = f'<a href="#cg-isolated" data-cg-jump="isolated">{isolated_n} modules are isolated.</a>'
+    s4 = (
+        f'<a href="#cg-changed" data-cg-jump="{html.esc(change_id)}">'
+        f"Biggest recent change impact: {html.esc(change_label)}.</a>"
+    )
     return (
-        f'<section class="cg-summary" aria-label="{html.esc("Code graph summary")}"><p>{html.esc(body)}</p></section>'
+        f'<section class="cg-summary" data-cg-summary="1" aria-label="{html.esc("Code graph summary")}">'
+        f"<p>{s1} {s2} {s3} {s4}</p></section>"
     )
 
 
@@ -126,52 +155,135 @@ def _render_module_map(export: dict) -> str:
         return html.panel(html.esc("Module map"), f"<p>{html.esc('Nothing here.')}</p>")
 
     trunc_note = ""
-    if isinstance(trunc.get("note"), str) and trunc["note"].strip():
-        trunc_note = f'<p class="cg-muted">{html.esc(trunc["note"])}</p>'
+    note = trunc.get("note")
+    if isinstance(note, str) and note.strip():
+        trunc_note = f'<p class="cg-muted" data-cg-truncation="1" id="cg-isolated">{html.esc(note.strip())}</p>'
+
+    hub_id = ""
+    insights = module_map.get("insights") if isinstance(module_map.get("insights"), dict) else {}
+    hub = insights.get("most_connected") if isinstance(insights.get("most_connected"), dict) else {}
+    if isinstance(hub.get("id"), str):
+        hub_id = hub["id"]
 
     return (
         _summary_strip(export)
-        + html.panel(html.esc("Module map"), trunc_note + _module_map_svg(modules, edges))
+        + html.panel(
+            html.esc("Module map"),
+            trunc_note + _module_map_svg(modules, edges, hub_id=hub_id) + _module_card_shell(),
+        )
         + _debug_details(export)
     )
 
 
-def _module_map_svg(modules: list[dict], edges: list[dict]) -> str:
+def _module_card_shell() -> str:
+    return (
+        '<aside id="cg-card" class="cg-card" hidden>'
+        f"<h3 data-cg-card-title>{html.esc('Module')}</h3>"
+        f"<p data-cg-card-meaning>{html.esc('What it is.')}</p>"
+        f"<h4>{html.esc('Top files (by symbol count)')}</h4>"
+        "<ul data-cg-card-files></ul>"
+        f"<h4>{html.esc('Imported by (who depends on it)')}</h4>"
+        "<ul data-cg-card-dependents></ul>"
+        f"<h4>{html.esc('Attributed tests')}</h4>"
+        "<ul data-cg-card-tests></ul>"
+        f'<button type="button" data-cg-card-close>{html.esc("Close")}</button>'
+        "</aside>"
+    )
+
+
+def _module_meaning(module: dict) -> str:
+    package = str(module.get("package") or module.get("label") or "this module")
+    files = int(module.get("file_count") or 0)
+    symbols = int(module.get("symbol_count") or 0)
+    return f"{package} package: {files} files, {symbols} symbols."
+
+
+def _module_card_payload(module: dict) -> str:
+    payload = {
+        "id": str(module.get("id") or ""),
+        "label": str(module.get("label") or module.get("id") or ""),
+        "meaning": _module_meaning(module),
+        "top_files": [
+            f"{row.get('path')} ({row.get('symbol_count')})"
+            for row in module.get("top_files", [])
+            if isinstance(row, dict)
+        ],
+        "dependents": [str(item) for item in module.get("dependents", []) if item],
+        "tests": [str(item) for item in module.get("attributed_tests", []) if item],
+    }
+    return html.esc(json.dumps(payload, separators=(",", ":")))
+
+
+def _modules_by_package(modules: list[dict]) -> list[tuple[str, list[dict]]]:
+    grouped: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for module in modules:
+        package = str(module.get("package") or module.get("label") or "(root)")
+        if package not in grouped:
+            grouped[package] = []
+            order.append(package)
+        grouped[package].append(module)
+    return [(package, grouped[package]) for package in order]
+
+
+def _module_map_svg(modules: list[dict], edges: list[dict], *, hub_id: str = "") -> str:
     if not modules:
         return f"<p>{html.esc('Nothing here.')}</p>"
 
     positions: dict[str, tuple[int, int, int, int]] = {}
     max_symbols = max(int(row.get("symbol_count") or 0) for row in modules) or 1
-    cols = min(_COLS, max(1, len(modules)))
-    rows = (len(modules) + cols - 1) // cols
-
+    grouped = _modules_by_package(modules)
     boxes: list[str] = []
-    for index, module in enumerate(modules):
-        col = index % cols
-        row = index // cols
-        x = _PAD + col * (_BOX_W + _GAP_X)
-        y = _PAD + row * (_BOX_MAX_H + _GAP_Y)
-        symbol_count = int(module.get("symbol_count") or 0)
-        ratio = symbol_count / max_symbols
-        height = int(_BOX_MIN_H + ratio * (_BOX_MAX_H - _BOX_MIN_H))
-        module_id = str(module.get("id") or "")
-        label = str(module.get("label") or module_id)
-        visible, full = code_export.fit_svg_label(label, _BOX_W - 16)
-        count_text = f" ({symbol_count})" if symbol_count else ""
-        fill = _CHANGED_FILL if module.get("changed") else _BOX_FILL
-        stroke = _CHANGED_STROKE if module.get("changed") else _BOX_STROKE
-        chip = _status_chip(x, y, height, "CHANGED" if module.get("changed") else "OK", module.get("changed") is True)
-        positions[module_id] = (x, y, _BOX_W, height)
-        boxes.append(
-            f'<g class="cg-module" role="img">'
-            f"<title>{html.esc(full)}{html.esc(count_text)}</title>"
-            f'<rect x="{x}" y="{y}" width="{_BOX_W}" height="{height}" rx="6" ry="6" '
-            f'fill="{html.esc(fill)}" stroke="{html.esc(stroke)}" stroke-width="1.5"/>'
-            f'<text x="{x + 8}" y="{y + 20}" class="cg-svg-label">{html.esc(visible)}{html.esc(count_text)}</text>'
-            f"{chip}"
-            f"</g>"
-        )
+    package_labels: list[str] = []
+    y = _PAD
+    max_x = _PAD + _LABEL_W + _BOX_MIN_W
+    marked_changed = False
+    start_x = _PAD + _LABEL_W
 
+    for package, rows in grouped:
+        package_labels.append(
+            f'<text x="{_PAD}" y="{y + 22}" class="cg-svg-heading">{html.esc(code_export.fit_svg_label(package, _LABEL_W - 8)[0])}</text>'
+        )
+        x = start_x
+        row_height = _BOX_MAX_H
+        for module in rows:
+            symbol_count = int(module.get("symbol_count") or 0)
+            ratio = symbol_count / max_symbols
+            height = int(_BOX_MIN_H + ratio * (_BOX_MAX_H - _BOX_MIN_H))
+            module_id = str(module.get("id") or "")
+            label = str(module.get("label") or module_id)
+            changed = module.get("changed") is True
+            box_w, visible, full, chip = _module_box_parts(label, symbol_count, x, y, height, changed)
+            if x > start_x and x + box_w > _MAX_ROW_X:
+                x = start_x
+                y += _BOX_MAX_H + _GAP_Y
+                box_w, visible, full, chip = _module_box_parts(label, symbol_count, x, y, height, changed)
+            fill = _CHANGED_FILL if changed else _BOX_FILL
+            stroke = _CHANGED_STROKE if changed else _BOX_STROKE
+            positions[module_id] = (x, y, box_w, height)
+            extra_ids = []
+            if hub_id and module_id == hub_id:
+                extra_ids.append("cg-hub")
+            if changed and not marked_changed:
+                extra_ids.append("cg-changed")
+                marked_changed = True
+            id_attr = f'id="cg-module-{html.esc(module_id)}"'
+            extra = "".join(f'<g id="{html.esc(item)}"></g>' for item in extra_ids)
+            boxes.append(
+                f'<g class="cg-module" {id_attr} role="button" tabindex="0" data-cg-card="{_module_card_payload(module)}">'
+                f"<title>{html.esc(full)}</title>"
+                f'<rect x="{x}" y="{y}" width="{box_w}" height="{height}" rx="6" ry="6" '
+                f'fill="{html.esc(fill)}" stroke="{html.esc(stroke)}" stroke-width="1.5"/>'
+                f'<text x="{x + _BOX_PAD_X}" y="{y + 20}" class="cg-svg-label">{html.esc(visible)}</text>'
+                f"{chip}"
+                f"</g>"
+                f"{extra}"
+            )
+            x += box_w + _GAP_X
+            max_x = max(max_x, x)
+        y += row_height + _GAP_Y
+
+    max_weight = max((int(edge.get("weight") or 0) for edge in edges), default=1) or 1
     edge_lines: list[str] = []
     for edge in edges:
         source = str(edge.get("from") or "")
@@ -180,17 +292,21 @@ def _module_map_svg(modules: list[dict], edges: list[dict]) -> str:
             continue
         sx, sy, sw, sh = positions[source]
         tx, ty, tw, th = positions[target]
-        x1, y1 = sx + sw, sy + sh // 2
-        x2, y2 = tx, ty + th // 2
+        x1, y1 = sx + sw // 2, sy + sh
+        x2, y2 = tx + tw // 2, ty
         weight = int(edge.get("weight") or 0)
+        cx = (x1 + x2) // 2
+        cy = min(y1, y2) - 18
+        width = min(4, 1 + weight // 3)
+        opacity = 0.25 + 0.75 * (weight / max_weight)
         edge_lines.append(
             f'<g class="cg-edge"><title>{html.esc(f"{source} → {target} ({weight})")}</title>'
-            f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{html.esc(_BOX_STROKE)}" '
-            f'stroke-width="{min(4, 1 + weight // 3)}" marker-end="url(#cg-arrow)"/></g>'
+            f'<path d="M {x1} {y1} Q {cx} {cy} {x2} {y2}" fill="none" stroke="{html.esc(_BOX_STROKE)}" '
+            f'stroke-width="{width}" stroke-opacity="{opacity:.2f}" marker-end="url(#cg-arrow)"/></g>'
         )
 
-    width = _PAD * 2 + cols * _BOX_W + max(0, cols - 1) * _GAP_X
-    height = _PAD * 2 + rows * _BOX_MAX_H + max(0, rows - 1) * _GAP_Y
+    width = max(max_x + _PAD, 720)
+    height = y + _PAD
 
     return (
         f'<div class="cg-map-wrap"><svg class="cg-map" viewBox="0 0 {width} {height}" width="100%" '
@@ -199,23 +315,47 @@ def _module_map_svg(modules: list[dict], edges: list[dict]) -> str:
         '<marker id="cg-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
         'markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
         f'<path d="M 0 0 L 10 5 L 0 10 z" fill="{html.esc(_BOX_STROKE)}"/>'
-        "</marker></defs>" + "".join(edge_lines) + "".join(boxes) + "</svg></div>"
+        "</marker></defs>" + "".join(edge_lines) + "".join(package_labels) + "".join(boxes) + "</svg></div>"
     )
 
 
-def _status_chip(box_x: int, box_y: int, box_h: int, word: str, changed: bool) -> str:
-    if changed:
-        color, icon = _STATUS_WARNING, "!"
-    else:
-        color, icon = _STATUS_GOOD, "\u2713"
-    chip_x = box_x + _BOX_W - 58
+def _chip_width(word: str) -> int:
+    return max(50, 18 + code_export.svg_text_width(word, font_size=8))
+
+
+def _module_box_parts(
+    label: str,
+    symbol_count: int,
+    box_x: int,
+    box_y: int,
+    box_h: int,
+    changed: bool,
+) -> tuple[int, str, str, str]:
+    count_text = f" ({symbol_count})" if symbol_count else ""
+    full_label = f"{label}{count_text}"
+    chip_w = _chip_width("CHANGED") if changed else 0
+    right = chip_w + _CHIP_GAP + _BOX_PAD_X if chip_w else _BOX_PAD_X
+    text_w = code_export.svg_text_width(full_label)
+    needed = _BOX_PAD_X + text_w + right
+    box_w = max(_BOX_MIN_W, min(_BOX_MAX_W, needed))
+    budget = max(8, box_w - _BOX_PAD_X - right)
+    visible, full = code_export.fit_svg_label(full_label, budget)
+    chip = _status_chip(box_x, box_y, box_h, box_w, "CHANGED") if changed else ""
+    return box_w, visible, full, chip
+
+
+def _status_chip(box_x: int, box_y: int, box_h: int, box_w: int, word: str) -> str:
+    color, icon = _STATUS_WARNING, "!"
+    chip_w = _chip_width(word)
+    chip_x = box_x + box_w - chip_w - _BOX_PAD_X
     chip_y = box_y + box_h - 24
+    word_x = chip_x + 16 + (chip_w - 20) / 2
     return (
-        f'<rect x="{chip_x}" y="{chip_y}" width="50" height="16" rx="8" ry="8" fill="{html.esc(_SURFACE)}" '
+        f'<rect x="{chip_x}" y="{chip_y}" width="{chip_w}" height="{_CHIP_H}" rx="8" ry="8" fill="{html.esc(_SURFACE)}" '
         f'stroke="{html.esc(color)}" stroke-width="1.2"/>'
         f'<circle cx="{chip_x + 8}" cy="{chip_y + 8}" r="4" fill="{html.esc(color)}"/>'
         f'<text x="{chip_x + 8}" y="{chip_y + 11}" text-anchor="middle" class="cg-svg-chip-icon">{html.esc(icon)}</text>'
-        f'<text x="{chip_x + 30}" y="{chip_y + 11}" text-anchor="middle" class="cg-svg-chip-word">{html.esc(word)}</text>'
+        f'<text x="{word_x}" y="{chip_y + 11}" text-anchor="middle" class="cg-svg-chip-word">{html.esc(word)}</text>'
     )
 
 
@@ -394,8 +534,18 @@ def _stylesheet(nonce: str) -> str:
   background:{_SURFACE}; color:{_TEXT_PRIMARY};
 }}
 .cg-summary p {{ margin:0; }}
+.cg-summary a {{ color:{_TEXT_PRIMARY}; text-decoration:underline; text-underline-offset:2px; }}
 .cg-muted {{ color:{_TEXT_SECONDARY}; font-size:0.9rem; }}
 .cg-map-wrap {{ overflow-x:auto; max-width:100%; }}
+.cg-module {{ cursor:pointer; }}
+.cg-card {{
+  margin:1rem 0 0; padding:0.85rem 1rem; border:1px solid {_BORDER}; border-radius:0.35rem;
+  background:{_SURFACE}; color:{_TEXT_PRIMARY}; max-width:36rem;
+}}
+.cg-card h3, .cg-card h4 {{ margin:0.6rem 0 0.25rem; }}
+.cg-card h3 {{ margin-top:0; }}
+.cg-card ul {{ margin:0; padding-left:1.2rem; }}
+.cg-card[hidden] {{ display:none; }}
 .cg-map {{ display:block; min-width:720px; height:auto; }}
 .cg-svg-label {{ fill:{_TEXT_PRIMARY}; font-size:12px; font-family:system-ui,sans-serif; }}
 .cg-svg-heading {{ fill:{_TEXT_SECONDARY}; font-size:11px; font-weight:700; font-family:system-ui,sans-serif; }}
@@ -431,11 +581,70 @@ def _script(nonce: str) -> str:
       panels[j].hidden = panels[j].getAttribute("data-cg-panel") !== mode;
     }}
   }}
+  function fillList(node, items) {{
+    node.innerHTML = "";
+    if (!items || !items.length) {{
+      var empty = document.createElement("li");
+      empty.textContent = "None listed.";
+      node.appendChild(empty);
+      return;
+    }}
+    for (var i = 0; i < items.length; i++) {{
+      var li = document.createElement("li");
+      li.textContent = items[i];
+      node.appendChild(li);
+    }}
+  }}
+  function showCard(raw) {{
+    var card = document.getElementById("cg-card");
+    if (!card) return;
+    var data;
+    try {{ data = JSON.parse(raw); }} catch (err) {{ return; }}
+    var title = card.querySelector("[data-cg-card-title]");
+    var meaning = card.querySelector("[data-cg-card-meaning]");
+    if (title) title.textContent = data.label || "Module";
+    if (meaning) meaning.textContent = data.meaning || "";
+    fillList(card.querySelector("[data-cg-card-files]"), data.top_files);
+    fillList(card.querySelector("[data-cg-card-dependents]"), data.dependents);
+    fillList(card.querySelector("[data-cg-card-tests]"), data.tests);
+    card.hidden = false;
+    if (card.scrollIntoView) card.scrollIntoView({{ block: "nearest" }});
+  }}
+  function closestAttr(el, name) {{
+    while (el && el.getAttribute) {{
+      var value = el.getAttribute(name);
+      if (value) return {{ el: el, value: value }};
+      el = el.parentNode;
+    }}
+    return null;
+  }}
   document.addEventListener("click", function (e) {{
     var t = e.target;
     if (!t || !t.getAttribute) return;
     var mode = t.getAttribute("data-cg-mode");
-    if (mode) {{ e.preventDefault(); selectMode(mode); }}
+    if (mode) {{ e.preventDefault(); selectMode(mode); return; }}
+    if (t.getAttribute("data-cg-card-close") !== null) {{
+      var card = document.getElementById("cg-card");
+      if (card) card.hidden = true;
+      return;
+    }}
+    var jump = closestAttr(t, "data-cg-jump");
+    if (jump && jump.value && jump.value !== "map" && jump.value !== "isolated") {{
+      var target = document.getElementById("cg-module-" + jump.value) || document.getElementById("cg-hub");
+      if (target) {{
+        var raw = target.getAttribute("data-cg-card");
+        if (raw) showCard(raw);
+      }}
+    }}
+    var cardHit = closestAttr(t, "data-cg-card");
+    if (cardHit) showCard(cardHit.value);
+  }});
+  document.addEventListener("keydown", function (e) {{
+    if (e.key !== "Enter" && e.key !== " ") return;
+    var hit = closestAttr(e.target, "data-cg-card");
+    if (!hit) return;
+    e.preventDefault();
+    showCard(hit.value);
   }});
   var params = new URLSearchParams(window.location.search || "");
   selectMode(params.get("symbol") ? "impact" : "map");

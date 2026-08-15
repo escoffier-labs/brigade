@@ -6,12 +6,14 @@ import hashlib
 import json
 import os
 import stat
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import __version__ as BRIGADE_VERSION
 from . import brief_sections, harness_profiles, localio, managed_block, mcp_adapters, mcp_cmd, skills_cmd
+from .projection import kernel as projection
 from .toml_compat import TOMLDecodeError as _TOMLDecodeError
 from .toml_compat import loads as _toml_loads
 
@@ -47,6 +49,10 @@ class LoadedProfileState:
     state: dict[str, Any]
     error: str | None
     migrated_from_legacy: bool = False
+
+
+class _ProfileInstructionWriteError(OSError):
+    """A final no-follow instruction check refused the planned write."""
 
 
 def digest_text(text: str) -> str:
@@ -306,6 +312,11 @@ def update_shared_instruction_digests(
         loaded = load_profile_state(state_path=other.state_path, workspace=workspace, harness=other.harness)
         if loaded.error:
             continue
+        receipt_conflict = _uninstall_receipt_conflict(other, loaded.state)
+        if receipt_conflict is not None:
+            raise _ProfileInstructionWriteError(
+                f"co-owner {other.harness} cannot attest shared instruction rewrite: {receipt_conflict['detail']}"
+            )
         state = json.loads(json.dumps(loaded.state))
         instruction = state.get("instructions")
         if not isinstance(instruction, dict) or not isinstance(instruction.get("digest"), str):
@@ -316,6 +327,53 @@ def update_shared_instruction_digests(
         write_profile_state(state_path=other.state_path, state=state)
         updated.append(other.harness)
     return updated
+
+
+def _shared_instruction_state_mutations(
+    *,
+    path: Path,
+    home: Path,
+    workspace: Path,
+    digest: str,
+    effective_profile: str,
+    exclude_harness: str,
+) -> list[projection.MutationSpec]:
+    """Stage co-owner attestation updates beside the shared instruction rewrite."""
+    target = _instruction_path_key(path)
+    mutations: list[projection.MutationSpec] = []
+    for other in harness_profiles.resolve_user_profiles(harness="all", home=home, workspace=workspace):
+        if other.harness == exclude_harness or other.instruction_mode != "marked-block":
+            continue
+        try:
+            if _instruction_path_key(other.instruction_path) != target:
+                continue
+        except OSError:
+            continue
+        loaded = load_profile_state(state_path=other.state_path, workspace=workspace, harness=other.harness)
+        if loaded.error:
+            continue
+        state = json.loads(json.dumps(loaded.state))
+        instruction = state.get("instructions")
+        if not isinstance(instruction, dict) or not isinstance(instruction.get("digest"), str):
+            continue
+        receipt_conflict = _uninstall_receipt_conflict(other, loaded.state)
+        if receipt_conflict is not None:
+            raise _ProfileInstructionWriteError(
+                f"co-owner {other.harness} cannot attest shared instruction rewrite: {receipt_conflict['detail']}"
+            )
+        receipt = json.loads(other.receipt_path.read_text(encoding="utf-8"))
+        assert isinstance(receipt, dict)
+        instruction["digest"] = digest
+        instruction[_INSTRUCTION_EFFECTIVE_PROFILE_KEY] = effective_profile
+        state["instructions"] = instruction
+        mutation = _profile_mutation(other.state_path, _json_bytes(state), writer=_write_profile_state_bytes)
+        if mutation is not None:
+            mutations.append(mutation)
+        receipt["ownership_fingerprints"] = _receipt_ownership(state)
+        mutation = _profile_mutation(other.receipt_path, _json_bytes(receipt))
+        if mutation is not None:
+            mutations.append(mutation)
+    return mutations
 
 
 def _split_components(text: str) -> tuple[str, str, str] | None:
@@ -1528,6 +1586,128 @@ def _prune_created_directories(paths: list[Path], root: Path) -> list[str]:
     return removed
 
 
+def _json_bytes(payload: dict[str, Any]) -> bytes:
+    """Match localio.write_json's on-disk rendering for a staged mutation."""
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _profile_mutation(
+    path: Path,
+    desired: bytes | None,
+    *,
+    mode: int | None = None,
+    writer: Callable[[Path, bytes], None] | None = None,
+    remover: Callable[[Path], None] | None = None,
+) -> projection.MutationSpec | None:
+    """Translate one already-preflighted profile surface into a kernel mutation."""
+    before = path.read_bytes() if path.exists() else None
+    if desired is None:
+        if before is None:
+            return None
+        return projection.mutation(
+            destination=path,
+            mutation="remove",
+            expected_before=projection.content_digest(before),
+            desired_after=projection.ABSENT,
+            display_path=str(path),
+            remover=remover,
+            propagate_error=True,
+        )
+    return projection.mutation(
+        destination=path,
+        mutation="create" if before is None else "replace",
+        expected_before=projection.content_digest(before),
+        desired_after=projection.content_digest(desired),
+        staged_bytes=desired,
+        display_path=str(path),
+        mode=mode,
+        writer=writer,
+        propagate_error=True,
+    )
+
+
+def _write_profile_state_bytes(path: Path, data: bytes) -> None:
+    """Publish state through its existing writer so state-write failures remain observable."""
+    payload = json.loads(data.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("profile state payload must be an object")
+    write_profile_state(state_path=path, state=payload)
+
+
+def _write_managed_instruction_bytes(path: Path, data: bytes) -> None:
+    outcome = managed_block.write_text_nofollow_atomic(path, data.decode("utf-8"))
+    if outcome.status in {managed_block.WRITE_WRITTEN, managed_block.WRITE_NOOP}:
+        return
+    raise _ProfileInstructionWriteError(outcome.detail or "instruction write refused")
+
+
+def _remove_managed_instruction(path: Path) -> None:
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise _ProfileInstructionWriteError(str(exc)) from exc
+    if stat.S_ISLNK(mode):
+        raise _ProfileInstructionWriteError("symlinked instruction path")
+    if not stat.S_ISREG(mode):
+        raise _ProfileInstructionWriteError("instruction path is not a regular file")
+    path.unlink()
+
+
+def _missing_ancestor_directories(path: Path, *, home: Path) -> list[Path]:
+    """Capture only user-home directories a failed profile write is allowed to remove."""
+    missing: list[Path] = []
+    cursor = path.parent
+    while cursor != home and not cursor.exists():
+        missing.append(cursor)
+        cursor = cursor.parent
+    return list(reversed(missing))
+
+
+def _remove_empty_directories(paths: list[Path]) -> None:
+    for path in sorted(set(paths), key=lambda item: len(item.parts), reverse=True):
+        try:
+            path.rmdir()
+        except OSError:
+            continue
+
+
+def _execute_profile_projection(
+    *,
+    profile,
+    workspace: Path,
+    operation: str,
+    mutations: list[projection.MutationSpec],
+    home: Path,
+) -> projection.Receipt | None:
+    """Commit all profile surfaces together, removing only newly created empty user directories on rollback."""
+    if not mutations:
+        return None
+    created_directories: list[Path] = []
+    for mutation in mutations:
+        if mutation.mutation == "create":
+            created_directories.extend(_missing_ancestor_directories(mutation.destination, home=home))
+    source = "\n".join(
+        f"{mutation.destination}\0{mutation.expected_before}\0{mutation.desired_after}" for mutation in mutations
+    ).encode("utf-8")
+    plan = projection.build_plan(
+        operation_id=f"harness-profile-{profile.harness}-{operation}-{uuid.uuid4().hex}",
+        projector="harness-profile",
+        source_fingerprint=projection.content_digest(source),
+        mutations=mutations,
+        target=workspace,
+    )
+    try:
+        receipt = projection.execute(plan, target=workspace)
+    except OSError:
+        _remove_empty_directories(created_directories)
+        raise
+    if receipt.terminal_state == "restored":
+        _remove_empty_directories(created_directories)
+    return receipt
+
+
 def _sync_profile(
     profile,
     workspace: Path,
@@ -1634,6 +1814,26 @@ def _sync_profile(
         proposed["generated"][_HOOK_STATE_KEY] = hook_plan["next"]
     proposed["mcp"] = mcp_plan["next"]
     proposed["package_version"] = BRIGADE_VERSION
+    instruction_dirs = (
+        _missing_directories(profile.user_root, instruction.path)
+        if instruction.action in {"create", "update"} and profile.instruction_mode == "managed-file"
+        else []
+    )
+    if instruction_dirs and isinstance(proposed.get("instructions"), dict):
+        existing = proposed["instructions"].get("created_directories", [])
+        proposed["instructions"]["created_directories"] = sorted(set(existing) | set(instruction_dirs))
+    created_dirs: dict[str, list[str]] = {}
+    for path, _data, skill_id, _relative in skill_plan["writes"]:
+        created_dirs.setdefault(skill_id, []).extend(_missing_skill_directories(profile, path))
+    for skill_id, directories in created_dirs.items():
+        existing = proposed["skills"][skill_id].setdefault("created_directories", [])
+        proposed["skills"][skill_id]["created_directories"] = sorted(set(existing) | set(directories))
+    generated_dirs: dict[str, list[str]] = {}
+    for path, _text, _executable, relative in generated_plan["writes"]:
+        generated_dirs.setdefault(relative, []).extend(_missing_directories(profile.user_root, path))
+    for relative, directories in generated_dirs.items():
+        existing = proposed["generated"][relative].setdefault("created_directories", [])
+        proposed["generated"][relative]["created_directories"] = sorted(set(existing) | set(directories))
     state_item = _state_item(profile.state_path, before=state, after=proposed)
     receipt_item = _receipt_item(profile.receipt_path, state_action=state_item["action"])
     items.extend([state_item, receipt_item])
@@ -1641,24 +1841,34 @@ def _sync_profile(
     files_written: list[str] = []
     files_removed: list[str] = []
     if write and ready:
-        changed = False
+        mutations: list[projection.MutationSpec] = []
         if instruction.action in {"create", "update"}:
-            instruction_dirs = (
-                _missing_directories(profile.user_root, instruction.path)
-                if profile.instruction_mode == "managed-file"
-                else []
+            mutation = _profile_mutation(
+                instruction.path,
+                (instruction.rendered or "").encode("utf-8"),
+                writer=_write_managed_instruction_bytes if profile.instruction_mode == "marked-block" else None,
             )
-            if profile.instruction_mode == "managed-file":
-                localio.write_text_atomic(instruction.path, instruction.rendered or "")
-            else:
-                outcome = managed_block.write_text_nofollow_atomic(instruction.path, instruction.rendered or "")
-                if outcome.status == managed_block.WRITE_SKIPPED_SYMLINK:
+            if mutation is not None:
+                mutations.append(mutation)
+            if profile.instruction_mode == "marked-block" and instruction.desired_digest:
+                try:
+                    mutations.extend(
+                        _shared_instruction_state_mutations(
+                            path=profile.instruction_path,
+                            home=home_path,
+                            workspace=workspace,
+                            digest=instruction.desired_digest,
+                            effective_profile=depth["effective_profile"],
+                            exclude_harness=profile.harness,
+                        )
+                    )
+                except _ProfileInstructionWriteError as exc:
                     conflict = {
                         "surface": "instruction",
                         "path": str(instruction.path),
                         "status": "conflict",
                         "action": "preserve",
-                        "detail": outcome.detail or "symlinked instruction path",
+                        "detail": str(exc),
                     }
                     return _result(
                         profile,
@@ -1672,69 +1882,27 @@ def _sync_profile(
                         receipt_path=profile.receipt_path,
                         receipt_state="missing",
                     ), False
-                if outcome.status not in {managed_block.WRITE_WRITTEN, managed_block.WRITE_NOOP}:
-                    conflict = {
-                        "surface": "instruction",
-                        "path": str(instruction.path),
-                        "status": "conflict",
-                        "action": "preserve",
-                        "detail": outcome.detail or "instruction write refused",
-                    }
-                    return _result(
-                        profile,
-                        status="conflict",
-                        ready=False,
-                        items=items,
-                        conflicts=[conflict],
-                        files_written=[],
-                        files_removed=[],
-                        mcp={"status": "pending", "items": []},
-                        receipt_path=profile.receipt_path,
-                        receipt_state="missing",
-                    ), False
-            files_written.append(str(instruction.path))
-            changed = True
-            if profile.instruction_mode == "managed-file":
-                existing_dirs = proposed["instructions"].get("created_directories", [])
-                proposed["instructions"]["created_directories"] = sorted(set(existing_dirs) | set(instruction_dirs))
-            elif instruction.desired_digest:
-                update_shared_instruction_digests(
-                    path=profile.instruction_path,
-                    home=home_path,
-                    workspace=workspace,
-                    digest=instruction.desired_digest,
-                    effective_profile=depth["effective_profile"],
-                    exclude_harness=profile.harness,
-                )
-        created_dirs: dict[str, list[str]] = {}
-        for path, data, skill_id, _relative in skill_plan["writes"]:
-            created_dirs.setdefault(skill_id, []).extend(_missing_skill_directories(profile, path))
-            localio.write_bytes_atomic(path, data)
-            files_written.append(str(path))
-            changed = True
-        for skill_id, directories in created_dirs.items():
-            existing = proposed["skills"][skill_id].setdefault("created_directories", [])
-            proposed["skills"][skill_id]["created_directories"] = sorted(set(existing) | set(directories))
+        for path, data, _skill_id, _relative in skill_plan["writes"]:
+            mutation = _profile_mutation(path, data)
+            if mutation is not None:
+                mutations.append(mutation)
         for path in skill_plan["removes"]:
-            path.unlink()
-            files_removed.append(str(path))
-            changed = True
-        generated_dirs: dict[str, list[str]] = {}
-        for path, text, executable, relative in generated_plan["writes"]:
-            generated_dirs.setdefault(relative, []).extend(_missing_directories(profile.user_root, path))
-            localio.write_text_atomic(path, text)
-            if executable:
-                path.chmod(path.stat().st_mode | 0o755)
-            files_written.append(str(path))
-            changed = True
-        for relative, directories in generated_dirs.items():
-            existing = proposed["generated"][relative].setdefault("created_directories", [])
-            proposed["generated"][relative]["created_directories"] = sorted(set(existing) | set(directories))
+            mutation = _profile_mutation(path, None)
+            if mutation is not None:
+                mutations.append(mutation)
+        for path, text, executable, _relative in generated_plan["writes"]:
+            mode = (
+                ((path.stat().st_mode & 0o777) | 0o755)
+                if executable and path.exists()
+                else (0o755 if executable else None)
+            )
+            mutation = _profile_mutation(path, text.encode("utf-8"), mode=mode)
+            if mutation is not None:
+                mutations.append(mutation)
         for path in generated_plan["removes"]:
-            path.unlink()
-            files_removed.append(str(path))
-            changed = True
-        files_removed.extend(_prune_created_directories(generated_plan["prune"], profile.user_root))
+            mutation = _profile_mutation(path, None)
+            if mutation is not None:
+                mutations.append(mutation)
         if hook_plan is not None:
             hook_item = hook_plan["items"][0]
             if hook_item["action"] in {"create", "update"}:
@@ -1746,24 +1914,63 @@ def _sync_profile(
                     entries.append(profile.hook.entry)
                 else:
                     entries[hook_item["prior_index"]] = profile.hook.entry
-                localio.write_text_atomic(profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc))
-                files_written.append(str(profile.hook.path))
-                changed = True
+                mutation = _profile_mutation(
+                    profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc).encode("utf-8")
+                )
+                if mutation is not None:
+                    mutations.append(mutation)
         if mcp_plan["updates"] or mcp_plan["remove"]:
-            localio.write_text_atomic(
+            mutation = _profile_mutation(
                 mcp_plan["path"],
-                mcp_plan["adapter"].write_file(mcp_plan["text"], mcp_plan["updates"], mcp_plan["remove"]),
+                mcp_plan["adapter"]
+                .write_file(mcp_plan["text"], mcp_plan["updates"], mcp_plan["remove"])
+                .encode("utf-8"),
             )
-            files_written.append(str(mcp_plan["path"]))
-            changed = True
-        files_removed.extend(_prune_created_directories(skill_plan["prune"], profile.skills_root))
+            if mutation is not None:
+                mutations.append(mutation)
+        changed = bool(mutations)
         if state_item["action"] != "none" or changed:
-            write_profile_state(state_path=profile.state_path, state=proposed)
-            files_written.append(str(profile.state_path))
+            mutation = _profile_mutation(profile.state_path, _json_bytes(proposed), writer=_write_profile_state_bytes)
+            if mutation is not None:
+                mutations.append(mutation)
         receipt = _receipt(profile, operation="sync", items=items, state=proposed, applied=True)
         if receipt_item["action"] != "none" or changed:
-            localio.write_json(profile.receipt_path, receipt)
-            files_written.append(str(profile.receipt_path))
+            mutation = _profile_mutation(profile.receipt_path, _json_bytes(receipt))
+            if mutation is not None:
+                mutations.append(mutation)
+        try:
+            committed = _execute_profile_projection(
+                profile=profile,
+                workspace=workspace,
+                operation="sync",
+                mutations=mutations,
+                home=home_path,
+            )
+        except (_ProfileInstructionWriteError, projection.PlanError, projection.DriftError) as exc:
+            conflict = {
+                "surface": "instruction",
+                "path": str(instruction.path),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": str(exc),
+            }
+            return _result(
+                profile,
+                status="conflict",
+                ready=False,
+                items=items,
+                conflicts=[conflict],
+                files_written=[],
+                files_removed=[],
+                mcp={"status": "pending", "items": []},
+                receipt_path=profile.receipt_path,
+                receipt_state="missing",
+            ), False
+        if committed is not None and committed.terminal_state == "committed":
+            for mutation in mutations:
+                (files_removed if mutation.mutation == "remove" else files_written).append(str(mutation.destination))
+        files_removed.extend(_prune_created_directories(generated_plan["prune"], profile.user_root))
+        files_removed.extend(_prune_created_directories(skill_plan["prune"], profile.skills_root))
         return _result(
             profile,
             status="updated" if files_written or files_removed else "current",
@@ -1925,114 +2132,64 @@ def _uninstall_profile(
     files_removed: list[str] = []
     files_written: list[str] = []
     if write and not conflicts:
+        mutations: list[projection.MutationSpec] = []
         if plan.action == "update" and remaining and plan.rendered is not None:
-            outcome = managed_block.write_text_nofollow_atomic(plan.path, plan.rendered)
-            if outcome.status == managed_block.WRITE_SKIPPED_SYMLINK:
-                conflicts.append(
-                    {
-                        "surface": "instruction",
-                        "path": str(plan.path),
-                        "status": "conflict",
-                        "action": "preserve",
-                        "detail": outcome.detail or "symlinked instruction path",
-                    }
-                )
-                return _result(
-                    profile,
-                    status="conflict",
-                    ready=False,
-                    items=items,
-                    conflicts=conflicts,
-                    files_written=[],
-                    files_removed=[],
-                    mcp={"status": "pending", "items": []},
-                    receipt_path=profile.receipt_path,
-                    receipt_state="present" if profile.receipt_path.exists() else "missing",
-                ), False
-            if outcome.status not in {managed_block.WRITE_WRITTEN, managed_block.WRITE_NOOP}:
-                conflicts.append(
-                    {
-                        "surface": "instruction",
-                        "path": str(plan.path),
-                        "status": "conflict",
-                        "action": "preserve",
-                        "detail": outcome.detail or "instruction write refused",
-                    }
-                )
-                return _result(
-                    profile,
-                    status="conflict",
-                    ready=False,
-                    items=items,
-                    conflicts=conflicts,
-                    files_written=[],
-                    files_removed=[],
-                    mcp={"status": "pending", "items": []},
-                    receipt_path=profile.receipt_path,
-                    receipt_state="present" if profile.receipt_path.exists() else "missing",
-                ), False
-            files_written.append(str(plan.path))
-            if plan.desired_digest:
+            mutation = _profile_mutation(
+                plan.path,
+                plan.rendered.encode("utf-8"),
+                writer=_write_managed_instruction_bytes if profile.instruction_mode == "marked-block" else None,
+            )
+            if mutation is not None:
+                mutations.append(mutation)
+            if profile.instruction_mode == "marked-block" and plan.desired_digest:
                 effective = brief_sections.effective_profile(remaining.values())
                 assert effective is not None
-                update_shared_instruction_digests(
-                    path=profile.instruction_path,
-                    home=home_path,
-                    workspace=workspace,
-                    digest=plan.desired_digest,
-                    effective_profile=effective,
-                    exclude_harness=profile.harness,
-                )
+                try:
+                    mutations.extend(
+                        _shared_instruction_state_mutations(
+                            path=profile.instruction_path,
+                            home=home_path,
+                            workspace=workspace,
+                            digest=plan.desired_digest,
+                            effective_profile=effective,
+                            exclude_harness=profile.harness,
+                        )
+                    )
+                except _ProfileInstructionWriteError as exc:
+                    conflict = {
+                        "surface": "instruction",
+                        "path": str(plan.path),
+                        "status": "conflict",
+                        "action": "preserve",
+                        "detail": str(exc),
+                    }
+                    return _result(
+                        profile,
+                        status="conflict",
+                        ready=False,
+                        items=items,
+                        conflicts=[conflict],
+                        files_written=[],
+                        files_removed=[],
+                        mcp={"status": "pending", "items": []},
+                        receipt_path=profile.receipt_path,
+                        receipt_state="present" if profile.receipt_path.exists() else "missing",
+                    ), False
         elif plan.action == "remove":
             if plan.rendered is None:
-                plan.path.unlink(missing_ok=True)
+                mutation = _profile_mutation(
+                    plan.path,
+                    None,
+                    remover=_remove_managed_instruction if profile.instruction_mode == "marked-block" else None,
+                )
             else:
-                outcome = managed_block.write_text_nofollow_atomic(plan.path, plan.rendered)
-                if outcome.status == managed_block.WRITE_SKIPPED_SYMLINK:
-                    conflicts.append(
-                        {
-                            "surface": "instruction",
-                            "path": str(plan.path),
-                            "status": "conflict",
-                            "action": "preserve",
-                            "detail": outcome.detail or "symlinked instruction path",
-                        }
-                    )
-                    return _result(
-                        profile,
-                        status="conflict",
-                        ready=False,
-                        items=items,
-                        conflicts=conflicts,
-                        files_written=[],
-                        files_removed=[],
-                        mcp={"status": "pending", "items": []},
-                        receipt_path=profile.receipt_path,
-                        receipt_state="present" if profile.receipt_path.exists() else "missing",
-                    ), False
-                if outcome.status not in {managed_block.WRITE_WRITTEN, managed_block.WRITE_NOOP}:
-                    conflicts.append(
-                        {
-                            "surface": "instruction",
-                            "path": str(plan.path),
-                            "status": "conflict",
-                            "action": "preserve",
-                            "detail": outcome.detail or "instruction write refused",
-                        }
-                    )
-                    return _result(
-                        profile,
-                        status="conflict",
-                        ready=False,
-                        items=items,
-                        conflicts=conflicts,
-                        files_written=[],
-                        files_removed=[],
-                        mcp={"status": "pending", "items": []},
-                        receipt_path=profile.receipt_path,
-                        receipt_state="present" if profile.receipt_path.exists() else "missing",
-                    ), False
-            files_removed.append(str(plan.path))
+                mutation = _profile_mutation(
+                    plan.path,
+                    plan.rendered.encode("utf-8"),
+                    writer=_write_managed_instruction_bytes if profile.instruction_mode == "marked-block" else None,
+                )
+            if mutation is not None:
+                mutations.append(mutation)
         instruction_dirs = state.get("instructions", {})
         instruction_dirs = (
             [Path(path) for path in instruction_dirs.get("created_directories", []) if isinstance(path, str)]
@@ -2040,13 +2197,13 @@ def _uninstall_profile(
             else []
         )
         for path in skill_plan["removes"]:
-            path.unlink(missing_ok=True)
-            files_removed.append(str(path))
-        files_removed.extend(_prune_created_directories(skill_plan["prune"], profile.skills_root))
+            mutation = _profile_mutation(path, None)
+            if mutation is not None:
+                mutations.append(mutation)
         for path in generated_plan["removes"]:
-            path.unlink(missing_ok=True)
-            files_removed.append(str(path))
-        files_removed.extend(_prune_created_directories(instruction_dirs + generated_plan["prune"], profile.user_root))
+            mutation = _profile_mutation(path, None)
+            if mutation is not None:
+                mutations.append(mutation)
         if hook_plan is not None and hook_plan["doc"] is not None and hook_plan["index"] is not None:
             from . import cursor_user_cmd
 
@@ -2055,20 +2212,62 @@ def _uninstall_profile(
             entries.pop(hook_plan["index"])
             if not entries:
                 hook_doc["hooks"].pop("sessionStart", None)
-            localio.write_text_atomic(profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc))
-            files_removed.append(str(profile.hook.path))
-        if mcp_plan["remove"]:
-            localio.write_text_atomic(
-                mcp_plan["path"], mcp_plan["adapter"].write_file(mcp_plan["text"], {}, mcp_plan["remove"])
+            mutation = _profile_mutation(
+                profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc).encode("utf-8")
             )
-            files_removed.append(str(mcp_plan["path"]))
+            if mutation is not None:
+                mutations.append(mutation)
+        if mcp_plan["remove"]:
+            mutation = _profile_mutation(
+                mcp_plan["path"],
+                mcp_plan["adapter"].write_file(mcp_plan["text"], {}, mcp_plan["remove"]).encode("utf-8"),
+            )
+            if mutation is not None:
+                mutations.append(mutation)
         if profile.state_path.exists():
-            profile.state_path.unlink()
-            files_removed.append(str(profile.state_path))
+            mutation = _profile_mutation(profile.state_path, None)
+            if mutation is not None:
+                mutations.append(mutation)
         if profile.receipt_path.exists():
-            profile.receipt_path.unlink()
-            files_removed.append(str(profile.receipt_path))
-    changed = bool(files_removed)
+            mutation = _profile_mutation(profile.receipt_path, None)
+            if mutation is not None:
+                mutations.append(mutation)
+        try:
+            committed = _execute_profile_projection(
+                profile=profile,
+                workspace=workspace,
+                operation="uninstall",
+                mutations=mutations,
+                home=home_path,
+            )
+        except (_ProfileInstructionWriteError, projection.PlanError, projection.DriftError) as exc:
+            conflict = {
+                "surface": "instruction",
+                "path": str(plan.path),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": str(exc),
+            }
+            return _result(
+                profile,
+                status="conflict",
+                ready=False,
+                items=items,
+                conflicts=[conflict],
+                files_written=[],
+                files_removed=[],
+                mcp={"status": "pending", "items": []},
+                receipt_path=profile.receipt_path,
+                receipt_state="present" if profile.receipt_path.exists() else "missing",
+            ), False
+        if committed is not None and committed.terminal_state == "committed":
+            for mutation in mutations:
+                (files_removed if mutation.mutation == "remove" else files_written).append(str(mutation.destination))
+            files_removed.extend(_prune_created_directories(skill_plan["prune"], profile.skills_root))
+            files_removed.extend(
+                _prune_created_directories(instruction_dirs + generated_plan["prune"], profile.user_root)
+            )
+    changed = bool(files_removed or files_written)
     return _result(
         profile,
         status="conflict" if conflicts else ("updated" if changed else "current"),

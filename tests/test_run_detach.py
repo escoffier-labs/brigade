@@ -481,6 +481,7 @@ def test_run_detach_child_argv_preserves_worker(tmp_path):
         wait=2.5,
         keep_going=False,
         scheduler="waves",
+        run_budget=None,
     )
     roster_resolution = roster_mod.RosterResolution(
         path=(tmp_path / "roster.toml").resolve(),
@@ -501,6 +502,46 @@ def test_run_detach_child_argv_preserves_worker(tmp_path):
     assert argv[argv.index("--wait") + 1] == "2.5"
     assert argv[argv.index("--resolved-roster-source") + 1] == "workspace"
     assert argv[argv.index("--resolved-roster-shadowed") + 1] == str(roster_resolution.shadowed[0])
+    assert "--run-budget" not in argv
+
+
+def test_run_detach_child_argv_forwards_run_budget(tmp_path):
+    budget_path = tmp_path / "budget.json"
+    budget_path.write_text("{}")
+    args = argparse.Namespace(
+        task="do work",
+        allow_dirty=False,
+        worktree=False,
+        show_plan=False,
+        verbose=False,
+        read_only=False,
+        no_code_graph=False,
+        no_evidence=False,
+        sandbox=None,
+        codex_transport=None,
+        handoff=False,
+        handoff_inbox=None,
+        worker="coder",
+        wait=2.5,
+        keep_going=False,
+        scheduler="waves",
+        run_budget=budget_path,
+    )
+    roster_resolution = roster_mod.RosterResolution(
+        path=(tmp_path / "roster.toml").resolve(),
+        source="workspace",
+        shadowed=((tmp_path / "user-roster.toml").resolve(),),
+    )
+    output_dir = tmp_path / "run"
+
+    argv = run_cli._detached_child_argv(
+        args,
+        run_cwd=tmp_path,
+        roster_resolution=roster_resolution,
+        output_dir=output_dir,
+    )
+
+    assert argv[argv.index("--run-budget") + 1] == str(budget_path.resolve())
 
 
 def _minimal_roster() -> roster_mod.Roster:

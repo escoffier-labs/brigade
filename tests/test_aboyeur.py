@@ -124,6 +124,40 @@ def _model_roster():
     )
 
 
+def test_budget_cancellation_report_combines_appserver_and_process_observations():
+    class ControlRegistry:
+        def interrupt_observed(self, workers):
+            assert workers == ("appserver", "direct")
+            return (("appserver", "interrupted"),), ("appserver",)
+
+    class ProcessRegistry:
+        def cancel(self):
+            return (proc.ProcessCancelOutcome("direct", "interrupted"),)
+
+    report = aboyeur._observed_budget_cancellation(
+        ProcessRegistry(),
+        ControlRegistry(),
+        ("appserver", "direct"),
+    )
+
+    assert [(outcome.seat, outcome.transport_capability, outcome.transport_result) for outcome in report.outcomes] == [
+        ("appserver", "interrupt", "interrupted"),
+        ("direct", "process_cancel", "interrupted"),
+    ]
+    assert report.active_seats == ("appserver",)
+
+
+def test_budget_cancellation_report_does_not_invent_active_seats_without_processes():
+    class ProcessRegistry:
+        def cancel(self):
+            return ()
+
+    report = aboyeur._observed_budget_cancellation(ProcessRegistry(), None, ("direct",))
+
+    assert report.active_seats == ()
+    assert [(outcome.seat, outcome.transport_result) for outcome in report.outcomes] == [("direct", "unsupported")]
+
+
 def _grok_roster(*, fallback=False):
     seats = {
         "chef": Agent("chef", "codex", "plan and synthesize"),
@@ -1321,6 +1355,63 @@ def test_normal_run_persists_and_enforces_declared_dispatch_ceiling(monkeypatch,
     assert len(requested) == 1
     assert denied
     assert exhausted
+
+
+def test_explicit_run_budget_survives_run_start_and_plan_persistence(monkeypatch, tmp_path):
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    budget_payload = {
+        "schema": "brigade.run_budget.v1",
+        "schema_version": 1,
+        "ceilings": {"worker_dispatch_count": 1},
+    }
+
+    def fake_run_agent(_cli_ref, prompt, **_kwargs):
+        if "Return exactly one JSON object" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"stage": 1, "worker": "coder", "task": "implement"}]}),
+                ok=True,
+            )
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "run"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=tmp_path,
+            output_dir=output_dir,
+            route_enabled=False,
+            code_graph_enabled=False,
+            evidence_enabled=False,
+            run_budget_payload=budget_payload,
+        )
+        == 0
+    )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    plan = json.loads((output_dir / "plan.json").read_text())
+    assert run_meta["run_budget"] == budget_payload
+    assert plan["run_budget"] == budget_payload
+
+
+def test_direct_run_rejects_invalid_explicit_budget_before_planning(monkeypatch, tmp_path):
+    def planner_must_not_run(*_args, **_kwargs):
+        raise AssertionError("planner should not run for an invalid budget declaration")
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", planner_must_not_run)
+
+    with pytest.raises(aboyeur.run_budget.BudgetCompatibilityError):
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            cwd=tmp_path,
+            route_enabled=False,
+            code_graph_enabled=False,
+            evidence_enabled=False,
+            run_budget_payload={"ceilings": {"worker_dispatch_count": 1}},
+        )
 
 
 def test_undeclared_ordinary_run_invents_no_hard_ceiling(monkeypatch, tmp_path):

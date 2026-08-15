@@ -7,15 +7,14 @@ reviewed packs into harness-specific folders.
 
 from __future__ import annotations
 
-import contextlib
 import difflib
 import hashlib
-import io
 import json
 import os
 import shlex
 import shutil
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +23,7 @@ from typing import Any
 from . import __version__ as BRIGADE_VERSION
 from . import mcp_server
 from .localio import slugify, utc_now_iso as _now, write_json as _write_json
+from .projection import kernel as projection
 from .templates import template_root
 from .untrusted import scan_untrusted
 
@@ -1351,6 +1351,201 @@ def user_profile_skill_packages(
     return tuple(sorted(packages, key=lambda package: package.skill_id))
 
 
+def _sync_file_entries(root: Path) -> dict[str, tuple[bytes, int]]:
+    if not root.is_dir():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): (path.read_bytes(), path.stat().st_mode & 0o777)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _sync_rendered_files(
+    source_dir: Path, metadata: dict[str, Any], skill_id: str, harness: str
+) -> dict[str, tuple[bytes, int]]:
+    files = _sync_file_entries(source_dir)
+    skill = files.get("SKILL.md")
+    if skill is not None:
+        rendered = _render_skill_text_for_harness(
+            skill[0].decode("utf-8", errors="replace"), metadata, skill_id, harness
+        )
+        files["SKILL.md"] = (rendered.encode("utf-8"), skill[1])
+    return files
+
+
+def _sync_files_fingerprint(files: dict[str, tuple[bytes, int]]) -> str:
+    digest = hashlib.sha256()
+    for relative, (content, _mode) in sorted(files.items()):
+        if Path(relative).name in {".DS_Store", "skill.json"}:
+            continue
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _sync_file_mutations(
+    *,
+    root: Path,
+    before: dict[str, tuple[bytes, int]],
+    after: dict[str, tuple[bytes, int]],
+    display_prefix: str,
+) -> list[projection.MutationSpec]:
+    mutations: list[projection.MutationSpec] = []
+    for relative in sorted(set(before) | set(after)):
+        old = before.get(relative)
+        new = after.get(relative)
+        if old == new:
+            continue
+        destination = root / relative
+        mutation_type = "create" if old is None else "remove" if new is None else "replace"
+        mutations.append(
+            projection.mutation(
+                destination=destination,
+                display_path=f"{display_prefix}/{relative}",
+                mutation=mutation_type,
+                expected_before=projection.content_digest(old[0] if old else None),
+                desired_after=projection.content_digest(new[0] if new else None),
+                staged_bytes=new[0] if new else None,
+                mode=new[1] if new else None,
+            )
+        )
+    return mutations
+
+
+def _sync_single_file_mutation(path: Path, before: bytes | None, after: bytes | None) -> projection.MutationSpec | None:
+    if before == after:
+        return None
+    mutation_type = "create" if before is None else "remove" if after is None else "replace"
+    return projection.mutation(
+        destination=path,
+        display_path=projection.safe_display_path(path, target=path.parent),
+        mutation=mutation_type,
+        expected_before=projection.content_digest(before),
+        desired_after=projection.content_digest(after),
+        staged_bytes=after,
+    )
+
+
+def _sync_recovery_records(workspace: Path) -> list[dict[str, str]]:
+    return [
+        {
+            "operation_id": record.operation_id,
+            "status": record.status,
+            "recovery_command": f"brigade projection recover {record.operation_id}",
+        }
+        for record in projection.unfinished_operations(workspace)
+        if record.operation_id.startswith("skills-")
+    ]
+
+
+def _sync_projection_plan(
+    *, workspace: Path, items: list[dict[str, Any]]
+) -> tuple[projection.Plan | None, list[dict[str, Any]], str | None]:
+    mutations: list[projection.MutationSpec] = []
+    history_path = _install_history_path(workspace)
+    history_before = history_path.read_bytes() if history_path.is_file() else None
+    history_lines: list[bytes] = []
+    source_rows: list[dict[str, Any]] = []
+    for item in items:
+        skill_id = str(item["skill_id"])
+        harness = str(item["harness"])
+        lint = _lint_payload(workspace, f"registry:{skill_id}")
+        if not lint.get("valid"):
+            return None, items, f"skill lint failed during sync planning: {skill_id}"
+        metadata = lint.get("metadata") if isinstance(lint.get("metadata"), dict) else {}
+        source_dir = Path(str(lint["skill_dir"]))
+        desired_files = _sync_rendered_files(source_dir, metadata, skill_id, harness)
+        installed_dir = _install_dir(workspace, harness, skill_id)
+        previous_files = _sync_file_entries(installed_dir)
+        mutations.extend(
+            _sync_file_mutations(
+                root=installed_dir,
+                before=previous_files,
+                after=desired_files,
+                display_prefix=f"bundle:{skill_id}:{harness}",
+            )
+        )
+        installed_at = _now()
+        rollback_snapshot: str | None = None
+        if previous_files:
+            rollback_dir = (
+                _rollback_root(workspace, skill_id, harness)
+                / f"{installed_at[:19].replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
+            )
+            rollback_snapshot = str(rollback_dir)
+            mutations.extend(
+                _sync_file_mutations(
+                    root=rollback_dir,
+                    before={},
+                    after=previous_files,
+                    display_prefix=f"rollback:{skill_id}:{harness}",
+                )
+            )
+        source = lint.get("source") if isinstance(lint.get("source"), dict) else {}
+        render = _renderer_contract(workspace, harness)
+        skill_content = desired_files.get("SKILL.md", (b"", 0))[0].decode("utf-8", errors="replace")
+        receipt_path = _installs_root(workspace) / f"{skill_id}-{harness}.json"
+        previous_receipt = _read_json(receipt_path) if receipt_path.is_file() else {}
+        receipt = {
+            "schema_version": RECEIPT_SCHEMA_VERSION,
+            "workspace": str(workspace),
+            "receipt_id": f"{installed_at[:19].replace(':', '').replace('-', '')}-{skill_id}-{harness}",
+            "skill_id": skill_id,
+            "target": harness,
+            "installed_dir": str(installed_dir),
+            "installed_at": installed_at,
+            "version": str(metadata.get("version") or "0.1.0"),
+            "source_path": str(metadata.get("source") or source_dir),
+            "source": source,
+            "render": {**render, "fingerprint": _text_fingerprint(skill_content)},
+            "installed": {
+                "bundle_fingerprint": _sync_files_fingerprint(desired_files),
+                "skill_fingerprint": _text_fingerprint(skill_content),
+                "metadata_fingerprint": _text_fingerprint(
+                    desired_files.get("skill.json", (b"", 0))[0].decode("utf-8", errors="replace")
+                ),
+            },
+            "fingerprint": lint.get("fingerprint"),
+            "source_fingerprint": lint.get("fingerprint"),
+            "render_fingerprint": _text_fingerprint(skill_content),
+            "installed_fingerprint": _sync_files_fingerprint(desired_files),
+            "format": _adapter_map(workspace)[harness].get("format"),
+            "rollback_snapshot": rollback_snapshot,
+            "previous_receipt": previous_receipt if previous_receipt else None,
+            "trust_score": lint.get("trust_score"),
+            "changelog": lint.get("changelog"),
+        }
+        receipt_before = receipt_path.read_bytes() if receipt_path.is_file() else None
+        receipt_after = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        receipt_mutation = _sync_single_file_mutation(receipt_path, receipt_before, receipt_after)
+        if receipt_mutation is not None:
+            mutations.append(receipt_mutation)
+        item["receipt"] = {**receipt, "receipt_path": str(receipt_path)}
+        history_lines.append((json.dumps(item["receipt"], sort_keys=True) + "\n").encode("utf-8"))
+        source_rows.append({"skill_id": skill_id, "harness": harness, "fingerprint": lint.get("fingerprint")})
+    history_after = (history_before or b"") + b"".join(history_lines)
+    history_mutation = _sync_single_file_mutation(history_path, history_before, history_after)
+    if history_mutation is not None:
+        mutations.append(history_mutation)
+    if not mutations:
+        return None, items, None
+    source_fingerprint = hashlib.sha256(json.dumps(source_rows, sort_keys=True).encode("utf-8")).hexdigest()
+    return (
+        projection.build_plan(
+            operation_id=f"skills-{uuid.uuid4().hex}",
+            projector="skills",
+            source_fingerprint=source_fingerprint,
+            mutations=mutations,
+            target=workspace,
+        ),
+        items,
+        None,
+    )
+
+
 def sync(
     *,
     workspace: Path,
@@ -1366,43 +1561,45 @@ def sync(
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    applied = {"installed": 0, "updated": 0, "failed": 0}
+    applied = {"installed": 0, "updated": 0, "restored": 0, "failed": 0}
+    projection_view: dict[str, Any] | None = None
     if write:
-        for item in items:
-            if item["action"] not in {"install", "update"}:
-                continue
-            stdout = io.StringIO()
-            stderr = io.StringIO()
-            exception_error: str | None = None
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                try:
-                    rc = install(
-                        workspace=workspace,
-                        skill=f"registry:{item['skill_id']}",
-                        harness=str(item["harness"]),
-                        force=True,
-                        json_output=True,
-                    )
-                except OSError as exc:
-                    rc = 1
-                    exception_error = str(exc)
-            if rc == 0:
-                result = "installed" if item["action"] == "install" else "updated"
-                item["result"] = result
-                applied[result] += 1
-                try:
-                    install_payload = json.loads(stdout.getvalue())
-                except json.JSONDecodeError:
-                    install_payload = {}
-                receipt = install_payload.get("receipt")
-                receipts = receipt.get("receipts", []) if isinstance(receipt, dict) else []
-                item["receipt"] = receipts[0] if isinstance(receipts, list) and receipts else None
-            else:
-                item["result"] = "failed"
-                item["error"] = (
-                    exception_error or stderr.getvalue().strip() or stdout.getvalue().strip() or f"install exited {rc}"
+        mutable_items = [item for item in items if item["action"] in {"install", "update"}]
+        if mutable_items:
+            recovery = _sync_recovery_records(workspace)
+            if recovery:
+                payload = {"workspace": str(workspace), "recovery": recovery, "terminal_state": "recovery-required"}
+                print(
+                    json.dumps(payload, indent=2, sort_keys=True)
+                    if json_output
+                    else f"error: recovery required: {recovery[0]['recovery_command']}"
                 )
-                applied["failed"] += 1
+                return 1
+            try:
+                planned, mutable_items, error = _sync_projection_plan(workspace=workspace, items=mutable_items)
+            except (OSError, projection.PlanError, ValueError) as exc:
+                planned, error = None, str(exc)
+            if error is not None:
+                print(f"error: {error}", file=sys.stderr)
+                return 1
+            if planned is not None:
+                try:
+                    receipt = projection.execute(planned, target=workspace)
+                except projection.ProjectionError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+                projection_view = receipt.to_dict()
+                if receipt.terminal_state == "committed":
+                    for item in mutable_items:
+                        result = "installed" if item["action"] == "install" else "updated"
+                        item["result"] = result
+                        applied[result] += 1
+                else:
+                    state = "restored" if receipt.terminal_state == "restored" else "recovery-required"
+                    for item in mutable_items:
+                        item["result"] = state
+                    applied["restored"] = len(mutable_items) if state == "restored" else 0
+                    applied["failed"] = 1
 
     counts = {
         state: sum(item["state"] == state for item in items)
@@ -1419,6 +1616,7 @@ def sync(
         "counts": counts,
         "applied": applied,
         "items": items,
+        "projection": projection_view,
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1428,6 +1626,9 @@ def sync(
         print(f"mode: {mode}")
         print(f"target: {harness}")
         print(f"minimum_trust: {trust}")
+        if projection_view is not None:
+            print(f"projection operation: {projection_view['operation_id']}")
+            print(f"projection status: {projection_view['terminal_state']}")
         print(
             " ".join(f"{state}={counts[state]}" for state in ("current", "missing", "changed", "blocked", "excluded"))
         )
@@ -1438,7 +1639,11 @@ def sync(
                 f"- {item['skill_id']} [{item['harness']}] {item['state']} "
                 f"action={item['action']} result={item['result']}{detail}"
             )
-    return 1 if applied["failed"] else 0
+    return (
+        1
+        if applied["failed"] or (projection_view is not None and projection_view["terminal_state"] != "committed")
+        else 0
+    )
 
 
 def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = False) -> int:

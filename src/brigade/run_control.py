@@ -131,6 +131,22 @@ class LiveTurnRegistry:
             interrupted.append(active.worker)
         return {"ok": True, "interrupted": len(interrupted), "workers": interrupted}
 
+    def interrupt_observed(self, workers: tuple[str, ...]) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+        """Request per-seat interruption and return bounded, provider-safe observations."""
+        outcomes: list[tuple[str, str]] = []
+        for worker in workers:
+            active = self._turns(worker)
+            if not active:
+                continue
+            try:
+                active[0].thread.interrupt(active[0].turn_id)
+            except Exception:
+                outcomes.append((worker, "error"))
+            else:
+                outcomes.append((worker, "interrupted"))
+        active_workers = tuple(active.worker for active in self._turns(None) if active.worker in workers)
+        return tuple(outcomes), active_workers
+
     def _require_worker(self, worker: str) -> ActiveTurn:
         with self._lock:
             active = self._active.get(worker)

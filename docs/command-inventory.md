@@ -37,8 +37,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
-- `brigade mcp`: 12 command path(s)
-- `brigade memory`: 17 command path(s)
+- `brigade mcp`: 14 command path(s)
+- `brigade memory`: 18 command path(s)
 - `brigade model`: 7 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade openclaw-fragments` (extras): 1 command path(s)
@@ -46,6 +46,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade outcome`: 12 command path(s)
 - `brigade pantry` (extras): 5 command path(s)
 - `brigade profiles`: 2 command path(s)
+- `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
 - `brigade receipts`: 5 command path(s)
 - `brigade reconfigure`: 1 command path(s)
@@ -237,6 +238,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade mcp pi-bridge install`
 - `brigade mcp pi-bridge uninstall`
 - `brigade mcp plan`
+- `brigade mcp recover`
+- `brigade mcp status`
 - `brigade mcp sync`
 - `brigade mcp verify`
 - `brigade memory care backfill`
@@ -251,6 +254,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory init-git`
 - `brigade memory inventory`
 - `brigade memory lint`
+- `brigade memory project-vault`
 - `brigade memory recall`
 - `brigade memory search`
 - `brigade memory serve-mcp`
@@ -311,6 +315,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade pantry status` (extras)
 - `brigade profiles list`
 - `brigade profiles show`
+- `brigade projection recover`
 - `brigade projects audit` (extras)
 - `brigade projects closeout` (extras)
 - `brigade projects closeout-show` (extras)

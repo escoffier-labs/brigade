@@ -37,13 +37,13 @@ class ProcessRegistry:
         self._terminate_grace = terminate_grace
         self._kill_grace = kill_grace
         self._lock = threading.Lock()
-        self._processes: set[subprocess.Popen[bytes]] = set()
+        self._processes: dict[subprocess.Popen[bytes], str | None] = {}
         self._canceled = False
 
-    def register(self, process: subprocess.Popen[bytes]) -> None:
+    def register(self, process: subprocess.Popen[bytes], *, seat: str | None = None) -> None:
         with self._lock:
             if not self._canceled:
-                self._processes.add(process)
+                self._processes[process] = seat
                 return
         _terminate_processes(
             (process,),
@@ -53,16 +53,26 @@ class ProcessRegistry:
 
     def unregister(self, process: subprocess.Popen[bytes]) -> None:
         with self._lock:
-            self._processes.discard(process)
+            self._processes.pop(process, None)
 
-    def cancel(self) -> None:
+    def for_seat(self, seat: str) -> _SeatProcessRegistry:
+        return _SeatProcessRegistry(self, seat)
+
+    def cancel(self) -> tuple[ProcessCancelOutcome, ...]:
         with self._lock:
             self._canceled = True
-            processes = tuple(self._processes)
-        _terminate_processes(
-            processes,
-            terminate_grace=self._terminate_grace,
-            kill_grace=self._kill_grace,
+            processes = tuple(self._processes.items())
+        try:
+            _terminate_processes(
+                tuple(process for process, _seat in processes),
+                terminate_grace=self._terminate_grace,
+                kill_grace=self._kill_grace,
+            )
+        except Exception:
+            return tuple(ProcessCancelOutcome(seat, "error") for _process, seat in processes)
+        return tuple(
+            ProcessCancelOutcome(seat, "interrupted" if process.poll() is not None else "still_active")
+            for process, seat in processes
         )
 
     def terminate(self, process: subprocess.Popen[bytes]) -> None:
@@ -71,6 +81,31 @@ class ProcessRegistry:
             terminate_grace=self._terminate_grace,
             kill_grace=self._kill_grace,
         )
+
+
+@dataclass(frozen=True)
+class ProcessCancelOutcome:
+    """Safe observed state after a cancellation request for one registered process."""
+
+    seat: str | None
+    result: str
+
+
+class _SeatProcessRegistry:
+    """Label process registrations with a Brigade seat without changing adapters."""
+
+    def __init__(self, parent: ProcessRegistry, seat: str) -> None:
+        self._parent = parent
+        self._seat = seat
+
+    def register(self, process: subprocess.Popen[bytes]) -> None:
+        self._parent.register(process, seat=self._seat)
+
+    def unregister(self, process: subprocess.Popen[bytes]) -> None:
+        self._parent.unregister(process)
+
+    def cancel(self) -> tuple[ProcessCancelOutcome, ...]:
+        return self._parent.cancel()
 
 
 def _signal_process_group(process: subprocess.Popen[bytes], sig: int) -> None:

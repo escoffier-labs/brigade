@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from brigade import cli, skills_cmd
+from brigade.projection import kernel as projection
 
 
 def _write_skill(root, name="security-review"):
@@ -219,9 +220,45 @@ def test_skills_sync_write_installs_only_missing_and_changed_pairs(tmp_path, cap
     assert payload["applied"]["installed"] == 2
     assert payload["applied"]["updated"] == 2
     assert payload["applied"]["failed"] == 0
+    assert payload["projection"]["projector"] == "skills"
+    assert payload["projection"]["terminal_state"] == "committed"
 
 
-def test_skills_sync_preserves_completed_receipts_when_later_target_fails(tmp_path, capsys, monkeypatch):
+def test_skills_sync_write_with_only_current_targets_creates_no_batch_material(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="current-only")
+    metadata_path = source / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["codex"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    assert skills_cmd.install(workspace=tmp_path, skill="registry:current-only", harness="codex", json_output=True) == 0
+    capsys.readouterr()
+
+    assert skills_cmd.sync(workspace=tmp_path, harness="codex", trust="workspace", write=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["items"][0]["result"] == "unchanged"
+    assert payload["projection"] is None
+
+
+def test_skills_sync_human_write_output_includes_batch_operation_id(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="human-batch")
+    metadata_path = source / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["codex"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+
+    assert skills_cmd.sync(workspace=tmp_path, harness="codex", trust="workspace", write=True) == 0
+    output = capsys.readouterr().out
+
+    assert "projection operation: skills-" in output
+    assert "projection status: committed" in output
+
+
+def test_skills_sync_restores_all_outputs_after_projection_write_failure(tmp_path, capsys, monkeypatch):
     source = _write_skill(tmp_path / "source", name="partial")
     metadata_path = source / "skill.json"
     metadata = json.loads(metadata_path.read_text())
@@ -230,55 +267,111 @@ def test_skills_sync_preserves_completed_receipts_when_later_target_fails(tmp_pa
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
     capsys.readouterr()
 
-    real_install = skills_cmd.install
+    real_write = projection.localio.write_bytes_atomic
 
-    def fail_cursor(**kwargs):
-        if kwargs["harness"] == "cursor":
-            print("error: simulated cursor failure", file=sys.stderr)
-            return 1
-        return real_install(**kwargs)
+    def fail_cursor_bundle(path, data):
+        if ".cursor" in path.parts and path.name == "SKILL.md":
+            raise OSError("simulated cursor write failure")
+        return real_write(path, data)
 
-    monkeypatch.setattr(skills_cmd, "install", fail_cursor)
+    monkeypatch.setattr(projection.localio, "write_bytes_atomic", fail_cursor_bundle)
     assert skills_cmd.sync(workspace=tmp_path, harness="all", trust="workspace", write=True, json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
     rows = {(row["skill_id"], row["harness"]): row for row in payload["items"]}
 
-    assert rows[("partial", "codex")]["result"] == "installed"
-    assert rows[("partial", "cursor")]["result"] == "failed"
-    assert "simulated cursor failure" in rows[("partial", "cursor")]["error"]
-    assert (tmp_path / ".brigade" / "skills" / "installs" / "partial-codex.json").is_file()
+    assert rows[("partial", "codex")]["result"] == "restored"
+    assert rows[("partial", "cursor")]["result"] == "restored"
+    assert payload["projection"]["terminal_state"] == "restored"
+    assert not (tmp_path / ".codex" / "skills" / "partial" / "SKILL.md").exists()
+    assert not (tmp_path / ".brigade" / "skills" / "installs" / "partial-codex.json").exists()
     assert not (tmp_path / ".brigade" / "skills" / "installs" / "partial-cursor.json").exists()
+    assert not (tmp_path / ".brigade" / "skills" / "installs" / "history.jsonl").exists()
 
 
-def test_skills_sync_records_later_target_filesystem_exception(tmp_path, capsys, monkeypatch):
-    source = _write_skill(tmp_path / "source", name="exceptional")
+def test_skills_sync_ignores_other_projectors_pending_recovery(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="ignore-mcp-recovery")
     metadata_path = source / "skill.json"
     metadata = json.loads(metadata_path.read_text())
-    metadata["supported_harnesses"] = ["codex", "cursor"]
+    metadata["supported_harnesses"] = ["codex"]
     metadata_path.write_text(json.dumps(metadata))
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
     capsys.readouterr()
+    foreign = projection.build_plan(
+        operation_id="mcp-pending",
+        projector="mcp",
+        source_fingerprint="fixture",
+        mutations=[
+            projection.mutation(
+                destination=tmp_path / "foreign-mcp.txt",
+                mutation="create",
+                expected_before=projection.ABSENT,
+                desired_after=projection.content_digest(b"pending\n"),
+                staged_bytes=b"pending\n",
+            )
+        ],
+        target=tmp_path,
+    )
+    projection.write_crash_fixture(foreign, target=tmp_path, committed_count=0)
 
-    real_install = skills_cmd.install
-
-    def fail_cursor(**kwargs):
-        if kwargs["harness"] == "cursor":
-            raise OSError("simulated read-only filesystem")
-        return real_install(**kwargs)
-
-    monkeypatch.setattr(skills_cmd, "install", fail_cursor)
-    assert skills_cmd.sync(workspace=tmp_path, harness="all", trust="workspace", write=True, json_output=True) == 1
+    assert skills_cmd.sync(workspace=tmp_path, harness="codex", trust="workspace", write=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    rows = {(row["skill_id"], row["harness"]): row for row in payload["items"]}
 
-    assert rows[("exceptional", "codex")]["result"] == "installed"
-    assert rows[("exceptional", "cursor")]["result"] == "failed"
-    assert rows[("exceptional", "cursor")]["error"] == "simulated read-only filesystem"
-    assert (tmp_path / ".brigade" / "skills" / "installs" / "exceptional-codex.json").is_file()
+    assert payload["projection"]["projector"] == "skills"
+    assert (tmp_path / ".codex" / "skills" / "ignore-mcp-recovery" / "SKILL.md").is_file()
 
-    assert skills_cmd.sync(workspace=tmp_path, harness="all", trust="workspace", write=True) == 1
-    text = capsys.readouterr().out
-    assert "exceptional [cursor] missing action=install result=failed (simulated read-only filesystem)" in text
+
+def test_skills_sync_preserves_foreign_bundle_without_receipt_or_history_write(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="foreign-bundle")
+    metadata_path = source / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["codex"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    foreign = tmp_path / ".codex" / "skills" / "foreign-bundle"
+    foreign.mkdir(parents=True)
+    (foreign / "SKILL.md").write_text("foreign\n")
+
+    assert skills_cmd.sync(workspace=tmp_path, harness="codex", trust="workspace", write=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["projection"] is None
+    assert (foreign / "SKILL.md").read_text() == "foreign\n"
+    assert not (tmp_path / ".brigade" / "skills" / "installs" / "foreign-bundle-codex.json").exists()
+    assert not (tmp_path / ".brigade" / "skills" / "installs" / "history.jsonl").exists()
+
+
+def test_skills_sync_blocks_only_its_own_pending_recovery(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="pending-skills-recovery")
+    metadata_path = source / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["codex"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    pending = projection.build_plan(
+        operation_id="skills-pending",
+        projector="skills",
+        source_fingerprint="fixture",
+        mutations=[
+            projection.mutation(
+                destination=tmp_path / "pending-skills.txt",
+                mutation="create",
+                expected_before=projection.ABSENT,
+                desired_after=projection.content_digest(b"pending\n"),
+                staged_bytes=b"pending\n",
+            )
+        ],
+        target=tmp_path,
+    )
+    projection.write_crash_fixture(pending, target=tmp_path, committed_count=0)
+
+    assert skills_cmd.sync(workspace=tmp_path, harness="codex", trust="workspace", write=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["terminal_state"] == "recovery-required"
+    assert payload["recovery"][0]["operation_id"] == "skills-pending"
+    assert not (tmp_path / ".codex" / "skills" / "pending-skills-recovery").exists()
 
 
 def test_skills_sync_excludes_unavailable_hermes_target(tmp_path, capsys, monkeypatch):

@@ -139,6 +139,8 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
             "transport_capability",
             "transport_result",
             "active_remaining",
+            "active_seats",
+            "outcomes",
             "dimension",
         }
     ),

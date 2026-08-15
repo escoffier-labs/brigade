@@ -15,6 +15,7 @@ ITEM_FIELDS = {
     "id",
     "title",
     "canonical_path",
+    "size_bytes",
     "logical_destination",
     "store_type",
     "category",
@@ -238,6 +239,22 @@ def test_memory_inventory_schema_pagination_and_item_fields(tmp_path, capsys):
         },
     }
     assert set(item["care"]) == {"issues", "queued_action"}
+
+
+def test_memory_inventory_exposes_sizes_and_master_index_without_card_bodies(tmp_path, capsys):
+    _write_card(tmp_path, "memory/cards/sized.md", title="Sized", body="A compact card body.")
+    master_index = tmp_path / "MEMORY.md"
+    master_index.write_text("# Memory\n\n- [Sized](memory/cards/sized.md)\n", encoding="utf-8")
+
+    payload = _payload(tmp_path, capsys)
+
+    item = next(item for item in payload["items"] if item["canonical_path"] == "memory/cards/sized.md")
+    assert item["size_bytes"] == (tmp_path / "memory/cards/sized.md").stat().st_size
+    assert payload["master_index"] == {
+        "canonical_path": "MEMORY.md",
+        "size_bytes": master_index.stat().st_size,
+    }
+    assert "A compact card body." not in json.dumps(payload)
 
 
 def test_memory_inventory_includes_non_card_canonical_stores_and_filters(tmp_path, capsys):

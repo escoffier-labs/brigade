@@ -7,7 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `brigade memory project-vault` writes a one-way Obsidian projection of
+  canonical memory into an existing vault: care-state frontmatter and tags,
+  wikilinks, category/harness maps, and a topology canvas. Vault writes use
+  the projection kernel, preserve manual edits via conflict copies, and keep
+  the operator vault path out of public status. (#888)
+- `--run-budget PATH` accepts one `brigade.run_budget.v1` JSON declaration on
+  `brigade run`, dogfood, and model-trial starts. Brigade persists the supplied
+  declaration in the run and plan receipts without mapping `timeout_seconds`
+  into a run budget. Budget cancellation receipts now carry bounded per-seat or
+  per-transport outcomes and the observed work that may still be active. (#885,
+  #886)
+- `brigade mcp sync --write` commits selected native configs and MCP ownership
+  state through the projection transaction kernel. A failed write restores the
+  selected destinations; unfinished operations are visible through `brigade
+  mcp status` and `brigade mcp doctor`, and can be recovered with `brigade mcp
+  recover <operation-id>`. Refs #911.
+
+### Changed
+- Center Memory Operations Cards now shows corpus size, a chip cloud, compact
+  expandable rows, and 30-row paging. Handoffs is a sibling tab on that page;
+  `/view/handoffs` redirects there. Snapshot polling reloads the page so
+  nonce-scoped assets stay valid. (#903)
+- The shipped review-heavy `reviewer_flash` preset now uses Gemini 3.7 Flash Low
+  on Antigravity. Security-sensitive or cross-file decisions still route to the
+  independent `reviewer` or `reviewer_codex` seat. (#920)
+
 ### Fixed
+- Bare `brigade care status` now discovers target-scoped per-entry
+  registrations instead of scoring the atomic five-entry default. A target
+  with no discovered units reports `missing`. Systemd status also reports
+  `enabled: false` until every discovered timer is linked from
+  `timers.target.wants`. (#914)
+- Graph snapshot copies during `brigade work verify run` now honor the same
+  `graphtrail_delta_timeout_seconds` cap as `graphtrail sync`. A snapshot that
+  exceeds that cap marks `code_graph_delta` `sync_timed_out` with a reason and
+  leaves the verification command result unchanged, so a slow graph cannot
+  reject a passing check. The 10s default and per-target `.brigade/config.json`
+  key are unchanged.
+- Source and pipx-from-checkout installs now declare `0.27.0`, which PEP 440
+  sorts at or above the publish-dev `0.27.0.devYYYYMMDD` wheel line. The
+  previous `0.26.1` pin version-sorted below those wheels, so a current main
+  checkout looked stale to naive auditors. publish-dev stamps
+  `{pyproject}.devYYYYMMDD` on the declared line instead of the next minor.
 - `brigade init --profile` now merges repeatable `--include` values into the
   profile includes with first-seen de-duplication before `--full` appends
   `repo-extras`. Refs #494.
@@ -31,6 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--force`. (#860)
 
 ### Added
+- Projection transaction kernel: an internal all-or-restored prepare/commit
+  engine, recovery journal, redacted receipts, injected-failure hooks, and a
+  reusable conformance fixture for multi-file projections, plus
+  `brigade projection recover <operation-id>`. Native stdlib implementation;
+  no production projector is migrated yet. (#910)
 - Cloud dispatch registry (`brigade run cloud`): register-on-dispatch and adopt
   paths, `status` JSON classification (pending / ready-to-land / landed / stale /
   orphaned / needs-investigation), receipted report-only `sweep`, configurable

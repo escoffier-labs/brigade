@@ -56,7 +56,7 @@ def table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     return f'<table class="data-table"><thead><tr>{head_cells}</tr></thead><tbody>{body}</tbody></table>'
 
 
-def page(title: str, nonce: str, nav: str, body: str, *, reload_ms: int = 30000) -> str:
+def page(title: str, nonce: str, nav: str, body: str, *, reload_ms: int = 15000) -> str:
     """Render a full HTML document. *title*, *nav*, and *body* must already be escaped."""
     nonce_attr = esc(nonce)
     reload_delay = max(500, int(reload_ms))
@@ -157,9 +157,16 @@ table.data-table th {{
 {body}
 </main>
 <script nonce="{nonce_attr}">
-setTimeout(function () {{
-  location.reload();
-}}, {reload_delay});
+(function () {{
+  var pollMs = {reload_delay};
+  if (document.querySelector("[data-center-loading]")) {{
+    setTimeout(function () {{ location.reload(); }}, pollMs);
+    return;
+  }}
+  setInterval(function () {{
+    location.reload();
+  }}, pollMs);
+}})();
 document.addEventListener("input", function (e) {{
   var input = e.target;
   if (!input || !input.getAttribute) return;

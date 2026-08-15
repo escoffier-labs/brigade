@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -58,6 +59,12 @@ def register(sub: argparse._SubParsersAction) -> None:
             help="Roster path. Uses normal workspace/worktree-parent/user fallback.",
         )
         parser.add_argument("--output-dir", type=Path, default=None, help="Trial artifact directory.")
+        parser.add_argument(
+            "--run-budget",
+            type=Path,
+            default=None,
+            help="Path to a brigade.run_budget.v1 JSON declaration for each trial cell.",
+        )
         parser.set_defaults(func=_dispatch_trial)
     for command in ("show", "summary"):
         parser = trial_sub.add_parser(command, help=f"{command.title()} trial artifacts.")
@@ -87,7 +94,7 @@ def _dispatch_trial(args) -> int:
     import json
     import sys
 
-    from .. import model_trials
+    from .. import model_trials, run_budget
     from .. import roster as roster_mod
 
     if args.trial_command in {"show", "summary"}:
@@ -105,21 +112,27 @@ def _dispatch_trial(args) -> int:
 
     target = args.target.expanduser().resolve()
     try:
+        run_budget_payload = run_budget.load_declaration_file(args.run_budget) if args.run_budget is not None else None
         roster_path = roster_mod.resolve_roster_path(target, args.roster)
         roster = roster_mod.load_roster(roster_path)
         manifest = model_trials.load_manifest(args.manifest)
         output_dir = args.output_dir or target / ".brigade" / "evals" / manifest["name"]
         plan, cells = model_trials.build_plan(args.manifest, roster, output_dir)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, run_budget.BudgetCompatibilityError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.trial_command == "plan":
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
+    execute_kwargs: dict[str, Any] = {
+        "workspace": target,
+        "output_dir": output_dir,
+        "resume": args.trial_command == "resume",
+    }
+    if run_budget_payload is not None:
+        execute_kwargs["run_budget_payload"] = run_budget_payload
     return model_trials.execute(
         args.manifest,
         roster,
-        workspace=target,
-        output_dir=output_dir,
-        resume=args.trial_command == "resume",
+        **execute_kwargs,
     )

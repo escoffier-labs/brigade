@@ -137,6 +137,89 @@ def test_get_unknown_view_returns_404(dashboard_server):
     assert _status_code(response) == "404"
 
 
+@pytest.mark.parametrize(
+    ("legacy", "location"),
+    [
+        ("/view/graph", "/view/work#ready"),
+        ("/view/waves", "/view/work#ready"),
+        ("/view/claims", "/view/work#claims"),
+        ("/view/activity", "/view/work#recent"),
+    ],
+)
+def test_folded_work_routes_redirect_to_work_anchors(dashboard_server, legacy, location):
+    host, port = dashboard_server.server_address
+    response = _raw_request(dashboard_server, f"{host}:{port}", path=legacy)
+    assert _status_code(response) == "301"
+    headers, _body = _headers_and_body(response)
+    assert f"Location: {location}" in headers
+
+
+def test_handoffs_route_redirects_to_memory_handoffs_tab(dashboard_server):
+    host, port = dashboard_server.server_address
+    response = _raw_request(dashboard_server, f"{host}:{port}", path="/view/handoffs")
+    assert _status_code(response) == "301"
+    headers, _body = _headers_and_body(response)
+    assert "Location: /view/memory#handoffs" in headers
+
+
+def test_work_view_browser_check_answers_operator_questions(dashboard_server, monkeypatch):
+    from brigade.center_cmd.dashboard.views import work as work_view
+
+    def fake_fetch(target):
+        del target
+        return {
+            "ready": {
+                "ready_count": 2,
+                "blocked_count": 0,
+                "ready": [
+                    {"id": "task-a", "text": "Browser check ready A", "status": "pending"},
+                    {"id": "task-b", "text": "Browser check ready B", "status": "pending"},
+                ],
+                "blocked": [],
+                "edges": [],
+                "waves": [
+                    {
+                        "index": 0,
+                        "exclusive": True,
+                        "tasks": [{"id": "task-a", "text": "Browser check ready A"}],
+                    },
+                    {
+                        "index": 1,
+                        "exclusive": True,
+                        "tasks": [{"id": "task-b", "text": "Browser check ready B"}],
+                    },
+                ],
+            },
+            "tasks": {"tasks": []},
+            "runs": {
+                "runs": [
+                    {
+                        "run_id": "run-browser",
+                        "status": "completed",
+                        "started_at": "2026-08-13T12:00:00Z",
+                        "commands": [{"command": "pytest -q", "exit_code": 0}],
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(work_view, "fetch", fake_fetch)
+    host, port = dashboard_server.server_address
+    response = _raw_request(dashboard_server, f"{host}:{port}", path="/view/work")
+    assert _status_code(response) == "200"
+    _, body = _headers_and_body(response)
+    assert "failed to render" not in body
+    assert ">Work<" in body
+    assert 'id="ready"' in body
+    assert 'id="claims"' in body
+    assert 'id="recent"' in body
+    assert "Browser check ready A" in body
+    assert "pytest -q" in body
+    assert ">Graph<" not in body
+    assert ">Waves<" not in body
+    assert ">Claims<" not in body
+
+
 def test_rendered_page_has_no_inline_handlers_and_nonce_matches(dashboard_server):
     host, port = dashboard_server.server_address
     response = _raw_request(dashboard_server, f"{host}:{port}", path="/view/status")
@@ -460,7 +543,7 @@ def _stub_memory_ops_json(monkeypatch, *, topology=None, inventory_pages=None):
     return calls
 
 
-def test_memory_operations_replaces_cards_and_uses_only_topology_inventory_contracts(monkeypatch, tmp_target):
+def test_memory_operations_replaces_cards_and_uses_only_contracts(monkeypatch, tmp_target):
     names = [module.NAME for module in all_views()]
     titles = [module.TITLE for module in all_views()]
     assert "cards" not in names
@@ -472,7 +555,11 @@ def test_memory_operations_replaces_cards_and_uses_only_topology_inventory_contr
     calls = _stub_memory_ops_json(monkeypatch)
     payload = view.fetch(tmp_target)
     assert isinstance(payload, dict)
-    assert {tuple(call[:2]) for call in calls} <= {("memory", "topology"), ("memory", "inventory")}
+    assert {tuple(call[:2]) for call in calls} <= {
+        ("memory", "topology"),
+        ("memory", "inventory"),
+        ("handoff", "lint"),
+    }
     assert ("memory", "topology") in {tuple(call[:2]) for call in calls}
     assert ("memory", "inventory") in {tuple(call[:2]) for call in calls}
     assert all("search" not in call for call in calls)
@@ -571,9 +658,116 @@ def test_memory_operations_renders_topology_health_ownership_and_inventory_field
     assert "stale" in html
     assert "refresh" in html.lower()
     assert "Topology" in html
-    assert "Inventory" in html
+    assert "Cards" in html
     assert 'data-mo-mode="topology"' in html
-    assert 'data-mo-mode="inventory"' in html
+    assert 'data-mo-mode="cards"' in html
+    assert 'data-mo-mode="handoffs"' in html
+
+
+def test_memory_operations_cards_density_matches_inventory_contract(monkeypatch, tmp_target):
+    inventory_pages = [
+        {
+            "master_index": {"canonical_path": "MEMORY.md", "size_bytes": 2048},
+            "items": [
+                _inventory_item(
+                    0,
+                    title="Architecture card",
+                    category="architecture",
+                    tags=["system", "design"],
+                    updated_at="2026-08-11",
+                    size_bytes=401,
+                ),
+                _inventory_item(
+                    1,
+                    title="Workflow card",
+                    category="workflow",
+                    tags=["system", "run"],
+                    updated_at="2026-07-03",
+                    size_bytes=800,
+                ),
+            ],
+            "pagination": {
+                "offset": 0,
+                "limit": 500,
+                "total": 2,
+                "returned": 2,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
+    ]
+    _stub_memory_ops_json(monkeypatch, inventory_pages=inventory_pages)
+    view = view_by_name("memory")
+    assert view is not None
+
+    rendered = view.render(view.fetch(tmp_target), nonce="density")
+
+    assert 'data-mo-mode="cards"' in rendered
+    assert 'data-mo-mode="handoffs"' in rendered
+    assert 'data-mo-mode="cards" aria-selected="true"' in rendered
+    assert 'data-mo-panel="topology" role="tabpanel" aria-labelledby="mo-tab-topology" hidden' in rendered
+    assert 'class="mo-corpus-stats"' in rendered
+    assert "2 cards" in rendered
+    assert "2 categories" in rendered
+    assert "~301 tokens" in rendered
+    assert 'class="mo-master-index"' in rendered
+    assert "MEMORY.md" in rendered and "2 KiB" in rendered
+    assert 'class="mo-filter-chip"' in rendered
+    assert "architecture (1)" in rendered
+    assert "system (2)" in rendered
+    assert "<select" not in rendered
+    assert 'class="mo-category-section"' in rendered
+    assert "ARCHITECTURE (1)" in rendered
+    assert 'class="mo-card-row"' in rendered
+    assert 'class="mo-card-detail"' in rendered
+    assert ">3d<" in rendered
+    assert "0h ago" not in rendered
+
+
+def test_memory_operations_humanizes_card_age():
+    from datetime import date
+
+    from brigade.center_cmd.dashboard.views import memory_operations
+
+    assert memory_operations._human_age("2026-08-11", today=date(2026, 8, 14)) == "3d"
+    assert memory_operations._human_age("2026-07-03", today=date(2026, 8, 14)) == "6w"
+
+
+def test_memory_view_browser_check_shows_dense_cards_and_handoffs(dashboard_server, monkeypatch):
+    from brigade.center_cmd.dashboard.views import memory_operations
+
+    def fake_fetch(target):
+        del target
+        return {
+            "topology": _topology_payload(),
+            "inventory": {
+                "items": [
+                    _inventory_item(
+                        0,
+                        title="Browser density card",
+                        category="workflow",
+                        tags=["browser", "memory"],
+                        size_bytes=480,
+                        updated_at="2026-08-11",
+                    )
+                ],
+                "total": 1,
+                "master_index": {"canonical_path": "MEMORY.md", "size_bytes": 1024},
+            },
+            "handoffs": {"count": 0, "results": []},
+        }
+
+    monkeypatch.setattr(memory_operations, "fetch", fake_fetch)
+    host, port = dashboard_server.server_address
+    response = _raw_request(dashboard_server, f"{host}:{port}", path="/view/memory")
+    assert _status_code(response) == "200"
+    _headers, body = _headers_and_body(response)
+    assert 'data-mo-mode="cards"' in body
+    assert 'data-mo-mode="handoffs"' in body
+    assert 'class="mo-corpus-stats"' in body
+    assert 'class="mo-master-index"' in body
+    assert 'class="mo-card-row"' in body
+    assert "Browser density card" in body
 
 
 def test_memory_operations_escapes_hostile_labels_and_has_no_inline_handlers(monkeypatch, tmp_target):

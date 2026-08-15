@@ -44,9 +44,11 @@ Standard library only. Brigade is zero-runtime-dependency.
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from brigade import run_events
@@ -95,7 +97,7 @@ ALL_DIMENSIONS = ENFORCEABLE_DIMENSIONS | OBSERVED_DIMENSIONS
 
 BUDGET_MODES = frozenset({"enforceable", "observed"})
 USAGE_SOURCES = frozenset({"estimated", "provider_reconciled"})
-TRANSPORT_CAPABILITIES = frozenset({"interrupt", "process_cancel", "none"})
+TRANSPORT_CAPABILITIES = frozenset({"interrupt", "process_cancel", "none", "mixed"})
 TRANSPORT_RESULTS = frozenset(
     {
         "interrupted",
@@ -103,6 +105,8 @@ TRANSPORT_RESULTS = frozenset(
         "partial",
         "unsupported",
         "requested",
+        "still_active",
+        "error",
     }
 )
 REASON_CLASSES = frozenset(
@@ -165,6 +169,8 @@ RUN_BUDGET_EVENT_PAYLOADS: dict[str, frozenset[str]] = {
             "transport_capability",
             "transport_result",
             "active_remaining",
+            "active_seats",
+            "outcomes",
             "dimension",
         }
     ),
@@ -363,6 +369,46 @@ def parse_declaration(payload: Mapping[str, Any] | None) -> RunBudgetDeclaration
     )
 
 
+def load_declaration_file(path: Path) -> dict[str, Any]:
+    """Load one operator-supplied, versioned run-budget declaration file.
+
+    The parsed mapping is returned verbatim after strict validation so the exact
+    declaration can be persisted into every run artifact without synthesizing
+    defaults or changing it into a verification-contract budget.
+    """
+    try:
+        payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise BudgetCompatibilityError(
+            f"could not read run budget declaration: {exc}", code="schema_incompatible"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise BudgetCompatibilityError("run budget declaration is not valid JSON", code="schema_incompatible") from exc
+    return validate_explicit_declaration(payload)
+
+
+def validate_explicit_declaration(payload: object) -> dict[str, Any]:
+    """Validate a supplied declaration without filling in compatibility defaults."""
+    if not isinstance(payload, Mapping):
+        raise BudgetCompatibilityError("run budget declaration must be an object", code="schema_incompatible")
+    required = {"schema", "schema_version"}
+    missing = required - set(payload)
+    if missing:
+        raise BudgetCompatibilityError(
+            _bound(f"run budget declaration is missing required fields: {sorted(missing)}"),
+            code="schema_incompatible",
+        )
+    allowed = required | {"ceilings", "observed", "threshold_pct", "token_budget"}
+    unknown = set(payload) - allowed
+    if unknown:
+        raise BudgetCompatibilityError(
+            _bound(f"run budget declaration has unknown fields: {sorted(unknown)}"),
+            code="schema_incompatible",
+        )
+    parse_declaration(payload)
+    return dict(payload)
+
+
 def declaration_has_budget_content(declaration: RunBudgetDeclaration) -> bool:
     """True when a declaration carries at least one known budget field."""
     if declaration.wall_clock_seconds is not None or declaration.worker_dispatch_count is not None:
@@ -501,6 +547,39 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
 
 
 @dataclass(frozen=True)
+class CancelOutcome:
+    """Bounded, provider-safe cancellation observation for one seat or transport."""
+
+    seat: str
+    transport_capability: str
+    transport_result: str
+
+
+@dataclass(frozen=True)
+class CancellationReport:
+    """Observed cancellation state used to build one durable receipt."""
+
+    outcomes: tuple[CancelOutcome, ...]
+    active_seats: tuple[str, ...]
+
+    @property
+    def transport_capability(self) -> str:
+        capabilities = {outcome.transport_capability for outcome in self.outcomes}
+        return next(iter(capabilities)) if len(capabilities) == 1 else "mixed"
+
+    @property
+    def transport_result(self) -> str:
+        results = {outcome.transport_result for outcome in self.outcomes}
+        if not results:
+            return "unsupported"
+        if "error" in results:
+            return "error"
+        if self.active_seats:
+            return "partial" if "interrupted" in results else "still_active"
+        return "interrupted" if results == {"interrupted"} else "partial"
+
+
+@dataclass(frozen=True)
 class CancelReceipt:
     request_id: str
     reason_class: str
@@ -508,6 +587,8 @@ class CancelReceipt:
     transport_result: str
     active_remaining: int
     dimension: str
+    outcomes: tuple[CancelOutcome, ...] = ()
+    active_seats: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -554,6 +635,15 @@ class BudgetProjection:
                     "transport_result": receipt.transport_result,
                     "active_remaining": receipt.active_remaining,
                     "dimension": receipt.dimension,
+                    "outcomes": [
+                        {
+                            "seat": outcome.seat,
+                            "transport_capability": outcome.transport_capability,
+                            "transport_result": outcome.transport_result,
+                        }
+                        for outcome in receipt.outcomes
+                    ],
+                    "active_seats": list(receipt.active_seats),
                 }
                 for receipt in self.cancel_receipts
             ],
@@ -640,6 +730,24 @@ def project_budget_state(
             elif reason == "budget_cancel" and terminal_policy is None:
                 terminal_policy = "budget_exhausted"
         elif event_type == EVENT_CANCELLED:
+            raw_outcomes = payload.get("outcomes")
+            outcomes: tuple[CancelOutcome, ...] = ()
+            if isinstance(raw_outcomes, list):
+                outcomes = tuple(
+                    CancelOutcome(
+                        seat=str(item.get("seat") or ""),
+                        transport_capability=str(item.get("transport_capability") or "none"),
+                        transport_result=str(item.get("transport_result") or "unsupported"),
+                    )
+                    for item in raw_outcomes
+                    if isinstance(item, Mapping)
+                )
+            raw_active_seats = payload.get("active_seats")
+            active_seats = (
+                tuple(seat for seat in raw_active_seats if isinstance(seat, str))
+                if isinstance(raw_active_seats, list)
+                else ()
+            )
             receipt = CancelReceipt(
                 request_id=str(payload.get("request_id") or ""),
                 reason_class=str(payload.get("reason_class") or "budget_cancel"),
@@ -650,6 +758,8 @@ def project_budget_state(
                 and not isinstance(payload.get("active_remaining"), bool)
                 else 0,
                 dimension=str(payload.get("dimension") or ""),
+                outcomes=outcomes,
+                active_seats=active_seats,
             )
             cancels.append(receipt)
             if receipt.reason_class == "operator_cancel":
@@ -957,21 +1067,53 @@ def build_cancelled_event(
     transport_result: str,
     active_remaining: int,
     dimension: str,
+    outcomes: Sequence[CancelOutcome] = (),
+    active_seats: Sequence[str] = (),
 ) -> dict[str, Any]:
     if transport_result not in TRANSPORT_RESULTS:
         raise BudgetError("invalid transport_result", code="cancel_invalid")
     if not isinstance(active_remaining, int) or isinstance(active_remaining, bool) or active_remaining < 0:
         raise BudgetError("active_remaining must be a non-negative integer", code="cancel_invalid")
+    if (outcomes or active_seats) and active_remaining != len(active_seats):
+        raise BudgetError("active_remaining must equal the observed active seat set", code="cancel_invalid")
+    if len(outcomes) > 16 or len(active_seats) > 16:
+        raise BudgetError("cancel outcomes exceed the bounded receipt limit", code="cancel_invalid")
+    safe_outcomes = []
+    for outcome in outcomes:
+        if not isinstance(outcome, CancelOutcome):
+            raise BudgetError("cancel outcome is invalid", code="cancel_invalid")
+        if not outcome.seat or len(outcome.seat) > 80:
+            raise BudgetError("cancel outcome seat is invalid", code="cancel_invalid")
+        if outcome.transport_capability not in TRANSPORT_CAPABILITIES:
+            raise BudgetError("cancel outcome capability is invalid", code="cancel_invalid")
+        if outcome.transport_result not in TRANSPORT_RESULTS:
+            raise BudgetError("cancel outcome result is invalid", code="cancel_invalid")
+        safe_outcomes.append(
+            {
+                "seat": outcome.seat,
+                "transport_capability": outcome.transport_capability,
+                "transport_result": outcome.transport_result,
+            }
+        )
+    safe_active_seats = list(active_seats)
+    if len(set(safe_active_seats)) != len(safe_active_seats) or any(
+        not isinstance(seat, str) or not seat or len(seat) > 80 for seat in safe_active_seats
+    ):
+        raise BudgetError("active seat set is invalid", code="cancel_invalid")
+    payload: dict[str, Any] = {
+        "request_id": request_id,
+        "reason_class": reason_class,
+        "transport_capability": transport_capability,
+        "transport_result": transport_result,
+        "active_remaining": active_remaining,
+        "dimension": dimension,
+    }
+    if outcomes or active_seats:
+        payload["active_seats"] = safe_active_seats
+        payload["outcomes"] = safe_outcomes
     return {
         "event_type": EVENT_CANCELLED,
-        "payload": {
-            "request_id": request_id,
-            "reason_class": reason_class,
-            "transport_capability": transport_capability,
-            "transport_result": transport_result,
-            "active_remaining": active_remaining,
-            "dimension": dimension,
-        },
+        "payload": payload,
         "idempotency_key": _idempotency_key(EVENT_CANCELLED, request_id),
     }
 
@@ -1040,6 +1182,33 @@ def validate_run_budget_payload(event_type: str, payload: Mapping[str, Any]) -> 
         active = payload.get("active_remaining")
         if not isinstance(active, int) or isinstance(active, bool) or active < 0:
             raise run_events.CanonicalizationError("run_budget.cancelled active_remaining is invalid")
+        active_seats = payload.get("active_seats")
+        outcomes = payload.get("outcomes")
+        if active_seats is not None:
+            if not isinstance(active_seats, list) or len(active_seats) > 16 or active != len(active_seats):
+                raise run_events.CanonicalizationError("run_budget.cancelled active_seats is invalid")
+            if len(set(active_seats)) != len(active_seats) or any(
+                not isinstance(seat, str) or not seat or len(seat) > 80 for seat in active_seats
+            ):
+                raise run_events.CanonicalizationError("run_budget.cancelled active_seats is invalid")
+        if outcomes is not None:
+            if not isinstance(outcomes, list) or len(outcomes) > 16:
+                raise run_events.CanonicalizationError("run_budget.cancelled outcomes is invalid")
+            for outcome in outcomes:
+                if not isinstance(outcome, Mapping) or set(outcome) != {
+                    "seat",
+                    "transport_capability",
+                    "transport_result",
+                }:
+                    raise run_events.CanonicalizationError("run_budget.cancelled outcome is invalid")
+                if (
+                    not isinstance(outcome["seat"], str)
+                    or not outcome["seat"]
+                    or len(outcome["seat"]) > 80
+                    or outcome["transport_capability"] not in TRANSPORT_CAPABILITIES
+                    or outcome["transport_result"] not in TRANSPORT_RESULTS
+                ):
+                    raise run_events.CanonicalizationError("run_budget.cancelled outcome is invalid")
 
 
 AppendEvent = Callable[[str, Mapping[str, Any], str], Any]
@@ -1323,13 +1492,17 @@ class BudgetCoordinator:
         reason_class: str,
         transport_capability: str,
         dimension: str,
-        cancel_fn: Callable[[], tuple[str, int]] | None = None,
+        cancel_fn: Callable[[], CancellationReport | tuple[str, int]] | None = None,
     ) -> CancelReceipt:
         """Best-effort cancel of active work with durable cancel receipts.
 
-        ``cancel_fn`` returns ``(transport_result, active_remaining)``.
+        ``cancel_fn`` returns observations. The legacy tuple form remains
+        readable for callers that only have an aggregate transport result.
         """
         with self._lock:
+            for receipt in reversed(self._projection.cancel_receipts):
+                if receipt.request_id == request_id:
+                    return receipt
             requested = build_cancel_requested_event(
                 request_id=request_id,
                 reason_class=reason_class,
@@ -1339,8 +1512,17 @@ class BudgetCoordinator:
             self._commit([requested])
             transport_result = "unsupported"
             active_remaining = 0
+            outcomes: tuple[CancelOutcome, ...] = ()
+            active_seats: tuple[str, ...] = ()
             if cancel_fn is not None:
-                transport_result, active_remaining = cancel_fn()
+                observation = cancel_fn()
+                if isinstance(observation, CancellationReport):
+                    outcomes = observation.outcomes
+                    active_seats = observation.active_seats
+                    transport_result = observation.transport_result
+                    active_remaining = len(active_seats)
+                else:
+                    transport_result, active_remaining = observation
             cancelled = build_cancelled_event(
                 request_id=request_id,
                 reason_class=reason_class,
@@ -1348,6 +1530,8 @@ class BudgetCoordinator:
                 transport_result=transport_result,
                 active_remaining=active_remaining,
                 dimension=dimension,
+                outcomes=outcomes,
+                active_seats=active_seats,
             )
             self._commit([cancelled])
             return CancelReceipt(
@@ -1357,6 +1541,8 @@ class BudgetCoordinator:
                 transport_result=transport_result,
                 active_remaining=active_remaining,
                 dimension=dimension,
+                outcomes=outcomes,
+                active_seats=active_seats,
             )
 
     def reconcile_usage(

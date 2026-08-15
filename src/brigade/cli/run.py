@@ -9,7 +9,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from subprocess import DEVNULL, STDOUT, Popen
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 
 _DETACH_START_TIMEOUT_SECONDS = 30.0
@@ -255,6 +255,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Directory for run artifacts. Defaults to .brigade/runs/<id> under --cwd.",
     )
+    p_run.add_argument(
+        "--run-budget",
+        type=Path,
+        default=None,
+        help="Path to a brigade.run_budget.v1 JSON declaration persisted with this run.",
+    )
     p_run.add_argument("--no-artifacts", action="store_true", help="Do not write run artifacts.")
     p_run.add_argument(
         "--handoff",
@@ -291,6 +297,7 @@ def _resolved_scheduler(args, roster) -> str:
 
 def dispatch(args) -> int:
     from .. import aboyeur as aboyeur_mod
+    from .. import run_budget
     from .. import runguard
     from .. import roster as roster_mod
     from ..route_catalog import validate_overrides
@@ -321,6 +328,16 @@ def dispatch(args) -> int:
     if args.inspect and args.no_artifacts:
         print("error: --inspect cannot be used with --no-artifacts", file=sys.stderr)
         return 2
+    if args.run_budget is not None and args.no_artifacts:
+        print("error: --run-budget requires run artifacts so the declaration can be persisted", file=sys.stderr)
+        return 2
+    run_budget_payload = None
+    if args.run_budget is not None:
+        try:
+            run_budget_payload = run_budget.load_declaration_file(args.run_budget)
+        except run_budget.BudgetCompatibilityError as exc:
+            print(f"error: invalid run budget declaration: {exc}", file=sys.stderr)
+            return 2
     if args.worktree and args.no_artifacts:
         print(
             "error: --worktree cannot be used with --no-artifacts; "
@@ -440,6 +457,7 @@ def dispatch(args) -> int:
             roster_resolution=roster_resolution,
             roster=loaded_roster,
             output_dir=output_dir,
+            run_budget_payload=run_budget_payload,
         )
 
     worktree_cwd = None
@@ -451,17 +469,22 @@ def dispatch(args) -> int:
             lifecycle.enter_context(_terminalize_escaped_run(output_dir, seat=lifecycle_seat))
             lifecycle.enter_context(aboyeur_mod.terminal_sigterm_handler(output_dir, seat=lifecycle_seat))
             if output_dir is not None:
+                start_kwargs: dict[str, Any] = {
+                    "task": args.task,
+                    "cwd": run_cwd,
+                    "roster": loaded_roster,
+                    "read_only": args.read_only,
+                    "worker": args.worker,
+                    "dry_run": args.dry_run,
+                    "lock_workspace": run_cwd,
+                    "codex_transport": args.codex_transport or loaded_roster.codex_transport,
+                    "scheduler": _resolved_scheduler(args, loaded_roster),
+                }
+                if run_budget_payload is not None:
+                    start_kwargs["run_budget_payload"] = run_budget_payload
                 aboyeur_mod.record_run_start(
                     output_dir,
-                    task=args.task,
-                    cwd=run_cwd,
-                    roster=loaded_roster,
-                    read_only=args.read_only,
-                    worker=args.worker,
-                    dry_run=args.dry_run,
-                    lock_workspace=run_cwd,
-                    codex_transport=args.codex_transport or loaded_roster.codex_transport,
-                    scheduler=_resolved_scheduler(args, loaded_roster),
+                    **start_kwargs,
                 )
             if output_dir is not None and (advisory or output_warnings):
                 from .. import localio
@@ -487,7 +510,7 @@ def dispatch(args) -> int:
                 effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
                 keep_worktree = True
                 print(f"worktree: {effective_cwd}", file=sys.stderr)
-            run_kwargs = {
+            run_kwargs: dict[str, Any] = {
                 "dry_run": args.dry_run,
                 "show_plan": args.show_plan,
                 "verbose": args.verbose,
@@ -497,6 +520,8 @@ def dispatch(args) -> int:
                 "read_only": args.read_only,
                 "sandbox": effective_sandbox,
             }
+            if run_budget_payload is not None:
+                run_kwargs["run_budget_payload"] = run_budget_payload
             if args.worktree and any(agent.transport == "acpx" for agent in loaded_roster.agents.values()):
                 run_kwargs["authorized_writable_worktree"] = True
             if args.worktree:
@@ -683,7 +708,9 @@ def dispatch(args) -> int:
     return rc
 
 
-def _dispatch_detached(args, *, run_cwd: Path, roster_resolution, roster, output_dir: Path) -> int:
+def _dispatch_detached(
+    args, *, run_cwd: Path, roster_resolution, roster, output_dir: Path, run_budget_payload: Mapping[str, Any] | None
+) -> int:
     from .. import aboyeur as aboyeur_mod
     from .. import proc as proc_mod
 
@@ -714,14 +741,19 @@ def _dispatch_detached(args, *, run_cwd: Path, roster_resolution, roster, output
                     should_record=lambda: not child_handoff,
                 )
             )
+            start_kwargs: dict[str, Any] = {
+                "task": args.task,
+                "cwd": run_cwd,
+                "roster": roster,
+                "read_only": args.read_only,
+                "worker": args.worker,
+                "scheduler": _resolved_scheduler(args, roster),
+            }
+            if run_budget_payload is not None:
+                start_kwargs["run_budget_payload"] = run_budget_payload
             aboyeur_mod.record_run_start(
                 output_dir,
-                task=args.task,
-                cwd=run_cwd,
-                roster=roster,
-                read_only=args.read_only,
-                worker=args.worker,
-                scheduler=_resolved_scheduler(args, roster),
+                **start_kwargs,
             )
             initial_receipt = (output_dir / "run.json").read_bytes()
             log_path = output_dir / "detached.log"
@@ -872,6 +904,8 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--handoff")
     if args.handoff_inbox is not None:
         argv.extend(["--handoff-inbox", str(args.handoff_inbox.expanduser().resolve())])
+    if args.run_budget is not None:
+        argv.extend(["--run-budget", str(args.run_budget.expanduser().resolve())])
     return argv
 
 

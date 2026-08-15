@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import Any
 from pathlib import Path
 
 from ..dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
@@ -39,11 +40,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Use Codex's native read-only sandbox instead of the dogfood trusted-workspace default.",
     )
     p_dogfood.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-agent timeout.")
+    p_dogfood.add_argument(
+        "--run-budget",
+        type=Path,
+        default=None,
+        help="Path to a brigade.run_budget.v1 JSON declaration for this dogfood run.",
+    )
     p_dogfood.set_defaults(func=dispatch)
 
 
 def dispatch(args) -> int:
-    from .. import dogfood_cmd
+    from .. import dogfood_cmd, run_budget
 
     dogfood_args = list(args.dogfood_args)
     if dogfood_args and dogfood_args[0] == "init":
@@ -77,14 +84,26 @@ def dispatch(args) -> int:
             return 2
         return dogfood_cmd.next_step(target=args.target)
     task = " ".join(dogfood_args) if dogfood_args else None
+    run_budget_payload = None
+    if args.run_budget is not None:
+        try:
+            run_budget_payload = run_budget.load_declaration_file(args.run_budget)
+        except run_budget.BudgetCompatibilityError as exc:
+            print(f"error: invalid run budget declaration: {exc}", file=sys.stderr)
+            return 2
+    run_kwargs: dict[str, Any] = {
+        "target": args.target,
+        "output_dir": args.output_dir,
+        "handoff": not args.no_handoff,
+        "handoff_inbox": args.handoff_inbox,
+        "agent_cli": args.agent_cli,
+        "inspect": not args.no_inspect,
+        "native_read_only_sandbox": args.native_read_only_sandbox,
+        "timeout_seconds": args.timeout_seconds,
+    }
+    if run_budget_payload is not None:
+        run_kwargs["run_budget_payload"] = run_budget_payload
     return dogfood_cmd.run(
         task,
-        target=args.target,
-        output_dir=args.output_dir,
-        handoff=not args.no_handoff,
-        handoff_inbox=args.handoff_inbox,
-        agent_cli=args.agent_cli,
-        inspect=not args.no_inspect,
-        native_read_only_sandbox=args.native_read_only_sandbox,
-        timeout_seconds=args.timeout_seconds,
+        **run_kwargs,
     )

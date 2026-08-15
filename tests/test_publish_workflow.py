@@ -1,10 +1,14 @@
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import subprocess
 import sys
 
 import pytest
+from packaging.version import Version
 
+from brigade import __version__
+from brigade.update_cmd import BETA_PREVIEW_BASE
 from scripts.prepare_dev_wheel import derive_dev_version, next_minor_version, prepare_dev_wheel, read_stable_version
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -311,8 +315,24 @@ def test_next_minor_version_rejects_invalid_stable_bases(stable_version):
         next_minor_version(stable_version)
 
 
-def test_derive_dev_version_builds_pep440_dev_from_next_minor_line():
-    assert derive_dev_version("0.26.0", "20260808") == "0.27.0.dev20260808"
+def test_derive_dev_version_stamps_the_declared_line():
+    assert derive_dev_version("0.27.0", "20260808") == "0.27.0.dev20260808"
+    assert derive_dev_version("0.26.1", "20260808") == "0.26.1.dev20260808"
+
+
+def test_source_tree_version_sorts_at_or_above_publish_dev_wheel_scheme():
+    """Source / pipx-from-checkout versions must not sort below publish-dev wheels.
+
+    Field trap: pyproject 0.26.1 < 0.27.0.devYYYYMMDD (PEP 440), so a main
+    checkout looks older than the daily wheel built from that same tree.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    declared = read_stable_version(ROOT)
+    derived = derive_dev_version(declared, today)
+    published_scheme = f"{BETA_PREVIEW_BASE}.dev{today}"
+    source = Version(__version__)
+    assert source >= Version(derived)
+    assert source >= Version(published_scheme)
 
 
 @pytest.mark.parametrize(

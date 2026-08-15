@@ -9,9 +9,9 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from . import aboyeur, localio, runguard, toml_compat
+from . import aboyeur, localio, run_budget, runguard, toml_compat
 from . import agents
 from . import runs_cmd
 from .roster import Agent, Roster
@@ -472,7 +472,14 @@ def run(
     inspect: bool = True,
     native_read_only_sandbox: bool = False,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    run_budget_payload: Mapping[str, Any] | None = None,
 ) -> int:
+    if run_budget_payload is not None:
+        try:
+            run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
+        except run_budget.BudgetCompatibilityError as exc:
+            print(f"error: invalid run budget declaration: {exc}", file=sys.stderr)
+            return 2
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -529,24 +536,34 @@ def run(
     run_task = task or DEFAULT_TASK
     roster = _dogfood_roster(effective_timeout, effective_agent_cli)
     try:
+        start_kwargs: dict[str, Any] = {
+            "task": run_task,
+            "cwd": effective_target,
+            "roster": roster,
+            "read_only": True,
+            "lock_workspace": effective_target,
+        }
+        if run_budget_payload is not None:
+            start_kwargs["run_budget_payload"] = run_budget_payload
         aboyeur.record_run_start(
             chosen_output_dir,
-            task=run_task,
-            cwd=effective_target,
-            roster=roster,
-            read_only=True,
-            lock_workspace=effective_target,
+            **start_kwargs,
         )
         with runguard.run_lock(effective_target, run_dir=chosen_output_dir):
+            run_kwargs: dict[str, Any] = {
+                "show_plan": True,
+                "cwd": effective_target,
+                "output_dir": chosen_output_dir,
+                "handoff_inbox": chosen_handoff_inbox,
+                "read_only": True,
+                "sandbox": "read-only" if effective_native else None,
+            }
+            if run_budget_payload is not None:
+                run_kwargs["run_budget_payload"] = run_budget_payload
             rc = aboyeur.run(
                 run_task,
                 roster,
-                show_plan=True,
-                cwd=effective_target,
-                output_dir=chosen_output_dir,
-                handoff_inbox=chosen_handoff_inbox,
-                read_only=True,
-                sandbox="read-only" if effective_native else None,
+                **run_kwargs,
             )
     except runguard.RunGuardError as exc:
         print(f"error: {exc}", file=sys.stderr)

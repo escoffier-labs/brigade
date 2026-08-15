@@ -726,6 +726,15 @@ def mcp_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     unsupported = sorted(h for h in ctx.harnesses if h not in mcp_adapters.ADAPTERS and h != "this-repo")
     if unsupported:
         results.append((INFO, "mcp: targets", f"no MCP adapter for: {', '.join(unsupported)}"))
+    for record in mcp_cmd._recovery_records(ctx.target):
+        command = record.get("recovery_command") or f"brigade mcp recover {record.get('operation_id')}"
+        results.append(
+            (
+                WARN,
+                "mcp: recovery",
+                f"{record.get('operation_id')}; run `{command}`",
+            )
+        )
     return results
 
 
