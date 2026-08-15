@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import memory_cmd, memory_operations
-from .card_identity import card_identity
+from .card_identity import card_identity, valid_card_id
 from .guard import redact_text
 from .projection import kernel
 
@@ -247,9 +247,16 @@ def _record(target: Path, item: dict[str, Any]) -> dict[str, Any]:
     path = target / rel
     text = path.read_text(encoding="utf-8", errors="replace")
     frontmatter, _ = memory_cmd._parse_frontmatter(text)
-    stable_id = card_identity(frontmatter, rel).card_id if item.get("store_type") == "card" else str(item["id"])
+    if item.get("store_type") == "card":
+        identity = card_identity(frontmatter, rel)
+        stable_id = identity.card_id
+        aliases: tuple[str, ...] = identity.aliases
+    else:
+        stable_id = str(item["id"])
+        aliases = ()
     return {
         "id": stable_id,
+        "aliases": aliases,
         "item": item,
         "title": str(item["title"]),
         "body": _without_frontmatter(text),
@@ -284,6 +291,11 @@ def _assign_link_paths(records: list[dict[str, Any]], *, root: Path, prior_files
 
 def _relationships(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     by_source = {str(record["item"]["canonical_path"]): record for record in records}
+    # Also index by stable card ID and all aliases for dual-read resolution.
+    for record in records:
+        by_source[record["id"]] = record
+        for alias in record.get("aliases") or ():
+            by_source[str(alias)] = record
     result: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         related: dict[str, dict[str, Any]] = {}
@@ -316,6 +328,7 @@ def _render_note(record: dict[str, Any], related: list[dict[str, Any]]) -> bytes
     if fresh_until:
         tags.append(f"freshness/{fresh_until}")
     tags = list(dict.fromkeys(_redacted_scalar(tag) for tag in tags if _redacted_scalar(tag)))
+    aliases = [str(a) for a in (record.get("aliases") or ())]
     frontmatter = [
         "---",
         "generated: true",
@@ -331,6 +344,11 @@ def _render_note(record: dict[str, Any], related: list[dict[str, Any]]) -> bytes
         f"source_harness: {_yaml(item.get('source_harness') or 'unknown')}",
         "tags:",
         *[f"  - {_yaml(tag)}" for tag in tags],
+        *(
+            ["aliases:", *[f"  - {_yaml(a)}" for a in aliases]]
+            if aliases
+            else []
+        ),
         "---",
         "",
         f"# {_redacted_scalar(record['title'])}",
@@ -472,7 +490,14 @@ def _references(frontmatter: dict[str, Any]) -> list[str]:
         if not isinstance(value, str):
             continue
         candidate = value.strip().replace("\\", "/")
-        if candidate.endswith(".md") and not candidate.startswith(("/", "~", "..")) and candidate not in found:
+        if candidate.startswith(("/", "~", "..")):
+            continue
+        # Accept .md paths, stable card IDs (card-UUID4), and short non-empty alias strings.
+        if (
+            candidate.endswith(".md")
+            or valid_card_id(candidate) is not None
+            or (candidate and "/" not in candidate and "." not in candidate)
+        ) and candidate not in found:
             found.append(candidate)
     return found
 
