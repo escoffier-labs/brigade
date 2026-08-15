@@ -1,6 +1,7 @@
 import json
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -474,6 +475,18 @@ def test_task_plan_write_from_research_unknown_returns_1_and_writes_nothing(tmp_
     assert not json_path.is_file()
 
 
+@pytest.mark.parametrize("unsafe_run_id", ["../outside", "nested/run"])
+def test_task_plan_write_from_research_unsafe_id_matches_not_found(tmp_path, capsys, unsafe_run_id):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, from_research=unsafe_run_id) == 1
+
+    assert capsys.readouterr().err == f"error: research run not found: {unsafe_run_id}\n"
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
+
+
 def test_task_plan_write_without_research_has_empty_runs_and_no_section(tmp_path, capsys):
     _init_git_repo(tmp_path)
     task_id = _plan_task_id(tmp_path, capsys)
@@ -497,6 +510,350 @@ def test_task_plan_write_from_research_dedupes_same_run(tmp_path, capsys):
     json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
     receipt = json.loads(json_path.read_text())
     assert [r["run_id"] for r in receipt["research_runs"]] == ["r1"]
+
+
+def doctor_roster():
+    from brigade.roster import Agent, Roster
+
+    return Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="orchestrator"),
+            "luna": Agent(
+                name="luna",
+                cli="codex",
+                role="researcher",
+                model="gpt-5.6-luna",
+                capabilities=(
+                    "research.plan",
+                    "research.extract",
+                    "research.synthesize",
+                    "research.review",
+                ),
+            ),
+            "gemini_browser": Agent(
+                name="gemini_browser",
+                cli="oracle",
+                role="browser researcher",
+                model="gemini-3.1-pro",
+                capabilities=("research.synthesize", "research.browser-discover"),
+            ),
+        },
+    )
+
+
+def seed_completed_standard_research_run(target):
+    from brigade import aboyeur, localio
+    from brigade.research import registry
+    from brigade.research.types import CitationAudit, CitationRecord
+
+    run_id = "completed-research"
+    registry.create_standard_run(
+        target,
+        run_id=run_id,
+        question="What is the loop?",
+        profile="grounded",
+        caps={"max_time": 300, "max_dispatches": 8},
+        roster=doctor_roster(),
+    )
+    audit_ref = registry.write_citation_audit(
+        target,
+        run_id,
+        CitationAudit(
+            accepted=True,
+            citations=(
+                CitationRecord(
+                    token="[source:src-1111111111111111]",
+                    source_ids=("src-1111111111111111",),
+                    status="accepted",
+                ),
+            ),
+            unresolved=(),
+        ),
+    )
+    localio.write_text_atomic(registry.standard_run_dir(target, run_id) / "report.md", "# Report\n")
+    # Production completion shape: plain names in artifacts, digest refs in artifact_refs.
+    registry.update_research(
+        target,
+        run_id,
+        review_result="accepted",
+        artifacts={
+            "report_md": registry.REPORT_MD_ARTIFACT,
+            "citation_audit": registry.CITATION_AUDIT_ARTIFACT,
+        },
+        artifact_refs={"report_md": {"path": "report.md", "digest": "unused"}, "citation_audit": audit_ref},
+    )
+    aboyeur.update_run_receipt(
+        registry.standard_run_dir(target, run_id),
+        status="completed",
+        artifacts={"report_md": registry.REPORT_MD_ARTIFACT},
+    )
+    return run_id
+
+
+def test_plan_artifact_accepts_completed_standard_research_run(tmp_path: Path, capsys) -> None:
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    artifact = json.loads(json_path.read_text(encoding="utf-8"))["research_runs"][0]
+
+    assert code == 0
+    assert artifact["kind"] == "research"
+    assert artifact["trust"] == "mixed-provenance"
+    assert artifact["citation_audit"] == "accepted"
+
+
+def test_plan_artifact_prefers_artifact_refs_over_plain_artifact_names(tmp_path: Path, capsys) -> None:
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    rec = registry.show_run(tmp_path, run_id)
+    assert rec is not None
+    assert rec["artifacts"]["citation_audit"] == registry.CITATION_AUDIT_ARTIFACT
+    assert isinstance(rec["artifact_refs"]["citation_audit"], dict)
+    assert "digest" in rec["artifact_refs"]["citation_audit"]
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    assert code == 0
+    capsys.readouterr()
+
+
+def test_plan_artifact_rejects_active_standard_research_run(tmp_path, capsys) -> None:
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    registry.create_standard_run(
+        tmp_path,
+        run_id="active-research",
+        question="Still running?",
+        profile="grounded",
+        caps={"max_time": 300, "max_dispatches": 8},
+        roster=doctor_roster(),
+    )
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research="active-research",
+    )
+    assert code == 1
+    assert "not completed" in capsys.readouterr().err
+
+
+def test_plan_artifact_rejects_standard_done_status(tmp_path, capsys) -> None:
+    from brigade import aboyeur
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    aboyeur.update_run_receipt(registry.standard_run_dir(tmp_path, run_id), status="done")
+    registry.update_research(tmp_path, run_id, status="done")
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "not completed" in err
+
+
+def test_plan_artifact_rejects_tampered_direct_citation_audit(tmp_path, capsys) -> None:
+    from brigade import localio
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    audit_path = registry.standard_run_dir(tmp_path, run_id) / registry.CITATION_AUDIT_ARTIFACT
+    # Tamper the on-disk audit so the stored digest no longer verifies, while
+    # leaving an "accepted" payload that a naive direct-file fallback would trust.
+    localio.write_json(
+        audit_path,
+        {
+            "schema": "brigade.research.citation-audit.v1",
+            "schema_version": 1,
+            "accepted": True,
+            "citations": [],
+            "unresolved": [],
+            "tampered": True,
+        },
+    )
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "citation audit" in err
+
+
+def test_plan_artifact_rejects_missing_verified_audit_ref(tmp_path, capsys) -> None:
+    from brigade import aboyeur, localio
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = "no-audit-ref"
+    registry.create_standard_run(
+        tmp_path,
+        run_id=run_id,
+        question="Missing ref?",
+        profile="grounded",
+        caps={"max_time": 300, "max_dispatches": 8},
+        roster=doctor_roster(),
+    )
+    localio.write_text_atomic(registry.standard_run_dir(tmp_path, run_id) / "report.md", "# Report\n")
+    localio.write_json(
+        registry.standard_run_dir(tmp_path, run_id) / registry.CITATION_AUDIT_ARTIFACT,
+        {
+            "schema": "brigade.research.citation-audit.v1",
+            "schema_version": 1,
+            "accepted": True,
+            "citations": [],
+            "unresolved": [],
+        },
+    )
+    registry.update_research(
+        tmp_path,
+        run_id,
+        review_result="accepted",
+        artifacts={"report_md": "report.md"},
+    )
+    aboyeur.update_run_receipt(
+        registry.standard_run_dir(tmp_path, run_id),
+        status="completed",
+        artifacts={"report_md": "report.md"},
+    )
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "citation audit" in err
+    assert "research run" in err.lower()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
+
+
+def test_plan_artifact_rejects_report_path_outside_run_dir(tmp_path: Path, capsys) -> None:
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    rec = registry.show_run(tmp_path, run_id)
+    assert rec is not None
+    audit_ref = rec["artifact_refs"]["citation_audit"]
+    registry.update_research(
+        tmp_path,
+        run_id,
+        review_result="accepted",
+        artifacts={
+            "report_md": "../../outside_report.md",
+            "citation_audit": registry.CITATION_AUDIT_ARTIFACT,
+        },
+        artifact_refs={
+            "report_md": {"path": "../../outside_report.md", "digest": "fake"},
+            "citation_audit": audit_ref,
+        },
+    )
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "report" in err.lower() or "outside" in err.lower() or "not found" in err.lower()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
+
+
+def test_plan_artifact_rejects_nonexistent_report_path(tmp_path: Path, capsys) -> None:
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    report_file = registry.standard_run_dir(tmp_path, run_id) / "report.md"
+    if report_file.exists():
+        report_file.unlink()
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "missing" in err.lower() or "not found" in err.lower() or "report" in err.lower()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
+
+
+def test_plan_artifact_rejects_malformed_citation_audit_record(tmp_path: Path, capsys) -> None:
+    from brigade.research import registry
+
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    run_id = seed_completed_standard_research_run(tmp_path)
+    audit_payload = {
+        "accepted": "invalid-non-boolean",
+        "citations": "invalid-citations-structure",
+        "unresolved": None,
+    }
+    audit_ref = registry.write_citation_audit(tmp_path, run_id, audit_payload)
+    registry.update_research(
+        tmp_path,
+        run_id,
+        review_result="accepted",
+        artifacts={"report_md": registry.REPORT_MD_ARTIFACT, "citation_audit": registry.CITATION_AUDIT_ARTIFACT},
+        artifact_refs={"report_md": {"path": "report.md", "digest": "unused"}, "citation_audit": audit_ref},
+    )
+
+    code = work_cmd.task_plan(
+        target=tmp_path,
+        task_id=task_id[:12],
+        write=True,
+        from_research=run_id,
+    )
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "malformed" in err.lower() or "invalid citation audit" in err.lower()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
 
 
 def test_plan_promote_accepted_writes_draft_proposal(tmp_path, capsys):

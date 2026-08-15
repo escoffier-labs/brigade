@@ -35,6 +35,10 @@ def assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]
     return payload
 
 
+def worker_payload_one(result: WorkerResult) -> dict[str, object]:
+    return worker_payload([result])[0]
+
+
 def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
     payload: list[dict[str, object]] = []
     for result in results:

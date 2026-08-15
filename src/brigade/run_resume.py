@@ -27,7 +27,7 @@ from . import (
     verification_contract,
     worker_events,
 )
-from .roster import Agent, Roster, _as_bool, _as_env
+from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
@@ -392,6 +392,10 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
             read_only_capable=_as_bool(
                 raw.get("read_only_capable", True),
                 f"agents.{name}.read_only_capable",
+            ),
+            capabilities=_as_capabilities(
+                raw.get("capabilities"),
+                f"agents.{name}.capabilities",
             ),
         )
     return Roster(

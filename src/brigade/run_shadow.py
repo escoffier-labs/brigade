@@ -593,6 +593,12 @@ def record_shadow_comparison(run_dir: Path, legacy_snapshot: Mapping[str, Any]) 
         tail_seq = tail.sequence
         tail_digest = tail.event_digest
         shadow_candidate = copy.deepcopy(dict(legacy_snapshot))
+        # Projector v6 defaults missing kind to "work". Stamp the same additive
+        # default on the shadow candidate before byte comparison so legacy
+        # unstamped work snapshots stay at parity; an explicit kind (e.g.
+        # research) is preserved and still compared strictly.
+        if "kind" not in shadow_candidate:
+            shadow_candidate["kind"] = "work"
         shadow_candidate["projector_version"] = run_projector.PROJECTOR_VERSION
         shadow_candidate["journal_present"] = True
         shadow_candidate["journal_last_sequence"] = tail_seq

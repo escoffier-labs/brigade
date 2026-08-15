@@ -2513,6 +2513,72 @@ def test_authoritative_status_write_rejects_uncovered_or_forged_dispatch_gap(
     assert _journal_path(run_dir).read_bytes() == journal_before
 
 
+def test_authoritative_lifecycle_dispatch_requested_checkpoint_carries_pairing_key(tmp_path, monkeypatch):
+    """Direct record_lifecycle_event dispatch facts must checkpoint with pairing_key.
+
+    Acceptance hit comparison-gap when run.dispatch.requested was appended via
+    record_lifecycle_event: the paired checkpoint lacked pairing_key even though
+    shadow requires it for dispatch fact types. record_dispatch_fact already
+    derived the key; this path must do the same.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    seat = "coder"
+    attempt = 1
+    event_type = "run.dispatch.requested"
+    payload = {"seat": seat, "attempt": attempt, "detail": "requested"}
+    idempotency_key = "lifecycle:dispatch:requested:coder:1"
+    expected_key = run_checkpoint.dispatch_pairing_key(event_type, seat, attempt)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        recorded = run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            workspace=repo,
+        )
+
+    events = _events(run_dir)
+    checkpoint = events[-2]
+    fact = events[-1]
+    assert checkpoint.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE
+    assert checkpoint.payload["paired_event_type"] == event_type
+    assert checkpoint.payload["pairing_key"] == expected_key
+    assert fact == recorded
+    assert fact.event_type == event_type
+
+    shadow = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert shadow["errors"] == 0
+    assert shadow["mismatches"] == 0
+    assert shadow["last_outcome"] == run_shadow.OUTCOME_MATCH
+    assert shadow.get("last_error_category") is None
+    readiness = run_shadow.check_projection_readiness(run_dir)
+    assert readiness.ready is True
+    assert readiness.reasons == ()
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["journal_last_sequence"] == recorded.sequence
+    assert repaired["journal_last_event_digest"] == recorded.event_digest
+
+    journal_path = _journal_path(run_dir)
+    journal_before = journal_path.read_bytes()
+    checkpoint_count = len(_checkpoint_events(run_dir))
+    with runguard.run_lock(repo, run_dir=run_dir):
+        replayed = run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            workspace=repo,
+        )
+    assert replayed == recorded
+    assert journal_path.read_bytes() == journal_before
+    assert len(_checkpoint_events(run_dir)) == checkpoint_count
+
+
 def test_authority_dispatch_checkpoint_is_base_stripped_and_recovers_exact_tail(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
@@ -2609,6 +2675,75 @@ def test_authoritative_dispatch_requested_recovers_exact_old_ceiling_checkpoint(
     assert requested.idempotency_key.startswith("dispatch:")
     assert _events(run_dir)[-2].sequence == checkpoint.sequence
     assert run_shadow.check_projection_readiness(run_dir).ready is True
+
+
+def test_authoritative_lifecycle_event_recovers_checkpoint_only_dispatch_crash_window(tmp_path, monkeypatch):
+    """record_lifecycle_event must finish an exact dispatch checkpoint-only tail.
+
+    Crash window: durable checkpoint exists, fact is missing. The same event
+    identity must complete the fact, create no extra checkpoint, and leave
+    projection ready/recoverable — without weakening the prior-decision gate.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    seat = "coder"
+    attempt = 1
+    event_type = "run.dispatch.requested"
+    payload = {"seat": seat, "attempt": attempt, "detail": "requested"}
+    idempotency_key = "lifecycle:dispatch:requested:coder:1"
+    pairing_key = run_checkpoint.dispatch_pairing_key(event_type, seat, attempt)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        snapshot = (run_dir / "run.json").read_bytes()
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            snapshot,
+            workspace=repo,
+            paired_event_type=event_type,
+            body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+            pairing_key=pairing_key,
+        )
+        assert checkpoint is not None
+        checkpoint_count = len(_checkpoint_events(run_dir))
+        run_json_before = (run_dir / "run.json").read_bytes()
+        monkeypatch.setattr(
+            run_checkpoint,
+            "write_checkpoint",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("new checkpoint")),
+        )
+        prior_calls: list[object] = []
+        real_prior = aboyeur._authoritative_prior_decision
+
+        def tracking_prior(run_dir_arg, snapshot_obj):
+            prior_calls.append(snapshot_obj)
+            return real_prior(run_dir_arg, snapshot_obj)
+
+        monkeypatch.setattr(aboyeur, "_authoritative_prior_decision", tracking_prior)
+        recorded = run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            workspace=repo,
+        )
+
+    assert recorded is not None
+    assert recorded.sequence == checkpoint.sequence + 1
+    assert recorded.event_type == event_type
+    assert recorded.payload == payload
+    assert recorded.idempotency_key == idempotency_key
+    assert len(_checkpoint_events(run_dir)) == checkpoint_count
+    assert prior_calls == []
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+    readiness = run_shadow.check_projection_readiness(run_dir)
+    assert readiness.ready is True
+    assert readiness.reasons == ()
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["journal_last_sequence"] == recorded.sequence
+    assert repaired["journal_last_event_digest"] == recorded.event_digest
 
 
 @pytest.mark.parametrize("mismatch", ["checkpoint-bytes", "checkpoint-payload", "checkpoint-key", "forged-cursor"])
@@ -2851,3 +2986,82 @@ def test_owner_lifecycle_append_stale_retries_exhausted_blocks_run_json(enabled,
     )
     assert sleeps == [0.01, 0.02, 0.04], f"expected exponential backoff sleeps, got {sleeps}"
     assert (run_dir / "run.json").read_bytes() == run_json_before, "run.json must not advance past the bounded failure"
+
+
+def test_research_completed_and_cancelled_status_mappings():
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("completed") == "run.completed"
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("cancelled") == "run.interrupted"
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("research-reopened") == "run.recovery.started"
+    # Existing American spellings remain.
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("ok") == "run.completed"
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("canceled") == "run.interrupted"
+
+
+def test_status_neutral_research_metadata_refresh_does_not_error_record(tmp_path, monkeypatch):
+    """Authoritative research same-status metadata writes must stay gate-ready.
+
+    Research running refreshes remap to research-state-refresh (unmapped, no
+    paired status event). Writing research receipt fields such as
+    run_budget_projection must not leave shadow error-recorded and must not
+    declare a paired run.resumed that never emits.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="research metadata refresh",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=True,
+        kind="research",
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        # Activate authority while preserving kind=research from record_run_start.
+        existing = json.loads((run_dir / "run.json").read_text())
+        existing["status"] = "started"
+        aboyeur._write_json(run_dir / "run.json", _apply_authority_request(run_dir, existing))
+        aboyeur.record_run_termination(
+            run_dir,
+            status="failed",
+            failure_phase="synthesis",
+            failure_kind="worker-failed",
+            detail="prior",
+        )
+        aboyeur.update_run_receipt(
+            run_dir,
+            status="running",
+            finished_at=None,
+            duration_seconds=None,
+            failure=None,
+            failure_kind=None,
+            failure_phase=None,
+            error=None,
+        )
+        events_after_reopen = [e.event_type for e in _events(run_dir)]
+        assert "run.recovery.started" in events_after_reopen
+        assert "run.resumed" not in events_after_reopen
+        journal_len_before = len(_events(run_dir))
+        aboyeur.update_run_receipt(
+            run_dir,
+            run_budget_projection={"used": {"worker_dispatch_count": 0}},
+            category="ops",
+            provenance={"report.md": {"path": "report.md", "digest": "a" * 64}},
+        )
+    readiness = run_shadow.check_projection_readiness(run_dir)
+    assert readiness.ready is True, readiness.reasons
+    assert run_shadow.REASON_ERROR_RECORDED not in readiness.reasons
+    shadow = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert shadow.get("errors", 0) == 0
+    assert shadow.get("last_outcome") == run_shadow.OUTCOME_MATCH
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["status"] == "running"
+    assert meta["kind"] == "research"
+    assert meta["category"] == "ops"
+    assert meta["run_budget_projection"]["used"]["worker_dispatch_count"] == 0
+    # Status-neutral refresh may append a null-paired checkpoint, never run.resumed.
+    events_after = [e.event_type for e in _events(run_dir)]
+    assert "run.resumed" not in events_after
+    assert events_after.count("run.recovery.started") == 1
+    assert len(events_after) >= journal_len_before

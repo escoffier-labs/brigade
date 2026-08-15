@@ -61,6 +61,35 @@ RUN_EVENT_SCHEMA_VERSION = 1
 WORK_RUN_ARCHIVE_SCHEMA = "brigade.work-run"
 WORK_RUN_ARCHIVE_SCHEMA_VERSION = 1
 
+RESEARCH_SIDECAR_SCHEMA = "brigade.research.v1"
+RESEARCH_SIDECAR_VERSION = 1
+RESEARCH_SOURCES_SCHEMA = "brigade.research.sources.v1"
+RESEARCH_SOURCES_VERSION = 1
+RESEARCH_FINDINGS_SCHEMA = "brigade.research.findings.v1"
+RESEARCH_FINDINGS_VERSION = 1
+RESEARCH_CITATION_AUDIT_SCHEMA = "brigade.research.citation-audit.v1"
+RESEARCH_CITATION_AUDIT_VERSION = 1
+
+
+def stamp_research_sidecar(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {**payload, "schema": RESEARCH_SIDECAR_SCHEMA, "schema_version": RESEARCH_SIDECAR_VERSION}
+
+
+def stamp_research_sources(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {**payload, "schema": RESEARCH_SOURCES_SCHEMA, "schema_version": RESEARCH_SOURCES_VERSION}
+
+
+def stamp_research_findings(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {**payload, "schema": RESEARCH_FINDINGS_SCHEMA, "schema_version": RESEARCH_FINDINGS_VERSION}
+
+
+def stamp_research_citation_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "schema": RESEARCH_CITATION_AUDIT_SCHEMA,
+        "schema_version": RESEARCH_CITATION_AUDIT_VERSION,
+    }
+
 
 def stamp_run_receipt(payload: dict[str, object]) -> dict[str, object]:
     payload.setdefault("schema", RUN_RECEIPT_SCHEMA)

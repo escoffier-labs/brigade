@@ -738,6 +738,21 @@ def _write_json_inner(path: Path, payload: object) -> None:
         status = payload.get("status")
         if isinstance(status, str) and status:
             transition_status = status
+            prior_status: str | None = None
+            prior_kind: str | None = None
+            if path.is_file():
+                try:
+                    prior_snapshot = json.loads(path.read_bytes())
+                except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+                    prior_snapshot = None
+                if isinstance(prior_snapshot, dict):
+                    raw_prior_status = prior_snapshot.get("status")
+                    if isinstance(raw_prior_status, str) and raw_prior_status:
+                        prior_status = raw_prior_status
+                    raw_prior_kind = prior_snapshot.get("kind")
+                    if isinstance(raw_prior_kind, str) and raw_prior_kind:
+                        prior_kind = raw_prior_kind
+            kind = payload.get("kind") if isinstance(payload.get("kind"), str) else prior_kind
             approval_reference = payload.get("approval_reference")
             if status == "running" and isinstance(approval_reference, Mapping):
                 decision_state = approval_reference.get("decision_state")
@@ -753,6 +768,24 @@ def _write_json_inner(path: Path, payload: object) -> None:
                     # run.resumed event that record_lifecycle_transition
                     # correctly suppresses.
                     transition_status = "approval-state-refresh"
+            elif status == "running" and kind == "research":
+                # Research reopen must not emit approval-gated run.resumed.
+                # Only a true terminal→running recovery is recorded; same-
+                # status research running refreshes stay status-neutral.
+                _research_terminal = {
+                    "failed",
+                    "cancelled",
+                    "canceled",
+                    "completed",
+                    "ok",
+                    "timeout",
+                    "incomplete",
+                    "dry-run",
+                }
+                if prior_status in _research_terminal:
+                    transition_status = "research-reopened"
+                else:
+                    transition_status = "research-state-refresh"
             run_dir = path.parent
             workspace = runguard.resolve_run_lock_workspace(payload, run_dir)
             # Cheap payload classification BEFORE the filesystem authority
@@ -2988,6 +3021,7 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
                 # values (enforced at roster load), so persisting them for
                 # resume is safe.
                 "env": dict(agent.env) if agent.env is not None else None,
+                "capabilities": list(agent.capabilities),
             }
             for name, agent in roster.agents.items()
         },
@@ -3038,10 +3072,12 @@ def _run_payload(
     transport_routing: dict[str, object] | None = None,
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
+    kind: str = "work",
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": receipt_schema.RUN_RECEIPT_SCHEMA,
         "schema_version": receipt_schema.RUN_RECEIPT_SCHEMA_VERSION,
+        "kind": kind,
         "task": task,
         "orchestrator": roster.orchestrator,
         "dry_run": dry_run,
@@ -3175,6 +3211,7 @@ def record_run_start(
     scheduler: str | None = None,
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
+    kind: str = "work",
 ) -> bool:
     """Write the minimal typed receipt needed before optional or blocking work.
 
@@ -3195,6 +3232,7 @@ def record_run_start(
     existing_authority_requested = False
     existing_verification_contract: dict[str, Any] | None = None
     existing_run_budget: dict[str, Any] | None = None
+    existing_kind: str | None = None
     if run_json_exists:
         try:
             existing = json.loads(run_json.read_text(encoding="utf-8"))
@@ -3218,6 +3256,8 @@ def record_run_start(
             existing_verification_contract = dict(existing["verification_contract"])
         if isinstance(existing.get("run_budget"), dict):
             existing_run_budget = dict(existing["run_budget"])
+        if isinstance(existing.get("kind"), str) and existing["kind"].strip():
+            existing_kind = existing["kind"].strip()
     # Every new run carries both durable request fields. Existing runs enroll
     # only from their stored run.json fields, so legacy snapshot-only runs stay
     # untouched. An authority request implies lifecycle journaling even when an
@@ -3231,6 +3271,7 @@ def record_run_start(
         else existing_verification_contract
     )
     budget_payload = dict(run_budget_payload) if isinstance(run_budget_payload, Mapping) else existing_run_budget
+    receipt_kind = kind if new_run or kind != "work" else (existing_kind or kind)
     # The first run.json write activates the lifecycle journal and publishes a
     # recovery checkpoint BEFORE the atomic run.json replacement. If that final
     # replacement fails, durable journal/checkpoint state already exists without
@@ -3265,12 +3306,23 @@ def record_run_start(
                 run_journal_authority_requested=True if authority_requested else None,
                 verification_contract_payload=contract_payload,
                 run_budget_payload=budget_payload,
+                kind=receipt_kind,
             ),
         )
     except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
         raise runguard.RetainRunLockError(f"failed to write initial run receipt: {exc}") from exc
     _write_json(output_dir / "roster.json", _roster_payload(roster))
     return lifecycle_requested or authority_requested
+
+
+def update_run_receipt(output_dir: Path, **fields: object) -> dict[str, object]:
+    path = output_dir.expanduser().resolve() / "run.json"
+    current = _read_json_dict(path)
+    if current is None:
+        raise FileNotFoundError(path)
+    current.update(fields)
+    _write_json(path, current)
+    return current
 
 
 @contextmanager
@@ -3720,6 +3772,8 @@ def run(
                         kwargs["verification_contract_payload"] = dict(existing["verification_contract"])
                     if "run_budget_payload" not in kwargs and isinstance(existing.get("run_budget"), dict):
                         kwargs["run_budget_payload"] = dict(existing["run_budget"])
+                    if "kind" not in kwargs and isinstance(existing.get("kind"), str) and existing["kind"].strip():
+                        kwargs["kind"] = existing["kind"].strip()
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,

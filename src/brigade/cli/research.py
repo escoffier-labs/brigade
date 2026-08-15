@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ..research.types import BUILTIN_PROFILES
+
 
 def register(sub: argparse._SubParsersAction) -> None:
     # research
@@ -19,6 +21,19 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--source", action="append", default=[], dest="source", help="Glob path of trusted local sources (repeatable)."
     )
     p_research_run.add_argument("--web", action="store_true", help="Enable the opt-in untrusted web tier.")
+    p_research_run.add_argument(
+        "--browser-ai-research",
+        action="store_true",
+        help="Enable explicit Gemini browser-AI discovery (untrusted).",
+    )
+    p_research_run.add_argument(
+        "--profile",
+        choices=tuple(BUILTIN_PROFILES),
+        default=None,
+        help="Built-in research profile.",
+    )
+    p_research_run.add_argument("--synthesizer", default=None, help="Override synthesis seat name.")
+    p_research_run.add_argument("--reviewer", default=None, help="Override review seat name.")
     p_research_run.add_argument("--rounds", type=int, default=None, help="Max research rounds (max_rounds).")
     p_research_run.add_argument(
         "--max-time", type=int, default=None, dest="max_time", help="Wall-clock budget in seconds (max_time)."
@@ -26,6 +41,29 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_research_run.add_argument("--provider", default=None, help="Web search provider override.")
     p_research_run.add_argument("--category", default=None, help="Optional category label for the run.")
     p_research_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_init = research_sub.add_parser("init", help="Create .brigade/research.toml when absent.")
+    p_research_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_research_init.add_argument(
+        "--profile",
+        choices=tuple(BUILTIN_PROFILES),
+        default=None,
+        help="Built-in default research profile.",
+    )
+    p_research_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_doctor = research_sub.add_parser("doctor", help="Report research lane health.")
+    p_research_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_research_doctor.add_argument(
+        "--profile",
+        choices=tuple(BUILTIN_PROFILES),
+        default=None,
+        help="Built-in research profile to diagnose.",
+    )
+    p_research_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_status = research_sub.add_parser("status", help="Show research run status.")
+    p_research_status.add_argument("run_id", nargs="?", default=None, help="Run id.")
+    p_research_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_research_status.add_argument("--all", action="store_true", dest="all_runs", help="List every local research run.")
+    p_research_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_research_list = research_sub.add_parser("list", help="List local research runs.")
     p_research_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_research_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -81,6 +119,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_research_resume.add_argument(
         "--max-time", type=int, default=None, dest="max_time", help="Wall-clock budget in seconds (max_time)."
     )
+    p_research_resume.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Keep at most the durable plan and repeat discovery plus downstream phases.",
+    )
     p_research_resume.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_research_open = research_sub.add_parser("open", help="Print the HTML report path for a local research run.")
     p_research_open.add_argument("run_id", help="Run id.")
@@ -131,6 +174,9 @@ def dispatch(args) -> int:
 
     if args.research_command == "run":
         overrides = {"max_rounds": args.rounds, "max_time": args.max_time}
+        browser_ai_research = bool(args.browser_ai_research)
+        if args.profile == "browser-ai":
+            browser_ai_research = True
         return research_cmd.cli_run(
             target=args.target,
             question=args.question,
@@ -139,6 +185,28 @@ def dispatch(args) -> int:
             web=args.web,
             overrides=overrides,
             provider=args.provider,
+            browser_ai_research=browser_ai_research,
+            profile=args.profile,
+            synthesizer=args.synthesizer,
+            reviewer=args.reviewer,
+            category=args.category,
+            json_output=args.json,
+        )
+    if args.research_command == "init":
+        return research_cmd.cli_init(target=args.target, profile=args.profile, json_output=args.json)
+    if args.research_command == "doctor":
+        return research_cmd.cli_doctor(target=args.target, profile=args.profile, json_output=args.json)
+    if args.research_command == "status":
+        if args.all_runs and args.run_id is not None:
+            args._brigade_parser.error("research status: <run-id> and --all are mutually exclusive / ambiguous")
+            return 2
+        if not args.all_runs and args.run_id is None:
+            args._brigade_parser.error("research status requires <run-id> or --all")
+            return 2
+        return research_cmd.cli_status(
+            target=args.target,
+            run_id=args.run_id,
+            all_runs=bool(args.all_runs),
             json_output=args.json,
         )
     if args.research_command == "list":
@@ -159,7 +227,11 @@ def dispatch(args) -> int:
     if args.research_command == "resume":
         overrides = {"max_rounds": args.rounds, "max_time": args.max_time}
         return research_cmd.cli_resume(
-            target=args.target, run_id=args.run_id, overrides=overrides, json_output=args.json
+            target=args.target,
+            run_id=args.run_id,
+            overrides=overrides,
+            json_output=args.json,
+            refresh=bool(args.refresh),
         )
     if args.research_command == "open":
         return research_cmd.cli_open(target=args.target, run_id=args.run_id, json_output=args.json)

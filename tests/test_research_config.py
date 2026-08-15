@@ -1,4 +1,6 @@
+import pytest
 from pathlib import Path
+
 from brigade.research import config
 
 
@@ -24,3 +26,129 @@ def test_source_adapters_returns_configured_sources(tmp_path: Path):
     )
     cfg = config.load(tmp_path)
     assert cfg.source_adapters() == [{"id": "cli-one", "type": "cli", "command": ["tool", "{query}"]}]
+
+
+def test_profile_defaults_and_explicit_lane_order(tmp_path: Path) -> None:
+    path = tmp_path / ".brigade" / "research.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """
+[research]
+default_profile = "grounded"
+
+[profiles.grounded]
+discovery = ["brigade"]
+planner = ["luna"]
+extractor = ["luna"]
+synthesizer = ["gemini_browser", "luna"]
+reviewer = ["luna"]
+allow_synthesis_fallback = true
+browser_ai_research = false
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = config.load(tmp_path)
+    profile = cfg.profile(None)
+
+    assert profile.name == "grounded"
+    assert profile.synthesizer == ("gemini_browser", "luna")
+    assert profile.browser_ai_research is False
+
+
+def test_grounded_overlay_cannot_enable_browser_ai(tmp_path: Path) -> None:
+    path = tmp_path / ".brigade" / "research.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """
+[profiles.grounded]
+browser_ai_research = true
+planner = ["luna"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    profile = config.load(tmp_path).profile("grounded")
+
+    assert profile.name == "grounded"
+    assert profile.browser_ai_research is False
+    assert profile.planner == ("luna",)
+
+
+def test_profile_rejects_blank_stripped_lane_entry(tmp_path: Path) -> None:
+    path = tmp_path / ".brigade" / "research.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """
+[profiles.grounded]
+planner = ["luna", "   "]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="blank"):
+        config.load(tmp_path).profile("grounded")
+
+
+def test_profile_rejects_whitespace_only_lane_entry(tmp_path: Path) -> None:
+    path = tmp_path / ".brigade" / "research.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """
+[profiles.grounded]
+extractor = ["  \t  "]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="blank"):
+        config.load(tmp_path).profile("grounded")
+
+
+def test_browser_ai_profile_explicit_false_stays_false(tmp_path: Path) -> None:
+    path = tmp_path / ".brigade" / "research.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """
+[profiles.browser-ai]
+browser_ai_research = false
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    profile = config.load(tmp_path).profile("browser-ai")
+
+    assert profile.browser_ai_research is False
+
+
+def test_profile_rejects_unknown_keys(tmp_path: Path) -> None:
+    path = tmp_path / ".brigade" / "research.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """
+[profiles.grounded]
+unexpected_lane_override = true
+planner = ["luna"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown"):
+        config.load(tmp_path).profile("grounded")
+
+
+def test_research_profile_is_frozen() -> None:
+    from brigade.research.types import BUILTIN_PROFILES
+
+    profile = BUILTIN_PROFILES["grounded"]
+    try:
+        profile.browser_ai_research = True  # type: ignore[misc]
+    except Exception:
+        return
+    raise AssertionError("ResearchProfile must be frozen")

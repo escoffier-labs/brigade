@@ -126,6 +126,29 @@ def test_roster_snapshot_preserves_read_only_capability_with_legacy_default():
     assert roster.agents["composer"].read_only_capable is False
 
 
+def test_roster_snapshot_preserves_explicit_capabilities():
+    snapshot = {
+        "orchestrator": "chef",
+        "agents": {
+            "chef": {"cli": "codex", "role": "plan"},
+            "luna": {
+                "cli": "codex",
+                "role": "researcher",
+                "capabilities": ["research.plan", "research.extract", "research.review"],
+            },
+        },
+    }
+
+    roster = run_resume._roster_from_snapshot(snapshot)
+
+    assert roster.agents["luna"].capabilities == (
+        "research.plan",
+        "research.extract",
+        "research.review",
+    )
+    assert roster.agents["chef"].capabilities == ()
+
+
 def test_roster_snapshot_rejects_inline_secret_env():
     snapshot = {
         "orchestrator": "chef",

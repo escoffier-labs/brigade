@@ -1,21 +1,242 @@
+# src/brigade/research/types.py
 from __future__ import annotations
-from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Literal, Protocol
 
-Trust = Literal["local", "web", "cli", "browser"]
+import hashlib
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Protocol, get_args
+
+Trust = Literal["local", "web", "cli", "browser", "browser-ai"]
+Origin = Literal["local", "repository", "indexed-cli", "web", "browser-ai"]
 Status = Literal["running", "done", "cancelled", "error"]
+ResearchPhase = Literal["planning", "discovery", "extraction", "synthesis", "review", "repair", "publishing"]
+
+VALID_TRUST: frozenset[str] = frozenset(get_args(Trust))
+VALID_ORIGIN: frozenset[str] = frozenset(get_args(Origin))
 
 
-@dataclass
+def require_trust(value: Any) -> Trust:
+    if not isinstance(value, str) or value not in VALID_TRUST:
+        raise ValueError(f"invalid trust: {value!r}")
+    return value  # type: ignore[return-value]
+
+
+def require_origin(value: Any) -> Origin:
+    if not isinstance(value, str) or value not in VALID_ORIGIN:
+        raise ValueError(f"invalid origin: {value!r}")
+    return value  # type: ignore[return-value]
+
+
+@dataclass(frozen=True)
+class SourceEnvelope:
+    source_id: str
+    origin: Origin
+    provider: str
+    uri: str
+    content: str
+    content_digest: str
+    acquired_at: str
+    trust: Trust
+    producing_lane: str | None = None
+    requested_model: str | None = None
+    observed_model: str | None = None
+    parent_source_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        require_origin(self.origin)
+        require_trust(self.trust)
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        origin: Origin,
+        provider: str,
+        uri: str,
+        content: str,
+        trust: Trust,
+        acquired_at: str,
+        producing_lane: str | None = None,
+        requested_model: str | None = None,
+        observed_model: str | None = None,
+        parent_source_ids: tuple[str, ...] = (),
+    ) -> SourceEnvelope:
+        origin = require_origin(origin)
+        trust = require_trust(trust)
+        content_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        identity = "\0".join((origin, provider, uri, content_digest))
+        source_id = "src-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return cls(
+            source_id=source_id,
+            origin=origin,
+            provider=provider,
+            uri=uri,
+            content=content,
+            content_digest=content_digest,
+            acquired_at=acquired_at,
+            trust=trust,
+            producing_lane=producing_lane,
+            requested_model=requested_model,
+            observed_model=observed_model,
+            parent_source_ids=parent_source_ids,
+        )
+
+
+@dataclass(frozen=True)
 class Finding:
-    source: str
+    source_ids: tuple[str, ...]
     title: str
     summary: str
     evidence: str
     trust: Trust
+    extraction_lane: str
+    extracted_at: str
+    parent_source_ids: tuple[str, ...] = ()
 
-    def as_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+    def __post_init__(self) -> None:
+        if not self.source_ids:
+            raise ValueError("Finding.source_ids cannot be empty")
+        require_trust(self.trust)
+
+    @property
+    def source(self) -> str:
+        return self.source_ids[0]
+
+
+@dataclass(frozen=True)
+class CitationRecord:
+    token: str
+    source_ids: tuple[str, ...]
+    status: Literal["accepted", "rejected", "unresolved", "repaired"]
+
+
+@dataclass(frozen=True)
+class CitationAudit:
+    accepted: bool
+    citations: tuple[CitationRecord, ...]
+    unresolved: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReviewResult:
+    accepted: bool
+    detail: str
+    rejected_claims: tuple[str, ...]
+    seat: str
+    attempt_id: str
+
+
+@dataclass(frozen=True)
+class SynthesisRecord:
+    seat: str
+    attempt_id: str
+    requested_model: str | None
+    observed_model: str
+
+
+@dataclass(frozen=True)
+class FallbackRecord:
+    phase: str
+    from_seat: str
+    to_seat: str
+    failure_kind: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class ResearchLanes:
+    planner: Any
+    extractor: Any
+    synthesizers: tuple[Any, ...]
+    reviewer: Any
+    browser_discovery: Any | None = None
+
+
+class ResearchRunError(RuntimeError):
+    def __init__(self, failure_phase: str, failure_kind: str, detail: str) -> None:
+        super().__init__(detail)
+        self.failure_phase = failure_phase
+        self.failure_kind = failure_kind
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class ResumeState:
+    plan: str | None = None
+    sources: tuple[SourceEnvelope, ...] | None = None
+    findings: tuple[Finding, ...] | None = None
+    report: str | None = None
+    audit: CitationAudit | None = None
+    review: ReviewResult | None = None
+    synthesis: SynthesisRecord | None = None
+
+
+@dataclass(frozen=True)
+class ResearchResult:
+    report: str
+    findings: tuple[Finding, ...]
+    sources: tuple[SourceEnvelope, ...]
+    citation_audit: CitationAudit
+    review: ReviewResult
+    synthesis_seat: str
+    synthesis_attempt_id: str
+    fallbacks: tuple[FallbackRecord, ...]
+    stats: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ResearchProfile:
+    name: str
+    discovery: tuple[str, ...]
+    planner: tuple[str, ...]
+    extractor: tuple[str, ...]
+    synthesizer: tuple[str, ...]
+    reviewer: tuple[str, ...]
+    allow_synthesis_fallback: bool
+    browser_ai_research: bool
+
+
+BUILTIN_PROFILES: Dict[str, ResearchProfile] = {
+    "grounded": ResearchProfile(
+        name="grounded",
+        discovery=("brigade",),
+        planner=(),
+        extractor=(),
+        synthesizer=(),
+        reviewer=(),
+        allow_synthesis_fallback=True,
+        browser_ai_research=False,
+    ),
+    "browser-ai": ResearchProfile(
+        name="browser-ai",
+        discovery=("brigade", "browser-ai"),
+        planner=(),
+        extractor=(),
+        synthesizer=(),
+        reviewer=(),
+        allow_synthesis_fallback=True,
+        browser_ai_research=True,
+    ),
+    "local-only": ResearchProfile(
+        name="local-only",
+        discovery=("local", "repository"),
+        planner=(),
+        extractor=(),
+        synthesizer=(),
+        reviewer=(),
+        allow_synthesis_fallback=False,
+        browser_ai_research=False,
+    ),
+    "luna-only": ResearchProfile(
+        name="luna-only",
+        discovery=("brigade",),
+        planner=(),
+        extractor=(),
+        synthesizer=(),
+        reviewer=(),
+        allow_synthesis_fallback=False,
+        browser_ai_research=False,
+    ),
+}
 
 
 @dataclass
@@ -23,6 +244,7 @@ class Caps:
     max_rounds: int = 6
     min_rounds: int = 2
     max_time: int = 300  # wall-clock seconds
+    max_dispatches: int = 24
     max_urls_per_round: int = 3
     max_local_docs_per_round: int = 5
     max_content_chars: int = 15000
@@ -31,10 +253,11 @@ class Caps:
     synthesis_window: int = 10
 
     @classmethod
-    def build(cls, **overrides: Any) -> "Caps":
+    def build(cls, **overrides: Any) -> Caps:
         base = cls()
+        fields = cls.__dataclass_fields__
         for k, v in overrides.items():
-            if v is not None and hasattr(base, k):
+            if v is not None and k in fields:
                 setattr(base, k, v)
         return base
 

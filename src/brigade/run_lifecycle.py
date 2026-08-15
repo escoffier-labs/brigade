@@ -108,14 +108,20 @@ STATUS_EVENT_TYPE: dict[str, str] = {
     "synthesizing": "run.synthesis.started",
     "handoff": "run.synthesis.completed",
     "ok": "run.completed",
+    # Research terminal success (does not replace ok/dry-run).
+    "completed": "run.completed",
     "failed": "run.failed",
     "canceled": "run.interrupted",
+    # Research terminal cancel (American spelling retained for brigade run).
+    "cancelled": "run.interrupted",
     "timeout": "run.failed",
     "dry-run": "run.completed",
     "incomplete": "run.failed",
     "artifact-collection": "run.artifact_collection.started",
     "paused": "run.paused",
     "running": "run.resumed",
+    # Research reopen from a terminal receipt without an approval reference.
+    "research-reopened": "run.recovery.started",
 }
 
 _CHECKPOINT_EVENT_PAIR_LOCK = threading.Lock()
@@ -785,6 +791,15 @@ def record_lifecycle_event(
         )
     except run_events.CanonicalizationError as exc:
         raise _bound_journal_failure(exc) from exc
+    pairing_key: str | None = None
+    if event_type in run_checkpoint._DISPATCH_FACT_EVENT_TYPES:
+        seat = payload.get("seat")
+        attempt = payload.get("attempt")
+        if not isinstance(seat, str) or not seat:
+            raise LifecycleJournalError(run_events._bound("dispatch fact seat must be non-empty"))
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise LifecycleJournalError(run_events._bound("dispatch fact attempt must be a positive integer"))
+        pairing_key = run_checkpoint.dispatch_pairing_key(event_type, seat, attempt)
     with checkpoint_event_pair():
         journal_path = _journal_path(run_dir)
         if not journal_path.is_file():
@@ -812,6 +827,26 @@ def record_lifecycle_event(
             if not isinstance(snapshot_obj, dict):
                 raise LifecycleJournalError(run_events._bound("lifecycle run receipt is not a JSON object"))
             if aboyeur._resolve_authority_state(run_dir) == "authoritative":
+                # Exact dispatch pairing keys share the crash-window recovery
+                # path used by record_dispatch_fact: finish a checkpoint-only
+                # tail before the ordinary prior-decision gate can fail closed.
+                if pairing_key is not None:
+                    report = run_journal.read_journal_bounded(journal_path)
+                    if report.partial_tail is not None or report.chain_errors:
+                        raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
+                    recovered = _recover_authoritative_dispatch_checkpoint(
+                        run_dir,
+                        journal_path=journal_path,
+                        journal_report=report,
+                        snapshot=snapshot,
+                        snapshot_obj=snapshot_obj,
+                        event_type=event_type,
+                        pairing_key=pairing_key,
+                        payload=dict(payload),
+                        idempotency_key=idempotency_key,
+                    )
+                    if recovered is not None:
+                        return recovered
                 aboyeur._authoritative_prior_decision(run_dir, snapshot_obj)
             checkpoint = run_checkpoint.write_checkpoint(
                 run_dir,
@@ -823,6 +858,7 @@ def record_lifecycle_event(
                     if snapshot_obj.get("run_journal_authority_requested") is True
                     else None
                 ),
+                pairing_key=pairing_key,
             )
             if checkpoint is None:
                 raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal checkpoint was not recorded"))

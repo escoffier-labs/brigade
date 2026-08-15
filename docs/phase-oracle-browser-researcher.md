@@ -1,5 +1,8 @@
 # Oracle Browser Researcher Adapter
 
+> This adapter phase is complete. New research orchestration work is specified
+> in `docs/phase-first-class-multi-lane-research.md`.
+
 ## Goal
 
 Give the roster's `researcher` role a working model again on a subscription
