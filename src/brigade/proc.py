@@ -107,6 +107,9 @@ class _SeatProcessRegistry:
     def cancel(self) -> tuple[ProcessCancelOutcome, ...]:
         return self._parent.cancel()
 
+    def terminate(self, process: subprocess.Popen[bytes]) -> None:
+        self._parent.terminate(process)
+
 
 def _signal_process_group(process: subprocess.Popen[bytes], sig: int) -> None:
     try:

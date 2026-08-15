@@ -488,3 +488,64 @@ def test_run_preserves_valid_prefix_on_invalid_utf8(monkeypatch):
     assert "\ufffd" in result.stdout
     assert result.stdout_decode_error is not None
     assert "child stdout is not valid UTF-8 (utf-8):" in result.stderr
+
+
+def test_seat_process_registry_exposes_full_call_surface():
+    """All methods used by proc.py failure paths must exist on _SeatProcessRegistry."""
+    parent = proc.ProcessRegistry()
+    seat_registry = parent.for_seat("test-seat")
+    assert callable(getattr(seat_registry, "register", None))
+    assert callable(getattr(seat_registry, "unregister", None))
+    assert callable(getattr(seat_registry, "cancel", None))
+    assert callable(getattr(seat_registry, "terminate", None))
+
+
+def test_seat_process_registry_terminate_delegates_to_parent(monkeypatch):
+    terminated = []
+
+    class FakeProcess:
+        pid = 1234
+
+    monkeypatch.setattr(
+        proc,
+        "_terminate_processes",
+        lambda processes, **kwargs: terminated.extend(p.pid for p in processes),
+    )
+
+    parent = proc.ProcessRegistry(terminate_grace=0, kill_grace=0)
+    seat_registry = parent.for_seat("worker-seat")
+    process = FakeProcess()
+    seat_registry.terminate(process)
+
+    assert terminated == [1234]
+
+
+def test_seat_registry_timeout_yields_code_124_not_attribute_error(monkeypatch):
+    """A seat-scoped registry passed to proc.run must not raise AttributeError on timeout."""
+
+    class StubProcess:
+        pid = 9999
+        returncode = 0
+
+        def communicate(self, *, input=None, timeout=None):
+            raise subprocess.TimeoutExpired(
+                ["worker"],
+                timeout,
+                output=b"out",
+                stderr=b"err",
+            )
+
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: StubProcess())
+    monkeypatch.setattr(
+        proc,
+        "_terminate_processes",
+        lambda processes, **kwargs: None,
+    )
+
+    parent = proc.ProcessRegistry(terminate_grace=0, kill_grace=0)
+    seat_registry = parent.for_seat("grok")
+
+    result = proc.run(["worker"], timeout=0.01, process_registry=seat_registry)
+
+    assert result.code == 124
+    assert "timeout after" in result.stderr
