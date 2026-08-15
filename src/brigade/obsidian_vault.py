@@ -344,11 +344,7 @@ def _render_note(record: dict[str, Any], related: list[dict[str, Any]]) -> bytes
         f"source_harness: {_yaml(item.get('source_harness') or 'unknown')}",
         "tags:",
         *[f"  - {_yaml(tag)}" for tag in tags],
-        *(
-            ["aliases:", *[f"  - {_yaml(a)}" for a in aliases]]
-            if aliases
-            else []
-        ),
+        *(["aliases:", *[f"  - {_yaml(a)}" for a in aliases]] if aliases else []),
         "---",
         "",
         f"# {_redacted_scalar(record['title'])}",
@@ -492,12 +488,8 @@ def _references(frontmatter: dict[str, Any]) -> list[str]:
         candidate = value.strip().replace("\\", "/")
         if candidate.startswith(("/", "~", "..")):
             continue
-        # Accept .md paths, stable card IDs (card-UUID4), and short non-empty alias strings.
-        if (
-            candidate.endswith(".md")
-            or valid_card_id(candidate) is not None
-            or (candidate and "/" not in candidate and "." not in candidate)
-        ) and candidate not in found:
+        # Accept .md relative paths and stable card IDs (card-UUID4); reject everything else.
+        if (candidate.endswith(".md") or valid_card_id(candidate) is not None) and candidate not in found:
             found.append(candidate)
     return found
 
