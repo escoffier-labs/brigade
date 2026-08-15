@@ -834,6 +834,131 @@ def test_evidence_brief_byte_cap_is_enforced(tmp_path, monkeypatch):
     assert "truncated to fit 2000 bytes" in brief.text
 
 
+def test_evidence_brief_renders_trust_source_and_selection_rule(tmp_path, monkeypatch):
+    miseledger = _write_fake_miseledger(
+        tmp_path,
+        {
+            "query": "project-x fix dispatch",
+            "selection_rule": "bm25-top5",
+            "results": [
+                {
+                    "id": "run-alpha",
+                    "snippet": "run id run-alpha status failed",
+                    "trust": "imported",
+                    "source": "brigade",
+                    "metadata": {"run_id": "run-alpha", "status": "failed"},
+                }
+            ],
+        },
+    )
+    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+
+    brief = evidence_brief.evidence_brief(tmp_path, "fix dispatch bug")
+
+    assert brief.attached is True
+    assert "trust: imported" in brief.text
+    assert "source: brigade" in brief.text
+    assert "selected-by: bm25-top5" in brief.text
+
+
+def test_evidence_brief_renders_single_arm_declaration(tmp_path, monkeypatch):
+    miseledger = _write_fake_miseledger(
+        tmp_path,
+        {
+            "retrieval_arms": ["bm25"],
+            "results": [
+                {
+                    "id": "run-beta",
+                    "snippet": "run id run-beta status completed",
+                    "metadata": {"run_id": "run-beta", "status": "completed"},
+                }
+            ],
+        },
+    )
+    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+
+    brief = evidence_brief.evidence_brief(tmp_path, "add feature")
+
+    assert brief.attached is True
+    assert "Retrieval: single arm (bm25)." in brief.text
+
+
+def test_evidence_brief_renders_multi_arm_and_retrieval_fields(tmp_path, monkeypatch):
+    miseledger = _write_fake_miseledger(
+        tmp_path,
+        {
+            "retrieval_arms": ["bm25", "semantic"],
+            "results": [
+                {
+                    "id": "run-gamma",
+                    "snippet": "run id run-gamma status completed",
+                    "metadata": {"run_id": "run-gamma", "status": "completed"},
+                    "retrieval_arm": "bm25",
+                    "arm_rank": 1,
+                    "final_rank": 1,
+                    "fusion_rule": "rrf-v1",
+                    "scores": {"bm25": 0.9, "semantic": 0.7},
+                }
+            ],
+        },
+    )
+    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+
+    brief = evidence_brief.evidence_brief(tmp_path, "refactor session handling")
+
+    assert brief.attached is True
+    assert "Retrieval arms: bm25, semantic." in brief.text
+    assert "arm: bm25 rank 1 -> final 1" in brief.text
+    assert "fusion: rrf-v1" in brief.text
+    assert "scores: bm25=0.9" in brief.text
+
+
+def test_evidence_brief_renders_unavailable_arm(tmp_path, monkeypatch):
+    miseledger = _write_fake_miseledger(
+        tmp_path,
+        {
+            "retrieval_arms": ["bm25"],
+            "unavailable_arms": [{"arm": "semantic", "reason": "index stale"}],
+            "results": [
+                {
+                    "id": "run-delta",
+                    "snippet": "run id run-delta status completed",
+                    "metadata": {"run_id": "run-delta", "status": "completed"},
+                }
+            ],
+        },
+    )
+    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+
+    brief = evidence_brief.evidence_brief(tmp_path, "check memory")
+
+    assert brief.attached is True
+    assert "Arm unavailable: semantic" in brief.text
+    assert "index stale" in brief.text
+
+
+def test_evidence_brief_renders_omitted_count_for_truncated_pool(tmp_path, monkeypatch):
+    miseledger = _write_fake_miseledger(
+        tmp_path,
+        {
+            "total_candidates": 47,
+            "results": [
+                {
+                    "id": "run-top",
+                    "snippet": "run id run-top status completed",
+                    "metadata": {"run_id": "run-top", "status": "completed"},
+                }
+            ],
+        },
+    )
+    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+
+    brief = evidence_brief.evidence_brief(tmp_path, "run evidence selection")
+
+    assert brief.attached is True
+    assert "Omitted 46 of 47 candidates at selection boundary." in brief.text
+
+
 def test_arbitrate_briefs_prefers_code_context_for_code_tasks():
     code = aboyeur.CodeGraphBrief(attached=True, text="## Code graph context\n\ncode\n", bytes=26)
     drift = aboyeur.DriftImpactBrief(
