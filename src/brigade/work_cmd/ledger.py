@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
 from .. import component_paths, provenance, runguard
@@ -1420,12 +1420,16 @@ def _import_proof_name(item_id: object) -> str | None:
     return f"{helpers._stable_hash({'item_id': item_id})}.json"
 
 
-def _directory_authority_store_path(target: Path) -> Path:
-    """Return the verifier-owned authority record for one resolved workspace."""
+def _directory_authority_store_path(target: Path, *, env: Mapping[str, str] | None = None) -> Path:
+    """Return the verifier-owned authority record for one resolved workspace.
+
+    ``env`` resolves the record under a different data root, which the scanner
+    child sandbox uses to seed a copy without exposing the operator's store.
+    """
     resolved = str(target.expanduser().resolve())
     digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
     try:
-        data_root = Path(component_paths.data_root())
+        data_root = Path(component_paths.data_root() if env is None else component_paths.data_root(env=env))
     except ValueError as exc:
         raise OSError("external directory authority storage is unavailable") from exc
     return data_root / "brigade" / "directory-authority" / f"{digest}.json"
@@ -1704,21 +1708,36 @@ def _snapshot_external_file_authorities(target: Path) -> dict[str, Any] | None:
     return _external_file_authorities(payload)
 
 
-def _restore_external_file_authorities(target: Path, files: dict[str, Any] | None) -> None:
-    """Merge a snapshot back into the file-authority map without erasing newer keys.
+def _restore_external_file_authorities(
+    target: Path, files: dict[str, Any] | None, *, owned: Sequence[str] | None = None
+) -> None:
+    """Roll the file-authority map back to a snapshot for the scopes the caller owns.
 
-    ``None`` means the snapshot saw no record; existing bindings are left intact.
-    An unreadable current record raises so rollback cannot wipe the store.
+    Restore is a merge for every key the caller did not touch, so a concurrent
+    writer's binding survives a rollback it had nothing to do with. For the
+    ``owned`` scopes - the ones the rolled-back operation may have added - it is
+    a true restore: a scope absent from the snapshot is deleted rather than left
+    behind pointing at a file the rollback just unlinked.
+
+    ``files`` of ``None`` means the snapshot saw no record at all; owned scopes
+    are still removed. An unreadable current record raises so rollback cannot
+    silently wipe the store.
     """
+    owned_scopes = tuple(owned or ())
     path, payload = _read_external_directory_authority(target)
     if payload is None:
         if files is None:
             return
         raise OSError("external file authority record could not be restored")
-    if files is None:
+    if files is None and not owned_scopes:
         return
     merged = _external_file_authorities(payload)
-    merged.update(files)
+    original = dict(merged)
+    for scope in owned_scopes:
+        merged.pop(scope, None)
+    merged.update(files or {})
+    if merged == original:
+        return
     if merged:
         payload["files"] = merged
     else:
@@ -1929,13 +1948,10 @@ def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...],
                 _record_external_directory_authority(target, components, child, workspace=workspace)
             elif _reanchor_external_directory_authority(target, components, child, workspace=workspace):
                 _validate_external_directory_authority(target, components, child, workspace=workspace)
-            elif create:
-                # A scanner child with a sandboxed HOME may create this directory
-                # and bind it in its own store. Adopt it only when this workspace
-                # is already bound; a mismatched identity still fails closed.
-                _external_workspace_directory_identity(target)
-                _record_external_directory_authority(target, components, child, workspace=workspace)
             else:
+                # A directory that already existed and is not bound to this
+                # workspace record is never adopted, including on the create
+                # path: a pre-created directory may be an attacker's inode.
                 raise
         _write_compatibility_directory_anchor(anchor_parent, child, anchor_name=anchor_name)
         os.close(parent)
@@ -1981,6 +1997,17 @@ def _validate_import_proof_name_matches_descriptor(parent: int, name: str, descr
         != (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink)
     ):
         raise OSError("import proof name no longer matches its held descriptor")
+
+
+def _persisted_import_proof_scopes(items: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Return the file-authority scopes a proof publication for ``items`` would own."""
+    scopes: list[str] = []
+    for item in items:
+        name = _import_proof_name(item.get("id"))
+        if name is None:
+            continue
+        scopes.append(_directory_authority_scope((".brigade", "work", "imports", "proofs", name)))
+    return tuple(scopes)
 
 
 def _persisted_import_proof_payload(item: dict[str, Any], *, operation_id: str) -> dict[str, Any] | None:
@@ -2052,7 +2079,11 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
                 pass
         os.fsync(parent)
         try:
-            _restore_external_file_authorities(target, prior_files)
+            _restore_external_file_authorities(
+                target,
+                prior_files,
+                owned=[_directory_authority_scope((".brigade", "work", "imports", "proofs", name)) for name in created],
+            )
         except OSError as exc:
             raise OSError("import proof binding rollback could not restore its retained snapshot") from exc
         raise

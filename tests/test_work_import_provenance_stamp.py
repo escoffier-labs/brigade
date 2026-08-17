@@ -385,6 +385,104 @@ def test_file_authority_rollback_preserves_unrelated_bindings(tmp_path: Path) ->
     assert ledger._has_persisted_import_proof(second, target=tmp_path) is True
 
 
+def test_import_proof_directory_refuses_a_preexisting_unbound_directory_on_create(tmp_path: Path) -> None:
+    """The create path must not adopt a directory it did not create (reviewer probe)."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    descriptor = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
+    os.close(descriptor)
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert isinstance(payload, dict)
+    assert ".brigade/scanners/runs" in payload["directories"]
+    assert ".brigade/work/imports/proofs" not in payload["directories"]
+
+    attacker = tmp_path / ".brigade" / "work" / "imports" / "proofs"
+    attacker.mkdir(parents=True)
+    attacker_inode = attacker.stat().st_ino
+
+    with pytest.raises(OSError, match="external directory authority record does not match directory"):
+        ledger._open_import_proof_directory(tmp_path, create=True)
+
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert isinstance(payload, dict)
+    assert ".brigade/work/imports/proofs" not in payload["directories"]
+    assert attacker.stat().st_ino == attacker_inode
+
+
+def test_parent_prebinds_the_proof_directory_before_launching_scanner_children(tmp_path: Path) -> None:
+    """The parent creates and binds the directory a sandboxed child would otherwise create."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanners_mod._prebind_child_visible_directories(tmp_path)
+
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert isinstance(payload, dict)
+    assert ".brigade/work/imports/proofs" in payload["directories"]
+    descriptor = ledger._open_import_proof_directory(tmp_path, create=True)
+    os.close(descriptor)
+    item = ledger._make_import("prebound proof", kind="task", source="handoff-ingest")
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is True
+
+
+def test_file_authority_rollback_removes_bindings_added_after_the_snapshot(tmp_path: Path) -> None:
+    """Rollback restores snapshot state for the scopes it owns and leaves others alone."""
+    unrelated = ledger._make_import("unrelated pre-existing proof", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [unrelated], operation_id="0" * 32)
+    snapshot = ledger._snapshot_external_file_authorities(tmp_path)
+    assert snapshot is not None
+
+    added = ledger._make_import("binding added after the snapshot", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [added], operation_id="1" * 32)
+    owned = ledger._persisted_import_proof_scopes([added])
+    assert len(owned) == 1
+    after_add = ledger._snapshot_external_file_authorities(tmp_path)
+    assert after_add is not None and owned[0] in after_add
+
+    ledger._restore_external_file_authorities(tmp_path, snapshot, owned=owned)
+
+    after_rollback = ledger._snapshot_external_file_authorities(tmp_path)
+    assert after_rollback is not None
+    assert owned[0] not in after_rollback
+    assert after_rollback == snapshot
+    assert ledger._has_persisted_import_proof(unrelated, target=tmp_path) is True
+
+
+def test_proof_write_failure_leaves_no_binding_for_the_unlinked_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed publication must not leave a stale binding for a proof file it removed."""
+    prior = ledger._make_import("prior bound proof", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [prior], operation_id="0" * 32)
+    before = ledger._snapshot_external_file_authorities(tmp_path)
+
+    failing = ledger._make_import("doomed proof", kind="task", source="learning-loop")
+    failing_name = ledger._import_proof_name(failing["id"])
+    assert failing_name is not None
+    scope = ledger._directory_authority_scope((".brigade", "work", "imports", "proofs", failing_name))
+    calls = {"n": 0}
+    original = ledger._record_verifier_owned_file
+
+    def fail_second(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            original(*args, **kwargs)
+            raise OSError("file authority write failed")
+        raise OSError("file authority write failed")
+
+    monkeypatch.setattr(ledger, "_record_verifier_owned_file", fail_second)
+    with pytest.raises(OSError, match="file authority write failed"):
+        ledger._write_persisted_import_proofs(tmp_path, [failing], operation_id="1" * 32)
+    monkeypatch.setattr(ledger, "_record_verifier_owned_file", original)
+
+    after = ledger._snapshot_external_file_authorities(tmp_path)
+    assert after is not None
+    assert scope not in after
+    assert after == before
+    assert not (tmp_path / ".brigade" / "work" / "imports" / "proofs" / failing_name).exists()
+    assert ledger._has_persisted_import_proof(prior, target=tmp_path) is True
+
+
 def test_file_authority_snapshot_raises_on_unreadable_record(tmp_path: Path) -> None:
     item = ledger._make_import("unreadable snapshot", kind="task", source="learning-loop")
     ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
