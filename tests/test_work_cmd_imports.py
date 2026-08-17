@@ -3976,6 +3976,29 @@ def test_import_context_json_output(tmp_path, capsys):
 
 
 def _write_fake_miseledger(tmp_path, payload):
+    if isinstance(payload, dict):
+        results = payload.get("results")
+        if isinstance(results, list):
+            from brigade import provenance as _prov
+
+            for item in results:
+                if not isinstance(item, dict) or isinstance(item.get("provenance"), dict):
+                    continue
+                text = str(item.get("text") or item.get("snippet") or "")
+                item["provenance"] = {
+                    "trust": {
+                        "label": "untrusted",
+                        "assigned_by": "ingest:test",
+                        "assigned_at": "2026-08-17T00:00:00+00:00",
+                        "trust_policy": {"schema": "brigade.trust-policy.v1", "schema_version": 1},
+                        "injection": {"status": "clean", "count": 0, "rules": []},
+                    },
+                    "hashes": {
+                        "content": _prov.content_sha256(text),
+                        "content_algorithm": "sha256",
+                        "content_scope": "item.text.utf8.v1",
+                    },
+                }
     script = tmp_path / "fake-miseledger.py"
     script.write_text(
         f"""
@@ -4219,3 +4242,46 @@ def test_cli_work_import_context_requires_text_or_file(tmp_path, capsys):
         assert exc.code == 2
     else:
         assert rc == 2
+
+
+def test_import_promote_rejects_unknown_and_quarantined(tmp_path, capsys):
+    from brigade import trust_gate
+
+    clean = work_cmd._make_import("promote the clean untrusted task", kind="task", source="manual")
+    unknown = work_cmd._make_import("unknown must not promote", kind="task", source="manual")
+    quarantined = work_cmd._make_import("quarantined must not promote", kind="task", source="manual")
+    unknown["metadata"]["provenance"] = trust_gate.apply_trust_label(
+        unknown["metadata"]["provenance"],
+        to_label="unknown",
+        assigned_by="ingest:test",
+        assigned_at="2026-08-17T00:00:00+00:00",
+    )
+    quarantined["metadata"]["provenance"] = trust_gate.apply_trust_label(
+        quarantined["metadata"]["provenance"],
+        to_label="quarantined",
+        assigned_by="ingest:test",
+        assigned_at="2026-08-17T00:00:00+00:00",
+    )
+    work_cmd._write_imports(tmp_path, [clean, unknown, quarantined])
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=clean["id"]) == 0
+    assert work_cmd.import_promote(target=tmp_path, import_id=unknown["id"]) == 2
+    err = capsys.readouterr().err
+    assert "unknown" in err
+    assert work_cmd.import_promote(target=tmp_path, import_id=quarantined["id"]) == 2
+    assert "quarantined" in capsys.readouterr().err
+
+
+def test_import_promote_handoff_rejects_quarantined(tmp_path, capsys):
+    from brigade import trust_gate
+
+    item = work_cmd._make_import("quarantined handoff finding", kind="finding", source="code-review")
+    item["metadata"]["provenance"] = trust_gate.apply_trust_label(
+        item["metadata"]["provenance"],
+        to_label="quarantined",
+        assigned_by="ingest:test",
+        assigned_at="2026-08-17T00:00:00+00:00",
+    )
+    work_cmd._write_imports(tmp_path, [item])
+    assert work_cmd.import_promote_handoff(target=tmp_path, import_id=item["id"]) == 2
+    assert "quarantined" in capsys.readouterr().err

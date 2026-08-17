@@ -1139,3 +1139,33 @@ def export_plan(*, target: Path, write: bool = False, json_output: bool = False)
     else:
         print(_render_plan_md(payload), end="")
     return 0
+
+
+def trust_review(
+    *,
+    target: Path,
+    item_ref: str,
+    content_hash: str,
+    json_output: bool = False,
+) -> int:
+    from . import trust_gate
+
+    target = target.expanduser().resolve()
+    try:
+        payload = trust_gate.review_item_ref(target, item_ref, content_hash)
+    except trust_gate.TrustReviewError as exc:
+        if json_output:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))
+        else:
+            print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+    print(f"item_ref: {payload.get('item_ref')}")
+    print(f"status: {payload.get('status')}")
+    event = payload.get("event")
+    if isinstance(event, dict):
+        print(f"to_label: {event.get('to_label')}")
+        print(f"envelope_content_hash: {event.get('envelope_content_hash')}")
+    return 0

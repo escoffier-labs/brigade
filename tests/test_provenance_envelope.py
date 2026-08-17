@@ -99,11 +99,64 @@ def test_validate_accepts_golden_envelopes():
 
 
 def test_trust_policy_fixture_shape():
+    from brigade import trust_gate
+
     policy = json.loads(POLICY_PATH.read_text())
     assert policy["schema"] == "brigade.trust-policy.v1"
     assert policy["schema_version"] == 1
     assert set(policy["entitlements"]) == set(LEGACY_LABELS)
     assert policy["untrusted_caps"] == {"max_items": 2, "max_fraction": 0.5}
+    loaded = trust_gate.load_trust_policy()
+    assert loaded == policy
+    assert trust_gate.allows("untrusted", "brief_wrapped")
+    assert not trust_gate.allows("unknown", "brief")
+    assert not trust_gate.allows("quarantined", "promote")
+    assert trust_gate.untrusted_caps() == (2, 0.5)
+
+
+def test_trust_label_of_reads_bare_envelope_without_synthesizing_unknown():
+    from brigade import trust_gate
+
+    env = _valid_envelope()
+    assert env["trust"]["label"] == "untrusted"
+    assert trust_gate.trust_label_of(env) == "untrusted"
+    assert trust_gate.envelope_from_record(env)["trust"]["label"] == "untrusted"
+    nested = {"text": "body", "metadata": {"provenance": env}}
+    assert trust_gate.trust_label_of(nested) == "untrusted"
+    assert trust_gate.promotion_blocker(nested) is None
+    assert trust_gate.citation_allowed(nested) is True
+    assert trust_gate.context_allowed(nested) is True
+
+
+def test_admit_consumer_rejects_laundered_unknown_and_quarantined_claims():
+    from brigade import trust_gate
+
+    text = "laundered body"
+    unknown = {
+        "text": text,
+        "trust_label": "verified",
+        "provenance": {
+            "schema": provenance.SCHEMA,
+            "schema_version": 1,
+            "trust": {
+                "label": "unknown",
+                "assigned_by": "ingest:forged",
+                "assigned_at": "2026-08-17T00:00:00+00:00",
+                "trust_policy": {"schema": "brigade.trust-policy.v1", "schema_version": 1},
+                "injection": {"status": "clean", "count": 0, "rules": []},
+            },
+            "hashes": {
+                "content": provenance.content_sha256(text),
+                "content_algorithm": "sha256",
+                "content_scope": "item.text.utf8.v1",
+            },
+        },
+    }
+    admission = trust_gate.admit_consumer(unknown, entitlement="promote")
+    assert admission.allowed is False
+    assert admission.label == "unknown"
+    assert trust_gate.promotion_blocker(unknown) == "trust label unknown cannot be promoted"
+    assert trust_gate.citation_allowed(unknown) is False
 
 
 @pytest.mark.parametrize(

@@ -1017,3 +1017,106 @@ def test_discord_crawl_still_works_alongside_memory(monkeypatch, tmp_path):
 
     assert rc == 0
     assert args_file.read_text().strip() == "crawl discord"
+
+
+def test_evidence_trust_review_requires_exact_hash_and_appends_one_event(tmp_path, capsys):
+    from brigade import cli, provenance, trust_gate, work_cmd
+
+    item = work_cmd._make_import("review this untrusted import", kind="task", source="manual")
+    work_cmd._write_imports(tmp_path, [item])
+    digest = item["metadata"]["provenance"]["hashes"]["content"]
+    assert digest == provenance.content_sha256(item["text"])
+    item_ref = f"work-import:{item['id']}"
+
+    assert (
+        cli.main(
+            [
+                "evidence",
+                "trust",
+                "review",
+                item_ref,
+                "--content-hash",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--target",
+                str(tmp_path),
+            ]
+        )
+        == 2
+    )
+    assert "content hash" in capsys.readouterr().err
+    assert trust_gate.read_events(trust_gate.work_events_path(tmp_path)) == []
+
+    assert (
+        cli.main(
+            [
+                "evidence",
+                "trust",
+                "review",
+                item_ref,
+                "--content-hash",
+                digest,
+                "--target",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "reviewed"
+    events = trust_gate.read_events(trust_gate.work_events_path(tmp_path))
+    assert len(events) == 1
+    assert events[0]["to_label"] == "reviewed"
+    assert events[0]["envelope_content_hash"] == digest
+    reloaded, _imports = work_cmd._find_import(tmp_path, item["id"])
+    assert reloaded["metadata"]["provenance"]["trust"]["label"] == "reviewed"
+
+    assert (
+        cli.main(
+            [
+                "evidence",
+                "trust",
+                "review",
+                item_ref,
+                "--content-hash",
+                digest,
+                "--target",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "noop"
+    assert len(trust_gate.read_events(trust_gate.work_events_path(tmp_path))) == 1
+
+
+def test_evidence_trust_review_rejects_unknown(tmp_path, capsys):
+    from brigade import cli, trust_gate, work_cmd
+
+    item = work_cmd._make_import("legacy unknown import", kind="task", source="manual")
+    item["metadata"]["provenance"] = trust_gate.apply_trust_label(
+        item["metadata"]["provenance"],
+        to_label="unknown",
+        assigned_by="ingest:test",
+        assigned_at="2026-08-17T00:00:00+00:00",
+    )
+    work_cmd._write_imports(tmp_path, [item])
+    digest = item["metadata"]["provenance"]["hashes"]["content"]
+    assert (
+        cli.main(
+            [
+                "evidence",
+                "trust",
+                "review",
+                f"work-import:{item['id']}",
+                "--content-hash",
+                digest,
+                "--target",
+                str(tmp_path),
+            ]
+        )
+        == 2
+    )
+    assert "unknown" in capsys.readouterr().err
+    assert trust_gate.read_events(trust_gate.work_events_path(tmp_path)) == []

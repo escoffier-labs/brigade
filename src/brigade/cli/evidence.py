@@ -62,6 +62,25 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_export_plan.add_argument("--write", action="store_true", help="Write plan under .brigade/evidence/plans/.")
     p_export_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    p_trust = evidence_sub.add_parser("trust", help="Review or inspect evidence trust labels.")
+    trust_sub = p_trust.add_subparsers(dest="evidence_trust_command", metavar="<trust-command>")
+    trust_sub.required = True
+    p_review = trust_sub.add_parser(
+        "review",
+        help="Attest an untrusted item as reviewed after checking the current envelope digest.",
+    )
+    p_review.add_argument(
+        "item_ref",
+        help="miseledger:item:<id>, work-import:<import_id>, or research-finding:<run_id>:<index>",
+    )
+    p_review.add_argument(
+        "--content-hash",
+        required=True,
+        help="Exact current envelope hashes.content digest (bare lowercase SHA-256).",
+    )
+    p_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     # Inert F2 hook: projection-only rebuild + identity audit register later.
     from .. import evidence_runtime
 
@@ -100,6 +119,16 @@ def dispatch(args) -> int:
         if args.evidence_export_command == "plan":
             return evidence_cmd.export_plan(target=args.target, write=args.write, json_output=args.json)
         args._brigade_parser.error(f"unknown evidence export command: {args.evidence_export_command}")
+        return 2
+    if args.evidence_command == "trust":
+        if args.evidence_trust_command == "review":
+            return evidence_cmd.trust_review(
+                target=args.target,
+                item_ref=args.item_ref,
+                content_hash=args.content_hash,
+                json_output=args.json,
+            )
+        args._brigade_parser.error(f"unknown evidence trust command: {args.evidence_trust_command}")
         return 2
     args._brigade_parser.error(f"unknown evidence command: {args.evidence_command}")
     return 2

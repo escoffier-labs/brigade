@@ -31,6 +31,7 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Added
 
+- `miseledger trust review --item ID --content-hash DIGEST` upgrades an item to `reviewed` or `verified` only when the supplied digest matches both the embedded envelope `hashes.content` and the recomputed item text. The transition appends one `provenance_events` row. (#587)
 - Provenance read verification Slice 5: search, show, evidence bundles, HTTP, and
   MCP recompute envelope content and materialized raw/artifact hashes, surface
   `integrity_mismatch` plus envelope fields, suppress mismatched snippets and

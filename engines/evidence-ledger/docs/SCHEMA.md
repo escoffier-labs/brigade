@@ -81,6 +81,10 @@ The canonical compact JSON encoding (UTF-8, no whitespace, HTML escaping disable
 
 An inbound adapter envelope claiming `trust.label = reviewed` or `verified` must pass `ValidationContext{InboundAdapter: true, AuthorityProof: &AuthorityProof{AssignedBy, Label}}` where `AssignedBy` matches `trust.assigned_by` and `Label` matches `trust.label`. Otherwise the ingester downgrades or rejects the assertion. An inbound adapter envelope is data, not authority.
 
+### Consumer enforcement
+
+Python consumers load `brigade.trust-policy.v1` and omit `unknown` / `quarantined` from default briefs, context, cite, and promote. `miseledger trust review` is the operator/verifier write path: it requires the current envelope digest and appends one `provenance_events` row. Envelope `verified` admits an indexed receipt to consumers but does not make it scoreable.
+
 ### Read verification
 
 Search, show, evidence bundles, HTTP, and MCP recompute envelope `hashes.content` (and `hashes.raw` when the raw body is materialized) against the stored bytes. A mismatch suppresses snippets and item bodies, sets `integrity_mismatch: true`, and appends one idempotent `provenance_events` row per item/hash/mismatch without deleting the item. Direct `miseledger show --forensic-content` can reveal a mismatched or synthesized-legacy body with a warning; MCP and HTTP have no forensic reveal path.

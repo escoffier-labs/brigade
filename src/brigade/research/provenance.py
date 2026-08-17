@@ -7,7 +7,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from brigade import localio, provenance
+from brigade import localio, provenance, trust_gate
 from brigade.untrusted import scan_handoff_injection_heuristics
 
 from .types import CitationAudit, CitationRecord, Finding, finding_text
@@ -33,19 +33,37 @@ def citation_token(source_id: str) -> str:
     return f"[source:{source_id}]"
 
 
+def _finding_for_source(findings: Sequence[Finding], source_id: str) -> Finding | None:
+    for finding in findings:
+        if source_id in finding.source_ids:
+            return finding
+    return None
+
+
 def audit_citations(report: str, findings: Sequence[Finding]) -> CitationAudit:
     known = {source_id for finding in findings for source_id in finding.source_ids}
     seen = tuple(dict.fromkeys(CITATION_PATTERN.findall(report)))
-    citations = tuple(
-        CitationRecord(
-            token=citation_token(source_id),
-            source_ids=(source_id,),
-            status="accepted" if source_id in known else "unresolved",
-        )
-        for source_id in seen
+    citations: list[CitationRecord] = []
+    unresolved: list[str] = []
+    for source_id in seen:
+        finding = _finding_for_source(findings, source_id)
+        if source_id not in known or finding is None:
+            citations.append(
+                CitationRecord(token=citation_token(source_id), source_ids=(source_id,), status="unresolved")
+            )
+            unresolved.append(source_id)
+            continue
+        record = {"text": finding.text, "provenance": finding_envelope(finding)}
+        if not trust_gate.citation_allowed(record):
+            citations.append(
+                CitationRecord(token=citation_token(source_id), source_ids=(source_id,), status="rejected")
+            )
+            unresolved.append(source_id)
+            continue
+        citations.append(CitationRecord(token=citation_token(source_id), source_ids=(source_id,), status="accepted"))
+    return CitationAudit(
+        accepted=bool(seen) and not unresolved, citations=tuple(citations), unresolved=tuple(unresolved)
     )
-    unresolved = tuple(source_id for source_id in seen if source_id not in known)
-    return CitationAudit(accepted=bool(seen) and not unresolved, citations=citations, unresolved=unresolved)
 
 
 def map_legacy_trust_origin_modality(trust: str) -> tuple[str, str]:

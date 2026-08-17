@@ -19,6 +19,7 @@ from . import component_bins
 from . import localio
 from . import provenance
 from . import receipt_signing
+from . import trust_gate
 from .untrusted import scan_handoff_injection_heuristics
 
 OK = "OK"
@@ -582,11 +583,121 @@ def _summary(items: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _complete_v2_patch_identity(payload: dict[str, Any], run_dir: Path) -> bool:
+    baseline = payload.get("baseline_commit")
+    fingerprint = payload.get("tree_fingerprint")
+    patch_hash = payload.get("changes_patch_sha256")
+    if not all(isinstance(value, str) and value for value in (baseline, fingerprint, patch_hash)):
+        return False
+    digest = patch_hash[7:] if isinstance(patch_hash, str) and patch_hash.startswith("sha256:") else patch_hash
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return False
+    patch_path = run_dir / "changes.patch"
+    try:
+        patch_bytes = patch_path.read_bytes()
+    except OSError:
+        return False
+    return provenance.sha256_bytes(patch_bytes) == digest
+
+
+def _receipt_digest_checks_ok(artifacts: list[dict[str, Any]], receipt_path: Path, target: Path) -> bool:
+    rel = _rel(receipt_path, target)
+    for item in artifacts:
+        artifact_id = str(item.get("artifact_id") or "")
+        if rel not in artifact_id and str(receipt_path) not in artifact_id:
+            continue
+        if item.get("status") in {MISMATCH, MISSING, SIGNATURE_MISMATCH, UNVERIFIABLE_SIGNATURE}:
+            return False
+    return True
+
+
+def _upgrade_indexed_verify_receipts(target: Path, artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Upgrade indexed verify-receipt items after digest checks and v2 patch proof.
+
+    Indexing stays untrusted. Envelope verified does not write subject_binding,
+    check_role, or #474 taxonomy fields onto the receipt.
+    """
+
+    cursor = _read_miseledger_cursor_hashes(target)
+    if not cursor:
+        return []
+    receipts, _count, _errors = _collect_export_receipts(target)
+    upgrades: list[dict[str, Any]] = []
+    for receipt in receipts:
+        if receipt.get("receipt_type") != "work_verify":
+            continue
+        path = receipt["path"]
+        payload = receipt["payload"]
+        if not isinstance(payload, dict):
+            continue
+        record = _verify_miseledger_item(payload, path, target, 1)
+        raw = record.get("raw")
+        raw_hash = raw.get("hash") if isinstance(raw, dict) else None
+        if not isinstance(raw_hash, str) or raw_hash not in cursor:
+            continue
+        if not _receipt_digest_checks_ok(artifacts, path, target):
+            continue
+        item = record.get("item")
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "")
+        env = trust_gate.envelope_from_record(item)
+        try:
+            content_hash = trust_gate.current_envelope_digest(env, text)
+        except trust_gate.TrustReviewError:
+            continue
+        if not _complete_v2_patch_identity(payload, path.parent):
+            continue
+        external_id = str(item.get("external_id") or "")
+        item_ref = f"{trust_gate.ITEM_REF_MISELEDGER}{external_id}"
+        if trust_gate.has_matching_transition(
+            target,
+            item_ref=item_ref,
+            to_label="verified",
+            envelope_content_hash=content_hash,
+        ):
+            upgrades.append({"status": "noop", "item_ref": item_ref, "envelope_content_hash": content_hash})
+            continue
+        receipt_digest, _source = _receipt_hash(payload, path)
+        event = trust_gate.build_provenance_event(
+            item_ref=item_ref,
+            from_label=trust_gate.trust_label_of(env),
+            to_label="verified",
+            envelope_content_hash=content_hash,
+            operator_command=trust_gate.OPERATOR_VERIFY,
+            evidence={
+                "receipt_sha256": receipt_digest,
+                "baseline_commit": payload.get("baseline_commit"),
+                "tree_fingerprint": payload.get("tree_fingerprint"),
+                "changes_patch_sha256": payload.get("changes_patch_sha256"),
+            },
+        )
+        trust_gate.append_work_event(target, event)
+        try:
+            trust_gate.notify_miseledger_trust(
+                target,
+                external_id,
+                content_hash,
+                to_label="verified",
+                operator_command=trust_gate.OPERATOR_VERIFY,
+            )
+        except trust_gate.TrustReviewError:
+            pass
+        upgrades.append({"status": "verified", "item_ref": item_ref, "event": event})
+    return upgrades
+
+
 def verify_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     artifacts = _verify_receipt_tree(target)
     artifacts.extend(_verify_outcome_ledger(target))
-    return {"target": str(target), "summary": _summary(artifacts), "artifacts": artifacts}
+    trust_upgrades = _upgrade_indexed_verify_receipts(target, artifacts)
+    return {
+        "target": str(target),
+        "summary": _summary(artifacts),
+        "artifacts": artifacts,
+        "trust_upgrades": trust_upgrades,
+    }
 
 
 def summary_detail(target: Path) -> str:
