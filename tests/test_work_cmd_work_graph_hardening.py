@@ -460,9 +460,9 @@ def test_cycle_via_import_promote_proposed_edges_fails_closed(tmp_path, monkeypa
     assert work_cmd.import_add(target=tmp_path, text="Cycle bait import", kind="task", source="manual") == 0
     capsys.readouterr()
     imports = work_cmd._read_imports(tmp_path)
-    imports[0]["metadata"] = {
-        "proposed_edges": [{"type": "blocks", "source": b["id"], "target": a["id"]}],
-    }
+    metadata = dict(imports[0].get("metadata") or {})
+    metadata["proposed_edges"] = [{"type": "blocks", "source": b["id"], "target": a["id"]}]
+    imports[0]["metadata"] = metadata
     work_cmd._write_imports(tmp_path, imports)
     before_count = len(work_cmd._read_task_ledger(tmp_path)["tasks"])
     # Must not traceback; must refuse the promote and leave ledger/import intact.
