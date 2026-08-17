@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
+- Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
+  closed on every `brigade work` surface (and other commands that read the
+  ledger) with `error: ...` and exit 2, instead of parsing as empty or
+  dumping a traceback. Unknown hand-edited edge types are preserved on
+  rewrite and surfaced via `work ready` (`unknown_type_count`) and a
+  `work doctor` WARN. `work import promote --all` returns 2 when any
+  import fails. (#948)
 - Bare `brigade care status` now discovers target-scoped per-entry
   registrations instead of scoring the atomic five-entry default. A target
   with no discovered units reports `missing`. Systemd status also reports
