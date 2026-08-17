@@ -124,6 +124,8 @@ def task_add(
             return 2
         try:
             result = ledger_mod._apply_graph_plan(target, plan, dry_run=dry_run)
+        except ledger_mod.TaskLedgerError as exc:
+            return _emit_ledger_error(exc, json_output=json_output)
         except (edges_mod.EdgeError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             if json_output and isinstance(exc, edges_mod.EdgeError):
@@ -233,6 +235,8 @@ def task_add(
         if json_output:
             print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
         return 2
+    except ledger_mod.TaskLedgerError as exc:
+        return _emit_ledger_error(exc, json_output=json_output)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -873,6 +877,8 @@ def task_edge_add(
         else:
             print(f"error: {exc}", file=sys.stderr)
         return 2
+    except ledger_mod.TaskLedgerError as exc:
+        return _emit_ledger_error(exc, json_output=json_output)
     payload = {"edge": edge, "created": created}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -979,6 +985,14 @@ def _emit_claim_error(exc: Exception, *, json_output: bool) -> int:
     raise exc
 
 
+def _emit_ledger_error(exc: ledger_mod.TaskLedgerError, *, json_output: bool) -> int:
+    if json_output:
+        print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"error: {exc}", file=sys.stderr)
+    return int(exc.exit_code)
+
+
 def claim(
     *,
     target: Path,
@@ -1017,6 +1031,8 @@ def claim(
         )
     except ClaimError as exc:
         return _emit_claim_error(exc, json_output=json_output)
+    except ledger_mod.TaskLedgerError as exc:
+        return _emit_ledger_error(exc, json_output=json_output)
     if json_output:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
