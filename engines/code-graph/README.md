@@ -31,7 +31,9 @@
 
 ## Install
 
-Install GraphTrail and `graphtrail-mcp` through Brigade's verified managed manifest:
+Install GraphTrail and `graphtrail-mcp` through Brigade's verified managed manifest.
+`brigade setup` is the distribution replacement for every standalone install path
+per [`docs/phase-4a-compatibility-and-archive.md`](../../docs/phase-4a-compatibility-and-archive.md):
 
 ```bash
 brigade setup
