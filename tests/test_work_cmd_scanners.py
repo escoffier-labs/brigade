@@ -719,6 +719,74 @@ conflict_window = "02:00-02:10"
     assert metadata["scanner_output_path_snapshot"]["exists"] is True
 
 
+def test_scanners_run_releases_directory_authority_when_import_publication_raises(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _init_git_repo(tmp_path)
+    script = tmp_path / "scanner.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+path = Path.cwd() / ".brigade" / "scanner-imports.jsonl"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps({"kind": "task", "source": "repo-scan", "text": "Review generated finding"}) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    prior_keys = set(scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES)
+    captured_keys: list[int] = []
+    captured_fds: list[tuple[int, int]] = []
+
+    def fail_publication(*_args: object, **_kwargs: object) -> None:
+        authorities = scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES
+        retained = {key: authority for key, authority in authorities.items() if key not in prior_keys}
+        assert retained, "expected retained scanner-run directory authority"
+        for key, authority in retained.items():
+            captured_keys.append(key)
+            captured_fds.append((authority.root, authority.directory))
+            os.fstat(authority.root)
+            os.fstat(authority.directory)
+        raise RuntimeError("forced import proof publication failure")
+
+    monkeypatch.setattr(scanners_mod.ledger_mod, "_append_import_records", fail_publication)
+
+    with pytest.raises(RuntimeError, match="forced import proof publication failure"):
+        scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="repo-scan", ingest_output=True)
+
+    assert captured_keys
+    assert captured_fds
+    remaining = scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES
+    assert set(remaining) == prior_keys
+    for key in captured_keys:
+        assert key not in remaining
+    for root, directory in captured_fds:
+        with pytest.raises(OSError) as raised:
+            os.fstat(root)
+        assert raised.value.errno == errno.EBADF
+        with pytest.raises(OSError) as raised:
+            os.fstat(directory)
+        assert raised.value.errno == errno.EBADF
+
+
 def test_work_scanners_ingest_output_sanitizes_hostile_records_and_owns_identity(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
