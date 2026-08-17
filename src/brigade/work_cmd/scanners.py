@@ -41,6 +41,7 @@ class _ScannerRunDirectoryAuthority:
 
 
 _SCANNER_RUN_DIRECTORY_AUTHORITIES: dict[int, _ScannerRunDirectoryAuthority] = {}
+_SCANNER_RUN_PUBLICATION_SNAPSHOTS: dict[int, dict[str, Any]] = {}
 
 
 def _open_scanner_runs_directory(target: Path, *, create: bool) -> int:
@@ -115,7 +116,13 @@ def _validate_scanner_run_file(parent: int, name: str, descriptor: int) -> None:
         raise OSError("scanner run file no longer matches its held descriptor")
 
 
-def _write_scanner_run_file(authority: _ScannerRunDirectoryAuthority, name: str, data: bytes) -> None:
+def _write_scanner_run_file(
+    authority: _ScannerRunDirectoryAuthority,
+    name: str,
+    data: bytes,
+    *,
+    after_publish: Any | None = None,
+) -> None:
     """Failure-atomically publish one scanner artifact below a retained run descriptor."""
     _validate_scanner_run_directory(authority)
     existing = -1
@@ -154,6 +161,8 @@ def _write_scanner_run_file(authority: _ScannerRunDirectoryAuthority, name: str,
         os.replace(temporary_name, name, src_dir_fd=authority.directory, dst_dir_fd=authority.directory)
         _validate_scanner_run_file(authority.directory, name, descriptor)
         os.fsync(authority.directory)
+        if after_publish is not None:
+            after_publish(descriptor)
     except BaseException:
         try:
             os.unlink(temporary_name, dir_fd=authority.directory)
@@ -212,18 +221,60 @@ def _restore_scanner_run_file_snapshot(
     raise OSError("scanner run artifact rollback could not restore its retained snapshot")
 
 
+def _apply_scanner_publication_snapshot(snapshot: dict[str, Any]) -> None:
+    """Restore inbox, proofs, and file bindings captured before a scanner publication."""
+    target = snapshot["target"]
+    assert isinstance(target, Path)
+    proof_items = snapshot.get("proof_items")
+    if isinstance(proof_items, list) and proof_items:
+        ledger_mod._remove_persisted_import_proofs(target, proof_items)
+    inbox = snapshot.get("inbox")
+    inbox_exists = bool(snapshot.get("inbox_exists"))
+    if isinstance(inbox, bytes):
+        _restore_scanner_inbox_bytes(target, inbox, inbox_exists)
+    files = snapshot.get("files")
+    ledger_mod._restore_external_file_authorities(target, files if isinstance(files, dict) or files is None else None)
+
+
 def _write_scanner_run_receipt(run: dict[str, Any]) -> None:
     authority = _SCANNER_RUN_DIRECTORY_AUTHORITIES.get(id(run))
     if authority is None:
         raise OSError("scanner run directory authority is unavailable")
-    _write_scanner_run_file(
-        authority,
-        "receipt.json",
-        (json.dumps(run, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-    )
+    data = (json.dumps(run, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    target_value = run.get("target")
+    target = Path(target_value) if isinstance(target_value, str) and target_value else None
+    bind = target is not None and run.get("status") == "completed" and run.get("exit_code") == 0
+    prior_files = ledger_mod._snapshot_external_file_authorities(target) if bind and target is not None else None
+
+    def after_publish(descriptor: int) -> None:
+        if not bind or target is None:
+            return
+        ledger_mod._record_verifier_owned_file(
+            target,
+            components=(".brigade", "scanners", "runs", authority.run_id, "receipt.json"),
+            descriptor=descriptor,
+            data=data,
+        )
+
+    try:
+        _write_scanner_run_file(authority, "receipt.json", data, after_publish=after_publish)
+    except BaseException:
+        if bind and target is not None:
+            snapshot = _SCANNER_RUN_PUBLICATION_SNAPSHOTS.pop(id(run), None)
+            try:
+                if snapshot is not None:
+                    _apply_scanner_publication_snapshot(snapshot)
+                else:
+                    ledger_mod._restore_external_file_authorities(target, prior_files)
+            except OSError as exc:
+                raise OSError("scanner receipt binding rollback could not restore its retained snapshot") from exc
+        raise
+    else:
+        _SCANNER_RUN_PUBLICATION_SNAPSHOTS.pop(id(run), None)
 
 
 def _release_scanner_run_directory_authority(run: dict[str, Any]) -> None:
+    _SCANNER_RUN_PUBLICATION_SNAPSHOTS.pop(id(run), None)
     authority = _SCANNER_RUN_DIRECTORY_AUTHORITIES.pop(id(run), None)
     if authority is not None:
         os.close(authority.directory)
@@ -1105,6 +1156,14 @@ def _scanner_stamp_new_imports(
         staged_proof_items.append(rebuilt)
     rendered = b"".join(final_rows)
     if rendered != imports_raw:
+        before_files = ledger_mod._snapshot_external_file_authorities(target)
+        inbox_exists = True
+        try:
+            existing_inbox = _open_scanner_inbox(target, os.O_RDONLY)
+        except FileNotFoundError:
+            inbox_exists = False
+        else:
+            os.close(existing_inbox)
         try:
             _write_scanner_inbox_bytes(target, rendered)
         except OSError:
@@ -1123,12 +1182,23 @@ def _scanner_stamp_new_imports(
             except BaseException:
                 _restore_scanner_inbox_snapshot_direct(target, imports_raw, exists=True)
                 raise
+            try:
+                ledger_mod._restore_external_file_authorities(target, before_files)
+            except OSError:
+                pass
             run["self_import"] = {
                 "created": 0,
                 "rejected": rejected + len(stamped_ids) + 1,
                 "rejection_reasons": {"provenance_stamp_failed": rejected + len(stamped_ids) + 1},
             }
             return []
+        _SCANNER_RUN_PUBLICATION_SNAPSHOTS[id(run)] = {
+            "target": target,
+            "inbox": imports_raw,
+            "inbox_exists": inbox_exists,
+            "proof_items": list(staged_proof_items),
+            "files": before_files,
+        }
         if run_proof is not None:
             for rebuilt in staged_proof_items:
                 _record_scanner_import_proof(scanner, run, rebuilt)

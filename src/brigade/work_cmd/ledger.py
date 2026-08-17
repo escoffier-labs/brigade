@@ -1654,6 +1654,105 @@ def _validate_verifier_owned_directory(
     )
 
 
+def _file_identity(descriptor: int, data: bytes) -> dict[str, Any]:
+    """Return verifier-owned file identity that cannot be rebuilt from row fields."""
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise OSError("file authority is not a single-link regular file")
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def _external_file_authorities(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        return {}
+    return {
+        key: dict(value) if isinstance(value, dict) else value for key, value in files.items() if isinstance(key, str)
+    }
+
+
+def _snapshot_external_file_authorities(target: Path) -> dict[str, Any] | None:
+    """Copy the current file-authority map, or None when no workspace record exists."""
+    try:
+        _path, payload = _read_external_directory_authority(target)
+    except OSError:
+        return None
+    if payload is None:
+        return None
+    return _external_file_authorities(payload)
+
+
+def _restore_external_file_authorities(target: Path, files: dict[str, Any] | None) -> None:
+    """Restore the file-authority map, or fail closed if the prior record cannot be written."""
+    path, payload = _read_external_directory_authority(target)
+    if payload is None:
+        if files is None:
+            return
+        raise OSError("external file authority record could not be restored")
+    if files is None:
+        payload.pop("files", None)
+    else:
+        payload["files"] = files
+    _write_external_directory_authority(path, payload)
+
+
+def _record_verifier_owned_file(
+    target: Path, *, components: tuple[str, ...], descriptor: int, data: bytes, workspace: dict[str, int] | None = None
+) -> None:
+    """Record durable file identity after the verifier has published the bytes."""
+    bound_workspace = _external_workspace_directory_identity(target) if workspace is None else workspace
+    _require_workspace_directory_identity(target, bound_workspace)
+    path, existing = _read_external_directory_authority(target)
+    resolved = str(target.expanduser().resolve())
+    _require_workspace_directory_identity(target, bound_workspace)
+    if existing is None:
+        raise OSError("external directory authority record is missing")
+    if (
+        existing.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+        or existing.get("target") != resolved
+        or existing.get("workspace") != bound_workspace
+        or not isinstance(existing.get("directories"), dict)
+    ):
+        raise OSError("external directory authority record is malformed")
+    files = existing.setdefault("files", {})
+    if not isinstance(files, dict):
+        raise OSError("external file authority record is malformed")
+    scope = _directory_authority_scope(components)
+    identity = _file_identity(descriptor, data)
+    if files.get(scope) == identity:
+        return
+    files[scope] = identity
+    _write_external_directory_authority(path, existing)
+    if _file_identity(descriptor, data) != identity:
+        raise OSError("file identity changed while recording authority")
+
+
+def _validate_verifier_owned_file(
+    target: Path, *, components: tuple[str, ...], descriptor: int, data: bytes, workspace: dict[str, int] | None = None
+) -> None:
+    """Require that a file still matches its verifier-owned identity and content."""
+    bound_workspace = _external_workspace_directory_identity(target) if workspace is None else workspace
+    _require_workspace_directory_identity(target, bound_workspace)
+    _path, payload = _read_external_directory_authority(target)
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if (
+        payload is None
+        or payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+        or payload.get("target") != str(target.expanduser().resolve())
+        or payload.get("workspace") != bound_workspace
+        or not isinstance(payload.get("directories"), dict)
+        or not isinstance(files, dict)
+        or files.get(_directory_authority_scope(components)) != _file_identity(descriptor, data)
+    ):
+        raise OSError("external file authority record does not match file")
+
+
 def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *, anchor_name: str) -> None:
     """Retain the old marker for released workspaces. It is never authority."""
     identity = _directory_identity(directory)
@@ -1872,12 +1971,15 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
     """Record verifier-owned proof only after the corresponding inbox write succeeds."""
     parent = _open_import_proof_directory(target, create=True)
     created: list[str] = []
+    published: list[tuple[str, bytes]] = []
+    prior_files = _snapshot_external_file_authorities(target)
     try:
         for item in items:
             payload = _persisted_import_proof_payload(item, operation_id=operation_id)
             name = _import_proof_name(item.get("id"))
             if payload is None or name is None:
                 raise OSError("cannot persist import proof for malformed local item")
+            data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
             descriptor = os.open(
                 name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
@@ -1887,14 +1989,31 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
             created.append(name)
             try:
                 with os.fdopen(os.dup(descriptor), "wb") as handle:
-                    handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+                    handle.write(data)
                     handle.flush()
                     os.fsync(handle.fileno())
                 _validate_import_proof_descriptor(descriptor)
                 _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
             finally:
                 os.close(descriptor)
+            published.append((name, data))
         os.fsync(parent)
+        for name, data in published:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+            try:
+                _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
+                _record_verifier_owned_file(
+                    target,
+                    components=(".brigade", "work", "imports", "proofs", name),
+                    descriptor=descriptor,
+                    data=data,
+                )
+            finally:
+                os.close(descriptor)
     except BaseException:
         for name in created:
             try:
@@ -1902,6 +2021,10 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
             except FileNotFoundError:
                 pass
         os.fsync(parent)
+        try:
+            _restore_external_file_authorities(target, prior_files)
+        except OSError as exc:
+            raise OSError("import proof binding rollback could not restore its retained snapshot") from exc
         raise
     finally:
         os.close(parent)
@@ -1949,10 +2072,27 @@ def _has_persisted_import_proof(item: dict[str, Any], *, target: Path | None = N
             return False
         try:
             _validate_import_proof_descriptor(descriptor)
+            before = os.fstat(descriptor)
             chunks: list[bytes] = []
             while chunk := os.read(descriptor, 64 * 1024):
                 chunks.append(chunk)
-            payload = json.loads(b"".join(chunks))
+            data = b"".join(chunks)
+            after = os.fstat(descriptor)
+            if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_nlink,
+            ):
+                return False
+            _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
+            _validate_verifier_owned_file(
+                target,
+                components=(".brigade", "work", "imports", "proofs", name),
+                descriptor=descriptor,
+                data=data,
+            )
+            payload = json.loads(data)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
         finally:
@@ -2076,7 +2216,14 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             components=(".brigade", "scanners", "runs", scanner_run_id),
             directory=current,
         )
-        payload = json.loads(b"".join(chunks))
+        data = b"".join(chunks)
+        _validate_verifier_owned_file(
+            target,
+            components=(".brigade", "scanners", "runs", scanner_run_id, "receipt.json"),
+            descriptor=receipt_descriptor,
+            data=data,
+        )
+        payload = json.loads(data)
         if not isinstance(payload, dict) or payload.get("run_id") != scanner_run_id:
             return None
         return payload

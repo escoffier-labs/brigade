@@ -62,6 +62,17 @@ def _write_scanner_import_proof(tmp_path: Path, items: list[dict[str, object]], 
     finally:
         os.close(descriptor)
     receipt_path.write_text(json.dumps(receipt))
+    data = receipt_path.read_bytes()
+    descriptor = os.open(receipt_path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        work_cmd.ledger._record_verifier_owned_file(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", run_id, "receipt.json"),
+            descriptor=descriptor,
+            data=data,
+        )
+    finally:
+        os.close(descriptor)
     work_cmd.ledger._write_persisted_import_proofs(tmp_path, items, operation_id="0" * 32)
 
 

@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
+- Scanner receipt and import-proof bytes now carry verifier-owned file
+  identity and content bindings. Legacy migration rejects in-place receipt
+  overwrites, attacker-created sidecars, missing bindings, and mismatched
+  file identity or content. A binding-write failure restores the prior
+  receipt, proof, inbox, and binding state or fails closed. Fixes #881.
 - Bare `brigade care status` now discovers target-scoped per-entry
   registrations instead of scoring the atomic five-entry default. A target
   with no discovered units reports `missing`. Systemd status also reports
