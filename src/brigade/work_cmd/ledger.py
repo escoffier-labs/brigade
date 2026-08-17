@@ -2520,7 +2520,7 @@ def _import_session_fields(metadata: dict[str, Any]) -> tuple[str | None, str | 
 
 
 def _locator_is_unsafe(kind: object, value: str) -> bool:
-    if provenance._is_absolute_locator(value):
+    if provenance.is_absolute_locator(value):
         return True
     if kind == "repo-relative" and ".." in value.replace("\\", "/").split("/"):
         return True
@@ -2658,7 +2658,7 @@ def _import_envelope_matches(item: dict[str, Any]) -> bool:
     env = metadata.get("provenance")
     if not isinstance(env, Mapping):
         return False
-    if provenance.validate_envelope(env):
+    if provenance.validate_envelope(env, inbound_adapter=True):
         return False
     hashes = env.get("hashes")
     if not isinstance(hashes, Mapping):

@@ -72,12 +72,33 @@ def _safe_label(value: object, fallback: str) -> str:
 
 
 def _envelope_matches_text(env: Mapping[str, Any], text: str) -> bool:
-    if provenance.validate_envelope(env):
+    if provenance.validate_envelope(env, inbound_adapter=True):
         return False
     hashes = env.get("hashes")
     if not isinstance(hashes, Mapping):
         return False
     return hashes.get("content") == provenance.content_sha256(text)
+
+
+def _expected_persist_identity(run_id: str | None, index: int) -> tuple[str, str, str | None]:
+    run_label = _safe_label(run_id, "unknown")
+    collection_id = f"research:{run_label}" if run_id else "research:findings"
+    locator_value = f"research-finding:{run_label}:{index}"
+    session_id = run_label if run_id else None
+    return collection_id, locator_value, session_id
+
+
+def _persist_identity_matches(env: Mapping[str, Any], *, run_id: str | None, index: int) -> bool:
+    collection_id, locator_value, session_id = _expected_persist_identity(run_id, index)
+    raw_locator = env.get("locator")
+    locator = raw_locator if isinstance(raw_locator, Mapping) else {}
+    raw_session = env.get("session")
+    session = raw_session if isinstance(raw_session, Mapping) else {}
+    return (
+        env.get("collection_id") == collection_id
+        and locator.get("value") == locator_value
+        and session.get("id") == session_id
+    )
 
 
 def stamp_finding_payload(
@@ -108,7 +129,11 @@ def stamp_finding_payload(
     payload["text"] = text
 
     existing = payload.get("provenance")
-    if isinstance(existing, Mapping) and _envelope_matches_text(existing, text):
+    if (
+        isinstance(existing, Mapping)
+        and _envelope_matches_text(existing, text)
+        and _persist_identity_matches(existing, run_id=run_id, index=index)
+    ):
         payload["provenance"] = dict(existing)
         return payload
 
@@ -218,12 +243,13 @@ def stamp_finding_list(
     run_id: str | None = None,
     inferred: bool = False,
     producer: str = _FINDINGS_PRODUCER,
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[Any], int]:
     """Stamp findings; return payloads and the number of envelopes written."""
-    stamped: list[dict[str, Any]] = []
+    stamped: list[Any] = []
     written = 0
     for index, item in enumerate(findings):
         if not isinstance(item, (Finding, Mapping)):
+            stamped.append(item)
             continue
         before = None
         if isinstance(item, Mapping):
@@ -233,7 +259,7 @@ def stamp_finding_list(
         payload = stamp_finding_payload(item, run_id=run_id, index=index, inferred=inferred, producer=producer)
         stamped.append(payload)
         after = payload.get("provenance")
-        if after is not before:
+        if after != before:
             written += 1
     return stamped, written
 
@@ -313,26 +339,16 @@ def _has_matching_envelope(item: object) -> bool:
     return isinstance(env, Mapping) and _envelope_matches_text(env, text)
 
 
-def _backfill_finding_list(findings: Sequence[Any], *, run_id: str) -> tuple[list[dict[str, Any]], int]:
-    stamped: list[dict[str, Any]] = []
+def _backfill_finding_list(findings: Sequence[Any], *, run_id: str) -> tuple[list[Any], int]:
+    stamped: list[Any] = []
     wrote = 0
     for index, item in enumerate(findings):
         if not isinstance(item, (Finding, Mapping)):
+            stamped.append(item)
             continue
-        if _has_matching_envelope(item):
-            if isinstance(item, Finding):
-                stamped.append(stamp_finding_payload(item, run_id=run_id, index=index, inferred=True))
-            else:
-                payload = dict(item)
-                payload["text"] = finding_text(
-                    str(payload.get("title") or ""),
-                    str(payload.get("summary") or ""),
-                    str(payload.get("evidence") or ""),
-                )
-                stamped.append(payload)
-            continue
-        stamped.append(
-            stamp_finding_payload(item, run_id=run_id, index=index, inferred=True, producer=_BACKFILL_PRODUCER)
-        )
-        wrote += 1
+        before = item.provenance if isinstance(item, Finding) else item.get("provenance")
+        payload = stamp_finding_payload(item, run_id=run_id, index=index, inferred=True, producer=_BACKFILL_PRODUCER)
+        stamped.append(payload)
+        if payload.get("provenance") != before:
+            wrote += 1
     return stamped, wrote

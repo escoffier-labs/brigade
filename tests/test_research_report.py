@@ -193,6 +193,36 @@ def test_render_escapes_hostile_source_metadata_in_html_and_markdown():
     assert "example.com" in sources_md
 
 
+def test_html_renders_full_multiline_summary() -> None:
+    source = _envelope(origin="web", provider="web", uri="https://ex.com/doc", trust="web")
+    finding = Finding(
+        source_ids=(source.source_id,),
+        title="Title",
+        summary="First sentence.\nSecond sentence with the real conclusion.",
+        evidence="EV",
+        trust="web",
+        extraction_lane="luna",
+        extracted_at="2026-08-13T12:00:00+00:00",
+    )
+    html = report.render_html(
+        question="Q",
+        markdown_report="body",
+        findings=[finding],
+        sources=[source],
+        stats={"rounds": 1},
+    )
+    assert "First sentence." in html
+    assert "Second sentence with the real conclusion." in html
+    md = report.render_markdown(
+        question="Q",
+        markdown_report="body",
+        findings=[finding],
+        sources=[source],
+    )
+    assert "Title" in md
+    assert "https://ex.com/doc" in md
+
+
 def test_html_stats_render_middle_dot_without_double_escape() -> None:
     findings, sources = _findings_and_sources()
     html = report.render_html(

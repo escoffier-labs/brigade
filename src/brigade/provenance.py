@@ -122,6 +122,11 @@ def _is_absolute_locator(value: Any) -> bool:
     return False
 
 
+def is_absolute_locator(value: Any) -> bool:
+    """Return whether a locator value is an absolute filesystem path or file URI."""
+    return _is_absolute_locator(value)
+
+
 def is_safe_identity_label(value: Any) -> bool:
     """Return whether an identity label cannot be interpreted as a locator."""
     if not isinstance(value, str) or not value or value != value.strip() or "\\" in value:

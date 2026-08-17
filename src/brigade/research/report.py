@@ -4,7 +4,7 @@ import re
 from collections.abc import Sequence
 from typing import Any, Dict, List
 
-from .provenance import envelope_label, finding_envelope, split_finding_text
+from .provenance import envelope_label, finding_envelope
 from .types import Finding, SourceEnvelope, Trust
 
 _TRUST_GROUPS: tuple[tuple[Trust, str, str], ...] = (
@@ -86,16 +86,15 @@ def _resolved_uri(finding: Finding, lookup: dict[str, SourceEnvelope]) -> str:
 def _sources_section(findings: List[Finding], sources: Sequence[SourceEnvelope]) -> str:
     lookup = _source_lookup(sources)
     parts = []
-    for trust, title, note in _TRUST_GROUPS:
+    for trust, heading, note in _TRUST_GROUPS:
         rows = [f for f in findings if f.trust == trust]
         if not rows:
             continue
-        parts.append(f"<h2>{_html.escape(_sanitize_text(title))}</h2>")
+        parts.append(f"<h2>{_html.escape(_sanitize_text(heading))}</h2>")
         parts.append(f'<p class="tag">{_html.escape(_sanitize_text(note))}</p>')
-        for f in rows:
-            title, summary, _evidence = split_finding_text(f)
-            label = envelope_label(finding_envelope(f))
-            uri = _sanitize_text(_resolved_uri(f, lookup))
+        for finding in rows:
+            label = envelope_label(finding_envelope(finding))
+            uri = _sanitize_text(_resolved_uri(finding, lookup))
             source = _html.escape(uri)
             source_html = (
                 f'<a href="{source}">{source}</a>'
@@ -105,8 +104,8 @@ def _sources_section(findings: List[Finding], sources: Sequence[SourceEnvelope])
             css_trust = _sanitize_text(trust).replace("_", "-")
             parts.append(
                 f'<div class="src {css_trust}"><div class="tag">{_html.escape(_sanitize_text(label))}</div>'
-                f"<strong>{_html.escape(_sanitize_text(title))}</strong><br>"
-                f"{source_html}<p>{_html.escape(_sanitize_text(summary))}</p></div>"
+                f"<strong>{_html.escape(_sanitize_text(finding.title))}</strong><br>"
+                f"{source_html}<p>{_html.escape(_sanitize_text(finding.summary))}</p></div>"
             )
     return "\n".join(parts)
 
@@ -146,10 +145,9 @@ def render_markdown(
     clean_question = _sanitize_md_line(question)
     clean_report = markdown_report.replace("\x00", "").replace("\r", "")
     lines = [f"# {clean_question}", "", clean_report, "", "## Sources", ""]
-    for f in findings:
-        title, _summary, _evidence = split_finding_text(f)
-        clean_label = _escape_md_inline(envelope_label(finding_envelope(f)))
-        clean_title = _escape_md_inline(title)
-        clean_uri = _escape_md_inline(_resolved_uri(f, lookup))
+    for finding in findings:
+        clean_label = _escape_md_inline(envelope_label(finding_envelope(finding)))
+        clean_title = _escape_md_inline(finding.title)
+        clean_uri = _escape_md_inline(_resolved_uri(finding, lookup))
         lines.append(f"- [{clean_label}] {clean_title} - {clean_uri}")
     return "\n".join(lines) + "\n"
