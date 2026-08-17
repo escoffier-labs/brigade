@@ -67,7 +67,7 @@ The following string fields are nullable (JSON `null` ↔ Go `*string` nil): `co
 
 ### Trust policy entitlements and caps
 
-`trust.trust_policy` stores only `schema = brigade.trust-policy.v1` and `schema_version = 1`. Consumers load the shared `src/brigade/fixtures/trust-policy.v1.json` fixture to derive entitlements per label: `unknown` (search, show_metadata, forensic_content_reveal), `untrusted` (search, show, brief_wrapped with caps), `reviewed`/`verified` (search, show, brief, cite, promote), `quarantined` (search_metadata, show_metadata). `untrusted_caps` are `max_items = 2` and `max_fraction = 0.5`.
+`trust.trust_policy` stores only `schema = brigade.trust-policy.v1` and `schema_version = 1`. Consumers load the shared `src/brigade/fixtures/trust-policy.v1.json` fixture to derive entitlements per label: `unknown` (search, show_metadata, forensic_content_reveal), `untrusted` (search, show, brief_wrapped with caps, cite, promote, context), `reviewed`/`verified` (search, show, brief, brief_wrapped, cite, promote, context), `quarantined` (search_metadata, show_metadata). Higher labels keep every content surface a lower upgrade-path label has. `untrusted_caps` are `max_items = 2` and `max_fraction = 0.5`.
 
 ### Size ceiling
 

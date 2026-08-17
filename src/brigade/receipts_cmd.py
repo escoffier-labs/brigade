@@ -672,7 +672,6 @@ def _upgrade_indexed_verify_receipts(target: Path, artifacts: list[dict[str, Any
                 "changes_patch_sha256": payload.get("changes_patch_sha256"),
             },
         )
-        trust_gate.append_work_event(target, event)
         try:
             trust_gate.notify_miseledger_trust(
                 target,
@@ -681,8 +680,17 @@ def _upgrade_indexed_verify_receipts(target: Path, artifacts: list[dict[str, Any
                 to_label="verified",
                 operator_command=trust_gate.OPERATOR_VERIFY,
             )
-        except trust_gate.TrustReviewError:
-            pass
+        except trust_gate.TrustReviewError as exc:
+            upgrades.append(
+                {
+                    "status": "verify-pending",
+                    "item_ref": item_ref,
+                    "envelope_content_hash": content_hash,
+                    "error": str(exc),
+                }
+            )
+            continue
+        trust_gate.append_work_event(target, event)
         upgrades.append({"status": "verified", "item_ref": item_ref, "event": event})
     return upgrades
 

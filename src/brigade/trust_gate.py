@@ -8,6 +8,7 @@ pending, flagged, or error injection state. Standard library only.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -185,7 +186,9 @@ def resolve_pending_injection(text: str, env: Mapping[str, Any]) -> tuple[dict[s
     """Resolve ``pending`` synchronously. Returns (envelope, status).
 
     A clean scan is a consumer-local release to ``untrusted`` and does not
-    persist. Hit, error, or unavailability leaves the body ineligible.
+    persist, but only when the item is not already ``quarantined``. A
+    quarantined label stays quarantined regardless of injection resolution.
+    Hit, error, or unavailability leaves the body ineligible.
     """
 
     updated = json.loads(json.dumps(env)) if isinstance(env, Mapping) else envelope_from_record(None)
@@ -207,8 +210,6 @@ def resolve_pending_injection(text: str, env: Mapping[str, Any]) -> tuple[dict[s
     injection["rules"] = rules
     if new_status == "flagged":
         trust["label"] = "quarantined"
-    elif new_status == "clean" and trust.get("label") == "quarantined":
-        trust["label"] = "untrusted"
     return updated, new_status
 
 
@@ -225,7 +226,7 @@ def admit_consumer(record: Mapping[str, Any] | None, *, entitlement: str) -> Con
     if injection_blocks_content(status):
         return ConsumerAdmission(
             label=label,
-            allowed=entitlement in {"brief", "brief_wrapped", "show", "search"},
+            allowed=entitlement in {"brief", "brief_wrapped", "show", "search", "context"},
             body_mode="metadata",
             injection_status=status,
             envelope=env,
@@ -246,8 +247,13 @@ def admit_consumer(record: Mapping[str, Any] | None, *, entitlement: str) -> Con
         return ConsumerAdmission(label=label, allowed=True, body_mode="wrapped", injection_status=status, envelope=env)
     if allows(label, entitlement):
         return ConsumerAdmission(label=label, allowed=True, body_mode="full", injection_status=status, envelope=env)
-    if entitlement in {"cite", "promote", "context"} and label == "untrusted" and status == "clean":
+    if (
+        entitlement in {"cite", "promote", "context"}
+        and label in {"untrusted", "reviewed", "verified"}
+        and status == "clean"
+    ):
         # Default work-import and research paths stay usable after a clean scan.
+        # Higher labels inherit those surfaces so trust upgrades never revoke them.
         # Unknown and quarantined remain excluded above.
         return ConsumerAdmission(label=label, allowed=True, body_mode="full", injection_status=status, envelope=env)
     return ConsumerAdmission(
@@ -349,11 +355,11 @@ def apply_trust_label(
 
 def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
     line = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
-    existing = ""
-    if path.is_file():
-        existing = path.read_text(encoding="utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
-    localio.write_text_atomic(path, existing + line)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def work_events_path(target: Path) -> Path:
