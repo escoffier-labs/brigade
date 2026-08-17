@@ -949,7 +949,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
     )
     p_work_import_promote.add_argument(
-        "--all", action="store_true", help="Promote all pending imports matching filters."
+        "--all",
+        action="store_true",
+        help="Promote all pending imports matching filters. Exits 2 if any import fails.",
     )
     p_work_import_promote.add_argument(
         "--kind",
