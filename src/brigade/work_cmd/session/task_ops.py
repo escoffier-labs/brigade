@@ -27,7 +27,10 @@ def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    ledger = ledger_mod._read_task_ledger(target)
+    try:
+        ledger = ledger_mod._read_task_ledger(target)
+    except ledger_mod.TaskLedgerError as exc:
+        return _emit_ledger_error(exc, json_output=json_output)
     task_items = [task for task in ledger["tasks"] if isinstance(task, dict)]
     task_items.sort(key=ledger_mod._task_sort_key)
     if not all_tasks:
@@ -778,6 +781,8 @@ def ready(
                 explain=explain,
                 parallel_safe=parallel_safe,
             )
+        except ledger_mod.TaskLedgerError as exc:
+            return _emit_ledger_error(exc, json_output=json_output)
         except campaign_mod.CampaignError as exc:
             if json_output:
                 print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
@@ -791,7 +796,10 @@ def ready(
                     print(f"dangling_endpoints: {len(dangling)}", file=sys.stderr)
             return int(exc.exit_code)
     else:
-        payload = ledger_mod._readiness_payload(target, explain=explain, parallel_safe=parallel_safe)
+        try:
+            payload = ledger_mod._readiness_payload(target, explain=explain, parallel_safe=parallel_safe)
+        except ledger_mod.TaskLedgerError as exc:
+            return _emit_ledger_error(exc, json_output=json_output)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -803,6 +811,11 @@ def ready(
     print(f"ready: {payload['ready_count']}")
     print(f"blocked: {payload['blocked_count']}")
     print(f"cycles: {payload['cycle_count']}")
+    unknown_type_count = int(payload.get("unknown_type_count") or 0)
+    if unknown_type_count:
+        unknown_types = ",".join(str(item) for item in payload.get("unknown_types") or [])
+        suffix = f" ({unknown_types})" if unknown_types else ""
+        print(f"unknown_type_count: {unknown_type_count}{suffix}")
     if parallel_safe:
         print(f"waves: {payload.get('wave_count', 0)}")
         print(f"partition_mode: {payload.get('partition_mode')}")
@@ -986,11 +999,7 @@ def _emit_claim_error(exc: Exception, *, json_output: bool) -> int:
 
 
 def _emit_ledger_error(exc: ledger_mod.TaskLedgerError, *, json_output: bool) -> int:
-    if json_output:
-        print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
-    else:
-        print(f"error: {exc}", file=sys.stderr)
-    return int(exc.exit_code)
+    return ledger_mod.emit_task_ledger_error(exc, json_output=json_output)
 
 
 def claim(
@@ -1077,6 +1086,8 @@ def release(
         )
     except ClaimError as exc:
         return _emit_claim_error(exc, json_output=json_output)
+    except ledger_mod.TaskLedgerError as exc:
+        return _emit_ledger_error(exc, json_output=json_output)
     if json_output:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

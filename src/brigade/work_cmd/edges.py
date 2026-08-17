@@ -78,6 +78,8 @@ class ReadinessResult:
     cycles: list[dict[str, Any]]
     orphans: list[dict[str, Any]]
     parents: list[str]
+    unknown_type_count: int = 0
+    unknown_types: tuple[str, ...] = ()
 
     def as_dict(self, *, explain: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -87,6 +89,8 @@ class ReadinessResult:
             "cycle_count": len(self.cycles),
             "orphan_count": len(self.orphans),
             "parent_ids": list(self.parents),
+            "unknown_type_count": self.unknown_type_count,
+            "unknown_types": list(self.unknown_types),
         }
         if explain:
             payload["blocked"] = list(self.blocked)
@@ -463,12 +467,16 @@ def resolve_readiness(ledger: dict[str, Any]) -> ReadinessResult:
         unique_orphans.append(item)
     unique_orphans.sort(key=lambda item: (str(item.get("id") or ""), tuple(item.get("via") or ())))
 
+    unknown_edges = [edge for edge in edges if edge["type"] not in EDGE_TYPES]
+    unknown_types = tuple(sorted({edge["type"] for edge in unknown_edges}))
     return ReadinessResult(
         ready=ready,
         blocked=blocked,
         cycles=cycles,
         orphans=unique_orphans,
         parents=parents,
+        unknown_type_count=len(unknown_edges),
+        unknown_types=unknown_types,
     )
 
 

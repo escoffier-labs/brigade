@@ -964,7 +964,7 @@ def import_promote(
             )
         for item, exc in failed:
             print(f"- {item.get('id')} failed: {exc}", file=sys.stderr)
-        if failed and not promoted:
+        if failed:
             return 2
         return 0
     if not import_id:

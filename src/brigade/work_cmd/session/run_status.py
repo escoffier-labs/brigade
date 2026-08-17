@@ -15,7 +15,7 @@ from uuid import uuid4
 from ... import dogfood_cmd, localio
 from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
-from .. import scanners as scanners_mod, reviews as reviews_mod
+from .. import scanners as scanners_mod, reviews as reviews_mod, edges as edges_mod
 
 from . import lifecycle as _family_base
 
@@ -489,7 +489,28 @@ def doctor(*, target: Path) -> int:
     else:
         helpers._doctor_line(constants.OK, "active_session", "none")
 
-    pending_tasks = ledger_mod._pending_tasks(effective_target)
+    try:
+        ledger = ledger_mod._read_task_ledger(effective_target)
+        pending_tasks = ledger_mod._pending_tasks(effective_target)
+    except ledger_mod.TaskLedgerError as exc:
+        failures += 1
+        helpers._doctor_line(constants.FAIL, "task_ledger", exc)
+        ledger = None
+        pending_tasks = []
+    else:
+        helpers._doctor_line(constants.OK, "task_ledger", helpers._tasks_path(effective_target))
+        unknown_edges = [
+            edge for edge in edges_mod.normalize_edges(ledger.get("edges")) if edge["type"] not in edges_mod.EDGE_TYPES
+        ]
+        if unknown_edges:
+            types = ", ".join(sorted({edge["type"] for edge in unknown_edges}))
+            helpers._doctor_line(
+                constants.WARN,
+                "unknown_edge_types",
+                f"{len(unknown_edges)} inert edge(s) with unknown type: {types}",
+            )
+        else:
+            helpers._doctor_line(constants.OK, "unknown_edge_types", "none")
     missing_acceptance = [task for task in pending_tasks if not ledger_mod._task_acceptance(task)]
     if missing_acceptance:
         sample = ", ".join(str(task.get("id")) for task in missing_acceptance[:5])
@@ -503,7 +524,10 @@ def doctor(*, target: Path) -> int:
             constants.OK, "task_acceptance", "pending tasks have acceptance criteria or no tasks are pending"
         )
 
-    plan_coverage = ledger_mod._plan_coverage_payload(effective_target)
+    if ledger is None:
+        plan_coverage = {"significant_without_plan": 0, "task_ids": []}
+    else:
+        plan_coverage = ledger_mod._plan_coverage_payload(effective_target)
     if plan_coverage["significant_without_plan"] > 0:
         plan_sample = ", ".join(plan_coverage["task_ids"][:5])
         helpers._doctor_line(

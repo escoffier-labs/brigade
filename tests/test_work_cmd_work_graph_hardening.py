@@ -656,6 +656,153 @@ def test_non_integer_ledger_version_rejects(tmp_path):
     assert "version" in str(excinfo.value).casefold()
 
 
+def _write_corrupt_ledger(target: Path) -> Path:
+    path = _tasks_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"version": 2, "tasks": [')
+    return path
+
+
+def _write_unsupported_ledger(target: Path) -> Path:
+    path = _tasks_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 99,
+        "tasks": [_seed_task_dict("future-1", "From the future")],
+        "edges": [],
+        "future_field": {"keep": True},
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+    return path
+
+
+def _run_read_surface(command: str, target: Path) -> int:
+    if command == "tasks":
+        return work_cmd.tasks(target=target, json_output=True)
+    if command == "ready":
+        return work_cmd.ready(target=target, json_output=True)
+    if command == "release":
+        return work_cmd.release(target=target, actor=["lane-a"], json_output=True)
+    raise AssertionError(f"unknown read surface: {command}")
+
+
+@pytest.mark.parametrize("command", ["tasks", "ready", "release"])
+@pytest.mark.parametrize("kind", ["corrupt", "unsupported"])
+def test_read_surfaces_fail_closed_on_bad_ledger(tmp_path, capsys, command, kind):
+    _init_git_repo(tmp_path)
+    path = _write_corrupt_ledger(tmp_path) if kind == "corrupt" else _write_unsupported_ledger(tmp_path)
+    before = path.read_text()
+    expected_reason = "corrupt_ledger" if kind == "corrupt" else "unsupported_ledger_version"
+    needle = "corrupt" if kind == "corrupt" else "version"
+
+    rc = _run_read_surface(command, tmp_path)
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["reason"] == expected_reason
+    assert payload["exit_code"] == 2
+    assert needle in (captured.out + captured.err).casefold()
+    assert path.read_text() == before
+
+
+def test_work_dispatch_catches_ledger_error_for_unwired_show(tmp_path):
+    _init_git_repo(tmp_path)
+    path = _write_corrupt_ledger(tmp_path)
+    before = path.read_text()
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "brigade",
+            "work",
+            "task",
+            "show",
+            "future-1",
+            "--target",
+            str(tmp_path),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 2
+    assert "Traceback" not in proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["reason"] == "corrupt_ledger"
+    assert payload["exit_code"] == 2
+    assert path.read_text() == before
+
+
+def test_unknown_edge_type_surfaces_in_ready_and_doctor(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    a = _add(tmp_path, "Task A")
+    b = _add(tmp_path, "Task B")
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    ledger["edges"].append(
+        {
+            "id": "edge-hand-unknown",
+            "source": a["id"],
+            "target": b["id"],
+            "type": "dependson",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    _write_raw_ledger(tmp_path, ledger)
+
+    assert work_cmd.ready(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["unknown_type_count"] == 1
+    assert payload["unknown_types"] == ["dependson"]
+
+    assert work_cmd.ready(target=tmp_path) == 0
+    text = capsys.readouterr().out
+    assert "unknown_type_count: 1" in text
+    assert "dependson" in text
+
+    work_cmd.doctor(target=tmp_path)
+    doctor_out = capsys.readouterr().out
+    assert "unknown_edge_types" in doctor_out
+    assert "dependson" in doctor_out
+
+
+def test_import_promote_all_partial_failure_is_nonzero(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 9, 16, 30, 0, tzinfo=timezone.utc),
+    )
+    a = _add(tmp_path, "Upstream A")
+    b = _add(tmp_path, "Downstream B")
+    assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"]) == 0
+    assert work_cmd.import_add(target=tmp_path, text="Healthy import", kind="task", source="manual") == 0
+    assert work_cmd.import_add(target=tmp_path, text="Cycle bait import", kind="task", source="manual") == 0
+    capsys.readouterr()
+    imports = work_cmd._read_imports(tmp_path)
+    cycle_item = next(item for item in imports if item["text"] == "Cycle bait import")
+    cycle_item["metadata"] = {
+        "proposed_edges": [{"type": "blocks", "source": b["id"], "target": a["id"]}],
+    }
+    work_cmd._write_imports(tmp_path, imports)
+    before_count = len(work_cmd._read_task_ledger(tmp_path)["tasks"])
+
+    rc = work_cmd.import_promote(target=tmp_path, all_matching=True)
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "promoted: 1" in captured.out
+    assert "failed: 1" in captured.out
+    assert (
+        "cycle" in (captured.out + captured.err).casefold() or "dependency" in (captured.out + captured.err).casefold()
+    )
+    after = work_cmd._read_task_ledger(tmp_path)
+    assert len(after["tasks"]) == before_count + 1
+    remaining = [item for item in work_cmd._read_imports(tmp_path) if item.get("status") == "pending"]
+    assert len(remaining) == 1
+    assert remaining[0]["text"] == "Cycle bait import"
+
+
 def test_legacy_v1_still_migrates_on_read(tmp_path):
     _init_git_repo(tmp_path)
     path = _tasks_path(tmp_path)

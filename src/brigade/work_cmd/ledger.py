@@ -78,6 +78,23 @@ class TaskLedgerError(ValueError):
         return payload
 
 
+def emit_task_ledger_error(exc: TaskLedgerError, *, json_output: bool = False) -> int:
+    """Print a ``TaskLedgerError`` with the same contract as ``task_add`` (rc=2)."""
+    if json_output:
+        print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"error: {exc}", file=sys.stderr)
+    return int(exc.exit_code)
+
+
+def guard_task_ledger_dispatch(args: Any, impl: Callable[[Any], int]) -> int:
+    """Catch ``TaskLedgerError`` from a CLI dispatch implementation."""
+    try:
+        return impl(args)
+    except TaskLedgerError as exc:
+        return emit_task_ledger_error(exc, json_output=bool(getattr(args, "json", False)))
+
+
 def _read_task_ledger(target: Path) -> dict[str, Any]:
     path = helpers._tasks_path(target)
     if not path.exists():

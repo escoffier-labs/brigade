@@ -362,6 +362,12 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 
 def dispatch(args) -> int:
+    from ..work_cmd.ledger import guard_task_ledger_dispatch
+
+    return guard_task_ledger_dispatch(args, _dispatch_impl)
+
+
+def _dispatch_impl(args) -> int:
     from .. import operator_cmd
 
     if args.operator_command == "guide":
