@@ -242,7 +242,7 @@ def run(
                 delta = footprint_mod.receipt_graph_delta(receipt)
                 footprint_mod.set_task_footprint(
                     task,
-                    footprint_mod.reconcile_footprint(delta, prior=footprint_mod.task_footprint(task)),
+                    footprint_mod.reconcile_footprint(delta, prior=footprint_mod.task_footprint(task), target=target),
                 )
                 ledger_mod._write_task_ledger(target, ledger)
     if dogfood_rc == 0 and queue_next:
