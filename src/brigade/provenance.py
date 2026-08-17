@@ -497,6 +497,10 @@ def apply_bundle_integrity(bundle: dict[str, Any]) -> dict[str, Any]:
     Python fetch has no v1 forensic reveal path. Snippets and artifact bodies
     are stripped when ``integrity_mismatch`` is set or a provided envelope
     content digest does not match a materialized ``text`` field.
+
+    Clean records are left unchanged: this does not invent
+    ``integrity_mismatch: false`` or ``integrity_omitted: 0`` on a raw
+    projection that did not already carry those fields.
     """
 
     raw_results = bundle.get("results")
@@ -526,10 +530,8 @@ def apply_bundle_integrity(bundle: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(art, dict):
                         art.pop("text", None)
             omitted += 1
-        elif "integrity_mismatch" not in item:
-            item["integrity_mismatch"] = False
     existing = bundle.get("integrity_omitted")
-    if not isinstance(existing, int) or existing < omitted:
+    if omitted > 0 and (not isinstance(existing, int) or existing < omitted):
         bundle["integrity_omitted"] = omitted
     return bundle
 

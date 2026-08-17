@@ -296,6 +296,26 @@ def test_apply_bundle_integrity_is_metadata_only_on_mismatch():
     assert out["integrity_omitted"] == 1
 
 
+def test_apply_bundle_integrity_leaves_clean_raw_bundle_unchanged():
+    bundle = {
+        "id": "bundle-json",
+        "query": "raw query",
+        "untrusted_context": True,
+        "results": [{"id": "item-one", "snippet": "run id verify-json status completed"}],
+    }
+
+    out = provenance.apply_bundle_integrity(bundle)
+
+    assert out == {
+        "id": "bundle-json",
+        "query": "raw query",
+        "untrusted_context": True,
+        "results": [{"id": "item-one", "snippet": "run id verify-json status completed"}],
+    }
+    assert "integrity_omitted" not in out
+    assert "integrity_mismatch" not in out["results"][0]
+
+
 def test_synthesize_legacy_provenance():
     env, display = provenance.synthesize_legacy_provenance()
     assert display == provenance.LEGACY_DISPLAY == "UNKNOWN PROVENANCE - legacy item"
