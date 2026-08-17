@@ -120,18 +120,16 @@ def _nonneg_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-_BOOTSTRAP_LINT_CHECK_IDS = frozenset(
-    {
-        "bootstrap-after-setup",
-        "orphan-workspace",
-        "configured-placeholder",
-        "memory-contradicts-fresh",
-        "inactive-context-content",
-        "dangling-agent-reference",
-        "duplicate-context",
-    }
-)
-_BOOTSTRAP_LINT_SEVERITIES = frozenset({"error", "warning"})
+_BOOTSTRAP_LINT_EXPECTED_SEVERITY = {
+    "bootstrap-after-setup": "error",
+    "orphan-workspace": "warning",
+    "configured-placeholder": "warning",
+    "memory-contradicts-fresh": "error",
+    "inactive-context-content": "warning",
+    "dangling-agent-reference": "error",
+    "duplicate-context": "warning",
+}
+_BOOTSTRAP_LINT_CHECK_IDS = frozenset(_BOOTSTRAP_LINT_EXPECTED_SEVERITY)
 
 
 def _first_stable_check_id(findings: list[object]) -> Optional[str]:
@@ -151,7 +149,7 @@ def _lint_findings_valid(findings: list[object]) -> bool:
         check_id = finding.get("check_id")
         if not isinstance(check_id, str) or check_id not in _BOOTSTRAP_LINT_CHECK_IDS:
             return False
-        if finding.get("severity") not in _BOOTSTRAP_LINT_SEVERITIES:
+        if finding.get("severity") != _BOOTSTRAP_LINT_EXPECTED_SEVERITY[check_id]:
             return False
     return True
 
@@ -179,18 +177,29 @@ def _bootstrap_doctor_lint_row(result: proc.Result) -> CheckResult:
     findings = data.get("findings")
     error_count = data.get("error_count")
     warning_count = data.get("warning_count")
+    ok = data.get("ok")
     if not isinstance(findings, list) or not _nonneg_int(error_count) or not _nonneg_int(warning_count):
+        return (WARN, name, "installed but lint payload is invalid")
+    if "ok" not in data or not isinstance(ok, bool):
         return (WARN, name, "installed but lint payload is invalid")
     if not _lint_findings_valid(findings):
         return (WARN, name, "installed but lint payload is invalid")
     actual_errors, actual_warnings = _lint_severity_counts(findings)
-    clean = error_count == 0 and warning_count == 0 and not findings
-    if clean:
-        if result.code != 0:
-            return (WARN, name, f"installed but lint exited {result.code}")
-        return (OK, name, "0 error(s), 0 warning(s)")
     if actual_errors != error_count or actual_warnings != warning_count:
         return (WARN, name, "installed but lint payload is inconsistent")
+    clean = error_count == 0 and warning_count == 0 and not findings
+    if ok is not clean:
+        return (WARN, name, "installed but lint payload is inconsistent")
+    if error_count:
+        expected_code = 2
+    elif warning_count:
+        expected_code = 1
+    else:
+        expected_code = 0
+    if result.code != expected_code:
+        return (WARN, name, "installed but lint payload is inconsistent")
+    if clean:
+        return (OK, name, "0 error(s), 0 warning(s)")
     detail = f"{error_count} error(s), {warning_count} warning(s)"
     check_id = _first_stable_check_id(findings)
     if check_id is not None:
