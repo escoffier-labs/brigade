@@ -12,7 +12,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal
 
 from . import localio, provenance
 from .untrusted import scan_handoff_injection_heuristics
@@ -160,7 +161,10 @@ def item_body_text(record: Mapping[str, Any] | None) -> str:
 
 
 def injection_blocks_content(status: str) -> bool:
-    return status in {"pending", "flagged", "error"}
+    """True when status is not the explicit known-safe ``clean`` value."""
+
+    normalized = status.strip().lower() if isinstance(status, str) else ""
+    return normalized != "clean"
 
 
 def scan_injection(text: str) -> tuple[str, int, list[str]]:
@@ -193,9 +197,10 @@ def resolve_pending_injection(text: str, env: Mapping[str, Any]) -> tuple[dict[s
     if not isinstance(injection, dict):
         injection = {"status": "pending", "count": 0, "rules": []}
         trust["injection"] = injection
-    status = injection.get("status")
+    raw_status = injection.get("status")
+    status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
     if status != "pending":
-        return updated, status if isinstance(status, str) else "error"
+        return updated, status or "error"
     new_status, count, rules = scan_injection(text)
     injection["status"] = new_status
     injection["count"] = count
@@ -215,6 +220,7 @@ def admit_consumer(record: Mapping[str, Any] | None, *, entitlement: str) -> Con
     status = provenance.injection_status(env)
     if status == "pending":
         env, status = resolve_pending_injection(text, env)
+        status = status.strip().lower() if isinstance(status, str) else "error"
     label = _label_from_env(env) or trust_label_of(record)
     if injection_blocks_content(status):
         return ConsumerAdmission(
@@ -234,9 +240,9 @@ def admit_consumer(record: Mapping[str, Any] | None, *, entitlement: str) -> Con
             envelope=env,
             reason=f"trust label {label} is excluded from {entitlement}",
         )
-    if entitlement == "brief" and allows(label, "brief"):
+    if entitlement == "brief" and allows(label, "brief") and status == "clean":
         return ConsumerAdmission(label=label, allowed=True, body_mode="full", injection_status=status, envelope=env)
-    if entitlement in {"brief", "brief_wrapped"} and allows(label, "brief_wrapped"):
+    if entitlement in {"brief", "brief_wrapped"} and allows(label, "brief_wrapped") and status == "clean":
         return ConsumerAdmission(label=label, allowed=True, body_mode="wrapped", injection_status=status, envelope=env)
     if allows(label, entitlement):
         return ConsumerAdmission(label=label, allowed=True, body_mode="full", injection_status=status, envelope=env)
@@ -377,7 +383,7 @@ def read_events(path: Path) -> list[dict[str, Any]]:
 
 
 def matching_transition(
-    events: list[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
     *,
     item_ref: str,
     to_label: str,
@@ -464,7 +470,8 @@ def review_work_import(
         raise TrustReviewError(f"cannot review trust label {label}")
     now = localio.utc_now_iso()
     updated_env = apply_trust_label(env, to_label="reviewed", assigned_by=operator_command, assigned_at=now)
-    metadata = dict(item.get("metadata") if isinstance(item.get("metadata"), dict) else {})
+    raw_metadata = item.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
     metadata["provenance"] = updated_env
     item["metadata"] = metadata
     item["updated_at"] = now
