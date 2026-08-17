@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -152,6 +153,28 @@ def _resolve_run_dir(run: str | Path, *, cwd: Path, runs_dir: Path | None = None
 def _line(label: str, value: object | None) -> None:
     if value not in (None, ""):
         print(f"{label}: {value}")
+
+
+def _lineage(meta: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    lineage = meta.get("lineage")
+    return lineage if isinstance(lineage, Mapping) else None
+
+
+def _print_lineage(meta: Mapping[str, Any]) -> None:
+    lineage = _lineage(meta)
+    if lineage is None:
+        return
+    print("lineage:")
+    _line("  kind", lineage.get("kind"))
+    _line("  parent run", lineage.get("parent_run_id"))
+    _line("  branch point", lineage.get("branch_point_event_id"))
+    shared_prefix = lineage.get("shared_prefix")
+    if not isinstance(shared_prefix, Mapping):
+        return
+    sequence = shared_prefix.get("event_sequence")
+    digest = shared_prefix.get("event_digest")
+    if isinstance(sequence, int) and isinstance(digest, str) and digest:
+        print(f"  shared prefix: seq={sequence} digest={digest[:12]}")
 
 
 def _print_roster(roster: dict[str, Any] | None) -> None:
@@ -1455,6 +1478,265 @@ def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> in
     return 0
 
 
+def _read_verified_parent_journal(run_dir: Path) -> tuple[list[Any] | None, str | None]:
+    from . import run_journal, run_lifecycle
+
+    journal_path = run_lifecycle._journal_path(run_dir)
+    if not journal_path.is_file():
+        return None, "parent run has no lifecycle journal"
+    try:
+        report = run_journal.read_journal_bounded(journal_path)
+    except run_journal.RunJournalError as exc:
+        return None, f"could not read parent lifecycle journal: {exc.diagnostic}"
+    if report.partial_tail is not None:
+        return None, "parent lifecycle journal has a partial trailing record"
+    if report.chain_errors:
+        return None, f"parent lifecycle journal is corrupt: {report.chain_errors[0]}"
+    return report.events, None
+
+
+def _supported_branch_snapshot(parent_run_dir: Path, branch_event: Any) -> tuple[dict[str, Any] | None, str | None]:
+    from . import run_checkpoint, run_projector
+
+    events, error = _read_verified_parent_journal(parent_run_dir)
+    if error is not None:
+        return None, error
+    assert events is not None
+    prefix = [event for event in events if event.sequence <= branch_event.sequence]
+    checkpoints = [event for event in prefix if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE]
+    checkpoint = checkpoints[-1] if checkpoints else None
+    if checkpoint is None:
+        return None, "unsupported branch point event: no verified checkpoint covers it"
+    if branch_event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE:
+        return None, (
+            "unsupported branch point event: branch from the checkpoint-covered "
+            "lifecycle event, not the checkpoint itself"
+        )
+    paired_event_type = checkpoint.payload.get("paired_event_type")
+    if (
+        branch_event.sequence != checkpoint.sequence + 1
+        or branch_event.event_type != paired_event_type
+        or run_checkpoint._paired_event_derived_status(branch_event) is None
+    ):
+        return None, "unsupported branch point event: not a checkpoint-covered lifecycle state"
+    try:
+        checkpoint_bytes = run_checkpoint.validate_checkpoint(parent_run_dir, checkpoint)
+        checkpoint_obj = run_checkpoint._parse_checkpoint_object(checkpoint_bytes)
+        if run_checkpoint._paired_event_derived_status(branch_event) != checkpoint_obj.get("status"):
+            return None, "unsupported branch point event: checkpoint status does not match the paired event"
+        projection = run_projector.project_run_snapshot(checkpoint_obj, prefix, journal_present=True)
+    except (run_checkpoint.CheckpointError, run_projector.ProjectionError) as exc:
+        return None, f"unsupported branch point event: {exc}"
+    return projection.snapshot, None
+
+
+def _child_status_followup(status: str) -> tuple[str, dict[str, Any]] | None:
+    from . import run_lifecycle
+
+    if status == "started":
+        return None
+    event_type = run_lifecycle.STATUS_EVENT_TYPE.get(status)
+    if event_type is None:
+        return None
+    if event_type in {"run.completed", "run.failed", "run.interrupted"}:
+        return event_type, {"status": status, "detail": "branched child snapshot"}
+    return event_type, {"detail": "branched child snapshot"}
+
+
+def _absolute_path_under(value: object, parent: Path) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    path = Path(value)
+    if not path.is_absolute():
+        return False
+    try:
+        resolved = path.resolve()
+        parent_resolved = parent.resolve()
+    except OSError:
+        return False
+    return resolved == parent_resolved or parent_resolved in resolved.parents
+
+
+def _rewrite_parent_owned_path(value: object, *, parent_run_dir: Path, child_run_dir: Path) -> str:
+    parent_resolved = parent_run_dir.resolve()
+    resolved = Path(str(value)).resolve()
+    if resolved == parent_resolved:
+        return str(child_run_dir)
+    return str(child_run_dir / resolved.relative_to(parent_resolved))
+
+
+def _child_receipt_from_parent_snapshot(
+    snapshot: Mapping[str, Any],
+    *,
+    workspace: Path,
+    parent_run_id: str,
+    parent_run_dir: Path,
+    child_run_dir: Path,
+    branch_event: Any,
+) -> dict[str, Any]:
+    child = dict(snapshot)
+    child["schema"] = child.get("schema") or "brigade.run.v1"
+    child["schema_version"] = child.get("schema_version") or 1
+    child["cwd"] = str(workspace)
+    child["lock_workspace"] = str(workspace)
+    created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    child["started_at"] = created_at
+    child["status_started_at"] = created_at
+    child.pop("projector_version", None)
+    child.pop("journal_present", None)
+    child.pop("journal_last_sequence", None)
+    child.pop("journal_last_event_digest", None)
+    child.pop("finished_at", None)
+    child.pop("duration_seconds", None)
+    child.pop("resumed_at", None)
+    child.pop("recovery_history", None)
+    child.pop("recovery_preserved_artifact", None)
+    child.pop("control_transport", None)
+    child.pop("control_socket", None)
+    child.pop("active_stage", None)
+    child.pop("active_seats", None)
+    child.pop("phase_owner", None)
+    child.pop("error", None)
+    child.pop("failure", None)
+    child.pop("failure_phase", None)
+    child.pop("failure_kind", None)
+    child.pop("worker_failure_summary", None)
+    artifacts = child.get("artifacts")
+    if _absolute_path_under(artifacts, parent_run_dir):
+        child["artifacts"] = _rewrite_parent_owned_path(
+            artifacts, parent_run_dir=parent_run_dir, child_run_dir=child_run_dir
+        )
+    if _absolute_path_under(child.get("handoff"), parent_run_dir):
+        child.pop("handoff", None)
+    child["lineage"] = {
+        "kind": "child",
+        "parent_run_id": parent_run_id,
+        "branch_point_event_id": branch_event.event_id,
+        "shared_prefix": {
+            "event_sequence": branch_event.sequence,
+            "event_digest": branch_event.event_digest,
+            "previous_digest": branch_event.previous_digest,
+        },
+    }
+    return child
+
+
+def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | None = None) -> int:
+    from . import (
+        aboyeur,
+        localio,
+        receipt_schema,
+        run_checkpoint,
+        run_journal,
+        run_lifecycle,
+        run_projector,
+        runguard,
+    )
+
+    parent_run_dir, error = _resolve_run_dir(parent_run, cwd=cwd, runs_dir=runs_dir)
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 2
+    assert parent_run_dir is not None
+    if not isinstance(event_id, str) or not event_id.strip():
+        print("error: event_id must not be empty", file=sys.stderr)
+        return 2
+    try:
+        parent_meta = _read_json(parent_run_dir / "run.json")
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if parent_meta is None:
+        print(f"error: run.json not found in {parent_run_dir}", file=sys.stderr)
+        return 2
+    events, journal_error = _read_verified_parent_journal(parent_run_dir)
+    if journal_error is not None:
+        print(f"error: {journal_error}", file=sys.stderr)
+        return 2
+    assert events is not None
+    branch_event = next((event for event in events if event.event_id == event_id), None)
+    if branch_event is None:
+        print(f"error: unknown branch point event: {event_id}", file=sys.stderr)
+        return 2
+    snapshot, snapshot_error = _supported_branch_snapshot(parent_run_dir, branch_event)
+    if snapshot_error is not None:
+        print(f"error: {snapshot_error}", file=sys.stderr)
+        return 2
+    assert snapshot is not None
+    workspace = runguard.resolve_run_lock_workspace(parent_meta, parent_run_dir, fallback=cwd)
+    if workspace is None:
+        print("error: parent run has no lock workspace", file=sys.stderr)
+        return 2
+    runs_root = parent_run_dir.parent
+    child_run_dir = aboyeur.make_run_dir(runs_root)
+    child_meta = _child_receipt_from_parent_snapshot(
+        snapshot,
+        workspace=workspace,
+        parent_run_id=parent_run_dir.name,
+        parent_run_dir=parent_run_dir,
+        child_run_dir=child_run_dir,
+        branch_event=branch_event,
+    )
+    create_errors = (
+        FileExistsError,
+        OSError,
+        ValueError,
+        runguard.RunGuardError,
+        run_lifecycle.LifecycleJournalError,
+        run_projector.ProjectionError,
+        run_checkpoint.CheckpointError,
+        run_journal.RunJournalError,
+    )
+    try:
+        target_status = str(child_meta.get("status") or "started")
+        followup = _child_status_followup(target_status)
+        if target_status != "started" and followup is None:
+            print(f"error: unsupported branch point status: {target_status}", file=sys.stderr)
+            return 2
+        child_bootstrap = dict(child_meta)
+        child_bootstrap["status"] = "started"
+        with runguard.run_lock(workspace, run_dir=child_run_dir):
+            try:
+                child_run_dir.mkdir(parents=True, exist_ok=False)
+                localio.write_json(child_run_dir / "run.json", receipt_schema.stamp_run_receipt(child_bootstrap))
+                run_lifecycle.prepare_lifecycle_journal(child_run_dir, workspace=workspace)
+                run_lifecycle.record_lifecycle_event(
+                    child_run_dir,
+                    event_type="run.created",
+                    payload={"status": "started"},
+                    idempotency_key=f"runs-child:{parent_run_dir.name}:{branch_event.event_id}",
+                    workspace=workspace,
+                )
+                if followup is not None:
+                    localio.write_json(child_run_dir / "run.json", receipt_schema.stamp_run_receipt(dict(child_meta)))
+                    event_type, payload = followup
+                    run_lifecycle.record_lifecycle_event(
+                        child_run_dir,
+                        event_type=event_type,
+                        payload=payload,
+                        idempotency_key=f"runs-child:{branch_event.event_id}:{event_type}",
+                        workspace=workspace,
+                    )
+                report = run_journal.read_journal_bounded(run_lifecycle._journal_path(child_run_dir))
+                if report.partial_tail is not None:
+                    raise run_journal.RunJournalError("child lifecycle journal has a partial trailing record")
+                if report.chain_errors:
+                    raise run_journal.RunJournalError(report.chain_errors[0])
+                projection = run_projector.project_run_snapshot(child_bootstrap, report.events, journal_present=True)
+                localio.write_json(
+                    child_run_dir / "run.json", receipt_schema.stamp_run_receipt(dict(projection.snapshot))
+                )
+            except create_errors:
+                if child_run_dir.exists():
+                    shutil.rmtree(child_run_dir, ignore_errors=True)
+                raise
+    except create_errors as exc:
+        print(f"error: could not create child run: {exc}", file=sys.stderr)
+        return 2
+    print(f"child: {child_run_dir}")
+    return 0
+
+
 def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
     cwd = cwd.expanduser().resolve()
     if not cwd.is_dir():
@@ -2144,6 +2426,7 @@ def show(run_dir: Path) -> int:
     _print_ground_truth(worker_results)
     _print_synthesis(synthesis)
     _print_final(_read_text(run_dir / "final.txt"))
+    _print_lineage(run_meta)
     _print_terminal_guidance(run_dir, run_meta)
     if _is_terminal(run_meta):
         return _watch_return_code(run_meta.get("status"))

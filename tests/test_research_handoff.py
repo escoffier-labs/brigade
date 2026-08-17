@@ -1,4 +1,5 @@
 from brigade.research import handoff
+from brigade.research.provenance import stamp_finding
 from brigade.research.types import Finding, SourceEnvelope
 from brigade import handoff_cmd
 
@@ -27,50 +28,65 @@ def test_handoff_is_standard_no_card_document_handoff(tmp_path):
         content="ai claim",
     )
     findings = [
-        Finding(
-            source_ids=(local.source_id,),
-            title="a.md",
-            summary="s",
-            evidence="e",
-            trust="local",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(local.source_id,),
+                title="a.md",
+                summary="s",
+                evidence="e",
+                trust="local",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=0,
         ),
-        Finding(
-            source_ids=(cli.source_id,),
-            title="T",
-            summary="s3",
-            evidence="e3",
-            trust="cli",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(cli.source_id,),
+                title="T",
+                summary="s3",
+                evidence="e3",
+                trust="cli",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=1,
         ),
-        Finding(
-            source_ids=(browser.source_id,),
-            title="B",
-            summary="s4",
-            evidence="e4",
-            trust="browser",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(browser.source_id,),
+                title="B",
+                summary="s4",
+                evidence="e4",
+                trust="browser",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=2,
         ),
-        Finding(
-            source_ids=(web.source_id,),
-            title="E",
-            summary="s2",
-            evidence="e2",
-            trust="web",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(web.source_id,),
+                title="E",
+                summary="s2",
+                evidence="e2",
+                trust="web",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=3,
         ),
-        Finding(
-            source_ids=(browser_ai.source_id,),
-            title="AI Doc",
-            summary="s5",
-            evidence="e5",
-            trust="browser-ai",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(browser_ai.source_id,),
+                title="AI Doc",
+                summary="s5",
+                evidence="e5",
+                trust="browser-ai",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=4,
         ),
     ]
     sources = (local, cli, browser, web, browser_ai)
@@ -88,6 +104,8 @@ def test_handoff_is_standard_no_card_document_handoff(tmp_path):
     assert "Trusted (local)" in md and "Configured CLI" in md
     assert "Browser-assisted" in md and "Untrusted (web)" in md
     assert "Browser AI" in md
+    assert "origin=workspace modality=tool-output trust=untrusted" in md
+    assert "origin=external-web modality=model-generated trust=untrusted" in md
     assert "What is X?" in md
     assert "\n### R\nbody" in md
     assert "/n/a.md" in md

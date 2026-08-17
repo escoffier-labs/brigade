@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Python evidence producers now stamp `brigade.provenance-envelope.v1` on work imports, research findings, and indexed receipt adapter rows. Research findings persist an exact `{title}\\n{summary}\\n{evidence}` text projection; legacy `Finding.trust` stays readable and only maps to origin/modality. `brigade work import provenance --backfill` and `brigade research provenance backfill` infer missing envelopes without treating them as trusted. Receipt indexing always starts `untrusted`. Existing pending imports without an envelope report `missing_envelope`, which surfaces as a doctor WARN until an operator runs `--backfill`. (#584)
+- `brigade runs child <run-id> <event-id>` creates a durable child run from a
+  checkpoint-covered parent lifecycle event, records lineage and the verified
+  shared prefix, and shows that lineage in `brigade runs show`. The child gets
+  a fresh `started_at` / `status_started_at` and does not inherit the parent's
+  live control socket, live-progress fields, failure terminal fields, or
+  parent-directory artifact/handoff paths. The covering checkpoint event itself
+  is not a valid branch point. (#594)
 - `brigade memory project-vault` writes a one-way Obsidian projection of
   canonical memory into an existing vault: care-state frontmatter and tags,
   wikilinks, category/harness maps, and a topology canvas. Vault writes use
@@ -35,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
+- Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
+  closed on every `brigade work` surface (and other commands that read the
+  ledger) with `error: ...` and exit 2, instead of parsing as empty or
+  dumping a traceback. The work-store measurement harness
+  (`scripts/measure_work_store.py`, protocol 4) now reports
+  `schema_version_policy.future_version_rejected: true` with a clean
+  exit-2 error and untouched ledger bytes; it no longer treats future
+  versions as coerced. Unknown hand-edited edge types are preserved on
+  rewrite and surfaced via `work ready` (`unknown_type_count`) and a
+  `work doctor` WARN. `work import promote --all` returns 2 when any
+  import fails. (#948)
 - Scanner receipt and import-proof bytes now carry verifier-owned file
   identity and content bindings. Legacy migration rejects in-place receipt
   overwrites, attacker-created sidecars, missing bindings, and mismatched

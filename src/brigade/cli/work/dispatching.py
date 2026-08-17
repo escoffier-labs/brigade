@@ -18,6 +18,12 @@ globals().update({name: value for name, value in vars(_family_base).items() if n
 
 
 def dispatch(args) -> int:
+    from ...work_cmd.ledger import guard_task_ledger_dispatch
+
+    return guard_task_ledger_dispatch(args, _dispatch_impl)
+
+
+def _dispatch_impl(args) -> int:
     from ... import work_cmd
 
     if args.work_command == "status":
@@ -820,7 +826,7 @@ def dispatch(args) -> int:
                 metadata=args.metadata,
             )
         if args.import_command == "provenance":
-            return work_cmd.import_provenance(target=args.target, json_output=args.json)
+            return work_cmd.import_provenance(target=args.target, json_output=args.json, backfill=bool(args.backfill))
         if args.import_command == "show":
             return work_cmd.import_show(target=args.target, import_id=args.import_id)
         if args.import_command == "promote":

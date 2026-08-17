@@ -309,6 +309,8 @@ def _operator_migration_task_summary(target: Path) -> dict[str, Any]:
     }
     try:
         ledger = work_cmd._read_task_ledger(target)
+    except work_cmd.TaskLedgerError:
+        raise
     except Exception:
         ledger = {"tasks": []}
     pending = []

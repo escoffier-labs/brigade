@@ -478,8 +478,11 @@ def consume_checkpoint(target: Path, run_id: str) -> bool:
 
 
 def write_findings(target: Path, run_id: str, findings: Sequence[Any]) -> dict[str, str]:
+    from .provenance import stamp_finding_list
+
     path = standard_run_dir(target, run_id) / FINDINGS_ARTIFACT
-    payload = receipt_schema.stamp_research_findings({"findings": _serialize_value(list(findings))})
+    stamped, _wrote = stamp_finding_list(findings, run_id=run_id, producer="research.registry.write_findings")
+    payload = receipt_schema.stamp_research_findings({"findings": stamped})
     localio.write_json(path, payload)
     return _artifact_ref(FINDINGS_ARTIFACT, _file_digest(path))
 
@@ -599,6 +602,8 @@ def _finding_from_dict(payload: Mapping[str, Any]) -> Finding:
     trust = payload.get("trust") or "web"
     if not isinstance(trust, str) or trust not in VALID_TRUST:
         raise ValueError(f"finding invalid trust: {trust!r}")
+    raw_provenance = payload.get("provenance")
+    provenance = dict(raw_provenance) if isinstance(raw_provenance, Mapping) else None
     return Finding(
         source_ids=tuple(str(item) for item in source_ids),
         title=str(payload.get("title") or ""),
@@ -608,6 +613,7 @@ def _finding_from_dict(payload: Mapping[str, Any]) -> Finding:
         extraction_lane=str(payload.get("extraction_lane") or ""),
         extracted_at=str(payload.get("extracted_at") or ""),
         parent_source_ids=tuple(str(item) for item in parent_ids),
+        provenance=provenance,
     )
 
 
@@ -656,6 +662,24 @@ def _review_from_dict(payload: Mapping[str, Any]) -> ReviewResult:
         seat=str(payload["seat"]),
         attempt_id=str(payload["attempt_id"]),
     )
+
+
+def artifact_verification_state(target: Path, run_id: str, artifact: Any) -> str:
+    """Classify an artifact reference for read-only projections.
+
+    Returns ``"verified"`` when the recorded digest matches the file on disk,
+    ``"digest-mismatch"`` when it does not, ``"missing"`` when the referenced
+    file is absent, and ``"unrecorded"`` when the reference carries no usable
+    path-plus-digest pair.
+    """
+    path_name, expected_digest = _artifact_path_and_digest(artifact)
+    if path_name is None or not _valid_sha256_digest(expected_digest):
+        return "unrecorded"
+    run_directory = standard_run_dir(target, run_id)
+    path = _resolved_artifact_path(run_directory, path_name)
+    if path is None or not path.is_file():
+        return "missing"
+    return "verified" if _file_digest(path) == expected_digest else "digest-mismatch"
 
 
 def read_verified_artifact(target: Path, run_id: str, artifact: Any) -> Any | None:
@@ -821,11 +845,18 @@ def finish_run(
 
 
 def save_checkpoint(target: Path, run_id: str, cp: dict[str, Any]) -> None:
+    from .provenance import stamp_finding_list
+
+    payload = dict(cp)
+    findings = payload.get("findings")
+    if isinstance(findings, list) and findings:
+        stamped, _wrote = stamp_finding_list(findings, run_id=run_id, producer="research.registry.save_checkpoint")
+        payload["findings"] = stamped
     path = run_dir(target, run_id) / "checkpoint.json"
     if standard_run_dir(target, run_id).is_dir():
-        localio.write_json(path, cp)
+        localio.write_json(path, payload)
         return
-    _write_legacy_json(path, cp)
+    _write_legacy_json(path, payload)
 
 
 def load_checkpoint(target: Path, run_id: str) -> dict[str, Any] | None:

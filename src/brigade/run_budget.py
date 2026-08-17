@@ -21,10 +21,25 @@ unbounded for backward compatibility (no invented defaults, CLI flags, or
 timeout→budget mapping).
 
 Observed dimensions (recorded when an adapter reports reliable data; never
-universal hard gates in this slice):
+universal hard gates):
   - ``model_call_count``, ``tool_call_count``
   - ``input_tokens``, ``output_tokens`` (explicit split dimensions only)
   - ``estimated_cost_micros``, ``provider_usage_units``
+
+Adapter-enforceable dimensions (#884):
+  An adapter that exposes a reliable pre-call reservation boundary declares
+  the observed dimensions it can enforce through the
+  ``AdapterBudgetCapability`` contract (``budget_enforceable_dimensions``).
+  For those dimensions a declared observed cap becomes a per-adapter hard
+  ceiling: units are reserved before provider or tool work starts, and a
+  denied reservation runs no external work. Reservation grants are recorded
+  as estimated usage marked ``reason_class=reservation_grant`` so recovery
+  rebuilds only real grants from the journal, while post-call provider
+  reconciles stay distinct. Replay identity is ``(dimension, request_id)``.
+  Adapters without a reliable reservation boundary keep the observation-only
+  behavior shipped by the first enforceable slice (#864). Enforcement is
+  never universal: an observed value without a pre-call reservation
+  boundary is not a hard gate.
 
 Legacy VerificationContract ``token_budget`` is an **aggregate** token ceiling
 (paired with receipt ``tokens_used``). It is preserved as declaration
@@ -46,10 +61,11 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from brigade import run_events
 from brigade.run_events import MAX_DIAGNOSTIC_LEN, MAX_IDEMPOTENCY_KEY_LEN
@@ -117,6 +133,7 @@ REASON_CLASSES = frozenset(
         "operator_cancel",
         "budget_cancel",
         "usage_reconcile",
+        "reservation_grant",
         "unknown_dimension",
         "schema_incompatible",
     }
@@ -235,6 +252,11 @@ def _idempotency_key(*parts: str) -> str:
     return f"{key[:keep]}:{digest}"
 
 
+def _adapter_reservation_identity(dimension: str, request_id: str) -> tuple[str, str]:
+    """Stable replay key for one adapter reservation grant."""
+    return (dimension, request_id)
+
+
 def mode_for_dimension(dimension: str) -> str:
     if dimension in ENFORCEABLE_DIMENSIONS:
         return "enforceable"
@@ -244,6 +266,66 @@ def mode_for_dimension(dimension: str) -> str:
         _bound(f"unknown budget dimension {dimension!r}"),
         code="unknown_dimension",
     )
+
+
+class AdapterBudgetCapability(Protocol):
+    """Adapter capability contract for adapter-enforceable dimensions (#884).
+
+    Returning a dimension from ``budget_enforceable_dimensions`` asserts the
+    adapter can reserve units for it *before* provider or tool work starts.
+    Adapters without a reliable reservation boundary must return an empty
+    set — or not implement the method at all; both keep every observed
+    dimension observation-only (#864 behavior).
+    """
+
+    def budget_enforceable_dimensions(self) -> Iterable[str]:
+        """Observed dimensions enforceable at this adapter's reservation boundary."""
+        ...
+
+
+def adapter_enforceable_dimensions(adapter: object) -> frozenset[str]:
+    """Normalize an adapter's declared enforceable set; fail closed on misuse.
+
+    ``None`` and adapters without the capability method are observation-only.
+    Unknown dimensions, coordinator-owned enforceable dimensions, and
+    malformed returns raise ``BudgetCompatibilityError`` rather than silently
+    degrading the contract.
+    """
+    if adapter is None:
+        return frozenset()
+    getter = getattr(adapter, "budget_enforceable_dimensions", None)
+    if getter is None:
+        return frozenset()
+    if not callable(getter):
+        raise BudgetCompatibilityError(
+            "adapter budget_enforceable_dimensions must be callable",
+            code="schema_incompatible",
+        )
+    declared = getter()
+    if isinstance(declared, (str, bytes)) or not isinstance(declared, Iterable):
+        raise BudgetCompatibilityError(
+            "adapter budget_enforceable_dimensions must return an iterable of dimensions",
+            code="schema_incompatible",
+        )
+    dimensions: set[str] = set()
+    for item in declared:
+        if not isinstance(item, str):
+            raise BudgetCompatibilityError(
+                "adapter budget_enforceable_dimensions must contain only dimension strings",
+                code="schema_incompatible",
+            )
+        if item in ENFORCEABLE_DIMENSIONS:
+            raise BudgetCompatibilityError(
+                _bound(f"adapter cannot enforce coordinator-owned dimension {item!r}"),
+                code="schema_incompatible",
+            )
+        if item not in OBSERVED_DIMENSIONS:
+            raise BudgetCompatibilityError(
+                _bound(f"unknown budget dimension {item!r}"),
+                code="unknown_dimension",
+            )
+        dimensions.add(item)
+    return frozenset(dimensions)
 
 
 @dataclass(frozen=True)
@@ -256,7 +338,9 @@ class RunBudgetDeclaration:
     threshold_pct: int = DEFAULT_THRESHOLD_PCT
     # Aggregate #500 token ceiling (receipt tokens_used). Not input_tokens.
     token_budget: int | None = None
-    # Observed-only declared caps (informational; never hard-gated here).
+    # Observed declared caps. Observation-only by default (#864); an adapter
+    # that declares a reservation boundary for a dimension hard-gates its cap
+    # at reservation time (#884).
     observed_caps: Mapping[str, int | None] = field(default_factory=dict)
 
     def ceiling(self, dimension: str) -> int | None:
@@ -1010,6 +1094,7 @@ def _maybe_threshold_events(
     dimension: str,
     used: int,
     declared: int,
+    mode: str | None = None,
 ) -> list[dict[str, Any]]:
     pct = projection.declaration.threshold_pct
     if declared <= 0:
@@ -1024,7 +1109,7 @@ def _maybe_threshold_events(
             "event_type": EVENT_THRESHOLD,
             "payload": {
                 "dimension": dimension,
-                "mode": mode_for_dimension(dimension),
+                "mode": mode if mode is not None else mode_for_dimension(dimension),
                 "declared": declared,
                 "used": used,
                 "remaining": remaining,
@@ -1126,6 +1211,7 @@ def build_usage_reconciled_event(
     request_id: str,
     estimated_used: int | None = None,
     provider_used: int | None = None,
+    reason_class: str = "usage_reconcile",
 ) -> dict[str, Any]:
     if dimension not in ALL_DIMENSIONS:
         raise BudgetCompatibilityError(
@@ -1134,6 +1220,8 @@ def build_usage_reconciled_event(
         )
     if usage_source not in USAGE_SOURCES:
         raise BudgetError("invalid usage_source", code="reconcile_invalid")
+    if reason_class not in REASON_CLASSES:
+        raise BudgetError("invalid reason_class", code="reconcile_invalid")
     mode = mode_for_dimension(dimension)
     # Enforceable dimensions may only reconcile as observed telemetry when an
     # adapter reports them; hard gates still own reservation.
@@ -1147,7 +1235,7 @@ def build_usage_reconciled_event(
             "provider_used": provider_used,
             "used": used,
             "request_id": request_id,
-            "reason_class": "usage_reconcile",
+            "reason_class": reason_class,
         },
         "idempotency_key": _idempotency_key(EVENT_RECONCILED, dimension, usage_source, request_id),
     }
@@ -1239,6 +1327,12 @@ class BudgetCoordinator:
     # Distinct from ``_reserved_request_ids`` so restart can reclaim a durable
     # pending identity once, while concurrent same-seat callers allocate anew.
     _launch_claims: set[str] = field(default_factory=set)
+    # Stable identities of granted adapter-unit reservations (#884), keyed by
+    # (dimension, request_id). Rebuilt from journal facts marked
+    # reason_class=reservation_grant so a retry or post-restart replay of the
+    # same identity does not double-charge, and public reconcile_usage events
+    # are not mistaken for grants.
+    _reserved_adapter_request_ids: set[tuple[str, str]] = field(default_factory=set)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
@@ -1271,6 +1365,23 @@ class BudgetCoordinator:
                 ):
                     reserved.add(dispatch_reservation_request_id(seat, attempt))
             self._reserved_request_ids = reserved
+            adapter_reserved: set[tuple[str, str]] = set()
+            for event in events:
+                if _event_type(event) != EVENT_RECONCILED:
+                    continue
+                payload = _event_payload(event)
+                # Only explicit reservation grants reconstruct replay identity.
+                # Public reconcile_usage also emits estimated usage_reconciled
+                # events; those must not become no-op grants after restart.
+                if payload.get("reason_class") != "reservation_grant":
+                    continue
+                if payload.get("usage_source") != "estimated":
+                    continue
+                request_id = payload.get("request_id")
+                dimension = payload.get("dimension")
+                if isinstance(request_id, str) and request_id and isinstance(dimension, str) and dimension:
+                    adapter_reserved.add(_adapter_reservation_identity(dimension, request_id))
+            self._reserved_adapter_request_ids = adapter_reserved
             return self._projection
 
     @property
@@ -1341,6 +1452,167 @@ class BudgetCoordinator:
         """Reserve enforceable dispatch units before new work starts."""
         with self._lock:
             return self._reserve_unlocked(request_id=request_id, units=units)
+
+    def enforcement_mode(self, adapter: object, dimension: str) -> str:
+        """Effective enforcement mode for one adapter + dimension (#884).
+
+        Coordinator-owned dimensions are always enforceable. An observed
+        dimension is enforceable for this adapter only when the adapter
+        declares a reservation boundary for it *and* the run declaration
+        carries a cap for it; otherwise it stays observation-only.
+        """
+        if dimension in ENFORCEABLE_DIMENSIONS:
+            return "enforceable"
+        mode_for_dimension(dimension)  # fail closed on unknown dimensions
+        if self.declaration.ceiling(dimension) is not None and dimension in adapter_enforceable_dimensions(adapter):
+            return "enforceable"
+        return "observed"
+
+    def reserve_adapter_units(
+        self,
+        *,
+        adapter: object,
+        dimension: str,
+        request_id: str,
+        units: int = 1,
+    ) -> ReservationDecision:
+        """Reserve adapter-enforceable units before the external call starts.
+
+        The caller must invoke this before any provider or tool work covered
+        by the reserved units. A denied reservation appends the bounded
+        lifecycle facts (threshold / exhausted / reservation_denied) and
+        raises ``BudgetPolicyError``; the caller must then start no external
+        work.         Grants are journaled as estimated usage with
+        ``reason_class=reservation_grant`` so recovery rebuilds only real
+        grants from the journal; a post-call provider reconcile keeps
+        estimated and provider-reconciled usage distinct. Replaying the same
+        stable ``(dimension, request_id)`` (retry or post-restart) neither
+        double-charges nor widens the ceiling. Dimensions without a declared
+        cap are unbounded: the reservation is allowed without charging usage
+        and does not register a replay identity.
+        """
+        with self._lock:
+            if dimension in ENFORCEABLE_DIMENSIONS:
+                raise BudgetError(
+                    _bound(f"{dimension} is coordinator-owned; use reserve_worker_dispatch"),
+                    code="reservation_invalid",
+                )
+            mode_for_dimension(dimension)  # fail closed on unknown dimensions
+            if isinstance(units, bool) or not isinstance(units, int) or units <= 0:
+                raise BudgetError("reservation units must be positive", code="reservation_invalid")
+            if not isinstance(request_id, str) or not request_id:
+                raise BudgetError("request_id must be a non-empty string", code="reservation_invalid")
+            if dimension not in adapter_enforceable_dimensions(adapter):
+                raise BudgetError(
+                    _bound(f"adapter exposes no reservation boundary for {dimension}; observation-only"),
+                    code="reservation_unsupported",
+                )
+            if request_id in self._projection.denied_request_ids:
+                exhausted = bool(self._projection.exhausted_dimensions)
+                raise BudgetPolicyError(
+                    _bound(f"run budget reservation previously denied for {request_id}"),
+                    code="budget_exhausted" if exhausted else "reservation_denied",
+                    dimension=dimension,
+                    exhausted=exhausted,
+                    request_id=request_id,
+                )
+            reservation_key = _adapter_reservation_identity(dimension, request_id)
+            if reservation_key in self._reserved_adapter_request_ids:
+                # Idempotent replay of the same stable reservation identity.
+                return ReservationDecision(
+                    allowed=True,
+                    dimension=dimension,
+                    request_id=request_id,
+                    exhausted=False,
+                    projection=self._projection_unlocked(),
+                    events=(),
+                    replayed=True,
+                )
+            ceiling = self.declaration.ceiling(dimension)
+            if ceiling is None:
+                return ReservationDecision(
+                    allowed=True,
+                    dimension=dimension,
+                    request_id=request_id,
+                    exhausted=False,
+                    projection=self._projection_unlocked(),
+                    events=(),
+                )
+            current = self._projection.used.get(dimension, 0)
+            events: list[dict[str, Any]] = []
+            events.extend(
+                _maybe_threshold_events(
+                    self._projection, dimension=dimension, used=current, declared=ceiling, mode="enforceable"
+                )
+            )
+            if current + units > ceiling:
+                remaining = max(0, ceiling - current)
+                exhausted = current >= ceiling
+                if exhausted or remaining == 0:
+                    events.append(
+                        {
+                            "event_type": EVENT_EXHAUSTED,
+                            "payload": {
+                                "dimension": dimension,
+                                "mode": "enforceable",
+                                "declared": ceiling,
+                                "used": current,
+                                "remaining": 0,
+                                "reason_class": "exhausted",
+                            },
+                            "idempotency_key": _idempotency_key(EVENT_EXHAUSTED, dimension),
+                        }
+                    )
+                    exhausted = True
+                events.append(
+                    {
+                        "event_type": EVENT_DENIED,
+                        "payload": {
+                            "dimension": dimension,
+                            "mode": "enforceable",
+                            "declared": ceiling,
+                            "used": current,
+                            "remaining": remaining,
+                            "request_id": request_id,
+                            "reason_class": "reservation_denied",
+                        },
+                        "idempotency_key": _idempotency_key(EVENT_DENIED, request_id),
+                    }
+                )
+                self._commit(events)
+                raise BudgetPolicyError(
+                    _bound(f"run budget reservation denied for {dimension}" + (" (exhausted)" if exhausted else "")),
+                    code="reservation_denied" if not exhausted else "budget_exhausted",
+                    dimension=dimension,
+                    exhausted=exhausted,
+                    request_id=request_id,
+                )
+            next_used = current + units
+            events.extend(
+                _maybe_threshold_events(
+                    self._projection, dimension=dimension, used=next_used, declared=ceiling, mode="enforceable"
+                )
+            )
+            events.append(
+                build_usage_reconciled_event(
+                    dimension=dimension,
+                    usage_source="estimated",
+                    used=next_used,
+                    request_id=request_id,
+                    estimated_used=next_used,
+                    reason_class="reservation_grant",
+                )
+            )
+            self._commit(events)
+            self._reserved_adapter_request_ids.add(reservation_key)
+            return ReservationDecision(
+                allowed=True,
+                dimension=dimension,
+                request_id=request_id,
+                exhausted=False,
+                projection=self._projection,
+                events=tuple(events),
+            )
 
     def _unreserve_unlocked(self, *, request_id: str, units: int = 1) -> None:
         self._reserved_request_ids.discard(request_id)

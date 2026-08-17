@@ -2209,10 +2209,34 @@ max_dispatches = 24
 When `--profile` is supplied, substitute its validated built-in name for
 `grounded` in `default_profile`. Every other line stays byte-identical.
 If the file exists, return exit code 2 and do not modify it. JSON projections
-use `brigade.research.status.v1`, `brigade.research.show.v1`, and
-`brigade.research.doctor.v1`, each with `schema_version: 1`. `show --json`
-contains `run`, `research`, `findings`, and `citation_audit`. Missing artifacts
-are `null`. The projection sanitizes secrets and absolute browser-profile paths.
+use `brigade.research.status.v1` and `brigade.research.doctor.v1`
+(`schema_version: 1`) plus `brigade.research.show.v2` (`schema_version: 2`).
+`show --json` was bumped in place from `show.v1` to `show.v2` when Center first
+projected source metadata and a digest-verified report; the CLI no longer
+emits v1. Center accepts a v1 payload with a degraded inspector (findings and
+citations only). External wrappers pinned to `brigade.research.show.v1` must
+update.
+
+`show.v2` keys:
+
+| Key | Shape |
+|---|---|
+| `schema` | `"brigade.research.show.v2"` |
+| `schema_version` | `2` |
+| `run` | sanitized run record |
+| `research` | sanitized sidecar, or `null` |
+| `findings` | sanitized findings object, or `null` |
+| `citation_audit` | sanitized audit object, or `null` |
+| `sources` | list of sanitized source records, or `null` |
+| `sources_verification` | `verified`, `unverified` (readable file, no digest ref), `missing`, `unavailable` (legacy run), or `digest-mismatch` (ref exists, file does not match; content withheld) |
+| `report` | `{artifact, digest, verification, content, content_chars, truncated}`; `content` is present only when `verification` is `verified` |
+| `artifact_verification` | map of artifact name (including the discovery `sources` ref) to a verification state |
+
+Missing artifacts are `null`. The projection sanitizes secrets and absolute
+browser-profile paths. Source `uri` values are structurally sanitized: URL
+userinfo is stripped, and secret-bearing query parameter *values* (`api_key`,
+`access_token`, `token`, `key`, `secret`, `sig`, and related names) are
+replaced with `[redacted]`.
 
 Change `cli_run` and `cli_resume` to return the pinned exit code from terminal
 status and failure kind. Do not return zero for a failed record.

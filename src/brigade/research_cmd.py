@@ -11,6 +11,7 @@ from pathlib import Path
 from collections.abc import Sequence
 from threading import Event, Thread
 from typing import Any, Callable, Dict, List, Mapping, Optional
+from urllib.parse import parse_qsl, quote, urlparse, urlunparse
 
 from .localio import parse_iso_datetime, utc_now_iso as _now
 from .research import config as rconfig
@@ -1654,6 +1655,7 @@ def _resume_state_from_legacy_checkpoint(
             continue
         evidence = registry.bound_text(str(item.get("evidence") or item.get("summary") or ""), max_content_chars)
         summary = registry.bound_text(str(item.get("summary") or evidence), max_content_chars)
+        raw_provenance = item.get("provenance")
         findings.append(
             Finding(
                 source_ids=tuple(str(sid) for sid in source_ids),
@@ -1664,6 +1666,7 @@ def _resume_state_from_legacy_checkpoint(
                 extraction_lane=str(item.get("extraction_lane") or "legacy"),
                 extracted_at=str(item.get("extracted_at") or "1970-01-01T00:00:00+00:00"),
                 parent_source_ids=tuple(str(p) for p in (item.get("parent_source_ids") or ())),
+                provenance=dict(raw_provenance) if isinstance(raw_provenance, Mapping) else None,
             )
         )
     report = checkpoint.get("report")
@@ -2162,6 +2165,27 @@ def cli_handoffs_import_issues(*, target: Path, dry_run: bool = False, json_outp
     return 0
 
 
+def cli_provenance_backfill(*, target: Path, json_output: bool = False) -> int:
+    from .research.provenance import backfill_research_provenance
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = backfill_research_provenance(target)
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"research provenance backfill: {target}")
+    print(f"scanned_findings: {payload['scanned_findings']}")
+    print(f"stamped: {payload['stamped']}")
+    print(f"unchanged: {payload['unchanged']}")
+    print(f"missing_envelope: {payload['missing_envelope']}")
+    print(f"inferred: {payload['inferred']}")
+    print("trusted: 0")
+    return 0
+
+
 def _new_run_id(question: str) -> str:
     # Caller passes run_id in tests for determinism; production stamps the time.
     from datetime import datetime, timezone
@@ -2297,6 +2321,14 @@ _SECRET_KEY_RE = re.compile(
 _BARE_TOKEN_KEY_RE = re.compile(r"(?i)^token$")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _COOKIE_ASSIGN_RE = re.compile(r"(?i)\bcookie\s*[=:]\s*[^\s,;]+")
+_URI_LIKE_RE = re.compile(r"(?i)^[a-z][a-z0-9+.-]*://")
+_SECRET_QUERY_PARAM_RE = re.compile(
+    r"(?i)^("
+    r"api[_-]?key|access[_-]?token|auth[_-]?token|api[_-]?token|"
+    r"refresh[_-]?token|id[_-]?token|token|key|secret|sig|signature|"
+    r"password|authorization|cookie|openai_api_key"
+    r")$"
+)
 
 
 def _pinned_research_exit_code(rec: Mapping[str, Any]) -> int:
@@ -2319,10 +2351,64 @@ def _is_projection_secret_key(key: object) -> bool:
 
 
 def _sanitize_projection_text(value: str) -> str:
-    text = _ABS_HOME_PATH_RE.sub("[redacted]", value)
+    text = _sanitize_projection_uri(value) if _URI_LIKE_RE.match(value.strip()) else value
+    text = _ABS_HOME_PATH_RE.sub("[redacted]", text)
     text = _BEARER_RE.sub("[redacted]", text)
     text = _COOKIE_ASSIGN_RE.sub("cookie=[redacted]", text)
     return text
+
+
+def _is_secret_query_param(name: str) -> bool:
+    return bool(_SECRET_QUERY_PARAM_RE.fullmatch(name))
+
+
+def _netloc_without_userinfo(parsed: Any) -> str:
+    try:
+        host = parsed.hostname
+    except ValueError:
+        host = None
+    if host is None:
+        netloc = parsed.netloc
+        return netloc.rsplit("@", 1)[-1] if "@" in netloc else netloc
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        return f"{host}:{parsed.port}"
+    return host
+
+
+def _redact_secret_query(query: str) -> str:
+    if not query:
+        return query
+    parts: list[str] = []
+    for name, value in parse_qsl(query, keep_blank_values=True):
+        encoded_name = quote(name, safe="")
+        encoded_value = "[redacted]" if _is_secret_query_param(name) else quote(value, safe="")
+        parts.append(f"{encoded_name}={encoded_value}")
+    return "&".join(parts)
+
+
+def _sanitize_projection_uri(value: str) -> str:
+    """Strip URL userinfo and redact secret-bearing query parameter values."""
+    text = value.strip()
+    if not _URI_LIKE_RE.match(text):
+        return value
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return value
+    if not parsed.scheme:
+        return value
+    return urlunparse(
+        (
+            parsed.scheme,
+            _netloc_without_userinfo(parsed),
+            parsed.path,
+            parsed.params,
+            _redact_secret_query(parsed.query),
+            parsed.fragment,
+        )
+    )
 
 
 def _sanitize_projection_value(value: object, *, key: str | None = None) -> object:
@@ -2384,6 +2470,148 @@ def _load_json_artifact(target: Path, run_id: str, name: str) -> dict[str, Any] 
     return payload if isinstance(payload, dict) else None
 
 
+_SHOW_SOURCE_EXCERPT_MAX_CHARS = 640
+_SHOW_REPORT_MAX_CHARS = 20000
+
+
+def _show_artifact_refs(rec: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge legacy ``artifacts`` and digest-bearing ``artifact_refs`` maps."""
+    refs: dict[str, Any] = {}
+    artifacts = rec.get("artifacts")
+    if isinstance(artifacts, Mapping):
+        refs.update({str(name): value for name, value in artifacts.items()})
+    artifact_refs = rec.get("artifact_refs")
+    if isinstance(artifact_refs, Mapping):
+        refs.update({str(name): value for name, value in artifact_refs.items()})
+    return refs
+
+
+def _source_record_projection(item: object) -> dict[str, object]:
+    from dataclasses import asdict, is_dataclass
+
+    if is_dataclass(item) and not isinstance(item, type):
+        item = asdict(item)
+    if not isinstance(item, Mapping):
+        return {"malformed": True}
+    content = item.get("content")
+    content_text = content if isinstance(content, str) else ""
+    excerpt = registry.bound_text(content_text, _SHOW_SOURCE_EXCERPT_MAX_CHARS)
+    raw_uri = item.get("uri")
+    record: dict[str, object] = {
+        "source_id": item.get("source_id"),
+        "origin": item.get("origin"),
+        "provider": item.get("provider"),
+        "uri": _sanitize_projection_uri(raw_uri) if isinstance(raw_uri, str) else raw_uri,
+        "trust": item.get("trust"),
+        "acquired_at": item.get("acquired_at"),
+        "producing_lane": item.get("producing_lane"),
+        "requested_model": item.get("requested_model"),
+        "observed_model": item.get("observed_model"),
+        "content_digest": item.get("content_digest"),
+        "content_chars": len(content_text),
+        "excerpt": excerpt,
+        "excerpt_truncated": len(content_text) > len(excerpt),
+    }
+    return _sanitize_projection_value(record)  # type: ignore[return-value]
+
+
+def _discovery_sources_ref(research: Mapping[str, Any] | None) -> Any | None:
+    """Return the discovery-phase sources artifact ref, if one was recorded."""
+    phases = (research or {}).get("phases") if isinstance(research, Mapping) else None
+    if not isinstance(phases, Mapping):
+        return None
+    discovery = phases.get("discovery")
+    if not isinstance(discovery, Mapping):
+        return None
+    candidate = discovery.get("artifact")
+    return candidate if isinstance(candidate, Mapping) else None
+
+
+def _show_sources_projection(
+    target: Path,
+    run_id: str,
+    rec: Mapping[str, Any],
+    research: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, object]] | None, str]:
+    """Return (sanitized source records, verification state) for show.v2.
+
+    Verification states: ``verified`` (digest-checked ref), ``unverified``
+    (sources artifact readable but no matching digest ref), ``missing`` (no
+    persisted sources), ``unavailable`` (legacy run), ``digest-mismatch``
+    (a digest-bearing ref exists and the file on disk does not match).
+    Content is withheld on every state except ``verified`` and ``unverified``.
+    """
+    if rec.get("legacy"):
+        return None, "unavailable"
+    ref = _discovery_sources_ref(research)
+    if ref is not None:
+        state = registry.artifact_verification_state(target, run_id, ref)
+        if state == "verified":
+            loaded = registry.read_verified_artifact(target, run_id, ref)
+            if isinstance(loaded, tuple):
+                return [_source_record_projection(item) for item in loaded], "verified"
+            return None, "missing"
+        if state == "digest-mismatch":
+            return None, "digest-mismatch"
+        if state == "missing":
+            return None, "missing"
+    payload = _load_json_artifact(target, run_id, registry.SOURCES_ARTIFACT)
+    if payload is None:
+        return None, "missing"
+    raw_sources = payload.get("sources")
+    if not isinstance(raw_sources, list):
+        return None, "missing"
+    return [_source_record_projection(item) for item in raw_sources], "unverified"
+
+
+def _show_report_projection(target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[str, object]:
+    """Bounded, digest-verified report body for show.v2.
+
+    Content is only included when the recorded digest matches the file on
+    disk; every other verification state ships metadata alone.
+    """
+    report: dict[str, object] = {
+        "artifact": registry.REPORT_MD_ARTIFACT,
+        "digest": None,
+        "verification": "unavailable",
+        "content": None,
+        "content_chars": 0,
+        "truncated": False,
+    }
+    if rec.get("legacy"):
+        return report
+    ref = _show_artifact_refs(rec).get("report_md")
+    if isinstance(ref, Mapping) and isinstance(ref.get("digest"), str):
+        report["digest"] = ref.get("digest")
+    report["verification"] = registry.artifact_verification_state(target, run_id, ref)
+    if report["verification"] != "verified":
+        return report
+    text = registry.read_verified_artifact(target, run_id, ref)
+    if not isinstance(text, str):
+        report["verification"] = "missing"
+        return report
+    bounded = registry.bound_text(text, _SHOW_REPORT_MAX_CHARS)
+    report["content"] = _sanitize_projection_text(bounded)
+    report["content_chars"] = len(text)
+    report["truncated"] = len(text) > len(bounded)
+    return report
+
+
+def _show_artifact_verification(
+    target: Path,
+    run_id: str,
+    rec: Mapping[str, Any],
+    research: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    if rec.get("legacy"):
+        return {}
+    refs = _show_artifact_refs(rec)
+    sources_ref = _discovery_sources_ref(research)
+    if sources_ref is not None and "sources" not in refs:
+        refs["sources"] = sources_ref
+    return {name: registry.artifact_verification_state(target, run_id, ref) for name, ref in sorted(refs.items())}
+
+
 def _show_payload(*, target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[str, object]:
     from dataclasses import asdict, is_dataclass
 
@@ -2421,13 +2649,18 @@ def _show_payload(*, target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[
                     citation_audit = asdict(loaded)
                 elif loaded is not None:
                     citation_audit = loaded
+    sources, sources_verification = _show_sources_projection(target, run_id, rec, research)
     return {
-        "schema": "brigade.research.show.v1",
-        "schema_version": 1,
+        "schema": "brigade.research.show.v2",
+        "schema_version": 2,
         "run": _sanitize_projection_value(dict(rec)),
         "research": _sanitize_projection_value(research) if research is not None else None,
         "findings": _sanitize_projection_value(findings) if findings is not None else None,
         "citation_audit": _sanitize_projection_value(citation_audit) if citation_audit is not None else None,
+        "sources": sources,
+        "sources_verification": sources_verification,
+        "report": _show_report_projection(target, run_id, rec),
+        "artifact_verification": _show_artifact_verification(target, run_id, rec, research),
     }
 
 

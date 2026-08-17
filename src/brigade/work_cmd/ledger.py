@@ -52,16 +52,106 @@ def _task_ledger_lock(target: Path) -> Iterator[None]:
         runguard._release_lock(path, ownership)
 
 
+REASON_CORRUPT_LEDGER = "corrupt_ledger"
+REASON_UNSUPPORTED_LEDGER_VERSION = "unsupported_ledger_version"
+
+
+class TaskLedgerError(ValueError):
+    """Fail-closed read/parse failure for ``.brigade/work/tasks.json``."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        details: dict[str, Any] | None = None,
+        exit_code: int = 2,
+    ):
+        super().__init__(message)
+        self.reason = reason
+        self.details = details or {}
+        self.exit_code = exit_code
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {"error": str(self), "reason": self.reason, "exit_code": self.exit_code}
+        payload.update(self.details)
+        return payload
+
+
+def emit_task_ledger_error(exc: TaskLedgerError, *, json_output: bool = False) -> int:
+    """Print a ``TaskLedgerError`` with the same contract as ``task_add`` (rc=2)."""
+    if json_output:
+        print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"error: {exc}", file=sys.stderr)
+    return int(exc.exit_code)
+
+
+def guard_task_ledger_dispatch(args: Any, impl: Callable[[Any], int]) -> int:
+    """Catch ``TaskLedgerError`` from a CLI dispatch implementation."""
+    try:
+        return impl(args)
+    except TaskLedgerError as exc:
+        return emit_task_ledger_error(exc, json_output=bool(getattr(args, "json", False)))
+
+
 def _read_task_ledger(target: Path) -> dict[str, Any]:
     path = helpers._tasks_path(target)
     if not path.exists():
         return {"version": edges_mod.TASK_LEDGER_VERSION, "tasks": [], "edges": []}
     try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {"version": edges_mod.TASK_LEDGER_VERSION, "tasks": [], "edges": []}
+        raw = path.read_text()
+    except OSError as exc:
+        raise TaskLedgerError(
+            f"task ledger is unreadable: {path}",
+            reason=REASON_CORRUPT_LEDGER,
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise TaskLedgerError(
+            f"task ledger is corrupt (invalid JSON): {path}",
+            reason=REASON_CORRUPT_LEDGER,
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
     if not isinstance(payload, dict):
-        return {"version": edges_mod.TASK_LEDGER_VERSION, "tasks": [], "edges": []}
+        raise TaskLedgerError(
+            f"task ledger is corrupt (root must be an object): {path}",
+            reason=REASON_CORRUPT_LEDGER,
+            details={"path": str(path)},
+        )
+    version = payload.get("version", 1)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise TaskLedgerError(
+            f"task ledger has invalid version {version!r}: {path}",
+            reason=REASON_UNSUPPORTED_LEDGER_VERSION,
+            details={
+                "path": str(path),
+                "version": version,
+                "supported": edges_mod.TASK_LEDGER_VERSION,
+            },
+        )
+    if version > edges_mod.TASK_LEDGER_VERSION:
+        raise TaskLedgerError(
+            f"task ledger version {version} is newer than supported {edges_mod.TASK_LEDGER_VERSION}: {path}",
+            reason=REASON_UNSUPPORTED_LEDGER_VERSION,
+            details={
+                "path": str(path),
+                "version": version,
+                "supported": edges_mod.TASK_LEDGER_VERSION,
+            },
+        )
+    if version < 1:
+        raise TaskLedgerError(
+            f"task ledger has invalid version {version}: {path}",
+            reason=REASON_UNSUPPORTED_LEDGER_VERSION,
+            details={
+                "path": str(path),
+                "version": version,
+                "supported": edges_mod.TASK_LEDGER_VERSION,
+            },
+        )
     tasks = payload.get("tasks")
     if not isinstance(tasks, list):
         payload["tasks"] = []
@@ -2728,7 +2818,7 @@ def _import_session_fields(metadata: dict[str, Any]) -> tuple[str | None, str | 
 
 
 def _locator_is_unsafe(kind: object, value: str) -> bool:
-    if provenance._is_absolute_locator(value):
+    if provenance.is_absolute_locator(value):
         return True
     if kind == "repo-relative" and ".." in value.replace("\\", "/").split("/"):
         return True
@@ -2797,6 +2887,127 @@ def _sanitize_import_identity_metadata(metadata: dict[str, Any]) -> dict[str, An
         else:
             sanitized.pop("session", None)
     return sanitized
+
+
+def _stamp_inferred_import_provenance(
+    *,
+    text: str,
+    source: str,
+    item_id: str,
+    metadata: dict[str, Any],
+    ingested_at: str,
+) -> dict[str, Any]:
+    """Backfill an inferred envelope. Never assigns reviewed or verified."""
+    origin, modality = _import_origin_modality(source)
+    try:
+        hits = scan_handoff_injection_heuristics(text)
+        warnings = [hit for hit in hits if hit.severity == "warning"]
+        if warnings:
+            trust_label, injection_status = "quarantined", "flagged"
+            injection_count = len(warnings)
+            injection_rules = sorted({hit.rule for hit in warnings if isinstance(hit.rule, str) and hit.rule})
+        else:
+            trust_label, injection_status, injection_count, injection_rules = "unknown", "clean", 0, []
+    except Exception:
+        trust_label, injection_status, injection_count, injection_rules = "quarantined", "pending", 0, []
+    repository_id, repository_revision = _import_repository_fields(metadata)
+    session_id, session_harness = _import_session_fields(metadata)
+    collection_id = _safe_import_identity(metadata.get("collection_id")) or f"work-inbox:{source}"
+    envelope_item_id = _safe_import_identity(_import_source_key({"metadata": metadata, "source": source})) or item_id
+    locator_kind, locator_value = _safe_locator_fields(
+        locator_kind=metadata.get("locator_kind"),
+        locator_value=metadata.get("locator_value"),
+        fallback_item_id=item_id,
+    )
+    captured_at = (
+        _bound_import_identity(metadata.get("captured_at"), max_len=_IMPORT_CAPTURED_AT_MAX_LEN) or ingested_at
+    )
+    return provenance.build_envelope(
+        source_system="work-inbox",
+        source_kind=source,
+        source_producer="work_cmd.imports.import_provenance",
+        origin=origin,
+        repository_id=repository_id,
+        repository_revision=repository_revision,
+        session_id=session_id,
+        session_harness=session_harness,
+        collection_id=collection_id,
+        item_id=envelope_item_id,
+        locator_kind=locator_kind,
+        locator_value=locator_value,
+        attribution="inferred",
+        modality=modality,
+        trust_label=trust_label,
+        trust_assigned_by="ingest:work_cmd.imports.import_provenance",
+        trust_assigned_at=ingested_at,
+        injection_status=injection_status,
+        injection_count=injection_count,
+        injection_rules=injection_rules,
+        text=text,
+        raw_bytes=None,
+        content_scope="item.text.utf8.v1",
+        captured_at=captured_at,
+        ingested_at=ingested_at,
+    )
+
+
+def _import_envelope_matches(item: dict[str, Any]) -> bool:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    env = metadata.get("provenance")
+    if not isinstance(env, Mapping):
+        return False
+    if provenance.validate_envelope(env, inbound_adapter=True):
+        return False
+    hashes = env.get("hashes")
+    if not isinstance(hashes, Mapping):
+        return False
+    return hashes.get("content") == provenance.content_sha256(str(item.get("text") or ""))
+
+
+def _backfill_import_provenance(target: Path) -> dict[str, Any]:
+    """Stamp inferred envelopes on inbox rows missing a valid matching envelope."""
+    imports = _read_imports(target)
+    now = helpers._now().isoformat()
+    updated: list[dict[str, Any]] = []
+    stamped = 0
+    unchanged = 0
+    missing = 0
+    inferred = 0
+    for item in imports:
+        if not isinstance(item, dict):
+            continue
+        if _import_envelope_matches(item):
+            unchanged += 1
+            updated.append(item)
+            continue
+        missing += 1
+        metadata = dict(item.get("metadata") if isinstance(item.get("metadata"), dict) else {})
+        metadata.pop("provenance", None)
+        env = _stamp_inferred_import_provenance(
+            text=str(item.get("text") or ""),
+            source=str(item.get("source") or "manual"),
+            item_id=str(item.get("id") or "unknown"),
+            metadata=metadata,
+            ingested_at=now,
+        )
+        new_item = dict(item)
+        new_meta = dict(metadata)
+        new_meta["provenance"] = env
+        new_item["metadata"] = new_meta
+        updated.append(new_item)
+        stamped += 1
+        inferred += 1
+    if stamped:
+        _write_imports(target, updated)
+    return {
+        "target": str(target),
+        "scanned": len(imports),
+        "stamped": stamped,
+        "unchanged": unchanged,
+        "missing_envelope": missing,
+        "inferred": inferred,
+        "trusted": 0,
+    }
 
 
 def _import_injection_trust(text: str) -> tuple[str, str, int, list[str]]:
