@@ -1507,12 +1507,11 @@ def _supported_branch_snapshot(parent_run_dir: Path, branch_event: Any) -> tuple
     checkpoint = checkpoints[-1] if checkpoints else None
     if checkpoint is None:
         return None, "unsupported branch point event: no verified checkpoint covers it"
-    if branch_event.sequence == checkpoint.sequence:
-        try:
-            checkpoint_bytes = run_checkpoint.validate_checkpoint(parent_run_dir, checkpoint)
-            return run_checkpoint._parse_checkpoint_object(checkpoint_bytes), None
-        except run_checkpoint.CheckpointError as exc:
-            return None, f"unsupported branch point event: {exc}"
+    if branch_event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE:
+        return None, (
+            "unsupported branch point event: branch from the checkpoint-covered "
+            "lifecycle event, not the checkpoint itself"
+        )
     paired_event_type = checkpoint.payload.get("paired_event_type")
     if (
         branch_event.sequence != checkpoint.sequence + 1
@@ -1580,7 +1579,9 @@ def _child_receipt_from_parent_snapshot(
     child["schema_version"] = child.get("schema_version") or 1
     child["cwd"] = str(workspace)
     child["lock_workspace"] = str(workspace)
-    child["status_started_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    child["started_at"] = created_at
+    child["status_started_at"] = created_at
     child.pop("projector_version", None)
     child.pop("journal_present", None)
     child.pop("journal_last_sequence", None)
@@ -1676,6 +1677,16 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
         child_run_dir=child_run_dir,
         branch_event=branch_event,
     )
+    create_errors = (
+        FileExistsError,
+        OSError,
+        ValueError,
+        runguard.RunGuardError,
+        run_lifecycle.LifecycleJournalError,
+        run_projector.ProjectionError,
+        run_checkpoint.CheckpointError,
+        run_journal.RunJournalError,
+    )
     try:
         target_status = str(child_meta.get("status") or "started")
         followup = _child_status_followup(target_status)
@@ -1685,45 +1696,41 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
         child_bootstrap = dict(child_meta)
         child_bootstrap["status"] = "started"
         with runguard.run_lock(workspace, run_dir=child_run_dir):
-            child_run_dir.mkdir(parents=True, exist_ok=False)
-            localio.write_json(child_run_dir / "run.json", receipt_schema.stamp_run_receipt(child_bootstrap))
-            run_lifecycle.prepare_lifecycle_journal(child_run_dir, workspace=workspace)
-            run_lifecycle.record_lifecycle_event(
-                child_run_dir,
-                event_type="run.created",
-                payload={"status": "started"},
-                idempotency_key=f"runs-child:{parent_run_dir.name}:{branch_event.event_id}",
-                workspace=workspace,
-            )
-            if followup is not None:
-                localio.write_json(child_run_dir / "run.json", receipt_schema.stamp_run_receipt(dict(child_meta)))
-                event_type, payload = followup
+            try:
+                child_run_dir.mkdir(parents=True, exist_ok=False)
+                localio.write_json(child_run_dir / "run.json", receipt_schema.stamp_run_receipt(child_bootstrap))
+                run_lifecycle.prepare_lifecycle_journal(child_run_dir, workspace=workspace)
                 run_lifecycle.record_lifecycle_event(
                     child_run_dir,
-                    event_type=event_type,
-                    payload=payload,
-                    idempotency_key=f"runs-child:{branch_event.event_id}:{event_type}",
+                    event_type="run.created",
+                    payload={"status": "started"},
+                    idempotency_key=f"runs-child:{parent_run_dir.name}:{branch_event.event_id}",
                     workspace=workspace,
                 )
-            report = run_journal.read_journal_bounded(run_lifecycle._journal_path(child_run_dir))
-            if report.partial_tail is not None:
-                raise run_journal.RunJournalError("child lifecycle journal has a partial trailing record")
-            if report.chain_errors:
-                raise run_journal.RunJournalError(report.chain_errors[0])
-            projection = run_projector.project_run_snapshot(child_bootstrap, report.events, journal_present=True)
-            localio.write_json(child_run_dir / "run.json", receipt_schema.stamp_run_receipt(dict(projection.snapshot)))
-    except (
-        FileExistsError,
-        OSError,
-        ValueError,
-        runguard.RunGuardError,
-        run_lifecycle.LifecycleJournalError,
-        run_projector.ProjectionError,
-        run_checkpoint.CheckpointError,
-        run_journal.RunJournalError,
-    ) as exc:
-        if child_run_dir.exists():
-            shutil.rmtree(child_run_dir, ignore_errors=True)
+                if followup is not None:
+                    localio.write_json(child_run_dir / "run.json", receipt_schema.stamp_run_receipt(dict(child_meta)))
+                    event_type, payload = followup
+                    run_lifecycle.record_lifecycle_event(
+                        child_run_dir,
+                        event_type=event_type,
+                        payload=payload,
+                        idempotency_key=f"runs-child:{branch_event.event_id}:{event_type}",
+                        workspace=workspace,
+                    )
+                report = run_journal.read_journal_bounded(run_lifecycle._journal_path(child_run_dir))
+                if report.partial_tail is not None:
+                    raise run_journal.RunJournalError("child lifecycle journal has a partial trailing record")
+                if report.chain_errors:
+                    raise run_journal.RunJournalError(report.chain_errors[0])
+                projection = run_projector.project_run_snapshot(child_bootstrap, report.events, journal_present=True)
+                localio.write_json(
+                    child_run_dir / "run.json", receipt_schema.stamp_run_receipt(dict(projection.snapshot))
+                )
+            except create_errors:
+                if child_run_dir.exists():
+                    shutil.rmtree(child_run_dir, ignore_errors=True)
+                raise
+    except create_errors as exc:
         print(f"error: could not create child run: {exc}", file=sys.stderr)
         return 2
     print(f"child: {child_run_dir}")

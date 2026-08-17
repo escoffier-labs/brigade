@@ -5,6 +5,7 @@ import shutil
 import threading
 import time as system_time
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -2292,6 +2293,44 @@ def test_runs_child_creates_lineaged_child_run(tmp_path, capsys):
     assert repaired["status"] == "planning"
 
 
+def test_runs_child_uses_fresh_started_at_not_parent(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    parent_started = json.loads((parent_dir / "run.json").read_text())["started_at"]
+    assert parent_started == "2026-08-17T12:00:00Z"
+    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    child_meta = json.loads((child_dir / "run.json").read_text())
+
+    after = datetime.now(timezone.utc) + timedelta(seconds=1)
+    assert child_meta["started_at"] != parent_started
+    assert child_meta["started_at"] == child_meta["status_started_at"]
+    started = datetime.fromisoformat(child_meta["started_at"].replace("Z", "+00:00"))
+    assert before <= started <= after
+
+
+def test_runs_child_rejects_checkpoint_event_as_branch_point(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    checkpoint_event = next(event for event in events if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE)
+
+    assert runs_cmd.child(parent_dir.name, checkpoint_event.event_id, cwd=workspace) == 2
+    err = capsys.readouterr().err
+    assert "unsupported branch point event" in err
+    assert "not the checkpoint itself" in err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
 def test_runs_child_fails_closed_for_unsupported_event_without_partial_run(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2349,11 +2388,20 @@ def test_runs_child_cleans_up_partial_dir_when_checkpoint_fails_after_mkdir(tmp_
     runs_root = workspace / ".brigade" / "runs"
     parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
     events = _write_checkpointed_parent_run(workspace, parent_dir)
+    lock_held_during_cleanup: list[bool] = []
+    original_rmtree = shutil.rmtree
 
     def boom(*_args, **_kwargs):
         raise run_checkpoint.CheckpointError("injected post-mkdir failure", category="test")
 
+    def tracking_rmtree(path, *args, **kwargs):
+        target = Path(path)
+        if target.parent == runs_root:
+            lock_held_during_cleanup.append(runguard.is_active_run_owner(workspace, target))
+        return original_rmtree(path, *args, **kwargs)
+
     monkeypatch.setattr(run_checkpoint, "write_checkpoint", boom)
+    monkeypatch.setattr(runs_cmd.shutil, "rmtree", tracking_rmtree)
 
     assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 2
     err = capsys.readouterr().err
@@ -2361,6 +2409,7 @@ def test_runs_child_cleans_up_partial_dir_when_checkpoint_fails_after_mkdir(tmp_
     assert "injected post-mkdir failure" in err
     children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
     assert children == []
+    assert lock_held_during_cleanup == [True]
 
 
 def test_runs_child_does_not_inherit_parent_control_socket_or_parent_paths(tmp_path, capsys):
