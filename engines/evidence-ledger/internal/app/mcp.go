@@ -172,10 +172,10 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "show_item",
-			"description": "Show one normalized MiseLedger item by ID. Quarantined injection-pending body/raw are omitted unless include_untrusted_body is true.",
+			"description": "Show one normalized MiseLedger item by ID. Returns envelope fields and integrity_mismatch. Quarantined injection-pending body/raw are omitted unless include_untrusted_body is true. Integrity-mismatched bodies stay metadata-only; there is no forensic reveal path on MCP.",
 			"inputSchema": map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{
 				"id":                     stringProp("MiseLedger item ID returned by search_evidence"),
-				"include_untrusted_body": boolProp("Include quarantined injection-pending text and raw payload"),
+				"include_untrusted_body": boolProp("Include quarantined injection-pending text and raw payload. Does not reveal integrity-mismatched bodies."),
 			}},
 		},
 		{

@@ -438,6 +438,102 @@ def build_envelope(
     return env
 
 
+def verify_content_digest(text: str, env: Mapping[str, Any] | None) -> bool:
+    """Return True when ``hashes.content`` is absent or matches exact UTF-8 bytes."""
+
+    if not isinstance(env, Mapping):
+        return True
+    hashes = env.get("hashes")
+    if not isinstance(hashes, Mapping):
+        return True
+    content = hashes.get("content")
+    if content is None:
+        return True
+    if not _valid_digest(content):
+        return False
+    return content == content_sha256(text)
+
+
+def verify_raw_digest(raw: bytes | None, env: Mapping[str, Any] | None) -> bool:
+    """Return True when ``hashes.raw`` is absent or matches the materialized bytes."""
+
+    if not isinstance(env, Mapping):
+        return True
+    hashes = env.get("hashes")
+    if not isinstance(hashes, Mapping):
+        return True
+    raw_digest = hashes.get("raw")
+    if raw_digest is None:
+        return True
+    if raw is None or not _valid_digest(raw_digest):
+        return False
+    return raw_digest == sha256_bytes(raw)
+
+
+def injection_status(env: Mapping[str, Any] | None) -> str:
+    if not isinstance(env, Mapping):
+        return ""
+    trust = env.get("trust")
+    if not isinstance(trust, Mapping):
+        return ""
+    injection = trust.get("injection")
+    if not isinstance(injection, Mapping):
+        return ""
+    status = injection.get("status")
+    return status if isinstance(status, str) else ""
+
+
+def is_legacy_unknown(env: Mapping[str, Any] | None) -> bool:
+    return (
+        isinstance(env, Mapping)
+        and _is_legacy(env)
+        and (not isinstance(env.get("hashes"), Mapping) or env.get("hashes", {}).get("content") is None)
+    )
+
+
+def apply_bundle_integrity(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Keep mismatched bundle items metadata-only and preserve omission counters.
+
+    Python fetch has no v1 forensic reveal path. Snippets and artifact bodies
+    are stripped when ``integrity_mismatch`` is set or a provided envelope
+    content digest does not match a materialized ``text`` field.
+    """
+
+    raw_results = bundle.get("results")
+    if not isinstance(raw_results, list):
+        return bundle
+    omitted = 0
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        env = item.get("provenance")
+        if not isinstance(env, Mapping):
+            metadata = item.get("metadata")
+            if isinstance(metadata, Mapping):
+                env = metadata.get("provenance")
+        text = item.get("text")
+        mismatch = bool(item.get("integrity_mismatch"))
+        if isinstance(text, str) and isinstance(env, Mapping) and not verify_content_digest(text, env):
+            mismatch = True
+        if mismatch:
+            item["integrity_mismatch"] = True
+            item["snippet"] = ""
+            item.pop("text", None)
+            item.pop("summary", None)
+            artifacts = item.get("artifacts")
+            if isinstance(artifacts, list):
+                for art in artifacts:
+                    if isinstance(art, dict):
+                        art.pop("text", None)
+            omitted += 1
+        elif "integrity_mismatch" not in item:
+            item["integrity_mismatch"] = False
+    existing = bundle.get("integrity_omitted")
+    if not isinstance(existing, int) or existing < omitted:
+        bundle["integrity_omitted"] = omitted
+    return bundle
+
+
 def synthesize_legacy_provenance() -> tuple[dict[str, Any], str]:
     env: dict[str, Any] = {
         "schema": SCHEMA,

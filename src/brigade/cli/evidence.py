@@ -37,6 +37,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_search.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
     p_show = evidence_sub.add_parser("show", help="Show one evidence item by id.")
+    p_show.add_argument(
+        "--forensic-content",
+        action="store_true",
+        help="Reveal a legacy unknown or integrity-mismatched body on this direct show only. Does not change trust and never reveals injection flagged, pending, or error.",
+    )
     p_show.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
     p_explain = evidence_sub.add_parser("explain", help="Explain how an evidence item was ingested and linked.")
@@ -84,7 +89,12 @@ def dispatch(args) -> int:
         return evidence_cmd.run_engine("crawl", args.engine_args)
     if args.evidence_command == "search":
         return evidence_cmd.run_engine("search", args.engine_args)
-    if args.evidence_command in ("show", "explain", "stats"):
+    if args.evidence_command == "show":
+        engine_args = list(args.engine_args)
+        if getattr(args, "forensic_content", False) and "--forensic-content" not in engine_args:
+            engine_args.append("--forensic-content")
+        return evidence_cmd.run_engine("show", engine_args)
+    if args.evidence_command in ("explain", "stats"):
         return evidence_cmd.run_engine(args.evidence_command, args.engine_args)
     if args.evidence_command == "export":
         if args.evidence_export_command == "plan":

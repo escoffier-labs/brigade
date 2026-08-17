@@ -31,6 +31,15 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Added
 
+- Provenance read verification Slice 5: search, show, evidence bundles, HTTP, and
+  MCP recompute envelope content and materialized raw/artifact hashes, surface
+  `integrity_mismatch` plus envelope fields, suppress mismatched snippets and
+  bodies, and append one idempotent downgrade event per item/hash/mismatch
+  without deleting the row. Direct `miseledger show --forensic-content` can
+  reveal a mismatched or synthesized-legacy body with a warning; it never
+  changes trust and never reveals injection `flagged`, `pending`, or `error`.
+  MCP and HTTP have no forensic reveal path. Bundle cache and Markdown keep
+  envelope fields and `integrity_omitted`.
 - Provenance persistence Slice 2: ingest stamps indexed `provenance.*` projections,
   append-only `provenance_events`, resumable `miseledger doctor provenance backfill`,
   on-read legacy show synthesis, and search/SQL filters for origin, modality, and

@@ -261,6 +261,41 @@ def test_validate_authority_for_inbound_adapter(
     assert (not errors) == want_valid, f"{name}: errors={errors}"
 
 
+def test_verify_content_digest_detects_forged_hash():
+    env = _valid_envelope()
+    text = _case("item_unicode_trailing_newline")["text"]
+    assert provenance.verify_content_digest(text, env) is True
+    env["hashes"]["content"] = "a" * 64
+    assert provenance.verify_content_digest(text, env) is False
+    env["hashes"]["content"] = None
+    assert provenance.verify_content_digest(text, env) is True
+
+
+def test_apply_bundle_integrity_is_metadata_only_on_mismatch():
+    env = _valid_envelope()
+    env["hashes"]["content"] = "a" * 64
+    bundle = {
+        "results": [
+            {
+                "id": "item-1",
+                "snippet": "unsafe leaked snippet",
+                "text": "tampered body",
+                "provenance": env,
+                "artifacts": [{"id": "art-1", "text": "artifact body"}],
+            }
+        ]
+    }
+
+    out = provenance.apply_bundle_integrity(bundle)
+
+    item = out["results"][0]
+    assert item["integrity_mismatch"] is True
+    assert item["snippet"] == ""
+    assert "text" not in item
+    assert "text" not in item["artifacts"][0]
+    assert out["integrity_omitted"] == 1
+
+
 def test_synthesize_legacy_provenance():
     env, display = provenance.synthesize_legacy_provenance()
     assert display == provenance.LEGACY_DISPLAY == "UNKNOWN PROVENANCE - legacy item"
