@@ -595,9 +595,9 @@ def _verification_css(verification: str) -> str:
 def _inspector_sources(show: Mapping[str, Any]) -> str:
     verification = str(show.get("sources_verification") or "unknown")
     sources = show.get("sources")
+    css = html.esc(_verification_css(verification))
     label = (
-        f'<p>Source records are <span class="rs-state rs-state-'
-        f"{html.esc(_verification_css(verification))}">"
+        f'<p>Source records are <span class="rs-state rs-state-{css}">'
         f"{html.esc(verification)}</span>.</p>"
     )
     if verification == "digest-mismatch":
