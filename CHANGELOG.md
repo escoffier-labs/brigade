@@ -54,6 +54,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rewrite and surfaced via `work ready` (`unknown_type_count`) and a
   `work doctor` WARN. `work import promote --all` returns 2 when any
   import fails. (#948)
+- Scanner receipt and import-proof bytes now carry verifier-owned file
+  identity and content bindings. Legacy migration rejects in-place receipt
+  overwrites, attacker-created sidecars, missing bindings, and mismatched
+  file identity or content. A binding-write failure restores the prior
+  receipt, proof, inbox, and binding state or fails closed. Workspace
+  rename re-anchors those file bindings with the directory record, and a
+  malformed store read fails closed instead of wiping every binding.
+  Rollback restores the snapshot for the bindings the failed operation
+  itself added, deleting one it added that the snapshot did not have, while
+  leaving a concurrent writer's unrelated bindings intact. A directory that
+  already exists and is not bound to the workspace record is never adopted,
+  including when the caller asked to create it; Brigade creates and binds
+  the import-proof directory before it launches a scanner child instead.
+  Scanner children run with an explicit environment allowlist whose `HOME`
+  and `XDG_*` paths point at a per-run sandbox that is removed when the
+  child exits, so a child cannot reach the verifier authority store through
+  its environment. That allowlist passes through what shipped scanners
+  need, including `GH_TOKEN`/`GITHUB_TOKEN` or `GH_CONFIG_DIR` pointed at
+  the operator's existing `gh` config, `SSH_AUTH_SOCK`, `USER`/`LOGNAME`,
+  `TMPDIR`, and proxy settings, so `gh`- and `git`-backed scanners keep
+  authenticating. Same-uid writes that guess the store path remain a
+  residual class. Refs #881.
 - Bare `brigade care status` now discovers target-scoped per-entry
   registrations instead of scoring the atomic five-entry default. A target
   with no discovered units reports `missing`. Systemd status also reports

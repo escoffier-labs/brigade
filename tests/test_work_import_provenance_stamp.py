@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,20 @@ def _establish_scanner_runs_authority(tmp_path: Path) -> None:
 def _rewrite_authority_anchor(anchor: Path, directory: Path) -> None:
     info = directory.stat()
     anchor.write_text(json.dumps({"schema_version": 1, "device": info.st_dev, "inode": info.st_ino}))
+
+
+def _bind_receipt_file(tmp_path: Path, receipt_path: Path, *, run_id: str) -> None:
+    data = receipt_path.read_bytes()
+    descriptor = os.open(receipt_path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        ledger._record_verifier_owned_file(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", run_id, "receipt.json"),
+            descriptor=descriptor,
+            data=data,
+        )
+    finally:
+        os.close(descriptor)
 
 
 def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source: str) -> None:
@@ -79,6 +94,7 @@ def _write_external_import_proof(tmp_path: Path, item: dict[str, Any], *, source
     finally:
         os.close(descriptor)
     receipt_path.write_text(json.dumps(receipt))
+    _bind_receipt_file(tmp_path, receipt_path, run_id=run_id)
     ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
 
 
@@ -116,6 +132,8 @@ def _write_builtin_scanner_receipt(
     finally:
         os.close(descriptor)
     path.write_text(json.dumps(receipt))
+    if status == "completed" and exit_code == 0:
+        _bind_receipt_file(tmp_path, path, run_id="chosen-run")
     return path
 
 
@@ -165,6 +183,392 @@ def test_legacy_identity_rejects_sidecar_without_a_successful_scanner_receipt(tm
 
     assert not ledger._has_locally_stamped_import_proof(legacy, target=tmp_path)
     assert ledger._legacy_import_source_content_identity(legacy, target=tmp_path) is None
+
+
+def test_legacy_identity_rejects_in_place_receipt_overwrite_and_attacker_sidecar(tmp_path: Path) -> None:
+    item = ledger._make_import("in-place receipt overwrite", kind="task", source="handoff-ingest")
+    failed = _write_builtin_scanner_receipt(tmp_path, item, status="failed", exit_code=23)
+    proof_dir = ledger._open_import_proof_directory(tmp_path, create=True)
+    os.close(proof_dir)
+    scanner = dict(next(value for value in constants.SCANNER_DEFAULTS if value["id"] == "handoff-ingest"))
+    forged = {
+        "run_id": "chosen-run",
+        "scanner_id": scanner["id"],
+        "source": scanner["source"],
+        "command": scanner["command"],
+        "status": "completed",
+        "exit_code": 0,
+        "self_import_proofs": {
+            "scanner_id": scanner["id"],
+            "source": scanner["source"],
+            "scanner": scanner,
+            "imports": [{"id": item["id"], "content_hash": ledger._locally_stamped_import_content_hash(item)}],
+        },
+    }
+    failed.write_text(json.dumps(forged))
+    payload = ledger._persisted_import_proof_payload(item, operation_id="0" * 32)
+    name = ledger._import_proof_name(item["id"])
+    assert payload is not None and name is not None
+    (tmp_path / ".brigade" / "work" / "imports" / "proofs" / name).write_text(json.dumps(payload))
+
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def test_legacy_identity_rejects_in_place_change_of_bound_successful_receipt(tmp_path: Path) -> None:
+    item = ledger._make_import("bound receipt overwrite", kind="task", source="handoff-ingest")
+    path = _write_builtin_scanner_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+
+    payload = json.loads(path.read_text())
+    payload["attacker_marker"] = "in-place-overwrite"
+    path.write_text(json.dumps(payload))
+
+    assert ledger._read_local_scanner_receipt(tmp_path, "chosen-run") is None
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def test_legacy_identity_rejects_attacker_created_sidecar_without_file_binding(tmp_path: Path) -> None:
+    item = ledger._make_import("unbound sidecar", kind="task", source="handoff-ingest")
+    _write_builtin_scanner_receipt(tmp_path, item)
+    proof_dir = ledger._open_import_proof_directory(tmp_path, create=True)
+    os.close(proof_dir)
+    payload = ledger._persisted_import_proof_payload(item, operation_id="0" * 32)
+    name = ledger._import_proof_name(item["id"])
+    assert payload is not None and name is not None
+    (tmp_path / ".brigade" / "work" / "imports" / "proofs" / name).write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    )
+
+    assert not ledger._has_persisted_import_proof(item, target=tmp_path)
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def test_legacy_identity_rejects_replaced_receipt_file_identity(tmp_path: Path) -> None:
+    item = ledger._make_import("replaced receipt identity", kind="task", source="handoff-ingest")
+    path = _write_builtin_scanner_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    data = path.read_bytes()
+    replacement = path.with_name("receipt.replacement.json")
+    replacement.write_bytes(data)
+    replacement.replace(path)
+
+    assert ledger._read_local_scanner_receipt(tmp_path, "chosen-run") is None
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def test_proof_binding_write_failure_restores_inbox_proofs_and_prior_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = b'{"text":"retained raw row"}\n'
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(before)
+    prior = ledger._make_import("prior bound proof", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [prior], operation_id="0" * 32)
+    prior_files = ledger._snapshot_external_file_authorities(tmp_path)
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "atomic row proof", "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+    original_record = ledger._record_verifier_owned_file
+
+    def fail_binding(*args: Any, **kwargs: Any) -> None:
+        raise OSError("file authority write failed")
+
+    monkeypatch.setattr(ledger, "_record_verifier_owned_file", fail_binding)
+    with pytest.raises(OSError, match="file authority write failed"):
+        ledger._append_import_records(
+            tmp_path,
+            [record],
+            provenance_source="learning-loop",
+            migrate_untrusted_identities=True,
+        )
+
+    assert inbox.read_bytes() == before
+    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="learning-loop")
+    assert not ledger._has_persisted_import_proof(incoming, target=tmp_path)
+    monkeypatch.setattr(ledger, "_record_verifier_owned_file", original_record)
+    assert ledger._snapshot_external_file_authorities(tmp_path) == prior_files
+    assert ledger._has_persisted_import_proof(prior, target=tmp_path)
+
+
+def test_receipt_binding_write_failure_restores_receipt_proof_inbox_and_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brigade.work_cmd import scanners as scanners_mod
+
+    item = ledger._make_import("publication rollback", kind="task", source="handoff-ingest")
+    receipt_path = _write_builtin_scanner_receipt(tmp_path, item, status="failed", exit_code=23)
+    prior_receipt = receipt_path.read_bytes()
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    prior_inbox = b'{"text":"prior inbox"}\n'
+    inbox.write_bytes(prior_inbox)
+    prior_files = ledger._snapshot_external_file_authorities(tmp_path)
+    scanner = dict(next(value for value in constants.SCANNER_DEFAULTS if value["id"] == "handoff-ingest"))
+    run: dict[str, Any] = {
+        "run_id": "chosen-run",
+        "target": str(tmp_path),
+        "status": "completed",
+        "exit_code": 0,
+        "scanner_id": scanner["id"],
+        "source": scanner["source"],
+        "command": scanner["command"],
+    }
+    authority = scanners_mod._ScannerRunDirectoryAuthority(
+        root=os.open(helpers._scanner_runs_root(tmp_path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
+        directory=os.open(receipt_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
+        run_id="chosen-run",
+    )
+    scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES[id(run)] = authority
+    scanners_mod._SCANNER_RUN_PUBLICATION_SNAPSHOTS[id(run)] = {
+        "target": tmp_path,
+        "inbox": prior_inbox,
+        "inbox_exists": True,
+        "proof_items": [item],
+        "files": prior_files,
+    }
+    proof_dir = ledger._open_import_proof_directory(tmp_path, create=True)
+    os.close(proof_dir)
+    payload = ledger._persisted_import_proof_payload(item, operation_id="0" * 32)
+    name = ledger._import_proof_name(item["id"])
+    assert payload is not None and name is not None
+    (tmp_path / ".brigade" / "work" / "imports" / "proofs" / name).write_text(json.dumps(payload))
+
+    def fail_binding(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("file authority write failed")
+
+    monkeypatch.setattr(ledger, "_record_verifier_owned_file", fail_binding)
+    with pytest.raises(OSError, match="file authority write failed"):
+        scanners_mod._write_scanner_run_receipt(run)
+
+    assert receipt_path.read_bytes() == prior_receipt
+    assert inbox.read_bytes() == prior_inbox
+    assert not (tmp_path / ".brigade" / "work" / "imports" / "proofs" / name).exists()
+    assert ledger._snapshot_external_file_authorities(tmp_path) == prior_files
+    os.close(authority.directory)
+    os.close(authority.root)
+    scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES.pop(id(run), None)
+
+
+def test_file_authority_reanchors_with_directory_after_workspace_rename(tmp_path: Path) -> None:
+    original = tmp_path / "original-workspace"
+    original.mkdir()
+    item = ledger._make_import("rename-survives", kind="task", source="handoff-ingest")
+    _write_builtin_scanner_receipt(original, item)
+    ledger._write_persisted_import_proofs(original, [item], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(item, target=original) is True
+    assert ledger._legacy_import_source_content_identity(item, target=original) is not None
+
+    relocated = tmp_path / "relocated-workspace"
+    original.rename(relocated)
+    descriptor = ledger._open_import_proof_directory(relocated, create=True)
+    os.close(descriptor)
+
+    assert ledger._has_persisted_import_proof(item, target=relocated) is True
+    assert ledger._legacy_import_source_content_identity(item, target=relocated) is not None
+
+
+def test_file_authority_rollback_preserves_unrelated_bindings(tmp_path: Path) -> None:
+    first = ledger._make_import("proof A", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [first], operation_id="0" * 32)
+    snapshot_after_first = ledger._snapshot_external_file_authorities(tmp_path)
+    second = ledger._make_import("proof B", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [second], operation_id="1" * 32)
+    assert ledger._has_persisted_import_proof(first, target=tmp_path) is True
+    assert ledger._has_persisted_import_proof(second, target=tmp_path) is True
+
+    ledger._restore_external_file_authorities(tmp_path, snapshot_after_first)
+
+    assert ledger._has_persisted_import_proof(first, target=tmp_path) is True
+    assert ledger._has_persisted_import_proof(second, target=tmp_path) is True
+
+
+def test_import_proof_directory_refuses_a_preexisting_unbound_directory_on_create(tmp_path: Path) -> None:
+    """The create path must not adopt a directory it did not create (reviewer probe)."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    descriptor = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
+    os.close(descriptor)
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert isinstance(payload, dict)
+    assert ".brigade/scanners/runs" in payload["directories"]
+    assert ".brigade/work/imports/proofs" not in payload["directories"]
+
+    attacker = tmp_path / ".brigade" / "work" / "imports" / "proofs"
+    attacker.mkdir(parents=True)
+    attacker_inode = attacker.stat().st_ino
+
+    with pytest.raises(OSError, match="external directory authority record does not match directory"):
+        ledger._open_import_proof_directory(tmp_path, create=True)
+
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert isinstance(payload, dict)
+    assert ".brigade/work/imports/proofs" not in payload["directories"]
+    assert attacker.stat().st_ino == attacker_inode
+
+
+def test_parent_prebinds_the_proof_directory_before_launching_scanner_children(tmp_path: Path) -> None:
+    """The parent creates and binds the directory a sandboxed child would otherwise create."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanners_mod._prebind_child_visible_directories(tmp_path)
+
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert isinstance(payload, dict)
+    assert ".brigade/work/imports/proofs" in payload["directories"]
+    descriptor = ledger._open_import_proof_directory(tmp_path, create=True)
+    os.close(descriptor)
+    item = ledger._make_import("prebound proof", kind="task", source="handoff-ingest")
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is True
+
+
+def test_file_authority_rollback_removes_bindings_added_after_the_snapshot(tmp_path: Path) -> None:
+    """Rollback restores snapshot state for the scopes it owns and leaves others alone."""
+    unrelated = ledger._make_import("unrelated pre-existing proof", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [unrelated], operation_id="0" * 32)
+    snapshot = ledger._snapshot_external_file_authorities(tmp_path)
+    assert snapshot is not None
+
+    added = ledger._make_import("binding added after the snapshot", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [added], operation_id="1" * 32)
+    owned = ledger._persisted_import_proof_scopes([added])
+    assert len(owned) == 1
+    after_add = ledger._snapshot_external_file_authorities(tmp_path)
+    assert after_add is not None and owned[0] in after_add
+
+    ledger._restore_external_file_authorities(tmp_path, snapshot, owned=owned)
+
+    after_rollback = ledger._snapshot_external_file_authorities(tmp_path)
+    assert after_rollback is not None
+    assert owned[0] not in after_rollback
+    assert after_rollback == snapshot
+    assert ledger._has_persisted_import_proof(unrelated, target=tmp_path) is True
+
+
+def test_proof_write_failure_leaves_no_binding_for_the_unlinked_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed publication must not leave a stale binding for a proof file it removed."""
+    prior = ledger._make_import("prior bound proof", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [prior], operation_id="0" * 32)
+    before = ledger._snapshot_external_file_authorities(tmp_path)
+
+    failing = ledger._make_import("doomed proof", kind="task", source="learning-loop")
+    failing_name = ledger._import_proof_name(failing["id"])
+    assert failing_name is not None
+    scope = ledger._directory_authority_scope((".brigade", "work", "imports", "proofs", failing_name))
+    calls = {"n": 0}
+    original = ledger._record_verifier_owned_file
+
+    def fail_second(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            original(*args, **kwargs)
+            raise OSError("file authority write failed")
+        raise OSError("file authority write failed")
+
+    monkeypatch.setattr(ledger, "_record_verifier_owned_file", fail_second)
+    with pytest.raises(OSError, match="file authority write failed"):
+        ledger._write_persisted_import_proofs(tmp_path, [failing], operation_id="1" * 32)
+    monkeypatch.setattr(ledger, "_record_verifier_owned_file", original)
+
+    after = ledger._snapshot_external_file_authorities(tmp_path)
+    assert after is not None
+    assert scope not in after
+    assert after == before
+    assert not (tmp_path / ".brigade" / "work" / "imports" / "proofs" / failing_name).exists()
+    assert ledger._has_persisted_import_proof(prior, target=tmp_path) is True
+
+
+def test_file_authority_snapshot_raises_on_unreadable_record(tmp_path: Path) -> None:
+    item = ledger._make_import("unreadable snapshot", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is True
+    path = ledger._directory_authority_store_path(tmp_path)
+    path.write_text("{not-json")
+
+    with pytest.raises(OSError, match="malformed"):
+        ledger._snapshot_external_file_authorities(tmp_path)
+
+
+def test_file_authority_restore_none_does_not_wipe_existing_files(tmp_path: Path) -> None:
+    item = ledger._make_import("keep bindings", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is True
+
+    ledger._restore_external_file_authorities(tmp_path, None)
+
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert isinstance(payload, dict)
+    assert "files" in payload
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is True
+
+
+def test_scanner_child_cannot_rewrite_authority_store_via_inherited_env(tmp_path: Path) -> None:
+    from brigade import component_paths
+    from brigade.work_cmd import scanners as scanners_mod
+
+    item = ledger._make_import("env-scrub probe", kind="task", source="handoff-ingest")
+    receipt_path = _write_builtin_scanner_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+    script = tmp_path / "forge-via-env.py"
+    script.write_text(
+        """
+import hashlib
+import json
+import os
+from pathlib import Path
+
+cwd = Path.cwd()
+(cwd / "child-env.json").write_text(
+    json.dumps({"HOME": os.environ.get("HOME"), "XDG_DATA_HOME": os.environ.get("XDG_DATA_HOME")})
+)
+receipt = cwd / ".brigade" / "scanners" / "runs" / "chosen-run" / "receipt.json"
+payload = json.loads(receipt.read_text())
+payload["attacker_marker"] = "child-rewrite"
+receipt.write_text(json.dumps(payload))
+data = receipt.read_bytes()
+info = receipt.stat()
+binding = {"device": info.st_dev, "inode": info.st_ino, "sha256": hashlib.sha256(data).hexdigest()}
+home = os.environ.get("HOME")
+xdg = os.environ.get("XDG_DATA_HOME")
+if xdg:
+    root = Path(xdg)
+elif home:
+    root = Path(home) / ".local" / "share"
+else:
+    raise SystemExit(0)
+store_dir = root / "brigade" / "directory-authority"
+if not store_dir.is_dir():
+    raise SystemExit(0)
+for path in store_dir.glob("*.json"):
+    record = json.loads(path.read_text())
+    files = record.setdefault("files", {})
+    files[".brigade/scanners/runs/chosen-run/receipt.json"] = binding
+    path.write_text(json.dumps(record))
+"""
+    )
+    scanners_mod._scanner_run_one(
+        tmp_path,
+        {
+            "id": "env-probe",
+            "source": "env-probe",
+            "command": f"{sys.executable} {script}",
+            "timeout": 30,
+        },
+    )
+
+    env_dump = json.loads((tmp_path / "child-env.json").read_text())
+    real_root = component_paths.data_root()
+    assert env_dump.get("HOME") != os.environ.get("HOME")
+    assert env_dump.get("XDG_DATA_HOME") != os.environ.get("XDG_DATA_HOME")
+    assert env_dump.get("XDG_DATA_HOME") != real_root
+    assert receipt_path.exists()
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
 
 
 def test_legacy_migration_requires_persisted_sidecar_in_addition_to_receipt(tmp_path: Path):
