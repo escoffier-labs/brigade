@@ -290,12 +290,25 @@ def _assign_link_paths(records: list[dict[str, Any]], *, root: Path, prior_files
 
 
 def _relationships(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    by_source = {str(record["item"]["canonical_path"]): record for record in records}
-    # Also index by stable card ID and all aliases for dual-read resolution.
+    # Dual-read index: canonical paths, stable card IDs, and legacy aliases all resolve.
+    # A key claimed by two different records is ambiguous (#867); mark it unresolvable
+    # instead of letting the last writer silently win and mis-link.
+    by_source: dict[str, dict[str, Any] | None] = {}
+
+    def claim(key: str, record: dict[str, Any]) -> None:
+        existing = by_source.get(key)
+        if existing is None:
+            if key not in by_source:
+                by_source[key] = record
+        elif existing is not record:
+            by_source[key] = None
+
     for record in records:
-        by_source[record["id"]] = record
+        claim(str(record["item"]["canonical_path"]), record)
+    for record in records:
+        claim(str(record["id"]), record)
         for alias in record.get("aliases") or ():
-            by_source[str(alias)] = record
+            claim(str(alias), record)
     result: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         related: dict[str, dict[str, Any]] = {}
@@ -486,11 +499,15 @@ def _references(frontmatter: dict[str, Any]) -> list[str]:
         if not isinstance(value, str):
             continue
         candidate = value.strip().replace("\\", "/")
-        if candidate.startswith(("/", "~", "..")):
+        if not candidate or candidate.startswith(("/", "~", "..")):
             continue
-        # Accept .md relative paths and stable card IDs (card-UUID4); reject everything else.
-        if (candidate.endswith(".md") or valid_card_id(candidate) is not None) and candidate not in found:
-            found.append(candidate)
+        # Normalize stable card IDs to the lowercase form used by the by_source index.
+        # Bare legacy aliases (stems/topics) are admitted as-is; candidates that match
+        # nothing simply miss the dual-read lookup.
+        card_id = valid_card_id(candidate)
+        key = card_id if card_id is not None else candidate
+        if key not in found:
+            found.append(key)
     return found
 
 

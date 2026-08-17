@@ -240,3 +240,128 @@ def test_project_vault_does_not_reuse_an_unfinished_transaction_journal(
     assert operation_ids[0] != operation_ids[1]
     assert kernel.operation_dir(tmp_path, operation_ids[0]).is_dir()
     assert not kernel.operation_dir(tmp_path, operation_ids[1]).exists()
+
+
+def _write_ref_card(
+    target: Path,
+    name: str,
+    uuid_suffix: str,
+    *,
+    title: str,
+    category: str,
+    refs: list[str],
+    extra_frontmatter: list[str] | None = None,
+) -> None:
+    """A card with explicit refs and no shared tags, so only refs can link it."""
+    path = target / "memory" / "cards" / f"{name}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "---",
+                f"id: card-00000000-0000-4000-8000-{uuid_suffix}",
+                f"title: {title}",
+                f"category: {category}",
+                "tags: []",
+                "fresh_until: 2099-01-01",
+                "last_reviewed: 2026-08-14",
+                "source_harness: codex",
+                f"refs: {json.dumps(refs)}",
+                *(extra_frontmatter or []),
+                "---",
+                f"{title} body.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_project_vault_resolves_uppercase_card_id_references(tmp_path: Path, vault: Path, capsys) -> None:
+    # Regression: an un-normalized CARD-... ref validated but never resolved (#934 review).
+    _write_ref_card(
+        tmp_path,
+        "alpha",
+        "00000000000a",
+        title="Alpha",
+        category="ops-a",
+        refs=["CARD-00000000-0000-4000-8000-00000000000B"],
+    )
+    _write_ref_card(tmp_path, "beta", "00000000000b", title="Beta", category="ops-b", refs=[])
+
+    _project(tmp_path, vault, capsys)
+
+    text = (vault / "Brigade Memory" / "Cards" / "Alpha.md").read_text(encoding="utf-8")
+    assert "[[Cards/Beta|Beta]]" in text
+
+
+def test_project_vault_resolves_bare_legacy_alias_references(tmp_path: Path, vault: Path, capsys) -> None:
+    # Regression: bare stem/topic refs were dropped before reaching the alias index (#931).
+    _write_ref_card(tmp_path, "alpha", "00000000000a", title="Alpha", category="ops-a", refs=["beta"])
+    _write_ref_card(
+        tmp_path,
+        "beta",
+        "00000000000b",
+        title="Beta",
+        category="ops-b",
+        refs=["legacy-rollout-topic"],
+    )
+    _write_ref_card(
+        tmp_path,
+        "gamma",
+        "00000000000c",
+        title="Gamma",
+        category="ops-c",
+        refs=[],
+        extra_frontmatter=["topic: legacy-rollout-topic"],
+    )
+
+    _project(tmp_path, vault, capsys)
+
+    cards = vault / "Brigade Memory" / "Cards"
+    assert "[[Cards/Beta|Beta]]" in (cards / "Alpha.md").read_text(encoding="utf-8")
+    beta = (cards / "Beta.md").read_text(encoding="utf-8")
+    assert "[[Cards/Gamma|Gamma]]" in beta
+
+
+def test_project_vault_neutralizes_colliding_dual_read_keys(tmp_path: Path, vault: Path, capsys) -> None:
+    # Regression: an alias that equals another record's canonical path must not silently
+    # overwrite the index and mis-link (#867 deterministic collision detection).
+    _write_ref_card(
+        tmp_path,
+        "alpha",
+        "00000000000a",
+        title="Alpha",
+        category="ops-a",
+        refs=[],
+        extra_frontmatter=["topic: memory/cards/beta.md"],
+    )
+    _write_ref_card(tmp_path, "beta", "00000000000b", title="Beta", category="ops-b", refs=[])
+    _write_ref_card(tmp_path, "gamma", "00000000000c", title="Gamma", category="ops-c", refs=["memory/cards/beta.md"])
+
+    _project(tmp_path, vault, capsys)
+
+    gamma = (vault / "Brigade Memory" / "Cards" / "Gamma.md").read_text(encoding="utf-8")
+    assert "[[" not in gamma
+
+
+def test_project_vault_emits_alias_frontmatter_for_rename_resolution(tmp_path: Path, vault: Path, capsys) -> None:
+    # aliases: frontmatter lets Obsidian resolve [[old-stem]] links across renames (#931).
+    _write_ref_card(
+        tmp_path,
+        "alpha",
+        "00000000000a",
+        title="Alpha",
+        category="ops-a",
+        refs=[],
+        extra_frontmatter=["topic: legacy-rollout-topic"],
+    )
+
+    _project(tmp_path, vault, capsys)
+
+    text = (vault / "Brigade Memory" / "Cards" / "Alpha.md").read_text(encoding="utf-8")
+    assert "aliases:" in text
+    assert "  - memory/cards/alpha.md" in text
+    assert "  - alpha" in text
+    assert "  - legacy-rollout-topic" in text
+    assert "  - card-00000000-0000-4000-8000-00000000000a" not in text
