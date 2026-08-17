@@ -2032,145 +2032,149 @@ def _scanners_run_payload(
     before_counts = _scanner_import_counts(target)
     runs: list[dict[str, Any]] = []
     contexts: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for scanner in selected:
-        try:
-            before_raw = _scanner_inbox_bytes(target)
-            before_imports = _scanner_inbox_imports(target)
-        except OSError:
-            before_raw = b""
-            before_imports = []
-        before_ids = {
-            str(item.get("id")) for item in before_imports if isinstance(item, dict) and isinstance(item.get("id"), str)
-        }
-        run = _scanner_run_one(target, scanner, force=force)
-        _register_scanner_run_proof(scanner, run)
-        stamped_ids = _scanner_stamp_new_imports(
-            target=target,
-            scanner=scanner,
-            run=run,
-            before_ids=before_ids,
-            before_imports=before_imports,
-            before_raw=before_raw,
-        )
-        run["provenance_imports_stamped"] = len(stamped_ids)
-        if stamped_ids:
-            run["stamped_import_ids"] = stamped_ids
-        _write_scanner_run_receipt(run)
-        runs.append(run)
-        contexts.append((scanner, run))
-    ingest_errors: list[str] = []
-    ingest_payloads: list[tuple[dict[str, Any], dict[str, Any], Path, list[dict[str, Any]]]] = []
-    if ingest_output:
-        for scanner, run in contexts:
-            if run.get("status") != "completed":
-                continue
-            path, records, errors = _scanner_validate_import_output(target, scanner)
-            if errors:
-                ingest_errors.extend(errors)
-                continue
-            if path is not None:
-                ingest_payloads.append(
-                    (
-                        scanner,
-                        run,
-                        path,
-                        _scanner_enrich_import_records(target=target, scanner=scanner, run=run, records=records),
-                    )
-                )
-        if ingest_errors:
-            after_counts = _scanner_import_counts(target)
-            payload = {
-                "target": str(target),
-                "runs_root": str(helpers._scanner_runs_root(target)),
-                "selected": len(selected),
-                "completed": len([run for run in runs if run.get("status") == "completed"]),
-                "failed": len([run for run in runs if run.get("status") != "completed"]),
-                "skipped": [
-                    {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
-                    for item in skipped
-                    if isinstance(item.get("scanner"), dict)
-                ],
-                "imports_before": before_counts,
-                "imports_after": after_counts,
-                "ingest_output": True,
-                "ingest_errors": ingest_errors,
-                "runs": runs,
-            }
-            for run in runs:
-                _release_scanner_run_directory_authority(run)
-            return payload, 2
-        for scanner, run, path, records in ingest_payloads:
-            scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
+    try:
+        for scanner in selected:
             try:
-                existing_imports = _scanner_inbox_imports(target)
+                before_raw = _scanner_inbox_bytes(target)
+                before_imports = _scanner_inbox_imports(target)
             except OSError:
+                before_raw = b""
+                before_imports = []
+            before_ids = {
+                str(item.get("id"))
+                for item in before_imports
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            }
+            run = _scanner_run_one(target, scanner, force=force)
+            _register_scanner_run_proof(scanner, run)
+            stamped_ids = _scanner_stamp_new_imports(
+                target=target,
+                scanner=scanner,
+                run=run,
+                before_ids=before_ids,
+                before_imports=before_imports,
+                before_raw=before_raw,
+            )
+            run["provenance_imports_stamped"] = len(stamped_ids)
+            if stamped_ids:
+                run["stamped_import_ids"] = stamped_ids
+            _write_scanner_run_receipt(run)
+            runs.append(run)
+            contexts.append((scanner, run))
+        ingest_errors: list[str] = []
+        ingest_payloads: list[tuple[dict[str, Any], dict[str, Any], Path, list[dict[str, Any]]]] = []
+        if ingest_output:
+            for scanner, run in contexts:
+                if run.get("status") != "completed":
+                    continue
+                path, records, errors = _scanner_validate_import_output(target, scanner)
+                if errors:
+                    ingest_errors.extend(errors)
+                    continue
+                if path is not None:
+                    ingest_payloads.append(
+                        (
+                            scanner,
+                            run,
+                            path,
+                            _scanner_enrich_import_records(target=target, scanner=scanner, run=run, records=records),
+                        )
+                    )
+            if ingest_errors:
+                after_counts = _scanner_import_counts(target)
+                payload = {
+                    "target": str(target),
+                    "runs_root": str(helpers._scanner_runs_root(target)),
+                    "selected": len(selected),
+                    "completed": len([run for run in runs if run.get("status") == "completed"]),
+                    "failed": len([run for run in runs if run.get("status") != "completed"]),
+                    "skipped": [
+                        {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
+                        for item in skipped
+                        if isinstance(item.get("scanner"), dict)
+                    ],
+                    "imports_before": before_counts,
+                    "imports_after": after_counts,
+                    "ingest_output": True,
+                    "ingest_errors": ingest_errors,
+                    "runs": runs,
+                }
+                return payload, 2
+            for scanner, run, path, records in ingest_payloads:
+                scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
+                try:
+                    existing_imports = _scanner_inbox_imports(target)
+                except OSError:
+                    run["ingest_output"] = {
+                        "path": str(path),
+                        "created": 0,
+                        "skipped": 0,
+                        "dismissed": 0,
+                        "rejected": len(records),
+                        "rejection_reasons": {"inbox_persistence_failed": len(records)},
+                        "records": len(records),
+                        "created_import_ids": [],
+                        "skipped_source_fingerprints": [],
+                        "dismissed_source_fingerprints": [],
+                    }
+                    _write_scanner_run_receipt(run)
+                    continue
+                imported, skipped_records, skipped_dismissed, rejected = ledger_mod._append_import_records(
+                    target,
+                    records,
+                    provenance_source=scanner_source,
+                    contain_provenance_errors=True,
+                    migrate_untrusted_identities=True,
+                    preserve_existing_raw=lambda data: _append_scanner_inbox_bytes(target, data),
+                    restore_existing_raw=lambda data, exists: _restore_scanner_inbox_bytes(target, data, exists),
+                    existing_imports=existing_imports,
+                )
+                if _scanner_run_proof(scanner, run) is not None:
+                    for item in imported:
+                        _record_scanner_import_proof(scanner, run, item)
                 run["ingest_output"] = {
                     "path": str(path),
-                    "created": 0,
-                    "skipped": 0,
-                    "dismissed": 0,
-                    "rejected": len(records),
-                    "rejection_reasons": {"inbox_persistence_failed": len(records)},
+                    "created": len(imported),
+                    "skipped": len(skipped_records),
+                    "dismissed": len(skipped_dismissed),
+                    "rejected": len(rejected),
+                    "rejection_reasons": {rejected[0]: len(rejected)} if rejected else {},
                     "records": len(records),
-                    "created_import_ids": [],
-                    "skipped_source_fingerprints": [],
-                    "dismissed_source_fingerprints": [],
+                    "created_import_ids": [str(item.get("id")) for item in imported if isinstance(item.get("id"), str)],
+                    "skipped_source_fingerprints": [
+                        fingerprint
+                        for record in skipped_records
+                        if (fingerprint := ledger_mod._import_fingerprint(record))
+                    ],
+                    "dismissed_source_fingerprints": [
+                        fingerprint
+                        for record in skipped_dismissed
+                        if (fingerprint := ledger_mod._import_fingerprint(record))
+                    ],
                 }
                 _write_scanner_run_receipt(run)
-                continue
-            imported, skipped_records, skipped_dismissed, rejected = ledger_mod._append_import_records(
-                target,
-                records,
-                provenance_source=scanner_source,
-                contain_provenance_errors=True,
-                migrate_untrusted_identities=True,
-                preserve_existing_raw=lambda data: _append_scanner_inbox_bytes(target, data),
-                restore_existing_raw=lambda data, exists: _restore_scanner_inbox_bytes(target, data, exists),
-                existing_imports=existing_imports,
-            )
-            if _scanner_run_proof(scanner, run) is not None:
-                for item in imported:
-                    _record_scanner_import_proof(scanner, run, item)
-            run["ingest_output"] = {
-                "path": str(path),
-                "created": len(imported),
-                "skipped": len(skipped_records),
-                "dismissed": len(skipped_dismissed),
-                "rejected": len(rejected),
-                "rejection_reasons": {rejected[0]: len(rejected)} if rejected else {},
-                "records": len(records),
-                "created_import_ids": [str(item.get("id")) for item in imported if isinstance(item.get("id"), str)],
-                "skipped_source_fingerprints": [
-                    fingerprint for record in skipped_records if (fingerprint := ledger_mod._import_fingerprint(record))
-                ],
-                "dismissed_source_fingerprints": [
-                    fingerprint
-                    for record in skipped_dismissed
-                    if (fingerprint := ledger_mod._import_fingerprint(record))
-                ],
-            }
-            _write_scanner_run_receipt(run)
-    after_counts = _scanner_import_counts(target)
-    payload = {
-        "target": str(target),
-        "runs_root": str(helpers._scanner_runs_root(target)),
-        "selected": len(selected),
-        "completed": len([run for run in runs if run.get("status") == "completed"]),
-        "failed": len([run for run in runs if run.get("status") != "completed"]),
-        "skipped": [
-            {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
-            for item in skipped
-            if isinstance(item.get("scanner"), dict)
-        ],
-        "imports_before": before_counts,
-        "imports_after": after_counts,
-        "ingest_output": ingest_output,
-        "ingest_errors": ingest_errors,
-        "runs": runs,
-    }
-    for run in runs:
-        _release_scanner_run_directory_authority(run)
-    return payload, 0 if payload["failed"] == 0 else 1
+        after_counts = _scanner_import_counts(target)
+        payload = {
+            "target": str(target),
+            "runs_root": str(helpers._scanner_runs_root(target)),
+            "selected": len(selected),
+            "completed": len([run for run in runs if run.get("status") == "completed"]),
+            "failed": len([run for run in runs if run.get("status") != "completed"]),
+            "skipped": [
+                {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
+                for item in skipped
+                if isinstance(item.get("scanner"), dict)
+            ],
+            "imports_before": before_counts,
+            "imports_after": after_counts,
+            "ingest_output": ingest_output,
+            "ingest_errors": ingest_errors,
+            "runs": runs,
+        }
+        return payload, 0 if payload["failed"] == 0 else 1
+    finally:
+        for run in runs:
+            _release_scanner_run_directory_authority(run)
 
 
 def scanners_run(
