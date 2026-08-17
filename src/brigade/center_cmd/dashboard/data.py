@@ -17,6 +17,23 @@ from typing import Sequence
 from brigade.center_cmd.dashboard import timing as center_timing
 
 
+def _command_error_detail(detail: str) -> str:
+    """Prefer a JSON ``error`` field over the first line of pretty-printed JSON."""
+    text = detail.strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        err = parsed.get("error")
+        if isinstance(err, str) and err.strip():
+            return err.strip()[:200]
+        return json.dumps(parsed, sort_keys=True)[:200]
+    return text.splitlines()[0][:200]
+
+
 def run_json(
     target: Path,
     args: Sequence[str],
@@ -51,8 +68,7 @@ def run_json(
     if result.returncode not in ok_codes:
         detail = (result.stderr or result.stdout or "").strip()
         if detail:
-            first_line = detail.splitlines()[0]
-            return {"error": first_line[:200]}
+            return {"error": _command_error_detail(detail)}
         return {"error": f"command exited {result.returncode}"}
 
     try:

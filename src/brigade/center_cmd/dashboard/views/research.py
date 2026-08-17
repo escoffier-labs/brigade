@@ -12,7 +12,6 @@ sessions, or browser profiles.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +19,7 @@ from typing import Any
 
 from brigade.center_cmd.dashboard import data
 from brigade.center_cmd.dashboard import render as html
+from brigade.research.registry import validate_run_id
 
 NAME = "research"
 TITLE = "Research"
@@ -27,7 +27,8 @@ ORDER = 5.5
 
 STATUS_SCHEMAS = frozenset({"brigade.research.status.v1"})
 DOCTOR_SCHEMAS = frozenset({"brigade.research.doctor.v1"})
-SHOW_SCHEMAS = frozenset({"brigade.research.show.v2"})
+SHOW_SCHEMAS = frozenset({"brigade.research.show.v1", "brigade.research.show.v2"})
+SHOW_V1_SCHEMA = "brigade.research.show.v1"
 
 RESEARCH_PHASES = (
     "planning",
@@ -39,7 +40,6 @@ RESEARCH_PHASES = (
     "publishing",
 )
 
-_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 _RECENT_LIMIT = 30
 _FINDINGS_LIMIT = 20
 _QUESTION_MAX_CHARS = 160
@@ -53,6 +53,21 @@ _TEXT_PRIMARY = "#0b0b0b"
 _TEXT_SECONDARY = "#52514e"
 _SURFACE = "#fcfcfb"
 _BORDER = "rgba(11,11,11,0.10)"
+
+
+def _valid_run_query(run_id: str) -> bool:
+    """Accept inspector run ids the registry would also accept.
+
+    Rejects leading dashes (so the value cannot become an argv flag) and the
+    ``.`` / ``..`` segments ``validate_run_id`` already refuses.
+    """
+    if not run_id or run_id.startswith("-"):
+        return False
+    try:
+        validate_run_id(run_id)
+    except ValueError:
+        return False
+    return True
 
 
 def run_tile_state(rec: Mapping[str, Any]) -> str:
@@ -84,7 +99,7 @@ def fetch(target: Path, query: dict[str, str] | None = None) -> dict:
         "selected_run": "",
     }
     requested = (query or {}).get("run", "").strip()
-    if requested and _RUN_ID_RE.fullmatch(requested):
+    if requested and _valid_run_query(requested):
         payload["selected_run"] = requested
         payload["show"] = data.run_json(target, ["research", "show", requested])
     return payload
@@ -400,7 +415,7 @@ def _question_cell(rec: Mapping[str, Any]) -> str:
     question = html.esc(_question_text(rec))
     run_id = str(rec.get("run_id") or "")
     legacy = f' <span class="rs-state rs-state-neutral">{html.esc("legacy")}</span>' if rec.get("legacy") else ""
-    if run_id and _RUN_ID_RE.fullmatch(run_id):
+    if run_id and _valid_run_query(run_id):
         href = html.esc(f"/view/{NAME}?run={run_id}")
         link = f'<a href="{href}">{question}</a>'
     else:
@@ -498,16 +513,38 @@ def _inspector_section(show: dict[str, Any] | None, selected: str, now: datetime
         return html.error_panel("Run inspector", problem)
     rec = show.get("run") if isinstance(show.get("run"), Mapping) else {}
     state = run_tile_state(rec)
-    parts = [
-        _inspector_summary(rec, state, now),
-        _phase_pipeline(rec),
-        _inspector_findings(show),
-        _inspector_sources(show),
-        _inspector_citations(show, state),
-        _inspector_fallbacks(rec),
-        _inspector_report(show),
-        _inspector_receipt(show, rec),
-    ]
+    if show.get("schema") == SHOW_V1_SCHEMA:
+        parts = [
+            _inspector_summary(rec, state, now),
+            _phase_pipeline(rec),
+            _inspector_findings(show),
+            _inspector_citations(show, state),
+            _inspector_fallbacks(rec),
+            _sub(
+                "Sources and report",
+                (
+                    "<p>"
+                    + html.esc(
+                        "This inspector received brigade.research.show.v1. "
+                        "Sources and the digest-verified report require show.v2; "
+                        "findings and citations below are the v1 subset."
+                    )
+                    + "</p>"
+                ),
+            ),
+            _inspector_receipt(show, rec),
+        ]
+    else:
+        parts = [
+            _inspector_summary(rec, state, now),
+            _phase_pipeline(rec),
+            _inspector_findings(show),
+            _inspector_sources(show),
+            _inspector_citations(show, state),
+            _inspector_fallbacks(rec),
+            _inspector_report(show),
+            _inspector_receipt(show, rec),
+        ]
     title = html.esc(f"Run inspector: {_question_text(rec)}")
     return html.panel(title, "".join(parts))
 
@@ -547,14 +584,28 @@ def _inspector_findings(show: Mapping[str, Any]) -> str:
     return _sub("Findings", f'<ul class="rs-list">{"".join(items)}</ul>{note}')
 
 
+def _verification_css(verification: str) -> str:
+    if verification == "verified":
+        return "good"
+    if verification == "digest-mismatch":
+        return "serious"
+    return "warning"
+
+
 def _inspector_sources(show: Mapping[str, Any]) -> str:
     verification = str(show.get("sources_verification") or "unknown")
     sources = show.get("sources")
     label = (
         f'<p>Source records are <span class="rs-state rs-state-'
-        f'{html.esc("good" if verification == "verified" else "warning")}">'
+        f"{html.esc(_verification_css(verification))}">"
         f"{html.esc(verification)}</span>.</p>"
     )
+    if verification == "digest-mismatch":
+        reason = (
+            "Source content is withheld because the recorded digest does not "
+            "match the file on disk."
+        )
+        return _sub("Sources", label + f"<p>{html.esc(reason)}</p>")
     if not isinstance(sources, list) or not sources:
         reason = {
             "unavailable": "Legacy runs do not carry source envelopes.",

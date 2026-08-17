@@ -156,7 +156,11 @@ def test_fetch_uses_only_versioned_cli_contracts(monkeypatch, tmp_path: Path) ->
     assert payload["selected_run"] == "run-1"
 
 
-def test_fetch_rejects_malformed_run_ids(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "run_id",
+    ["../escape<script>", "--target", "--help", ".", "..", "-dash"],
+)
+def test_fetch_rejects_malformed_run_ids(monkeypatch, tmp_path: Path, run_id: str) -> None:
     calls: list[list[str]] = []
 
     def fake_run_json(target, args, **kwargs):
@@ -164,7 +168,7 @@ def test_fetch_rejects_malformed_run_ids(monkeypatch, tmp_path: Path) -> None:
         return {}
 
     monkeypatch.setattr(data, "run_json", fake_run_json)
-    payload = research.fetch(tmp_path, query={"run": "../escape<script>"})
+    payload = research.fetch(tmp_path, query={"run": run_id})
     assert payload["selected_run"] == ""
     assert all(args[:2] != ["research", "show"] for args in calls)
 
@@ -340,8 +344,12 @@ def test_inspector_renders_summary_findings_sources_citations_report() -> None:
     assert "Receipt and artifact references" in page
 
 
-def test_inspector_rejects_unsupported_show_schema() -> None:
+def test_inspector_accepts_show_v1_as_degraded_panel() -> None:
     show = _show_payload(schema="brigade.research.show.v1", schema_version=1)
+    show.pop("sources", None)
+    show.pop("sources_verification", None)
+    show.pop("report", None)
+    show.pop("artifact_verification", None)
     page = research.render(
         {
             "status": _status_payload([]),
@@ -351,7 +359,25 @@ def test_inspector_rejects_unsupported_show_schema() -> None:
         },
         "nonce",
     )
-    assert "unsupported schema: brigade.research.show.v1" in page
+    assert "brigade.research.show.v1" in page
+    assert "show.v2" in page
+    assert "Receipts are journaled" in page
+    assert "excerpt text" not in page
+    assert "# Report body" not in page
+
+
+def test_inspector_rejects_unsupported_show_schema() -> None:
+    show = _show_payload(schema="brigade.research.show.v99", schema_version=99)
+    page = research.render(
+        {
+            "status": _status_payload([]),
+            "doctor": _doctor_payload(),
+            "selected_run": "run-1",
+            "show": show,
+        },
+        "nonce",
+    )
+    assert "unsupported schema: brigade.research.show.v99" in page
     assert "Receipts are journaled" not in page
 
 
@@ -382,6 +408,34 @@ def test_inspector_labels_missing_artifacts_and_withholds_report() -> None:
     assert "digest-mismatch" in page
     assert "Report content is withheld until the digest verifies." in page
     assert "No citation audit recorded for this run." in page
+
+
+def test_inspector_labels_tampered_sources_distinct_from_unverified() -> None:
+    show = _show_payload(
+        sources=[
+            {
+                "source_id": "src-evil",
+                "uri": "https://tampered.example/evil",
+                "excerpt": "TAMPERED INJECTED CONTENT",
+            }
+        ],
+        sources_verification="digest-mismatch",
+    )
+    page = research.render(
+        {
+            "status": _status_payload([]),
+            "doctor": _doctor_payload(),
+            "selected_run": "run-1",
+            "show": show,
+        },
+        "nonce",
+    )
+    assert "digest-mismatch" in page
+    assert "rs-state-serious" in page
+    assert "Source content is withheld because the recorded digest does not match" in page
+    assert "https://tampered.example/evil" not in page
+    assert "TAMPERED INJECTED CONTENT" not in page
+    assert "unverified" not in page.split("Source records are", 1)[1].split("</p>", 1)[0]
 
 
 def test_inspector_handles_corrupt_show_records_without_raising() -> None:
@@ -427,6 +481,23 @@ def test_run_json_accepts_doctor_fail_exit_code(monkeypatch, tmp_path: Path) -> 
     assert "error" in data.run_json(tmp_path, ["research", "doctor"])
     degraded = data.run_json(tmp_path, ["research", "doctor"], ok_codes=(0, 1))
     assert degraded["status"] == "fail"
+
+
+def test_run_json_uses_json_error_field_not_first_pretty_line(monkeypatch, tmp_path: Path) -> None:
+    import subprocess
+    from types import SimpleNamespace
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(
+            returncode=2,
+            stdout='{\n  "error": "invalid run_id: \'..\'",\n  "failure_kind": "invalid-run-id"\n}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = data.run_json(tmp_path, ["research", "show", ".."])
+    assert result["error"] == "invalid run_id: '..'"
+    assert result["error"] != "{"
 
 
 def test_fetch_tolerates_degraded_doctor_exit(monkeypatch, tmp_path: Path) -> None:
