@@ -67,6 +67,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         # Research receipt fields mirrored onto run.json
         "category",
         "provenance",
+        "lineage",
         # Timing
         "started_at",
         "status_started_at",
