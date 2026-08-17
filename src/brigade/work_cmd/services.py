@@ -434,6 +434,9 @@ def _provenance_audit_item(
             if not metadata.get(key):
                 missing.append(key)
 
+    if not ledger_mod._import_envelope_matches(item):
+        missing.append("missing_envelope")
+
     missing = sorted(set(missing))
     return {
         "id": item.get("id"),

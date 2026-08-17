@@ -1654,6 +1654,7 @@ def _resume_state_from_legacy_checkpoint(
             continue
         evidence = registry.bound_text(str(item.get("evidence") or item.get("summary") or ""), max_content_chars)
         summary = registry.bound_text(str(item.get("summary") or evidence), max_content_chars)
+        raw_provenance = item.get("provenance")
         findings.append(
             Finding(
                 source_ids=tuple(str(sid) for sid in source_ids),
@@ -1664,6 +1665,7 @@ def _resume_state_from_legacy_checkpoint(
                 extraction_lane=str(item.get("extraction_lane") or "legacy"),
                 extracted_at=str(item.get("extracted_at") or "1970-01-01T00:00:00+00:00"),
                 parent_source_ids=tuple(str(p) for p in (item.get("parent_source_ids") or ())),
+                provenance=dict(raw_provenance) if isinstance(raw_provenance, Mapping) else None,
             )
         )
     report = checkpoint.get("report")
@@ -2159,6 +2161,27 @@ def cli_handoffs_import_issues(*, target: Path, dry_run: bool = False, json_outp
     print(f"dismissed: {len(skipped_dismissed)}")
     if records and not imported:
         print("status: no new imports")
+    return 0
+
+
+def cli_provenance_backfill(*, target: Path, json_output: bool = False) -> int:
+    from .research.provenance import backfill_research_provenance
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = backfill_research_provenance(target)
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"research provenance backfill: {target}")
+    print(f"scanned_findings: {payload['scanned_findings']}")
+    print(f"stamped: {payload['stamped']}")
+    print(f"unchanged: {payload['unchanged']}")
+    print(f"missing_envelope: {payload['missing_envelope']}")
+    print(f"inferred: {payload['inferred']}")
+    print("trusted: 0")
     return 0
 
 

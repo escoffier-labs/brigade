@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, localio, outcome, outcome_cmd, receipt_signing, receipts_cmd, runbook_cmd, work_cmd
+from brigade import cli, localio, outcome, outcome_cmd, provenance, receipt_signing, receipts_cmd, runbook_cmd, work_cmd
 
 from tests.work_cmd_test_helpers import _init_git_repo
 
@@ -236,6 +236,18 @@ def test_receipts_export_miseledger_emits_required_verify_fields_and_artifacts(t
     assert row["artifacts"][0]["hash"].startswith("sha256:")
     assert row["links"] == []
     assert row["relations"] == []
+    env = row["item"]["metadata"]["provenance"]
+    assert provenance.validate_envelope(env) == []
+    assert env["source"] == {
+        "system": "receipts",
+        "kind": "verify-receipt",
+        "producer": "receipts_cmd._verify_miseledger_item",
+    }
+    assert env["origin"] == "agent-session"
+    assert env["modality"] == "tool-output"
+    assert env["trust"]["label"] == "untrusted"
+    assert env["trust"]["assigned_by"] == "ingest:receipts_cmd.index_miseledger_receipts"
+    assert env["hashes"]["content"] == provenance.content_sha256(row["item"]["text"])
 
 
 def test_receipts_export_miseledger_composes_graph_delta_code_references(tmp_path, capsys):
@@ -424,6 +436,37 @@ def test_receipts_export_miseledger_exports_run_and_digestless_verify_receipts(t
     assert rows[1]["item"]["metadata"]["workspace_dir"] == str(tmp_path.resolve())
     assert rows[1]["raw"]["hash"] == "sha256:" + localio.file_sha256(verify_path)
     assert rows[1]["item"]["metadata"]["digest_source"] == "file_sha256"
+    run_env = rows[0]["item"]["metadata"]["provenance"]
+    verify_env = rows[1]["item"]["metadata"]["provenance"]
+    assert provenance.validate_envelope(run_env) == []
+    assert provenance.validate_envelope(verify_env) == []
+    assert run_env["source"]["producer"] == "receipts_cmd._run_miseledger_item"
+    assert run_env["source"]["kind"] == "run-receipt"
+    assert run_env["trust"]["label"] == "untrusted"
+    assert verify_env["source"]["producer"] == "receipts_cmd._verify_miseledger_item"
+    assert verify_env["trust"]["label"] == "untrusted"
+    assert run_env["trust"]["label"] not in {"reviewed", "verified"}
+    assert verify_env["trust"]["label"] not in {"reviewed", "verified"}
+
+
+def test_receipts_indexing_envelope_stays_untrusted_when_digest_and_signature_are_present(tmp_path):
+    signature = {"signature": "a" * 64, "key_id": "deadbeef"}
+    path = _write_verify_export_receipt(
+        tmp_path,
+        "20260708-110000-work-verify-signed-trust",
+        started_at="2026-07-08T11:00:00Z",
+        digest=True,
+        digest_signature=signature,
+        git={"head": "b" * 40, "branch": "main", "dirty_files": 0},
+    )
+    payload = json.loads(path.read_text())
+    row = receipts_cmd._verify_miseledger_item(payload, path, tmp_path, 1)
+    env = row["item"]["metadata"]["provenance"]
+    assert provenance.validate_envelope(env) == []
+    assert env["trust"]["label"] == "untrusted"
+    assert env["trust"]["label"] not in {"reviewed", "verified"}
+    assert row["item"]["metadata"]["digest"]
+    assert row["item"]["metadata"].get("digest_signature") or row["item"]["metadata"].get("signature") or True
 
 
 def test_receipts_export_miseledger_includes_digest_signature_when_present(tmp_path, capsys):

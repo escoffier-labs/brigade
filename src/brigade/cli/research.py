@@ -166,6 +166,18 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_research_handoffs_import.add_argument("--dry-run", action="store_true", help="Preview imports without writing.")
     p_research_handoffs_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_provenance = research_sub.add_parser("provenance", help="Research finding provenance tools.")
+    research_provenance_sub = p_research_provenance.add_subparsers(
+        dest="research_provenance_command", metavar="<provenance-command>"
+    )
+    research_provenance_sub.required = True
+    p_research_provenance_backfill = research_provenance_sub.add_parser(
+        "backfill", help="Infer envelopes and text projections on legacy research findings."
+    )
+    p_research_provenance_backfill.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
+    )
+    p_research_provenance_backfill.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_research.set_defaults(func=dispatch)
 
 
@@ -250,6 +262,11 @@ def dispatch(args) -> int:
                 target=args.target, dry_run=args.dry_run, json_output=args.json
             )
         args._brigade_parser.error(f"unknown research handoffs command: {args.research_handoffs_command}")
+        return 2
+    if args.research_command == "provenance":
+        if args.research_provenance_command == "backfill":
+            return research_cmd.cli_provenance_backfill(target=args.target, json_output=args.json)
+        args._brigade_parser.error(f"unknown research provenance command: {args.research_provenance_command}")
         return 2
     args._brigade_parser.error(f"unknown research command: {args.research_command}")
     return 2

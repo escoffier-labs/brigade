@@ -20,6 +20,8 @@ brigade work inbox doctor
 brigade work inbox archive
 brigade work import triage
 brigade work import provenance
+brigade work import provenance --backfill
+brigade research provenance backfill
 brigade work import plan <import-id>
 brigade work import plan-handoff <import-id>
 brigade work import promote-handoff <import-id>
@@ -27,7 +29,7 @@ brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 ```
 
-`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `import provenance` audits producer imports for stable source identity, source fingerprints, safe summaries, evidence references, and scanner run provenance. `plan` previews the task or handoff a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `plan-handoff` and `promote-handoff` preview and write reviewed Memory Handoff drafts for durable non-task imports. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`. Actionable issues become task imports. `brigade chat sweep import-issues <surface-id>` produces that same chat-sweep import shape from configured local chat export fixtures. `workflow scan --import-candidates` mines repeated command sequences from local verify receipts and daily run receipts, then writes reviewed workflow imports. `workflow propose-runbook` writes a workshop `runbook.json` from a chosen sequence candidate using its concrete `example_commands` only. It does not execute the runbook.
+`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `import provenance` audits producer imports for stable source identity, source fingerprints, safe summaries, evidence references, scanner run provenance, and a valid `metadata.provenance` envelope. `--backfill` stamps inferred envelopes on rows missing one without treating them as trusted. `brigade research provenance backfill` does the same for research checkpoint and findings rows. `plan` previews the task or handoff a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `plan-handoff` and `promote-handoff` preview and write reviewed Memory Handoff drafts for durable non-task imports. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`. Actionable issues become task imports. `brigade chat sweep import-issues <surface-id>` produces that same chat-sweep import shape from configured local chat export fixtures. `workflow scan --import-candidates` mines repeated command sequences from local verify receipts and daily run receipts, then writes reviewed workflow imports. `workflow propose-runbook` writes a workshop `runbook.json` from a chosen sequence candidate using its concrete `example_commands` only. It does not execute the runbook.
 
 ## Record Shape
 
@@ -251,11 +253,13 @@ Each export finding must provide `provider`, `surface_id`, `issue_id`, `issue_ty
 
 ## Provenance Envelope
 
-New work import items will carry a `brigade.provenance-envelope.v1` envelope under `metadata.provenance`. The envelope records source, origin, trust, and an exact-byte SHA-256 content digest so consumers can derive entitlements from a shared trust policy. Slice 1 ships the schema, validator, and legacy read synthesis in `src/brigade/provenance.py`. Ingestion stamping and consumer enforcement land in later slices.
+New work import items carry a `brigade.provenance-envelope.v1` envelope under `metadata.provenance`. Python producers stamp through `ledger._make_import`. Research findings persist the same envelope at `checkpoint.json.findings[].provenance` and `findings.json`, plus an exact `{title}\\n{summary}\\n{evidence}` text projection. Receipt adapter rows from `_verify_miseledger_item` and `_run_miseledger_item` start `untrusted`. Consumer enforcement lands in later slices.
 
 ### Location
 
 - Work imports: `metadata.provenance` on each inbox record.
+- Research findings: `findings[].provenance` and `findings[].text`.
+- Receipt adapter rows: `item.metadata.provenance`.
 - Fixture/policy files ship as package data: `src/brigade/fixtures/provenance-envelope.v1.golden.json` and `src/brigade/fixtures/trust-policy.v1.json`.
 
 ### Field sets
