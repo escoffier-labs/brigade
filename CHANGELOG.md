@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Python evidence producers now stamp `brigade.provenance-envelope.v1` on work imports, research findings, and indexed receipt adapter rows. Research findings persist an exact `{title}\\n{summary}\\n{evidence}` text projection; legacy `Finding.trust` stays readable and only maps to origin/modality. `brigade work import provenance --backfill` and `brigade research provenance backfill` infer missing envelopes without treating them as trusted. Receipt indexing always starts `untrusted`. Existing pending imports without an envelope report `missing_envelope`, which surfaces as a doctor WARN until an operator runs `--backfill`. (#584)
+
 - `brigade memory project-vault` writes a one-way Obsidian projection of
   canonical memory into an existing vault: care-state frontmatter and tags,
   wikilinks, category/harness maps, and a topology canvas. Vault writes use

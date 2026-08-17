@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from ..untrusted import wrap_untrusted
+from .provenance import stamp_finding
 from .types import Finding, SourceEnvelope, Trust
 
 EXTRACTOR_PROMPT = """\
@@ -78,13 +79,16 @@ def extract_finding(
     summary = str(data.get("summary", ""))
     if is_low_quality(summary):
         return None
-    return Finding(
-        source_ids=(source.source_id,),
-        title=source.uri,
-        summary=summary,
-        evidence=str(data.get("evidence", ""))[:3000],
-        trust=source.trust,
-        extraction_lane=extraction_lane,
-        extracted_at=datetime.now(timezone.utc).isoformat(),
-        parent_source_ids=source.parent_source_ids,
+    return stamp_finding(
+        Finding(
+            source_ids=(source.source_id,),
+            title=source.uri,
+            summary=summary,
+            evidence=str(data.get("evidence", ""))[:3000],
+            trust=source.trust,
+            extraction_lane=extraction_lane,
+            extracted_at=datetime.now(timezone.utc).isoformat(),
+            parent_source_ids=source.parent_source_ids,
+        ),
+        producer="research.extract",
     )

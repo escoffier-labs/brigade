@@ -19,6 +19,8 @@ def test_finding_defaults_and_trust():
     assert f.extracted_at == "2026-08-13T12:00:00+00:00"
     assert f.parent_source_ids == ()
     assert f.source == "/notes/a.md"
+    assert f.text == "A\ns\ne"
+    assert f.provenance is None
 
 
 def test_caps_from_overrides():

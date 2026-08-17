@@ -674,12 +674,17 @@ def import_triage(
     return 0
 
 
-def import_provenance(*, target: Path, json_output: bool = False) -> int:
+def import_provenance(*, target: Path, json_output: bool = False, backfill: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    backfill_payload: dict[str, Any] | None = None
+    if backfill:
+        backfill_payload = ledger_mod._backfill_import_provenance(target)
     payload = services_mod._import_provenance_payload(target)
+    if backfill_payload is not None:
+        payload["backfill"] = backfill_payload
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -699,6 +704,11 @@ def import_provenance(*, target: Path, json_output: bool = False) -> int:
     for item in payload["issues"][:20]:
         fields = ", ".join(str(field) for field in item.get("missing_fields", []))
         print(f"- {item.get('id')} {item.get('source')} {item.get('kind')} missing={fields}")
+    if backfill_payload is not None:
+        print(f"backfill_stamped: {backfill_payload['stamped']}")
+        print(f"backfill_inferred: {backfill_payload['inferred']}")
+        print(f"backfill_unchanged: {backfill_payload['unchanged']}")
+        print("backfill_trusted: 0")
     return 0
 
 

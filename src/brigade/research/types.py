@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Protocol, get_args
 
@@ -81,6 +82,11 @@ class SourceEnvelope:
         )
 
 
+def finding_text(title: str, summary: str, evidence: str) -> str:
+    """Exact persisted text projection: ``{title}\\n{summary}\\n{evidence}``."""
+    return f"{title}\n{summary}\n{evidence}"
+
+
 @dataclass(frozen=True)
 class Finding:
     source_ids: tuple[str, ...]
@@ -91,11 +97,14 @@ class Finding:
     extraction_lane: str
     extracted_at: str
     parent_source_ids: tuple[str, ...] = ()
+    text: str = ""
+    provenance: Mapping[str, Any] | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if not self.source_ids:
             raise ValueError("Finding.source_ids cannot be empty")
         require_trust(self.trust)
+        object.__setattr__(self, "text", finding_text(self.title, self.summary, self.evidence))
 
     @property
     def source(self) -> str:

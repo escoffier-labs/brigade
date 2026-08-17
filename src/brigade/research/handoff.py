@@ -3,6 +3,7 @@ import re
 from collections.abc import Sequence
 from typing import Any, Dict, List
 
+from .provenance import envelope_label, finding_envelope
 from .types import Finding, SourceEnvelope, Trust
 
 
@@ -29,7 +30,9 @@ def _section_lines(
 ) -> list[str]:
     lines = ["", title]
     if findings:
-        lines.extend(f"- {f.title} ({_resolved_uri(f, lookup)})" for f in findings)
+        lines.extend(
+            f"- {f.title} ({_resolved_uri(f, lookup)}) [{envelope_label(finding_envelope(f))}]" for f in findings
+        )
     else:
         lines.append("- (none)")
     return lines
