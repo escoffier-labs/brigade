@@ -294,6 +294,10 @@ The canonical compact JSON encoding (`ensure_ascii = False`, UTF-8, sorted keys,
 
 An inbound adapter envelope claiming `trust.label = reviewed` or `verified` must pass `authority_proof = {"assigned_by": <str>, "label": <str>}` with exactly those two keys, where `assigned_by` matches `trust.assigned_by` and `label` matches `trust.label`. Otherwise the ingester downgrades or rejects the assertion. An inbound adapter envelope is data, not authority.
 
+### Read verification
+
+Public read surfaces recompute `hashes.content` (and `hashes.raw` when materialized) against the exact stored bytes. Search suppresses a mismatched snippet and sets `integrity_mismatch: true`. Direct `miseledger show` / `brigade evidence show` hide a mismatched or synthesized-legacy body unless `--forensic-content` is passed. `--forensic-content` never changes trust and only reveals a body when injection status is the explicit known-safe value `clean`; empty, unknown, and parse-lost statuses block. MCP, HTTP, bundles, briefs, and context stay metadata-only on mismatch. One idempotent downgrade event is appended per item/hash/mismatch; the row is never deleted.
+
 ### Legacy banner
 
 When an item carries no provenance, `synthesize_legacy_provenance()` returns a non-null envelope with `origin = unknown`, `modality = unknown`, `attribution = inferred`, `trust.label = unknown`, null `repository`/`session`/`collection_id`/`item_id`/`locator`, and a null content digest. The display string is `UNKNOWN PROVENANCE - legacy item` (`provenance.LEGACY_DISPLAY`). A missing envelope is never treated as trusted.

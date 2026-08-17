@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import component_bins
+from . import component_bins, provenance
 
 HEADING = "## Untrusted run evidence (MiseLedger, read-only)"
 LIMIT_BYTES = 2000
@@ -148,14 +148,23 @@ def _find_selection_rule(bundle: dict[str, Any], result: dict[str, Any]) -> str:
 
 
 def _result_line(result: dict[str, Any], bundle: dict[str, Any]) -> str:
-    snippet = _one_line(result.get("snippet"), 500)
+    mismatch = bool(result.get("integrity_mismatch"))
+    snippet = "" if mismatch else _one_line(result.get("snippet"), 500)
     parts = [
         f"run: {_find_run_id(result, snippet)}",
         f"status: {_find_status(result, snippet)}",
     ]
 
-    trust = _find_trust(result)
+    trust = result.get("trust_label") or _find_trust(result)
     parts.append(f"trust: {trust}")
+    if mismatch:
+        parts.append("integrity_mismatch: true")
+    origin = result.get("origin")
+    if isinstance(origin, str) and origin.strip():
+        parts.append(f"origin: {_one_line(origin, 40)}")
+    modality = result.get("modality")
+    if isinstance(modality, str) and modality.strip():
+        parts.append(f"modality: {_one_line(modality, 40)}")
 
     source = _find_source_label(result)
     if source:
@@ -226,6 +235,10 @@ def _render_bundle_context(bundle: dict[str, Any], total: int, selected: int) ->
     if omitted > 0:
         lines.append(f"Omitted {omitted} of {total} candidates at selection boundary.")
 
+    integrity_omitted = bundle.get("integrity_omitted")
+    if isinstance(integrity_omitted, int) and integrity_omitted > 0:
+        lines.append(f"Integrity omitted {integrity_omitted} item bodies due to hash mismatch.")
+
     return lines
 
 
@@ -292,7 +305,9 @@ def fetch_evidence_bundle(cwd: Path, query: str, *, limit: int = 5) -> dict[str,
         bundle = json.loads(completed.stdout)
     except (json.JSONDecodeError, ValueError):
         return None
-    return bundle if isinstance(bundle, dict) else None
+    if not isinstance(bundle, dict):
+        return None
+    return provenance.apply_bundle_integrity(bundle)
 
 
 def render_evidence_bundle(bundle: dict[str, Any], *, limit: int | None = None) -> str:

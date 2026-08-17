@@ -81,6 +81,10 @@ The canonical compact JSON encoding (UTF-8, no whitespace, HTML escaping disable
 
 An inbound adapter envelope claiming `trust.label = reviewed` or `verified` must pass `ValidationContext{InboundAdapter: true, AuthorityProof: &AuthorityProof{AssignedBy, Label}}` where `AssignedBy` matches `trust.assigned_by` and `Label` matches `trust.label`. Otherwise the ingester downgrades or rejects the assertion. An inbound adapter envelope is data, not authority.
 
+### Read verification
+
+Search, show, evidence bundles, HTTP, and MCP recompute envelope `hashes.content` (and `hashes.raw` when the raw body is materialized) against the stored bytes. A mismatch suppresses snippets and item bodies, sets `integrity_mismatch: true`, and appends one idempotent `provenance_events` row per item/hash/mismatch without deleting the item. Direct `miseledger show --forensic-content` can reveal a mismatched or synthesized-legacy body with a warning; MCP and HTTP have no forensic reveal path.
+
 ### Legacy banner
 
 When an item carries no provenance, `SynthesizeLegacyProvenance()` returns a non-null envelope with `origin = unknown`, `modality = unknown`, `attribution = inferred`, `trust.label = unknown`, nil `repository`/`session`/`locator`, null `collection_id`/`item_id`/`captured_at`/`ingested_at`/`trust.assigned_at`, and null `hashes.content`/`raw`/`raw_algorithm`/`raw_scope`. The display string is `UNKNOWN PROVENANCE - legacy item` (`provenance.LegacyDisplay`). A missing envelope is never treated as trusted.
