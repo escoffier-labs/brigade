@@ -124,6 +124,7 @@ def test_watch_json_outputs_ndjson_incrementally(tmp_path, capsys, monkeypatch):
         "final",
         "summary",
     ]
+    assert all(record["schema"] == "brigade.run-watch.v1" for record in records)
     assert records[2]["worker"] == "coder"
     assert records[2]["event"]["method"] == "item/started"
     assert records[-1]["status"] == "ok"

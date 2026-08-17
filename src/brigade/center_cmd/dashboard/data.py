@@ -19,10 +19,19 @@ from brigade.center_cmd.dashboard import timing as center_timing
 
 def run_json(target: Path, args: Sequence[str], *, timeout: float = 20.0) -> dict:
     """Run a brigade subcommand and return parsed JSON, or ``{"error": ...}``."""
-    cmd = [sys.executable, "-m", "brigade", *args, "--target", str(target), "--json"]
+    return _invoke([*args, "--target", str(target), "--json"], phase_args=args, timeout=timeout)
+
+
+def run_json_cwd(target: Path, args: Sequence[str], *, timeout: float = 20.0) -> dict:
+    """Like :func:`run_json` for subcommands scoped by ``--cwd`` instead of ``--target``."""
+    return _invoke([*args, "--cwd", str(target), "--json"], phase_args=args, timeout=timeout)
+
+
+def _invoke(full_args: Sequence[str], *, phase_args: Sequence[str], timeout: float) -> dict:
+    cmd = [sys.executable, "-m", "brigade", *full_args]
     env = os.environ.copy()
     env["BRIGADE_EXTRAS"] = "1"
-    phase_name = "cli:" + " ".join(args)
+    phase_name = "cli:" + " ".join(phase_args)
     try:
         with center_timing.phase(phase_name):
             result = subprocess.run(
