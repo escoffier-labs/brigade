@@ -1,4 +1,5 @@
 from brigade.research import report
+from brigade.research.provenance import stamp_finding
 from brigade.research.types import Finding, SourceEnvelope
 
 
@@ -26,50 +27,65 @@ def _findings_and_sources():
         content="browser-ai claim",
     )
     findings = [
-        Finding(
-            source_ids=(local.source_id,),
-            title="a.md",
-            summary="local summary",
-            evidence="ev",
-            trust="local",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(local.source_id,),
+                title="a.md",
+                summary="local summary",
+                evidence="ev",
+                trust="local",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=0,
         ),
-        Finding(
-            source_ids=(cli.source_id,),
-            title="Tool",
-            summary="cli summary",
-            evidence="ev",
-            trust="cli",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(cli.source_id,),
+                title="Tool",
+                summary="cli summary",
+                evidence="ev",
+                trust="cli",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=1,
         ),
-        Finding(
-            source_ids=(browser.source_id,),
-            title="Browser",
-            summary="browser summary",
-            evidence="ev",
-            trust="browser",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(browser.source_id,),
+                title="Browser",
+                summary="browser summary",
+                evidence="ev",
+                trust="browser",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=2,
         ),
-        Finding(
-            source_ids=(web.source_id,),
-            title="Ex",
-            summary="web summary",
-            evidence="ev",
-            trust="web",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(web.source_id,),
+                title="Ex",
+                summary="web summary",
+                evidence="ev",
+                trust="web",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=3,
         ),
-        Finding(
-            source_ids=(browser_ai.source_id,),
-            title="Browser AI Doc",
-            summary="browser-ai summary",
-            evidence="ev",
-            trust="browser-ai",
-            extraction_lane="luna",
-            extracted_at="2026-08-13T12:00:00+00:00",
+        stamp_finding(
+            Finding(
+                source_ids=(browser_ai.source_id,),
+                title="Browser AI Doc",
+                summary="browser-ai summary",
+                evidence="ev",
+                trust="browser-ai",
+                extraction_lane="luna",
+                extracted_at="2026-08-13T12:00:00+00:00",
+            ),
+            index=4,
         ),
     ]
     sources = (local, cli, browser, web, browser_ai)
@@ -91,6 +107,8 @@ def test_html_is_self_contained_and_separates_trust():
     assert "Trusted (local)" in html and "Configured CLI" in html
     assert "Browser-assisted" in html and "Untrusted (web)" in html
     assert "Browser AI" in html
+    assert "origin=workspace modality=tool-output trust=untrusted" in html
+    assert "origin=external-web modality=external-web trust=untrusted" in html
     assert "/n/a.md" in html and "ex.com" in html
     assert "cli://tool/abc" in html
     assert "https://browser-ai.ex/doc" in html
@@ -113,7 +131,8 @@ def test_markdown_includes_sources_block():
     assert "## R" in md and "Sources" in md and "a.md" in md
     assert "/n/a.md" in md
     assert "https://browser-ai.ex/doc" in md
-    assert "[browser-ai]" in md
+    assert "origin=external-web modality=model-generated trust=untrusted" in md
+    assert "origin=workspace modality=tool-output trust=untrusted" in md
     for source in sources:
         assert source.source_id not in md.split("## Sources", 1)[1]
 
@@ -172,6 +191,36 @@ def test_render_escapes_hostile_source_metadata_in_html_and_markdown():
     assert "Evil" in sources_md
     assert "breakout" in sources_md
     assert "example.com" in sources_md
+
+
+def test_html_renders_full_multiline_summary() -> None:
+    source = _envelope(origin="web", provider="web", uri="https://ex.com/doc", trust="web")
+    finding = Finding(
+        source_ids=(source.source_id,),
+        title="Title",
+        summary="First sentence.\nSecond sentence with the real conclusion.",
+        evidence="EV",
+        trust="web",
+        extraction_lane="luna",
+        extracted_at="2026-08-13T12:00:00+00:00",
+    )
+    html = report.render_html(
+        question="Q",
+        markdown_report="body",
+        findings=[finding],
+        sources=[source],
+        stats={"rounds": 1},
+    )
+    assert "First sentence." in html
+    assert "Second sentence with the real conclusion." in html
+    md = report.render_markdown(
+        question="Q",
+        markdown_report="body",
+        findings=[finding],
+        sources=[source],
+    )
+    assert "Title" in md
+    assert "https://ex.com/doc" in md
 
 
 def test_html_stats_render_middle_dot_without_double_escape() -> None:

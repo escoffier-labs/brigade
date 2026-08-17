@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Python evidence producers now stamp `brigade.provenance-envelope.v1` on work imports, research findings, and indexed receipt adapter rows. Research findings persist an exact `{title}\\n{summary}\\n{evidence}` text projection; legacy `Finding.trust` stays readable and only maps to origin/modality. `brigade work import provenance --backfill` and `brigade research provenance backfill` infer missing envelopes without treating them as trusted. Receipt indexing always starts `untrusted`. Existing pending imports without an envelope report `missing_envelope`, which surfaces as a doctor WARN until an operator runs `--backfill`. (#584)
 - `brigade runs child <run-id> <event-id>` creates a durable child run from a
   checkpoint-covered parent lifecycle event, records lineage and the verified
   shared prefix, and shows that lineage in `brigade runs show`. The child gets

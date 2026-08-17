@@ -933,6 +933,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
     p_work_import_provenance.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_import_provenance.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Stamp inferred envelopes on inbox rows missing metadata.provenance.",
+    )
     p_work_import_show = import_sub.add_parser("show", help="Show one work import.")
     p_work_import_show.add_argument("import_id", help="Import id or unique prefix.")
     p_work_import_show.add_argument(

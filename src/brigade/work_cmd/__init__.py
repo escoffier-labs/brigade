@@ -125,6 +125,8 @@ from .ledger import (  # noqa: F401
     _import_source_key,
     _import_fingerprint,
     _import_source_identity,
+    _import_envelope_matches,
+    _backfill_import_provenance,
     _validate_import_record,
     _load_import_jsonl,
     _append_import_records,

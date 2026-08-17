@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -16,7 +17,9 @@ from . import __version__
 from . import code_references
 from . import component_bins
 from . import localio
+from . import provenance
 from . import receipt_signing
+from .untrusted import scan_handoff_injection_heuristics
 
 OK = "OK"
 MISMATCH = "MISMATCH"
@@ -1013,6 +1016,98 @@ def _short_commands(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _receipt_repository_fields(payload: dict[str, Any], target: Path) -> tuple[str, str | None]:
+    repository = _code_reference_repository(target)
+    repo_id = repository if isinstance(repository, str) and provenance.is_safe_identity_label(repository) else "unknown"
+    git = _receipt_git(payload)
+    revision = git.get("head") if git is not None else None
+    if revision is not None and not provenance.is_safe_repository_revision(revision):
+        revision = None
+    return repo_id, revision
+
+
+def _receipt_locator(path: Path, target: Path, item_external_id: str) -> tuple[str, str]:
+    rel = _rel(path, target)
+    if (
+        isinstance(rel, str)
+        and rel
+        and not provenance.is_absolute_locator(rel)
+        and ".." not in rel.replace("\\", "/").split("/")
+    ):
+        return "repo-relative", rel
+    return "uri", f"receipt:{item_external_id}"
+
+
+def _stamp_receipt_provenance(
+    *,
+    text: str,
+    payload: dict[str, Any],
+    path: Path,
+    target: Path,
+    item_external_id: str,
+    collection_id: str,
+    source_kind: str,
+    producer: str,
+) -> dict[str, Any]:
+    """Stamp a receipt adapter envelope. Indexing always starts untrusted."""
+    captured = str(payload.get("started_at") or payload.get("completed_at") or payload.get("finished_at") or "")
+    ingested_at = str(
+        payload.get("completed_at") or payload.get("finished_at") or payload.get("started_at") or captured
+    )
+    if not ingested_at:
+        try:
+            ingested_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+        except OSError:
+            ingested_at = "1970-01-01T00:00:00+00:00"
+    if not captured:
+        captured = ingested_at
+    repo_id, revision = _receipt_repository_fields(payload, target)
+    session_raw = str(payload.get("run_id") or path.parent.name)
+    session_id = session_raw if provenance.is_safe_identity_label(session_raw) else None
+    locator_kind, locator_value = _receipt_locator(path, target, item_external_id)
+    injection_status, injection_count, injection_rules = _receipt_injection(text)
+    return provenance.build_envelope(
+        source_system="receipts",
+        source_kind=source_kind,
+        source_producer=producer,
+        origin="agent-session",
+        repository_id=repo_id,
+        repository_revision=revision,
+        session_id=session_id,
+        session_harness=None,
+        collection_id=collection_id,
+        item_id=item_external_id,
+        locator_kind=locator_kind,
+        locator_value=locator_value,
+        attribution="observed",
+        modality="tool-output",
+        trust_label="untrusted",
+        trust_assigned_by="ingest:receipts_cmd.index_miseledger_receipts",
+        trust_assigned_at=ingested_at,
+        injection_status=injection_status,
+        injection_count=injection_count,
+        injection_rules=injection_rules,
+        text=text,
+        raw_bytes=None,
+        content_scope="item.text.utf8.v1",
+        captured_at=captured,
+        ingested_at=ingested_at,
+    )
+
+
+def _receipt_injection(text: str) -> tuple[str, int, list[str]]:
+    """Derive injection fields from a real scan. Receipt trust stays untrusted."""
+    try:
+        hits = scan_handoff_injection_heuristics(text)
+        warnings = [hit for hit in hits if hit.severity == "warning"]
+    except Exception:
+        return "pending", 0, []
+    if warnings:
+        rules = sorted({hit.rule for hit in warnings if isinstance(hit.rule, str) and hit.rule})
+        return "flagged", len(warnings), rules
+    return "clean", 0, []
+
+
 def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordinal: int) -> dict[str, Any]:
     run_id = str(payload.get("run_id") or path.parent.name)
     item_external_id = f"brigade:work-verify:{run_id}"
@@ -1043,6 +1138,16 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
     if command_text:
         text = f"{text} Commands: {command_text}."
     text = _append_delta_text(text, payload)
+    metadata["provenance"] = _stamp_receipt_provenance(
+        text=text,
+        payload=payload,
+        path=path,
+        target=target,
+        item_external_id=item_external_id,
+        collection_id="brigade_work_verify_runs",
+        source_kind="verify-receipt",
+        producer="receipts_cmd._verify_miseledger_item",
+    )
     artifacts = [_receipt_artifact(item_external_id, path, target, receipt_hash)]
     artifacts.extend(_verify_log_artifacts(item_external_id, payload, path, target))
     return {
@@ -1103,6 +1208,16 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
     if task:
         text += f" Task: {task}."
     text = _append_delta_text(text, payload)
+    metadata["provenance"] = _stamp_receipt_provenance(
+        text=text,
+        payload=payload,
+        path=path,
+        target=target,
+        item_external_id=item_external_id,
+        collection_id="brigade_runs",
+        source_kind="run-receipt",
+        producer="receipts_cmd._run_miseledger_item",
+    )
     artifacts = [_receipt_artifact(item_external_id, path, target, receipt_hash)]
     output_dir = payload.get("artifacts")
     if isinstance(output_dir, str) and output_dir:

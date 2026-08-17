@@ -820,7 +820,7 @@ def dispatch(args) -> int:
                 metadata=args.metadata,
             )
         if args.import_command == "provenance":
-            return work_cmd.import_provenance(target=args.target, json_output=args.json)
+            return work_cmd.import_provenance(target=args.target, json_output=args.json, backfill=bool(args.backfill))
         if args.import_command == "show":
             return work_cmd.import_show(target=args.target, import_id=args.import_id)
         if args.import_command == "promote":
