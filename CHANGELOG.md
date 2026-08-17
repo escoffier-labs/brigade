@@ -38,7 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
   closed on every `brigade work` surface (and other commands that read the
   ledger) with `error: ...` and exit 2, instead of parsing as empty or
-  dumping a traceback. Unknown hand-edited edge types are preserved on
+  dumping a traceback. The work-store measurement harness
+  (`scripts/measure_work_store.py`, protocol 4) now reports
+  `schema_version_policy.future_version_rejected: true` with a clean
+  exit-2 error and untouched ledger bytes; it no longer treats future
+  versions as coerced. Unknown hand-edited edge types are preserved on
   rewrite and surfaced via `work ready` (`unknown_type_count`) and a
   `work doctor` WARN. `work import promote --all` returns 2 when any
   import fails. (#948)
