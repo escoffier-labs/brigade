@@ -3307,9 +3307,7 @@ def test_show_v2_sources_are_verified_bounded_and_sanitized(tmp_path: Path, caps
     assert payload["artifact_verification"]["sources"] == "verified"
 
 
-_PROBE_SOURCE_URI = (
-    "https://alice:hunter2@api.example.com/v1/doc?api_key=SECRETKEY123&access_token=TOKENVAL456"
-)
+_PROBE_SOURCE_URI = "https://alice:hunter2@api.example.com/v1/doc?api_key=SECRETKEY123&access_token=TOKENVAL456"
 _PROBE_URI_SECRETS = ("hunter2", "SECRETKEY123", "TOKENVAL456")
 
 
@@ -3339,12 +3337,8 @@ def _seed_probe_run_with_credential_uri(target: Path, run_id: str = "probe-run")
 
 def test_sanitize_projection_uri_redacts_userinfo_and_secret_query_values() -> None:
     cleaned = research_cmd._sanitize_projection_uri(_PROBE_SOURCE_URI)
-    assert cleaned == (
-        "https://api.example.com/v1/doc?api_key=[redacted]&access_token=[redacted]"
-    )
-    extra = research_cmd._sanitize_projection_uri(
-        "https://example.test/doc?key=FAKEKEYVAL&sig=FAKESIGVAL&q=public"
-    )
+    assert cleaned == ("https://api.example.com/v1/doc?api_key=[redacted]&access_token=[redacted]")
+    extra = research_cmd._sanitize_projection_uri("https://example.test/doc?key=FAKEKEYVAL&sig=FAKESIGVAL&q=public")
     assert extra == "https://example.test/doc?key=[redacted]&sig=[redacted]&q=public"
     assert research_cmd._sanitize_projection_uri("not a uri") == "not a uri"
 

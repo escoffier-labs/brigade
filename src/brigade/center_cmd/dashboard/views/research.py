@@ -596,15 +596,9 @@ def _inspector_sources(show: Mapping[str, Any]) -> str:
     verification = str(show.get("sources_verification") or "unknown")
     sources = show.get("sources")
     css = html.esc(_verification_css(verification))
-    label = (
-        f'<p>Source records are <span class="rs-state rs-state-{css}">'
-        f"{html.esc(verification)}</span>.</p>"
-    )
+    label = f'<p>Source records are <span class="rs-state rs-state-{css}">{html.esc(verification)}</span>.</p>'
     if verification == "digest-mismatch":
-        reason = (
-            "Source content is withheld because the recorded digest does not "
-            "match the file on disk."
-        )
+        reason = "Source content is withheld because the recorded digest does not match the file on disk."
         return _sub("Sources", label + f"<p>{html.esc(reason)}</p>")
     if not isinstance(sources, list) or not sources:
         reason = {

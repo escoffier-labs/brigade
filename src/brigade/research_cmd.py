@@ -2586,10 +2586,7 @@ def _show_artifact_verification(
     sources_ref = _discovery_sources_ref(research)
     if sources_ref is not None and "sources" not in refs:
         refs["sources"] = sources_ref
-    return {
-        name: registry.artifact_verification_state(target, run_id, ref)
-        for name, ref in sorted(refs.items())
-    }
+    return {name: registry.artifact_verification_state(target, run_id, ref) for name, ref in sorted(refs.items())}
 
 
 def _show_payload(*, target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[str, object]:
