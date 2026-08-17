@@ -40,6 +40,316 @@ def test_detect_uses_resolver(monkeypatch):
     assert t.detect() is True
 
 
+_CLEAN_BOOTSTRAP_STATUS = '{"rows": []}'
+_CLEAN_BOOTSTRAP_LINT = '{"ok": true, "findings": [], "error_count": 0, "warning_count": 0}'
+
+
+def _run_bootstrap_doctor(monkeypatch, *, lint, status_stdout=_CLEAN_BOOTSTRAP_STATUS):
+    t = managed.resolve("bootstrap-doctor")
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append(list(args))
+        if args == ["bootstrap-doctor", "status", "--json"]:
+            return managed.proc.Result(code=0, stdout=status_stdout, stderr="")
+        if args == ["bootstrap-doctor", "lint", "--json"]:
+            return lint
+        raise AssertionError(f"unexpected argv: {args}")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    return t.doctor(ctx), calls
+
+
+def test_bootstrap_doctor_runs_status_then_lint(monkeypatch):
+    results, calls = _run_bootstrap_doctor(
+        monkeypatch,
+        lint=managed.proc.Result(code=0, stdout=_CLEAN_BOOTSTRAP_LINT, stderr=""),
+    )
+    assert calls == [
+        ["bootstrap-doctor", "status", "--json"],
+        ["bootstrap-doctor", "lint", "--json"],
+    ]
+    assert results  # doctor still returns rows after both probes
+
+
+def test_bootstrap_doctor_clean_status_and_clean_lint_return_two_ok_rows(monkeypatch):
+    results, _calls = _run_bootstrap_doctor(
+        monkeypatch,
+        lint=managed.proc.Result(code=0, stdout=_CLEAN_BOOTSTRAP_LINT, stderr=""),
+    )
+    assert [(status, name) for status, name, _detail in results] == [
+        ("OK", "bootstrap-doctor (operator files)"),
+        ("OK", "bootstrap-doctor (operator lifecycle)"),
+    ]
+    assert all(status != "FAIL" for status, _, _ in results)
+
+
+def test_bootstrap_doctor_lint_findings_map_to_warn_never_fail(monkeypatch):
+    sentinel = "do-not-leak-finding-message"
+    payload = {
+        "ok": False,
+        "error_count": 1,
+        "warning_count": 1,
+        "findings": [
+            {
+                "check_id": "orphan-workspace",
+                "severity": "error",
+                "message": sentinel,
+                "path": "/tmp/orphan",
+            },
+            {
+                "check_id": "inactive-context-content",
+                "severity": "warning",
+                "message": sentinel,
+                "path": "/tmp/inactive",
+            },
+        ],
+    }
+    results, _calls = _run_bootstrap_doctor(
+        monkeypatch,
+        lint=managed.proc.Result(code=2, stdout=json.dumps(payload), stderr=sentinel),
+    )
+    lint_rows = [row for row in results if row[1] == "bootstrap-doctor (operator lifecycle)"]
+    assert lint_rows
+    assert all(status == "WARN" for status, _, _ in lint_rows)
+    assert all(status != "FAIL" for status, _, _ in results)
+    assert all(sentinel not in detail for _, _, detail in results)
+
+
+def test_bootstrap_doctor_lint_summary_includes_counts_and_first_check_id(monkeypatch):
+    payload = {
+        "ok": False,
+        "error_count": 2,
+        "warning_count": 1,
+        "findings": [
+            {"check_id": "orphan-workspace", "severity": "error", "message": "hidden"},
+            {"check_id": "dangling-agent-reference", "severity": "error", "message": "hidden"},
+            {"check_id": "inactive-context-content", "severity": "warning", "message": "hidden"},
+        ],
+    }
+    results, _calls = _run_bootstrap_doctor(
+        monkeypatch,
+        lint=managed.proc.Result(code=2, stdout=json.dumps(payload), stderr=""),
+    )
+    detail = next(detail for status, name, detail in results if name == "bootstrap-doctor (operator lifecycle)")
+    assert "2 error(s)" in detail
+    assert "1 warning(s)" in detail
+    assert "orphan-workspace" in detail
+    assert "dangling-agent-reference" not in detail
+    assert "hidden" not in detail
+
+
+_KNOWN_BOOTSTRAP_LINT_CHECK_IDS = (
+    "bootstrap-after-setup",
+    "orphan-workspace",
+    "configured-placeholder",
+    "memory-contradicts-fresh",
+    "inactive-context-content",
+    "dangling-agent-reference",
+    "duplicate-context",
+)
+
+
+def _lifecycle_row(results):
+    return next(row for row in results if row[1] == "bootstrap-doctor (operator lifecycle)")
+
+
+@pytest.mark.parametrize(
+    "error_count, warning_count, findings",
+    [
+        (3, 0, [{"check_id": "orphan-workspace", "severity": "error"}]),
+        (0, 2, [{"check_id": "inactive-context-content", "severity": "warning"}]),
+        (
+            1,
+            0,
+            [
+                {"check_id": "orphan-workspace", "severity": "error"},
+                {"check_id": "inactive-context-content", "severity": "warning"},
+            ],
+        ),
+    ],
+)
+def test_bootstrap_doctor_lint_counts_must_match_finding_severities(monkeypatch, error_count, warning_count, findings):
+    sentinel = "do-not-leak-mismatch-message"
+    payload = {
+        "ok": False,
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "findings": [
+            {**finding, "message": sentinel, "path": "/tmp/mismatch", "agent_id": "agent-do-not-leak"}
+            for finding in findings
+        ],
+    }
+    results, _calls = _run_bootstrap_doctor(
+        monkeypatch,
+        lint=managed.proc.Result(code=2, stdout=json.dumps(payload), stderr=""),
+    )
+    status, _name, detail = _lifecycle_row(results)
+    assert status == "WARN"
+    assert detail == "installed but lint payload is inconsistent"
+    assert all(row_status != "FAIL" for row_status, _, _ in results)
+    assert all(f"{error_count} error(s)" not in row_detail for _, _, row_detail in results)
+    assert all(sentinel not in row_detail for _, _, row_detail in results)
+    assert all("agent-do-not-leak" not in row_detail for _, _, row_detail in results)
+    assert all("/tmp/mismatch" not in row_detail for _, _, row_detail in results)
+
+
+@pytest.mark.parametrize(
+    "findings",
+    [
+        [{"check_id": "invented-check-id-do-not-leak", "severity": "error"}],
+        ["not-a-finding-dict"],
+        [{"severity": "error"}],
+        [{"check_id": "orphan-workspace"}],
+        [{"check_id": "orphan-workspace", "severity": "info"}],
+        [{"check_id": "", "severity": "error"}],
+        [{"check_id": 1, "severity": "error"}],
+        [
+            {"check_id": "orphan-workspace", "severity": "error"},
+            {"check_id": "invented-check-id-do-not-leak", "severity": "warning"},
+        ],
+    ],
+)
+def test_bootstrap_doctor_lint_rejects_unknown_or_malformed_findings(monkeypatch, findings):
+    payload = {
+        "ok": False,
+        "error_count": 1,
+        "warning_count": 0,
+        "findings": findings,
+    }
+    results, _calls = _run_bootstrap_doctor(
+        monkeypatch,
+        lint=managed.proc.Result(code=2, stdout=json.dumps(payload), stderr=""),
+    )
+    status, _name, detail = _lifecycle_row(results)
+    assert status == "WARN"
+    assert detail == "installed but lint payload is invalid"
+    assert all(row_status != "FAIL" for row_status, _, _ in results)
+    assert all("invented-check-id-do-not-leak" not in row_detail for _, _, row_detail in results)
+    assert all("not-a-finding-dict" not in row_detail for _, _, row_detail in results)
+    assert all("1 error(s)" not in row_detail for _, _, row_detail in results)
+
+
+def test_bootstrap_doctor_lint_unknown_check_id_never_appears_in_detail(monkeypatch):
+    unknown = "invented-check-id-do-not-leak"
+    payload = {
+        "ok": False,
+        "error_count": 1,
+        "warning_count": 0,
+        "findings": [
+            {
+                "check_id": unknown,
+                "severity": "error",
+                "message": "hidden-message",
+                "path": "/tmp/unknown",
+                "agent_id": "agent-do-not-leak",
+            }
+        ],
+    }
+    results, _calls = _run_bootstrap_doctor(
+        monkeypatch,
+        lint=managed.proc.Result(code=2, stdout=json.dumps(payload), stderr="hidden-stderr"),
+    )
+    status, _name, detail = _lifecycle_row(results)
+    assert status == "WARN"
+    assert detail == "installed but lint payload is invalid"
+    assert all(unknown not in row_detail for _, _, row_detail in results)
+    assert all("hidden-message" not in row_detail for _, _, row_detail in results)
+    assert all("hidden-stderr" not in row_detail for _, _, row_detail in results)
+    assert all("agent-do-not-leak" not in row_detail for _, _, row_detail in results)
+    assert all("/tmp/unknown" not in row_detail for _, _, row_detail in results)
+
+
+@pytest.mark.parametrize("check_id", _KNOWN_BOOTSTRAP_LINT_CHECK_IDS)
+def test_bootstrap_doctor_lint_accepts_known_check_ids(monkeypatch, check_id):
+    payload = {
+        "ok": False,
+        "error_count": 1,
+        "warning_count": 0,
+        "findings": [
+            {
+                "check_id": check_id,
+                "severity": "error",
+                "message": "hidden",
+                "path": "/tmp/known",
+                "agent_id": "agent-do-not-leak",
+            }
+        ],
+    }
+    results, _calls = _run_bootstrap_doctor(
+        monkeypatch,
+        lint=managed.proc.Result(code=2, stdout=json.dumps(payload), stderr=""),
+    )
+    status, _name, detail = _lifecycle_row(results)
+    assert status == "WARN"
+    assert "1 error(s)" in detail
+    assert "0 warning(s)" in detail
+    assert check_id in detail
+    assert "hidden" not in detail
+    assert "agent-do-not-leak" not in detail
+    assert "/tmp/known" not in detail
+    assert all(row_status != "FAIL" for row_status, _, _ in results)
+
+
+@pytest.mark.parametrize(
+    "lint",
+    [
+        managed.proc.Result(code=0, stdout="not-json-at-all", stderr="kaboom-do-not-leak"),
+        managed.proc.Result(
+            code=0,
+            stdout='{"ok": true, "findings": {}, "error_count": 0, "warning_count": 0}',
+            stderr="",
+        ),
+        managed.proc.Result(
+            code=0,
+            stdout='{"ok": true, "findings": [], "error_count": true, "warning_count": 0}',
+            stderr="",
+        ),
+        managed.proc.Result(
+            code=0,
+            stdout='{"ok": true, "findings": [], "error_count": 0, "warning_count": -1}',
+            stderr="",
+        ),
+        managed.proc.Result(
+            code=0,
+            stdout='{"ok": true, "findings": [], "error_count": 1, "warning_count": 0}',
+            stderr="",
+        ),
+        managed.proc.Result(
+            code=2,
+            stdout="",
+            stderr="usage: bootstrap-doctor [-h] {status,apply}\nerror: invalid choice: 'lint'",
+        ),
+        managed.proc.Result(code=2, stdout="", stderr="openclaw.json unreadable"),
+    ],
+)
+def test_bootstrap_doctor_lint_degrades_to_warn_without_raising(monkeypatch, lint):
+    results, calls = _run_bootstrap_doctor(monkeypatch, lint=lint)
+    assert calls == [
+        ["bootstrap-doctor", "status", "--json"],
+        ["bootstrap-doctor", "lint", "--json"],
+    ]
+    lint_rows = [row for row in results if row[1] == "bootstrap-doctor (operator lifecycle)"]
+    assert lint_rows
+    assert all(status == "WARN" for status, _, _ in lint_rows)
+    assert all(status != "FAIL" for status, _, _ in results)
+    assert all("kaboom-do-not-leak" not in detail for _, _, detail in results)
+    assert all("openclaw.json unreadable" not in detail for _, _, detail in results)
+    assert all("invalid choice" not in detail for _, _, detail in results)
+
+
+def test_bootstrap_doctor_declares_status_and_lint_surfaces():
+    t = managed.resolve("bootstrap-doctor")
+    surfaces = {surface.kind: surface for surface in t.surfaces}
+    assert surfaces["summary-json"].command == ("bootstrap-doctor", "status", "--json")
+    assert surfaces["doctor-json"].command == ("bootstrap-doctor", "lint", "--json")
+    assert surfaces["verify-exit"].command == ("bootstrap-doctor", "lint", "--json")
+    for surface in surfaces.values():
+        assert surface.read_only is True
+        assert surface.timeout_seconds == 30.0
+
+
 def test_memory_doctor_no_longer_external_managed_tool():
     # Folded into brigade.memory_doctor / brigade memory status|lint|compact.
     assert managed.resolve("memory-doctor") is None

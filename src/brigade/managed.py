@@ -116,23 +116,111 @@ def _apply_snapshot(tool: ManagedTool, contract: dict[str, Any]) -> ManagedTool:
 # advisory: labeled operator-scoped and never FAIL a workspace doctor run.
 
 
+def _nonneg_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+_BOOTSTRAP_LINT_CHECK_IDS = frozenset(
+    {
+        "bootstrap-after-setup",
+        "orphan-workspace",
+        "configured-placeholder",
+        "memory-contradicts-fresh",
+        "inactive-context-content",
+        "dangling-agent-reference",
+        "duplicate-context",
+    }
+)
+_BOOTSTRAP_LINT_SEVERITIES = frozenset({"error", "warning"})
+
+
+def _first_stable_check_id(findings: list[object]) -> Optional[str]:
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        check_id = finding.get("check_id")
+        if isinstance(check_id, str) and check_id in _BOOTSTRAP_LINT_CHECK_IDS:
+            return check_id
+    return None
+
+
+def _lint_findings_valid(findings: list[object]) -> bool:
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return False
+        check_id = finding.get("check_id")
+        if not isinstance(check_id, str) or check_id not in _BOOTSTRAP_LINT_CHECK_IDS:
+            return False
+        if finding.get("severity") not in _BOOTSTRAP_LINT_SEVERITIES:
+            return False
+    return True
+
+
+def _lint_severity_counts(findings: list[object]) -> tuple[int, int]:
+    errors = sum(1 for finding in findings if isinstance(finding, dict) and finding.get("severity") == "error")
+    warnings = sum(1 for finding in findings if isinstance(finding, dict) and finding.get("severity") == "warning")
+    return errors, warnings
+
+
+def _bootstrap_doctor_lint_missing(result: proc.Result) -> bool:
+    blob = f"{result.stdout}\n{result.stderr}".lower()
+    return "invalid choice" in blob or "unrecognized arguments" in blob
+
+
+def _bootstrap_doctor_lint_row(result: proc.Result) -> CheckResult:
+    name = "bootstrap-doctor (operator lifecycle)"
+    data = result.json()
+    if data is None:
+        if _bootstrap_doctor_lint_missing(result):
+            return (WARN, name, "installed but lint is unavailable; upgrade bootstrap-doctor")
+        return (WARN, name, f"installed but lint output unreadable (exit {result.code})")
+    if not isinstance(data, dict):
+        return (WARN, name, f"unexpected lint output (exit {result.code})")
+    findings = data.get("findings")
+    error_count = data.get("error_count")
+    warning_count = data.get("warning_count")
+    if not isinstance(findings, list) or not _nonneg_int(error_count) or not _nonneg_int(warning_count):
+        return (WARN, name, "installed but lint payload is invalid")
+    if not _lint_findings_valid(findings):
+        return (WARN, name, "installed but lint payload is invalid")
+    actual_errors, actual_warnings = _lint_severity_counts(findings)
+    clean = error_count == 0 and warning_count == 0 and not findings
+    if clean:
+        if result.code != 0:
+            return (WARN, name, f"installed but lint exited {result.code}")
+        return (OK, name, "0 error(s), 0 warning(s)")
+    if actual_errors != error_count or actual_warnings != warning_count:
+        return (WARN, name, "installed but lint payload is inconsistent")
+    detail = f"{error_count} error(s), {warning_count} warning(s)"
+    check_id = _first_stable_check_id(findings)
+    if check_id is not None:
+        detail = f"{detail}, {check_id}"
+    return (WARN, name, detail)
+
+
 def _bootstrap_doctor_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "bootstrap-doctor (operator files)"
-    r = proc.run(["bootstrap-doctor", "status", "--json"])
+    r = proc.run(["bootstrap-doctor", "status", "--json"], timeout=30.0)
     data = r.json()
     if data is None:
-        return [(WARN, name, f"installed but unwired or errored (exit {r.code})")]
-    if not isinstance(data, dict):
-        return [(WARN, name, f"unexpected status output (exit {r.code})")]
-    rows_value = data.get("rows", [])
-    rows = rows_value if isinstance(rows_value, list) else []
-    bad = [row for row in rows if isinstance(row, dict) and row.get("severity") in ("hard", "missing", "unreadable")]
-    soft = [row for row in rows if isinstance(row, dict) and row.get("severity") == "soft"]
-    if bad:
-        return [(WARN, name, f"{len(bad)} file(s) over hard limit / missing (advisory)")]
-    if soft:
-        return [(WARN, name, f"{len(soft)} file(s) in soft band")]
-    return [(OK, name, f"{len(rows)} bootstrap file(s) within limits")]
+        status_row: CheckResult = (WARN, name, f"installed but unwired or errored (exit {r.code})")
+    elif not isinstance(data, dict):
+        status_row = (WARN, name, f"unexpected status output (exit {r.code})")
+    else:
+        rows_value = data.get("rows", [])
+        rows = rows_value if isinstance(rows_value, list) else []
+        bad = [
+            row for row in rows if isinstance(row, dict) and row.get("severity") in ("hard", "missing", "unreadable")
+        ]
+        soft = [row for row in rows if isinstance(row, dict) and row.get("severity") == "soft"]
+        if bad:
+            status_row = (WARN, name, f"{len(bad)} file(s) over hard limit / missing (advisory)")
+        elif soft:
+            status_row = (WARN, name, f"{len(soft)} file(s) in soft band")
+        else:
+            status_row = (OK, name, f"{len(rows)} bootstrap file(s) within limits")
+    lint = proc.run(["bootstrap-doctor", "lint", "--json"], timeout=30.0)
+    return [status_row, _bootstrap_doctor_lint_row(lint)]
 
 
 def _token_glace_doctor(ctx: DoctorContext) -> List[CheckResult]:
@@ -431,8 +519,9 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         wire=_noop_wire,
         doctor=_bootstrap_doctor_doctor,
         surfaces=(
-            _surface("doctor-json", ("bootstrap-doctor", "status", "--json"), timeout_seconds=30.0),
-            _surface("verify-exit", ("bootstrap-doctor", "status", "--json"), timeout_seconds=30.0),
+            _surface("summary-json", ("bootstrap-doctor", "status", "--json"), timeout_seconds=30.0),
+            _surface("doctor-json", ("bootstrap-doctor", "lint", "--json"), timeout_seconds=30.0),
+            _surface("verify-exit", ("bootstrap-doctor", "lint", "--json"), timeout_seconds=30.0),
         ),
     ),
     ManagedTool(
