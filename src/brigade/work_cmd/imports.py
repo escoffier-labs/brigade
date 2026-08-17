@@ -9,6 +9,7 @@ from typing import Any
 from .. import evidence_brief, scrub
 from ..untrusted import scan_untrusted, wrap_untrusted
 from . import constants, helpers, ledger as ledger_mod
+from . import edges as edges_mod
 from . import scanners as scanners_mod
 from . import services as services_mod
 
@@ -935,25 +936,36 @@ def import_promote(
             )
         }
         promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+        failed: list[tuple[dict[str, Any], Exception]] = []
         for item in imports:
             if item.get("id") not in wanted_ids:
                 continue
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
-            task, created = ledger_mod._mark_import_promoted(target, item)
+            try:
+                task, created = ledger_mod._mark_import_promoted(target, item)
+            except (edges_mod.EdgeError, ledger_mod.TaskLedgerError) as exc:
+                failed.append((item, exc))
+                continue
             promoted.append((item, task, created))
         ledger_mod._write_imports(target, imports)
         created_count = len([item for item in promoted if item[2]])
         print(f"promoted: {len(promoted)}")
         print(f"created: {created_count}")
         print(f"existing: {len(promoted) - created_count}")
+        if failed:
+            print(f"failed: {len(failed)}")
         for item, task, created in promoted:
             status = "created" if created else "existing"
             print(
                 f"- {item.get('id')} -> {task['id']} [{status} acceptance={len(ledger_mod._task_acceptance(task))}] "
                 f"{helpers._short(str(task.get('text', '')))}"
             )
+        for item, exc in failed:
+            print(f"- {item.get('id')} failed: {exc}", file=sys.stderr)
+        if failed and not promoted:
+            return 2
         return 0
     if not import_id:
         print("error: import id is required unless --all is passed", file=sys.stderr)
@@ -972,7 +984,14 @@ def import_promote(
     if not text:
         print(f"error: import has no text: {import_id}", file=sys.stderr)
         return 2
-    task, created = ledger_mod._mark_import_promoted(target, item)
+    try:
+        task, created = ledger_mod._mark_import_promoted(target, item)
+    except edges_mod.EdgeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except ledger_mod.TaskLedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     ledger_mod._write_imports(target, imports)
     print(f"import: {item.get('id')}")
     print(f"status: {item.get('status')}")
