@@ -1589,6 +1589,21 @@ def _reanchor_external_directory_authority(
         ):
             continue
         _record_external_directory_authority(target, components, directory, workspace=workspace)
+        new_path, new_payload = _read_external_directory_authority(target)
+        if new_payload is None:
+            return True
+        old_directories = payload.get("directories")
+        current_directories = new_payload.get("directories")
+        if isinstance(old_directories, dict) and isinstance(current_directories, dict):
+            for key, value in old_directories.items():
+                if isinstance(key, str) and key not in current_directories:
+                    current_directories[key] = value
+        old_files = _external_file_authorities(payload)
+        if old_files:
+            merged = dict(old_files)
+            merged.update(_external_file_authorities(new_payload))
+            new_payload["files"] = merged
+        _write_external_directory_authority(new_path, new_payload)
         return True
     return False
 
@@ -1678,27 +1693,36 @@ def _external_file_authorities(payload: dict[str, Any] | None) -> dict[str, Any]
 
 
 def _snapshot_external_file_authorities(target: Path) -> dict[str, Any] | None:
-    """Copy the current file-authority map, or None when no workspace record exists."""
-    try:
-        _path, payload = _read_external_directory_authority(target)
-    except OSError:
-        return None
+    """Copy the current file-authority map, or None when no workspace record exists.
+
+    A missing record is None. An unreadable or malformed record raises OSError so
+    callers fail closed instead of treating a read failure as an empty map.
+    """
+    _path, payload = _read_external_directory_authority(target)
     if payload is None:
         return None
     return _external_file_authorities(payload)
 
 
 def _restore_external_file_authorities(target: Path, files: dict[str, Any] | None) -> None:
-    """Restore the file-authority map, or fail closed if the prior record cannot be written."""
+    """Merge a snapshot back into the file-authority map without erasing newer keys.
+
+    ``None`` means the snapshot saw no record; existing bindings are left intact.
+    An unreadable current record raises so rollback cannot wipe the store.
+    """
     path, payload = _read_external_directory_authority(target)
     if payload is None:
         if files is None:
             return
         raise OSError("external file authority record could not be restored")
     if files is None:
-        payload.pop("files", None)
+        return
+    merged = _external_file_authorities(payload)
+    merged.update(files)
+    if merged:
+        payload["files"] = merged
     else:
-        payload["files"] = files
+        payload.pop("files", None)
     _write_external_directory_authority(path, payload)
 
 
@@ -1905,6 +1929,12 @@ def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...],
                 _record_external_directory_authority(target, components, child, workspace=workspace)
             elif _reanchor_external_directory_authority(target, components, child, workspace=workspace):
                 _validate_external_directory_authority(target, components, child, workspace=workspace)
+            elif create:
+                # A scanner child with a sandboxed HOME may create this directory
+                # and bind it in its own store. Adopt it only when this workspace
+                # is already bound; a mismatched identity still fails closed.
+                _external_workspace_directory_identity(target)
+                _record_external_directory_authority(target, components, child, workspace=workspace)
             else:
                 raise
         _write_compatibility_directory_anchor(anchor_parent, child, anchor_name=anchor_name)

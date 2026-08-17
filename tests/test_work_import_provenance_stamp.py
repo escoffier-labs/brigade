@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -349,6 +350,127 @@ def test_receipt_binding_write_failure_restores_receipt_proof_inbox_and_bindings
     os.close(authority.directory)
     os.close(authority.root)
     scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES.pop(id(run), None)
+
+
+def test_file_authority_reanchors_with_directory_after_workspace_rename(tmp_path: Path) -> None:
+    original = tmp_path / "original-workspace"
+    original.mkdir()
+    item = ledger._make_import("rename-survives", kind="task", source="handoff-ingest")
+    _write_builtin_scanner_receipt(original, item)
+    ledger._write_persisted_import_proofs(original, [item], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(item, target=original) is True
+    assert ledger._legacy_import_source_content_identity(item, target=original) is not None
+
+    relocated = tmp_path / "relocated-workspace"
+    original.rename(relocated)
+    descriptor = ledger._open_import_proof_directory(relocated, create=True)
+    os.close(descriptor)
+
+    assert ledger._has_persisted_import_proof(item, target=relocated) is True
+    assert ledger._legacy_import_source_content_identity(item, target=relocated) is not None
+
+
+def test_file_authority_rollback_preserves_unrelated_bindings(tmp_path: Path) -> None:
+    first = ledger._make_import("proof A", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [first], operation_id="0" * 32)
+    snapshot_after_first = ledger._snapshot_external_file_authorities(tmp_path)
+    second = ledger._make_import("proof B", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [second], operation_id="1" * 32)
+    assert ledger._has_persisted_import_proof(first, target=tmp_path) is True
+    assert ledger._has_persisted_import_proof(second, target=tmp_path) is True
+
+    ledger._restore_external_file_authorities(tmp_path, snapshot_after_first)
+
+    assert ledger._has_persisted_import_proof(first, target=tmp_path) is True
+    assert ledger._has_persisted_import_proof(second, target=tmp_path) is True
+
+
+def test_file_authority_snapshot_raises_on_unreadable_record(tmp_path: Path) -> None:
+    item = ledger._make_import("unreadable snapshot", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is True
+    path = ledger._directory_authority_store_path(tmp_path)
+    path.write_text("{not-json")
+
+    with pytest.raises(OSError, match="malformed"):
+        ledger._snapshot_external_file_authorities(tmp_path)
+
+
+def test_file_authority_restore_none_does_not_wipe_existing_files(tmp_path: Path) -> None:
+    item = ledger._make_import("keep bindings", kind="task", source="learning-loop")
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is True
+
+    ledger._restore_external_file_authorities(tmp_path, None)
+
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert isinstance(payload, dict)
+    assert "files" in payload
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is True
+
+
+def test_scanner_child_cannot_rewrite_authority_store_via_inherited_env(tmp_path: Path) -> None:
+    from brigade import component_paths
+    from brigade.work_cmd import scanners as scanners_mod
+
+    item = ledger._make_import("env-scrub probe", kind="task", source="handoff-ingest")
+    receipt_path = _write_builtin_scanner_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+    script = tmp_path / "forge-via-env.py"
+    script.write_text(
+        """
+import hashlib
+import json
+import os
+from pathlib import Path
+
+cwd = Path.cwd()
+(cwd / "child-env.json").write_text(
+    json.dumps({"HOME": os.environ.get("HOME"), "XDG_DATA_HOME": os.environ.get("XDG_DATA_HOME")})
+)
+receipt = cwd / ".brigade" / "scanners" / "runs" / "chosen-run" / "receipt.json"
+payload = json.loads(receipt.read_text())
+payload["attacker_marker"] = "child-rewrite"
+receipt.write_text(json.dumps(payload))
+data = receipt.read_bytes()
+info = receipt.stat()
+binding = {"device": info.st_dev, "inode": info.st_ino, "sha256": hashlib.sha256(data).hexdigest()}
+home = os.environ.get("HOME")
+xdg = os.environ.get("XDG_DATA_HOME")
+if xdg:
+    root = Path(xdg)
+elif home:
+    root = Path(home) / ".local" / "share"
+else:
+    raise SystemExit(0)
+store_dir = root / "brigade" / "directory-authority"
+if not store_dir.is_dir():
+    raise SystemExit(0)
+for path in store_dir.glob("*.json"):
+    record = json.loads(path.read_text())
+    files = record.setdefault("files", {})
+    files[".brigade/scanners/runs/chosen-run/receipt.json"] = binding
+    path.write_text(json.dumps(record))
+"""
+    )
+    scanners_mod._scanner_run_one(
+        tmp_path,
+        {
+            "id": "env-probe",
+            "source": "env-probe",
+            "command": f"{sys.executable} {script}",
+            "timeout": 30,
+        },
+    )
+
+    env_dump = json.loads((tmp_path / "child-env.json").read_text())
+    real_root = component_paths.data_root()
+    assert env_dump.get("HOME") != os.environ.get("HOME")
+    assert env_dump.get("XDG_DATA_HOME") != os.environ.get("XDG_DATA_HOME")
+    assert env_dump.get("XDG_DATA_HOME") != real_root
+    assert receipt_path.exists()
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
 
 
 def test_legacy_migration_requires_persisted_sidecar_in_addition_to_receipt(tmp_path: Path):

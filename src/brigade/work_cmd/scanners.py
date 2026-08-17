@@ -7,6 +7,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,36 @@ class _ScannerRunDirectoryAuthority:
 
 _SCANNER_RUN_DIRECTORY_AUTHORITIES: dict[int, _ScannerRunDirectoryAuthority] = {}
 _SCANNER_RUN_PUBLICATION_SNAPSHOTS: dict[int, dict[str, Any]] = {}
+
+_SCANNER_CHILD_ENV_ALLOWLIST = (
+    "PATH",
+    "PATHEXT",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LANGUAGE",
+    "TZ",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+)
+
+
+def _scanner_child_environment() -> dict[str, str]:
+    """Return an explicit child env whose HOME/XDG paths cannot reach the authority store."""
+    env = {key: value for key in _SCANNER_CHILD_ENV_ALLOWLIST if (value := os.environ.get(key))}
+    sandbox = Path(tempfile.mkdtemp(prefix="brigade-scanner-child-"))
+    data_home = sandbox / ".local" / "share"
+    data_home.mkdir(parents=True)
+    (sandbox / ".config").mkdir(parents=True)
+    (sandbox / ".cache").mkdir(parents=True)
+    env["HOME"] = str(sandbox)
+    env["XDG_DATA_HOME"] = str(data_home)
+    env["XDG_CONFIG_HOME"] = str(sandbox / ".config")
+    env["XDG_CACHE_HOME"] = str(sandbox / ".cache")
+    return env
 
 
 def _open_scanner_runs_directory(target: Path, *, create: bool) -> int:
@@ -1160,7 +1191,7 @@ def _scanner_stamp_new_imports(
         inbox_exists = True
         try:
             existing_inbox = _open_scanner_inbox(target, os.O_RDONLY)
-        except FileNotFoundError:
+        except OSError:
             inbox_exists = False
         else:
             os.close(existing_inbox)
@@ -1184,8 +1215,8 @@ def _scanner_stamp_new_imports(
                 raise
             try:
                 ledger_mod._restore_external_file_authorities(target, before_files)
-            except OSError:
-                pass
+            except OSError as exc:
+                raise OSError("scanner import binding rollback could not restore its retained snapshot") from exc
             run["self_import"] = {
                 "created": 0,
                 "rejected": rejected + len(stamped_ids) + 1,
@@ -1440,6 +1471,7 @@ def _scanner_run_one(
             capture_output=True,
             timeout=float(scanner.get("timeout") or 300),
             shell=False,
+            env=_scanner_child_environment(),
         )
         stdout = completed_process.stdout or ""
         stderr = completed_process.stderr or ""

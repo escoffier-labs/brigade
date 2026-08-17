@@ -39,7 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity and content bindings. Legacy migration rejects in-place receipt
   overwrites, attacker-created sidecars, missing bindings, and mismatched
   file identity or content. A binding-write failure restores the prior
-  receipt, proof, inbox, and binding state or fails closed. Fixes #881.
+  receipt, proof, inbox, and binding state or fails closed. Workspace
+  rename re-anchors those file bindings with the directory record; rollback
+  merges the snapshot instead of replacing the map; and a malformed store
+  read fails closed instead of wiping every binding. Scanner children get
+  an explicit environment allowlist whose `HOME` and `XDG_DATA_HOME` point
+  at a disposable sandbox, not the verifier authority store. Same-uid
+  writes that guess the store path remain a residual class. Refs #881.
 - Bare `brigade care status` now discovers target-scoped per-entry
   registrations instead of scoring the atomic five-entry default. A target
   with no discovered units reports `missing`. Systemd status also reports

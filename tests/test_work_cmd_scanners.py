@@ -2936,6 +2936,90 @@ def test_scanner_stamp_discards_staged_receipt_proof_when_inbox_rewrite_fails(tm
     assert "self_import_proofs" not in run
 
 
+def test_scanner_child_environment_omits_home_and_xdg_data_home() -> None:
+    from brigade import component_paths
+    from brigade.work_cmd import scanners as scanners_mod
+
+    env = scanners_mod._scanner_child_environment()
+    real_root = component_paths.data_root()
+    child_home = env["HOME"]
+    child_data = env["XDG_DATA_HOME"]
+    assert child_home != os.environ.get("HOME")
+    assert child_data != os.environ.get("XDG_DATA_HOME")
+    assert child_data != real_root
+    assert not child_home.startswith(real_root)
+    assert not child_data.startswith(real_root)
+    assert "LOCALAPPDATA" not in env
+    if "PATH" in os.environ:
+        assert env.get("PATH") == os.environ["PATH"]
+    assert component_paths.data_root(env=env) != real_root
+
+
+def test_scanner_stamp_inbox_probe_treats_not_a_directory_as_missing(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanner = _builtin_scanner("handoff-ingest")
+    run = _verified_builtin_scanner_run(scanner)
+    emitted = work_cmd.ledger._make_import("probe inbox", kind="finding", source="handoff-ingest")
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text(json.dumps(emitted) + "\n")
+    original = scanners_mod._open_scanner_inbox
+    calls = {"n": 0}
+
+    def raise_on_probe(target, flags, *, create=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return original(target, flags, create=create)
+        raise NotADirectoryError(errno.ENOTDIR, "Not a directory", ".brigade")
+
+    monkeypatch.setattr(scanners_mod, "_open_scanner_inbox", raise_on_probe)
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner=scanner,
+        run=run,
+        before_ids=set(),
+        before_imports=[],
+        before_raw=b"",
+    )
+
+    assert calls["n"] >= 2
+    assert stamped
+
+
+def test_scanner_stamp_binding_restore_failure_fails_closed(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanner = _builtin_scanner("handoff-ingest")
+    run = _verified_builtin_scanner_run(scanner)
+    emitted = work_cmd.ledger._make_import("binding restore failure", kind="finding", source="handoff-ingest")
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    raw = json.dumps(emitted).encode() + b"\n"
+    inbox.write_bytes(raw)
+
+    def fail_proof(*_args, **_kwargs):
+        raise OSError("proof persistence failed")
+
+    def fail_restore(*_args, **_kwargs):
+        raise OSError("file authority restore failed")
+
+    monkeypatch.setattr(work_cmd.ledger, "_write_persisted_import_proofs", fail_proof)
+    monkeypatch.setattr(work_cmd.ledger, "_restore_external_file_authorities", fail_restore)
+
+    with pytest.raises(OSError, match="scanner import binding rollback could not restore"):
+        scanners_mod._scanner_stamp_new_imports(
+            target=tmp_path,
+            scanner=scanner,
+            run=run,
+            before_ids=set(),
+            before_imports=[],
+            before_raw=b"",
+        )
+
+    assert inbox.read_bytes() == raw
+
+
 def test_scanner_stamp_surfaces_failed_proof_rollback_and_restores_inbox(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
