@@ -1541,9 +1541,29 @@ def _child_status_followup(status: str) -> tuple[str, dict[str, Any]] | None:
         return None
     if event_type in {"run.completed", "run.failed", "run.interrupted"}:
         return event_type, {"status": status, "detail": "branched child snapshot"}
-    if event_type == "run.created":
-        return event_type, {"status": "started"}
     return event_type, {"detail": "branched child snapshot"}
+
+
+def _absolute_path_under(value: object, parent: Path) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    path = Path(value)
+    if not path.is_absolute():
+        return False
+    try:
+        resolved = path.resolve()
+        parent_resolved = parent.resolve()
+    except OSError:
+        return False
+    return resolved == parent_resolved or parent_resolved in resolved.parents
+
+
+def _rewrite_parent_owned_path(value: object, *, parent_run_dir: Path, child_run_dir: Path) -> str:
+    parent_resolved = parent_run_dir.resolve()
+    resolved = Path(str(value)).resolve()
+    if resolved == parent_resolved:
+        return str(child_run_dir)
+    return str(child_run_dir / resolved.relative_to(parent_resolved))
 
 
 def _child_receipt_from_parent_snapshot(
@@ -1551,6 +1571,8 @@ def _child_receipt_from_parent_snapshot(
     *,
     workspace: Path,
     parent_run_id: str,
+    parent_run_dir: Path,
+    child_run_dir: Path,
     branch_event: Any,
 ) -> dict[str, Any]:
     child = dict(snapshot)
@@ -1568,6 +1590,23 @@ def _child_receipt_from_parent_snapshot(
     child.pop("resumed_at", None)
     child.pop("recovery_history", None)
     child.pop("recovery_preserved_artifact", None)
+    child.pop("control_transport", None)
+    child.pop("control_socket", None)
+    child.pop("active_stage", None)
+    child.pop("active_seats", None)
+    child.pop("phase_owner", None)
+    child.pop("error", None)
+    child.pop("failure", None)
+    child.pop("failure_phase", None)
+    child.pop("failure_kind", None)
+    child.pop("worker_failure_summary", None)
+    artifacts = child.get("artifacts")
+    if _absolute_path_under(artifacts, parent_run_dir):
+        child["artifacts"] = _rewrite_parent_owned_path(
+            artifacts, parent_run_dir=parent_run_dir, child_run_dir=child_run_dir
+        )
+    if _absolute_path_under(child.get("handoff"), parent_run_dir):
+        child.pop("handoff", None)
     child["lineage"] = {
         "kind": "child",
         "parent_run_id": parent_run_id,
@@ -1582,7 +1621,16 @@ def _child_receipt_from_parent_snapshot(
 
 
 def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | None = None) -> int:
-    from . import aboyeur, localio, receipt_schema, run_journal, run_lifecycle, run_projector, runguard
+    from . import (
+        aboyeur,
+        localio,
+        receipt_schema,
+        run_checkpoint,
+        run_journal,
+        run_lifecycle,
+        run_projector,
+        runguard,
+    )
 
     parent_run_dir, error = _resolve_run_dir(parent_run, cwd=cwd, runs_dir=runs_dir)
     if error is not None:
@@ -1624,6 +1672,8 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
         snapshot,
         workspace=workspace,
         parent_run_id=parent_run_dir.name,
+        parent_run_dir=parent_run_dir,
+        child_run_dir=child_run_dir,
         branch_event=branch_event,
     )
     try:
@@ -1655,8 +1705,12 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
                     idempotency_key=f"runs-child:{branch_event.event_id}:{event_type}",
                     workspace=workspace,
                 )
-            child_events = run_journal.read_journal(run_lifecycle._journal_path(child_run_dir)).events
-            projection = run_projector.project_run_snapshot(child_bootstrap, child_events, journal_present=True)
+            report = run_journal.read_journal_bounded(run_lifecycle._journal_path(child_run_dir))
+            if report.partial_tail is not None:
+                raise run_journal.RunJournalError("child lifecycle journal has a partial trailing record")
+            if report.chain_errors:
+                raise run_journal.RunJournalError(report.chain_errors[0])
+            projection = run_projector.project_run_snapshot(child_bootstrap, report.events, journal_present=True)
             localio.write_json(child_run_dir / "run.json", receipt_schema.stamp_run_receipt(dict(projection.snapshot)))
     except (
         FileExistsError,
@@ -1665,6 +1719,8 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
         runguard.RunGuardError,
         run_lifecycle.LifecycleJournalError,
         run_projector.ProjectionError,
+        run_checkpoint.CheckpointError,
+        run_journal.RunJournalError,
     ) as exc:
         if child_run_dir.exists():
             shutil.rmtree(child_run_dir, ignore_errors=True)

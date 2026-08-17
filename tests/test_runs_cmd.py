@@ -2343,6 +2343,78 @@ def test_runs_child_fails_closed_for_corrupt_parent_journal_without_partial_run(
     assert children == []
 
 
+def test_runs_child_cleans_up_partial_dir_when_checkpoint_fails_after_mkdir(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+
+    def boom(*_args, **_kwargs):
+        raise run_checkpoint.CheckpointError("injected post-mkdir failure", category="test")
+
+    monkeypatch.setattr(run_checkpoint, "write_checkpoint", boom)
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 2
+    err = capsys.readouterr().err
+    assert "could not create child run" in err
+    assert "injected post-mkdir failure" in err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
+def test_runs_child_does_not_inherit_parent_control_socket_or_parent_paths(tmp_path, capsys):
+    from brigade import run_control
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    parent_socket = "/tmp/brigade-parent-worker.sock"
+    events = _write_checkpointed_parent_run(
+        workspace,
+        parent_dir,
+        extra={
+            "control_transport": {
+                "schema": "brigade.run_control_transport.v1",
+                "kind": "unix",
+                "path": parent_socket,
+            },
+            "control_socket": parent_socket,
+            "active_stage": "dispatch",
+            "active_seats": ["coder"],
+            "phase_owner": "coder",
+            "artifacts": str(parent_dir),
+            "handoff": str(parent_dir / "handoff.md"),
+            "error": "parent timed out",
+            "failure_phase": "dispatch",
+            "failure_kind": "timeout",
+            "failure": {"phase": "dispatch", "kind": "timeout", "detail": "parent timed out"},
+            "worker_failure_summary": "coder timed out",
+        },
+    )
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    child_meta = json.loads((child_dir / "run.json").read_text())
+
+    assert "control_transport" not in child_meta
+    assert "control_socket" not in child_meta
+    assert "active_stage" not in child_meta
+    assert "active_seats" not in child_meta
+    assert "phase_owner" not in child_meta
+    assert "error" not in child_meta
+    assert "failure" not in child_meta
+    assert "failure_phase" not in child_meta
+    assert "failure_kind" not in child_meta
+    assert "worker_failure_summary" not in child_meta
+    assert "handoff" not in child_meta
+    assert child_meta.get("artifacts") == str(child_dir)
+    with pytest.raises(run_control.ControlError):
+        run_control.control_transport_from_run(child_dir)
+
+
 def test_runs_show_prints_ground_truth(tmp_path, capsys):
     run_dir = tmp_path / "run"
     _write_run_artifacts(run_dir)
@@ -2490,7 +2562,12 @@ def _events(run_dir: Path) -> list:
     return run_journal.read_journal(_journal_path(run_dir)).events
 
 
-def _write_checkpointed_parent_run(workspace: Path, run_dir: Path) -> list[run_journal.RunEvent]:
+def _write_checkpointed_parent_run(
+    workspace: Path,
+    run_dir: Path,
+    *,
+    extra: dict | None = None,
+) -> list[run_journal.RunEvent]:
     run_dir.parent.mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
     run_json_obj = {
@@ -2508,6 +2585,8 @@ def _write_checkpointed_parent_run(workspace: Path, run_dir: Path) -> list[run_j
         "lifecycle_journal_requested": True,
         "run_journal_authority_requested": True,
     }
+    if extra:
+        run_json_obj.update(extra)
     _localio().write_json(run_dir / "run.json", run_json_obj)
     with runguard.run_lock(workspace, run_dir=run_dir):
         run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
