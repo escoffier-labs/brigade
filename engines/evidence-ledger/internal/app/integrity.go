@@ -52,7 +52,7 @@ func resolveReadEnvelope(metadata map[string]any) integrityView {
 		TrustLabel:      "unknown",
 		Origin:          "unknown",
 		Modality:        "unknown",
-		InjectionStatus: "clean",
+		InjectionStatus: "",
 	}
 	raw, has := metadata["provenance"]
 	if !has || raw == nil {
@@ -204,10 +204,10 @@ func recordIntegrityMismatchEvents(db *sql.DB, itemID, fromLabel string, mismatc
 
 func injectionBlocksForensic(status string) bool {
 	switch status {
-	case "flagged", "pending", "error":
-		return true
-	default:
+	case "clean":
 		return false
+	default:
+		return true
 	}
 }
 
@@ -325,7 +325,7 @@ func stringField(m map[string]any, key string) string {
 }
 
 func digestField(m map[string]any, key string) string {
-	s := stringField(m, key)
+	s := strings.ToLower(stringField(m, key))
 	if len(s) != 64 {
 		return ""
 	}

@@ -206,6 +206,59 @@ func TestEvidenceBundleMarkdownAndCachePreserveEnvelopeAndOmissions(t *testing.T
 	assertIntegrityEventCount(t, id, 1)
 }
 
+func TestUppercaseStoredDigestWithTamperedContentRaisesMismatch(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	id := insertCleanIntegrityItem(t, "UNIQUE_UPPERCASE_NEEDLE original body", "untrusted", "clean")
+	uppercaseItemContentHash(t, id)
+	tamperItemText(t, id, "UNIQUE_UPPERCASE_NEEDLE tampered body")
+
+	search := runJSON(t, "search", "UNIQUE_UPPERCASE_NEEDLE", "--json")
+	results := search["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("search results = %#v", search)
+	}
+	hit := results[0].(map[string]any)
+	if hit["integrity_mismatch"] != true {
+		t.Fatalf("uppercase digest skipped verification: %#v", hit)
+	}
+	if snippet, _ := hit["snippet"].(string); snippet != "" {
+		t.Fatalf("uppercase-digest mismatch leaked snippet: %q", snippet)
+	}
+
+	hidden := runJSON(t, "show", id, "--json")
+	if hidden["integrity_mismatch"] != true {
+		t.Fatalf("show missed uppercase-digest mismatch: %#v", hidden)
+	}
+	if _, ok := hidden["text"]; ok {
+		t.Fatalf("show leaked tampered body after uppercase digest: %#v", hidden)
+	}
+	assertItemNotDeleted(t, id)
+}
+
+func TestForensicContentBlocksUnknownInjectionStatus(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	id := insertCleanIntegrityItem(t, "unknown injection mismatched body", "untrusted", "clean")
+	setItemInjectionStatus(t, id, "unknown")
+	forgeItemContentHash(t, id, forgedContentDigest)
+
+	revealed := runJSON(t, "show", id, "--json", "--forensic-content")
+	if _, ok := revealed["text"]; ok {
+		t.Fatalf("forensic reveal leaked unknown-injection mismatched body: %#v", revealed)
+	}
+	if revealed["integrity_mismatch"] != true {
+		t.Fatalf("unknown-injection mismatch not flagged: %#v", revealed)
+	}
+	if revealed["integrity_body_omitted"] != true {
+		t.Fatalf("unknown-injection mismatch should omit body: %#v", revealed)
+	}
+	if revealed["trust_label"] != "untrusted" {
+		t.Fatalf("unknown-injection forensic changed trust: %#v", revealed)
+	}
+	assertItemNotDeleted(t, id)
+}
+
 func TestIntegrityMismatchDoesNotDowngradeTrustLabel(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
@@ -290,6 +343,78 @@ func ensureIntegrityParents(t *testing.T, db *sql.DB) {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`insert or ignore into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('integrity-col','integrity-src','integrity-col','agent_session','integrity','{}',?,?)`, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func uppercaseItemContentHash(t *testing.T, itemID string) {
+	t.Helper()
+	db := openTestDB(t)
+	defer db.Close()
+	var metadataJSON string
+	if err := db.QueryRow(`select metadata_json from items where id = ?`, itemID).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	env := meta["provenance"].(map[string]any)
+	hashes := env["hashes"].(map[string]any)
+	digest, _ := hashes["content"].(string)
+	if digest == "" {
+		t.Fatal("missing content digest")
+	}
+	hashes["content"] = strings.ToUpper(digest)
+	updated, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update items set metadata_json = ? where id = ?`, string(updated), itemID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func tamperItemText(t *testing.T, itemID, newText string) {
+	t.Helper()
+	db := openTestDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`update items set text = ? where id = ?`, newText, itemID); err != nil {
+		t.Fatal(err)
+	}
+	var sourceKind, collectionKind, itemKind, actorType string
+	if err := db.QueryRow(`select source_kind, collection_kind, item_kind, actor_type from item_fts where item_id = ?`, itemID).Scan(&sourceKind, &collectionKind, &itemKind, &actorType); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`delete from item_fts where item_id = ?`, itemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) values(?,?,?,?,?,?)`, itemID, sourceKind, collectionKind, itemKind, actorType, newText); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setItemInjectionStatus(t *testing.T, itemID, status string) {
+	t.Helper()
+	db := openTestDB(t)
+	defer db.Close()
+	var metadataJSON string
+	if err := db.QueryRow(`select metadata_json from items where id = ?`, itemID).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	env := meta["provenance"].(map[string]any)
+	trust := env["trust"].(map[string]any)
+	injection := trust["injection"].(map[string]any)
+	injection["status"] = status
+	updated, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update items set metadata_json = ? where id = ?`, string(updated), itemID); err != nil {
 		t.Fatal(err)
 	}
 }

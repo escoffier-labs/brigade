@@ -37,7 +37,8 @@ Releases before this changelog was started are on the [releases page](https://gi
   bodies, and append one idempotent downgrade event per item/hash/mismatch
   without deleting the row. Direct `miseledger show --forensic-content` can
   reveal a mismatched or synthesized-legacy body with a warning; it never
-  changes trust and never reveals injection `flagged`, `pending`, or `error`.
+  changes trust and only reveals a body when injection status is the explicit
+  known-safe value `clean` (empty, unknown, and parse-lost statuses block).
   MCP and HTTP have no forensic reveal path. Bundle cache and Markdown keep
   envelope fields and `integrity_omitted`.
 - Provenance persistence Slice 2: ingest stamps indexed `provenance.*` projections,
