@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover <operation-id>`. Refs #911.
 
 ### Changed
+- `brigade memory project-vault` produces a browsable vault on a real corpus.
+  Notes take their title from the card's leading heading when frontmatter has
+  no `title`, instead of the filename slug, and that heading is no longer
+  repeated in the body. Related links are ranked and capped at 12 per note, so
+  a large shared category no longer forms a complete graph. Maps that would
+  cover every note are omitted, and canvas nodes lay out in a grid rather than
+  one row. On a 1,254-card corpus this took the canvas from 83,586 edges and
+  11.3 MB to a bounded graph. (#888)
 - Center Memory Operations Cards now shows corpus size, a chip cloud, compact
   expandable rows, and 30-row paging. Handoffs is a sibling tab on that page;
   `/view/handoffs` redirects there. Snapshot polling reloads the page so
