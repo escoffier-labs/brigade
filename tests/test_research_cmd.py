@@ -3304,6 +3304,118 @@ def test_show_v2_sources_are_verified_bounded_and_sanitized(tmp_path: Path, caps
     assert "content" not in record
     assert "web-content-secret" not in json.dumps(record)
     assert record["content_chars"] > len(record["excerpt"])
+    assert payload["artifact_verification"]["sources"] == "verified"
+
+
+_PROBE_SOURCE_URI = (
+    "https://alice:hunter2@api.example.com/v1/doc?api_key=SECRETKEY123&access_token=TOKENVAL456"
+)
+_PROBE_URI_SECRETS = ("hunter2", "SECRETKEY123", "TOKENVAL456")
+
+
+def _seed_probe_run_with_credential_uri(target: Path, run_id: str = "probe-run") -> None:
+    registry.create_standard_run(
+        target,
+        run_id=run_id,
+        question="Probe URI redaction",
+        profile="grounded",
+        caps={"max_time": 300, "max_dispatches": 8},
+        roster=doctor_roster(),
+    )
+    source = SourceEnvelope.build(
+        origin="web",
+        provider="fetcher",
+        uri=_PROBE_SOURCE_URI,
+        content="public excerpt body",
+        trust="web",
+        acquired_at="2026-08-17T00:00:00+00:00",
+        producing_lane="discovery",
+        requested_model="gemini-web",
+        observed_model=None,
+    )
+    sources_ref = registry.write_sources(target, run_id, [source])
+    registry.update_phase(target, run_id, "discovery", status="completed", artifact=sources_ref)
+
+
+def test_sanitize_projection_uri_redacts_userinfo_and_secret_query_values() -> None:
+    cleaned = research_cmd._sanitize_projection_uri(_PROBE_SOURCE_URI)
+    assert cleaned == (
+        "https://api.example.com/v1/doc?api_key=[redacted]&access_token=[redacted]"
+    )
+    extra = research_cmd._sanitize_projection_uri(
+        "https://example.test/doc?key=FAKEKEYVAL&sig=FAKESIGVAL&q=public"
+    )
+    assert extra == "https://example.test/doc?key=[redacted]&sig=[redacted]&q=public"
+    assert research_cmd._sanitize_projection_uri("not a uri") == "not a uri"
+
+
+def test_show_v2_source_uri_strips_userinfo_and_secret_query_values(tmp_path: Path, capsys) -> None:
+    _seed_probe_run_with_credential_uri(tmp_path)
+
+    code = cli_show(target=tmp_path, run_id="probe-run", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    dumped = json.dumps(payload)
+
+    assert code == 0
+    (record,) = payload["sources"]
+    uri = record["uri"]
+    assert isinstance(uri, str)
+    assert "alice" not in uri
+    assert "@" not in uri
+    assert "api.example.com/v1/doc" in uri
+    assert "api_key=" in uri
+    assert "access_token=" in uri
+    for secret in _PROBE_URI_SECRETS:
+        assert secret not in uri
+        assert secret not in dumped
+
+    from brigade.center_cmd.dashboard.views import research
+
+    page = research.render(
+        {
+            "status": {"schema": "brigade.research.status.v1", "schema_version": 1, "runs": []},
+            "doctor": {"schema": "brigade.research.doctor.v1", "schema_version": 1, "status": "ok", "lanes": []},
+            "selected_run": "probe-run",
+            "show": payload,
+        },
+        "nonce",
+    )
+    for secret in _PROBE_URI_SECRETS:
+        assert secret not in page
+    assert "api.example.com/v1/doc" in page
+
+
+def test_show_v2_tampered_sources_withhold_content(tmp_path: Path, capsys) -> None:
+    _seed_shown_run_with_sources_and_report(tmp_path)
+    sources_path = tmp_path / ".brigade" / "runs" / "shown-run" / registry.SOURCES_ARTIFACT
+    sources_path.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "source_id": "src-tampered",
+                        "origin": "web",
+                        "provider": "fetcher",
+                        "uri": "https://tampered.example/evil",
+                        "content": "TAMPERED INJECTED CONTENT TAMPERED INJECTED CONTENT",
+                        "trust": "web",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = cli_show(target=tmp_path, run_id="shown-run", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    dumped = json.dumps(payload)
+
+    assert code == 0
+    assert payload["sources_verification"] == "digest-mismatch"
+    assert payload["sources"] is None
+    assert "tampered.example" not in dumped
+    assert "TAMPERED INJECTED CONTENT" not in dumped
+    assert payload["artifact_verification"]["sources"] == "digest-mismatch"
 
 
 def test_show_v2_report_is_digest_verified_and_sanitized(tmp_path: Path, capsys) -> None:

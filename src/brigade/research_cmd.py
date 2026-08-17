@@ -11,6 +11,7 @@ from pathlib import Path
 from collections.abc import Sequence
 from threading import Event, Thread
 from typing import Any, Callable, Dict, List, Mapping, Optional
+from urllib.parse import parse_qsl, quote, urlparse, urlunparse
 
 from .localio import parse_iso_datetime, utc_now_iso as _now
 from .research import config as rconfig
@@ -2297,6 +2298,14 @@ _SECRET_KEY_RE = re.compile(
 _BARE_TOKEN_KEY_RE = re.compile(r"(?i)^token$")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _COOKIE_ASSIGN_RE = re.compile(r"(?i)\bcookie\s*[=:]\s*[^\s,;]+")
+_URI_LIKE_RE = re.compile(r"(?i)^[a-z][a-z0-9+.-]*://")
+_SECRET_QUERY_PARAM_RE = re.compile(
+    r"(?i)^("
+    r"api[_-]?key|access[_-]?token|auth[_-]?token|api[_-]?token|"
+    r"refresh[_-]?token|id[_-]?token|token|key|secret|sig|signature|"
+    r"password|authorization|cookie|openai_api_key"
+    r")$"
+)
 
 
 def _pinned_research_exit_code(rec: Mapping[str, Any]) -> int:
@@ -2319,10 +2328,64 @@ def _is_projection_secret_key(key: object) -> bool:
 
 
 def _sanitize_projection_text(value: str) -> str:
-    text = _ABS_HOME_PATH_RE.sub("[redacted]", value)
+    text = _sanitize_projection_uri(value) if _URI_LIKE_RE.match(value.strip()) else value
+    text = _ABS_HOME_PATH_RE.sub("[redacted]", text)
     text = _BEARER_RE.sub("[redacted]", text)
     text = _COOKIE_ASSIGN_RE.sub("cookie=[redacted]", text)
     return text
+
+
+def _is_secret_query_param(name: str) -> bool:
+    return bool(_SECRET_QUERY_PARAM_RE.fullmatch(name))
+
+
+def _netloc_without_userinfo(parsed: Any) -> str:
+    try:
+        host = parsed.hostname
+    except ValueError:
+        host = None
+    if host is None:
+        netloc = parsed.netloc
+        return netloc.rsplit("@", 1)[-1] if "@" in netloc else netloc
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        return f"{host}:{parsed.port}"
+    return host
+
+
+def _redact_secret_query(query: str) -> str:
+    if not query:
+        return query
+    parts: list[str] = []
+    for name, value in parse_qsl(query, keep_blank_values=True):
+        encoded_name = quote(name, safe="")
+        encoded_value = "[redacted]" if _is_secret_query_param(name) else quote(value, safe="")
+        parts.append(f"{encoded_name}={encoded_value}")
+    return "&".join(parts)
+
+
+def _sanitize_projection_uri(value: str) -> str:
+    """Strip URL userinfo and redact secret-bearing query parameter values."""
+    text = value.strip()
+    if not _URI_LIKE_RE.match(text):
+        return value
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return value
+    if not parsed.scheme:
+        return value
+    return urlunparse(
+        (
+            parsed.scheme,
+            _netloc_without_userinfo(parsed),
+            parsed.path,
+            parsed.params,
+            _redact_secret_query(parsed.query),
+            parsed.fragment,
+        )
+    )
 
 
 def _sanitize_projection_value(value: object, *, key: str | None = None) -> object:
@@ -2410,11 +2473,12 @@ def _source_record_projection(item: object) -> dict[str, object]:
     content = item.get("content")
     content_text = content if isinstance(content, str) else ""
     excerpt = registry.bound_text(content_text, _SHOW_SOURCE_EXCERPT_MAX_CHARS)
+    raw_uri = item.get("uri")
     record: dict[str, object] = {
         "source_id": item.get("source_id"),
         "origin": item.get("origin"),
         "provider": item.get("provider"),
-        "uri": item.get("uri"),
+        "uri": _sanitize_projection_uri(raw_uri) if isinstance(raw_uri, str) else raw_uri,
         "trust": item.get("trust"),
         "acquired_at": item.get("acquired_at"),
         "producing_lane": item.get("producing_lane"),
@@ -2428,6 +2492,18 @@ def _source_record_projection(item: object) -> dict[str, object]:
     return _sanitize_projection_value(record)  # type: ignore[return-value]
 
 
+def _discovery_sources_ref(research: Mapping[str, Any] | None) -> Any | None:
+    """Return the discovery-phase sources artifact ref, if one was recorded."""
+    phases = (research or {}).get("phases") if isinstance(research, Mapping) else None
+    if not isinstance(phases, Mapping):
+        return None
+    discovery = phases.get("discovery")
+    if not isinstance(discovery, Mapping):
+        return None
+    candidate = discovery.get("artifact")
+    return candidate if isinstance(candidate, Mapping) else None
+
+
 def _show_sources_projection(
     target: Path,
     run_id: str,
@@ -2438,22 +2514,24 @@ def _show_sources_projection(
 
     Verification states: ``verified`` (digest-checked ref), ``unverified``
     (sources artifact readable but no matching digest ref), ``missing`` (no
-    persisted sources), ``unavailable`` (legacy run).
+    persisted sources), ``unavailable`` (legacy run), ``digest-mismatch``
+    (a digest-bearing ref exists and the file on disk does not match).
+    Content is withheld on every state except ``verified`` and ``unverified``.
     """
     if rec.get("legacy"):
         return None, "unavailable"
-    ref: Any = None
-    phases = (research or {}).get("phases") if isinstance(research, Mapping) else None
-    if isinstance(phases, Mapping):
-        discovery = phases.get("discovery")
-        if isinstance(discovery, Mapping):
-            candidate = discovery.get("artifact")
-            if isinstance(candidate, Mapping):
-                ref = candidate
+    ref = _discovery_sources_ref(research)
     if ref is not None:
-        loaded = registry.read_verified_artifact(target, run_id, ref)
-        if isinstance(loaded, tuple):
-            return [_source_record_projection(item) for item in loaded], "verified"
+        state = registry.artifact_verification_state(target, run_id, ref)
+        if state == "verified":
+            loaded = registry.read_verified_artifact(target, run_id, ref)
+            if isinstance(loaded, tuple):
+                return [_source_record_projection(item) for item in loaded], "verified"
+            return None, "missing"
+        if state == "digest-mismatch":
+            return None, "digest-mismatch"
+        if state == "missing":
+            return None, "missing"
     payload = _load_json_artifact(target, run_id, registry.SOURCES_ARTIFACT)
     if payload is None:
         return None, "missing"
@@ -2496,12 +2574,21 @@ def _show_report_projection(target: Path, run_id: str, rec: Mapping[str, Any]) -
     return report
 
 
-def _show_artifact_verification(target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[str, str]:
+def _show_artifact_verification(
+    target: Path,
+    run_id: str,
+    rec: Mapping[str, Any],
+    research: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
     if rec.get("legacy"):
         return {}
+    refs = _show_artifact_refs(rec)
+    sources_ref = _discovery_sources_ref(research)
+    if sources_ref is not None and "sources" not in refs:
+        refs["sources"] = sources_ref
     return {
         name: registry.artifact_verification_state(target, run_id, ref)
-        for name, ref in sorted(_show_artifact_refs(rec).items())
+        for name, ref in sorted(refs.items())
     }
 
 
@@ -2553,7 +2640,7 @@ def _show_payload(*, target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[
         "sources": sources,
         "sources_verification": sources_verification,
         "report": _show_report_projection(target, run_id, rec),
-        "artifact_verification": _show_artifact_verification(target, run_id, rec),
+        "artifact_verification": _show_artifact_verification(target, run_id, rec, research),
     }
 
 
