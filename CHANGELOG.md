@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade runs child <run-id> <event-id>` creates a durable child run from a
+  checkpoint-covered parent lifecycle event, records lineage and the verified
+  shared prefix, and shows that lineage in `brigade runs show`. The child does
+  not inherit the parent's live control socket, live-progress fields, failure
+  terminal fields, or parent-directory artifact/handoff paths. (#594)
 - `brigade memory project-vault` writes a one-way Obsidian projection of
   canonical memory into an existing vault: care-state frontmatter and tags,
   wikilinks, category/harness maps, and a topology canvas. Vault writes use
