@@ -33,11 +33,13 @@ Adapter-enforceable dimensions (#884):
   For those dimensions a declared observed cap becomes a per-adapter hard
   ceiling: units are reserved before provider or tool work starts, and a
   denied reservation runs no external work. Reservation grants are recorded
-  as estimated usage so recovery rebuilds them from the journal, while
-  post-call provider reconciles stay distinct. Adapters without a reliable
-  reservation boundary keep the observation-only behavior shipped by the
-  first enforceable slice (#864). Enforcement is never universal: an
-  observed value without a pre-call reservation boundary is not a hard gate.
+  as estimated usage marked ``reason_class=reservation_grant`` so recovery
+  rebuilds only real grants from the journal, while post-call provider
+  reconciles stay distinct. Replay identity is ``(dimension, request_id)``.
+  Adapters without a reliable reservation boundary keep the observation-only
+  behavior shipped by the first enforceable slice (#864). Enforcement is
+  never universal: an observed value without a pre-call reservation
+  boundary is not a hard gate.
 
 Legacy VerificationContract ``token_budget`` is an **aggregate** token ceiling
 (paired with receipt ``tokens_used``). It is preserved as declaration
@@ -131,6 +133,7 @@ REASON_CLASSES = frozenset(
         "operator_cancel",
         "budget_cancel",
         "usage_reconcile",
+        "reservation_grant",
         "unknown_dimension",
         "schema_incompatible",
     }
@@ -247,6 +250,11 @@ def _idempotency_key(*parts: str) -> str:
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     keep = MAX_IDEMPOTENCY_KEY_LEN - 17
     return f"{key[:keep]}:{digest}"
+
+
+def _adapter_reservation_identity(dimension: str, request_id: str) -> tuple[str, str]:
+    """Stable replay key for one adapter reservation grant."""
+    return (dimension, request_id)
 
 
 def mode_for_dimension(dimension: str) -> str:
@@ -1203,6 +1211,7 @@ def build_usage_reconciled_event(
     request_id: str,
     estimated_used: int | None = None,
     provider_used: int | None = None,
+    reason_class: str = "usage_reconcile",
 ) -> dict[str, Any]:
     if dimension not in ALL_DIMENSIONS:
         raise BudgetCompatibilityError(
@@ -1211,6 +1220,8 @@ def build_usage_reconciled_event(
         )
     if usage_source not in USAGE_SOURCES:
         raise BudgetError("invalid usage_source", code="reconcile_invalid")
+    if reason_class not in REASON_CLASSES:
+        raise BudgetError("invalid reason_class", code="reconcile_invalid")
     mode = mode_for_dimension(dimension)
     # Enforceable dimensions may only reconcile as observed telemetry when an
     # adapter reports them; hard gates still own reservation.
@@ -1224,7 +1235,7 @@ def build_usage_reconciled_event(
             "provider_used": provider_used,
             "used": used,
             "request_id": request_id,
-            "reason_class": "usage_reconcile",
+            "reason_class": reason_class,
         },
         "idempotency_key": _idempotency_key(EVENT_RECONCILED, dimension, usage_source, request_id),
     }
@@ -1316,10 +1327,12 @@ class BudgetCoordinator:
     # Distinct from ``_reserved_request_ids`` so restart can reclaim a durable
     # pending identity once, while concurrent same-seat callers allocate anew.
     _launch_claims: set[str] = field(default_factory=set)
-    # Stable identities of granted adapter-unit reservations (#884). Rebuilt
-    # from estimated usage_reconciled journal facts on reload so a retry or
-    # post-restart replay of the same id does not double-charge the ceiling.
-    _reserved_adapter_request_ids: set[str] = field(default_factory=set)
+    # Stable identities of granted adapter-unit reservations (#884), keyed by
+    # (dimension, request_id). Rebuilt from journal facts marked
+    # reason_class=reservation_grant so a retry or post-restart replay of the
+    # same identity does not double-charge, and public reconcile_usage events
+    # are not mistaken for grants.
+    _reserved_adapter_request_ids: set[tuple[str, str]] = field(default_factory=set)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
@@ -1352,18 +1365,22 @@ class BudgetCoordinator:
                 ):
                     reserved.add(dispatch_reservation_request_id(seat, attempt))
             self._reserved_request_ids = reserved
-            adapter_reserved: set[str] = set()
+            adapter_reserved: set[tuple[str, str]] = set()
             for event in events:
                 if _event_type(event) != EVENT_RECONCILED:
                     continue
                 payload = _event_payload(event)
-                # Adapter reservation grants are journaled as estimated usage;
-                # their request ids are the stable reservation identities.
+                # Only explicit reservation grants reconstruct replay identity.
+                # Public reconcile_usage also emits estimated usage_reconciled
+                # events; those must not become no-op grants after restart.
+                if payload.get("reason_class") != "reservation_grant":
+                    continue
                 if payload.get("usage_source") != "estimated":
                     continue
                 request_id = payload.get("request_id")
-                if isinstance(request_id, str) and request_id:
-                    adapter_reserved.add(request_id)
+                dimension = payload.get("dimension")
+                if isinstance(request_id, str) and request_id and isinstance(dimension, str) and dimension:
+                    adapter_reserved.add(_adapter_reservation_identity(dimension, request_id))
             self._reserved_adapter_request_ids = adapter_reserved
             return self._projection
 
@@ -1465,12 +1482,14 @@ class BudgetCoordinator:
         by the reserved units. A denied reservation appends the bounded
         lifecycle facts (threshold / exhausted / reservation_denied) and
         raises ``BudgetPolicyError``; the caller must then start no external
-        work. Grants are journaled as estimated usage so recovery rebuilds
-        reservations from the journal; a post-call provider reconcile keeps
+        work.         Grants are journaled as estimated usage with
+        ``reason_class=reservation_grant`` so recovery rebuilds only real
+        grants from the journal; a post-call provider reconcile keeps
         estimated and provider-reconciled usage distinct. Replaying the same
-        stable ``request_id`` (retry or post-restart) neither double-charges
-        nor widens the ceiling. Dimensions without a declared cap are
-        unbounded: the reservation is allowed without charging usage.
+        stable ``(dimension, request_id)`` (retry or post-restart) neither
+        double-charges nor widens the ceiling. Dimensions without a declared
+        cap are unbounded: the reservation is allowed without charging usage
+        and does not register a replay identity.
         """
         with self._lock:
             if dimension in ENFORCEABLE_DIMENSIONS:
@@ -1497,7 +1516,8 @@ class BudgetCoordinator:
                     exhausted=exhausted,
                     request_id=request_id,
                 )
-            if request_id in self._reserved_adapter_request_ids:
+            reservation_key = _adapter_reservation_identity(dimension, request_id)
+            if reservation_key in self._reserved_adapter_request_ids:
                 # Idempotent replay of the same stable reservation identity.
                 return ReservationDecision(
                     allowed=True,
@@ -1510,7 +1530,6 @@ class BudgetCoordinator:
                 )
             ceiling = self.declaration.ceiling(dimension)
             if ceiling is None:
-                self._reserved_adapter_request_ids.add(request_id)
                 return ReservationDecision(
                     allowed=True,
                     dimension=dimension,
@@ -1581,10 +1600,11 @@ class BudgetCoordinator:
                     used=next_used,
                     request_id=request_id,
                     estimated_used=next_used,
+                    reason_class="reservation_grant",
                 )
             )
             self._commit(events)
-            self._reserved_adapter_request_ids.add(request_id)
+            self._reserved_adapter_request_ids.add(reservation_key)
             return ReservationDecision(
                 allowed=True,
                 dimension=dimension,
