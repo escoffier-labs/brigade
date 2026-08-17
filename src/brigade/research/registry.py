@@ -658,6 +658,24 @@ def _review_from_dict(payload: Mapping[str, Any]) -> ReviewResult:
     )
 
 
+def artifact_verification_state(target: Path, run_id: str, artifact: Any) -> str:
+    """Classify an artifact reference for read-only projections.
+
+    Returns ``"verified"`` when the recorded digest matches the file on disk,
+    ``"digest-mismatch"`` when it does not, ``"missing"`` when the referenced
+    file is absent, and ``"unrecorded"`` when the reference carries no usable
+    path-plus-digest pair.
+    """
+    path_name, expected_digest = _artifact_path_and_digest(artifact)
+    if path_name is None or not _valid_sha256_digest(expected_digest):
+        return "unrecorded"
+    run_directory = standard_run_dir(target, run_id)
+    path = _resolved_artifact_path(run_directory, path_name)
+    if path is None or not path.is_file():
+        return "missing"
+    return "verified" if _file_digest(path) == expected_digest else "digest-mismatch"
+
+
 def read_verified_artifact(target: Path, run_id: str, artifact: Any) -> Any | None:
     path_name, expected_digest = _artifact_path_and_digest(artifact)
     if path_name is None:

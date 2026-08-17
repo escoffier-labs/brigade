@@ -17,8 +17,19 @@ from typing import Sequence
 from brigade.center_cmd.dashboard import timing as center_timing
 
 
-def run_json(target: Path, args: Sequence[str], *, timeout: float = 20.0) -> dict:
-    """Run a brigade subcommand and return parsed JSON, or ``{"error": ...}``."""
+def run_json(
+    target: Path,
+    args: Sequence[str],
+    *,
+    timeout: float = 20.0,
+    ok_codes: Sequence[int] = (0,),
+) -> dict:
+    """Run a brigade subcommand and return parsed JSON, or ``{"error": ...}``.
+
+    ``ok_codes`` lists exit codes whose stdout is still a valid payload.
+    Doctor-style commands signal an unhealthy-but-projected state with a
+    nonzero exit while printing their versioned JSON; pass ``(0, 1)`` there.
+    """
     cmd = [sys.executable, "-m", "brigade", *args, "--target", str(target), "--json"]
     env = os.environ.copy()
     env["BRIGADE_EXTRAS"] = "1"
@@ -37,7 +48,7 @@ def run_json(target: Path, args: Sequence[str], *, timeout: float = 20.0) -> dic
     except OSError as exc:
         return {"error": f"command failed: {exc}"}
 
-    if result.returncode != 0:
+    if result.returncode not in ok_codes:
         detail = (result.stderr or result.stdout or "").strip()
         if detail:
             first_line = detail.splitlines()[0]

@@ -2059,9 +2059,9 @@ def test_show_json_redacts_adversarial_secrets(tmp_path: Path, capsys, monkeypat
     dumped = json.dumps(payload)
 
     assert code == 0
-    assert payload["schema"] == "brigade.research.show.v1"
-    assert payload["schema_version"] == 1
-    assert set(payload) >= {"run", "research", "findings", "citation_audit"}
+    assert payload["schema"] == "brigade.research.show.v2"
+    assert payload["schema_version"] == 2
+    assert set(payload) >= {"run", "research", "findings", "citation_audit", "sources", "report"}
     assert "literal-bearer-secret" not in dumped
     assert "sk-literal-api-secret" not in dumped
     assert "evil-cookie-value" not in dumped
@@ -2098,9 +2098,9 @@ def test_show_json_schema_nulls_absent_artifacts(tmp_path: Path, capsys) -> None
     payload = json.loads(capsys.readouterr().out)
 
     assert code == 0
-    assert payload["schema"] == "brigade.research.show.v1"
-    assert payload["schema_version"] == 1
-    assert set(payload) >= {"run", "research", "findings", "citation_audit"}
+    assert payload["schema"] == "brigade.research.show.v2"
+    assert payload["schema_version"] == 2
+    assert set(payload) >= {"run", "research", "findings", "citation_audit", "sources", "report"}
     assert payload["findings"] is None
     assert payload["citation_audit"] is None
     assert payload["run"]["run_id"] == "standard-run"
@@ -3253,3 +3253,106 @@ def test_cli_invalid_run_id_is_typed_usage_error(tmp_path: Path, capsys, cli_cal
     payload = json.loads(capsys.readouterr().out)
     assert payload["failure_kind"] == "invalid-run-id"
     assert "invalid run_id" in payload["error"]
+
+
+def _seed_shown_run_with_sources_and_report(target: Path) -> None:
+    registry.create_standard_run(
+        target,
+        run_id="shown-run",
+        question="What changed?",
+        profile="grounded",
+        caps={"max_time": 300, "max_dispatches": 8},
+        roster=doctor_roster(),
+    )
+    source = SourceEnvelope.build(
+        origin="web",
+        provider="fetcher",
+        uri="https://example.com/page",
+        content="finding-body " + ("Bearer web-content-secret " * 60),
+        trust="web",
+        acquired_at="2026-08-17T00:00:00+00:00",
+        producing_lane="discovery",
+        requested_model="gemini-web",
+        observed_model=None,
+    )
+    sources_ref = registry.write_sources(target, "shown-run", [source])
+    registry.update_phase(target, "shown-run", "discovery", status="completed", artifact=sources_ref)
+    report_ref = registry.write_text_artifact(
+        target,
+        "shown-run",
+        registry.REPORT_MD_ARTIFACT,
+        "# Report\n\nAnswer citing [source:src-0000000000000000]. Secret at /home/alice/creds.\n",
+    )
+    registry.update_research(target, "shown-run", artifact_refs={"report_md": report_ref})
+
+
+def test_show_v2_sources_are_verified_bounded_and_sanitized(tmp_path: Path, capsys) -> None:
+    _seed_shown_run_with_sources_and_report(tmp_path)
+
+    code = cli_show(target=tmp_path, run_id="shown-run", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["schema"] == "brigade.research.show.v2"
+    assert payload["sources_verification"] == "verified"
+    (record,) = payload["sources"]
+    assert record["provider"] == "fetcher"
+    assert record["origin"] == "web"
+    assert record["trust"] == "web"
+    assert record["excerpt_truncated"] is True
+    assert len(record["excerpt"]) <= research_cmd._SHOW_SOURCE_EXCERPT_MAX_CHARS
+    assert "content" not in record
+    assert "web-content-secret" not in json.dumps(record)
+    assert record["content_chars"] > len(record["excerpt"])
+
+
+def test_show_v2_report_is_digest_verified_and_sanitized(tmp_path: Path, capsys) -> None:
+    _seed_shown_run_with_sources_and_report(tmp_path)
+
+    code = cli_show(target=tmp_path, run_id="shown-run", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    report = payload["report"]
+    assert report["verification"] == "verified"
+    assert isinstance(report["digest"], str) and len(report["digest"]) == 64
+    assert "Answer citing" in report["content"]
+    assert "/home/alice" not in report["content"]
+    assert report["truncated"] is False
+    assert payload["artifact_verification"]["report_md"] == "verified"
+
+
+def test_show_v2_tampered_report_withholds_content(tmp_path: Path, capsys) -> None:
+    _seed_shown_run_with_sources_and_report(tmp_path)
+    report_path = tmp_path / ".brigade" / "runs" / "shown-run" / registry.REPORT_MD_ARTIFACT
+    report_path.write_text("tampered body\n", encoding="utf-8")
+
+    code = cli_show(target=tmp_path, run_id="shown-run", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["report"]["verification"] == "digest-mismatch"
+    assert payload["report"]["content"] is None
+    assert "tampered body" not in json.dumps(payload)
+    assert payload["artifact_verification"]["report_md"] == "digest-mismatch"
+
+
+def test_show_v2_empty_and_legacy_runs_are_stable(tmp_path: Path, capsys) -> None:
+    seed_standard_and_legacy_runs(tmp_path)
+
+    code = cli_show(target=tmp_path, run_id="standard-run", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["sources"] is None
+    assert payload["sources_verification"] == "missing"
+    assert payload["report"]["verification"] == "unrecorded"
+    assert payload["report"]["content"] is None
+
+    code = cli_show(target=tmp_path, run_id="legacy-run", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["schema"] == "brigade.research.show.v2"
+    assert payload["sources"] is None
+    assert payload["sources_verification"] == "unavailable"
+    assert payload["report"]["verification"] == "unavailable"
+    assert payload["artifact_verification"] == {}
