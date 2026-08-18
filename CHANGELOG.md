@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover <operation-id>`. Refs #911.
 
 ### Changed
+- `brigade memory project-vault` accepts `--max-related` to tune the per-note
+  related-link cap (default 12). Explicit refs still outrank tag/category
+  matches but no longer claim to always survive the cap. (#966)
 - `brigade memory project-vault` produces a browsable vault on a real corpus.
   Notes take their title from the card's leading heading when frontmatter has
   no `title`, instead of the filename slug, and that heading is no longer
