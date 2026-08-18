@@ -1563,96 +1563,102 @@ def _scanner_run_one(
         "forced": force,
     }
     _SCANNER_RUN_DIRECTORY_AUTHORITIES[id(receipt)] = authority
-    _write_scanner_run_receipt(receipt)
-    if blocker is not None:
-        completed = helpers._now()
-        receipt.update(
-            {
-                "status": "failed",
-                "completed_at": completed.isoformat(),
-                "duration_seconds": (completed - started).total_seconds(),
-                "exit_code": None,
-                "timed_out": False,
-                "error": blocker,
-                "stdout_summary": "",
-                "stderr_summary": blocker,
-                "output_after": _scanner_output_snapshot(output_path),
-            }
-        )
-        _write_scanner_run_file(authority, "stdout.log", b"")
-        _write_scanner_run_file(authority, "stderr.log", (blocker + "\n").encode("utf-8"))
-        _write_scanner_run_receipt(receipt)
-        return receipt
-    if not cwd.is_dir():
-        completed = helpers._now()
-        error = f"scanner cwd does not exist: {cwd}"
-        receipt.update(
-            {
-                "status": "failed",
-                "completed_at": completed.isoformat(),
-                "duration_seconds": (completed - started).total_seconds(),
-                "exit_code": None,
-                "timed_out": False,
-                "error": error,
-                "stdout_summary": "",
-                "stderr_summary": error,
-                "output_after": _scanner_output_snapshot(output_path),
-            }
-        )
-        _write_scanner_run_file(authority, "stdout.log", b"")
-        _write_scanner_run_file(authority, "stderr.log", (error + "\n").encode("utf-8"))
-        _write_scanner_run_receipt(receipt)
-        return receipt
-    _prebind_child_visible_directories(target)
     try:
-        with _scanner_child_environment_sandbox(target) as child_env:
-            completed_process = subprocess.run(
-                argv,
-                cwd=cwd,
-                text=True,
-                capture_output=True,
-                timeout=float(scanner.get("timeout") or 300),
-                shell=False,
-                env=child_env,
+        _write_scanner_run_receipt(receipt)
+        if blocker is not None:
+            completed = helpers._now()
+            receipt.update(
+                {
+                    "status": "failed",
+                    "completed_at": completed.isoformat(),
+                    "duration_seconds": (completed - started).total_seconds(),
+                    "exit_code": None,
+                    "timed_out": False,
+                    "error": blocker,
+                    "stdout_summary": "",
+                    "stderr_summary": blocker,
+                    "output_after": _scanner_output_snapshot(output_path),
+                }
             )
-        stdout = completed_process.stdout or ""
-        stderr = completed_process.stderr or ""
-        _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
-        _write_scanner_run_file(authority, "stderr.log", stderr.encode("utf-8"))
-        completed = helpers._now()
-        receipt.update(
-            {
-                "status": "completed" if completed_process.returncode == 0 else "failed",
-                "completed_at": completed.isoformat(),
-                "duration_seconds": (completed - started).total_seconds(),
-                "exit_code": completed_process.returncode,
-                "timed_out": False,
-                "stdout_summary": _scanner_run_summary(stdout),
-                "stderr_summary": _scanner_run_summary(stderr),
-                "output_after": _scanner_output_snapshot(output_path),
-            }
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
-        _write_scanner_run_file(authority, "stderr.log", stderr.encode("utf-8"))
-        completed = helpers._now()
-        receipt.update(
-            {
-                "status": "failed",
-                "completed_at": completed.isoformat(),
-                "duration_seconds": (completed - started).total_seconds(),
-                "exit_code": None,
-                "timed_out": True,
-                "error": f"scanner timed out after {scanner.get('timeout')} seconds",
-                "stdout_summary": _scanner_run_summary(stdout),
-                "stderr_summary": _scanner_run_summary(stderr),
-                "output_after": _scanner_output_snapshot(output_path),
-            }
-        )
-    _write_scanner_run_receipt(receipt)
-    return receipt
+            _write_scanner_run_file(authority, "stdout.log", b"")
+            _write_scanner_run_file(authority, "stderr.log", (blocker + "\n").encode("utf-8"))
+            _write_scanner_run_receipt(receipt)
+            return receipt
+        if not cwd.is_dir():
+            completed = helpers._now()
+            error = f"scanner cwd does not exist: {cwd}"
+            receipt.update(
+                {
+                    "status": "failed",
+                    "completed_at": completed.isoformat(),
+                    "duration_seconds": (completed - started).total_seconds(),
+                    "exit_code": None,
+                    "timed_out": False,
+                    "error": error,
+                    "stdout_summary": "",
+                    "stderr_summary": error,
+                    "output_after": _scanner_output_snapshot(output_path),
+                }
+            )
+            _write_scanner_run_file(authority, "stdout.log", b"")
+            _write_scanner_run_file(authority, "stderr.log", (error + "\n").encode("utf-8"))
+            _write_scanner_run_receipt(receipt)
+            return receipt
+        _prebind_child_visible_directories(target)
+        try:
+            with _scanner_child_environment_sandbox(target) as child_env:
+                completed_process = subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    text=True,
+                    capture_output=True,
+                    timeout=float(scanner.get("timeout") or 300),
+                    shell=False,
+                    env=child_env,
+                )
+            stdout = completed_process.stdout or ""
+            stderr = completed_process.stderr or ""
+            _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
+            _write_scanner_run_file(authority, "stderr.log", stderr.encode("utf-8"))
+            completed = helpers._now()
+            receipt.update(
+                {
+                    "status": "completed" if completed_process.returncode == 0 else "failed",
+                    "completed_at": completed.isoformat(),
+                    "duration_seconds": (completed - started).total_seconds(),
+                    "exit_code": completed_process.returncode,
+                    "timed_out": False,
+                    "stdout_summary": _scanner_run_summary(stdout),
+                    "stderr_summary": _scanner_run_summary(stderr),
+                    "output_after": _scanner_output_snapshot(output_path),
+                }
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
+            _write_scanner_run_file(authority, "stderr.log", stderr.encode("utf-8"))
+            completed = helpers._now()
+            receipt.update(
+                {
+                    "status": "failed",
+                    "completed_at": completed.isoformat(),
+                    "duration_seconds": (completed - started).total_seconds(),
+                    "exit_code": None,
+                    "timed_out": True,
+                    "error": f"scanner timed out after {scanner.get('timeout')} seconds",
+                    "stdout_summary": _scanner_run_summary(stdout),
+                    "stderr_summary": _scanner_run_summary(stderr),
+                    "output_after": _scanner_output_snapshot(output_path),
+                }
+            )
+        _write_scanner_run_receipt(receipt)
+        return receipt
+    except BaseException:
+        # The payload finally only releases runs that reached `runs.append`.
+        # Release here so a failure after install cannot retain the descriptors.
+        _release_scanner_run_directory_authority(receipt)
+        raise
 
 
 def _scanner_plan_payload(target: Path) -> dict[str, Any]:
@@ -2290,6 +2296,8 @@ def _scanners_run_payload(
                 if isinstance(item, dict) and isinstance(item.get("id"), str)
             }
             run = _scanner_run_one(target, scanner, force=force)
+            # Cover stamp/receipt failures: authority exists from `_scanner_run_one`.
+            runs.append(run)
             _register_scanner_run_proof(scanner, run)
             stamped_ids = _scanner_stamp_new_imports(
                 target=target,
@@ -2303,7 +2311,6 @@ def _scanners_run_payload(
             if stamped_ids:
                 run["stamped_import_ids"] = stamped_ids
             _write_scanner_run_receipt(run)
-            runs.append(run)
             contexts.append((scanner, run))
         ingest_errors: list[str] = []
         ingest_payloads: list[tuple[dict[str, Any], dict[str, Any], Path, list[dict[str, Any]]]] = []
