@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `memory care backfill` dry-run receipts now predict `--apply` (stable `new_id`), record `old_id` as the topic/stem consumers already use, mint IDs on complete ID-less cards so coverage can reach 100 percent, skip creating `.brigade/` on zero-candidate dry runs, and count `duplicate_ids` without a `memory/NAMESPACE` file. (#867)
+- Evidence brief rendering one-lines MiseLedger score keys/values (including zero and `False`) and retrieval-arm labels, omits `trust:` when the gate-resolved label is `unknown`, prefers the provenance envelope over item-level trust keys, and keeps a partial first result line when truncation leaves room after context lines. (#941)
 - `brigade runs watch --json` (`brigade.run-watch.v1`) now routes every
   record through the same allowlist and one-line helpers as the list and
   detail contracts. `watch`/`summary` emit `run_id` instead of an absolute
