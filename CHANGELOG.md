@@ -56,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
+- `brigade runs watch --json` (`brigade.run-watch.v1`) now routes every
+  record through the same allowlist and one-line helpers as the list and
+  detail contracts. `watch`/`summary` emit `run_id` instead of an absolute
+  path, `event` records drop raw params (tokens, prompts, stdout, log
+  paths), and a field that cannot be rendered safely is omitted. (#631)
 - Center Research provider table no longer labels absent model seats as `- (unverified)`; only named models carry the unverified marker. (#961)
 - The graphtrail stale-baseline verify test no longer races wall-clock sync delays
   against a tight subprocess timeout on loaded CI runners; sync timeout is injected
