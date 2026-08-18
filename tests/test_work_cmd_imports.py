@@ -2457,7 +2457,7 @@ def test_work_import_memory_refresh_rejects_alias_collisions_without_writing(tmp
             ]
         },
     )
-    inbox = tmp_path / ".brigade" / "work" / "imports.jsonl"
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
     before = inbox.read_text() if inbox.is_file() else ""
 
     assert work_cmd.import_memory_refresh(target=tmp_path, queue=queue, json_output=True) == 2
