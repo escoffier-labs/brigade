@@ -208,7 +208,9 @@ def _result_line(
 
     scores = result.get("scores")
     if isinstance(scores, dict) and scores:
-        score_parts = [f"{_one_line(k, 40)}={_one_line(v, 40)}" for k, v in list(scores.items())[:4] if v is not None]
+        score_parts = [
+            f"{_one_line(k, 40)}={_one_line(str(v), 40)}" for k, v in list(scores.items())[:4] if v is not None
+        ]
         if score_parts:
             parts.append(f"scores: {', '.join(score_parts)}")
 

@@ -1117,6 +1117,19 @@ def test_evidence_brief_renders_declared_trust_from_envelope_shapes(build):
     assert "trust: reviewed" in line
 
 
+def test_evidence_brief_renders_zero_and_false_scores():
+    """Falsy-but-present score values must still render (bm25=0, not bm25=)."""
+
+    result = {
+        "id": "zeros",
+        "metadata": {"run_id": "zeros", "status": "completed"},
+        "scores": {"bm25": 0, "vec": 0.0, "flag": False, "ok": 1.25},
+    }
+    line = evidence_brief._result_line(result, {}, snippet="")
+
+    assert "scores: bm25=0, vec=0.0, flag=False, ok=1.25" in line
+
+
 def test_evidence_brief_truncation_keeps_partial_result_with_context():
     snippet = "run id run-big status completed code graph delta: ok " + ("z" * 300)
     unavailable = [{"arm": f"arm{index}", "reason": "reason " + ("r" * 80)} for index in range(25)]
