@@ -400,8 +400,7 @@ def doctor_payload(target: Path) -> dict[str, Any]:
                         "status": "warn",
                         "name": "vault_index_stale",
                         "detail": (
-                            "index was built for a different vault or root "
-                            "allowlist; run brigade memory vault-index"
+                            "index was built for a different vault or root allowlist; run brigade memory vault-index"
                         ),
                     }
                 )
@@ -932,9 +931,7 @@ def _index_root_drift(index_doc: dict[str, Any], config: VaultConfig) -> list[st
     if not isinstance(notes, list):
         return []
     indexed = {
-        str(note.get("scope") or "")
-        for note in notes
-        if isinstance(note, dict) and str(note.get("scope") or "")
+        str(note.get("scope") or "") for note in notes if isinstance(note, dict) and str(note.get("scope") or "")
     }
     return sorted(scope for scope in indexed if scope not in configured)
 
