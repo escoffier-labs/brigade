@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover <operation-id>`. Refs #911.
 
 ### Changed
+- Search integrity verification loads item text and provenance in one
+  `IN (...)` query keyed by the result ids, instead of one select per
+  hit (search limit is up to 200). (#964)
 - `brigade memory project-vault` accepts `--max-related` to tune the per-note
   related-link cap (default 12). Explicit refs still outrank tag/category
   matches but no longer claim to always survive the cap. (#966)
