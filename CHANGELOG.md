@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover <operation-id>`. Refs #911.
 
 ### Changed
+- Search integrity verification loads item text and provenance in one
+  `IN (...)` query keyed by the result ids, instead of one select per
+  hit (search limit is up to 200). (#964)
 - `brigade memory project-vault` produces a browsable vault on a real corpus.
   Notes take their title from the card's leading heading when frontmatter has
   no `title`, instead of the filename slug, and that heading is no longer
