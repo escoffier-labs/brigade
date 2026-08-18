@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
-from . import agents, proc, receipt_schema, run_budget, run_control, runguard
+from . import agents, message_envelope, proc, receipt_schema, run_budget, run_control, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
 from .seat_health_policy import SeatQuarantineState, decide_retry, failure_for_worker_result
 
@@ -270,6 +270,7 @@ class WorkerResult:
     env_overrides: tuple[str, ...] = ()
     endpoint_host: str | None = None
     attempts: tuple[WorkerAttempt, ...] = ()
+    provenance: dict[str, Any] | None = None
 
 
 class PromptBuilder(Protocol):
@@ -352,6 +353,7 @@ def dispatch(
     reprobe_seat: Callable[[Agent], bool] | None = None,
     on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
     run_id: str | None = None,
+    output_dir: Path | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -374,6 +376,10 @@ def dispatch(
     process_registry = process_registry or proc.ProcessRegistry()
     quarantine_state = quarantine_state or SeatQuarantineState()
     orchestrator_run_id = run_id.strip() if isinstance(run_id, str) and run_id.strip() else None
+    if orchestrator_run_id is None and output_dir is not None:
+        orchestrator_run_id = output_dir.name
+    orchestrator_seat = roster.orchestrator
+    worker_producer = "run_transport.dispatch"
 
     def _with_orchestrator_run_id(env: dict[str, str] | None) -> dict[str, str] | None:
         if orchestrator_run_id is None:
@@ -455,6 +461,27 @@ def dispatch(
             drift_impact=drift_impact,
             evidence=evidence,
         )
+        request = message_envelope.emit(
+            prompt,
+            kind="worker-request",
+            producer=worker_producer,
+            from_seat=message_envelope.BRIGADE_SEAT,
+            to_seat=assignment.worker,
+            run_dir=output_dir,
+            run_id=orchestrator_run_id,
+            session_harness=agent.cli,
+        )
+        if not request.delivered:
+            return WorkerResult(
+                worker=assignment.worker,
+                task=assignment.task,
+                text="",
+                ok=False,
+                detail=request.reason or "worker-request rejected by provenance gate",
+                failure_phase="dispatch",
+                failure_kind="unclassified",
+                provenance=request.envelope,
+            )
         started = time.monotonic()
         effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
         approval_correlation_marker = secrets.token_urlsafe(32)
@@ -684,14 +711,27 @@ def dispatch(
             terminal_agent: Agent,
             attempts: list[WorkerAttempt] | None = None,
         ) -> WorkerResult:
+            captured = message_envelope.emit(
+                result.text,
+                kind="worker-result",
+                producer=worker_producer,
+                from_seat=assignment.worker,
+                to_seat=orchestrator_seat,
+                run_dir=output_dir,
+                run_id=orchestrator_run_id,
+                session_harness=terminal_agent.cli,
+            )
+            delivered_text = result.text if captured.delivered else ""
+            delivered_ok = result.ok if captured.delivered else False
+            delivered_detail = result.detail if captured.delivered else (captured.reason or result.detail)
             return WorkerResult(
                 worker=assignment.worker,
                 task=assignment.task,
-                text=result.text,
-                ok=result.ok,
-                detail=result.detail,
-                failure_phase=result.failure_phase,
-                failure_kind=result.failure_kind,
+                text=delivered_text,
+                ok=delivered_ok,
+                detail=delivered_detail,
+                failure_phase=result.failure_phase if captured.delivered else "dispatch",
+                failure_kind=result.failure_kind if captured.delivered else "unclassified",
                 transport_warning=result.transport_warning,
                 thread_id=result.thread_id,
                 status=result.status,
@@ -717,6 +757,7 @@ def dispatch(
                     _env_endpoint_host(terminal_agent.env) if result.failure_kind != "env-ref-missing" else None
                 ),
                 attempts=tuple(attempts or ()),
+                provenance=captured.envelope,
             )
 
         initial_started = _attempt_timestamp()
