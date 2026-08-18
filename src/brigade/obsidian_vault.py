@@ -17,7 +17,8 @@ from .projection import kernel
 
 PROJECTOR = "obsidian-vault"
 PROJECTION_FOLDER = "Brigade Memory"
-MAX_RELATED = 12
+DEFAULT_MAX_RELATED = 12
+MAX_RELATED = DEFAULT_MAX_RELATED
 CANVAS_COLUMNS = 24
 _REFERENCE_WEIGHT = 1_000
 _CANVAS_COLUMN_WIDTH = 260
@@ -28,7 +29,7 @@ _BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+")
 _AUTHORIZATION_RE = re.compile(r"(?i)(\bauthorization\s*:\s*)[^\r\n]*")
 
 
-def project(*, target: Path, vault: Path, json_output: bool = False) -> int:
+def project(*, target: Path, vault: Path, json_output: bool = False, max_related: int = DEFAULT_MAX_RELATED) -> int:
     """Project canonical memory to an operator-selected vault without reading it as content."""
     target = target.expanduser().resolve()
     vault = vault.expanduser().resolve()
@@ -36,8 +37,10 @@ def project(*, target: Path, vault: Path, json_output: bool = False) -> int:
         return _error(f"--target is not a directory: {target}")
     if not vault.is_dir():
         return _error(f"--vault is not a directory: {vault}")
+    if max_related < 1:
+        return _error(f"--max-related must be at least 1, got {max_related}")
 
-    payload = _project_payload(target=target, vault=vault)
+    payload = _project_payload(target=target, vault=vault, max_related=max_related)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -70,12 +73,12 @@ def status_payload(target: Path) -> dict[str, Any] | None:
     }
 
 
-def _project_payload(*, target: Path, vault: Path) -> dict[str, Any]:
+def _project_payload(*, target: Path, vault: Path, max_related: int = DEFAULT_MAX_RELATED) -> dict[str, Any]:
     root = vault / PROJECTION_FOLDER
     ledger_path = _ledger_path(target, vault)
     ledger = _read_ledger(ledger_path)
     prior_files = _ledger_files(ledger)
-    desired = _render_projection(target, root=root, prior_files=prior_files)
+    desired = _render_projection(target, root=root, prior_files=prior_files, max_related=max_related)
     drift = _drift(root, prior_files)
     mutations: list[kernel.MutationSpec] = []
     actual_files: dict[str, str] = dict(prior_files)
@@ -220,12 +223,14 @@ def _project_payload(*, target: Path, vault: Path) -> dict[str, Any]:
     }
 
 
-def _render_projection(target: Path, *, root: Path, prior_files: dict[str, str]) -> dict[str, bytes]:
+def _render_projection(
+    target: Path, *, root: Path, prior_files: dict[str, str], max_related: int = DEFAULT_MAX_RELATED
+) -> dict[str, bytes]:
     inventory = _inventory(target)
     records = [_record(target, item) for item in inventory]
     _assign_paths(records)
     _assign_link_paths(records, root=root, prior_files=prior_files)
-    links = _relationships(records)
+    links = _relationships(records, max_related=max_related)
     rendered: dict[str, bytes] = {}
     for record in records:
         rendered[record["path"]] = _render_note(record, links[record["id"]])
@@ -315,7 +320,9 @@ def _assign_link_paths(records: list[dict[str, Any]], *, root: Path, prior_files
             record["link_path"] = path
 
 
-def _relationships(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _relationships(
+    records: list[dict[str, Any]], *, max_related: int = DEFAULT_MAX_RELATED
+) -> dict[str, list[dict[str, Any]]]:
     """Rank each note's neighbours and keep the strongest few.
 
     Every pair sharing a category used to become related, so one 221-card category
@@ -349,10 +356,10 @@ def _relationships(records: list[dict[str, Any]]) -> dict[str, list[dict[str, An
         for reference in record["references"]:
             referenced = by_source.get(reference)
             if referenced is not None and referenced is not record:
-                # An explicit ref is the strongest signal and always survives the cap.
+                # Explicit refs outrank tag/category matches, but the cap still applies.
                 scored[referenced["id"]] = (_REFERENCE_WEIGHT, referenced)
         ranked = sorted(scored.values(), key=lambda entry: (-entry[0], entry[1]["title"], entry[1]["id"]))
-        kept = [other for _, other in ranked[:MAX_RELATED]]
+        kept = [other for _, other in ranked[:max_related]]
         result[record["id"]] = sorted(kept, key=lambda other: (other["title"], other["id"]))
     return result
 
@@ -416,7 +423,8 @@ def _render_maps(
     used: set[str] = set()
     for name, members in groups.items():
         # A map holding every note groups nothing. Cards without `source_harness` used to
-        # collapse into one "unknown" map listing the entire corpus.
+        # collapse into one "unknown" map listing the entire corpus. With a single-note
+        # corpus, every group is the whole set, so no maps are emitted.
         if len(members) >= total:
             continue
         stem = _unique_map_stem(name, used)
