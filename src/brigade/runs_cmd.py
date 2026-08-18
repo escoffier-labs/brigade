@@ -28,6 +28,18 @@ _NONTERMINAL_STATUSES = frozenset(
     }
 )
 _SUCCESS_STATUSES = frozenset({"ok", "dry-run"})
+
+# Versioned read contracts for higher-level surfaces (issue #631). These are
+# browser-safe allowlisted views over run artifacts; the CLI stays the single
+# source of behavior.
+RUNS_LIST_SCHEMA = "brigade.runs-list.v1"
+RUN_DETAIL_SCHEMA = "brigade.run-detail.v1"
+RUN_WATCH_SCHEMA = "brigade.run-watch.v1"
+
+_LIST_TASK_LIMIT = 160
+_DETAIL_TASK_LIMIT = 400
+_DETAIL_TEXT_LIMIT = 400
+_DETAIL_COMMAND_LIMIT = 200
 _APPROVAL_REFERENCE_FIELDS = (
     "approval_id",
     "source",
@@ -1148,21 +1160,47 @@ def _emit_json(payload: dict[str, object]) -> None:
     print(json.dumps(payload, sort_keys=True))
 
 
+def _emit_watch_json(payload: dict[str, object]) -> None:
+    _emit_json({"schema": RUN_WATCH_SCHEMA, **payload})
+
+
+def _watch_run_id(run_dir: Path) -> str:
+    """Directory name only — never an absolute operator path."""
+    return run_dir.name
+
+
+def _watch_inspect_command(run_dir: Path) -> str:
+    return f"brigade runs show {_watch_run_id(run_dir)}"
+
+
+def _watch_event_payload(event: dict[str, Any]) -> dict[str, object]:
+    """Allowlisted watch event: method and item type, never raw params."""
+    return _compact(
+        {
+            "method": _clean_str(event.get("method")),
+            "item_type": _clean_str(_event_item_type(event)) or None,
+        }
+    )
+
+
 def _emit_run(meta: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         phase, kind, detail = _failure_fields(meta)
-        payload = {
-            "type": "run",
-            "status": meta.get("status"),
-            "task": meta.get("task"),
-            "started_at": meta.get("started_at"),
-            "finished_at": meta.get("finished_at"),
-            "duration_seconds": meta.get("duration_seconds"),
-            "failure_phase": phase,
-            "failure_kind": kind,
-            "failure_detail": detail,
-        }
-        _emit_json({key: value for key, value in payload.items() if value is not None})
+        _emit_watch_json(
+            _compact(
+                {
+                    "type": "run",
+                    "status": _clean_str(meta.get("status")),
+                    "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
+                    "started_at": _clean_str(meta.get("started_at")),
+                    "finished_at": _clean_str(meta.get("finished_at")),
+                    "duration_seconds": _clean_number(meta.get("duration_seconds")),
+                    "failure_phase": _clean_str(phase),
+                    "failure_kind": _clean_str(kind),
+                    "failure_detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
+                }
+            )
+        )
         return
     _line("status", meta.get("status"))
     _line("task", meta.get("task"))
@@ -1174,7 +1212,7 @@ def _emit_plan(plan_payload: dict[str, Any], *, json_output: bool) -> None:
     if not isinstance(assignments, list):
         return
     if json_output:
-        _emit_json({"type": "plan", "assignments": assignments})
+        _emit_watch_json({"type": "plan", **_detail_plan_section(plan_payload)})
         return
     print("plan:")
     if not assignments:
@@ -1202,7 +1240,15 @@ def _event_item_type(event: dict[str, Any]) -> str:
 
 def _emit_event(worker: str, event: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
-        _emit_json({"type": "event", "worker": worker, "event": event})
+        _emit_watch_json(
+            _compact(
+                {
+                    "type": "event",
+                    "worker": _clean_str(worker) or "unknown",
+                    "event": _watch_event_payload(event),
+                }
+            )
+        )
         return
     method = event.get("method", "unknown")
     item_type = _event_item_type(event)
@@ -1212,27 +1258,22 @@ def _emit_event(worker: str, event: dict[str, Any], *, json_output: bool) -> Non
 
 def _emit_workers(worker_results: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
-        _emit_json({"type": "workers", "results": worker_results.get("results") or []})
+        _emit_watch_json({"type": "workers", **_detail_workers_section(worker_results)})
         return
     _print_workers(worker_results)
 
 
 def _emit_synthesis(synthesis: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
-        _emit_json(
-            {
-                "type": "synthesis",
-                "orchestrator": synthesis.get("orchestrator"),
-                "result": synthesis.get("result"),
-            }
-        )
+        _emit_watch_json({"type": "synthesis", **_detail_synthesis_section(synthesis)})
         return
     _print_synthesis(synthesis)
 
 
 def _emit_final(final_text: str, *, json_output: bool) -> None:
     if json_output:
-        _emit_json({"type": "final", "text": final_text})
+        # final.txt is raw operator output; emit a bounded one-line or omit.
+        _emit_watch_json(_compact({"type": "final", "text": _clean_str(final_text, _DETAIL_TEXT_LIMIT)}))
         return
     _print_final(final_text)
 
@@ -1241,17 +1282,22 @@ def _emit_summary(run_dir: Path, meta: dict[str, Any], *, json_output: bool) -> 
     status = str(meta.get("status") or "unknown")
     duration = meta.get("duration_seconds")
     if json_output:
-        payload: dict[str, object] = {"type": "summary", "run": str(run_dir), "status": status}
-        if isinstance(duration, (int, float)):
-            payload["duration_seconds"] = duration
+        payload: dict[str, object] = {
+            "type": "summary",
+            "run_id": _watch_run_id(run_dir),
+            "status": _clean_str(status) or "unknown",
+        }
+        cleaned_duration = _clean_number(duration)
+        if cleaned_duration is not None:
+            payload["duration_seconds"] = cleaned_duration
         phase, _, _ = _failure_fields(meta)
         if phase == "stale-lock-recovery":
             recovery_status = _lock_recovery_status(run_dir, meta)
-            payload["failure_phase"] = phase
-            payload["inspect_command"] = f"brigade runs show {run_dir}"
-            payload["recover_status"] = recovery_status
+            payload["failure_phase"] = _clean_str(phase)
+            payload["inspect_command"] = _watch_inspect_command(run_dir)
+            payload["recover_status"] = _clean_str(recovery_status)
             payload["resume_available"] = _resume_available(run_dir)
-        _emit_json(payload)
+        _emit_watch_json(_compact(payload))
         return
     print(f"summary: {status} in {_duration_text(duration)}")
     _print_terminal_guidance(run_dir, meta)
@@ -1442,7 +1488,309 @@ def _stale_timeout(run_dir: Path, meta: dict[str, Any]) -> float | None:
     return timeout if time.time() - started.timestamp() > timeout else None
 
 
-def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> int:
+def _clean_str(value: object, limit: int | None = None) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return _short(value, limit) if limit is not None else value
+
+
+def _clean_number(value: object) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _compact(payload: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _mode_text(meta: Mapping[str, Any]) -> str:
+    mode = "read-only" if meta.get("read_only") else "normal"
+    if meta.get("dry_run"):
+        mode = f"{mode}, dry-run"
+    return mode
+
+
+def _detail_lineage_section(meta: Mapping[str, Any]) -> dict[str, object] | None:
+    """Allowlisted child-run lineage for the versioned read contracts."""
+    lineage = _lineage(meta)
+    if lineage is None:
+        return None
+    shared_prefix = lineage.get("shared_prefix")
+    prefix_payload = None
+    if isinstance(shared_prefix, Mapping):
+        prefix_payload = (
+            _compact(
+                {
+                    "event_sequence": _clean_number(shared_prefix.get("event_sequence")),
+                    "event_digest": _clean_str(shared_prefix.get("event_digest")),
+                    "previous_digest": _clean_str(shared_prefix.get("previous_digest")),
+                }
+            )
+            or None
+        )
+    payload = _compact(
+        {
+            "kind": _clean_str(lineage.get("kind")),
+            "parent_run_id": _clean_str(lineage.get("parent_run_id")),
+            "branch_point_event_id": _clean_str(lineage.get("branch_point_event_id")),
+            "shared_prefix": prefix_payload,
+        }
+    )
+    return payload or None
+
+
+def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
+    """Browser-safe run summary for brigade.runs-list.v1 (no absolute paths)."""
+    phase, _, _ = _failure_fields(meta)
+    lineage = _detail_lineage_section(meta)
+    parent_run_id = None
+    if lineage is not None:
+        parent_run_id = lineage.get("parent_run_id")
+        parent_run_id = parent_run_id if isinstance(parent_run_id, str) else None
+    return _compact(
+        {
+            "run_id": run_dir.name,
+            "status": _clean_str(meta.get("status")) or "unknown",
+            "task": _clean_str(meta.get("task"), _LIST_TASK_LIMIT),
+            "started_at": _clean_str(meta.get("started_at")),
+            "finished_at": _clean_str(meta.get("finished_at")),
+            "duration_seconds": _clean_number(meta.get("duration_seconds")),
+            "failure_phase": _clean_str(phase),
+            "mode": _mode_text(meta),
+            "resume_available": _resume_available(run_dir),
+            "parent_run_id": parent_run_id,
+        }
+    )
+
+
+def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
+    phase, kind, detail = _failure_fields(meta)
+    failure = _compact(
+        {
+            "phase": _clean_str(phase),
+            "kind": _clean_str(kind),
+            "detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
+        }
+    )
+    return _compact(
+        {
+            "run_id": run_dir.name,
+            "status": _clean_str(meta.get("status")) or "unknown",
+            "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
+            "mode": _mode_text(meta),
+            "started_at": _clean_str(meta.get("started_at")),
+            "finished_at": _clean_str(meta.get("finished_at")),
+            "duration_seconds": _clean_number(meta.get("duration_seconds")),
+            "failure": failure or None,
+            "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
+            "suspected_noop": True if meta.get("suspected_noop") is True else None,
+            "resume_available": _resume_available(run_dir),
+            "lineage": _detail_lineage_section(meta),
+        }
+    )
+
+
+def _detail_roster_section(roster: dict[str, Any] | None) -> dict[str, object]:
+    if not roster:
+        return {}
+    agents_payload: dict[str, object] = {}
+    agents = roster.get("agents")
+    if isinstance(agents, dict):
+        for name, agent in agents.items():
+            if not isinstance(agent, dict):
+                continue
+            agents_payload[str(name)] = _compact(
+                {
+                    "cli": _clean_str(agent.get("cli")),
+                    "model": _clean_str(agent.get("model")),
+                    "reasoning": _clean_str(agent.get("reasoning")),
+                    "role": _clean_str(agent.get("role"), _DETAIL_TEXT_LIMIT),
+                    "timeout_seconds": _clean_number(agent.get("timeout_seconds")),
+                }
+            )
+    allow_models = roster.get("allow_models")
+    return _compact(
+        {
+            "orchestrator": _clean_str(roster.get("orchestrator")),
+            "max_workers": _clean_number(roster.get("max_workers")),
+            "timeout_seconds": _clean_number(roster.get("timeout_seconds")),
+            "allow_models": (
+                [item for item in allow_models if isinstance(item, str)] if isinstance(allow_models, list) else None
+            ),
+            "agents": agents_payload or None,
+        }
+    )
+
+
+def _detail_plan_section(plan: dict[str, Any] | None) -> dict[str, object]:
+    assignments = plan.get("assignments") if plan else None
+    if not isinstance(assignments, list):
+        return {}
+    payload = [
+        _compact(
+            {
+                "stage": _clean_number(assignment.get("stage")),
+                "worker": _clean_str(assignment.get("worker")),
+                "task": _clean_str(assignment.get("task"), _DETAIL_TASK_LIMIT),
+            }
+        )
+        for assignment in assignments
+        if isinstance(assignment, dict)
+    ]
+    return {"assignments": payload}
+
+
+def _detail_worker_result(result: dict[str, Any]) -> dict[str, object]:
+    failure = result.get("failure")
+    failure_payload = None
+    if isinstance(failure, dict):
+        failure_payload = _compact(
+            {
+                "class": _clean_str(failure.get("class")),
+                "detail": _clean_str(failure.get("detail"), _DETAIL_TEXT_LIMIT),
+            }
+        )
+    return _compact(
+        {
+            "worker": _clean_str(result.get("worker")),
+            "ok": result.get("ok") if isinstance(result.get("ok"), bool) else None,
+            "status": _clean_str(result.get("status")),
+            "task": _clean_str(result.get("task"), _DETAIL_TASK_LIMIT),
+            "detail": _clean_str(result.get("detail"), _DETAIL_TEXT_LIMIT),
+            "duration_seconds": _clean_number(result.get("duration_seconds")),
+            "exit_code": _clean_number(result.get("exit_code")),
+            "timed_out": result.get("timed_out") if isinstance(result.get("timed_out"), bool) else None,
+            "requested_model": _clean_str(result.get("requested_model")),
+            "transport": _clean_str(result.get("transport")),
+            "failure": failure_payload or None,
+        }
+    )
+
+
+def _detail_workers_section(worker_results: dict[str, Any] | None) -> dict[str, object]:
+    results = worker_results.get("results") if worker_results else None
+    if not isinstance(results, list):
+        return {}
+    return {"results": [_detail_worker_result(result) for result in results if isinstance(result, dict)]}
+
+
+def _detail_synthesis_section(synthesis: dict[str, Any] | None) -> dict[str, object]:
+    if not synthesis:
+        return {}
+    result = synthesis.get("result")
+    result_payload = None
+    if isinstance(result, dict):
+        result_payload = _compact(
+            {
+                "ok": result.get("ok") if isinstance(result.get("ok"), bool) else None,
+                "detail": _clean_str(result.get("detail"), _DETAIL_TEXT_LIMIT),
+                "duration_seconds": _clean_number(result.get("duration_seconds")),
+                "exit_code": _clean_number(result.get("exit_code")),
+                "requested_model": _clean_str(result.get("requested_model")),
+            }
+        )
+    return _compact(
+        {
+            "orchestrator": _clean_str(synthesis.get("orchestrator")),
+            "mode": _clean_str(synthesis.get("mode")),
+            "result": result_payload,
+        }
+    )
+
+
+def _detail_verification_section(
+    worker_results: dict[str, Any] | None,
+    synthesis: dict[str, Any] | None,
+) -> list[dict[str, object]]:
+    receipts: list[object] = []
+    for source in (worker_results, synthesis):
+        ground_truth = source.get("ground_truth") if source else None
+        if isinstance(ground_truth, dict) and isinstance(ground_truth.get("verify_receipts"), list):
+            receipts = ground_truth["verify_receipts"]
+            break
+    payload: list[dict[str, object]] = []
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        commands = receipt.get("commands")
+        command_payload = [
+            _compact(
+                {
+                    "command": _clean_str(command.get("command"), _DETAIL_COMMAND_LIMIT),
+                    "exit_code": _clean_number(command.get("exit_code")),
+                    "duration_seconds": _clean_number(command.get("duration_seconds")),
+                }
+            )
+            for command in (commands if isinstance(commands, list) else [])
+            if isinstance(command, dict)
+        ]
+        payload.append(
+            _compact(
+                {
+                    "run_id": _clean_str(receipt.get("run_id")),
+                    "status": _clean_str(receipt.get("status")),
+                    "started_at": _clean_str(receipt.get("started_at")),
+                    "duration_seconds": _clean_number(receipt.get("duration_seconds")),
+                    "commands": command_payload,
+                }
+            )
+        )
+    return payload
+
+
+_BRIEF_MARKERS = (
+    ("code-graph", "code_graph_brief"),
+    ("drift-impact", "drift_impact_brief"),
+    ("evidence", "evidence_brief"),
+)
+
+
+def _detail_briefs_section(meta: dict[str, Any]) -> list[dict[str, object]]:
+    payload: list[dict[str, object]] = []
+    for name, key in _BRIEF_MARKERS:
+        marker = meta.get(key)
+        if not isinstance(marker, dict):
+            continue
+        payload.append(
+            _compact(
+                {
+                    "name": name,
+                    "attached": bool(marker.get("attached")),
+                    "bytes": _clean_number(marker.get("bytes")),
+                    "pending_count": _clean_number(marker.get("pending_count")),
+                }
+            )
+        )
+    return payload
+
+
+def _run_detail_payload(
+    run_dir: Path,
+    run_meta: dict[str, Any],
+    roster: dict[str, Any] | None,
+    plan: dict[str, Any] | None,
+    worker_results: dict[str, Any] | None,
+    synthesis: dict[str, Any] | None,
+) -> dict[str, object]:
+    """Allowlisted brigade.run-detail.v1 payload shared by show/latest --json.
+
+    Excludes environment values, tokens, full prompts, transcript bodies,
+    log paths, raw stdout/stderr, and absolute workspace paths.
+    """
+    return {
+        "schema": RUN_DETAIL_SCHEMA,
+        "run": _detail_run_section(run_dir, run_meta),
+        "roster": _detail_roster_section(roster),
+        "plan": _detail_plan_section(plan),
+        "workers": _detail_workers_section(worker_results),
+        "synthesis": _detail_synthesis_section(synthesis),
+        "verification": _detail_verification_section(worker_results, synthesis),
+        "briefs": _detail_briefs_section(run_meta),
+    }
+
+
+def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10, json_output: bool = False) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
         return 2
@@ -1457,6 +1805,14 @@ def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> in
         return 2
 
     runs, skipped = _collect_runs(root)
+    if json_output:
+        payload = {
+            "schema": RUNS_LIST_SCHEMA,
+            "runs": [_run_summary_payload(path, meta) for path, meta in runs[:limit]],
+            "skipped_invalid": skipped,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
     for path, meta in runs[:limit]:
         status = meta.get("status", "unknown")
         stale_timeout = _stale_timeout(path, meta)
@@ -1737,7 +2093,7 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
     return 0
 
 
-def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
+def show_latest(*, cwd: Path, runs_dir: Path | None = None, json_output: bool = False) -> int:
     cwd = cwd.expanduser().resolve()
     if not cwd.is_dir():
         print(f"error: --cwd is not a directory: {cwd}", file=sys.stderr)
@@ -1753,7 +2109,7 @@ def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
     if not runs:
         print(f"error: no runs found in {root}", file=sys.stderr)
         return 1
-    return show(runs[0][0])
+    return show(runs[0][0], json_output=json_output)
 
 
 def _resume_available(run_dir: Path) -> bool:
@@ -2264,7 +2620,7 @@ def watch(
         return 2
     assert run_dir is not None
     if json_output:
-        _emit_json({"type": "watch", "run": str(run_dir)})
+        _emit_watch_json({"type": "watch", "run_id": _watch_run_id(run_dir)})
     else:
         print(f"watching: {run_dir}")
 
@@ -2381,7 +2737,7 @@ def audit(
     return 1
 
 
-def show(run_dir: Path) -> int:
+def show(run_dir: Path, *, json_output: bool = False) -> int:
     run_dir = run_dir.expanduser()
     if not run_dir.is_dir():
         print(f"error: run directory not found: {run_dir}", file=sys.stderr)
@@ -2399,6 +2755,13 @@ def show(run_dir: Path) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    if json_output:
+        payload = _run_detail_payload(run_dir, run_meta, roster, plan, worker_results, synthesis)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        if _is_terminal(run_meta):
+            return _watch_return_code(run_meta.get("status"))
+        return 0
 
     print(f"run: {run_dir}")
     _line("status", run_meta.get("status"))
