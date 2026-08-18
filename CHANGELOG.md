@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover <operation-id>`. Refs #911.
 
 ### Changed
+- Search integrity verification loads item text and provenance in one
+  `IN (...)` query keyed by the result ids, instead of one select per
+  hit (search limit is up to 200). (#964)
+- `brigade memory project-vault` accepts `--max-related` to tune the per-note
+  related-link cap (default 12). Explicit refs still outrank tag/category
+  matches but no longer claim to always survive the cap. (#966)
 - `brigade memory project-vault` produces a browsable vault on a real corpus.
   Notes take their title from the card's leading heading when frontmatter has
   no `title`, instead of the filename slug, and that heading is no longer
@@ -54,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - The Claude Stop closeout gate no longer treats another session's writes in a shared workspace as this session's unverified work. Worktree deltas during a Bash window are attributed only when no concurrent Claude write evidence (`write_observed` / `last_write_at` / `pending_write_at`) or other-harness receipt explains them — a read-only neighbor that only touches its session file is not foreign write evidence; a time-valid session receipt still counts when the live tree has drifted under a foreign writer; and a hard block that another process can re-arm is downgraded to a warning after this session has already captured, unless this session itself wrote again after that capture. (#959)
+- `brigade runs watch --json` (`brigade.run-watch.v1`) now routes every
+  record through the same allowlist and one-line helpers as the list and
+  detail contracts. `watch`/`summary` emit `run_id` instead of an absolute
+  path, `event` records drop raw params (tokens, prompts, stdout, log
+  paths), and a field that cannot be rendered safely is omitted. (#631)
+- Center Research provider table no longer labels absent model seats as `- (unverified)`; only named models carry the unverified marker. (#961)
+- The graphtrail stale-baseline verify test no longer races wall-clock sync delays
+  against a tight subprocess timeout on loaded CI runners; sync timeout is injected
+  deterministically so the stale-graph assertion is reliable on Python 3.12. (#954)
 - Quarantined items stay quarantined when a pending injection scan comes back clean, so a labeled quarantine cannot be released to untrusted and become content-eligible. Reviewed and verified items keep every consumer surface untrusted already has, including `context`. `brigade receipts verify` reports `verify-pending` (and does not append a local verified event) when the MiseLedger trust notify fails. Provenance-event JSONL now appends and fsyncs instead of rewriting the whole file. (#587)
 - Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
   closed on every `brigade work` surface (and other commands that read the
