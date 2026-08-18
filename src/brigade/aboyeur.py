@@ -25,6 +25,7 @@ from . import codex_appserver
 from . import context_eval
 from . import evidence_brief as evidence_brief_mod
 from . import graphtrail_delta
+from . import causal_receipt
 from . import localio
 from . import proc, receipt_schema, runguard
 from . import run_control
@@ -1027,6 +1028,8 @@ def write_run_handoff(
     final_text: str,
     read_only: bool = False,
     now: datetime | None = None,
+    outcome_id: str | None = None,
+    outcome_digest: str | None = None,
 ) -> Path:
     timestamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d-%H%M")
     safe_task = _one_line(task)
@@ -1104,6 +1107,18 @@ no-card
 """
     inbox.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
+    if output_dir is not None or outcome_id:
+        parent_kind = "outcome" if outcome_id else "run"
+        parent_id = outcome_id if outcome_id else output_dir.name
+        localio.write_json(
+            causal_receipt.handoff_sidecar_path(path),
+            causal_receipt.recorded_handoff(
+                handoff_id=path.stem,
+                parent_kind=parent_kind,
+                parent_id=parent_id,
+                parent_digest=outcome_digest,
+            ),
+        )
     return path
 
 
@@ -3073,6 +3088,7 @@ def _run_payload(
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
     kind: str = "work",
+    causal_receipt_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": receipt_schema.RUN_RECEIPT_SCHEMA,
@@ -3171,6 +3187,8 @@ def _run_payload(
         payload["verification_contract"] = dict(verification_contract_payload)
     if run_budget_payload is not None:
         payload["run_budget"] = dict(run_budget_payload)
+    if isinstance(causal_receipt_payload, Mapping):
+        payload["causal_receipt"] = dict(causal_receipt_payload)
     return seat_health_policy.apply_health_fields(
         payload,
         health=health,
@@ -3233,6 +3251,7 @@ def record_run_start(
     existing_verification_contract: dict[str, Any] | None = None
     existing_run_budget: dict[str, Any] | None = None
     existing_kind: str | None = None
+    existing_causal_receipt: dict[str, Any] | None = None
     if run_json_exists:
         try:
             existing = json.loads(run_json.read_text(encoding="utf-8"))
@@ -3258,6 +3277,8 @@ def record_run_start(
             existing_run_budget = dict(existing["run_budget"])
         if isinstance(existing.get("kind"), str) and existing["kind"].strip():
             existing_kind = existing["kind"].strip()
+        if isinstance(existing.get("causal_receipt"), dict):
+            existing_causal_receipt = dict(existing["causal_receipt"])
     # Every new run carries both durable request fields. Existing runs enroll
     # only from their stored run.json fields, so legacy snapshot-only runs stay
     # untouched. An authority request implies lifecycle journaling even when an
@@ -3307,6 +3328,11 @@ def record_run_start(
                 verification_contract_payload=contract_payload,
                 run_budget_payload=budget_payload,
                 kind=receipt_kind,
+                causal_receipt_payload=(
+                    existing_causal_receipt
+                    if existing_causal_receipt is not None
+                    else (causal_receipt.recorded_run(run_id=output_dir.name) if new_run else None)
+                ),
             ),
         )
     except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
@@ -3774,6 +3800,8 @@ def run(
                         kwargs["run_budget_payload"] = dict(existing["run_budget"])
                     if "kind" not in kwargs and isinstance(existing.get("kind"), str) and existing["kind"].strip():
                         kwargs["kind"] = existing["kind"].strip()
+                    if "causal_receipt_payload" not in kwargs and isinstance(existing.get("causal_receipt"), dict):
+                        kwargs["causal_receipt_payload"] = dict(existing["causal_receipt"])
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
@@ -4167,7 +4195,10 @@ def run(
         if direct_worker:
             attempts_payload["mode"] = "direct-worker"
         _write_json(output_dir / "plan-attempts.json", attempts_payload)
-        plan_doc = receipt_schema.run_plan_document(_assignment_payload(assignments))
+        plan_doc = receipt_schema.run_plan_document(
+            _assignment_payload(assignments),
+            run_id=output_dir.name,
+        )
         contract_for_plan = verification_contract_payload
         if contract_for_plan is None:
             try:
@@ -4212,7 +4243,10 @@ def run(
             plan_attempts=plan_attempts,
             allow_replan=not dry_run and not direct_worker,
         )
-        plan_doc = receipt_schema.run_plan_document(_assignment_payload(assignments))
+        plan_doc = receipt_schema.run_plan_document(
+            _assignment_payload(assignments),
+            run_id=output_dir.name,
+        )
         try:
             prior_plan = json.loads((output_dir / "plan.json").read_text())
         except (OSError, json.JSONDecodeError):
@@ -4831,15 +4865,24 @@ def run(
                 worker=worker,
                 result=_agent_result_payload(final),
                 ground_truth=ground_truth,
+                run_id=output_dir.name,
+                worker_results=_worker_payload(worker_results),
             )
             if direct_worker
             else receipt_schema.synthesis_document(
                 orchestrator=roster.orchestrator,
                 result=_agent_result_payload(final),
                 ground_truth=ground_truth,
+                run_id=output_dir.name,
+                worker_results=_worker_payload(worker_results),
             )
         )
-        write_sidecar_revision(output_dir, "synthesis.json", synthesis_payload)
+        causal_receipt.write_synthesis_lineage_artifacts(
+            output_dir,
+            synthesis_payload,
+            worker_results=_worker_payload(worker_results),
+            write=write_sidecar_revision,
+        )
     if not final.ok:
         if output_dir is not None:
             finished_at = datetime.now(timezone.utc)
