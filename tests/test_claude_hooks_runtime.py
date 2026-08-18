@@ -524,6 +524,58 @@ def test_posttooluse_records_python_c_write_via_repo_snapshot(tmp_path: Path):
     assert blocked["decision"] == "block"
 
 
+def test_posttooluse_records_bash_write_when_other_session_only_reads(tmp_path: Path):
+    """A read-only neighbor must not discard this session's Bash write.
+
+    Probe from #987 review: B runs a Python write of ``real_source.py``; inside
+    that Bash window A does one ``git log -1`` PreToolUse and nothing else.
+    Bare session-state mtime is not foreign write evidence.
+    """
+    target = _wired_claude(tmp_path)
+    writer_session = "session-b-build"
+    reader_session = "session-a-git-log"
+    out_file = target / "real_source.py"
+    command = f"{sys.executable} -c \"from pathlib import Path; Path({str(out_file)!r}).write_text('built')\""
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=writer_session,
+        tool_name="Bash",
+        tool_input={"command": command},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert runtime.read_session_state(target, writer_session)["write_observed"] is False
+
+    assert (
+        runtime.handle_payload(
+            "PreToolUse",
+            _payload(
+                target,
+                "PreToolUse",
+                session_id=reader_session,
+                tool_name="Bash",
+                tool_input={"command": "git log -1"},
+            ),
+        )
+        is None
+    )
+    reader_state = runtime.read_session_state(target, reader_session)
+    assert reader_state["write_observed"] is False
+    assert "last_write_at" not in reader_state
+    assert "pending_write_at" not in reader_state
+
+    out_file.write_text("built")
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+    writer_state = runtime.read_session_state(target, writer_session)
+    assert writer_state["write_observed"] is True
+    assert writer_state.get("last_write_at")
+
+    blocked = runtime.handle_payload(
+        "Stop", _payload(target, "Stop", session_id=writer_session, stop_hook_active=False)
+    )
+    assert blocked["decision"] == "block"
+
+
 def test_posttooluse_ignores_concurrent_session_write_during_read_only_bash(tmp_path: Path):
     target = _wired_claude(tmp_path)
     reader_session = "read-only-bash"
@@ -706,6 +758,447 @@ def test_stop_keeps_prior_receipt_when_interleaved_foreign_write_lags_fingerprin
         runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
         is None
     )
+
+
+def _write_session_receipt(target: Path, session_id: str, *, tree_fingerprint: str | None = None) -> dict:
+    state = runtime.read_session_state(target, session_id)
+    stamp = state["last_verification_write_at"]
+    run_dir = target / ".brigade" / "work" / "verify-runs" / f"run-{session_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": f"run-{session_id}",
+        "status": "completed",
+        "started_at": stamp,
+        "completed_at": stamp,
+        "target": str(target.resolve()),
+        "harness_session": {
+            "harness": "claude",
+            "fingerprint": state["session_fingerprint"],
+        },
+    }
+    if tree_fingerprint is not None:
+        payload["tree_fingerprint"] = tree_fingerprint
+    (run_dir / "receipt.json").write_text(json.dumps(payload) + "\n")
+    return state
+
+
+def test_stop_does_not_block_when_concurrent_session_dirties_audited_tree(tmp_path: Path, monkeypatch):
+    """Issue #959: session B's receipt must still close out after session A writes."""
+    target = _git_wired_claude(tmp_path)
+    (target / "owned.py").write_text("owned = 1\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=target, check=True, capture_output=True, text=True)
+
+    reader = "session-b"
+    writer = "session-a"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned = 2\n"},
+        ),
+    )
+    from brigade.work_cmd.verification import _tree_fingerprint
+
+    receipt_tree = _tree_fingerprint(target)
+    assert receipt_tree is not None
+    _write_session_receipt(target, reader, tree_fingerprint=receipt_tree)
+
+    (target / "foreign.py").write_text("foreign\n")
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=writer,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "foreign.py"), "content": "foreign\n"},
+        ),
+    )
+    assert _tree_fingerprint(target) != receipt_tree
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader, stop_hook_active=False))
+    assert result is None or result.get("decision") != "block"
+
+
+def test_stop_does_not_rearm_after_read_only_bash_during_foreign_writes(tmp_path: Path, monkeypatch):
+    """Issue #959: another session's writes must not bump this session's last_write_at."""
+    target = _wired_claude(tmp_path)
+    reader = "session-b-bash"
+    writer = "session-a-loop"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned\n"},
+        ),
+    )
+    state = _write_session_receipt(target, reader)
+    write_at = state["last_write_at"]
+
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=reader,
+        tool_name="Bash",
+        tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+
+    changed = target / "foreign-loop.py"
+    changed.write_text("pass 1\n")
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=writer,
+            tool_name="Write",
+            tool_input={"file_path": str(changed), "content": "pass 1\n"},
+        ),
+    )
+    changed.write_text("pass 2\n")
+
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+    updated = runtime.read_session_state(target, reader)
+    assert updated["last_write_at"] == write_at
+    assert updated["last_verification_write_at"] == state["last_verification_write_at"]
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader, stop_hook_active=False))
+    assert result is None or result.get("decision") != "block"
+
+
+def test_stop_ignores_other_harness_receipt_as_this_session_write(tmp_path: Path, monkeypatch):
+    """Issue #959: a Codex/other-harness capture must not look like this session's write."""
+    target = _wired_claude(tmp_path)
+    reader = "claude-hub-session"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned\n"},
+        ),
+    )
+    state = _write_session_receipt(target, reader)
+    write_at = state["last_write_at"]
+
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=reader,
+        tool_name="Bash",
+        tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+
+    (target / "codex.py").write_text("from the other agent\n")
+    other_dir = target / ".brigade" / "work" / "verify-runs" / "codex-run"
+    other_dir.mkdir(parents=True)
+    (other_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "codex-run",
+                "status": "completed",
+                "started_at": localio.utc_now_iso(),
+                "completed_at": localio.utc_now_iso(),
+                "target": str(target.resolve()),
+                "harness_session": {"harness": "codex", "fingerprint": "codex-other"},
+            }
+        )
+        + "\n"
+    )
+
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+    updated = runtime.read_session_state(target, reader)
+    assert updated["last_write_at"] == write_at
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader, stop_hook_active=False))
+    assert result is None or result.get("decision") != "block"
+
+
+def test_stop_warns_when_foreign_write_outruns_this_session_receipt(tmp_path: Path, monkeypatch):
+    """Issue #959: a threshold another process can raise must not hard-block closeout."""
+    target = _wired_claude(tmp_path)
+    reader = "blocked-session"
+    writer = "busy-session"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned\n"},
+        ),
+    )
+    _write_session_receipt(target, reader)
+
+    later = localio.utc_now().isoformat()
+    state = runtime.read_session_state(target, reader)
+    state["last_write_at"] = later
+    state["last_verification_write_at"] = later
+    runtime.write_session_state(target, reader, state)
+
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=writer,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "foreign.py"), "content": "foreign\n"},
+        ),
+    )
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader, stop_hook_active=False))
+    assert result is not None
+    assert result.get("decision") != "block"
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "concurrent session" in context
+    assert "not blocked" in context
+
+
+def test_stop_still_blocks_without_receipt_when_concurrent_session_is_active(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    reader = "never-captured"
+    writer = "other-writer"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned\n"},
+        ),
+    )
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=writer,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "foreign.py"), "content": "foreign\n"},
+        ),
+    )
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader, stop_hook_active=False))
+    assert result is not None
+    assert result["decision"] == "block"
+
+
+def test_stop_still_blocks_when_this_session_writes_after_its_receipt(tmp_path: Path, monkeypatch):
+    """Busy-hub order: this session writes after capture, then a neighbor writes.
+
+    The prior order (foreign write, then own write) hid the Stop downgrade:
+    ``_foreign_write_since`` was evaluated against this session's later
+    ``last_write_at``, so the neighbor's earlier write did not count.
+    """
+    target = _wired_claude(tmp_path)
+    reader = "wrote-again"
+    writer = "background-writer"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned\n"},
+        ),
+    )
+    _write_session_receipt(target, reader)
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned again\n"},
+        ),
+    )
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=writer,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "foreign.py"), "content": "foreign\n"},
+        ),
+    )
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader, stop_hook_active=False))
+    assert result is not None
+    assert result["decision"] == "block"
+
+
+def test_stop_still_blocks_own_unverified_write_when_neighbor_only_reads(tmp_path: Path, monkeypatch):
+    """Own Write after capture still hard-blocks when a neighbor only reads."""
+    target = _wired_claude(tmp_path)
+    reader = "wrote-again-read-neighbor"
+    neighbor = "read-only-neighbor"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned\n"},
+        ),
+    )
+    _write_session_receipt(target, reader)
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned again\n"},
+        ),
+    )
+    assert (
+        runtime.handle_payload(
+            "PreToolUse",
+            _payload(
+                target,
+                "PreToolUse",
+                session_id=neighbor,
+                tool_name="Bash",
+                tool_input={"command": "git log -1"},
+            ),
+        )
+        is None
+    )
+    neighbor_state = runtime.read_session_state(target, neighbor)
+    assert neighbor_state["write_observed"] is False
+    assert "last_write_at" not in neighbor_state
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader, stop_hook_active=False))
+    assert result is not None
+    assert result["decision"] == "block"
+
+
+def test_stop_still_blocks_own_unverified_write_when_other_session_receipt_only(tmp_path: Path, monkeypatch):
+    """Own Write after capture still hard-blocks when another session only captures."""
+    target = _wired_claude(tmp_path)
+    reader = "wrote-again-receipt-neighbor"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned\n"},
+        ),
+    )
+    _write_session_receipt(target, reader)
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned again\n"},
+        ),
+    )
+    other_dir = target / ".brigade" / "work" / "verify-runs" / "other-session-only"
+    other_dir.mkdir(parents=True)
+    (other_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "other-session-only",
+                "status": "completed",
+                "started_at": localio.utc_now_iso(),
+                "completed_at": localio.utc_now_iso(),
+                "target": str(target.resolve()),
+                "harness_session": {"harness": "claude", "fingerprint": "other-session-fp"},
+            }
+        )
+        + "\n"
+    )
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader, stop_hook_active=False))
+    assert result is not None
+    assert result["decision"] == "block"
+
+
+def test_receipt_since_accepts_tree_drift_when_foreign_session_wrote(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    (target / "source.py").write_text("value = 1\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=target, check=True, capture_output=True, text=True)
+    (target / "source.py").write_text("value = 2\n")
+
+    session_id = "audited-session"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    fingerprint = runtime._session_fingerprint(session_id)
+    from brigade.work_cmd.verification import _tree_fingerprint
+
+    receipt_tree = _tree_fingerprint(target)
+    threshold = localio.utc_now() - timedelta(seconds=10)
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "matching"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "matching",
+                "target": str(target.resolve()),
+                "status": "completed",
+                "started_at": (threshold + timedelta(seconds=1)).isoformat(),
+                "completed_at": (threshold + timedelta(seconds=2)).isoformat(),
+                "tree_fingerprint": receipt_tree,
+                "harness_session": {"harness": "claude", "fingerprint": fingerprint},
+            }
+        )
+        + "\n"
+    )
+
+    (target / "foreign.py").write_text("other session\n")
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id="foreign-writer",
+            tool_name="Write",
+            tool_input={"file_path": str(target / "foreign.py"), "content": "other session\n"},
+        ),
+    )
+    assert _tree_fingerprint(target) != receipt_tree
+    assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is True
 
 
 def test_posttooluse_snapshot_fails_closed_when_state_cannot_be_inspected(tmp_path: Path, monkeypatch):
