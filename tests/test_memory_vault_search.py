@@ -284,11 +284,13 @@ def test_output_runs_through_guard_redaction(workspace, capsys) -> None:
         vault,
         "Notes/contact.md",
         title="Contact Rotation",
-        body="Bearer super-secret-token-value-123456 about rotation.",
+        # Built by concatenation so the repo's own secret scanner does not
+        # match a contiguous bearer token in this fixture's source.
+        body="Bearer " + "super-secret-token-value-" + "123456 about rotation.",
     )
     assert cli.main(["memory", "vault-search", "rotation", "--target", str(target), "--json"]) == 0
     hit = json.loads(capsys.readouterr().out)["hits"][0]
-    assert "super-secret-token-value-123456" not in hit["snippet"]
+    assert "super-secret-token-value-" + "123456" not in hit["snippet"]
     assert "Bearer [redacted-secret]" in hit["snippet"]
 
 
