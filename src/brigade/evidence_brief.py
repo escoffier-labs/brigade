@@ -116,21 +116,25 @@ def _find_commit(result: dict[str, Any], snippet: str) -> str:
     return _one_line(match.group(0).rstrip(").,;"), 160) if match else ""
 
 
-def _find_trust(result: dict[str, Any]) -> str:
-    label = trust_gate.trust_label_of(result)
-    if label in provenance.TRUST_LABELS:
-        return label
-    value = result.get("trust_label")
-    if isinstance(value, str) and value.strip() and value in provenance.TRUST_LABELS:
-        return value
-    value = result.get("trust")
-    if isinstance(value, str) and value.strip() and value in provenance.TRUST_LABELS:
-        return value
+def _find_trust(result: dict[str, Any]) -> str | None:
+    """Return an explicit trust label declared on the item, or None when absent."""
+
+    for key in ("trust_label", "trust"):
+        value = result.get(key)
+        if isinstance(value, str) and value in provenance.TRUST_LABELS:
+            return value
     metadata = _metadata(result)
     value = metadata.get("trust")
-    if isinstance(value, str) and value.strip() and value in provenance.TRUST_LABELS:
+    if isinstance(value, str) and value in provenance.TRUST_LABELS:
         return value
-    return "unknown"
+    env = result.get("provenance")
+    if isinstance(env, dict):
+        trust = env.get("trust")
+        if isinstance(trust, dict):
+            label = trust.get("label")
+            if label in provenance.TRUST_LABELS:
+                return str(label)
+    return None
 
 
 def _find_source_label(result: dict[str, Any]) -> str:
@@ -159,7 +163,6 @@ def _result_line(
     bundle: dict[str, Any],
     *,
     snippet: str | None = None,
-    trust_label: str | None = None,
     metadata_only: bool = False,
 ) -> str:
     mismatch = bool(result.get("integrity_mismatch"))
@@ -170,8 +173,9 @@ def _result_line(
         f"status: {_find_status(result, snippet)}",
     ]
 
-    trust = trust_label or result.get("trust_label") or _find_trust(result)
-    parts.append(f"trust: {trust}")
+    trust = _find_trust(result)
+    if trust:
+        parts.append(f"trust: {trust}")
     if mismatch:
         parts.append("integrity_mismatch: true")
     if metadata_only:
@@ -208,7 +212,7 @@ def _result_line(
 
     scores = result.get("scores")
     if isinstance(scores, dict) and scores:
-        score_parts = [f"{k}={v}" for k, v in list(scores.items())[:4] if v is not None]
+        score_parts = [f"{_one_line(k, 40)}={_one_line(v, 40)}" for k, v in list(scores.items())[:4] if v is not None]
         if score_parts:
             parts.append(f"scores: {', '.join(score_parts)}")
 
@@ -241,7 +245,7 @@ def _render_bundle_context(
     unavailable = bundle.get("unavailable_arms")
 
     if isinstance(arms, list) and arms:
-        arm_labels = [str(a) for a in arms if a]
+        arm_labels = [_one_line(a, 40) for a in arms if a]
         if len(arm_labels) == 1:
             lines.append(f"Retrieval: single arm ({arm_labels[0]}).")
         else:
@@ -352,7 +356,6 @@ def _render(results: list[dict[str, Any]], bundle: dict[str, Any] | None = None)
             result,
             bundle,
             snippet=snippet,
-            trust_label=admission.label,
             metadata_only=metadata_only,
         )
         if wrapped:
@@ -370,12 +373,14 @@ def _render(results: list[dict[str, Any]], bundle: dict[str, Any] | None = None)
         if len(candidate.encode()) > LIMIT_BYTES:
             break
         kept.append(cl)
+    result_kept = False
     for line in lines:
         candidate = "\n".join([*kept, line]).rstrip() + note
         if len(candidate.encode()) > LIMIT_BYTES:
             break
         kept.append(line)
-    if len(kept) == len(intro) and lines:
+        result_kept = True
+    if not result_kept and lines:
         base = "\n".join(kept).rstrip() + "\n"
         room = max(0, LIMIT_BYTES - len((base + note).encode()))
         kept.append(_fit_bytes(lines[0], room))
