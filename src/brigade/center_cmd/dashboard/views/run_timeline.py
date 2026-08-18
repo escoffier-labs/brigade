@@ -1,4 +1,9 @@
-"""Run timeline dashboard view."""
+"""Run timeline dashboard view.
+
+Renders Brigade orchestration runs from the versioned ``brigade.runs-list.v1``
+CLI contract (issue #631) alongside the existing verify-run receipts. Data
+access stays CLI-owned; this module never reads run artifacts directly.
+"""
 
 from __future__ import annotations
 
@@ -12,21 +17,88 @@ NAME = "runs"
 TITLE = "Runs"
 ORDER = 5
 
+RUNS_LIST_SCHEMA = "brigade.runs-list.v1"
+
 _RUNS_FETCH_LIMIT = 500
+_BRIGADE_RUNS_LIMIT = 50
 _CLIENT_PAGE_SIZE = 50
 
 
 def fetch(target: Path) -> dict:
-    return data.run_json(target, ["work", "verify", "runs", "--limit", str(_RUNS_FETCH_LIMIT)])
+    return {
+        "brigade": data.run_json_cwd(target, ["runs", "list", "--limit", str(_BRIGADE_RUNS_LIMIT)]),
+        "verify": data.run_json(target, ["work", "verify", "runs", "--limit", str(_RUNS_FETCH_LIMIT)]),
+    }
 
 
 def render(payload: dict, nonce: str) -> str:
-    if payload.get("error"):
-        return html.error_panel(TITLE, str(payload["error"]))
+    brigade_payload = payload.get("brigade") if isinstance(payload.get("brigade"), dict) else {}
+    verify_payload = payload.get("verify") if isinstance(payload.get("verify"), dict) else {}
+    return _render_brigade_panel(brigade_payload) + _render_verify_panel(verify_payload, nonce)
+
+
+def _render_brigade_panel(payload: dict) -> str:
+    title = "Brigade runs"
+    error = payload.get("error")
+    if error:
+        # A missing runs directory is an empty state, not a failure.
+        detail = f"<details><summary>{html.esc('CLI diagnostic')}</summary><pre>{html.esc(str(error))}</pre></details>"
+        return html.panel(html.esc(title), f"<p>{html.esc('No Brigade runs yet.')}</p>{detail}")
 
     runs = payload.get("runs")
     if not isinstance(runs, list) or not runs:
-        return _empty_panel()
+        return html.panel(html.esc(title), f"<p>{html.esc('No Brigade runs yet.')}</p>")
+
+    rows = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        rows.append(
+            [
+                html.esc(_value(run, "run_id")),
+                html.esc(_value(run, "status")),
+                html.esc(_value(run, "task")),
+                html.esc(_value(run, "started_at")),
+                html.esc(_value(run, "duration_seconds")),
+                html.esc(_value(run, "failure_phase")),
+                html.esc(_value(run, "mode")),
+                html.esc("yes" if run.get("resume_available") else "no"),
+            ]
+        )
+    if not rows:
+        return html.panel(html.esc(title), f"<p>{html.esc('No Brigade runs yet.')}</p>")
+
+    table = html.table(
+        [
+            html.esc("Run ID"),
+            html.esc("Status"),
+            html.esc("Task"),
+            html.esc("Started"),
+            html.esc("Duration"),
+            html.esc("Failure phase"),
+            html.esc("Mode"),
+            html.esc("Resume"),
+        ],
+        rows,
+    )
+    notes = []
+    skipped = payload.get("skipped_invalid")
+    if isinstance(skipped, int) and skipped > 0:
+        notes.append(f"<p>{html.esc(f'Skipped {skipped} invalid run directories.')}</p>")
+    if payload.get("schema") != RUNS_LIST_SCHEMA:
+        notes.append(f"<p>{html.esc('Warning: unexpected runs list schema from CLI.')}</p>")
+    body = '<div class="mo-scroll">' + table + "</div>" + "".join(notes)
+    return html.panel(html.esc(title), body)
+
+
+def _render_verify_panel(payload: dict, nonce: str) -> str:
+    title = "Verify runs"
+    if payload.get("error"):
+        return html.error_panel(title, str(payload["error"]))
+
+    runs = payload.get("runs")
+    if not isinstance(runs, list) or not runs:
+        return _empty_panel(title)
 
     rows = []
     for receipt in sorted(
@@ -49,7 +121,7 @@ def render(payload: dict, nonce: str) -> str:
         )
 
     if not rows:
-        return _empty_panel()
+        return _empty_panel(title)
 
     table = html.table(
         [
@@ -79,11 +151,11 @@ def render(payload: dict, nonce: str) -> str:
         "</div>"
     )
     wrapped = '<div class="mo-scroll">' + table + "</div>"
-    return f"{_stylesheet(nonce)}{html.panel(html.esc(TITLE), pager + wrapped)}{_script(nonce)}"
+    return f"{_stylesheet(nonce)}{html.panel(html.esc(title), pager + wrapped)}{_script(nonce)}"
 
 
-def _empty_panel() -> str:
-    return html.panel(html.esc(TITLE), f"<p>{html.esc('Nothing here.')}</p>")
+def _empty_panel(title: str) -> str:
+    return html.panel(html.esc(title), f"<p>{html.esc('Nothing here.')}</p>")
 
 
 def _value(receipt: dict, name: str) -> object:

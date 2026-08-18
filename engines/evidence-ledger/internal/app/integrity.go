@@ -247,16 +247,72 @@ func attachIntegrityFields(out map[string]any, view integrityView) {
 	}
 }
 
-func applySearchIntegrity(db *sql.DB, results []SearchResult) error {
-	for i := range results {
-		var text, metadataJSON, rawJSON string
-		if err := db.QueryRow(`select coalesce(text,''), metadata_json, coalesce(raw_json,'') from items where id = ?`, results[i].ID).Scan(&text, &metadataJSON, &rawJSON); err != nil {
-			if err == sql.ErrNoRows {
-				continue
-			}
-			return err
+type itemQuerier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+type searchIntegrityItem struct {
+	Text         string
+	MetadataJSON string
+	RawJSON      string
+}
+
+func searchResultIDs(results []SearchResult) []string {
+	ids := make([]string, 0, len(results))
+	seen := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		if result.ID == "" {
+			continue
 		}
-		view := inspectItemIntegrity(text, rawJSON, metadataJSON, nil, false)
+		if _, ok := seen[result.ID]; ok {
+			continue
+		}
+		seen[result.ID] = struct{}{}
+		ids = append(ids, result.ID)
+	}
+	return ids
+}
+
+func searchIntegrityLookupSQL(n int) string {
+	return `select id, coalesce(text,''), metadata_json, coalesce(raw_json,'') from items where id in (` + placeholders(n) + `)`
+}
+
+func loadItemsForSearchIntegrity(db itemQuerier, ids []string) (map[string]searchIntegrityItem, error) {
+	if len(ids) == 0 {
+		return map[string]searchIntegrityItem{}, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := db.Query(searchIntegrityLookupSQL(len(args)), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]searchIntegrityItem, len(ids))
+	for rows.Next() {
+		var id string
+		var item searchIntegrityItem
+		if err := rows.Scan(&id, &item.Text, &item.MetadataJSON, &item.RawJSON); err != nil {
+			return nil, err
+		}
+		out[id] = item
+	}
+	return out, rows.Err()
+}
+
+func applySearchIntegrity(db *sql.DB, results []SearchResult) error {
+	items, err := loadItemsForSearchIntegrity(db, searchResultIDs(results))
+	if err != nil {
+		return err
+	}
+	for i := range results {
+		item, ok := items[results[i].ID]
+		if !ok {
+			continue
+		}
+		view := inspectItemIntegrity(item.Text, item.RawJSON, item.MetadataJSON, nil, false)
 		results[i].Origin = view.Origin
 		results[i].Modality = view.Modality
 		results[i].TrustLabel = view.TrustLabel

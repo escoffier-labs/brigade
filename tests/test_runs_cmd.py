@@ -1300,6 +1300,57 @@ def test_runs_show_prints_child_lineage(tmp_path, capsys):
     assert "shared prefix: seq=3 digest=bbbbbbbbbbbb" in out
 
 
+def test_runs_show_json_includes_child_lineage(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_run_artifacts(run_dir)
+    payload = json.loads((run_dir / "run.json").read_text())
+    payload["lineage"] = {
+        "kind": "child",
+        "parent_run_id": "20260817-120000-parent-aaaaaa",
+        "branch_point_event_id": "20260817-120000-parent-aaaaaa-000003-bbbbbbbbbbbb",
+        "shared_prefix": {
+            "event_sequence": 3,
+            "event_digest": "b" * 64,
+            "previous_digest": "a" * 64,
+        },
+    }
+    _write_json(run_dir / "run.json", payload)
+
+    assert runs_cmd.show(run_dir, json_output=True) == 0
+    detail = json.loads(capsys.readouterr().out)
+    assert detail["schema"] == "brigade.run-detail.v1"
+    assert detail["run"]["lineage"] == {
+        "kind": "child",
+        "parent_run_id": "20260817-120000-parent-aaaaaa",
+        "branch_point_event_id": "20260817-120000-parent-aaaaaa-000003-bbbbbbbbbbbb",
+        "shared_prefix": {
+            "event_sequence": 3,
+            "event_digest": "b" * 64,
+            "previous_digest": "a" * 64,
+        },
+    }
+
+
+def test_runs_list_json_includes_parent_run_id(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    child = runs_root / "20260817-130000-child-bbbbbb"
+    _write_minimal_run(child, task="branched work", status="ok", started_at="2026-08-17T13:00:00Z")
+    payload = json.loads((child / "run.json").read_text())
+    payload["lineage"] = {
+        "kind": "child",
+        "parent_run_id": "20260817-120000-parent-aaaaaa",
+        "branch_point_event_id": "20260817-120000-parent-aaaaaa-000003-bbbbbbbbbbbb",
+        "shared_prefix": {"event_sequence": 3, "event_digest": "b" * 64, "previous_digest": "a" * 64},
+    }
+    _write_json(child / "run.json", payload)
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["schema"] == "brigade.runs-list.v1"
+    assert listed["runs"][0]["parent_run_id"] == "20260817-120000-parent-aaaaaa"
+
+
 def test_runs_show_reports_missing_run_json(tmp_path, capsys):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -1323,6 +1374,239 @@ def test_runs_show_cli(tmp_path, capsys):
 
     assert cli.main(["runs", "show", str(run_dir)]) == 0
     assert "status: ok" in capsys.readouterr().out
+
+
+def _write_detail_run_artifacts(run_dir):
+    _write_run_artifacts(run_dir)
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["code_graph_brief"] = {"attached": True, "bytes": 1200}
+    run_meta["drift_impact_brief"] = {"attached": False, "bytes": 0, "pending_count": 1}
+    run_meta["evidence_brief"] = {"attached": True, "bytes": 800}
+    _write_json(run_dir / "run.json", run_meta)
+    _write_json(
+        run_dir / "worker-results.json",
+        {
+            "results": [
+                {
+                    "worker": "coder",
+                    "task": "implement it",
+                    "ok": True,
+                    "detail": "",
+                    "text": "secret transcript body",
+                    "stdout_log": "logs/worker-001-coder.stdout.log",
+                    "stderr_log": "logs/worker-001-coder.stderr.log",
+                    "duration_seconds": 12.5,
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "requested_model": "gpt-5.5",
+                    "transport": "cli",
+                }
+            ],
+            "ground_truth": {
+                "available": True,
+                "cwd": "/repo",
+                "verify_receipts": [
+                    {
+                        "run_id": "verify-1",
+                        "status": "ok",
+                        "started_at": "2026-05-26T14:00:01Z",
+                        "duration_seconds": 3.2,
+                        "commands": [{"command": "./scripts/verify", "exit_code": 0, "duration_seconds": 3.0}],
+                    }
+                ],
+            },
+        },
+    )
+
+
+def test_runs_show_json_emits_versioned_detail_contract(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_detail_run_artifacts(run_dir)
+
+    assert runs_cmd.show(run_dir, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == "brigade.run-detail.v1"
+    assert sorted(payload) == [
+        "briefs",
+        "plan",
+        "roster",
+        "run",
+        "schema",
+        "synthesis",
+        "verification",
+        "workers",
+    ]
+    assert payload["run"]["run_id"] == "run"
+    assert payload["run"]["status"] == "ok"
+    assert payload["run"]["mode"] == "read-only"
+    assert payload["run"]["resume_available"] is False
+    assert payload["roster"]["orchestrator"] == "chef"
+    assert payload["roster"]["agents"]["chef"]["cli"] == "codex"
+    assert payload["plan"]["assignments"] == [{"worker": "coder", "task": "implement it"}]
+    assert payload["workers"]["results"][0]["worker"] == "coder"
+    assert payload["workers"]["results"][0]["requested_model"] == "gpt-5.5"
+    assert payload["synthesis"]["result"]["ok"] is True
+    assert payload["verification"] == [
+        {
+            "run_id": "verify-1",
+            "status": "ok",
+            "started_at": "2026-05-26T14:00:01Z",
+            "duration_seconds": 3.2,
+            "commands": [{"command": "./scripts/verify", "exit_code": 0, "duration_seconds": 3.0}],
+        }
+    ]
+    assert payload["briefs"] == [
+        {"name": "code-graph", "attached": True, "bytes": 1200},
+        {"name": "drift-impact", "attached": False, "bytes": 0, "pending_count": 1},
+        {"name": "evidence", "attached": True, "bytes": 800},
+    ]
+
+
+def test_runs_show_json_excludes_private_runtime_values(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_detail_run_artifacts(run_dir)
+
+    assert runs_cmd.show(run_dir, json_output=True) == 0
+
+    out = capsys.readouterr().out
+    assert str(run_dir) not in out
+    assert "/repo" not in out
+    assert "secret transcript body" not in out
+    assert "stdout_log" not in out
+    assert "stderr_log" not in out
+    assert "handoff" not in out
+    assert "artifacts" not in out
+
+
+def test_runs_view_contracts_omit_planted_token_path_and_prompt(tmp_path, capsys):
+    from tests.test_runs_watch import (
+        _assert_no_planted_secrets,
+        _plant_watch_secrets,
+    )
+
+    run_dir = tmp_path / ".brigade" / "runs" / "20260817-100000-watch-aaaaaa"
+    leaks = _plant_watch_secrets(run_dir, tmp_path)
+
+    assert runs_cmd.list_runs(cwd=tmp_path, json_output=True) == 0
+    listed = capsys.readouterr().out
+    _assert_no_planted_secrets(listed, leaks)
+    assert json.loads(listed)["schema"] == "brigade.runs-list.v1"
+
+    assert runs_cmd.show(run_dir, json_output=True) == 0
+    detail = capsys.readouterr().out
+    _assert_no_planted_secrets(detail, leaks)
+    assert json.loads(detail)["schema"] == "brigade.run-detail.v1"
+
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.0, json_output=True) == 0
+    watched = capsys.readouterr().out
+    _assert_no_planted_secrets(watched, leaks)
+    frames = [json.loads(line) for line in watched.splitlines()]
+    assert frames
+    assert all(frame["schema"] == "brigade.run-watch.v1" for frame in frames)
+
+
+def test_runs_show_json_bounds_long_task_text(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_run_artifacts(run_dir)
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["task"] = "x" * 5_000
+    _write_json(run_dir / "run.json", run_meta)
+
+    assert runs_cmd.show(run_dir, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["run"]["task"]) <= 400
+    assert payload["run"]["task"].endswith("...")
+
+
+def test_runs_show_json_cli_flag(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_run_artifacts(run_dir)
+
+    assert cli.main(["runs", "show", str(run_dir), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == "brigade.run-detail.v1"
+
+
+def test_runs_latest_json_shares_detail_contract(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    early = runs_root / "20260526-130000-aaaa"
+    late = runs_root / "20260526-140000-bbbb"
+    runs_root.mkdir(parents=True)
+    _write_run_artifacts(early)
+    _write_run_artifacts(late)
+    late_meta = json.loads((late / "run.json").read_text())
+    late_meta["started_at"] = "2026-05-26T15:00:00Z"
+    _write_json(late / "run.json", late_meta)
+
+    assert cli.main(["runs", "latest", "--cwd", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == "brigade.run-detail.v1"
+    assert payload["run"]["run_id"] == "20260526-140000-bbbb"
+
+
+def test_runs_list_json_emits_versioned_contract(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    _write_minimal_run(
+        runs_root / "20260526-130000-aaaa",
+        task="t" * 5_000,
+        status="ok",
+        started_at="2026-05-26T13:00:00Z",
+        read_only=True,
+    )
+    _write_minimal_run(
+        runs_root / "20260526-140000-bbbb",
+        task="fix the bug",
+        status="failed",
+        started_at="2026-05-26T14:00:00Z",
+        dry_run=True,
+    )
+    failed = json.loads((runs_root / "20260526-140000-bbbb" / "run.json").read_text())
+    failed["failure_phase"] = "dispatch"
+    _write_json(runs_root / "20260526-140000-bbbb" / "run.json", failed)
+    invalid = runs_root / "20260526-150000-cccc"
+    invalid.mkdir()
+    (invalid / "run.json").write_text("not json")
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
+
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["schema"] == "brigade.runs-list.v1"
+    assert payload["skipped_invalid"] == 1
+    assert [run["run_id"] for run in payload["runs"]] == [
+        "20260526-140000-bbbb",
+        "20260526-130000-aaaa",
+    ]
+    newest, oldest = payload["runs"]
+    assert newest["status"] == "failed"
+    assert newest["failure_phase"] == "dispatch"
+    assert newest["mode"] == "normal, dry-run"
+    assert newest["resume_available"] is False
+    assert oldest["mode"] == "read-only"
+    assert len(oldest["task"]) <= 160
+    assert str(runs_root) not in out
+    assert "/repo" not in out
+
+
+def test_runs_list_json_respects_limit(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    for hour in (13, 14):
+        _write_minimal_run(
+            runs_root / f"20260526-{hour}0000-aaaa",
+            task="task",
+            status="ok",
+            started_at=f"2026-05-26T{hour}:00:00Z",
+        )
+
+    assert runs_cmd.list_runs(cwd=tmp_path, limit=1, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [run["run_id"] for run in payload["runs"]] == ["20260526-140000-aaaa"]
 
 
 def test_runs_recover_cli_dispatches_resolved_run(tmp_path, monkeypatch):
