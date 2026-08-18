@@ -259,6 +259,146 @@ func TestForensicContentBlocksUnknownInjectionStatus(t *testing.T) {
 	assertItemNotDeleted(t, id)
 }
 
+func TestSearchIntegrityLookupSQLBatchesIDs(t *testing.T) {
+	got := searchIntegrityLookupSQL(3)
+	if !strings.Contains(got, "id in (?,?,?)") {
+		t.Fatalf("expected one batched IN clause, got %q", got)
+	}
+	if strings.Count(strings.ToLower(got), "select") != 1 {
+		t.Fatalf("expected a single select, got %q", got)
+	}
+}
+
+func TestLoadItemsForSearchIntegritySkipsQueryWhenEmpty(t *testing.T) {
+	counter := &queryCounter{}
+	items, err := loadItemsForSearchIntegrity(counter, searchResultIDs(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counter.selects != 0 {
+		t.Fatalf("empty ids issued %d queries", counter.selects)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
+func TestLoadItemsForSearchIntegrityUsesOneQuery(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	okID := insertCleanIntegrityItem(t, "UNIQUE_BATCH_LOAD ok body", "untrusted", "clean")
+	badID := insertCleanIntegrityItem(t, "UNIQUE_BATCH_LOAD bad body", "reviewed", "clean")
+	legacyID := insertLegacyIntegrityItem(t, "UNIQUE_BATCH_LOAD legacy body")
+	missingID := "item-does-not-exist"
+
+	db := openTestDB(t)
+	defer db.Close()
+	counter := &queryCounter{DB: db}
+	ids := []string{okID, badID, legacyID, missingID, okID, ""}
+	items, err := loadItemsForSearchIntegrity(counter, searchResultIDs(resultsFromIDs(ids...)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counter.selects != 1 {
+		t.Fatalf("item lookups = %d, want 1", counter.selects)
+	}
+	if len(items) != 3 {
+		t.Fatalf("loaded items = %d, want 3 (missing id skipped): %#v", len(items), items)
+	}
+	if _, ok := items[missingID]; ok {
+		t.Fatalf("missing id should not be present: %#v", items)
+	}
+	if items[okID].Text == "" || items[badID].Text == "" || items[legacyID].Text == "" {
+		t.Fatalf("expected text for known ids: %#v", items)
+	}
+}
+
+func TestApplySearchIntegrityBatchesMultipleResults(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	okID := insertCleanIntegrityItem(t, "UNIQUE_BATCH_APPLY ok body", "untrusted", "clean")
+	badID := insertCleanIntegrityItem(t, "UNIQUE_BATCH_APPLY bad body", "reviewed", "clean")
+	forgeItemContentHash(t, badID, forgedContentDigest)
+	missingID := "item-does-not-exist"
+
+	db := openTestDB(t)
+	defer db.Close()
+	results := []SearchResult{
+		{ID: okID, Snippet: "keep-ok"},
+		{ID: badID, Snippet: "clear-bad"},
+		{ID: missingID, Snippet: "keep-missing"},
+		{ID: okID, Snippet: "keep-dup"},
+	}
+	if err := applySearchIntegrity(db, results); err != nil {
+		t.Fatal(err)
+	}
+	if results[0].IntegrityMismatch || results[0].Snippet != "keep-ok" {
+		t.Fatalf("matching hit changed: %#v", results[0])
+	}
+	if results[0].Origin != "workspace" || results[0].TrustLabel != "untrusted" {
+		t.Fatalf("matching envelope fields = %#v", results[0])
+	}
+	if !results[1].IntegrityMismatch || results[1].Snippet != "" {
+		t.Fatalf("mismatched hit not suppressed: %#v", results[1])
+	}
+	if results[1].TrustLabel != "reviewed" {
+		t.Fatalf("mismatch changed trust: %#v", results[1])
+	}
+	if results[2].IntegrityMismatch || results[2].Snippet != "keep-missing" || results[2].Origin != "" {
+		t.Fatalf("missing id should be left unchanged: %#v", results[2])
+	}
+	if results[3].IntegrityMismatch || results[3].Snippet != "keep-dup" {
+		t.Fatalf("duplicate matching hit changed: %#v", results[3])
+	}
+	assertItemNotDeleted(t, okID)
+	assertItemNotDeleted(t, badID)
+	assertIntegrityEventCount(t, badID, 1)
+}
+
+func TestSearchIntegrityHandlesMultipleHitsInOnePass(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	okID := insertCleanIntegrityItem(t, "UNIQUE_MULTI_HIT ok body", "untrusted", "clean")
+	badID := insertCleanIntegrityItem(t, "UNIQUE_MULTI_HIT bad body", "untrusted", "clean")
+	forgeItemContentHash(t, badID, forgedContentDigest)
+
+	search := runJSON(t, "search", "UNIQUE_MULTI_HIT", "--json", "--limit", "50")
+	results := search["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("search results = %#v", search)
+	}
+	byID := map[string]map[string]any{}
+	for _, raw := range results {
+		hit := raw.(map[string]any)
+		id, _ := hit["id"].(string)
+		byID[id] = hit
+	}
+	okHit := byID[okID]
+	if okHit == nil || okHit["integrity_mismatch"] == true {
+		t.Fatalf("matching hit flagged: %#v", okHit)
+	}
+	if snippet, _ := okHit["snippet"].(string); snippet == "" {
+		t.Fatalf("matching hit lost snippet: %#v", okHit)
+	}
+	if okHit["trust_label"] != "untrusted" {
+		t.Fatalf("matching hit trust = %#v", okHit)
+	}
+	badHit := byID[badID]
+	if badHit == nil || badHit["integrity_mismatch"] != true {
+		t.Fatalf("mismatched hit missing flag: %#v", badHit)
+	}
+	if snippet, _ := badHit["snippet"].(string); snippet != "" {
+		t.Fatalf("mismatched hit leaked snippet: %q", snippet)
+	}
+	if badHit["trust_label"] != "untrusted" {
+		t.Fatalf("mismatched hit changed trust: %#v", badHit)
+	}
+	assertItemNotDeleted(t, okID)
+	assertItemNotDeleted(t, badID)
+	assertIntegrityEventCount(t, badID, 1)
+	assertIntegrityEventCount(t, okID, 0)
+}
+
 func TestIntegrityMismatchDoesNotDowngradeTrustLabel(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
@@ -467,6 +607,26 @@ func assertIntegrityEventCount(t *testing.T, itemID string, want int) {
 	if n != want {
 		t.Fatalf("integrity events = %d, want %d", n, want)
 	}
+}
+
+type queryCounter struct {
+	*sql.DB
+	selects int
+}
+
+func (q *queryCounter) Query(query string, args ...any) (*sql.Rows, error) {
+	if strings.Contains(strings.ToLower(query), "from items") {
+		q.selects++
+	}
+	return q.DB.Query(query, args...)
+}
+
+func resultsFromIDs(ids ...string) []SearchResult {
+	out := make([]SearchResult, len(ids))
+	for i, id := range ids {
+		out[i] = SearchResult{ID: id}
+	}
+	return out
 }
 
 func mcpTextPayload(t *testing.T, result map[string]any) map[string]any {

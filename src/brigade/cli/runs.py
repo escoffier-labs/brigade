@@ -26,6 +26,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
     )
     p_runs_list.add_argument("--limit", type=int, default=10, help="Maximum number of runs to show.")
+    p_runs_list.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the versioned brigade.runs-list.v1 JSON contract.",
+    )
     p_runs_latest = runs_sub.add_parser("latest", help="Show the most recent Brigade run.")
     p_runs_latest.add_argument(
         "--cwd",
@@ -39,8 +44,18 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
     )
+    p_runs_latest.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the versioned brigade.run-detail.v1 JSON contract.",
+    )
     p_runs_show = runs_sub.add_parser("show", help="Show a readable summary of one run directory.")
     p_runs_show.add_argument("run_dir", type=Path, help="Path to a Brigade run artifact directory.")
+    p_runs_show.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the versioned brigade.run-detail.v1 JSON contract.",
+    )
     p_runs_child = runs_sub.add_parser(
         "child",
         help="Create a durable child run from a checkpoint-covered parent lifecycle event.",
@@ -309,11 +324,11 @@ def dispatch(args) -> int:
     from .. import runs_cmd
 
     if args.runs_command == "list":
-        return runs_cmd.list_runs(cwd=args.cwd, runs_dir=args.runs_dir, limit=args.limit)
+        return runs_cmd.list_runs(cwd=args.cwd, runs_dir=args.runs_dir, limit=args.limit, json_output=args.json)
     if args.runs_command == "latest":
-        return runs_cmd.show_latest(cwd=args.cwd, runs_dir=args.runs_dir)
+        return runs_cmd.show_latest(cwd=args.cwd, runs_dir=args.runs_dir, json_output=args.json)
     if args.runs_command == "show":
-        return runs_cmd.show(args.run_dir)
+        return runs_cmd.show(args.run_dir, json_output=args.json)
     if args.runs_command == "child":
         return runs_cmd.child(args.run, args.event_id, cwd=args.cwd, runs_dir=args.runs_dir)
     if args.runs_command == "watch":

@@ -1621,6 +1621,153 @@ def repo_worktree_fingerprint(target: Path) -> str | None:
     return localio.stable_hash(sorted(lines))
 
 
+def _session_id_for_fingerprint(target: Path, session_fingerprint: str) -> str | None:
+    for state in iter_session_states(target, limit=MAX_RECENT_SESSION_STATES):
+        if state.get("session_fingerprint") != session_fingerprint:
+            continue
+        session_id = state.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            return session_id
+    return None
+
+
+def _receipt_target_matches(receipt: dict[str, Any], target: Path) -> bool:
+    receipt_target = receipt.get("target")
+    if not isinstance(receipt_target, str):
+        return False
+    try:
+        return Path(receipt_target).expanduser().resolve() == target
+    except OSError:
+        return False
+
+
+def _iter_verify_receipts(target: Path) -> Iterator[dict[str, Any]]:
+    root = target / ".brigade" / "work" / "verify-runs"
+    if not root.is_dir():
+        return
+    for path in root.glob("*/receipt.json"):
+        receipt = localio.read_json_dict(path)
+        if isinstance(receipt, dict):
+            yield receipt
+
+
+def _foreign_receipt_since(target: Path, session_fingerprint: str, since: datetime) -> bool:
+    """True when another harness or session completed a verify at or after ``since``."""
+    for receipt in _iter_verify_receipts(target):
+        if receipt.get("status") != "completed":
+            continue
+        completed = localio.parse_iso_datetime(receipt.get("completed_at"))
+        started = localio.parse_iso_datetime(receipt.get("started_at"))
+        stamped = completed or started
+        if stamped is None or stamped < since:
+            continue
+        harness_session = receipt.get("harness_session")
+        if isinstance(harness_session, dict) and harness_session.get("fingerprint") == session_fingerprint:
+            continue
+        return True
+    return False
+
+
+def _foreign_write_since(
+    target: Path,
+    session_id: str,
+    since: datetime,
+    *,
+    session_fingerprint: str | None = None,
+) -> bool:
+    """True when another actor wrote in this target at or after ``since``.
+
+    Shared workspaces mix Claude sessions and other harnesses. A worktree
+    delta in that window is not safely this session's write work (#959).
+    Only write evidence counts: ``write_observed`` plus ``last_write_at``,
+    an in-flight ``pending_write_at``, or another harness/session receipt.
+    """
+    for other_state in iter_session_states(target, limit=MAX_RECENT_SESSION_STATES):
+        if other_state.get("session_id") == session_id:
+            continue
+        other_write = localio.parse_iso_datetime(other_state.get("last_write_at"))
+        if other_write is not None and other_write >= since and other_state.get("write_observed") is True:
+            return True
+        pending_write = localio.parse_iso_datetime(other_state.get("pending_write_at"))
+        if pending_write is not None and pending_write >= since:
+            return True
+    fingerprint = session_fingerprint if isinstance(session_fingerprint, str) else _session_fingerprint(session_id)
+    return _foreign_receipt_since(target, fingerprint, since)
+
+
+def _session_has_completed_receipt(
+    target: Path,
+    *,
+    session_fingerprint: str,
+    since: object,
+) -> bool:
+    started = localio.parse_iso_datetime(since)
+    if started is None:
+        return False
+    target = target.expanduser().resolve()
+    for receipt in _iter_verify_receipts(target):
+        if receipt.get("status") != "completed":
+            continue
+        harness_session = receipt.get("harness_session")
+        if not isinstance(harness_session, dict):
+            continue
+        if harness_session.get("harness") != "claude" or harness_session.get("fingerprint") != session_fingerprint:
+            continue
+        if not _receipt_target_matches(receipt, target):
+            continue
+        receipt_started = localio.parse_iso_datetime(receipt.get("started_at"))
+        completed = localio.parse_iso_datetime(receipt.get("completed_at"))
+        if receipt_started is None or completed is None or receipt_started < started or completed < receipt_started:
+            continue
+        return True
+    return False
+
+
+def _session_has_unverified_attributed_write(
+    target: Path,
+    state: dict[str, Any],
+    *,
+    session_fingerprint: str,
+) -> bool:
+    """True when this session's own Write/Edit/Bash PostToolUse is still unverified.
+
+    A Write or Edit PostToolUse is direct attribution, not a shared-tree
+    inference. Those writes must still hard-block even when neighbors are
+    alive (#959 review).
+    """
+    attributed = state.get("last_attributed_write_at")
+    if localio.parse_iso_datetime(attributed) is None:
+        return False
+    return not _receipt_since(target, attributed, session_fingerprint=session_fingerprint)
+
+
+def _shared_tree_block_is_foreign(
+    target: Path,
+    session_id: str,
+    state: dict[str, Any],
+) -> bool:
+    """True when a Stop block would be controlled by another session's writes.
+
+    The session already captured after it started, and another actor wrote at
+    or after this session's receipt threshold. A hard block then cannot be
+    cleared from inside the session (#959). This session's own directly
+    attributed post-receipt writes still own the block.
+    """
+    fingerprint = state.get("session_fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        fingerprint = _session_fingerprint(session_id)
+    if not _session_has_completed_receipt(target, session_fingerprint=fingerprint, since=state.get("started_at")):
+        return False
+    if _session_has_unverified_attributed_write(target, state, session_fingerprint=fingerprint):
+        return False
+    threshold = localio.parse_iso_datetime(
+        state.get("last_verification_write_at") or state.get("last_write_at") or state.get("started_at")
+    )
+    if threshold is None:
+        return False
+    return _foreign_write_since(target, session_id, threshold, session_fingerprint=fingerprint)
+
+
 def _bash_write_detected(
     target: Path,
     baseline: object,
@@ -1644,14 +1791,13 @@ def _bash_write_detected(
     # Another live session may have written again (or a third write may have
     # interleaved) after recording an older repo_fingerprint; requiring an
     # exact match re-arms this session's closeout gate (#704 / #380 follow-up).
-    for other_state in iter_session_states(target, limit=MAX_RECENT_SESSION_STATES):
-        if other_state.get("session_id") == session_id:
-            continue
-        if other_state.get("write_observed") is not True:
-            continue
-        other_write = localio.parse_iso_datetime(other_state.get("last_write_at"))
-        if other_write is not None and other_write >= started:
-            return False
+    # Cross-harness writers never appear in Claude session state; treat their
+    # receipts and another session's write evidence (write_observed /
+    # last_write_at / pending_write_at) in the same window as foreign so a
+    # shared hub cannot pin this session's last_write_at (#959). A read-only
+    # neighbor that only touches its session file is not write evidence.
+    if _foreign_write_since(target, session_id, started):
+        return False
     return True
 
 
@@ -1803,6 +1949,9 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
     pending_started = localio.parse_iso_datetime(payload.get("pending_bash_started_at"))
     if pending_started is not None and pending_started <= now:
         normalized["pending_bash_started_at"] = pending_started.isoformat()
+    pending_write = localio.parse_iso_datetime(payload.get("pending_write_at"))
+    if pending_write is not None and pending_write <= now:
+        normalized["pending_write_at"] = pending_write.isoformat()
     denied = payload.get("verify_denied_count")
     if isinstance(denied, int) and not isinstance(denied, bool) and denied >= 0:
         normalized["verify_denied_count"] = denied
@@ -1812,6 +1961,9 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
     last_verification_write = localio.parse_iso_datetime(payload.get("last_verification_write_at"))
     if last_verification_write is not None and last_verification_write <= now:
         normalized["last_verification_write_at"] = last_verification_write.isoformat()
+    last_attributed_write = localio.parse_iso_datetime(payload.get("last_attributed_write_at"))
+    if last_attributed_write is not None and last_attributed_write <= now:
+        normalized["last_attributed_write_at"] = last_attributed_write.isoformat()
     session_repos = payload.get("session_repos")
     if isinstance(session_repos, list) and all(isinstance(item, str) for item in session_repos):
         normalized["session_repos"] = list(session_repos)
@@ -1830,19 +1982,19 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
     session's source tree.  Bind the receipt to the routed Claude session, the
     target, and (when Git can provide it) the exact tree that is being audited.
     """
-    started = localio.parse_iso_datetime(started_at)
+    started = localio.parse_iso_datetime(started_at.isoformat() if isinstance(started_at, datetime) else started_at)
     if started is None:
         return False
     target = target.expanduser().resolve()
     # Snapshotting is an optional strengthening signal.  ``None`` preserves
     # hook operation in non-Git workspaces and on local Git/tool errors.
     audited_tree = _tree_fingerprint(target)
-    root = target / ".brigade" / "work" / "verify-runs"
-    if not root.is_dir():
-        return False
-    for path in root.glob("*/receipt.json"):
-        receipt = localio.read_json_dict(path)
-        if not receipt or receipt.get("status") != "completed":
+    session_id = (
+        _session_id_for_fingerprint(target, session_fingerprint) if isinstance(session_fingerprint, str) else None
+    )
+    drifted: list[datetime] = []
+    for receipt in _iter_verify_receipts(target):
+        if receipt.get("status") != "completed":
             continue
         if session_fingerprint is not None:
             harness_session = receipt.get("harness_session")
@@ -1850,21 +2002,23 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
                 continue
             if harness_session.get("harness") != "claude" or harness_session.get("fingerprint") != session_fingerprint:
                 continue
-        receipt_target = receipt.get("target")
-        if not isinstance(receipt_target, str):
-            continue
-        try:
-            if Path(receipt_target).expanduser().resolve() != target:
-                continue
-        except OSError:
+        if not _receipt_target_matches(receipt, target):
             continue
         receipt_started = localio.parse_iso_datetime(receipt.get("started_at"))
         completed = localio.parse_iso_datetime(receipt.get("completed_at"))
         if receipt_started is None or completed is None or receipt_started < started or completed < receipt_started:
             continue
-        if audited_tree is not None and receipt.get("tree_fingerprint") != audited_tree:
-            continue
-        return True
+        if audited_tree is None or receipt.get("tree_fingerprint") == audited_tree:
+            return True
+        drifted.append(completed)
+    # A time-valid session receipt that no longer matches the live tree still
+    # covers this session when another actor mutated the shared worktree after
+    # capture. Requiring an exact live-tree match is unsatisfiable in a hub
+    # with concurrent writers (#959).
+    if drifted and session_id:
+        earliest = min(drifted)
+        if _foreign_write_since(target, session_id, earliest, session_fingerprint=session_fingerprint):
+            return True
     return False
 
 
@@ -2086,6 +2240,10 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if event == "PreToolUse":
         tool_name = payload.get("tool_name")
         if tool_name in _WRITE_TOOLS:
+            # Heartbeat so a concurrent session can attribute the coming write
+            # to this session instead of a shared worktree delta (#959).
+            state["pending_write_at"] = localio.utc_now_iso()
+            write_session_state(target, session_id, state)
             return None
         if tool_name != "Bash":
             return None
@@ -2164,6 +2322,7 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             state["write_observed"] = True
             written_at = localio.utc_now_iso()
             state["last_write_at"] = written_at
+            state["last_attributed_write_at"] = written_at
             handoff_write = (tool_name in _WRITE_TOOLS and _is_handoff_tool_write(target, post_tool_input)) or (
                 tool_name == "Bash" and _bash_write_targets_handoffs(target, post_tool_input.get("command"))
             )
@@ -2174,6 +2333,7 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                 state["repo_fingerprint"] = updated_fp
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
+            state.pop("pending_write_at", None)
             write_session_state(target, session_id, state)
         elif state.get("pending_bash_fingerprint") is not None:
             state.pop("pending_bash_fingerprint", None)
@@ -2209,7 +2369,9 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         if payload.get("stop_hook_active") is True:
             return None
         blocking_failures: list[str] = []
+        shared_tree_notes: list[str] = []
         handoff_target: Path | None = None
+        context_target: Path | None = None
         for stop_target in _stop_targets(payload, session_id):
             if not stop_target.is_dir():
                 continue
@@ -2226,6 +2388,17 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                 or stop_state.get("started_at")
             )
             if not _receipt_since(stop_target, receipt_threshold, session_fingerprint=fingerprint):
+                if _shared_tree_block_is_foreign(stop_target, session_id, stop_state):
+                    # Another session owns the live tree. A hard block here is
+                    # unsatisfiable: capture, foreign write, re-arm (#959).
+                    shared_tree_notes.append(
+                        f"{stop_target}: a concurrent session has written since this session's last capture; "
+                        "the shared tree is not this session's unverified work."
+                    )
+                    context_target = stop_target
+                    if not _handoff_since(stop_target, stop_state.get("started_at")):
+                        handoff_target = stop_target
+                    continue
                 exercised = stop_state.get("exercised_artifact_id")
                 replacement = _verify_replacement(
                     stop_target,
@@ -2244,6 +2417,24 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                     + "\n- ".join(blocking_failures)
                 ),
             }
+        if shared_tree_notes:
+            records = [
+                "Verification is recorded for this session. Closeout is not blocked because a concurrent "
+                "session changed the shared worktree.",
+                *shared_tree_notes,
+            ]
+            if handoff_target is not None:
+                records.append(
+                    "If this work produced durable knowledge, write a Memory Handoff in "
+                    "`.claude/memory-handoffs/` before finishing."
+                )
+            return _additional_context(
+                "Stop",
+                "",
+                target=context_target or handoff_target or target,
+                session_id=session_id,
+                records=records,
+            )
         if handoff_target is not None:
             return _additional_context(
                 "Stop",

@@ -10,6 +10,9 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Changed
 
+- Search integrity verification loads item text and provenance in one
+  `IN (...)` query keyed by the result ids, instead of one select per
+  hit (search limit is up to 200). (#964)
 - Memory projection E2 read-path hardening (#843): soft-tombstone superseded
   content-hash versions (and drop their FTS rows) so each
   `(source, collection, external_id)` has one default-live version; generic

@@ -11,7 +11,13 @@ from .. import localio
 from ..config import load_config
 from ..templates import template_root
 from .install_cmd import status_payload
-from .runtime import MAX_RECENT_SESSION_STATES, _receipt_since, _session_fingerprint, iter_session_states
+from .runtime import (
+    MAX_RECENT_SESSION_STATES,
+    _receipt_since,
+    _session_fingerprint,
+    _shared_tree_block_is_foreign,
+    iter_session_states,
+)
 
 RECENT_WRITE_WINDOW = timedelta(days=7)
 
@@ -69,7 +75,7 @@ def _recent_write_without_receipt(target: Path) -> bool:
             target,
             receipt_threshold,
             session_fingerprint=fingerprint,
-        ):
+        ) and not _shared_tree_block_is_foreign(target, session_id, state):
             return True
     return False
 

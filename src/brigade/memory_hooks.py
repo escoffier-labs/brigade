@@ -165,9 +165,13 @@ def _recall_cards_payload_impl(
             continue
         tags_raw = item.get("tags")
         tags = [str(t) for t in tags_raw] if isinstance(tags_raw, list) else []
+        aliases_raw = item.get("card_aliases")
+        aliases = [str(alias) for alias in aliases_raw] if isinstance(aliases_raw, list) else []
         matches.append(
             {
                 "path": str(item.get("path") or ""),
+                "card_id": str(item.get("card_id") or ""),
+                "card_aliases": aliases,
                 "title": str(item.get("title") or ""),
                 "tags": tags,
                 "score": item.get("score"),
