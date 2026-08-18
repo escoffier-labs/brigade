@@ -1479,6 +1479,33 @@ def test_runs_show_json_excludes_private_runtime_values(tmp_path, capsys):
     assert "artifacts" not in out
 
 
+def test_runs_view_contracts_omit_planted_token_path_and_prompt(tmp_path, capsys):
+    from tests.test_runs_watch import (
+        _assert_no_planted_secrets,
+        _plant_watch_secrets,
+    )
+
+    run_dir = tmp_path / ".brigade" / "runs" / "20260817-100000-watch-aaaaaa"
+    leaks = _plant_watch_secrets(run_dir, tmp_path)
+
+    assert runs_cmd.list_runs(cwd=tmp_path, json_output=True) == 0
+    listed = capsys.readouterr().out
+    _assert_no_planted_secrets(listed, leaks)
+    assert json.loads(listed)["schema"] == "brigade.runs-list.v1"
+
+    assert runs_cmd.show(run_dir, json_output=True) == 0
+    detail = capsys.readouterr().out
+    _assert_no_planted_secrets(detail, leaks)
+    assert json.loads(detail)["schema"] == "brigade.run-detail.v1"
+
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.0, json_output=True) == 0
+    watched = capsys.readouterr().out
+    _assert_no_planted_secrets(watched, leaks)
+    frames = [json.loads(line) for line in watched.splitlines()]
+    assert frames
+    assert all(frame["schema"] == "brigade.run-watch.v1" for frame in frames)
+
+
 def test_runs_show_json_bounds_long_task_text(tmp_path, capsys):
     run_dir = tmp_path / "run"
     _write_run_artifacts(run_dir)
