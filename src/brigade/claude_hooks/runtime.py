@@ -1735,8 +1735,8 @@ def _session_has_unverified_attributed_write(
     inference. Those writes must still hard-block even when neighbors are
     alive (#959 review).
     """
-    attributed = localio.parse_iso_datetime(state.get("last_attributed_write_at"))
-    if attributed is None:
+    attributed = state.get("last_attributed_write_at")
+    if localio.parse_iso_datetime(attributed) is None:
         return False
     return not _receipt_since(target, attributed, session_fingerprint=session_fingerprint)
 
@@ -1982,7 +1982,9 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
     session's source tree.  Bind the receipt to the routed Claude session, the
     target, and (when Git can provide it) the exact tree that is being audited.
     """
-    started = localio.parse_iso_datetime(started_at)
+    started = localio.parse_iso_datetime(
+        started_at.isoformat() if isinstance(started_at, datetime) else started_at
+    )
     if started is None:
         return False
     target = target.expanduser().resolve()
