@@ -46,6 +46,29 @@ def _write_card(
     )
 
 
+def _write_cards(target: Path, count: int, *, category: str, tags: list[str]) -> None:
+    """Write `count` sibling cards that all share one category, the shape that blew up the canvas."""
+    root = target / "memory" / "cards"
+    root.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        (root / f"bulk-{index:03d}.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    f"id: card-00000000-0000-4000-8000-{index:012d}",
+                    f"title: Bulk {index:03d}",
+                    f"category: {category}",
+                    f"tags: {json.dumps(tags)}",
+                    "refs: []",
+                    "---",
+                    f"Bulk body {index:03d}.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+
 def _project(target: Path, vault: Path, capsys) -> dict:
     assert cli.main(["memory", "project-vault", "--target", str(target), "--vault", str(vault), "--json"]) == 0
     return json.loads(capsys.readouterr().out)
@@ -217,6 +240,86 @@ def test_project_vault_skips_a_manually_edited_conflict_copy_when_linking(tmp_pa
     beta = (root / "Beta.md").read_text(encoding="utf-8")
     assert "[[Cards/Alpha.conflict-ea62791a-2|Alpha]]" in beta
     assert (root / "Alpha.conflict-ea62791a.md").read_text(encoding="utf-8") == "operator-owned conflict\n"
+
+
+def test_project_vault_titles_a_note_from_its_leading_heading(tmp_path: Path, vault: Path, capsys) -> None:
+    """Cards without a frontmatter title fall back to their slug, which reads badly in a vault."""
+    path = tmp_path / "memory" / "cards" / "rocinante-gateway-beta-worktree-steering.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\nid: card-00000000-0000-4000-8000-00000000000c\ncategory: operations\ntags: []\n---\n"
+        "# Rocinante gateway from a worktree\n\nSteer the beta from a worktree.\n",
+        encoding="utf-8",
+    )
+
+    _project(tmp_path, vault, capsys)
+
+    note = vault / "Brigade Memory" / "Cards" / "Rocinante gateway from a worktree.md"
+    assert note.is_file()
+    text = note.read_text(encoding="utf-8")
+    assert 'title: "Rocinante gateway from a worktree"' in text
+    assert text.count("# Rocinante gateway from a worktree") == 1
+    # Provenance still points at the slug file the card actually lives in.
+    assert "canonical_path: " in text and "rocinante-gateway-beta-worktree-steering.md" in text
+
+
+def test_project_vault_keeps_an_explicit_frontmatter_title_over_the_body_heading(
+    tmp_path: Path, vault: Path, capsys
+) -> None:
+    """An explicit title is operator intent; a differing body heading stays part of the body."""
+    _write_card(
+        tmp_path,
+        "alpha",
+        title="Solomon jobs and profile cheatsheet",
+        tags=["shared"],
+        body="# Targeted resume variants\n\nPick the lane.",
+    )
+
+    _project(tmp_path, vault, capsys)
+
+    text = (vault / "Brigade Memory" / "Cards" / "Solomon jobs and profile cheatsheet.md").read_text(encoding="utf-8")
+    assert "# Solomon jobs and profile cheatsheet" in text
+    assert "# Targeted resume variants" in text
+
+
+def test_project_vault_caps_related_links_and_canvas_edges(tmp_path: Path, vault: Path, capsys) -> None:
+    """Same-category cards used to form a complete graph, so 1,254 notes produced 83,586 edges."""
+    _write_cards(tmp_path, 30, category="workflow", tags=["shared"])
+
+    _project(tmp_path, vault, capsys)
+
+    projection = vault / "Brigade Memory"
+    for note in (projection / "Cards").glob("Bulk *.md"):
+        assert note.read_text(encoding="utf-8").count("[[") <= obsidian_vault.MAX_RELATED
+    canvas = json.loads((projection / "Brigade Memory.canvas").read_text(encoding="utf-8"))
+    card_edges = [edge for edge in canvas["edges"] if not str(edge["id"]).startswith("topology:")]
+    assert card_edges
+    assert len(card_edges) <= 30 * obsidian_vault.MAX_RELATED
+    assert len(card_edges) < 30 * 29 // 2  # not the complete graph the cap replaced
+
+
+def test_project_vault_omits_a_map_that_covers_every_note(tmp_path: Path, vault: Path, capsys) -> None:
+    """A map listing every note groups nothing; the harness map was one 1,254-entry file."""
+    _write_cards(tmp_path, 3, category="workflow", tags=["shared"])
+
+    _project(tmp_path, vault, capsys)
+
+    projection = vault / "Brigade Memory"
+    assert not list((projection / "Maps" / "Harnesses").glob("*.md"))
+    assert not list((projection / "Maps" / "Categories").glob("*.md"))
+
+
+def test_project_vault_lays_out_canvas_notes_in_a_grid(tmp_path: Path, vault: Path, capsys) -> None:
+    """A single row put 1,254 nodes across roughly 345,000 pixels of canvas."""
+    _write_cards(tmp_path, 30, category="workflow", tags=["shared"])
+
+    _project(tmp_path, vault, capsys)
+
+    canvas = json.loads((vault / "Brigade Memory" / "Brigade Memory.canvas").read_text(encoding="utf-8"))
+    card_nodes = [node for node in canvas["nodes"] if str(node["id"]).startswith("card-")]
+    assert len(card_nodes) == 30
+    assert len({node["y"] for node in card_nodes}) > 1
+    assert max(node["x"] for node in card_nodes) < 30 * 260
 
 
 def test_project_vault_does_not_reuse_an_unfinished_transaction_journal(

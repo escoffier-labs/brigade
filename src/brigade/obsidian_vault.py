@@ -17,6 +17,11 @@ from .projection import kernel
 
 PROJECTOR = "obsidian-vault"
 PROJECTION_FOLDER = "Brigade Memory"
+MAX_RELATED = 12
+CANVAS_COLUMNS = 24
+_REFERENCE_WEIGHT = 1_000
+_CANVAS_COLUMN_WIDTH = 260
+_CANVAS_ROW_HEIGHT = 140
 LEDGER_DIR = ".brigade/memory-vault"
 LEDGER_SCHEMA = "brigade.obsidian-vault.ledger.v1"
 _BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+")
@@ -224,8 +229,8 @@ def _render_projection(target: Path, *, root: Path, prior_files: dict[str, str])
     rendered: dict[str, bytes] = {}
     for record in records:
         rendered[record["path"]] = _render_note(record, links[record["id"]])
-    _render_maps(rendered, "category", "Categories", _groups(records, "category"))
-    _render_maps(rendered, "harness", "Harnesses", _groups(records, "source_harness"))
+    _render_maps(rendered, "category", "Categories", _groups(records, "category"), total=len(records))
+    _render_maps(rendered, "harness", "Harnesses", _groups(records, "source_harness"), total=len(records))
     rendered["Brigade Memory.canvas"] = _render_canvas(target, records, links)
     return rendered
 
@@ -254,14 +259,35 @@ def _record(target: Path, item: dict[str, Any]) -> dict[str, Any]:
     else:
         stable_id = str(item["id"])
         aliases = ()
+    title = str(item["title"])
+    body = _without_frontmatter(text)
+    heading, remainder = _leading_heading(body)
+    if heading and not str(frontmatter.get("title") or "").strip():
+        # Without a frontmatter title the inventory falls back to the filename slug,
+        # so the card's own heading is the better name for a human-browsable vault.
+        title, body = heading, remainder
+    elif heading and heading.casefold() == title.casefold():
+        body = remainder
     return {
         "id": stable_id,
         "aliases": aliases,
         "item": item,
-        "title": str(item["title"]),
-        "body": _without_frontmatter(text),
+        "title": title,
+        "body": body,
         "references": _references(frontmatter),
     }
+
+
+def _leading_heading(body: str) -> tuple[str, str]:
+    """Split a leading `# Heading` off the body; the projection renders its own title heading."""
+    lines = body.split("\n")
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if not line.startswith("# "):
+            return "", body
+        return line[2:].strip(), "\n".join(lines[index + 1 :]).lstrip("\n")
+    return "", body
 
 
 def _assign_paths(records: list[dict[str, Any]]) -> None:
@@ -290,6 +316,11 @@ def _assign_link_paths(records: list[dict[str, Any]], *, root: Path, prior_files
 
 
 def _relationships(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Rank each note's neighbours and keep the strongest few.
+
+    Every pair sharing a category used to become related, so one 221-card category
+    alone contributed ~24,000 edges. Ranking keeps the useful links and bounds the graph.
+    """
     # Dual-read index: canonical paths, stable card IDs, and legacy aliases all resolve.
     # A key claimed by two different records is ambiguous (#867); mark it unresolvable
     # instead of letting the last writer silently win and mis-link.
@@ -311,7 +342,7 @@ def _relationships(records: list[dict[str, Any]]) -> dict[str, list[dict[str, An
             claim(str(alias), record)
     result: dict[str, list[dict[str, Any]]] = {}
     for record in records:
-        related: dict[str, dict[str, Any]] = {}
+        scored: dict[str, tuple[int, dict[str, Any]]] = {}
         item = record["item"]
         tags = {str(tag).lower() for tag in item.get("tags") or []}
         category = str(item.get("category") or "")
@@ -319,16 +350,19 @@ def _relationships(records: list[dict[str, Any]]) -> dict[str, list[dict[str, An
             if other is record:
                 continue
             other_item = other["item"]
-            if category and category == str(other_item.get("category") or ""):
-                related[other["id"]] = other
+            shared = len(tags & {str(tag).lower() for tag in other_item.get("tags") or []})
+            same_category = bool(category) and category == str(other_item.get("category") or "")
+            if not shared and not same_category:
                 continue
-            if tags & {str(tag).lower() for tag in other_item.get("tags") or []}:
-                related[other["id"]] = other
+            scored[other["id"]] = (shared * 2 + (1 if same_category else 0), other)
         for reference in record["references"]:
             referenced = by_source.get(reference)
             if referenced is not None and referenced is not record:
-                related[referenced["id"]] = referenced
-        result[record["id"]] = sorted(related.values(), key=lambda item: (item["title"], item["id"]))
+                # An explicit ref is the strongest signal and always survives the cap.
+                scored[referenced["id"]] = (_REFERENCE_WEIGHT, referenced)
+        ranked = sorted(scored.values(), key=lambda entry: (-entry[0], entry[1]["title"], entry[1]["id"]))
+        kept = [other for _, other in ranked[:MAX_RELATED]]
+        result[record["id"]] = sorted(kept, key=lambda other: (other["title"], other["id"]))
     return result
 
 
@@ -385,9 +419,15 @@ def _render_map(kind: str, name: str, members: list[dict[str, Any]]) -> bytes:
     return "\n".join(lines).encode()
 
 
-def _render_maps(rendered: dict[str, bytes], kind: str, folder: str, groups: dict[str, list[dict[str, Any]]]) -> None:
+def _render_maps(
+    rendered: dict[str, bytes], kind: str, folder: str, groups: dict[str, list[dict[str, Any]]], *, total: int
+) -> None:
     used: set[str] = set()
     for name, members in groups.items():
+        # A map holding every note groups nothing. Cards without `source_harness` used to
+        # collapse into one "unknown" map listing the entire corpus.
+        if len(members) >= total:
+            continue
         stem = _unique_map_stem(name, used)
         rendered[f"Maps/{folder}/{stem}.md"] = _render_map(kind, name, members)
 
@@ -412,13 +452,15 @@ def _render_canvas(target: Path, records: list[dict[str, Any]], links: dict[str,
             "id": f"card-{_sha256(record['id'])[:16]}",
             "type": "text",
             "text": _redacted_scalar(record["title"]),
-            "x": index * 260,
-            "y": 0,
+            "x": (index % CANVAS_COLUMNS) * _CANVAS_COLUMN_WIDTH,
+            "y": (index // CANVAS_COLUMNS) * _CANVAS_ROW_HEIGHT,
             "width": 220,
             "height": 80,
         }
         for index, record in enumerate(records_sorted)
     ]
+    # Topology sits below the note grid instead of overlapping row two.
+    topology_row = ((len(records_sorted) + CANVAS_COLUMNS - 1) // CANVAS_COLUMNS) * _CANVAS_ROW_HEIGHT + 180
     node_ids = {record["id"]: node["id"] for record, node in zip(records_sorted, nodes, strict=True)}
     edges = []
     seen: set[tuple[str, str]] = set()
@@ -452,8 +494,8 @@ def _render_canvas(target: Path, records: list[dict[str, Any]], links: dict[str,
                 "id": canvas_id,
                 "type": "text",
                 "text": _redacted_scalar(node.get("label") or original_id),
-                "x": index * 260,
-                "y": 180,
+                "x": (index % CANVAS_COLUMNS) * _CANVAS_COLUMN_WIDTH,
+                "y": topology_row + (index // CANVAS_COLUMNS) * _CANVAS_ROW_HEIGHT,
                 "width": 220,
                 "height": 80,
             }
