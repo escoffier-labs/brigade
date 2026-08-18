@@ -298,11 +298,12 @@ def _doctor_css(status: str) -> str:
 
 def _lane_model_text(lane: Mapping[str, Any]) -> str:
     requested = lane.get("requested_model")
-    label = str(requested) if isinstance(requested, str) and requested else "-"
+    if not isinstance(requested, str) or not requested:
+        return "-"
     attestation = lane.get("model_attestation")
     if attestation != "verified":
-        return f"{label} (unverified)"
-    return label
+        return f"{requested} (unverified)"
+    return requested
 
 
 def _lane_fallback_text(lane: Mapping[str, Any]) -> str:

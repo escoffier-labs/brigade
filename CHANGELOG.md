@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `memory care backfill` dry-run receipts now predict `--apply` (stable `new_id`), record `old_id` as the topic/stem consumers already use, mint IDs on complete ID-less cards so coverage can reach 100 percent, skip creating `.brigade/` on zero-candidate dry runs, and count `duplicate_ids` without a `memory/NAMESPACE` file. (#867)
+- Center Research provider table no longer labels absent model seats as `- (unverified)`; only named models carry the unverified marker. (#961)
 - The graphtrail stale-baseline verify test no longer races wall-clock sync delays
   against a tight subprocess timeout on loaded CI runners; sync timeout is injected
   deterministically so the stale-graph assertion is reliable on Python 3.12. (#954)

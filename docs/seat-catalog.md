@@ -128,17 +128,17 @@ role = "Fallback review through the reviewed ACP transport."
 
 The reference is fail-closed: it must resolve to a non-orchestrator Cursor seat with a `grok-*` model and the reviewed ACPX version. Brigade does not search the roster for a similar model. The policy applies only to a typed malformed-final result from a direct Grok `--worker` read-only run; startup, authentication, network, timeout, permission, and nonzero failures are terminal.
 
-### Anthropic-compatible API lanes (Kimi, GLM, and friends)
+### Anthropic-compatible API lanes (GLM and friends)
 
 Several open-weight providers expose Anthropic-compatible endpoints, which means the `claude` CLI can drive them and Brigade can seat them directly. Declare the lane's environment on the seat: plain values inline, secrets by reference with a `_REF` suffix naming the environment variable that holds the value (the roster never stores the secret itself):
 
 ```toml
-[agents.k3]
+[agents.glm52]
 cli = "claude"
-model = "kimi-k3"
+model = "glm-5.2"
 read_only_capable = false
-role = "Open-weight worker on a coding-plan quota; relief for orchestrator-tier work."
-env = { ANTHROPIC_BASE_URL = "https://api.moonshot.ai/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/home/operator/.claude-lanes" }
+role = "Open-weight worker on an Anthropic-compatible API; relief for orchestrator-tier work."
+env = { ANTHROPIC_BASE_URL = "https://api.example.com/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "GLM_API_KEY", CLAUDE_CONFIG_DIR = "/home/operator/.claude-lanes" }
 ```
 
 This proxy example opts out of read-only dispatch. Set the value to `true` only after
@@ -148,7 +148,7 @@ When the proxy credential is rendered into a runtime systemd environment file, p
 reference at that file rather than the parent process environment:
 
 ```toml
-env = { ANTHROPIC_AUTH_TOKEN_REF = "env-file:/run/brigade/k3.env#CLIPROXY_API_KEY" }
+env = { ANTHROPIC_AUTH_TOKEN_REF = "env-file:/run/brigade/glm.env#CLIPROXY_API_KEY" }
 ```
 
 The path must be absolute. Brigade reads only `KEY=VALUE` entries from the file and does not
