@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Evidence ingest now applies an origin-scoped redaction policy (`brigade.evidence-redaction.v1`) before persistence. Sources classify to the provenance envelope origin; each origin selects detectors; the stored item keeps only redacted bytes plus a count/detector record (never the removed values). Scanner failure, timeout, or unavailability cannot produce a clean verdict and persists a placeholder instead of the original. The policy version is stamped on every decision and applies to future writes only — existing rows and provenance backfill are not rewritten. (#498)
 - Canonical memory cards mint one opaque `card-<uuid4>` ID on create, and the reviewed `memory care backfill` path can mint an ID on a legacy card, including complete care cards that only lack an ID. Valid IDs are never replaced. Care queues, recall and search logs, refresh imports, and retrieval-eval fixtures dual-read explicit IDs and legacy path/stem/topic aliases; alias collisions fail without rewriting cards. Dry-run backfill writes a deterministic mapping receipt with coverage and old-to-new IDs (relative paths only; `old_id` is the consumer-facing identity). A zero-candidate dry run writes nothing. Duplicate-ID coverage does not require `memory/NAMESPACE`. Missing IDs stay a doctor warning until coverage is 100 percent. (#867)
 - `brigade memory vault-index`, `vault-search`, `vault-show`, and `vault-doctor`
   close the operator-vault projection round trip. Config lives in

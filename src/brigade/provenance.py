@@ -77,6 +77,12 @@ _ENVELOPE_METADATA_FIELDS = {
         "content_digest",
         "raw_digest",
     ),
+    "redaction": (
+        "redaction",
+        "redaction_status",
+        "redaction_count",
+        "redaction_detectors",
+    ),
     "timestamps": ("captured_at", "ingested_at"),
 }
 ENVELOPE_METADATA_RESERVED_KEYS = frozenset(
@@ -344,6 +350,12 @@ def validate_envelope(
         if val is not None and not isinstance(val, str):
             errors.append(f"{key} must be a string or null")
 
+    if "redaction" in env:
+        from . import evidence_redaction
+
+        redaction_errors = evidence_redaction.validate_redaction_record(env.get("redaction"))
+        errors.extend(redaction_errors)
+
     if errors:
         return errors
 
@@ -380,6 +392,7 @@ def build_envelope(
     content_scope: str,
     captured_at: str | None,
     ingested_at: str | None,
+    redaction: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     content_digest = content_sha256(text)
     if raw_bytes is None:
@@ -432,6 +445,8 @@ def build_envelope(
         "captured_at": captured_at,
         "ingested_at": ingested_at,
     }
+    if redaction is not None:
+        env["redaction"] = dict(redaction)
     errors = validate_envelope(env)
     if errors:
         raise ValueError("invalid provenance envelope: " + "; ".join(errors))
