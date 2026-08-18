@@ -121,3 +121,65 @@ def test_dag_dispatch_stamps_worker_messages(monkeypatch, tmp_path):
     kinds = [record["envelope"]["source"]["kind"] for record in records]
     assert kinds.count("worker-request") == 2
     assert kinds.count("worker-result") == 2
+
+
+def test_worker_result_gate_rejects_cross_channel_synthesis_request():
+    """A valid synthesis-request envelope must not replay at the worker-result gate."""
+
+    from brigade import aboyeur
+
+    body = "synthesize the final answer from worker outputs"
+    delivery = message_envelope.emit(
+        body,
+        kind="synthesis-request",
+        producer="aboyeur.build_synth_prompt",
+        from_seat="brigade",
+        to_seat="chef",
+        run_id="demo-run",
+        session_harness="codex",
+    )
+    assert delivery.delivered, delivery.reason
+    assert delivery.envelope["source"]["kind"] == "synthesis-request"
+    assert delivery.envelope["source"]["producer"] == "aboyeur.build_synth_prompt"
+
+    admission = message_envelope.admit_message(
+        body,
+        delivery.envelope,
+        kind="worker-result",
+        producer="run_transport.dispatch",
+    )
+    assert admission.delivered is False
+    assert "source.kind" in admission.reason
+    assert "worker-result" in admission.reason
+
+    replayed = aboyeur.WorkerResult(
+        worker="coder",
+        task="implement it",
+        text=body,
+        ok=True,
+        provenance=delivery.envelope,
+    )
+    prompt = aboyeur.build_synth_prompt("build feature", [replayed])
+    assert body not in prompt
+    assert "[envelope trust.label=" not in prompt or body not in prompt
+
+    empty_kind = message_envelope.admit_message(
+        body,
+        delivery.envelope,
+        kind="",
+        producer="aboyeur.build_synth_prompt",
+    )
+    assert empty_kind.delivered is False
+    assert "explicit message kind" in empty_kind.reason
+
+    forged = json.loads(json.dumps(delivery.envelope))
+    forged["source"]["kind"] = "worker-result"
+    forged["source"]["producer"] = "not-an-allowlisted-producer"
+    foreign = message_envelope.admit_message(
+        body,
+        forged,
+        kind="worker-result",
+        producer="not-an-allowlisted-producer",
+    )
+    assert foreign.delivered is False
+    assert "not an allowlisted" in foreign.reason

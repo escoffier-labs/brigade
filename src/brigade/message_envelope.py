@@ -63,6 +63,9 @@ ALLOWLISTED_PRODUCERS = frozenset(
 )
 BLOCKED_LABELS = frozenset({"unknown", "quarantined"})
 BLOCKED_INJECTION = frozenset({"pending", "error", "flagged"})
+UPGRADED_LABELS = frozenset({"reviewed", "verified"})
+MODEL_TOOL_ORIGINS = frozenset({"agent-session"})
+MODEL_TOOL_MODALITIES = frozenset({"model-generated", "tool-output"})
 
 _JSONL_LOCK = threading.Lock()
 _RECEIPT_BODY_KEYS = frozenset(
@@ -175,14 +178,41 @@ def truncate_utf8(text: str, max_bytes: int = MESSAGE_WRAP_MAX_BYTES) -> str:
     return raw[:max_bytes].decode("utf-8", errors="ignore")
 
 
+def is_model_or_tool_origin(env: Mapping[str, Any] | None) -> bool:
+    """True when the envelope claims model-session or tool-output provenance."""
+
+    if not isinstance(env, Mapping):
+        return False
+    return env.get("origin") in MODEL_TOOL_ORIGINS or env.get("modality") in MODEL_TOOL_MODALITIES
+
+
+def receive_trust_label(env: Mapping[str, Any] | None) -> str:
+    """Effective receive-side trust. Never taken from a stored upgrade.
+
+    Model and tool-origin content stay ``untrusted`` (or the blocked label
+    already on the envelope). ``reviewed`` / ``verified`` are not rendered
+    from disk; those labels require authority proof at the gate.
+    """
+
+    if not isinstance(env, Mapping):
+        return "unknown"
+    trust = env.get("trust")
+    stored = "unknown"
+    if isinstance(trust, Mapping) and isinstance(trust.get("label"), str):
+        stored = trust["label"]
+    if is_model_or_tool_origin(env):
+        if stored in BLOCKED_LABELS:
+            return stored
+        return "untrusted"
+    if stored in UPGRADED_LABELS:
+        return "untrusted"
+    return stored
+
+
 def wrap_message_body(text: str, env: Mapping[str, Any] | None) -> str:
     """Wrap admitted worker/prior-stage text as untrusted, byte-capped data."""
 
-    label = "unknown"
-    if isinstance(env, Mapping):
-        trust = env.get("trust")
-        if isinstance(trust, Mapping) and isinstance(trust.get("label"), str):
-            label = trust["label"]
+    label = receive_trust_label(env)
     body = truncate_utf8(text)
     wrapped = wrap_untrusted(body, source_kind="tool-output", max_chars=len(body))
     return f"[envelope trust.label={label}]\n{wrapped}"
@@ -237,18 +267,37 @@ def admit_message(
         env, display = synthesize_legacy_message_provenance()
     envelope = dict(env)
     message_id = _safe_label(str(envelope.get("item_id") or ""), f"legacy-{uuid4().hex[:8]}")
-    raw_source = envelope.get("source")
-    source: Mapping[str, Any] = raw_source if isinstance(raw_source, Mapping) else {}
-    phase = phase_for(kind or str(source.get("kind") or ""))
-    source_kind = kind or str(source.get("kind") or "")
-    source_producer = producer if producer is not None else str(source.get("producer") or "")
-    reason = _rejection_reason(text, envelope, kind=source_kind, producer=source_producer)
+    if not isinstance(kind, str) or not kind:
+        return MessageDelivery(
+            message_id=message_id,
+            phase="work",
+            from_seat="",
+            to_seat="",
+            kind="",
+            envelope=envelope,
+            delivered=False,
+            reason="receive gate requires an explicit message kind",
+            display=display,
+        )
+    if producer is None:
+        return MessageDelivery(
+            message_id=message_id,
+            phase=phase_for(kind),
+            from_seat="",
+            to_seat="",
+            kind=kind,
+            envelope=envelope,
+            delivered=False,
+            reason="receive gate requires an explicit producer",
+            display=display,
+        )
+    reason = _rejection_reason(text, envelope, kind=kind, producer=producer)
     return MessageDelivery(
         message_id=message_id,
-        phase=phase,
+        phase=phase_for(kind),
         from_seat="",
         to_seat="",
-        kind=source_kind,
+        kind=kind,
         envelope=envelope,
         delivered=reason is None,
         reason=reason or "",
@@ -263,11 +312,19 @@ def _rejection_reason(
     kind: str,
     producer: str,
 ) -> str | None:
-    errors = provenance.validate_envelope(env)
+    errors = provenance.validate_envelope(env, inbound_adapter=True)
     if errors:
         return "invalid envelope: " + "; ".join(errors)
     if provenance.is_legacy_unknown(env):
         return "legacy message has unknown provenance and cannot be replayed"
+    raw_source = env.get("source")
+    source: Mapping[str, Any] = raw_source if isinstance(raw_source, Mapping) else {}
+    env_kind = source.get("kind")
+    env_producer = source.get("producer")
+    if env_kind != kind:
+        return f"envelope source.kind {env_kind!r} does not match receive channel {kind!r}"
+    if env_producer != producer:
+        return f"envelope source.producer {env_producer!r} does not match receive producer {producer!r}"
     raw_hashes = env.get("hashes")
     hashes: Mapping[str, Any] = raw_hashes if isinstance(raw_hashes, Mapping) else {}
     if hashes.get("content_scope") != CONTENT_SCOPE:
@@ -279,6 +336,10 @@ def _rejection_reason(
     label = trust.get("label")
     if label in BLOCKED_LABELS:
         return f"trust label {label} is not deliverable"
+    if label in UPGRADED_LABELS:
+        if is_model_or_tool_origin(env):
+            return f"trust label {label} is not deliverable for model/tool-origin content"
+        return f"trust label {label} requires authority proof and is not deliverable on receive"
     status = provenance.injection_status(env)
     if status in BLOCKED_INJECTION:
         return f"injection status {status} is not deliverable"
@@ -286,8 +347,6 @@ def _rejection_reason(
         return f"unknown message kind {kind!r}"
     if producer not in ALLOWLISTED_PRODUCERS:
         return f"producer {producer!r} is not an allowlisted inter-seat producer"
-    if kind in REQUEST_KINDS and producer not in ALLOWLISTED_PRODUCERS:
-        return f"request producer {producer!r} is not allowlisted"
     return None
 
 
