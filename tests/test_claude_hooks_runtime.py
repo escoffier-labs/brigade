@@ -1008,6 +1008,12 @@ def test_stop_still_blocks_without_receipt_when_concurrent_session_is_active(tmp
 
 
 def test_stop_still_blocks_when_this_session_writes_after_its_receipt(tmp_path: Path, monkeypatch):
+    """Busy-hub order: this session writes after capture, then a neighbor writes.
+
+    The prior order (foreign write, then own write) hid the Stop downgrade:
+    ``_foreign_write_since`` was evaluated against this session's later
+    ``last_write_at``, so the neighbor's earlier write did not count.
+    """
     target = _wired_claude(tmp_path)
     reader = "wrote-again"
     writer = "background-writer"
@@ -1029,9 +1035,9 @@ def test_stop_still_blocks_when_this_session_writes_after_its_receipt(tmp_path: 
         _payload(
             target,
             "PostToolUse",
-            session_id=writer,
+            session_id=reader,
             tool_name="Write",
-            tool_input={"file_path": str(target / "foreign.py"), "content": "foreign\n"},
+            tool_input={"file_path": str(target / "owned.py"), "content": "owned again\n"},
         ),
     )
     runtime.handle_payload(
@@ -1039,9 +1045,9 @@ def test_stop_still_blocks_when_this_session_writes_after_its_receipt(tmp_path: 
         _payload(
             target,
             "PostToolUse",
-            session_id=reader,
+            session_id=writer,
             tool_name="Write",
-            tool_input={"file_path": str(target / "owned.py"), "content": "owned again\n"},
+            tool_input={"file_path": str(target / "foreign.py"), "content": "foreign\n"},
         ),
     )
 
