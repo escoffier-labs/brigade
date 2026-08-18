@@ -116,6 +116,60 @@ def test_synthesis_can_reference_multiple_worker_results():
     ]
 
 
+def test_recorded_synthesis_falls_back_to_manifest_when_thirteen_realistic_workers_exceed_size():
+    """A 13-worker fan-in stays under MAX_PARENTS but exceeds MAX_COMPACT_BYTES.
+
+    The review probe used a real run-directory name and roster-style seat
+    labels. Inline parents used to raise from build_receipt and drop
+    synthesis.json; the emitter must collapse to parent_manifest instead.
+    """
+
+    run_id = "2026-08-18-1200-evidence-provenance-trust-enforcement"
+    seats = [
+        "cursor-grok-4.6-high-fast",
+        "codex-gpt-5.6-terra",
+        "claude-opus-5",
+        "composer",
+        "cursor-composer-2.5",
+        "codex-gpt-5.6-sol",
+        "claude-sonnet-4.6",
+        "cursor-gpt-5.6-luna",
+        "codex-gpt-5.4",
+        "claude-opus-4.6",
+        "cursor-grok-4.5",
+        "codex-gpt-5.6-high",
+        "gemini-3-pro",
+    ]
+    results = [{"worker": seat} for seat in seats]
+    parents = causal_receipt.synthesis_worker_parents(run_id, results)
+    assert len(parents) == 13
+    assert len(parents) <= causal_receipt.MAX_PARENTS
+    inline = {
+        "schema": causal_receipt.SCHEMA,
+        "schema_version": causal_receipt.SCHEMA_VERSION,
+        "subject": {"kind": "synthesis", "id": run_id},
+        "parents": parents,
+    }
+    assert len(causal_receipt.compact_bytes(inline)) > causal_receipt.MAX_COMPACT_BYTES
+
+    receipt = causal_receipt.recorded_synthesis(run_id=run_id, worker_parents=parents)
+    assert receipt["parents"] == []
+    assert "parent_manifest" in receipt
+    assert receipt["parent_manifest"]["id"] == f"{run_id}-parent-manifest"
+    assert causal_receipt.validate_receipt(receipt) == []
+    assert len(causal_receipt.compact_bytes(receipt)) <= causal_receipt.MAX_COMPACT_BYTES
+
+    document = receipt_schema.synthesis_document(
+        orchestrator="chef",
+        result={"ok": True, "detail": "", "text": "done"},
+        run_id=run_id,
+        worker_results=results,
+    )
+    assert document["result"]["ok"] is True
+    assert document["causal_receipt"]["parent_manifest"]["id"] == f"{run_id}-parent-manifest"
+    assert document["causal_receipt"]["parents"] == []
+
+
 def test_parent_count_boundary():
     parents = [
         causal_receipt.parent_ref(
@@ -138,6 +192,9 @@ def test_parent_count_boundary():
     ]
     errors = causal_receipt.validate_receipt(overflow)
     assert any("parent count exceeds" in item and "parent_manifest" in item for item in errors)
+    collapsed = causal_receipt.recorded_synthesis(run_id=RUN_ID, worker_parents=overflow["parents"])
+    assert collapsed["parents"] == []
+    assert "parent_manifest" in collapsed
 
 
 def test_encoded_size_boundary():

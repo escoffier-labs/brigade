@@ -474,9 +474,26 @@ def recorded_handoff(
     )
 
 
+def _inline_synthesis_receipt(run_id: str, parents: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "subject": {"kind": "synthesis", "id": run_id},
+        "parents": [dict(parent) for parent in parents],
+    }
+
+
+def _synthesis_exceeds_inline_bounds(run_id: str, parents: Sequence[Mapping[str, Any]]) -> bool:
+    """True when fan-in must collapse to a hashed parent_manifest."""
+
+    if len(parents) > MAX_PARENTS:
+        return True
+    return len(compact_bytes(_inline_synthesis_receipt(run_id, parents))) > MAX_COMPACT_BYTES
+
+
 def recorded_synthesis(*, run_id: str, worker_parents: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     parents = [dict(parent) for parent in worker_parents]
-    if len(parents) > MAX_PARENTS:
+    if _synthesis_exceeds_inline_bounds(run_id, parents):
         manifest_id = f"{run_id}-parent-manifest"
         digest = receipt_digest({"parents": parents})
         return build_receipt(
