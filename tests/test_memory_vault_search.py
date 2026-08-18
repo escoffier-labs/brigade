@@ -429,18 +429,45 @@ def test_does_not_follow_symlinks_out_of_the_vault(workspace, capsys) -> None:
     target, vault = workspace
     outside = target.parent / "outside"
     outside.mkdir()
-    (outside / "secret.md").write_text("---\ntitle: Secret\n---\n\nsecret-unique-token\n", encoding="utf-8")
+    (outside / "secret.md").write_text(
+        "---\ntitle: Secret\n---\n\nOUTSIDEONLY leaked from outside the vault\n",
+        encoding="utf-8",
+    )
     _write_note(vault, "Notes/ok.md", title="Ok Rotation", body="safe rotation")
-    (vault / "Notes" / "escape").symlink_to(outside)
-    (vault / "Notes" / "linked.md").symlink_to(outside / "secret.md")
+    _write_note(vault, "Notes/live.md", title="Live Note", body="live rotation inside the vault")
+    (vault / "Notes" / "escape-dir").symlink_to(outside)
+    (vault / "Notes" / "escape-file.md").symlink_to(outside / "secret.md")
 
-    assert cli.main(["memory", "vault-search", "secret-unique-token", "--target", str(target), "--json"]) == 0
+    assert cli.main(["memory", "vault-index", "--target", str(target), "--json"]) == 0
+    indexed = json.loads(capsys.readouterr().out)
+    assert indexed["indexed"] == 2
+    index_text = (target / ".brigade" / "vault-index" / "index.json").read_text(encoding="utf-8")
+    assert "OUTSIDEONLY" not in index_text
+    assert "escape-dir" not in index_text
+    assert "escape-file.md" not in index_text
+
+    assert (
+        cli.main(
+            [
+                "memory",
+                "vault-search",
+                "OUTSIDEONLY",
+                "--target",
+                str(target),
+                "--include-archived",
+                "--json",
+            ]
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["hits"] == []
+    assert payload["match_count"] == 0
 
     assert cli.main(["memory", "vault-search", "rotation", "--target", str(target), "--json"]) == 0
     hits = json.loads(capsys.readouterr().out)["hits"]
-    assert [hit["relative_path"] for hit in hits] == ["Notes/ok.md"]
+    assert [hit["relative_path"] for hit in hits] == ["Notes/live.md", "Notes/ok.md"]
+    assert all("OUTSIDEONLY" not in json.dumps(hit) for hit in hits)
 
 
 def test_optional_missing_root_is_skipped_and_doctor_warns(tmp_path: Path, capsys) -> None:
