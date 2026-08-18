@@ -100,6 +100,8 @@ def build_gitignore_block(selection: Selection) -> str:
             ".brigade/chat-surfaces.toml",
             ".brigade/daily.toml",
             ".brigade/memory-care.toml",
+            ".brigade/vault.toml",
+            ".brigade/vault-index/",
             ".brigade/reviews.toml",
             ".brigade/scanners.toml",
             ".brigade/security.toml",

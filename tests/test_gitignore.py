@@ -42,6 +42,7 @@ def test_init_creates_gitignore_when_missing(tmp_target: Path):
     assert ".brigade/handoff-sources.json" in gi
     assert ".brigade/daily.toml" in gi
     assert ".brigade/memory-care.toml" in gi
+    assert ".brigade/vault.toml" in gi
     assert ".brigade/reviews.toml" in gi
     assert ".brigade/security.toml" in gi
     assert ".brigade/runs/" in gi
@@ -228,6 +229,7 @@ def test_gitignore_block_includes_claude_section_when_selected():
     assert ".brigade/dogfood.toml" in block
     assert ".brigade/handoff-sources.json" in block
     assert ".brigade/memory-care.toml" in block
+    assert ".brigade/vault.toml" in block
     assert ".brigade/runs/" in block
     assert ".brigade/scanners/" in block
     assert ".brigade/security/" in block

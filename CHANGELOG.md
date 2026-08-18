@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade memory vault-index`, `vault-search`, `vault-show`, and `vault-doctor`
+  close the operator-vault projection round trip. Config lives in
+  `.brigade/vault.toml` (`vault`, `[[roots]]` with `scope` / `path` /
+  `optional`, and `schema_version`). Search reads allowlisted roots only,
+  writes a derived owner-only index under `.brigade/vault-index/`, redacts
+  output through `guard.redact_text`, and labels every hit
+  `untrusted_vault_content`. Projected notes key on `canonical_id`;
+  operator-authored notes fall back to the vault-relative path. (#943)
 - Evidence consumers now enforce `brigade.trust-policy.v1`: unknown and quarantined items are excluded from default briefs, context packs, citations, and promotion; untrusted brief content is wrapped and capped at 2 items and 50 percent of brief bytes; only the explicit known-safe injection status `clean` (after `strip().lower()` and pending resolution) may wrap or emit a body — case, whitespace, empty, and garbage variants are metadata-only. `brigade evidence trust review <item-ref> --content-hash <digest>` attests an untrusted item as reviewed after an exact envelope digest match and appends one transition event. `brigade receipts verify` upgrades indexed verify-receipt items to verified only after complete receipt v2 patch identity and exact retained `changes.patch` validation; duplicate verify is an idempotent no-op. Envelope verified does not bypass subject_binding, check_role, patch identity, or failure-taxonomy requirements. Citing a flagged research finding is rejected; the run takes one repair attempt and then fails `review-rejected`. (#587)
 - Evidence read surfaces recompute provenance content and materialized raw/artifact hashes. Search suppresses a mismatched snippet and returns `integrity_mismatch: true`. Direct `miseledger show` / `brigade evidence show` hide a mismatched or synthesized-legacy body unless `--forensic-content` is passed; that flag never changes trust and only reveals a body when injection status is the explicit known-safe value `clean` (empty, unknown, and parse-lost statuses block). MCP, HTTP, bundles, briefs, and context stay metadata-only on mismatch. Bundle cache and Markdown preserve envelope fields and `integrity_omitted`. One downgrade event is appended per item/hash/mismatch; the row is never deleted. (#586)
 - Python evidence producers now stamp `brigade.provenance-envelope.v1` on work imports, research findings, and indexed receipt adapter rows. Research findings persist an exact `{title}\\n{summary}\\n{evidence}` text projection; legacy `Finding.trust` stays readable and only maps to origin/modality. `brigade work import provenance --backfill` and `brigade research provenance backfill` infer missing envelopes without treating them as trusted. Receipt indexing always starts `untrusted`. Existing pending imports without an envelope report `missing_envelope`, which surfaces as a doctor WARN until an operator runs `--backfill`. (#584)
@@ -59,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
+- `memory vault-search` rebuilds the derived index when `.brigade/vault.toml`
+  roots change, so removing a scope from the allowlist stops serving that
+  root. `vault-doctor` warns on index/config root drift instead of reporting
+  all-green against a stale index. (#943)
 - Evidence brief rendering one-lines MiseLedger score keys/values (including zero and `False`) and retrieval-arm labels, omits `trust:` when the gate-resolved label is `unknown`, prefers the provenance envelope over item-level trust keys, and keeps a partial first result line when truncation leaves room after context lines. (#941)
 - `brigade runs watch --json` (`brigade.run-watch.v1`) now routes every
   record through the same allowlist and one-line helpers as the list and
@@ -69,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The graphtrail stale-baseline verify test no longer races wall-clock sync delays
   against a tight subprocess timeout on loaded CI runners; sync timeout is injected
   deterministically so the stale-graph assertion is reliable on Python 3.12. (#954)
+>>>>>>> origin/main
 - Quarantined items stay quarantined when a pending injection scan comes back clean, so a labeled quarantine cannot be released to untrusted and become content-eligible. Reviewed and verified items keep every consumer surface untrusted already has, including `context`. `brigade receipts verify` reports `verify-pending` (and does not append a local verified event) when the MiseLedger trust notify fails. Provenance-event JSONL now appends and fsyncs instead of rewriting the whole file. (#587)
 - Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
   closed on every `brigade work` surface (and other commands that read the
