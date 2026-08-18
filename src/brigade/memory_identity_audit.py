@@ -180,8 +180,8 @@ def audit_workspaces(workspaces: list[Path]) -> dict[str, Any]:
                     }
                 )
 
+            by_namespace[namespace or ""][card["identity"]].append(relative)
             if namespace:
-                by_namespace[namespace][card["identity"]].append(relative)
                 if explicit_id:
                     explicit_across_namespaces[explicit_id][namespace].append(relative)
                 else:

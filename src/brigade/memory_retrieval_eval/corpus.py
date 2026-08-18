@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from brigade.card_identity import IdentityIndex
 from brigade.memory_cmd import MemoryCareConfig, _card_search_fields, _iter_cards
 
 CATEGORIES = ("exact", "paraphrase", "abbreviation", "cross_tag")
@@ -114,12 +115,31 @@ def load_queries(queries_path: Path) -> tuple[int, list[QuerySpec]]:
     return k, queries
 
 
+def _gold_index(cards: list[CardDoc]) -> IdentityIndex[CardDoc]:
+    index: IdentityIndex[CardDoc] = IdentityIndex()
+    for card in cards:
+        index.claim(card.card_id, card)
+        for alias in card.aliases:
+            index.claim(alias, card)
+    return index
+
+
 def validate_gold(cards: list[CardDoc], queries: list[QuerySpec]) -> list[str]:
-    """Return human-readable problems when gold ids are missing from the corpus."""
-    known = {key for card in cards for key in (card.card_id, *card.aliases)}
+    """Return human-readable problems when gold ids are missing or colliding."""
+    index = _gold_index(cards)
     problems: list[str] = []
+    for key in index.colliding_keys():
+        problems.append(f"alias collision: {key}")
     for q in queries:
-        missing = [g for g in q.gold if g not in known]
+        missing: list[str] = []
+        colliding: list[str] = []
+        for gold in q.gold:
+            if index.is_collision(gold):
+                colliding.append(gold)
+            elif index.resolve(gold) is None:
+                missing.append(gold)
+        if colliding:
+            problems.append(f"{q.query_id}: colliding gold card ids: {', '.join(colliding)}")
         if missing:
             problems.append(f"{q.query_id}: missing gold card ids: {', '.join(missing)}")
     return problems
@@ -127,11 +147,18 @@ def validate_gold(cards: list[CardDoc], queries: list[QuerySpec]) -> list[str]:
 
 def resolve_gold_aliases(cards: list[CardDoc], queries: list[QuerySpec]) -> list[QuerySpec]:
     """Translate legacy fixture keys to their explicit card IDs for scoring."""
-    aliases: dict[str, str] = {}
-    for card in cards:
-        for key in (card.card_id, *card.aliases):
-            aliases.setdefault(key, card.card_id)
-    return [replace(query, gold=tuple(aliases.get(gold, gold) for gold in query.gold)) for query in queries]
+    index = _gold_index(cards)
+    resolved: list[QuerySpec] = []
+    for query in queries:
+        gold_ids: list[str] = []
+        for gold in query.gold:
+            card = index.resolve(gold)
+            if card is None:
+                gold_ids.append(gold)
+            else:
+                gold_ids.append(card.card_id)
+        resolved.append(replace(query, gold=tuple(gold_ids)))
+    return resolved
 
 
 def corpus_stats(cards: list[CardDoc], queries: list[QuerySpec]) -> dict[str, Any]:

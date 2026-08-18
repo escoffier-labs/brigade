@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never overwrite an existing note, and `--dry-run` reports the destination
   and rendered bytes without touching the vault. Containment fails closed
   when symlink or descriptor checks cannot be performed. (#945)
+- Canonical memory cards mint one opaque `card-<uuid4>` ID on create, and the reviewed `memory care backfill` path can mint an ID on a legacy card, including complete care cards that only lack an ID. Valid IDs are never replaced. Care queues, recall and search logs, refresh imports, and retrieval-eval fixtures dual-read explicit IDs and legacy path/stem/topic aliases; alias collisions fail without rewriting cards. Dry-run backfill writes a deterministic mapping receipt with coverage and old-to-new IDs (relative paths only; `old_id` is the consumer-facing identity). A zero-candidate dry run writes nothing. Duplicate-ID coverage does not require `memory/NAMESPACE`. Missing IDs stay a doctor warning until coverage is 100 percent. (#867)
 - `brigade memory vault-index`, `vault-search`, `vault-show`, and `vault-doctor`
   close the operator-vault projection round trip. Config lives in
   `.brigade/vault.toml` (`vault`, `[[roots]]` with `scope` / `path` /
@@ -75,6 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
+- The Claude Stop closeout gate no longer treats another session's writes in a shared workspace as this session's unverified work. Worktree deltas during a Bash window are attributed only when no concurrent Claude write evidence (`write_observed` / `last_write_at` / `pending_write_at`) or other-harness receipt explains them — a read-only neighbor that only touches its session file is not foreign write evidence; a time-valid session receipt still counts when the live tree has drifted under a foreign writer; and a hard block that another process can re-arm is downgraded to a warning after this session has already captured, unless this session itself wrote again after that capture. (#959)
+- `memory care backfill` dry-run receipts now predict `--apply` (stable `new_id`), record `old_id` as the topic/stem consumers already use, mint IDs on complete ID-less cards so coverage can reach 100 percent, skip creating `.brigade/` on zero-candidate dry runs, and count `duplicate_ids` without a `memory/NAMESPACE` file. (#867)
 - `memory vault-search` rebuilds the derived index when `.brigade/vault.toml`
   roots change, so removing a scope from the allowlist stops serving that
   root. `vault-doctor` warns on index/config root drift instead of reporting
