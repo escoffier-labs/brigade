@@ -163,6 +163,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_memory_project_vault.add_argument("--vault", type=Path, required=True, help="Existing Obsidian vault directory.")
     p_memory_project_vault.add_argument(
+        "--max-related",
+        type=int,
+        default=None,
+        help="Maximum ranked related links per note (default: 12).",
+    )
+    p_memory_project_vault.add_argument(
         "--json", action="store_true", help="Print machine-readable projection receipt."
     )
     p_memory_vault_index = memory_sub.add_parser(
@@ -338,7 +344,10 @@ def dispatch(args) -> int:
     if args.memory_command == "project-vault":
         from .. import obsidian_vault
 
-        return obsidian_vault.project(target=args.target, vault=args.vault, json_output=args.json)
+        max_related = obsidian_vault.DEFAULT_MAX_RELATED if args.max_related is None else args.max_related
+        return obsidian_vault.project(
+            target=args.target, vault=args.vault, json_output=args.json, max_related=max_related
+        )
     if args.memory_command in {"vault-index", "vault-search", "vault-show", "vault-doctor"}:
         from .. import memory_vault
 
@@ -361,6 +370,7 @@ def dispatch(args) -> int:
         if args.memory_command == "vault-show":
             return memory_vault.show(target=args.target, note_id=args.note_id, json_output=args.json)
         return memory_vault.doctor(target=args.target, json_output=args.json)
+
     if args.memory_command == "care":
         if args.memory_care_command == "init":
             return memory_cmd.init(
