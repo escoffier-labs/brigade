@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade.causal_receipt.v1` is a lineage-only companion record for plan, run,
+  verify, outcome, and handoff artifacts. New writes stamp typed `recorded`
+  parent links so one plan→run→verify→outcome→handoff chain (and multi-parent
+  synthesis) is traversable without timestamp or path guessing. Parent count
+  and encoded size are capped; oversized fan-in must reference a hashed
+  manifest. Unknown relations, malformed digests, broken parents, and
+  unsupported versions produce bounded diagnostics. Telemetry export prefers
+  these links for parentage and keeps its deterministic trace/span projection.
+  Historical artifacts stay readable and are not rewritten; inferred backfill
+  remains under #583. (#493)
 - Evidence consumers now enforce `brigade.trust-policy.v1`: unknown and quarantined items are excluded from default briefs, context packs, citations, and promotion; untrusted brief content is wrapped and capped at 2 items and 50 percent of brief bytes; only the explicit known-safe injection status `clean` (after `strip().lower()` and pending resolution) may wrap or emit a body — case, whitespace, empty, and garbage variants are metadata-only. `brigade evidence trust review <item-ref> --content-hash <digest>` attests an untrusted item as reviewed after an exact envelope digest match and appends one transition event. `brigade receipts verify` upgrades indexed verify-receipt items to verified only after complete receipt v2 patch identity and exact retained `changes.patch` validation; duplicate verify is an idempotent no-op. Envelope verified does not bypass subject_binding, check_role, patch identity, or failure-taxonomy requirements. Citing a flagged research finding is rejected; the run takes one repair attempt and then fails `review-rejected`. (#587)
 - Evidence read surfaces recompute provenance content and materialized raw/artifact hashes. Search suppresses a mismatched snippet and returns `integrity_mismatch: true`. Direct `miseledger show` / `brigade evidence show` hide a mismatched or synthesized-legacy body unless `--forensic-content` is passed; that flag never changes trust and only reveals a body when injection status is the explicit known-safe value `clean` (empty, unknown, and parse-lost statuses block). MCP, HTTP, bundles, briefs, and context stay metadata-only on mismatch. Bundle cache and Markdown preserve envelope fields and `integrity_omitted`. One downgrade event is appended per item/hash/mismatch; the row is never deleted. (#586)
 - Python evidence producers now stamp `brigade.provenance-envelope.v1` on work imports, research findings, and indexed receipt adapter rows. Research findings persist an exact `{title}\\n{summary}\\n{evidence}` text projection; legacy `Finding.trust` stays readable and only maps to origin/modality. `brigade work import provenance --backfill` and `brigade research provenance backfill` infer missing envelopes without treating them as trusted. Receipt indexing always starts `untrusted`. Existing pending imports without an envelope report `missing_envelope`, which surfaces as a doctor WARN until an operator runs `--backfill`. (#584)

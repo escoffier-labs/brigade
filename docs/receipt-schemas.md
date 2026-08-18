@@ -9,7 +9,8 @@ JSON Schema files.
 1. **`schema_version` is an integer.** Bump only for breaking changes (rename,
    remove, or change the type/meaning of an existing field).
 2. **Within a `schema_version`, evolution is additive only.** New optional fields
-   may appear (including #491 telemetry projection). Patch identity from #485
+   may appear (including #491 telemetry projection and #493 `causal_receipt`).
+   Patch identity from #485
    is already represented by verify `schema_version: 2`. Consumers **must
    ignore unknown keys**.
 3. **Absent vs null:** optional fields are **omitted** when unset. Producers should
@@ -851,6 +852,44 @@ not infer import acceptance from the artifact filename alone.
 `strip_to_artifact_reference`, `unsupported_archive_version` = `refuse`,
 `nested_receipt_unknown_keys` = `ignore`, `symlinks_and_special_files` =
 `refuse`, and `journal_authority` one of `none` / `present` / `authoritative`.
+
+---
+
+## `brigade.causal_receipt.v1`: `schema_version: 1`
+
+Lineage-only companion for plan, run, verify, outcome, handoff, and synthesis
+artifacts (issue #493). It is not a second provenance, trust, or privacy
+envelope. Artifacts carry the companion under the additive `causal_receipt`
+field; run handoffs also write a sibling `*.causal-receipt.json`. Historical
+artifacts without the field remain readable and are not rewritten.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema` | string | yes | Always `brigade.causal_receipt.v1` |
+| `schema_version` | integer | yes | `1` |
+| `subject` | object | yes | `{kind, id}` stable subject reference |
+| `parents` | array | yes | Typed parent links. Empty for a root. Max 16 |
+| `parent_manifest` | object | no | `{id, digest}` when fan-in exceeds the parent cap. Inline `parents` must then be empty |
+
+**Parent object**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `relation` | string | yes | Closed: `planned_from`, `executed_from`, `verified_from`, `captured_from`, `handed_off_from`, `synthesized_from` |
+| `kind` | string | yes | Closed: `plan`, `run`, `worker-result`, `synthesis`, `verify`, `outcome`, `handoff` |
+| `id` | string | yes | Safe identity label. Never an absolute path |
+| `digest` | string | no | Bare lowercase SHA-256 hex of the parent companion record |
+| `link` | string | yes | `recorded` on new writes; `inferred` is reserved for #583 backfill |
+
+Compact JSON is capped at 2048 bytes. Unknown relations, malformed digests,
+broken parents, digest mismatches, and unsupported versions produce bounded
+diagnostics. Companions store references and digests only — never prompts,
+model output, tool arguments, retrieved content, stack traces, credentials,
+or home paths.
+
+Typical recorded chain: plan → run (`planned_from`) → verify (`executed_from`)
+→ outcome (`captured_from`) → handoff (`handed_off_from`). Synthesis may list
+multiple `synthesized_from` worker-result parents.
 
 ---
 

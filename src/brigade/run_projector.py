@@ -68,6 +68,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "category",
         "provenance",
         "lineage",
+        "causal_receipt",
         # Timing
         "started_at",
         "status_started_at",

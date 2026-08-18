@@ -58,6 +58,9 @@ SYNTHESIS_SCHEMA_VERSION = 1
 RUN_EVENT_SCHEMA = "brigade.run_event.v1"
 RUN_EVENT_SCHEMA_VERSION = 1
 
+CAUSAL_RECEIPT_SCHEMA = "brigade.causal_receipt.v1"
+CAUSAL_RECEIPT_SCHEMA_VERSION = 1
+
 WORK_RUN_ARCHIVE_SCHEMA = "brigade.work-run"
 WORK_RUN_ARCHIVE_SCHEMA_VERSION = 1
 
@@ -109,12 +112,21 @@ def stamp_synthesis_document(payload: dict[str, object]) -> dict[str, object]:
     return payload
 
 
-def run_plan_document(assignments: list[dict[str, object]]) -> dict[str, object]:
-    return {
+def run_plan_document(
+    assignments: list[dict[str, object]],
+    *,
+    run_id: str | None = None,
+) -> dict[str, object]:
+    from . import causal_receipt
+
+    doc: dict[str, object] = {
         "schema": RUN_PLAN_SCHEMA,
         "schema_version": RUN_PLAN_SCHEMA_VERSION,
         "assignments": assignments,
     }
+    if isinstance(run_id, str) and run_id:
+        causal_receipt.stamp_causal_receipt(doc, causal_receipt.recorded_plan(run_id=run_id))
+    return doc
 
 
 def worker_results_document(
@@ -139,7 +151,11 @@ def synthesis_document(
     worker: str | None = None,
     mode: str | None = None,
     ground_truth: dict[str, object] | None = None,
+    run_id: str | None = None,
+    worker_results: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    from . import causal_receipt
+
     doc: dict[str, object] = {
         "schema": SYNTHESIS_SCHEMA,
         "schema_version": SYNTHESIS_SCHEMA_VERSION,
@@ -155,4 +171,13 @@ def synthesis_document(
         doc["orchestrator"] = None
     if ground_truth is not None:
         doc["ground_truth"] = ground_truth
+    if isinstance(run_id, str) and run_id:
+        results = worker_results if isinstance(worker_results, list) else []
+        causal_receipt.stamp_causal_receipt(
+            doc,
+            causal_receipt.recorded_synthesis(
+                run_id=run_id,
+                worker_parents=causal_receipt.synthesis_worker_parents(run_id, results),
+            ),
+        )
     return doc

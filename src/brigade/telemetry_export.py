@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import localio, outcome
+from . import causal_receipt, localio, outcome
 from .outcome_cmd import _fingerprint_cohorts_by_artifact, _record_from_dict
 from .selection import KNOWN_HARNESSES
 
@@ -234,12 +234,45 @@ def _run_row(base: dict[str, Any], cli: str, projection: str) -> dict[str, Any]:
     return {"schema": schema, "mapping": mapping, **base, "attributes": attributes}
 
 
+def _lineage_parent_ids(payload: dict[str, Any], *, kind: str) -> list[str]:
+    receipt = causal_receipt.read_causal_receipt(payload)
+    if receipt is None or causal_receipt.validate_receipt(receipt):
+        return []
+    parents = receipt.get("parents")
+    if not isinstance(parents, list):
+        return []
+    ids: list[str] = []
+    for parent in parents:
+        if not isinstance(parent, dict):
+            continue
+        if parent.get("kind") != kind:
+            continue
+        parent_id = parent.get("id")
+        if isinstance(parent_id, str) and parent_id:
+            ids.append(parent_id)
+    return ids
+
+
 def _outcome_parentage(
     target: Path,
     record: dict[str, Any],
     run_anchors: dict[str, tuple[str, str]],
     verify_parents: dict[str, tuple[str, str]],
 ) -> tuple[str, str | None] | None:
+    run_ids = _lineage_parent_ids(record, kind="run")
+    if len(run_ids) == 1:
+        return run_anchors.get(run_ids[0])
+    verify_ids = _lineage_parent_ids(record, kind="verify")
+    if len(verify_ids) == 1:
+        verify_id = verify_ids[0]
+        anchor = verify_parents.get(verify_id)
+        if anchor is None:
+            verify_receipt = _object(target / ".brigade" / "work" / "verify-runs" / verify_id / "receipt.json")
+            if verify_receipt is not None:
+                run_ids = _lineage_parent_ids(verify_receipt, kind="run")
+                if len(run_ids) == 1:
+                    anchor = run_anchors.get(run_ids[0])
+        return anchor if anchor is not None else (_receipt_trace_id(verify_id), None)
     rel = _resolve_under_target(target, record["evidence_ref"])
     if rel is None:
         return None
@@ -316,6 +349,7 @@ def _project_verify(
     target: Path,
     projection: str,
     verify_parents: dict[str, tuple[str, str]],
+    run_anchors: dict[str, tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     target_name = target.name
@@ -332,7 +366,13 @@ def _project_verify(
         commands = receipt.get("commands")
         if not isinstance(commands, list):
             continue
-        anchor = verify_parents.get(receipt_id)
+        lineage_runs = _lineage_parent_ids(receipt, kind="run")
+        lineage_anchor = None
+        if run_anchors is not None and len(lineage_runs) == 1:
+            lineage_anchor = run_anchors.get(lineage_runs[0])
+            if lineage_anchor is not None:
+                verify_parents[receipt_id] = lineage_anchor
+        anchor = lineage_anchor if lineage_anchor is not None else verify_parents.get(receipt_id)
         trace_id, parent_span_id = anchor if anchor is not None else (_receipt_trace_id(receipt_id), None)
         harness_session = _valid_harness_session(receipt.get("harness_session"))
         harness = fingerprint = None
@@ -482,7 +522,7 @@ def _project_outcomes(
 def records(target: Path, projection: str) -> list[dict[str, Any]]:
     target = target.expanduser().resolve()
     rows, run_anchors, verify_parents = _project_runs(target, projection)
-    rows.extend(_project_verify(target, projection, verify_parents))
+    rows.extend(_project_verify(target, projection, verify_parents, run_anchors))
     rows.extend(_project_outcomes(target, projection, run_anchors, verify_parents))
     return rows
 
