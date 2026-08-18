@@ -45,13 +45,19 @@ The crawl command projects memory into the evidence log only when the installed 
 ```bash
 brigade memory project-vault --target . --vault /path/to/vault
 brigade memory project-vault --target . --vault /path/to/vault --json
+brigade memory vault-index --target .
+brigade memory vault-search "rotation policy" --scope notes --json
+brigade memory vault-show card-00000000-0000-4000-8000-00000000000a --json
+brigade memory vault-doctor --target . --json
 ```
 
 One-way projection of canonical memory into a `Brigade Memory/` subfolder of an operator-supplied vault: one note per store item with care-state frontmatter and tags, category and harness maps, and a topology canvas. Writes go through the projection transaction kernel, so a failed run restores the vault. A manual edit inside the projection is untrusted data: Brigade preserves it, writes a conflict copy, and reports drift instead of merging.
 
-Note titles come from a card's leading heading when its frontmatter has no `title`, falling back to the inventory title. Related links are ranked (explicit refs, then shared tags, then shared category) and capped per note, so a large shared category does not turn into a complete graph. A map that would cover every note is omitted. The vault path stays out of topology output as `redacted:operator-vault`.
+The read path is a separate surface. Configure it once in `.brigade/vault.toml` with the vault path, allowlisted `[[roots]]` (`scope`, vault-relative `path`, optional), and `schema_version = 1`. `--scope` names a configured root; an unknown scope is an error. `vault-index` writes a derived, owner-readable index under `.brigade/vault-index/` and never writes into the vault. `vault-search` returns bounded, redacted hits with a per-result `trust` of `untrusted_vault_content`. Projected notes key on `canonical_id` from the #934 contract; operator-authored notes fall back to the vault-relative path.
 
-Rerunning is idempotent: unchanged notes produce no mutation.
+Note titles come from a card's leading heading when its frontmatter has no `title`, falling back to the inventory title. Related links are ranked (explicit refs, then shared tags, then shared category) and capped per note, so a large shared category does not turn into a complete graph. A map that would cover every note is omitted. The vault path stays out of topology and vault-search output as `redacted:operator-vault`.
+
+Rerunning projection is idempotent: unchanged notes produce no mutation. Writing agent-proposed notes back into a vault is tracked in [#945](https://github.com/escoffier-labs/brigade/issues/945).
 
 ### Where memory flows
 
@@ -71,10 +77,11 @@ flowchart LR
     H -->|"handoff ingest"| CANON
     CANON -->|"memory recall · search · serve-mcp"| AGENTS
     CANON -->|"memory project-vault"| PROJ
-    OWNED -.->|"no read path yet"| CANON
+    PROJ -->|"memory vault-search · vault-show"| AGENTS
+    OWNED -->|"memory vault-search · vault-show"| AGENTS
 ```
 
-Brigade writes into a vault and does not read back from one. Retrieval from operator-authored vault notes is tracked in [#943](https://github.com/escoffier-labs/brigade/issues/943); writing agent-proposed notes back into a vault is tracked in [#945](https://github.com/escoffier-labs/brigade/issues/945). Until those land, a vault is a projection target, not a memory source.
+An operator configures a vault once in `.brigade/vault.toml` and gets cited retrieval from `brigade` alone. The vault stays untrusted data: hits are labeled per result, snippets are bounded, and `project-vault` remains the only writer into the vault. Writing agent-proposed notes back is tracked in [#945](https://github.com/escoffier-labs/brigade/issues/945).
 
 ## Care
 
