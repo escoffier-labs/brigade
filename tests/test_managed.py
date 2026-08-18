@@ -582,7 +582,7 @@ def test_bootstrap_doctor_declares_status_and_lint_surfaces():
     surfaces = {surface.kind: surface for surface in t.surfaces}
     assert surfaces["summary-json"].command == ("bootstrap-doctor", "status", "--json")
     assert surfaces["doctor-json"].command == ("bootstrap-doctor", "lint", "--json")
-    assert surfaces["verify-exit"].command == ("bootstrap-doctor", "lint", "--json")
+    assert surfaces["verify-exit"].command == ("bootstrap-doctor", "--version")
     for surface in surfaces.values():
         assert surface.read_only is True
         assert surface.timeout_seconds == 30.0

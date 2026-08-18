@@ -530,7 +530,7 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         surfaces=(
             _surface("summary-json", ("bootstrap-doctor", "status", "--json"), timeout_seconds=30.0),
             _surface("doctor-json", ("bootstrap-doctor", "lint", "--json"), timeout_seconds=30.0),
-            _surface("verify-exit", ("bootstrap-doctor", "lint", "--json"), timeout_seconds=30.0),
+            _surface("verify-exit", ("bootstrap-doctor", "--version"), timeout_seconds=30.0),
         ),
     ),
     ManagedTool(
