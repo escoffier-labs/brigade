@@ -658,6 +658,7 @@ def test_memory_care_backfill_dry_run_derives_dates_and_writes_nothing(tmp_path,
         cards / "complete.md",
         {
             "topic": "complete",
+            "id": "card-11111111-1111-4111-8111-111111111111",
             "last_reviewed": "2026-05-01",
             "fresh_until": "2026-12-01",
             "fingerprint": "already-set",
@@ -705,6 +706,7 @@ def test_memory_care_backfill_apply_writes_metadata_receipt_and_is_idempotent(tm
         cards / "complete.md",
         {
             "topic": "complete",
+            "id": "card-11111111-1111-4111-8111-111111111111",
             "last_reviewed": "2026-05-01",
             "fresh_until": "2026-12-01",
             "fingerprint": "already-set",
@@ -841,6 +843,144 @@ def test_memory_care_backfill_apply_preserves_outside_file(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["written_count"] == 0
     assert victim.read_bytes() == victim_bytes
+
+
+def test_memory_care_backfill_dry_run_mapping_predicts_apply(tmp_path, capsys):
+    """Two dry runs and --apply must emit the same new_id (probe #984)."""
+    cards = tmp_path / "memory" / "cards"
+    _write_card(
+        cards / "incomplete-legacy.md",
+        {"title": "Incomplete Legacy", "topic": "legacy-topic-key", "confidence": "high", "evidence": ["README.md"]},
+    )
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+    first_id = first["candidates"][0]["id"]
+    assert first_id == second["candidates"][0]["id"]
+    assert first["identity_receipt"]["mappings"] == second["identity_receipt"]["mappings"]
+    assert first["identity_receipt"]["mappings"][0]["old_id"] == "legacy-topic-key"
+    assert first["identity_receipt"]["mappings"][0]["new_id"] == first_id
+
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["candidates"][0]["id"] == first_id
+    written = (cards / "incomplete-legacy.md").read_text()
+    assert f"id: {first_id}" in written
+    assert written.count("id:") == 1
+
+
+def test_memory_care_backfill_mints_id_on_complete_idless_card(tmp_path, capsys):
+    """Complete care frontmatter without an ID must still be mintable (probe #984)."""
+    cards = tmp_path / "memory" / "cards"
+    _write_card(
+        cards / "complete-legacy.md",
+        {
+            "title": "Complete Legacy",
+            "topic": "complete-topic",
+            "last_reviewed": "2026-01-01",
+            "fresh_until": "2026-04-01",
+            "fingerprint": "already-set",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
+    _write_card(
+        cards / "incomplete-legacy.md",
+        {"title": "Incomplete Legacy", "topic": "incomplete-topic", "confidence": "high", "evidence": ["README.md"]},
+    )
+
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 0
+    applied = json.loads(capsys.readouterr().out)
+    files = {item["file"].split("/")[-1] for item in applied["candidates"]}
+    assert files == {"complete-legacy.md", "incomplete-legacy.md"}
+    complete_item = next(item for item in applied["candidates"] if item["file"].endswith("complete-legacy.md"))
+    assert complete_item["fields"] == ["id"]
+    assert complete_item["old_id"] == "complete-topic"
+    assert (cards / "complete-legacy.md").read_text().count("id:") == 1
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    follow_up = json.loads(capsys.readouterr().out)
+    assert follow_up["candidate_count"] == 0
+    assert follow_up["identity_receipt"]["coverage"]["path_fallbacks"] == 0
+    assert follow_up["identity_receipt"]["missing_ids_validation"] == "enabled"
+
+
+def test_memory_care_backfill_never_replaces_valid_existing_id(tmp_path, capsys):
+    """A valid explicit ID plus a missing care field must keep exactly one id: (probe #984)."""
+    cards = tmp_path / "memory" / "cards"
+    card_id = "card-77777777-7777-4777-8777-777777777777"
+    _write_card(
+        cards / "has-id.md",
+        {
+            "title": "Has A Valid Id",
+            "id": card_id,
+            "last_reviewed": "2026-01-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    planned = json.loads(capsys.readouterr().out)
+    item = planned["candidates"][0]
+    assert "id" not in item["fields"]
+    assert "id" not in item
+
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 0
+    text = (cards / "has-id.md").read_text()
+    assert text.count("id:") == 1
+    assert f"id: {card_id}" in text
+    assert "fresh_until:" in text
+    assert "fingerprint:" in text
+
+
+def test_memory_care_backfill_dry_run_skips_receipt_when_no_candidates(tmp_path, capsys):
+    """A zero-candidate dry run must not create .brigade/ (probe #984)."""
+    cards = tmp_path / "memory" / "cards"
+    _write_card(
+        cards / "complete.md",
+        {
+            "topic": "complete",
+            "id": "card-11111111-1111-4111-8111-111111111111",
+            "last_reviewed": "2026-05-01",
+            "fresh_until": "2026-12-01",
+            "fingerprint": "already-set",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+    assert payload["receipt_path"] is None
+    assert not (tmp_path / ".brigade").exists()
+
+
+def test_memory_care_backfill_counts_duplicate_ids_without_namespace(tmp_path, capsys):
+    """duplicate_ids must fire without memory/NAMESPACE (probe #984)."""
+    cards = tmp_path / "memory" / "cards"
+    shared = "card-99999999-9999-4999-8999-999999999999"
+    _write_card(cards / "one.md", {"id": shared, "topic": "one", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(cards / "two.md", {"id": shared, "topic": "two", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(
+        cards / "other.md",
+        {
+            "id": "card-11111111-1111-4111-8111-111111111111",
+            "topic": "other",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
+    assert not (tmp_path / "memory" / "NAMESPACE").exists()
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    coverage = payload["identity_receipt"]["coverage"]
+    assert coverage["alias_collisions"] == 1
+    assert coverage["duplicate_ids"] == 1
 
 
 def test_memory_care_producer_artifacts_use_write_dir_not_read_fallback(tmp_path):

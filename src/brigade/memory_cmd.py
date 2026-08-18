@@ -1394,13 +1394,14 @@ def _git_last_commit_date(target: Path, rel: str) -> date | None:
 
 
 def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[dict[str, Any]], int]:
-    """Cards with frontmatter but missing review/freshness/fingerprint metadata.
+    """Cards with frontmatter but missing review/freshness/fingerprint/id metadata.
 
     The derived `last_reviewed` is the card file's last git commit date (the
     last time anyone touched the fact), falling back to file mtime outside git.
     `fresh_until` is the derived or existing reviewed date plus the configured
     stale window. `fingerprint` is a stable hash of normalized card content.
-    Existing values are never proposed for change.
+    Existing values are never proposed for change. A complete care card with no
+    valid explicit ID is still a candidate so coverage can reach 100 percent.
     """
     from .card_fingerprint import content_fingerprint
 
@@ -1429,37 +1430,40 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
         expiry = _parse_date(_frontmatter_value(meta, "fresh_until", "expires_at", "expires"))
         has_fingerprint = bool(str(meta.get("fingerprint") or "").strip())
-        if reviewed is not None and expiry is not None and has_fingerprint:
+        identity = card_identity(meta, rel)
+        care_complete = reviewed is not None and expiry is not None and has_fingerprint
+        if care_complete and identity.explicit:
             continue
-        derived = _git_last_commit_date(target, rel)
-        source = "git-history"
-        if derived is None:
-            from datetime import datetime as _dt, timezone as _tz
-
-            derived = _dt.fromtimestamp(path.stat().st_mtime, tz=_tz.utc).date()
-            source = "file-mtime"
-        base_reviewed = reviewed or derived
-        from datetime import timedelta as _td
-
         candidate: dict[str, Any] = {
             "file": rel,
-            "source": source,
+            "source": "identity",
             "fields": [],
         }
-        if reviewed is None:
-            candidate["last_reviewed"] = derived.isoformat()
-            candidate["fields"].append("last_reviewed")
-        if expiry is None:
-            candidate["fresh_until"] = (base_reviewed + _td(days=config.stale_after_days)).isoformat()
-            candidate["fields"].append("fresh_until")
-        if not has_fingerprint:
-            candidate["fingerprint"] = content_fingerprint(text)
-            candidate["fields"].append("fingerprint")
-            if reviewed is not None and expiry is not None:
-                candidate["source"] = "content-hash"
-        identity = card_identity(meta, rel)
-        if candidate["fields"] and not identity.explicit:
-            candidate["id"] = mint_claimed_card_id(claimed_ids, rel)
+        if not care_complete:
+            derived = _git_last_commit_date(target, rel)
+            source = "git-history"
+            if derived is None:
+                from datetime import datetime as _dt, timezone as _tz
+
+                derived = _dt.fromtimestamp(path.stat().st_mtime, tz=_tz.utc).date()
+                source = "file-mtime"
+            base_reviewed = reviewed or derived
+            from datetime import timedelta as _td
+
+            candidate["source"] = source
+            if reviewed is None:
+                candidate["last_reviewed"] = derived.isoformat()
+                candidate["fields"].append("last_reviewed")
+            if expiry is None:
+                candidate["fresh_until"] = (base_reviewed + _td(days=config.stale_after_days)).isoformat()
+                candidate["fields"].append("fresh_until")
+            if not has_fingerprint:
+                candidate["fingerprint"] = content_fingerprint(text)
+                candidate["fields"].append("fingerprint")
+                if reviewed is not None and expiry is not None:
+                    candidate["source"] = "content-hash"
+        if not identity.explicit:
+            candidate["id"] = mint_claimed_card_id(claimed_ids, rel, seed=f"path:{rel}")
             candidate["fields"].append("id")
             candidate["old_id"] = mapping_old_id(identity, rel)
         candidates.append(candidate)
@@ -1525,7 +1529,7 @@ def _identity_mapping_receipt(
         "stale_after_days": stale_after_days,
         "coverage": coverage,
         "alias_collisions": {key: list(paths) for key, paths in identity_collisions.items()},
-        "missing_ids_validation": "warning",
+        "missing_ids_validation": "enabled" if coverage["path_fallbacks"] == 0 else "warning",
         "identity_mapping": [{"file": item["path"], "card_id": item["new_id"]} for item in mappings],
         "mappings": mappings,
     }
@@ -1592,7 +1596,7 @@ def backfill(*, target: Path, apply: bool = False, json_output: bool = False) ->
         stamp = utc_now().strftime("%Y%m%dT%H%M%S")
         receipt_path = receipts_dir / f"{stamp}.json"
         write_json(receipt_path, identity_receipt)
-    elif not apply:
+    elif not apply and candidates:
         receipts_dir.mkdir(parents=True, exist_ok=True)
         from .localio import write_json
 
