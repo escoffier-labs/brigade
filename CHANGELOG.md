@@ -71,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   roots change, so removing a scope from the allowlist stops serving that
   root. `vault-doctor` warns on index/config root drift instead of reporting
   all-green against a stale index. (#943)
+- Evidence brief rendering one-lines MiseLedger score keys/values (including zero and `False`) and retrieval-arm labels, omits `trust:` when the gate-resolved label is `unknown`, prefers the provenance envelope over item-level trust keys, and keeps a partial first result line when truncation leaves room after context lines. (#941)
 - `brigade runs watch --json` (`brigade.run-watch.v1`) now routes every
   record through the same allowlist and one-line helpers as the list and
   detail contracts. `watch`/`summary` emit `run_id` instead of an absolute

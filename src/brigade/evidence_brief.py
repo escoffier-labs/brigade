@@ -116,21 +116,20 @@ def _find_commit(result: dict[str, Any], snippet: str) -> str:
     return _one_line(match.group(0).rstrip(").,;"), 160) if match else ""
 
 
-def _find_trust(result: dict[str, Any]) -> str:
+def _find_trust(result: dict[str, Any]) -> str | None:
+    """Return the gate-resolved trust label, or None when it is ``unknown``.
+
+    ``trust_gate.trust_label_of`` prefers the provenance envelope (including
+    ``result.provenance``, ``metadata.provenance``, and a result that is
+    itself an envelope) over top-level ``trust_label`` / ``trust`` keys.
+    The ``unknown`` sentinel — synthesized when no declared label exists —
+    is omitted so the brief does not infer a fallback.
+    """
+
     label = trust_gate.trust_label_of(result)
-    if label in provenance.TRUST_LABELS:
-        return label
-    value = result.get("trust_label")
-    if isinstance(value, str) and value.strip() and value in provenance.TRUST_LABELS:
-        return value
-    value = result.get("trust")
-    if isinstance(value, str) and value.strip() and value in provenance.TRUST_LABELS:
-        return value
-    metadata = _metadata(result)
-    value = metadata.get("trust")
-    if isinstance(value, str) and value.strip() and value in provenance.TRUST_LABELS:
-        return value
-    return "unknown"
+    if label == "unknown":
+        return None
+    return label
 
 
 def _find_source_label(result: dict[str, Any]) -> str:
@@ -170,8 +169,9 @@ def _result_line(
         f"status: {_find_status(result, snippet)}",
     ]
 
-    trust = trust_label or result.get("trust_label") or _find_trust(result)
-    parts.append(f"trust: {trust}")
+    trust = trust_label if trust_label and trust_label != "unknown" else _find_trust(result)
+    if trust:
+        parts.append(f"trust: {trust}")
     if mismatch:
         parts.append("integrity_mismatch: true")
     if metadata_only:
@@ -208,7 +208,9 @@ def _result_line(
 
     scores = result.get("scores")
     if isinstance(scores, dict) and scores:
-        score_parts = [f"{k}={v}" for k, v in list(scores.items())[:4] if v is not None]
+        score_parts = [
+            f"{_one_line(k, 40)}={_one_line(str(v), 40)}" for k, v in list(scores.items())[:4] if v is not None
+        ]
         if score_parts:
             parts.append(f"scores: {', '.join(score_parts)}")
 
@@ -241,7 +243,7 @@ def _render_bundle_context(
     unavailable = bundle.get("unavailable_arms")
 
     if isinstance(arms, list) and arms:
-        arm_labels = [str(a) for a in arms if a]
+        arm_labels = [_one_line(a, 40) for a in arms if a]
         if len(arm_labels) == 1:
             lines.append(f"Retrieval: single arm ({arm_labels[0]}).")
         else:
@@ -370,12 +372,14 @@ def _render(results: list[dict[str, Any]], bundle: dict[str, Any] | None = None)
         if len(candidate.encode()) > LIMIT_BYTES:
             break
         kept.append(cl)
+    result_kept = False
     for line in lines:
         candidate = "\n".join([*kept, line]).rstrip() + note
         if len(candidate.encode()) > LIMIT_BYTES:
             break
         kept.append(line)
-    if len(kept) == len(intro) and lines:
+        result_kept = True
+    if not result_kept and lines:
         base = "\n".join(kept).rstrip() + "\n"
         room = max(0, LIMIT_BYTES - len((base + note).encode()))
         kept.append(_fit_bytes(lines[0], room))
