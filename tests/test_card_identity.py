@@ -11,6 +11,7 @@ from brigade.card_identity import (
     mapping_old_id,
     mint_card_id,
     mint_claimed_card_id,
+    mint_stable_card_id,
     valid_card_id,
 )
 
@@ -33,7 +34,7 @@ def test_legacy_cards_use_path_fallback_and_keep_aliases():
     assert identity.card_id == "rollout"
     assert "memory/cards/renamed.md" in identity.aliases
     assert "renamed" in identity.aliases
-    assert mapping_old_id(identity, "memory/cards/renamed.md") == "path:memory/cards/renamed.md"
+    assert mapping_old_id(identity, "memory/cards/renamed.md") == "rollout"
 
 
 def test_explicit_id_survives_rename_and_keeps_legacy_alias():
@@ -64,6 +65,21 @@ def test_mint_claimed_card_id_never_replaces_existing():
     assert _CARD_ID.fullmatch(minted)
     assert index.resolve(existing) == "kept.md"
     assert index.resolve(minted) == "new.md"
+
+
+def test_mint_claimed_card_id_is_deterministic_for_the_same_seed():
+    seed = "path:memory/cards/incomplete-legacy.md"
+    first = mint_stable_card_id(seed)
+    second = mint_stable_card_id(seed)
+    other = mint_stable_card_id("path:memory/cards/complete-legacy.md")
+    assert first == second
+    assert first != other
+    assert valid_card_id(first) == first
+    index: IdentityIndex[str] = IdentityIndex()
+    claimed = mint_claimed_card_id(index, "incomplete-legacy.md", seed=seed)
+    again: IdentityIndex[str] = IdentityIndex()
+    assert mint_claimed_card_id(again, "incomplete-legacy.md", seed=seed) == claimed
+    assert claimed == first
 
 
 def test_ensure_card_id_preserves_valid_id_on_repeat_write():

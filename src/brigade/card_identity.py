@@ -130,10 +130,29 @@ class IdentityIndex(Generic[T]):
         return tuple(seen)
 
 
-def mint_claimed_card_id(index: IdentityIndex[T], record: T) -> str:
-    """Mint one unused ``card-<uuid4>`` and claim it. Never replaces a claimed key."""
-    for _ in range(8):
-        card_id = mint_card_id()
+def mint_stable_card_id(seed: str) -> str:
+    """Derive a valid ``card-<uuid4>`` from a stable seed so dry-run matches apply.
+
+    The digest is UUID5 over ``seed``, then the version nibble is forced to 4 so
+    the ID keeps the ``card-<uuid4>`` shape ``valid_card_id`` accepts.
+    """
+    digest = uuid.uuid5(uuid.NAMESPACE_URL, seed)
+    data = bytearray(digest.bytes)
+    data[6] = (data[6] & 0x0F) | 0x40
+    return f"card-{uuid.UUID(bytes=bytes(data))}"
+
+
+def mint_claimed_card_id(index: IdentityIndex[T], record: T, *, seed: str | None = None) -> str:
+    """Mint one unused card ID and claim it. Never replaces a claimed key.
+
+    When ``seed`` is set, the ID is derived deterministically so a dry-run
+    receipt predicts the IDs ``--apply`` will write.
+    """
+    for attempt in range(8):
+        if seed is None:
+            card_id = mint_card_id()
+        else:
+            card_id = mint_stable_card_id(seed if attempt == 0 else f"{seed}:{attempt}")
         if index.available(card_id):
             index.claim(card_id, record)
             return card_id
@@ -141,8 +160,12 @@ def mint_claimed_card_id(index: IdentityIndex[T], record: T) -> str:
 
 
 def mapping_old_id(identity: CardIdentity, relative_path: str) -> str:
-    """Legacy key recorded in dry-run receipts (never a card body or absolute path)."""
-    relative_path = normalized_relative_path(relative_path)
-    if identity.explicit:
+    """Consumer-facing legacy key for dry-run receipts (never a card body).
+
+    Non-explicit cards resolve as ``card_identity.card_id`` (topic, stem, or
+    path) — the same key care queues, search logs, and refresh imports record.
+    The ``path:`` prefix is not a consumer key.
+    """
+    if identity.card_id:
         return identity.card_id
-    return f"path:{relative_path}"
+    return f"path:{normalized_relative_path(relative_path)}"
