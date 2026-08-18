@@ -912,9 +912,21 @@ Both commands share one serializer:
 
 Every newline-delimited watch record (`watch`, `run`, `plan`, `event`,
 `workers`, `synthesis`, `final`, `summary`) carries
-`"schema": "brigade.run-watch.v1"`. Consumers must ignore unknown future
-record types. `brigade runs events` keeps its own `brigade.run_event.v1`
-lifecycle contract and is unchanged.
+`"schema": "brigade.run-watch.v1"` and is filtered through the same
+allowlist / one-line helpers as list and detail. Consumers must ignore
+unknown future record types. `brigade runs events` keeps its own
+`brigade.run_event.v1` lifecycle contract and is unchanged.
+
+- `watch` and `summary` identify the run as `run_id` (directory name,
+  never an absolute path). The stale-lock `inspect_command` is
+  `brigade runs show <run_id>`.
+- `run`, `plan`, `workers`, and `synthesis` reuse the detail-contract
+  field allowlists and bounded strings.
+- `event` records emit only `method` and `item_type`. Auth tokens,
+  prompts, transcript bodies, raw stdout/stderr, log paths, and
+  absolute paths in `params` are omitted.
+- `final` text is one-lined and bounded; a value that cannot be
+  rendered safely is omitted.
 
 ---
 

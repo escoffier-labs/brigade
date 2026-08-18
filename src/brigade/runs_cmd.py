@@ -1164,21 +1164,43 @@ def _emit_watch_json(payload: dict[str, object]) -> None:
     _emit_json({"schema": RUN_WATCH_SCHEMA, **payload})
 
 
+def _watch_run_id(run_dir: Path) -> str:
+    """Directory name only — never an absolute operator path."""
+    return run_dir.name
+
+
+def _watch_inspect_command(run_dir: Path) -> str:
+    return f"brigade runs show {_watch_run_id(run_dir)}"
+
+
+def _watch_event_payload(event: dict[str, Any]) -> dict[str, object]:
+    """Allowlisted watch event: method and item type, never raw params."""
+    return _compact(
+        {
+            "method": _clean_str(event.get("method")),
+            "item_type": _clean_str(_event_item_type(event)) or None,
+        }
+    )
+
+
 def _emit_run(meta: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         phase, kind, detail = _failure_fields(meta)
-        payload = {
-            "type": "run",
-            "status": meta.get("status"),
-            "task": meta.get("task"),
-            "started_at": meta.get("started_at"),
-            "finished_at": meta.get("finished_at"),
-            "duration_seconds": meta.get("duration_seconds"),
-            "failure_phase": phase,
-            "failure_kind": kind,
-            "failure_detail": detail,
-        }
-        _emit_watch_json({key: value for key, value in payload.items() if value is not None})
+        _emit_watch_json(
+            _compact(
+                {
+                    "type": "run",
+                    "status": _clean_str(meta.get("status")),
+                    "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
+                    "started_at": _clean_str(meta.get("started_at")),
+                    "finished_at": _clean_str(meta.get("finished_at")),
+                    "duration_seconds": _clean_number(meta.get("duration_seconds")),
+                    "failure_phase": _clean_str(phase),
+                    "failure_kind": _clean_str(kind),
+                    "failure_detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
+                }
+            )
+        )
         return
     _line("status", meta.get("status"))
     _line("task", meta.get("task"))
@@ -1190,7 +1212,7 @@ def _emit_plan(plan_payload: dict[str, Any], *, json_output: bool) -> None:
     if not isinstance(assignments, list):
         return
     if json_output:
-        _emit_watch_json({"type": "plan", "assignments": assignments})
+        _emit_watch_json({"type": "plan", **_detail_plan_section(plan_payload)})
         return
     print("plan:")
     if not assignments:
@@ -1218,7 +1240,15 @@ def _event_item_type(event: dict[str, Any]) -> str:
 
 def _emit_event(worker: str, event: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
-        _emit_watch_json({"type": "event", "worker": worker, "event": event})
+        _emit_watch_json(
+            _compact(
+                {
+                    "type": "event",
+                    "worker": _clean_str(worker) or "unknown",
+                    "event": _watch_event_payload(event),
+                }
+            )
+        )
         return
     method = event.get("method", "unknown")
     item_type = _event_item_type(event)
@@ -1228,27 +1258,22 @@ def _emit_event(worker: str, event: dict[str, Any], *, json_output: bool) -> Non
 
 def _emit_workers(worker_results: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
-        _emit_watch_json({"type": "workers", "results": worker_results.get("results") or []})
+        _emit_watch_json({"type": "workers", **_detail_workers_section(worker_results)})
         return
     _print_workers(worker_results)
 
 
 def _emit_synthesis(synthesis: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
-        _emit_watch_json(
-            {
-                "type": "synthesis",
-                "orchestrator": synthesis.get("orchestrator"),
-                "result": synthesis.get("result"),
-            }
-        )
+        _emit_watch_json({"type": "synthesis", **_detail_synthesis_section(synthesis)})
         return
     _print_synthesis(synthesis)
 
 
 def _emit_final(final_text: str, *, json_output: bool) -> None:
     if json_output:
-        _emit_watch_json({"type": "final", "text": final_text})
+        # final.txt is raw operator output; emit a bounded one-line or omit.
+        _emit_watch_json(_compact({"type": "final", "text": _clean_str(final_text, _DETAIL_TEXT_LIMIT)}))
         return
     _print_final(final_text)
 
@@ -1257,17 +1282,22 @@ def _emit_summary(run_dir: Path, meta: dict[str, Any], *, json_output: bool) -> 
     status = str(meta.get("status") or "unknown")
     duration = meta.get("duration_seconds")
     if json_output:
-        payload: dict[str, object] = {"type": "summary", "run": str(run_dir), "status": status}
-        if isinstance(duration, (int, float)):
-            payload["duration_seconds"] = duration
+        payload: dict[str, object] = {
+            "type": "summary",
+            "run_id": _watch_run_id(run_dir),
+            "status": _clean_str(status) or "unknown",
+        }
+        cleaned_duration = _clean_number(duration)
+        if cleaned_duration is not None:
+            payload["duration_seconds"] = cleaned_duration
         phase, _, _ = _failure_fields(meta)
         if phase == "stale-lock-recovery":
             recovery_status = _lock_recovery_status(run_dir, meta)
-            payload["failure_phase"] = phase
-            payload["inspect_command"] = f"brigade runs show {run_dir}"
-            payload["recover_status"] = recovery_status
+            payload["failure_phase"] = _clean_str(phase)
+            payload["inspect_command"] = _watch_inspect_command(run_dir)
+            payload["recover_status"] = _clean_str(recovery_status)
             payload["resume_available"] = _resume_available(run_dir)
-        _emit_watch_json(payload)
+        _emit_watch_json(_compact(payload))
         return
     print(f"summary: {status} in {_duration_text(duration)}")
     _print_terminal_guidance(run_dir, meta)
@@ -2590,7 +2620,7 @@ def watch(
         return 2
     assert run_dir is not None
     if json_output:
-        _emit_watch_json({"type": "watch", "run": str(run_dir)})
+        _emit_watch_json({"type": "watch", "run_id": _watch_run_id(run_dir)})
     else:
         print(f"watching: {run_dir}")
 
