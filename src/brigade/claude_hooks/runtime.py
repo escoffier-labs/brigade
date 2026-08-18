@@ -1651,23 +1651,6 @@ def _iter_verify_receipts(target: Path) -> Iterator[dict[str, Any]]:
             yield receipt
 
 
-def _other_session_state_touched_since(target: Path, session_id: str, since: datetime) -> bool:
-    own = _state_path(target, session_id)
-    root = _sessions_root(target)
-    if not root.is_dir():
-        return False
-    threshold = since.timestamp()
-    for path in root.glob("*.json"):
-        if path == own:
-            continue
-        try:
-            if path.stat().st_mtime >= threshold:
-                return True
-        except OSError:
-            continue
-    return False
-
-
 def _foreign_receipt_since(target: Path, session_fingerprint: str, since: datetime) -> bool:
     """True when another harness or session completed a verify at or after ``since``."""
     for receipt in _iter_verify_receipts(target):
@@ -1696,6 +1679,8 @@ def _foreign_write_since(
 
     Shared workspaces mix Claude sessions and other harnesses. A worktree
     delta in that window is not safely this session's write work (#959).
+    Only write evidence counts: ``write_observed`` plus ``last_write_at``,
+    an in-flight ``pending_write_at``, or another harness/session receipt.
     """
     for other_state in iter_session_states(target, limit=MAX_RECENT_SESSION_STATES):
         if other_state.get("session_id") == session_id:
@@ -1706,8 +1691,6 @@ def _foreign_write_since(
         pending_write = localio.parse_iso_datetime(other_state.get("pending_write_at"))
         if pending_write is not None and pending_write >= since:
             return True
-    if _other_session_state_touched_since(target, session_id, since):
-        return True
     fingerprint = session_fingerprint if isinstance(session_fingerprint, str) else _session_fingerprint(session_id)
     return _foreign_receipt_since(target, fingerprint, since)
 
@@ -1788,8 +1771,10 @@ def _bash_write_detected(
     # interleaved) after recording an older repo_fingerprint; requiring an
     # exact match re-arms this session's closeout gate (#704 / #380 follow-up).
     # Cross-harness writers never appear in Claude session state; treat their
-    # receipts and any other session heartbeat in the same window as foreign
-    # so a shared hub cannot pin this session's last_write_at (#959).
+    # receipts and another session's write evidence (write_observed /
+    # last_write_at / pending_write_at) in the same window as foreign so a
+    # shared hub cannot pin this session's last_write_at (#959). A read-only
+    # neighbor that only touches its session file is not write evidence.
     if _foreign_write_since(target, session_id, started):
         return False
     return True

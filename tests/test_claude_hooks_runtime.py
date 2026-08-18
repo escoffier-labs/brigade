@@ -524,6 +524,58 @@ def test_posttooluse_records_python_c_write_via_repo_snapshot(tmp_path: Path):
     assert blocked["decision"] == "block"
 
 
+def test_posttooluse_records_bash_write_when_other_session_only_reads(tmp_path: Path):
+    """A read-only neighbor must not discard this session's Bash write.
+
+    Probe from #987 review: B runs a Python write of ``real_source.py``; inside
+    that Bash window A does one ``git log -1`` PreToolUse and nothing else.
+    Bare session-state mtime is not foreign write evidence.
+    """
+    target = _wired_claude(tmp_path)
+    writer_session = "session-b-build"
+    reader_session = "session-a-git-log"
+    out_file = target / "real_source.py"
+    command = f"{sys.executable} -c \"from pathlib import Path; Path({str(out_file)!r}).write_text('built')\""
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=writer_session,
+        tool_name="Bash",
+        tool_input={"command": command},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert runtime.read_session_state(target, writer_session)["write_observed"] is False
+
+    assert (
+        runtime.handle_payload(
+            "PreToolUse",
+            _payload(
+                target,
+                "PreToolUse",
+                session_id=reader_session,
+                tool_name="Bash",
+                tool_input={"command": "git log -1"},
+            ),
+        )
+        is None
+    )
+    reader_state = runtime.read_session_state(target, reader_session)
+    assert reader_state["write_observed"] is False
+    assert "last_write_at" not in reader_state
+    assert "pending_write_at" not in reader_state
+
+    out_file.write_text("built")
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+    writer_state = runtime.read_session_state(target, writer_session)
+    assert writer_state["write_observed"] is True
+    assert writer_state.get("last_write_at")
+
+    blocked = runtime.handle_payload(
+        "Stop", _payload(target, "Stop", session_id=writer_session, stop_hook_active=False)
+    )
+    assert blocked["decision"] == "block"
+
+
 def test_posttooluse_ignores_concurrent_session_write_during_read_only_bash(tmp_path: Path):
     target = _wired_claude(tmp_path)
     reader_session = "read-only-bash"
