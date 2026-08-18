@@ -1067,6 +1067,56 @@ def test_evidence_brief_skips_trust_without_explicit_label():
     assert "trust:" not in line
 
 
+@pytest.mark.parametrize(
+    ("item_id", "conflict"),
+    [
+        ("prec", {"trust_label": "verified"}),
+        ("prec2", {"trust": "reviewed"}),
+    ],
+)
+def test_evidence_brief_envelope_trust_precedes_item_label(item_id, conflict):
+    """An envelope-untrusted item must not render a conflicting item-level label."""
+
+    result = {
+        "id": item_id,
+        "provenance": _untrusted_envelope("", label="untrusted"),
+        **conflict,
+    }
+    line = evidence_brief._result_line(result, {}, snippet="", metadata_only=True)
+
+    assert f"run: {item_id}" in line
+    assert "trust: untrusted" in line
+    assert "trust: verified" not in line
+    assert "trust: reviewed" not in line
+    assert "content: omitted" in line
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(
+            lambda env: {"id": "shape-prov", "provenance": env},
+            id="result.provenance",
+        ),
+        pytest.param(
+            lambda env: {"id": "shape-meta", "metadata": {"provenance": env}},
+            id="metadata.provenance",
+        ),
+        pytest.param(
+            lambda env: {**env, "id": "shape-self"},
+            id="result-is-envelope",
+        ),
+    ],
+)
+def test_evidence_brief_renders_declared_trust_from_envelope_shapes(build):
+    """Declared envelope labels render for every shape trust_label_of accepts."""
+
+    env = _untrusted_envelope("body", label="reviewed")
+    line = evidence_brief._result_line(build(env), {}, snippet="")
+
+    assert "trust: reviewed" in line
+
+
 def test_evidence_brief_truncation_keeps_partial_result_with_context():
     snippet = "run id run-big status completed code graph delta: ok " + ("z" * 300)
     unavailable = [{"arm": f"arm{index}", "reason": "reason " + ("r" * 80)} for index in range(25)]

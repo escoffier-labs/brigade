@@ -117,24 +117,19 @@ def _find_commit(result: dict[str, Any], snippet: str) -> str:
 
 
 def _find_trust(result: dict[str, Any]) -> str | None:
-    """Return an explicit trust label declared on the item, or None when absent."""
+    """Return the gate-resolved trust label, or None when it is ``unknown``.
 
-    for key in ("trust_label", "trust"):
-        value = result.get(key)
-        if isinstance(value, str) and value in provenance.TRUST_LABELS:
-            return value
-    metadata = _metadata(result)
-    value = metadata.get("trust")
-    if isinstance(value, str) and value in provenance.TRUST_LABELS:
-        return value
-    env = result.get("provenance")
-    if isinstance(env, dict):
-        trust = env.get("trust")
-        if isinstance(trust, dict):
-            label = trust.get("label")
-            if label in provenance.TRUST_LABELS:
-                return str(label)
-    return None
+    ``trust_gate.trust_label_of`` prefers the provenance envelope (including
+    ``result.provenance``, ``metadata.provenance``, and a result that is
+    itself an envelope) over top-level ``trust_label`` / ``trust`` keys.
+    The ``unknown`` sentinel — synthesized when no declared label exists —
+    is omitted so the brief does not infer a fallback.
+    """
+
+    label = trust_gate.trust_label_of(result)
+    if label == "unknown":
+        return None
+    return label
 
 
 def _find_source_label(result: dict[str, Any]) -> str:
@@ -163,6 +158,7 @@ def _result_line(
     bundle: dict[str, Any],
     *,
     snippet: str | None = None,
+    trust_label: str | None = None,
     metadata_only: bool = False,
 ) -> str:
     mismatch = bool(result.get("integrity_mismatch"))
@@ -173,7 +169,7 @@ def _result_line(
         f"status: {_find_status(result, snippet)}",
     ]
 
-    trust = _find_trust(result)
+    trust = trust_label if trust_label and trust_label != "unknown" else _find_trust(result)
     if trust:
         parts.append(f"trust: {trust}")
     if mismatch:
@@ -356,6 +352,7 @@ def _render(results: list[dict[str, Any]], bundle: dict[str, Any] | None = None)
             result,
             bundle,
             snippet=snippet,
+            trust_label=admission.label,
             metadata_only=metadata_only,
         )
         if wrapped:
