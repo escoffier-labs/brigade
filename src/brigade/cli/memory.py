@@ -171,6 +171,56 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_project_vault.add_argument(
         "--json", action="store_true", help="Print machine-readable projection receipt."
     )
+    p_memory_vault_index = memory_sub.add_parser(
+        "vault-index",
+        help="Build the derived operator-vault search index from allowlisted roots.",
+    )
+    p_memory_vault_index.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace that holds .brigade/vault.toml."
+    )
+    p_memory_vault_index.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_vault_search = memory_sub.add_parser(
+        "vault-search",
+        help="Search allowlisted operator-vault roots and cite untrusted hits.",
+    )
+    p_memory_vault_search.add_argument("query", help="Search terms (title, tags, path, and body).")
+    p_memory_vault_search.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace that holds .brigade/vault.toml."
+    )
+    p_memory_vault_search.add_argument(
+        "--scope",
+        default=None,
+        help="Configured root name (not a filesystem path). Unknown scopes error.",
+    )
+    p_memory_vault_search.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum hits (default: 10, min: 1, max: 100). Out-of-range is an error.",
+    )
+    p_memory_vault_search.add_argument(
+        "--include-archived",
+        action="store_true",
+        help="Include notes marked archived or living under an archive path.",
+    )
+    p_memory_vault_search.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_vault_show = memory_sub.add_parser(
+        "vault-show",
+        help="Show one vault note by stable id, alias, or vault-relative path.",
+    )
+    p_memory_vault_show.add_argument("note_id", help="Stable note id, alias, or vault-relative path.")
+    p_memory_vault_show.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace that holds .brigade/vault.toml."
+    )
+    p_memory_vault_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_vault_doctor = memory_sub.add_parser(
+        "vault-doctor",
+        help="Check operator-vault read-path config, roots, and derived index.",
+    )
+    p_memory_vault_doctor.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace that holds .brigade/vault.toml."
+    )
+    p_memory_vault_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_search = memory_sub.add_parser("search", help="Keyword-search local memory cards.")
     p_memory_search.add_argument("query", help="Search terms (matched against title, tags, summary, and body).")
     p_memory_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to search.")
@@ -298,6 +348,29 @@ def dispatch(args) -> int:
         return obsidian_vault.project(
             target=args.target, vault=args.vault, json_output=args.json, max_related=max_related
         )
+    if args.memory_command in {"vault-index", "vault-search", "vault-show", "vault-doctor"}:
+        from .. import memory_vault
+
+        if args.memory_command == "vault-index":
+            return memory_vault.index(target=args.target, json_output=args.json)
+        if args.memory_command == "vault-search":
+            limit = memory_vault.DEFAULT_LIMIT if args.limit is None else args.limit
+            if args.limit is not None and (args.limit < memory_vault.MIN_LIMIT or args.limit > memory_vault.MAX_LIMIT):
+                args._brigade_parser.error(
+                    f"--limit must be between {memory_vault.MIN_LIMIT} and {memory_vault.MAX_LIMIT}"
+                )
+            return memory_vault.search(
+                target=args.target,
+                query=args.query,
+                scope=args.scope,
+                limit=limit,
+                include_archived=args.include_archived,
+                json_output=args.json,
+            )
+        if args.memory_command == "vault-show":
+            return memory_vault.show(target=args.target, note_id=args.note_id, json_output=args.json)
+        return memory_vault.doctor(target=args.target, json_output=args.json)
+
     if args.memory_command == "care":
         if args.memory_care_command == "init":
             return memory_cmd.init(
