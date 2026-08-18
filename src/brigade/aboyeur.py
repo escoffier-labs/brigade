@@ -4877,7 +4877,12 @@ def run(
                 worker_results=_worker_payload(worker_results),
             )
         )
-        write_sidecar_revision(output_dir, "synthesis.json", synthesis_payload)
+        causal_receipt.write_synthesis_lineage_artifacts(
+            output_dir,
+            synthesis_payload,
+            worker_results=_worker_payload(worker_results),
+            write=write_sidecar_revision,
+        )
     if not final.ok:
         if output_dir is not None:
             finished_at = datetime.now(timezone.utc)

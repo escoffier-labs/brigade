@@ -20,8 +20,12 @@ from . import provenance
 
 SCHEMA = "brigade.causal_receipt.v1"
 SCHEMA_VERSION = 1
+PARENT_MANIFEST_SCHEMA = "brigade.causal_parent_manifest.v1"
+PARENT_MANIFEST_SCHEMA_VERSION = 1
+PARENT_MANIFEST_KIND = "parent-manifest"
 MAX_PARENTS = 16
 MAX_COMPACT_BYTES = 2048
+MAX_MANIFEST_COMPACT_BYTES = 65536
 MAX_DIAGNOSTIC_LEN = 240
 MAX_DIAGNOSTICS = 8
 ARTIFACT_FIELD = "causal_receipt"
@@ -89,6 +93,7 @@ _ALLOWED_TOP_LEVEL = frozenset({"schema", "schema_version", "subject", "parents"
 _ALLOWED_SUBJECT = frozenset({"kind", "id"})
 _ALLOWED_PARENT = frozenset({"relation", "kind", "id", "digest", "link"})
 _ALLOWED_MANIFEST = frozenset({"id", "digest"})
+_ALLOWED_MANIFEST_DOC = frozenset({"schema", "schema_version", "id", "parents"})
 
 
 def _bound(message: str) -> str:
@@ -233,6 +238,213 @@ def validate_receipt(payload: Any) -> list[str]:
     return _cap(errors)
 
 
+def parent_manifest_id(run_id: str) -> str:
+    return f"{run_id}-parent-manifest"
+
+
+def parent_manifest_filename(manifest_id: str) -> str:
+    if not isinstance(manifest_id, str) or not provenance.is_safe_identity_label(manifest_id):
+        raise ValueError("invalid causal receipt: parent_manifest.id must be a safe identity label")
+    return f"{manifest_id}.json"
+
+
+def parent_manifest_path(directory: Path, manifest_id: str) -> Path:
+    return Path(directory) / parent_manifest_filename(manifest_id)
+
+
+def validate_parent_manifest(payload: Any) -> list[str]:
+    """Return bounded diagnostics for a hashed parent-manifest document."""
+
+    errors: list[str] = []
+    if not isinstance(payload, Mapping):
+        return [_bound("parent manifest must be a JSON object")]
+
+    forbidden: set[str] = set()
+    _collect_forbidden_keys(payload, found=forbidden)
+    if forbidden:
+        shown = ", ".join(sorted(forbidden)[:4])
+        errors.append(_bound(f"parent manifest must not embed sensitive or provenance fields: {shown}"))
+
+    unknown = sorted(set(payload.keys()) - _ALLOWED_MANIFEST_DOC)
+    if unknown:
+        errors.append(_bound(f"parent manifest has unsupported keys: {', '.join(unknown[:4])}"))
+
+    if payload.get("schema") != PARENT_MANIFEST_SCHEMA:
+        errors.append(_bound(f"unsupported parent manifest schema {payload.get('schema')!r}"))
+    version = payload.get("schema_version")
+    if version != PARENT_MANIFEST_SCHEMA_VERSION:
+        errors.append(_bound(f"unsupported parent manifest schema_version {version!r}"))
+    _safe_id(payload.get("id"), field="parent_manifest.id", errors=errors)
+
+    parents = payload.get("parents")
+    if not isinstance(parents, Sequence) or isinstance(parents, (str, bytes)):
+        errors.append(_bound("parents must be a list"))
+        parents = []
+    else:
+        for index, parent in enumerate(parents):
+            _validate_parent(parent, index=index, errors=errors)
+
+    if errors:
+        return _cap(errors)
+
+    encoded = compact_bytes(payload)
+    if len(encoded) > MAX_MANIFEST_COMPACT_BYTES:
+        errors.append(_bound(f"parent manifest compact JSON size exceeds {MAX_MANIFEST_COMPACT_BYTES} bytes"))
+    return _cap(errors)
+
+
+def build_parent_manifest(*, manifest_id: str, parents: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    manifest = {
+        "schema": PARENT_MANIFEST_SCHEMA,
+        "schema_version": PARENT_MANIFEST_SCHEMA_VERSION,
+        "id": manifest_id,
+        "parents": [dict(parent) for parent in parents],
+    }
+    errors = validate_parent_manifest(manifest)
+    if errors:
+        raise ValueError("invalid parent manifest: " + "; ".join(errors))
+    return manifest
+
+
+def synthesis_parent_manifest(
+    *,
+    run_id: str,
+    worker_parents: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the hashed lineage document when inline fan-in exceeds receipt bounds."""
+
+    parents = [dict(parent) for parent in worker_parents]
+    if not _synthesis_exceeds_inline_bounds(run_id, parents):
+        return None
+    return build_parent_manifest(manifest_id=parent_manifest_id(run_id), parents=parents)
+
+
+def write_parent_manifest_artifact(
+    directory: Path,
+    manifest: Mapping[str, Any],
+    *,
+    write: Callable[[Path, str, Any], None] | None = None,
+) -> Path:
+    """Persist a validated parent-manifest beside other run artifacts."""
+
+    errors = validate_parent_manifest(manifest)
+    if errors:
+        raise ValueError("invalid parent manifest: " + "; ".join(errors))
+    filename = parent_manifest_filename(str(manifest.get("id") or ""))
+    payload = dict(manifest)
+    if write is None:
+        from . import localio
+
+        localio.write_json(Path(directory) / filename, payload)
+    else:
+        write(Path(directory), filename, payload)
+    return Path(directory) / filename
+
+
+def write_synthesis_lineage_artifacts(
+    directory: Path,
+    synthesis_payload: Mapping[str, Any],
+    *,
+    worker_results: Sequence[Mapping[str, Any]],
+    write: Callable[[Path, str, Any], None],
+) -> Path | None:
+    """Write synthesis.json and the hashed parent-manifest when fan-in overflows.
+
+    Returns the manifest path when one is written, otherwise None.
+    """
+
+    write(Path(directory), "synthesis.json", dict(synthesis_payload))
+    receipt = read_causal_receipt(synthesis_payload)
+    subject = receipt.get("subject") if isinstance(receipt, Mapping) else None
+    run_id = subject.get("id") if isinstance(subject, Mapping) else Path(directory).name
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    manifest = synthesis_parent_manifest(
+        run_id=run_id,
+        worker_parents=synthesis_worker_parents(run_id, worker_results),
+    )
+    if manifest is None:
+        return None
+    expected = receipt.get("parent_manifest") if isinstance(receipt, Mapping) else None
+    if (
+        not isinstance(expected, Mapping)
+        or expected.get("id") != manifest["id"]
+        or expected.get("digest") != receipt_digest(manifest)
+    ):
+        raise ValueError("invalid parent manifest: receipt parent_manifest does not match written document")
+    return write_parent_manifest_artifact(directory, manifest, write=write)
+
+
+def read_parent_manifest(directory: Path, receipt: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Load the sibling parent-manifest named by ``receipt['parent_manifest']``."""
+
+    ref = receipt.get("parent_manifest")
+    if not isinstance(ref, Mapping):
+        return None
+    manifest_id = ref.get("id")
+    if not isinstance(manifest_id, str) or not manifest_id:
+        return None
+    path = parent_manifest_path(directory, manifest_id)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def diagnose_parent_manifest(
+    ref: Mapping[str, Any],
+    *,
+    resolved: Mapping[str, Any] | None,
+) -> str | None:
+    """Return a bounded diagnostic for a missing or mismatched parent-manifest."""
+
+    manifest_id = ref.get("id")
+    label = artifact_key(PARENT_MANIFEST_KIND, str(manifest_id or ""))
+    if resolved is None:
+        return _bound(f"broken lineage: {label} is missing")
+    errors = validate_parent_manifest(resolved)
+    if errors:
+        return _bound(f"broken lineage: {label} is invalid")
+    expected = ref.get("digest")
+    if not _valid_digest(expected):
+        return _bound("parent_manifest digest is malformed")
+    if receipt_digest(resolved) != expected:
+        return _bound("parent digest mismatch")
+    return None
+
+
+def lineage_parents(
+    receipt: Mapping[str, Any],
+    *,
+    manifest: Mapping[str, Any] | None = None,
+    resolve: Callable[[str, str], Mapping[str, Any] | None] | None = None,
+    artifacts_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return inline parents, or the parent list from a resolved parent-manifest."""
+
+    ref = receipt.get("parent_manifest")
+    if not isinstance(ref, Mapping):
+        parents = receipt.get("parents")
+        if not isinstance(parents, Sequence) or isinstance(parents, (str, bytes)):
+            return []
+        return [dict(parent) for parent in parents if isinstance(parent, Mapping)]
+
+    loaded = manifest
+    if loaded is None and resolve is not None:
+        loaded = resolve(PARENT_MANIFEST_KIND, str(ref.get("id") or ""))
+    if loaded is None and artifacts_dir is not None:
+        loaded = read_parent_manifest(artifacts_dir, receipt)
+    if loaded is None or diagnose_parent_manifest(ref, resolved=loaded) is not None:
+        return []
+    parents = loaded.get("parents") if isinstance(loaded, Mapping) else None
+    if not isinstance(parents, Sequence) or isinstance(parents, (str, bytes)):
+        return []
+    return [dict(parent) for parent in parents if isinstance(parent, Mapping)]
+
+
 def parent_ref(
     *,
     relation: str,
@@ -344,6 +556,24 @@ def walk_ancestors(
             continue
         seen.add(node_key)
         parents = current.get("parents")
+        manifest_ref = current.get("parent_manifest")
+        if isinstance(manifest_ref, Mapping) and manifest_ref.get("id"):
+            manifest_id = str(manifest_ref.get("id") or "")
+            resolved_manifest = resolve(PARENT_MANIFEST_KIND, manifest_id)
+            diagnostic = diagnose_parent_manifest(manifest_ref, resolved=resolved_manifest)
+            if diagnostic is not None:
+                hops.append(
+                    {
+                        "from": artifact_key(subject_kind, subject_id),
+                        "kind": PARENT_MANIFEST_KIND,
+                        "id": manifest_id,
+                        "link": "recorded",
+                        "status": "digest_mismatch" if diagnostic == _bound("parent digest mismatch") else "broken",
+                        "diagnostic": diagnostic,
+                    }
+                )
+                continue
+            parents = resolved_manifest.get("parents") if isinstance(resolved_manifest, Mapping) else []
         if not isinstance(parents, Sequence) or isinstance(parents, (str, bytes)):
             continue
         for parent in parents:
@@ -493,13 +723,12 @@ def _synthesis_exceeds_inline_bounds(run_id: str, parents: Sequence[Mapping[str,
 
 def recorded_synthesis(*, run_id: str, worker_parents: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     parents = [dict(parent) for parent in worker_parents]
-    if _synthesis_exceeds_inline_bounds(run_id, parents):
-        manifest_id = f"{run_id}-parent-manifest"
-        digest = receipt_digest({"parents": parents})
+    manifest = synthesis_parent_manifest(run_id=run_id, worker_parents=parents)
+    if manifest is not None:
         return build_receipt(
             subject_kind="synthesis",
             subject_id=run_id,
-            parent_manifest={"id": manifest_id, "digest": digest},
+            parent_manifest={"id": manifest["id"], "digest": receipt_digest(manifest)},
         )
     return build_receipt(subject_kind="synthesis", subject_id=run_id, parents=parents)
 

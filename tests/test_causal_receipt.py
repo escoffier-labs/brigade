@@ -116,13 +116,8 @@ def test_synthesis_can_reference_multiple_worker_results():
     ]
 
 
-def test_recorded_synthesis_falls_back_to_manifest_when_thirteen_realistic_workers_exceed_size():
-    """A 13-worker fan-in stays under MAX_PARENTS but exceeds MAX_COMPACT_BYTES.
-
-    The review probe used a real run-directory name and roster-style seat
-    labels. Inline parents used to raise from build_receipt and drop
-    synthesis.json; the emitter must collapse to parent_manifest instead.
-    """
+def _thirteen_realistic_workers():
+    """Review-probe fan-in: under MAX_PARENTS, over MAX_COMPACT_BYTES."""
 
     run_id = "2026-08-18-1200-evidence-provenance-trust-enforcement"
     seats = [
@@ -142,6 +137,18 @@ def test_recorded_synthesis_falls_back_to_manifest_when_thirteen_realistic_worke
     ]
     results = [{"worker": seat} for seat in seats]
     parents = causal_receipt.synthesis_worker_parents(run_id, results)
+    return run_id, seats, results, parents
+
+
+def test_recorded_synthesis_falls_back_to_manifest_when_thirteen_realistic_workers_exceed_size():
+    """A 13-worker fan-in stays under MAX_PARENTS but exceeds MAX_COMPACT_BYTES.
+
+    The review probe used a real run-directory name and roster-style seat
+    labels. Inline parents used to raise from build_receipt and drop
+    synthesis.json; the emitter must collapse to parent_manifest instead.
+    """
+
+    run_id, _seats, results, parents = _thirteen_realistic_workers()
     assert len(parents) == 13
     assert len(parents) <= causal_receipt.MAX_PARENTS
     inline = {
@@ -158,6 +165,14 @@ def test_recorded_synthesis_falls_back_to_manifest_when_thirteen_realistic_worke
     assert receipt["parent_manifest"]["id"] == f"{run_id}-parent-manifest"
     assert causal_receipt.validate_receipt(receipt) == []
     assert len(causal_receipt.compact_bytes(receipt)) <= causal_receipt.MAX_COMPACT_BYTES
+    manifest = causal_receipt.synthesis_parent_manifest(run_id=run_id, worker_parents=parents)
+    assert manifest is not None
+    assert causal_receipt.validate_parent_manifest(manifest) == []
+    assert receipt["parent_manifest"]["digest"] == causal_receipt.receipt_digest(manifest)
+    assert [parent["id"] for parent in manifest["parents"]] == [
+        causal_receipt.worker_result_id(run_id, result["worker"], ordinal)
+        for ordinal, result in enumerate(results, start=1)
+    ]
 
     document = receipt_schema.synthesis_document(
         orchestrator="chef",
@@ -168,6 +183,121 @@ def test_recorded_synthesis_falls_back_to_manifest_when_thirteen_realistic_worke
     assert document["result"]["ok"] is True
     assert document["causal_receipt"]["parent_manifest"]["id"] == f"{run_id}-parent-manifest"
     assert document["causal_receipt"]["parents"] == []
+
+
+def test_thirteen_worker_manifest_is_written_and_traversable(tmp_path):
+    """Re-verifier probe: receipt + written manifest yields the full parent set.
+
+    The size-cap fallback used to emit a dangling parent_manifest reference.
+    walk_ancestors then returned zero hops — indistinguishable from a
+    parentless root — and telemetry projected no worker-result parents.
+    """
+
+    run_id, seats, results, parents = _thirteen_realistic_workers()
+    expected_ids = [parent["id"] for parent in parents]
+    run_dir = tmp_path / ".brigade" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    document = receipt_schema.synthesis_document(
+        orchestrator="chef",
+        result={"ok": True, "detail": "", "text": "done"},
+        run_id=run_id,
+        worker_results=results,
+    )
+    manifest_path = causal_receipt.write_synthesis_lineage_artifacts(
+        run_dir,
+        document,
+        worker_results=results,
+        write=aboyeur.write_sidecar_revision,
+    )
+    assert manifest_path is not None
+    assert manifest_path == causal_receipt.parent_manifest_path(run_dir, f"{run_id}-parent-manifest")
+    assert manifest_path.is_file()
+    assert (run_dir / "synthesis.json").is_file()
+
+    written_receipt = json.loads((run_dir / "synthesis.json").read_text())["causal_receipt"]
+    written_manifest = json.loads(manifest_path.read_text())
+    assert written_receipt["parents"] == []
+    assert written_manifest["schema"] == causal_receipt.PARENT_MANIFEST_SCHEMA
+    assert written_manifest["id"] == written_receipt["parent_manifest"]["id"]
+    assert causal_receipt.receipt_digest(written_manifest) == written_receipt["parent_manifest"]["digest"]
+    assert [parent["id"] for parent in written_manifest["parents"]] == expected_ids
+    assert "text" not in written_manifest
+    assert "origin" not in json.dumps(written_manifest)
+
+    def resolve(kind, artifact_id):
+        if kind == causal_receipt.PARENT_MANIFEST_KIND:
+            loaded = causal_receipt.read_parent_manifest(run_dir, written_receipt)
+            if loaded is not None and loaded.get("id") == artifact_id:
+                return loaded
+        return None
+
+    hops = causal_receipt.walk_ancestors(written_receipt, resolve)
+    assert len(hops) == 13
+    assert [hop["id"] for hop in hops] == expected_ids
+    assert [hop["kind"] for hop in hops] == ["worker-result"] * 13
+    assert {hop["relation"] for hop in hops} == {"synthesized_from"}
+    assert {hop["link"] for hop in hops} == {"recorded"}
+    assert hops != []
+    assert causal_receipt.chain_kinds(hops)[0] == "synthesis"
+    assert "worker-result" in causal_receipt.chain_kinds(hops)
+    assert telemetry_export._lineage_parent_ids(document, kind="worker-result") == []
+    assert (
+        telemetry_export._lineage_parent_ids(
+            json.loads((run_dir / "synthesis.json").read_text()),
+            kind="worker-result",
+            artifacts_dir=run_dir,
+        )
+        == expected_ids
+    )
+    assert (
+        telemetry_export._lineage_parent_ids(
+            document,
+            kind="worker-result",
+            manifest=written_manifest,
+        )
+        == expected_ids
+    )
+
+    missing = causal_receipt.walk_ancestors(written_receipt, lambda kind, artifact_id: None)
+    assert len(missing) == 1
+    assert missing[0]["status"] == "broken"
+    assert "parent-manifest" in missing[0]["diagnostic"]
+    tampered = dict(written_manifest)
+    tampered["parents"] = written_manifest["parents"][:-1]
+    hops = causal_receipt.walk_ancestors(
+        written_receipt,
+        lambda kind, artifact_id: tampered if kind == causal_receipt.PARENT_MANIFEST_KIND else None,
+    )
+    assert len(hops) == 1
+    assert hops[0]["status"] == "digest_mismatch"
+
+    twelve = results[:12]
+    twelve_dir = tmp_path / "inline" / run_id
+    twelve_dir.mkdir(parents=True)
+    twelve_doc = receipt_schema.synthesis_document(
+        orchestrator="chef",
+        result={"ok": True, "detail": "", "text": "done"},
+        run_id=run_id,
+        worker_results=twelve,
+    )
+    assert (
+        causal_receipt.write_synthesis_lineage_artifacts(
+            twelve_dir,
+            twelve_doc,
+            worker_results=twelve,
+            write=aboyeur.write_sidecar_revision,
+        )
+        is None
+    )
+    assert not causal_receipt.parent_manifest_path(twelve_dir, f"{run_id}-parent-manifest").exists()
+    twelve_hops = causal_receipt.walk_ancestors(
+        twelve_doc["causal_receipt"],
+        lambda kind, artifact_id: None,
+    )
+    assert len(twelve_hops) == 12
+    assert [hop["id"] for hop in twelve_hops] == expected_ids[:12]
+    assert telemetry_export._lineage_parent_ids(twelve_doc, kind="worker-result") == expected_ids[:12]
+    assert seats[-1] not in {hop["id"].split(":")[1] for hop in twelve_hops}
 
 
 def test_parent_count_boundary():

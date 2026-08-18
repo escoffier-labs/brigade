@@ -7,6 +7,7 @@ import json
 import re
 import shlex
 import sys
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -234,17 +235,25 @@ def _run_row(base: dict[str, Any], cli: str, projection: str) -> dict[str, Any]:
     return {"schema": schema, "mapping": mapping, **base, "attributes": attributes}
 
 
-def _lineage_parent_ids(payload: dict[str, Any], *, kind: str) -> list[str]:
+def _lineage_parent_ids(
+    payload: dict[str, Any],
+    *,
+    kind: str,
+    manifest: Mapping[str, Any] | None = None,
+    artifacts_dir: Path | None = None,
+    resolve: Callable[[str, str], Mapping[str, Any] | None] | None = None,
+) -> list[str]:
     receipt = causal_receipt.read_causal_receipt(payload)
     if receipt is None or causal_receipt.validate_receipt(receipt):
         return []
-    parents = receipt.get("parents")
-    if not isinstance(parents, list):
-        return []
+    parents = causal_receipt.lineage_parents(
+        receipt,
+        manifest=manifest,
+        resolve=resolve,
+        artifacts_dir=artifacts_dir,
+    )
     ids: list[str] = []
     for parent in parents:
-        if not isinstance(parent, dict):
-            continue
         if parent.get("kind") != kind:
             continue
         parent_id = parent.get("id")

@@ -869,7 +869,7 @@ artifacts without the field remain readable and are not rewritten.
 | `schema_version` | integer | yes | `1` |
 | `subject` | object | yes | `{kind, id}` stable subject reference |
 | `parents` | array | yes | Typed parent links. Empty for a root. Max 16 |
-| `parent_manifest` | object | no | `{id, digest}` when fan-in exceeds the parent cap. Inline `parents` must then be empty |
+| `parent_manifest` | object | no | `{id, digest}` when fan-in exceeds the parent or size cap. Inline `parents` must then be empty. The hashed document is written beside `synthesis.json` as `<id>.json` |
 
 **Parent object**
 
@@ -889,7 +889,24 @@ or home paths.
 
 Typical recorded chain: plan → run (`planned_from`) → verify (`executed_from`)
 → outcome (`captured_from`) → handoff (`handed_off_from`). Synthesis may list
-multiple `synthesized_from` worker-result parents.
+multiple `synthesized_from` worker-result parents. When fan-in exceeds the
+inline bounds, those parents live in `brigade.causal_parent_manifest.v1`
+(`<run-id>-parent-manifest.json`); `walk_ancestors` resolves them through
+that sibling artifact.
+
+### `brigade.causal_parent_manifest.v1`: `schema_version: 1`
+
+**Path:** `.brigade/runs/<run-id>/<run-id>-parent-manifest.json`
+
+Lineage-only hashed parent list referenced by `causal_receipt.parent_manifest`.
+It is not a second provenance envelope. Compact JSON is capped at 65536 bytes.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema` | string | yes | Always `brigade.causal_parent_manifest.v1` |
+| `schema_version` | integer | yes | `1` |
+| `id` | string | yes | Safe identity label. Matches `parent_manifest.id` |
+| `parents` | array | yes | Same parent-object schema as the causal receipt |
 
 ---
 

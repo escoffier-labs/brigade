@@ -65,8 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Synthesis causal receipts now fall back to a hashed `parent_manifest` when
   encoded lineage exceeds the compact-size cap, not only when parent count
-  exceeds 16. A realistic 13-worker fan-in no longer raises and drop
-  `synthesis.json`. (#493)
+  exceeds 16. The fallback writes the lineage-only parent-manifest artifact
+  the receipt references (beside `synthesis.json`) so traversal can recover
+  the full worker-result parent set. A realistic 13-worker fan-in no longer
+  raises, drops `synthesis.json`, or looks like a parentless root. (#493)
 - Quarantined items stay quarantined when a pending injection scan comes back clean, so a labeled quarantine cannot be released to untrusted and become content-eligible. Reviewed and verified items keep every consumer surface untrusted already has, including `context`. `brigade receipts verify` reports `verify-pending` (and does not append a local verified event) when the MiseLedger trust notify fails. Provenance-event JSONL now appends and fsyncs instead of rewriting the whole file. (#587)
 - Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
   closed on every `brigade work` surface (and other commands that read the
