@@ -122,8 +122,9 @@ returns to either mirror.
 ## GraphTrail crates.io policy
 
 Per the 2026-07-21 maintainer decision, no further crates.io releases ship.
-Leave every published crate version unyanked for reproducibility. Mark the
-crate deprecated and maintenance-frozen, and remove current `cargo install`
+Leave every published crate version unyanked for reproducibility. The crate
+is frozen at 0.4.0, with deprecation communicated off-registry since
+crates.io exposes no deprecation flag. Remove current `cargo install`
 guidance from documentation.
 
 ## Phase 4B checklist (compressed)

@@ -290,12 +290,98 @@ def test_project_vault_caps_related_links_and_canvas_edges(tmp_path: Path, vault
 
     projection = vault / "Brigade Memory"
     for note in (projection / "Cards").glob("Bulk *.md"):
-        assert note.read_text(encoding="utf-8").count("[[") <= obsidian_vault.MAX_RELATED
+        assert note.read_text(encoding="utf-8").count("[[") <= obsidian_vault.DEFAULT_MAX_RELATED
     canvas = json.loads((projection / "Brigade Memory.canvas").read_text(encoding="utf-8"))
     card_edges = [edge for edge in canvas["edges"] if not str(edge["id"]).startswith("topology:")]
     assert card_edges
-    assert len(card_edges) <= 30 * obsidian_vault.MAX_RELATED
+    assert len(card_edges) <= 30 * obsidian_vault.DEFAULT_MAX_RELATED
     assert len(card_edges) < 30 * 29 // 2  # not the complete graph the cap replaced
+
+
+def test_project_vault_honors_max_related_override(tmp_path: Path, vault: Path, capsys) -> None:
+    _write_cards(tmp_path, 20, category="workflow", tags=["shared"])
+
+    assert (
+        cli.main(
+            [
+                "memory",
+                "project-vault",
+                "--target",
+                str(tmp_path),
+                "--vault",
+                str(vault),
+                "--max-related",
+                "5",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    projection = vault / "Brigade Memory"
+    for note in (projection / "Cards").glob("Bulk *.md"):
+        assert note.read_text(encoding="utf-8").count("[[") <= 5
+    canvas = json.loads((projection / "Brigade Memory.canvas").read_text(encoding="utf-8"))
+    card_edges = [edge for edge in canvas["edges"] if not str(edge["id"]).startswith("topology:")]
+    assert len(card_edges) <= 20 * 5
+
+
+def test_project_vault_rejects_non_positive_max_related(tmp_path: Path, vault: Path, capsys) -> None:
+    _write_card(tmp_path, "alpha", title="Alpha", tags=["operations"], body="Canonical note.")
+
+    assert (
+        cli.main(
+            [
+                "memory",
+                "project-vault",
+                "--target",
+                str(tmp_path),
+                "--vault",
+                str(vault),
+                "--max-related",
+                "0",
+            ]
+        )
+        == 2
+    )
+    assert "--max-related must be at least 1" in capsys.readouterr().err
+
+
+def test_project_vault_drops_explicit_refs_beyond_max_related(tmp_path: Path, vault: Path, capsys) -> None:
+    """Explicit refs outrank tag/category matches but still respect the cap."""
+    refs = [f"card-00000000-0000-4000-8000-{index:012d}" for index in range(1, 6)]
+    _write_ref_card(tmp_path, "hub", "000000000000", title="Hub", category="ops", refs=refs)
+    for index in range(1, 6):
+        _write_ref_card(
+            tmp_path,
+            f"target-{index}",
+            f"{index:012d}",
+            title=f"Target {index}",
+            category="ops",
+            refs=[],
+        )
+
+    assert (
+        cli.main(
+            [
+                "memory",
+                "project-vault",
+                "--target",
+                str(tmp_path),
+                "--vault",
+                str(vault),
+                "--max-related",
+                "3",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    hub = (vault / "Brigade Memory" / "Cards" / "Hub.md").read_text(encoding="utf-8")
+    related_section = hub.split("## Related", 1)[1]
+    assert related_section.count("[[") == 3
 
 
 def test_project_vault_omits_a_map_that_covers_every_note(tmp_path: Path, vault: Path, capsys) -> None:
