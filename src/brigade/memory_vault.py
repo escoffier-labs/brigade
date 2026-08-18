@@ -1,8 +1,10 @@
-"""Read path for an operator-configured Obsidian vault.
+"""Read and inbox-propose paths for an operator-configured Obsidian vault.
 
-``brigade memory project-vault`` is the only writer into a vault. This module
-indexes allowlisted roots, searches them, and shows a cited note. The derived
-index lives under the Brigade state directory and is owner-readable only.
+``brigade memory project-vault`` remains the writer for generated
+``Brigade Memory/`` content. This module indexes allowlisted roots, searches
+them, shows a cited note, and delivers additive proposals into an allowlisted
+inbox. The derived index and proposal staging live under the Brigade state
+directory and are owner-readable only.
 """
 
 from __future__ import annotations
@@ -13,15 +15,17 @@ import os
 import re
 import stat
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import toml_compat as tomllib
-from .card_identity import valid_card_id
+from .card_identity import mint_card_id, valid_card_id
 from .guard import redact_text
 from .localio import utc_now_iso_z, write_text_atomic
+from .projection import kernel
 
 CONFIG_REL_PATH = ".brigade/vault.toml"
 INDEX_REL_PATH = ".brigade/vault-index/index.json"
@@ -30,15 +34,21 @@ RECEIPT_SCHEMA = "brigade.vault-index.receipt.v1"
 SEARCH_SCHEMA = "brigade.vault-search.v1"
 SHOW_SCHEMA = "brigade.vault-show.v1"
 DOCTOR_SCHEMA = "brigade.vault-doctor.v1"
+PROPOSE_SCHEMA = "brigade.vault-propose.v1"
 SCHEMA_VERSION = 1
 TRUST_UNTRUSTED_VAULT = "untrusted_vault_content"
 VAULT_REDACTED = "redacted:operator-vault"
+PROJECTION_FOLDER = "Brigade Memory"
+STAGING_REL_PATH = ".brigade/vault-propose"
+PROJECTOR = "vault-propose"
 DEFAULT_LIMIT = 10
 MIN_LIMIT = 1
 MAX_LIMIT = 100
 SNIPPET_CHARS = 240
 SHOW_BODY_CHARS = 32_768
 INDEX_BODY_CHARS = 512_000
+MAX_PROPOSE_CHARS = 512_000
+SLUG_MAX_CHARS = 80
 TITLE_EXACT_SCORE = 1000
 TITLE_TOKEN_SCORE = 50
 TAG_TOKEN_SCORE = 30
@@ -54,6 +64,10 @@ class VaultConfigError(ValueError):
 
 class VaultSearchError(ValueError):
     """A vault read command cannot proceed."""
+
+
+class VaultProposeError(ValueError):
+    """A vault propose command cannot proceed."""
 
 
 @dataclass(frozen=True)
@@ -191,6 +205,22 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     payload = doctor_payload(target)
     _print_payload(payload, json_output=json_output, human=_format_doctor)
     return 0 if payload["valid"] else 1
+
+
+def propose(
+    *,
+    target: Path,
+    title: str,
+    scope: str,
+    body: str,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    try:
+        payload = propose_payload(target, title=title, scope=scope, body=body, dry_run=dry_run)
+    except (VaultConfigError, VaultSearchError, VaultProposeError) as exc:
+        return _error(str(exc))
+    return _print_payload(payload, json_output=json_output, human=_format_propose)
 
 
 def build_index(target: Path) -> dict[str, Any]:
@@ -441,6 +471,70 @@ def doctor_payload(target: Path) -> dict[str, Any]:
     }
 
 
+def propose_payload(
+    target: Path,
+    *,
+    title: str,
+    scope: str,
+    body: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Stage a proposal outside the vault, then deliver it into an allowlisted inbox."""
+    target = target.expanduser().resolve()
+    config = _require_config(target)
+    selected = _resolve_scope(config, scope)
+    if selected is None:
+        raise VaultProposeError("vault-propose requires --scope")
+    cleaned_title = str(title or "").strip()
+    if not cleaned_title:
+        raise VaultProposeError("title must not be empty")
+    if any(part in cleaned_title for part in ("/", "\\", "\x00")):
+        raise VaultProposeError("title must be a name, not a path")
+    text = body if isinstance(body, str) else ""
+    if len(text) > MAX_PROPOSE_CHARS:
+        raise VaultProposeError(f"proposal body exceeds {MAX_PROPOSE_CHARS} characters")
+    root = next(item for item in config.roots if item.scope == selected)
+    if _path_has_projection_folder(root.path):
+        raise VaultProposeError("refusing to write into the Brigade Memory projection")
+    slug = _proposal_slug(cleaned_title)
+    relative_path = PurePosixPath(root.path).joinpath(f"{slug}.md").as_posix()
+    if _path_has_projection_folder(relative_path):
+        raise VaultProposeError("refusing to write into the Brigade Memory projection")
+    note_id = mint_card_id()
+    rendered = _render_proposal(title=cleaned_title, body=text, note_id=note_id)
+    digest = f"sha256:{hashlib.sha256(rendered).hexdigest()}"
+    payload = {
+        "schema": PROPOSE_SCHEMA,
+        "dry_run": dry_run,
+        "title": _redact(_one_line(cleaned_title)),
+        "scope": selected,
+        "relative_path": relative_path,
+        "id": note_id,
+        "content_hash": digest,
+        "bytes": len(rendered),
+        "rendered": rendered.decode("utf-8"),
+        "vault": VAULT_REDACTED,
+        "receipt": None,
+        "staging": STAGING_REL_PATH,
+    }
+    inbox_fd = _open_contained_inbox(config.vault, root.path)
+    try:
+        _reject_existing_note(inbox_fd, f"{slug}.md")
+        if dry_run:
+            return payload
+        return _deliver_proposal(
+            target,
+            config=config,
+            inbox_fd=inbox_fd,
+            filename=f"{slug}.md",
+            relative_path=relative_path,
+            rendered=rendered,
+            payload=payload,
+        )
+    finally:
+        os.close(inbox_fd)
+
+
 def score_note(note: dict[str, Any], normalized_query: str, query_tokens: list[str]) -> int:
     """Rank one note. Weights are the settled vault-search contract."""
     title = _normalize(str(note.get("title") or ""))
@@ -463,7 +557,7 @@ def score_note(note: dict[str, Any], normalized_query: str, query_tokens: list[s
 def _require_config(target: Path) -> VaultConfig:
     config = load_config(target)
     if config is None:
-        raise VaultConfigError("vault search is not configured; write .brigade/vault.toml")
+        raise VaultConfigError("vault is not configured; write .brigade/vault.toml")
     if not config.vault.is_dir():
         raise VaultConfigError("configured vault is not a directory")
     return config
@@ -952,6 +1046,265 @@ def _mtime_iso(path: Path) -> str:
     return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _containment_primitives_available() -> bool:
+    return bool(getattr(os, "O_NOFOLLOW", 0)) and bool(getattr(os, "O_DIRECTORY", 0))
+
+
+def _directory_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _file_flags(mode: int) -> int:
+    return mode | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _path_has_projection_folder(relative: str) -> bool:
+    return PROJECTION_FOLDER in PurePosixPath(relative.replace("\\", "/")).parts
+
+
+def _proposal_slug(title: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "-", title.strip()).strip("-").lower()
+    if not cleaned:
+        raise VaultProposeError("title does not produce a usable filename")
+    return cleaned[:SLUG_MAX_CHARS]
+
+
+def _yaml_scalar(value: str) -> str:
+    special_prefix = {"-", "'", '"', "[", "{", "*", "&", "!", "|", ">", "%", "@", "`"}
+    if not value or value != value.strip() or value[:1] in special_prefix:
+        return json.dumps(value)
+    if any(char in value for char in (":", "#", "{", "}", "[", "]", ",", "\n")):
+        return json.dumps(value)
+    return value
+
+
+def _one_line(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _render_proposal(*, title: str, body: str, note_id: str) -> bytes:
+    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [
+        "---",
+        f"title: {_yaml_scalar(title)}",
+        f"canonical_id: {note_id}",
+        f"id: {note_id}",
+        "---",
+        "",
+    ]
+    if normalized.strip():
+        lines.append(normalized.rstrip("\n"))
+        lines.append("")
+    else:
+        lines.append(f"# {title}")
+        lines.append("")
+    return "\n".join(lines).encode("utf-8")
+
+
+def _open_contained_inbox(vault: Path, relative: str) -> int:
+    """Open the inbox directory without following any symlink component."""
+    if not _containment_primitives_available():
+        raise VaultProposeError("vault containment checks are unavailable on this platform")
+    try:
+        vault_stat = os.lstat(vault)
+    except OSError as exc:
+        raise VaultProposeError(f"configured vault is unreadable: {exc}") from exc
+    if stat.S_ISLNK(vault_stat.st_mode) or not stat.S_ISDIR(vault_stat.st_mode):
+        raise VaultProposeError("configured vault must be a real directory")
+    parts = PurePosixPath(relative.replace("\\", "/")).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise VaultProposeError("inbox path is unsafe")
+    flags = _directory_flags()
+    try:
+        descriptor = os.open(vault, flags)
+    except OSError as exc:
+        raise VaultProposeError(f"configured vault is not a contained directory: {exc}") from exc
+    for part in parts:
+        try:
+            nxt = os.open(part, flags, dir_fd=descriptor)
+        except OSError as exc:
+            os.close(descriptor)
+            raise VaultProposeError(f"required inbox missing or escapes the vault: {exc}") from exc
+        os.close(descriptor)
+        try:
+            opened = os.fstat(nxt)
+        except OSError as exc:
+            os.close(nxt)
+            raise VaultProposeError(f"inbox parent is unreadable: {exc}") from exc
+        if not stat.S_ISDIR(opened.st_mode):
+            os.close(nxt)
+            raise VaultProposeError("inbox parent chain contains a symlink or non-directory")
+        descriptor = nxt
+    return descriptor
+
+
+def _reject_existing_note(inbox_fd: int, filename: str) -> None:
+    if not _containment_primitives_available():
+        raise VaultProposeError("vault containment checks are unavailable on this platform")
+    try:
+        existing = os.open(
+            filename,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=inbox_fd,
+        )
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise VaultProposeError(f"refusing to overwrite an existing note: {exc}") from exc
+    os.close(existing)
+    raise VaultProposeError("refusing to overwrite an existing note")
+
+
+def _prepare_staging_dir(target: Path, vault: Path) -> Path:
+    if not _containment_primitives_available():
+        raise VaultProposeError("vault containment checks are unavailable on this platform")
+    staging = target / STAGING_REL_PATH
+    if staging.exists() and (staging.is_symlink() or not staging.is_dir()):
+        raise VaultProposeError("staging directory must be a real owner-only directory")
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(staging, 0o700)
+    except OSError as exc:
+        raise VaultProposeError(f"could not set owner-only staging permissions: {exc}") from exc
+    try:
+        if staging.is_symlink():
+            raise VaultProposeError("staging directory must not be a symlink")
+        resolved = staging.resolve()
+        vault_resolved = vault.resolve()
+    except OSError as exc:
+        raise VaultProposeError(f"unable to resolve staging directory: {exc}") from exc
+    if _is_within(resolved, vault_resolved):
+        raise VaultProposeError("staging directory resolves inside the vault")
+    mode = _file_mode(staging)
+    if mode is None or mode & 0o077:
+        raise VaultProposeError(
+            f"staging directory must be owner-accessible only (got {mode:04o})"
+            if mode is not None
+            else "staging directory permissions are unreadable"
+        )
+    return staging
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise VaultProposeError("short write to staged proposal")
+        view = view[written:]
+
+
+def _read_exact(descriptor: int, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = os.read(descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _stage_proposal(staging_dir: Path, data: bytes) -> tuple[int, Path, bytes]:
+    """Write the proposal outside the vault and hold the validated fd open."""
+    if not _containment_primitives_available():
+        raise VaultProposeError("vault containment checks are unavailable on this platform")
+    path = staging_dir / f"{uuid.uuid4().hex}.md"
+    flags = _file_flags(os.O_RDWR | os.O_CREAT | os.O_EXCL)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise VaultProposeError(f"could not create staged proposal: {exc}") from exc
+    try:
+        _write_all(descriptor, data)
+        os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        validated = _read_exact(descriptor, len(data) + 1)
+        if validated != data:
+            raise VaultProposeError("staged bytes changed during write")
+        mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        if mode & 0o077:
+            raise VaultProposeError(f"staged proposal must be owner-readable only (got {mode:04o})")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor, path, validated
+    except Exception:
+        os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _write_via_held_parent(parent_fd: int, filename: str, data: bytes) -> None:
+    if not _containment_primitives_available():
+        raise VaultProposeError("vault containment checks are unavailable on this platform")
+    flags = _file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        descriptor = os.open(filename, flags, 0o644, dir_fd=parent_fd)
+    except OSError as exc:
+        raise OSError(f"contained inbox write failed: {exc}") from exc
+    try:
+        _write_all(descriptor, data)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _deliver_proposal(
+    target: Path,
+    *,
+    config: VaultConfig,
+    inbox_fd: int,
+    filename: str,
+    relative_path: str,
+    rendered: bytes,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    staging_dir = _prepare_staging_dir(target, config.vault)
+    staged_fd, staged_path, validated = _stage_proposal(staging_dir, rendered)
+    try:
+        # Deliver the bytes already read from the held fd. Do not re-open by path.
+        delivered = validated
+        source_digest = hashlib.sha256(delivered).hexdigest()
+        operation_id = f"vault-propose-{source_digest[:16]}-{uuid.uuid4().hex[:12]}"
+        destination = config.vault / relative_path
+
+        def writer(_destination: Path, data: bytes) -> None:
+            if data != delivered:
+                raise VaultProposeError("delivery bytes do not match the held staged source")
+            _write_via_held_parent(inbox_fd, filename, data)
+
+        plan = kernel.build_plan(
+            operation_id=operation_id,
+            projector=PROJECTOR,
+            source_fingerprint=source_digest,
+            mutations=[
+                kernel.mutation(
+                    destination=destination,
+                    mutation="create",
+                    expected_before=kernel.ABSENT,
+                    desired_after=kernel.content_digest(delivered),
+                    staged_bytes=delivered,
+                    display_path=f"vault/{relative_path}",
+                    writer=writer,
+                    propagate_error=True,
+                )
+            ],
+            target=target,
+        )
+        receipt = kernel.execute(plan, target=target).to_dict()
+        payload["receipt"] = receipt
+        if receipt.get("terminal_state") != "committed":
+            raise VaultProposeError(
+                str(receipt.get("diagnostic") or f"proposal delivery {receipt.get('terminal_state')}")
+            )
+        return payload
+    except kernel.ProjectionError as exc:
+        raise VaultProposeError(exc.diagnostic) from exc
+    finally:
+        os.close(staged_fd)
+        staged_path.unlink(missing_ok=True)
+
+
 def _redact(value: str) -> str:
     return redact_text(value)
 
@@ -984,6 +1337,17 @@ def _format_doctor(payload: dict[str, Any]) -> None:
     print("memory vault-doctor")
     for check in payload["checks"]:
         print(f"[{check['status']}] {check['name']}: {check['detail']}")
+
+
+def _format_propose(payload: dict[str, Any]) -> None:
+    label = "memory vault-propose dry-run" if payload.get("dry_run") else "memory vault-propose"
+    print(f"{label}: {payload['relative_path']}")
+    print(f"id: {payload['id']}")
+    print(f"scope: {payload['scope']}")
+    print(f"bytes: {payload['bytes']}")
+    if payload.get("dry_run"):
+        print()
+        print(payload["rendered"], end="" if str(payload["rendered"]).endswith("\n") else "\n")
 
 
 def _print_payload(payload: dict[str, Any], *, json_output: bool, human: Any) -> int:
