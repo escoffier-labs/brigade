@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import memory_cmd, memory_operations
-from .card_identity import card_identity, valid_card_id
+from .card_identity import IdentityIndex, card_identity, valid_card_id
 from .guard import redact_text
 from .projection import kernel
 
@@ -331,22 +331,13 @@ def _relationships(
     # Dual-read index: canonical paths, stable card IDs, and legacy aliases all resolve.
     # A key claimed by two different records is ambiguous (#867); mark it unresolvable
     # instead of letting the last writer silently win and mis-link.
-    by_source: dict[str, dict[str, Any] | None] = {}
-
-    def claim(key: str, record: dict[str, Any]) -> None:
-        existing = by_source.get(key)
-        if existing is None:
-            if key not in by_source:
-                by_source[key] = record
-        elif existing is not record:
-            by_source[key] = None
-
+    by_source: IdentityIndex[dict[str, Any]] = IdentityIndex()
     for record in records:
-        claim(str(record["item"]["canonical_path"]), record)
+        by_source.claim(str(record["item"]["canonical_path"]), record)
     for record in records:
-        claim(str(record["id"]), record)
+        by_source.claim(str(record["id"]), record)
         for alias in record.get("aliases") or ():
-            claim(str(alias), record)
+            by_source.claim(str(alias), record)
     result: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         scored: dict[str, tuple[int, dict[str, Any]]] = {}
