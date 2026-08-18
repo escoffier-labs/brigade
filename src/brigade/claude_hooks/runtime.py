@@ -1723,6 +1723,24 @@ def _session_has_completed_receipt(
     return False
 
 
+def _session_has_unverified_attributed_write(
+    target: Path,
+    state: dict[str, Any],
+    *,
+    session_fingerprint: str,
+) -> bool:
+    """True when this session's own Write/Edit/Bash PostToolUse is still unverified.
+
+    A Write or Edit PostToolUse is direct attribution, not a shared-tree
+    inference. Those writes must still hard-block even when neighbors are
+    alive (#959 review).
+    """
+    attributed = localio.parse_iso_datetime(state.get("last_attributed_write_at"))
+    if attributed is None:
+        return False
+    return not _receipt_since(target, attributed, session_fingerprint=session_fingerprint)
+
+
 def _shared_tree_block_is_foreign(
     target: Path,
     session_id: str,
@@ -1732,12 +1750,15 @@ def _shared_tree_block_is_foreign(
 
     The session already captured after it started, and another actor wrote at
     or after this session's receipt threshold. A hard block then cannot be
-    cleared from inside the session (#959).
+    cleared from inside the session (#959). This session's own directly
+    attributed post-receipt writes still own the block.
     """
     fingerprint = state.get("session_fingerprint")
     if not isinstance(fingerprint, str) or not fingerprint:
         fingerprint = _session_fingerprint(session_id)
     if not _session_has_completed_receipt(target, session_fingerprint=fingerprint, since=state.get("started_at")):
+        return False
+    if _session_has_unverified_attributed_write(target, state, session_fingerprint=fingerprint):
         return False
     threshold = localio.parse_iso_datetime(
         state.get("last_verification_write_at") or state.get("last_write_at") or state.get("started_at")
@@ -1940,6 +1961,9 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
     last_verification_write = localio.parse_iso_datetime(payload.get("last_verification_write_at"))
     if last_verification_write is not None and last_verification_write <= now:
         normalized["last_verification_write_at"] = last_verification_write.isoformat()
+    last_attributed_write = localio.parse_iso_datetime(payload.get("last_attributed_write_at"))
+    if last_attributed_write is not None and last_attributed_write <= now:
+        normalized["last_attributed_write_at"] = last_attributed_write.isoformat()
     session_repos = payload.get("session_repos")
     if isinstance(session_repos, list) and all(isinstance(item, str) for item in session_repos):
         normalized["session_repos"] = list(session_repos)
@@ -2298,6 +2322,7 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             state["write_observed"] = True
             written_at = localio.utc_now_iso()
             state["last_write_at"] = written_at
+            state["last_attributed_write_at"] = written_at
             handoff_write = (tool_name in _WRITE_TOOLS and _is_handoff_tool_write(target, post_tool_input)) or (
                 tool_name == "Bash" and _bash_write_targets_handoffs(target, post_tool_input.get("command"))
             )
