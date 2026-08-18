@@ -257,7 +257,41 @@ def test_render_provider_health_shows_fallback_and_unverified_model() -> None:
     assert "gemini-browser" in page
     assert "luna (ok)" in page
     assert "gemini-web (unverified)" in page
+    assert "- (unverified)" not in page
     assert "Providers are degraded but usable." in page
+
+
+def test_lane_model_text_absent_model_skips_unverified_marker() -> None:
+    """Provider table: no requested_model is '-' alone, not '- (unverified)'."""
+    lane = {"requested_model": None, "model_attestation": "unverified"}
+    assert research._lane_model_text(lane) == "-"
+
+
+def test_lane_model_text_unverified_model_keeps_marker() -> None:
+    lane = {"requested_model": "gemini-web", "model_attestation": "unverified"}
+    assert research._lane_model_text(lane) == "gemini-web (unverified)"
+
+
+def test_render_provider_table_absent_model_column_is_bare_placeholder() -> None:
+    doctor = _doctor_payload(
+        lanes=[
+            {
+                "capability": "review",
+                "seat": "luna",
+                "status": "warn",
+                "auth_status": "unknown",
+                "requested_model": None,
+                "model_attestation": "unverified",
+                "detail": "probe skipped",
+            }
+        ]
+    )
+    page = research.render(
+        {"status": _status_payload([]), "doctor": doctor, "selected_run": ""},
+        "nonce",
+    )
+    assert "- (unverified)" not in page
+    assert "gemini-web (unverified)" not in page
 
 
 def test_render_recent_list_labels_legacy_missing_audit_and_fallback() -> None:

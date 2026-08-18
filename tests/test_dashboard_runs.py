@@ -4,43 +4,105 @@ from pathlib import Path
 from brigade.center_cmd.dashboard.views import run_timeline
 
 
-def test_fetch_uses_verify_runs_json(monkeypatch, tmp_path):
-    expected = {"runs": []}
-    calls: list[tuple[Path, list[str]]] = []
+def test_fetch_uses_runs_list_and_verify_runs_contracts(monkeypatch, tmp_path):
+    brigade_payload = {"schema": "brigade.runs-list.v1", "runs": [], "skipped_invalid": 0}
+    verify_payload = {"runs": []}
+    calls: list[tuple[str, Path, list[str]]] = []
 
     def fake_run_json(target: Path, args: list[str]) -> dict:
-        calls.append((target, args))
-        return expected
+        calls.append(("target", target, args))
+        return verify_payload
+
+    def fake_run_json_cwd(target: Path, args: list[str]) -> dict:
+        calls.append(("cwd", target, args))
+        return brigade_payload
 
     monkeypatch.setattr("brigade.center_cmd.dashboard.data.run_json", fake_run_json)
+    monkeypatch.setattr("brigade.center_cmd.dashboard.data.run_json_cwd", fake_run_json_cwd)
 
-    assert run_timeline.fetch(tmp_path) == expected
-    argv = calls[0][1]
-    assert argv[:3] == ["work", "verify", "runs"]
-    assert "--limit" in argv
-    limit = int(argv[argv.index("--limit") + 1])
+    payload = run_timeline.fetch(tmp_path)
+
+    assert payload == {"brigade": brigade_payload, "verify": verify_payload}
+    styles = {call[0] for call in calls}
+    assert styles == {"target", "cwd"}
+    cwd_argv = next(call[2] for call in calls if call[0] == "cwd")
+    assert cwd_argv[:2] == ["runs", "list"]
+    assert "--limit" in cwd_argv
+    verify_argv = next(call[2] for call in calls if call[0] == "target")
+    assert verify_argv[:3] == ["work", "verify", "runs"]
+    assert "--limit" in verify_argv
+    limit = int(verify_argv[verify_argv.index("--limit") + 1])
     assert limit >= 50
 
 
-def test_render_lists_runs_newest_first_with_bounded_receipts():
+def test_render_brigade_runs_from_versioned_list_contract():
     payload = {
-        "runs": [
-            {
-                "run_id": "run-early",
-                "status": "failed",
-                "started_at": "2026-01-01T09:00:00Z",
-                "duration_seconds": 1.25,
-                "commands": [{"command": "fake check", "exit_code": 1}],
-            },
-            {
-                "run_id": "run-late",
-                "status": "completed",
-                "started_at": "2026-01-02T09:00:00Z",
-                "duration_seconds": 2.5,
-                "commands": [{"command": "fake check &lt;safe&gt;", "exit_code": 0}],
-                "large_field": "x" * 5_000,
-            },
-        ]
+        "brigade": {
+            "schema": "brigade.runs-list.v1",
+            "skipped_invalid": 2,
+            "runs": [
+                {
+                    "run_id": "20260101-090000-aaaa",
+                    "status": "failed",
+                    "task": "build the <thing>",
+                    "started_at": "2026-01-01T09:00:00Z",
+                    "duration_seconds": 4.5,
+                    "failure_phase": "dispatch",
+                    "mode": "read-only",
+                    "resume_available": True,
+                }
+            ],
+        },
+        "verify": {"runs": []},
+    }
+
+    fragment = run_timeline.render(payload, "unused")
+
+    assert "Brigade runs" in fragment
+    assert "20260101-090000-aaaa" in fragment
+    assert "dispatch" in fragment
+    assert "read-only" in fragment
+    assert "Skipped 2 invalid run directories." in fragment
+    assert "build the &lt;thing&gt;" in fragment
+    assert "<thing>" not in fragment
+
+
+def test_render_brigade_runs_error_is_empty_state_with_diagnostic():
+    payload = {
+        "brigade": {"error": "error: runs directory not found: <root>"},
+        "verify": {"runs": []},
+    }
+
+    fragment = run_timeline.render(payload, "unused")
+
+    assert "No Brigade runs yet." in fragment
+    assert "CLI diagnostic" in fragment
+    assert "runs directory not found" in fragment
+    assert "<root>" not in fragment
+
+
+def test_render_lists_verify_runs_newest_first_with_bounded_receipts():
+    payload = {
+        "brigade": {"schema": "brigade.runs-list.v1", "runs": [], "skipped_invalid": 0},
+        "verify": {
+            "runs": [
+                {
+                    "run_id": "run-early",
+                    "status": "failed",
+                    "started_at": "2026-01-01T09:00:00Z",
+                    "duration_seconds": 1.25,
+                    "commands": [{"command": "fake check", "exit_code": 1}],
+                },
+                {
+                    "run_id": "run-late",
+                    "status": "completed",
+                    "started_at": "2026-01-02T09:00:00Z",
+                    "duration_seconds": 2.5,
+                    "commands": [{"command": "fake check &lt;safe&gt;", "exit_code": 0}],
+                    "large_field": "x" * 5_000,
+                },
+            ]
+        },
     }
 
     fragment = run_timeline.render(payload, "unused")
@@ -56,10 +118,11 @@ def test_render_lists_runs_newest_first_with_bounded_receipts():
 
 
 def test_render_error_and_empty_payloads_degrade_safely():
-    assert "boom" in run_timeline.render({"error": "boom"}, "unused")
+    fragment = run_timeline.render({"verify": {"error": "boom"}, "brigade": {}}, "unused")
+    assert "boom" in fragment
 
     assert "Nothing here." in run_timeline.render({}, "unused")
-    assert "Nothing here." in run_timeline.render({"runs": []}, "unused")
+    assert "Nothing here." in run_timeline.render({"verify": {"runs": []}, "brigade": {"runs": []}}, "unused")
 
 
 def test_render_paginates_with_prior_next_like_memory_inventory():
@@ -74,7 +137,7 @@ def test_render_paginates_with_prior_next_like_memory_inventory():
                 "commands": [{"command": f"check-{index:04d}", "exit_code": 0}],
             }
         )
-    fragment = run_timeline.render({"runs": runs}, "run-nonce")
+    fragment = run_timeline.render({"verify": {"runs": runs}, "brigade": {}}, "run-nonce")
     assert '<style nonce="run-nonce">' in fragment or "data-mo-page=" in fragment
     assert 'data-mo-page-size="50"' in fragment
     assert 'data-mo-page="prev"' in fragment
