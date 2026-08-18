@@ -64,12 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
-<<<<<<< HEAD
 - `memory vault-search` rebuilds the derived index when `.brigade/vault.toml`
   roots change, so removing a scope from the allowlist stops serving that
   root. `vault-doctor` warns on index/config root drift instead of reporting
   all-green against a stale index. (#943)
-=======
+
 - The graphtrail stale-baseline verify test no longer races wall-clock sync delays
   against a tight subprocess timeout on loaded CI runners; sync timeout is injected
   deterministically so the stale-graph assertion is reliable on Python 3.12. (#954)

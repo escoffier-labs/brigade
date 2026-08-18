@@ -787,6 +787,118 @@ conflict_window = "02:00-02:10"
         assert raised.value.errno == errno.EBADF
 
 
+def _repo_scan_config(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    script = tmp_path / "scanner.py"
+    script.write_text("\n")
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+
+def _capture_retained_scanner_run_authorities(
+    prior_keys: set[int],
+) -> tuple[list[int], list[tuple[int, int]]]:
+    from brigade.work_cmd import scanners as scanners_mod
+
+    authorities = scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES
+    retained = {key: authority for key, authority in authorities.items() if key not in prior_keys}
+    assert retained, "expected retained scanner-run directory authority"
+    captured_keys: list[int] = []
+    captured_fds: list[tuple[int, int]] = []
+    for key, authority in retained.items():
+        captured_keys.append(key)
+        captured_fds.append((authority.root, authority.directory))
+        os.fstat(authority.root)
+        os.fstat(authority.directory)
+    return captured_keys, captured_fds
+
+
+def _assert_scanner_run_authorities_released(
+    prior_keys: set[int],
+    captured_keys: list[int],
+    captured_fds: list[tuple[int, int]],
+) -> None:
+    from brigade.work_cmd import scanners as scanners_mod
+
+    remaining = scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES
+    assert set(remaining) == prior_keys
+    for key in captured_keys:
+        assert key not in remaining
+    for root, directory in captured_fds:
+        with pytest.raises(OSError) as raised:
+            os.fstat(root)
+        assert raised.value.errno == errno.EBADF
+        with pytest.raises(OSError) as raised:
+            os.fstat(directory)
+        assert raised.value.errno == errno.EBADF
+
+
+def test_scanners_run_releases_directory_authority_when_stamp_raises(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _repo_scan_config(tmp_path)
+    prior_keys = set(scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES)
+    captured_keys: list[int] = []
+    captured_fds: list[tuple[int, int]] = []
+
+    def fail_stamp(*_args: object, **_kwargs: object) -> list[str]:
+        keys, fds = _capture_retained_scanner_run_authorities(prior_keys)
+        captured_keys.extend(keys)
+        captured_fds.extend(fds)
+        raise RuntimeError("forced stamp failure")
+
+    monkeypatch.setattr(scanners_mod, "_scanner_stamp_new_imports", fail_stamp)
+
+    with pytest.raises(RuntimeError, match="forced stamp failure"):
+        scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="repo-scan")
+
+    assert captured_keys
+    assert captured_fds
+    _assert_scanner_run_authorities_released(prior_keys, captured_keys, captured_fds)
+
+
+def test_scanners_run_releases_directory_authority_when_receipt_rewrite_raises(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _repo_scan_config(tmp_path)
+    prior_keys = set(scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES)
+    captured_keys: list[int] = []
+    captured_fds: list[tuple[int, int]] = []
+    real_write = scanners_mod._write_scanner_run_receipt
+
+    def fail_loop_local_receipt(run: dict[str, object]) -> None:
+        if "provenance_imports_stamped" in run:
+            keys, fds = _capture_retained_scanner_run_authorities(prior_keys)
+            captured_keys.extend(keys)
+            captured_fds.extend(fds)
+            raise RuntimeError("forced receipt rewrite failure")
+        real_write(run)
+
+    monkeypatch.setattr(scanners_mod, "_write_scanner_run_receipt", fail_loop_local_receipt)
+
+    with pytest.raises(RuntimeError, match="forced receipt rewrite failure"):
+        scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="repo-scan")
+
+    assert captured_keys
+    assert captured_fds
+    _assert_scanner_run_authorities_released(prior_keys, captured_keys, captured_fds)
+
+
 def test_work_scanners_ingest_output_sanitizes_hostile_records_and_owns_identity(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
