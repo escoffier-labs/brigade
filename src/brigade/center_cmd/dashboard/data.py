@@ -17,17 +17,67 @@ from typing import Sequence
 from brigade.center_cmd.dashboard import timing as center_timing
 
 
-def run_json(target: Path, args: Sequence[str], *, timeout: float = 20.0) -> dict:
-    """Run a brigade subcommand and return parsed JSON, or ``{"error": ...}``."""
-    return _invoke([*args, "--target", str(target), "--json"], phase_args=args, timeout=timeout)
+def _command_error_detail(detail: str) -> str:
+    """Prefer a JSON ``error`` field over the first line of pretty-printed JSON."""
+    text = detail.strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        err = parsed.get("error")
+        if isinstance(err, str) and err.strip():
+            return err.strip()[:200]
+        return json.dumps(parsed, sort_keys=True)[:200]
+    return text.splitlines()[0][:200]
 
 
-def run_json_cwd(target: Path, args: Sequence[str], *, timeout: float = 20.0) -> dict:
+def run_json(
+    target: Path,
+    args: Sequence[str],
+    *,
+    timeout: float = 20.0,
+    ok_codes: Sequence[int] = (0,),
+) -> dict:
+    """Run a brigade subcommand and return parsed JSON, or ``{"error": ...}``.
+
+    ``ok_codes`` lists exit codes whose stdout is still a valid payload.
+    Doctor-style commands signal an unhealthy-but-projected state with a
+    nonzero exit while printing their versioned JSON; pass ``(0, 1)`` there.
+    """
+    return _invoke(
+        [*args, "--target", str(target), "--json"],
+        phase_args=args,
+        timeout=timeout,
+        ok_codes=ok_codes,
+    )
+
+
+def run_json_cwd(
+    target: Path,
+    args: Sequence[str],
+    *,
+    timeout: float = 20.0,
+    ok_codes: Sequence[int] = (0,),
+) -> dict:
     """Like :func:`run_json` for subcommands scoped by ``--cwd`` instead of ``--target``."""
-    return _invoke([*args, "--cwd", str(target), "--json"], phase_args=args, timeout=timeout)
+    return _invoke(
+        [*args, "--cwd", str(target), "--json"],
+        phase_args=args,
+        timeout=timeout,
+        ok_codes=ok_codes,
+    )
 
 
-def _invoke(full_args: Sequence[str], *, phase_args: Sequence[str], timeout: float) -> dict:
+def _invoke(
+    full_args: Sequence[str],
+    *,
+    phase_args: Sequence[str],
+    timeout: float,
+    ok_codes: Sequence[int] = (0,),
+) -> dict:
     cmd = [sys.executable, "-m", "brigade", *full_args]
     env = os.environ.copy()
     env["BRIGADE_EXTRAS"] = "1"
@@ -46,11 +96,10 @@ def _invoke(full_args: Sequence[str], *, phase_args: Sequence[str], timeout: flo
     except OSError as exc:
         return {"error": f"command failed: {exc}"}
 
-    if result.returncode != 0:
+    if result.returncode not in ok_codes:
         detail = (result.stderr or result.stdout or "").strip()
         if detail:
-            first_line = detail.splitlines()[0]
-            return {"error": first_line[:200]}
+            return {"error": _command_error_detail(detail)}
         return {"error": f"command exited {result.returncode}"}
 
     try:

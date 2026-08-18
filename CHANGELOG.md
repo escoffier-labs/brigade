@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Evidence consumers now enforce `brigade.trust-policy.v1`: unknown and quarantined items are excluded from default briefs, context packs, citations, and promotion; untrusted brief content is wrapped and capped at 2 items and 50 percent of brief bytes; only the explicit known-safe injection status `clean` (after `strip().lower()` and pending resolution) may wrap or emit a body — case, whitespace, empty, and garbage variants are metadata-only. `brigade evidence trust review <item-ref> --content-hash <digest>` attests an untrusted item as reviewed after an exact envelope digest match and appends one transition event. `brigade receipts verify` upgrades indexed verify-receipt items to verified only after complete receipt v2 patch identity and exact retained `changes.patch` validation; duplicate verify is an idempotent no-op. Envelope verified does not bypass subject_binding, check_role, patch identity, or failure-taxonomy requirements. Citing a flagged research finding is rejected; the run takes one repair attempt and then fails `review-rejected`. (#587)
+- Evidence read surfaces recompute provenance content and materialized raw/artifact hashes. Search suppresses a mismatched snippet and returns `integrity_mismatch: true`. Direct `miseledger show` / `brigade evidence show` hide a mismatched or synthesized-legacy body unless `--forensic-content` is passed; that flag never changes trust and only reveals a body when injection status is the explicit known-safe value `clean` (empty, unknown, and parse-lost statuses block). MCP, HTTP, bundles, briefs, and context stay metadata-only on mismatch. Bundle cache and Markdown preserve envelope fields and `integrity_omitted`. One downgrade event is appended per item/hash/mismatch; the row is never deleted. (#586)
+- Python evidence producers now stamp `brigade.provenance-envelope.v1` on work imports, research findings, and indexed receipt adapter rows. Research findings persist an exact `{title}\\n{summary}\\n{evidence}` text projection; legacy `Finding.trust` stays readable and only maps to origin/modality. `brigade work import provenance --backfill` and `brigade research provenance backfill` infer missing envelopes without treating them as trusted. Receipt indexing always starts `untrusted`. Existing pending imports without an envelope report `missing_envelope`, which surfaces as a doctor WARN until an operator runs `--backfill`. (#584)
+- `brigade runs child <run-id> <event-id>` creates a durable child run from a
+  checkpoint-covered parent lifecycle event, records lineage and the verified
+  shared prefix, and shows that lineage in `brigade runs show`. The child gets
+  a fresh `started_at` / `status_started_at` and does not inherit the parent's
+  live control socket, live-progress fields, failure terminal fields, or
+  parent-directory artifact/handoff paths. The covering checkpoint event itself
+  is not a valid branch point. (#594)
 - `brigade memory project-vault` writes a one-way Obsidian projection of
   canonical memory into an existing vault: care-state frontmatter and tags,
   wikilinks, category/harness maps, and a topology canvas. Vault writes use
@@ -26,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover <operation-id>`. Refs #911.
 
 ### Changed
+- `brigade memory project-vault` produces a browsable vault on a real corpus.
+  Notes take their title from the card's leading heading when frontmatter has
+  no `title`, instead of the filename slug, and that heading is no longer
+  repeated in the body. Related links are ranked and capped at 12 per note, so
+  a large shared category no longer forms a complete graph. Maps that would
+  cover every note are omitted, and canvas nodes lay out in a grid rather than
+  one row. On a 1,254-card corpus this took the canvas from 83,586 edges and
+  11.3 MB to a bounded graph. (#888)
 - Center Memory Operations Cards now shows corpus size, a chip cloud, compact
   expandable rows, and 30-row paging. Handoffs is a sibling tab on that page;
   `/view/handoffs` redirects there. Snapshot polling reloads the page so
@@ -35,6 +53,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
+- Quarantined items stay quarantined when a pending injection scan comes back clean, so a labeled quarantine cannot be released to untrusted and become content-eligible. Reviewed and verified items keep every consumer surface untrusted already has, including `context`. `brigade receipts verify` reports `verify-pending` (and does not append a local verified event) when the MiseLedger trust notify fails. Provenance-event JSONL now appends and fsyncs instead of rewriting the whole file. (#587)
+- Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
+  closed on every `brigade work` surface (and other commands that read the
+  ledger) with `error: ...` and exit 2, instead of parsing as empty or
+  dumping a traceback. The work-store measurement harness
+  (`scripts/measure_work_store.py`, protocol 4) now reports
+  `schema_version_policy.future_version_rejected: true` with a clean
+  exit-2 error and untouched ledger bytes; it no longer treats future
+  versions as coerced. Unknown hand-edited edge types are preserved on
+  rewrite and surfaced via `work ready` (`unknown_type_count`) and a
+  `work doctor` WARN. `work import promote --all` returns 2 when any
+  import fails. (#948)
+- Scanner receipt and import-proof bytes now carry verifier-owned file
+  identity and content bindings. Legacy migration rejects in-place receipt
+  overwrites, attacker-created sidecars, missing bindings, and mismatched
+  file identity or content. A binding-write failure restores the prior
+  receipt, proof, inbox, and binding state or fails closed. Workspace
+  rename re-anchors those file bindings with the directory record, and a
+  malformed store read fails closed instead of wiping every binding.
+  Rollback restores the snapshot for the bindings the failed operation
+  itself added, deleting one it added that the snapshot did not have, while
+  leaving a concurrent writer's unrelated bindings intact. A directory that
+  already exists and is not bound to the workspace record is never adopted,
+  including when the caller asked to create it; Brigade creates and binds
+  the import-proof directory before it launches a scanner child instead.
+  Scanner children run with an explicit environment allowlist whose `HOME`
+  and `XDG_*` paths point at a per-run sandbox that is removed when the
+  child exits, so a child cannot reach the verifier authority store through
+  its environment. That allowlist passes through what shipped scanners
+  need, including `GH_TOKEN`/`GITHUB_TOKEN` or `GH_CONFIG_DIR` pointed at
+  the operator's existing `gh` config, `SSH_AUTH_SOCK`, `USER`/`LOGNAME`,
+  `TMPDIR`, and proxy settings, so `gh`- and `git`-backed scanners keep
+  authenticating. Same-uid writes that guess the store path remain a
+  residual class. Refs #881.
 - Bare `brigade care status` now discovers target-scoped per-entry
   registrations instead of scoring the atomic five-entry default. A target
   with no discovered units reports `missing`. Systemd status also reports

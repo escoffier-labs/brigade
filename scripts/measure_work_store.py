@@ -17,11 +17,14 @@ Protocol defaults match the #846 scoping comment: 10 warmups and 100 measured
 trials, nearest-rank p50/p95, two-claimer barrier race requiring one success
 and one exit 13, and pass/fail gates for #737/#738 anchors where exercised.
 R3 retains the residual no-listener cells: same-actor rejection, guards/empty-filter,
-restart recovery, schema coercion observation, branch/config backup restore,
+restart recovery, fail-closed future-version rejection, branch/config backup restore,
 install footprint, cold-start/backup timing, resource samples, and observed
 metrics-state plus deleted-secret/history checks. Latency remains descriptive
 (no absolute service level). Numbers are never fabricated: cells are
 ``measured``, ``blocked``, or ``unavailable``.
+Protocol 4 inverts ``schema_version_policy``: a future ledger version must be
+rejected cleanly (exit 2, bytes untouched) instead of coerced to the current
+schema.
 
 Standard library plus the in-repo ``brigade`` package only.
 """
@@ -59,10 +62,11 @@ from brigade.work_cmd import ledger as ledger_mod
 ISSUE = 846
 SLICE = "R3"
 KIND = "work-store-characterization"
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 TIMEBOX_NOTE = (
-    "R3 bounded repair: correct the SQLite release characterization while "
-    "retaining the accepted no-listener scope and residual cells. Dolt shapes "
+    "R3 bounded repair plus protocol 4: schema_version_policy records "
+    "fail-closed rejection of future ledger versions (clean error, exit 2, "
+    "bytes untouched) instead of ensure_ledger_edges coercion. Dolt shapes "
     "stay optional characterization candidates "
     "and must not enter Brigade runtime dependencies. Server listeners, TLS, "
     "and permission cells that need a listener remain blocked pending separate "
@@ -1059,35 +1063,76 @@ def _json_restart_recovery(root: Path, ledger: dict[str, Any]) -> dict[str, Any]
 
 
 def _json_schema_version_policy(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
-    """Observe current ledger version coercion (no production schema change)."""
+    """Observe fail-closed rejection of future ledger versions (no schema bump)."""
     future = _clone_ledger(ledger)
     future["version"] = edges_mod.TASK_LEDGER_VERSION + 100
+    future["future_field"] = {"keep": True}
     past = _clone_ledger(ledger)
     past["version"] = 1
     future_target = _json_load_target(root, future, with_git=False)
     past_target = _json_load_target(root, past, with_git=False)
     try:
-        future_on_disk = json.loads(work_helpers._tasks_path(future_target).read_text(encoding="utf-8"))
+        future_path = work_helpers._tasks_path(future_target)
+        before_bytes = future_path.read_bytes()
+        future_on_disk = json.loads(before_bytes.decode("utf-8"))
         past_on_disk = json.loads(work_helpers._tasks_path(past_target).read_text(encoding="utf-8"))
-        future_loaded = ledger_mod._read_task_ledger(future_target)
+
+        future_error: dict[str, Any] | None = None
+        future_version_after_read = None
+        try:
+            future_loaded = ledger_mod._read_task_ledger(future_target)
+            future_version_after_read = future_loaded.get("version")
+        except ledger_mod.TaskLedgerError as exc:
+            future_error = exc.as_dict()
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            cli_rc = work_cmd.tasks(target=future_target, json_output=True)
+        after_bytes = future_path.read_bytes()
+        cli_out = stdout.getvalue()
+        cli_err = stderr.getvalue()
+        try:
+            cli_payload = json.loads(cli_out) if cli_out.strip() else None
+        except json.JSONDecodeError:
+            cli_payload = None
+
         past_loaded = ledger_mod._read_task_ledger(past_target)
-        future_version_after_read = future_loaded.get("version")
         past_version_after_read = past_loaded.get("version")
-        future_coerced = future_version_after_read == edges_mod.TASK_LEDGER_VERSION
         past_coerced = past_version_after_read == edges_mod.TASK_LEDGER_VERSION
+        bytes_unchanged = after_bytes == before_bytes
+        rejected = (
+            future_error is not None
+            and future_error.get("reason") == ledger_mod.REASON_UNSUPPORTED_LEDGER_VERSION
+            and int(future_error.get("exit_code") or 0) == 2
+            and future_version_after_read is None
+        )
+        clean_error = (
+            cli_rc == 2
+            and "Traceback" not in cli_err
+            and isinstance(cli_payload, dict)
+            and cli_payload.get("reason") == ledger_mod.REASON_UNSUPPORTED_LEDGER_VERSION
+            and int(cli_payload.get("exit_code") or 0) == 2
+        )
+        extra_field_kept = future_on_disk.get("future_field") == {"keep": True}
         return {
             "status": "measured",
             "expected_version": edges_mod.TASK_LEDGER_VERSION,
             "future_version_written": future_on_disk.get("version"),
             "future_version_after_read": future_version_after_read,
-            "future_version_rejected": False,
-            "future_version_coerced_on_read": future_coerced,
+            "future_version_rejected": rejected,
+            "future_version_coerced_on_read": False,
+            "future_version_bytes_unchanged": bytes_unchanged,
+            "future_version_reason": None if future_error is None else future_error.get("reason"),
+            "future_version_exit_code": None if future_error is None else future_error.get("exit_code"),
+            "future_version_cli_exit_code": cli_rc,
+            "future_version_clean_error": clean_error,
             "downgrade_version_written": past_on_disk.get("version"),
             "downgrade_version_after_read": past_version_after_read,
             "downgrade_rejected": False,
             "downgrade_coerced_on_read": past_coerced,
-            "observed_policy": "ensure_ledger_edges_coerces_version_to_current",
-            "pass": future_coerced and past_coerced,
+            "observed_policy": "fail_closed_unsupported_ledger_version",
+            "pass": rejected and bytes_unchanged and clean_error and extra_field_kept and past_coerced,
         }
     finally:
         shutil.rmtree(future_target, ignore_errors=True)
@@ -1535,6 +1580,20 @@ def _sqlite_load(path: Path, ledger: dict[str, Any]) -> None:
         conn.close()
 
 
+def _sqlite_logical_digest(path: Path) -> str:
+    """Digest logical sqlite rows so WAL header churn is not a false write."""
+    conn = _sqlite_connect(path)
+    try:
+        payload = {
+            "meta": list(conn.execute("SELECT key, value FROM meta ORDER BY key")),
+            "tasks": list(conn.execute("SELECT id, payload FROM tasks ORDER BY id")),
+            "edges": list(conn.execute("SELECT id, payload FROM edges ORDER BY id")),
+        }
+    finally:
+        conn.close()
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def _sqlite_export_ledger(path: Path) -> dict[str, Any]:
     conn = _sqlite_connect(path)
     try:
@@ -1546,6 +1605,16 @@ def _sqlite_export_ledger(path: Path) -> dict[str, Any]:
             edges.append(json.loads(row[0]))
         version_row = conn.execute("SELECT value FROM meta WHERE key='version'").fetchone()
         version = int(version_row[0]) if version_row else edges_mod.TASK_LEDGER_VERSION
+        if version > edges_mod.TASK_LEDGER_VERSION:
+            raise ledger_mod.TaskLedgerError(
+                f"task ledger version {version} is newer than supported {edges_mod.TASK_LEDGER_VERSION}: {path}",
+                reason=ledger_mod.REASON_UNSUPPORTED_LEDGER_VERSION,
+                details={
+                    "path": str(path),
+                    "version": version,
+                    "supported": edges_mod.TASK_LEDGER_VERSION,
+                },
+            )
         ledger = {"version": version, "tasks": tasks, "edges": edges}
         edges_mod.ensure_ledger_edges(ledger)
         return ledger
@@ -2054,11 +2123,15 @@ def _sqlite_schema_version_policy(root: Path, ledger: dict[str, Any]) -> dict[st
         past["version"] = 1
         _sqlite_load(future_path, future)
         _sqlite_load(past_path, past)
-        # Adapter stores meta.version as written; export returns stored int.
-        future_export = _sqlite_export_ledger(future_path)
+        before_digest = _sqlite_logical_digest(future_path)
+        future_error: dict[str, Any] | None = None
+        future_export: dict[str, Any] | None = None
+        try:
+            future_export = _sqlite_export_ledger(future_path)
+        except ledger_mod.TaskLedgerError as exc:
+            future_error = exc.as_dict()
+        after_digest = _sqlite_logical_digest(future_path)
         past_export = _sqlite_export_ledger(past_path)
-        # After export, ensure_ledger_edges coerces for graph use.
-        future_coerced = future_export.get("version") == edges_mod.TASK_LEDGER_VERSION
         past_coerced = past_export.get("version") == edges_mod.TASK_LEDGER_VERSION
         conn = _sqlite_connect(future_path)
         try:
@@ -2070,19 +2143,37 @@ def _sqlite_schema_version_policy(root: Path, ledger: dict[str, Any]) -> dict[st
             past_meta = conn.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0]
         finally:
             conn.close()
+        bytes_unchanged = after_digest == before_digest
+        rejected = (
+            future_error is not None
+            and future_error.get("reason") == ledger_mod.REASON_UNSUPPORTED_LEDGER_VERSION
+            and int(future_error.get("exit_code") or 0) == 2
+            and future_export is None
+        )
+        clean_error = rejected and "Traceback" not in str(future_error.get("error") if future_error else "")
         return {
             "status": "measured",
             "expected_version": edges_mod.TASK_LEDGER_VERSION,
             "future_version_written": int(future_meta),
-            "future_version_after_export": future_export.get("version"),
-            "future_version_rejected": False,
-            "future_version_coerced_on_export": future_coerced,
+            "future_version_after_export": None if future_export is None else future_export.get("version"),
+            "future_version_rejected": rejected,
+            "future_version_coerced_on_export": False,
+            "future_version_bytes_unchanged": bytes_unchanged,
+            "future_version_reason": None if future_error is None else future_error.get("reason"),
+            "future_version_exit_code": None if future_error is None else future_error.get("exit_code"),
+            "future_version_clean_error": clean_error,
             "downgrade_version_written": int(past_meta),
             "downgrade_version_after_export": past_export.get("version"),
             "downgrade_rejected": False,
             "downgrade_coerced_on_export": past_coerced,
-            "observed_policy": "adapter_meta_preserves_written_version_export_coerces_via_ensure_ledger_edges",
-            "pass": future_coerced and past_coerced and int(future_meta) == edges_mod.TASK_LEDGER_VERSION + 100,
+            "observed_policy": "fail_closed_unsupported_ledger_version",
+            "pass": (
+                rejected
+                and bytes_unchanged
+                and clean_error
+                and past_coerced
+                and int(future_meta) == edges_mod.TASK_LEDGER_VERSION + 100
+            ),
         }
     finally:
         for path in (future_path, past_path):

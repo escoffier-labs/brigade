@@ -31,6 +31,17 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Added
 
+- `miseledger trust review --item ID --content-hash DIGEST` upgrades an item to `reviewed` or `verified` only when the supplied digest matches both the embedded envelope `hashes.content` and the recomputed item text. The transition appends one `provenance_events` row. (#587)
+- Provenance read verification Slice 5: search, show, evidence bundles, HTTP, and
+  MCP recompute envelope content and materialized raw/artifact hashes, surface
+  `integrity_mismatch` plus envelope fields, suppress mismatched snippets and
+  bodies, and append one idempotent downgrade event per item/hash/mismatch
+  without deleting the row. Direct `miseledger show --forensic-content` can
+  reveal a mismatched or synthesized-legacy body with a warning; it never
+  changes trust and only reveals a body when injection status is the explicit
+  known-safe value `clean` (empty, unknown, and parse-lost statuses block).
+  MCP and HTTP have no forensic reveal path. Bundle cache and Markdown keep
+  envelope fields and `integrity_omitted`.
 - Provenance persistence Slice 2: ingest stamps indexed `provenance.*` projections,
   append-only `provenance_events`, resumable `miseledger doctor provenance backfill`,
   on-read legacy show synthesis, and search/SQL filters for origin, modality, and

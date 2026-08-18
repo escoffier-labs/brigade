@@ -9,6 +9,7 @@ from typing import Any
 from .. import evidence_brief, scrub
 from ..untrusted import scan_untrusted, wrap_untrusted
 from . import constants, helpers, ledger as ledger_mod
+from . import edges as edges_mod
 from . import scanners as scanners_mod
 from . import services as services_mod
 
@@ -674,12 +675,17 @@ def import_triage(
     return 0
 
 
-def import_provenance(*, target: Path, json_output: bool = False) -> int:
+def import_provenance(*, target: Path, json_output: bool = False, backfill: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    backfill_payload: dict[str, Any] | None = None
+    if backfill:
+        backfill_payload = ledger_mod._backfill_import_provenance(target)
     payload = services_mod._import_provenance_payload(target)
+    if backfill_payload is not None:
+        payload["backfill"] = backfill_payload
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -699,6 +705,11 @@ def import_provenance(*, target: Path, json_output: bool = False) -> int:
     for item in payload["issues"][:20]:
         fields = ", ".join(str(field) for field in item.get("missing_fields", []))
         print(f"- {item.get('id')} {item.get('source')} {item.get('kind')} missing={fields}")
+    if backfill_payload is not None:
+        print(f"backfill_stamped: {backfill_payload['stamped']}")
+        print(f"backfill_inferred: {backfill_payload['inferred']}")
+        print(f"backfill_unchanged: {backfill_payload['unchanged']}")
+        print("backfill_trusted: 0")
     return 0
 
 
@@ -935,25 +946,36 @@ def import_promote(
             )
         }
         promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+        failed: list[tuple[dict[str, Any], Exception]] = []
         for item in imports:
             if item.get("id") not in wanted_ids:
                 continue
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
-            task, created = ledger_mod._mark_import_promoted(target, item)
+            try:
+                task, created = ledger_mod._mark_import_promoted(target, item)
+            except (edges_mod.EdgeError, ledger_mod.TaskLedgerError) as exc:
+                failed.append((item, exc))
+                continue
             promoted.append((item, task, created))
         ledger_mod._write_imports(target, imports)
         created_count = len([item for item in promoted if item[2]])
         print(f"promoted: {len(promoted)}")
         print(f"created: {created_count}")
         print(f"existing: {len(promoted) - created_count}")
+        if failed:
+            print(f"failed: {len(failed)}")
         for item, task, created in promoted:
             status = "created" if created else "existing"
             print(
                 f"- {item.get('id')} -> {task['id']} [{status} acceptance={len(ledger_mod._task_acceptance(task))}] "
                 f"{helpers._short(str(task.get('text', '')))}"
             )
+        for item, exc in failed:
+            print(f"- {item.get('id')} failed: {exc}", file=sys.stderr)
+        if failed:
+            return 2
         return 0
     if not import_id:
         print("error: import id is required unless --all is passed", file=sys.stderr)
@@ -972,7 +994,14 @@ def import_promote(
     if not text:
         print(f"error: import has no text: {import_id}", file=sys.stderr)
         return 2
-    task, created = ledger_mod._mark_import_promoted(target, item)
+    try:
+        task, created = ledger_mod._mark_import_promoted(target, item)
+    except edges_mod.EdgeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except ledger_mod.TaskLedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     ledger_mod._write_imports(target, imports)
     print(f"import: {item.get('id')}")
     print(f"status: {item.get('status')}")

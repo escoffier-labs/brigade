@@ -46,6 +46,29 @@ def _write_card(
     )
 
 
+def _write_cards(target: Path, count: int, *, category: str, tags: list[str]) -> None:
+    """Write `count` sibling cards that all share one category, the shape that blew up the canvas."""
+    root = target / "memory" / "cards"
+    root.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        (root / f"bulk-{index:03d}.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    f"id: card-00000000-0000-4000-8000-{index:012d}",
+                    f"title: Bulk {index:03d}",
+                    f"category: {category}",
+                    f"tags: {json.dumps(tags)}",
+                    "refs: []",
+                    "---",
+                    f"Bulk body {index:03d}.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+
 def _project(target: Path, vault: Path, capsys) -> dict:
     assert cli.main(["memory", "project-vault", "--target", str(target), "--vault", str(vault), "--json"]) == 0
     return json.loads(capsys.readouterr().out)
@@ -219,6 +242,86 @@ def test_project_vault_skips_a_manually_edited_conflict_copy_when_linking(tmp_pa
     assert (root / "Alpha.conflict-ea62791a.md").read_text(encoding="utf-8") == "operator-owned conflict\n"
 
 
+def test_project_vault_titles_a_note_from_its_leading_heading(tmp_path: Path, vault: Path, capsys) -> None:
+    """Cards without a frontmatter title fall back to their slug, which reads badly in a vault."""
+    path = tmp_path / "memory" / "cards" / "rocinante-gateway-beta-worktree-steering.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\nid: card-00000000-0000-4000-8000-00000000000c\ncategory: operations\ntags: []\n---\n"
+        "# Rocinante gateway from a worktree\n\nSteer the beta from a worktree.\n",
+        encoding="utf-8",
+    )
+
+    _project(tmp_path, vault, capsys)
+
+    note = vault / "Brigade Memory" / "Cards" / "Rocinante gateway from a worktree.md"
+    assert note.is_file()
+    text = note.read_text(encoding="utf-8")
+    assert 'title: "Rocinante gateway from a worktree"' in text
+    assert text.count("# Rocinante gateway from a worktree") == 1
+    # Provenance still points at the slug file the card actually lives in.
+    assert "canonical_path: " in text and "rocinante-gateway-beta-worktree-steering.md" in text
+
+
+def test_project_vault_keeps_an_explicit_frontmatter_title_over_the_body_heading(
+    tmp_path: Path, vault: Path, capsys
+) -> None:
+    """An explicit title is operator intent; a differing body heading stays part of the body."""
+    _write_card(
+        tmp_path,
+        "alpha",
+        title="Solomon jobs and profile cheatsheet",
+        tags=["shared"],
+        body="# Targeted resume variants\n\nPick the lane.",
+    )
+
+    _project(tmp_path, vault, capsys)
+
+    text = (vault / "Brigade Memory" / "Cards" / "Solomon jobs and profile cheatsheet.md").read_text(encoding="utf-8")
+    assert "# Solomon jobs and profile cheatsheet" in text
+    assert "# Targeted resume variants" in text
+
+
+def test_project_vault_caps_related_links_and_canvas_edges(tmp_path: Path, vault: Path, capsys) -> None:
+    """Same-category cards used to form a complete graph, so 1,254 notes produced 83,586 edges."""
+    _write_cards(tmp_path, 30, category="workflow", tags=["shared"])
+
+    _project(tmp_path, vault, capsys)
+
+    projection = vault / "Brigade Memory"
+    for note in (projection / "Cards").glob("Bulk *.md"):
+        assert note.read_text(encoding="utf-8").count("[[") <= obsidian_vault.MAX_RELATED
+    canvas = json.loads((projection / "Brigade Memory.canvas").read_text(encoding="utf-8"))
+    card_edges = [edge for edge in canvas["edges"] if not str(edge["id"]).startswith("topology:")]
+    assert card_edges
+    assert len(card_edges) <= 30 * obsidian_vault.MAX_RELATED
+    assert len(card_edges) < 30 * 29 // 2  # not the complete graph the cap replaced
+
+
+def test_project_vault_omits_a_map_that_covers_every_note(tmp_path: Path, vault: Path, capsys) -> None:
+    """A map listing every note groups nothing; the harness map was one 1,254-entry file."""
+    _write_cards(tmp_path, 3, category="workflow", tags=["shared"])
+
+    _project(tmp_path, vault, capsys)
+
+    projection = vault / "Brigade Memory"
+    assert not list((projection / "Maps" / "Harnesses").glob("*.md"))
+    assert not list((projection / "Maps" / "Categories").glob("*.md"))
+
+
+def test_project_vault_lays_out_canvas_notes_in_a_grid(tmp_path: Path, vault: Path, capsys) -> None:
+    """A single row put 1,254 nodes across roughly 345,000 pixels of canvas."""
+    _write_cards(tmp_path, 30, category="workflow", tags=["shared"])
+
+    _project(tmp_path, vault, capsys)
+
+    canvas = json.loads((vault / "Brigade Memory" / "Brigade Memory.canvas").read_text(encoding="utf-8"))
+    card_nodes = [node for node in canvas["nodes"] if str(node["id"]).startswith("card-")]
+    assert len(card_nodes) == 30
+    assert len({node["y"] for node in card_nodes}) > 1
+    assert max(node["x"] for node in card_nodes) < 30 * 260
+
+
 def test_project_vault_does_not_reuse_an_unfinished_transaction_journal(
     tmp_path: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -240,3 +343,128 @@ def test_project_vault_does_not_reuse_an_unfinished_transaction_journal(
     assert operation_ids[0] != operation_ids[1]
     assert kernel.operation_dir(tmp_path, operation_ids[0]).is_dir()
     assert not kernel.operation_dir(tmp_path, operation_ids[1]).exists()
+
+
+def _write_ref_card(
+    target: Path,
+    name: str,
+    uuid_suffix: str,
+    *,
+    title: str,
+    category: str,
+    refs: list[str],
+    extra_frontmatter: list[str] | None = None,
+) -> None:
+    """A card with explicit refs and no shared tags, so only refs can link it."""
+    path = target / "memory" / "cards" / f"{name}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "---",
+                f"id: card-00000000-0000-4000-8000-{uuid_suffix}",
+                f"title: {title}",
+                f"category: {category}",
+                "tags: []",
+                "fresh_until: 2099-01-01",
+                "last_reviewed: 2026-08-14",
+                "source_harness: codex",
+                f"refs: {json.dumps(refs)}",
+                *(extra_frontmatter or []),
+                "---",
+                f"{title} body.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_project_vault_resolves_uppercase_card_id_references(tmp_path: Path, vault: Path, capsys) -> None:
+    # Regression: an un-normalized CARD-... ref validated but never resolved (#934 review).
+    _write_ref_card(
+        tmp_path,
+        "alpha",
+        "00000000000a",
+        title="Alpha",
+        category="ops-a",
+        refs=["CARD-00000000-0000-4000-8000-00000000000B"],
+    )
+    _write_ref_card(tmp_path, "beta", "00000000000b", title="Beta", category="ops-b", refs=[])
+
+    _project(tmp_path, vault, capsys)
+
+    text = (vault / "Brigade Memory" / "Cards" / "Alpha.md").read_text(encoding="utf-8")
+    assert "[[Cards/Beta|Beta]]" in text
+
+
+def test_project_vault_resolves_bare_legacy_alias_references(tmp_path: Path, vault: Path, capsys) -> None:
+    # Regression: bare stem/topic refs were dropped before reaching the alias index (#931).
+    _write_ref_card(tmp_path, "alpha", "00000000000a", title="Alpha", category="ops-a", refs=["beta"])
+    _write_ref_card(
+        tmp_path,
+        "beta",
+        "00000000000b",
+        title="Beta",
+        category="ops-b",
+        refs=["legacy-rollout-topic"],
+    )
+    _write_ref_card(
+        tmp_path,
+        "gamma",
+        "00000000000c",
+        title="Gamma",
+        category="ops-c",
+        refs=[],
+        extra_frontmatter=["topic: legacy-rollout-topic"],
+    )
+
+    _project(tmp_path, vault, capsys)
+
+    cards = vault / "Brigade Memory" / "Cards"
+    assert "[[Cards/Beta|Beta]]" in (cards / "Alpha.md").read_text(encoding="utf-8")
+    beta = (cards / "Beta.md").read_text(encoding="utf-8")
+    assert "[[Cards/Gamma|Gamma]]" in beta
+
+
+def test_project_vault_neutralizes_colliding_dual_read_keys(tmp_path: Path, vault: Path, capsys) -> None:
+    # Regression: an alias that equals another record's canonical path must not silently
+    # overwrite the index and mis-link (#867 deterministic collision detection).
+    _write_ref_card(
+        tmp_path,
+        "alpha",
+        "00000000000a",
+        title="Alpha",
+        category="ops-a",
+        refs=[],
+        extra_frontmatter=["topic: memory/cards/beta.md"],
+    )
+    _write_ref_card(tmp_path, "beta", "00000000000b", title="Beta", category="ops-b", refs=[])
+    _write_ref_card(tmp_path, "gamma", "00000000000c", title="Gamma", category="ops-c", refs=["memory/cards/beta.md"])
+
+    _project(tmp_path, vault, capsys)
+
+    gamma = (vault / "Brigade Memory" / "Cards" / "Gamma.md").read_text(encoding="utf-8")
+    assert "[[" not in gamma
+
+
+def test_project_vault_emits_alias_frontmatter_for_rename_resolution(tmp_path: Path, vault: Path, capsys) -> None:
+    # aliases: frontmatter lets Obsidian resolve [[old-stem]] links across renames (#931).
+    _write_ref_card(
+        tmp_path,
+        "alpha",
+        "00000000000a",
+        title="Alpha",
+        category="ops-a",
+        refs=[],
+        extra_frontmatter=["topic: legacy-rollout-topic"],
+    )
+
+    _project(tmp_path, vault, capsys)
+
+    text = (vault / "Brigade Memory" / "Cards" / "Alpha.md").read_text(encoding="utf-8")
+    assert "aliases:" in text
+    assert "  - memory/cards/alpha.md" in text
+    assert "  - alpha" in text
+    assert "  - legacy-rollout-topic" in text
+    assert "  - card-00000000-0000-4000-8000-00000000000a" not in text

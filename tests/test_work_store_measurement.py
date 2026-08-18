@@ -77,7 +77,7 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
     )
     assert report["issue"] == 846
     assert report["slice"] == "R3"
-    assert report["protocol_version"] == 3
+    assert report["protocol_version"] == 4
     assert report["kind"] == "work-store-characterization"
     assert report["anonymous_metrics"] == "disabled_in_harness"
     assert {"environment", "fixtures", "results", "decision", "capability_notes"} <= set(report)
@@ -107,7 +107,19 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
         assert result["restart_recovery"]["status"] == "measured"
         assert result["restart_recovery"]["pass"] is True
         assert result["schema_version_policy"]["status"] == "measured"
-        assert result["schema_version_policy"]["future_version_rejected"] is False
+        # Protocol 4: fail-closed. The v102 probe must reject, not coerce.
+        assert result["schema_version_policy"]["future_version_rejected"] is True
+        assert result["schema_version_policy"]["future_version_bytes_unchanged"] is True
+        assert result["schema_version_policy"]["future_version_reason"] == "unsupported_ledger_version"
+        assert result["schema_version_policy"]["future_version_exit_code"] == 2
+        assert result["schema_version_policy"]["future_version_clean_error"] is True
+        assert result["schema_version_policy"]["observed_policy"] == "fail_closed_unsupported_ledger_version"
+        assert result["schema_version_policy"]["pass"] is True
+        assert result["schema_version_policy"]["downgrade_rejected"] is False
+        downgrade_key = (
+            "downgrade_coerced_on_read" if result["shape"] == "json_ledger" else "downgrade_coerced_on_export"
+        )
+        assert result["schema_version_policy"][downgrade_key] is True
         assert result["backup_restore"]["status"] == "measured"
         assert result["backup_restore"]["pass"] is True
         assert isinstance(result["backup_restore"]["backup_time_ns"], int)
@@ -124,6 +136,10 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
         assert result["claim_race"]["exit_13_count"] == 1
 
     json_result = next(item for item in report["results"] if item["shape"] == "json_ledger")
+    assert json_result["schema_version_policy"]["future_version_after_read"] is None
+    assert json_result["schema_version_policy"]["future_version_coerced_on_read"] is False
+    assert json_result["schema_version_policy"]["future_version_cli_exit_code"] == 2
+    assert json_result["schema_version_policy"]["future_version_written"] == 102
     assert json_result["guard_and_empty_filter"]["status"] == "measured"
     assert json_result["guard_and_empty_filter"]["pass"] is True
     assert json_result["guard_and_empty_filter"]["if_actor_mismatch"]["pass"] is True
@@ -147,6 +163,9 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
     assert git_history["synthetic_tracked_history"]["deleted_secret_retained_in_history"] is True
     assert git_history["pass"] is True
     sqlite_result = next(item for item in report["results"] if item["shape"] == "sqlite_wal")
+    assert sqlite_result["schema_version_policy"]["future_version_after_export"] is None
+    assert sqlite_result["schema_version_policy"]["future_version_coerced_on_export"] is False
+    assert sqlite_result["schema_version_policy"]["future_version_written"] == 102
     assert sqlite_result["guard_and_empty_filter"]["status"] == "measured"
     assert sqlite_result["guard_and_empty_filter"]["pass"] is True
     assert sqlite_result["guard_and_empty_filter"]["claim_cleanup"] == {"item_revision": 2, "pass": True}
@@ -162,6 +181,35 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
     assert sqlite_result["secret_history_handling"]["git_history"]["status"] == "unavailable"
     assert "scanned_store_path" in sqlite_result["metrics_state"]
     assert sqlite_result["metrics_state"]["metrics_artifacts"] == []
+
+
+def test_schema_version_policy_rejects_future_version_cleanly(tmp_path):
+    """v102 probe records fail-closed rejection: clean error, rc=2, lossless."""
+    module = _load_module()
+    ledger = module.build_fixture("chain_50")
+    json_policy = module._json_schema_version_policy(tmp_path, ledger)
+    assert json_policy["pass"] is True
+    assert json_policy["future_version_rejected"] is True
+    assert json_policy["future_version_written"] == 102
+    assert json_policy["future_version_after_read"] is None
+    assert json_policy["future_version_coerced_on_read"] is False
+    assert json_policy["future_version_bytes_unchanged"] is True
+    assert json_policy["future_version_reason"] == "unsupported_ledger_version"
+    assert json_policy["future_version_exit_code"] == 2
+    assert json_policy["future_version_cli_exit_code"] == 2
+    assert json_policy["future_version_clean_error"] is True
+    assert json_policy["downgrade_coerced_on_read"] is True
+    sqlite_policy = module._sqlite_schema_version_policy(tmp_path, ledger)
+    assert sqlite_policy["pass"] is True
+    assert sqlite_policy["future_version_rejected"] is True
+    assert sqlite_policy["future_version_written"] == 102
+    assert sqlite_policy["future_version_after_export"] is None
+    assert sqlite_policy["future_version_coerced_on_export"] is False
+    assert sqlite_policy["future_version_bytes_unchanged"] is True
+    assert sqlite_policy["future_version_reason"] == "unsupported_ledger_version"
+    assert sqlite_policy["future_version_exit_code"] == 2
+    assert sqlite_policy["future_version_clean_error"] is True
+    assert sqlite_policy["downgrade_coerced_on_export"] is True
 
 
 def test_sqlite_metrics_restores_env_and_scans_store(tmp_path, monkeypatch):

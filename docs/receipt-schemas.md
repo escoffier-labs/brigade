@@ -872,7 +872,8 @@ authoritative artifacts are never modified.
 Each entry in `runs` carries browser-safe summary fields only: `run_id` (the
 run directory name, never an absolute path), `status`, bounded `task`,
 `started_at`, `finished_at`, `duration_seconds`, `failure_phase`, `mode`
-(`normal` / `read-only`, with `, dry-run` appended), and `resume_available`.
+(`normal` / `read-only`, with `, dry-run` appended), `resume_available`, and
+optional `parent_run_id` when the run is a durable child of another run.
 Invalid run directories are counted in `skipped_invalid` and skipped.
 
 ### `brigade.run-detail.v1` — `brigade runs show <run> --json`, `brigade runs latest --json`
@@ -894,7 +895,9 @@ Both commands share one serializer:
 
 - `run`: identifier, status, bounded task, mode, timestamps, duration,
   `failure` (`phase` / `kind` / bounded `detail`), bounded `error`,
-  `suspected_noop`, and `resume_available`.
+  `suspected_noop`, `resume_available`, and optional `lineage`
+  (`kind`, `parent_run_id`, `branch_point_event_id`, `shared_prefix`)
+  when the run is a durable child.
 - `roster`: orchestrator, worker limits, allowed models, and per-seat `cli`,
   `model`, `reasoning`, bounded `role`, and `timeout_seconds`.
 - `plan`: worker `assignments` with stage, worker, and bounded task.

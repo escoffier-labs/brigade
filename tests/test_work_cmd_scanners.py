@@ -719,6 +719,74 @@ conflict_window = "02:00-02:10"
     assert metadata["scanner_output_path_snapshot"]["exists"] is True
 
 
+def test_scanners_run_releases_directory_authority_when_import_publication_raises(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _init_git_repo(tmp_path)
+    script = tmp_path / "scanner.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+path = Path.cwd() / ".brigade" / "scanner-imports.jsonl"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps({"kind": "task", "source": "repo-scan", "text": "Review generated finding"}) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    prior_keys = set(scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES)
+    captured_keys: list[int] = []
+    captured_fds: list[tuple[int, int]] = []
+
+    def fail_publication(*_args: object, **_kwargs: object) -> None:
+        authorities = scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES
+        retained = {key: authority for key, authority in authorities.items() if key not in prior_keys}
+        assert retained, "expected retained scanner-run directory authority"
+        for key, authority in retained.items():
+            captured_keys.append(key)
+            captured_fds.append((authority.root, authority.directory))
+            os.fstat(authority.root)
+            os.fstat(authority.directory)
+        raise RuntimeError("forced import proof publication failure")
+
+    monkeypatch.setattr(scanners_mod.ledger_mod, "_append_import_records", fail_publication)
+
+    with pytest.raises(RuntimeError, match="forced import proof publication failure"):
+        scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="repo-scan", ingest_output=True)
+
+    assert captured_keys
+    assert captured_fds
+    remaining = scanners_mod._SCANNER_RUN_DIRECTORY_AUTHORITIES
+    assert set(remaining) == prior_keys
+    for key in captured_keys:
+        assert key not in remaining
+    for root, directory in captured_fds:
+        with pytest.raises(OSError) as raised:
+            os.fstat(root)
+        assert raised.value.errno == errno.EBADF
+        with pytest.raises(OSError) as raised:
+            os.fstat(directory)
+        assert raised.value.errno == errno.EBADF
+
+
 def test_work_scanners_ingest_output_sanitizes_hostile_records_and_owns_identity(tmp_path, capsys):
     _init_git_repo(tmp_path)
     script = tmp_path / "scanner.py"
@@ -2866,6 +2934,265 @@ def test_scanner_stamp_discards_staged_receipt_proof_when_inbox_rewrite_fails(tm
         == []
     )
     assert "self_import_proofs" not in run
+
+
+def test_scanner_child_environment_omits_home_and_xdg_data_home() -> None:
+    from brigade import component_paths
+    from brigade.work_cmd import scanners as scanners_mod
+
+    with scanners_mod._scanner_child_environment_sandbox() as env:
+        real_root = component_paths.data_root()
+        child_home = env["HOME"]
+        child_data = env["XDG_DATA_HOME"]
+        assert child_home != os.environ.get("HOME")
+        assert child_data != os.environ.get("XDG_DATA_HOME")
+        assert child_data != real_root
+        assert not child_home.startswith(real_root)
+        assert not child_data.startswith(real_root)
+        assert "LOCALAPPDATA" not in env
+        if "PATH" in os.environ:
+            assert env.get("PATH") == os.environ["PATH"]
+        assert component_paths.data_root(env=env) != real_root
+
+
+def test_scanner_child_environment_sandbox_is_removed_after_use() -> None:
+    from brigade.work_cmd import scanners as scanners_mod
+
+    sandboxes = []
+    for _ in range(3):
+        with scanners_mod._scanner_child_environment_sandbox() as env:
+            sandbox = Path(env["HOME"])
+            assert sandbox.is_dir()
+            sandboxes.append(sandbox)
+        assert not sandbox.exists()
+
+    assert [sandbox for sandbox in sandboxes if sandbox.exists()] == []
+
+
+def test_scanner_child_environment_sandbox_is_removed_when_the_child_raises() -> None:
+    from brigade.work_cmd import scanners as scanners_mod
+
+    captured: list[Path] = []
+    with pytest.raises(RuntimeError, match="child blew up"):
+        with scanners_mod._scanner_child_environment_sandbox() as env:
+            captured.append(Path(env["HOME"]))
+            raise RuntimeError("child blew up")
+
+    assert captured and not captured[0].exists()
+
+
+def test_scanner_child_environment_passes_through_documented_allowlist(monkeypatch) -> None:
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setenv("GH_TOKEN", "token-value")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/run/agent.sock")
+    monkeypatch.setenv("USER", "operator")
+    monkeypatch.setenv("LOGNAME", "operator")
+    monkeypatch.setenv("TMPDIR", "/scratch")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+
+    with scanners_mod._scanner_child_environment_sandbox() as env:
+        assert env["GH_TOKEN"] == "token-value"
+        assert env["SSH_AUTH_SOCK"] == "/run/agent.sock"
+        assert env["USER"] == "operator"
+        assert env["LOGNAME"] == "operator"
+        assert env["TMPDIR"] == "/scratch"
+        assert env["HTTPS_PROXY"] == "http://proxy.invalid:3128"
+        # The scrub still holds for everything that can reach the authority store.
+        assert env["HOME"] != os.environ["HOME"]
+        assert env["XDG_DATA_HOME"] != os.environ.get("XDG_DATA_HOME")
+
+
+def test_scanner_child_environment_points_gh_at_the_operator_config_dir(tmp_path, monkeypatch) -> None:
+    from brigade.work_cmd import scanners as scanners_mod
+
+    config_home = tmp_path / "config"
+    (config_home / "gh").mkdir(parents=True)
+    (config_home / "gh" / "hosts.yml").write_text("github.com:\n  oauth_token: t\n")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+
+    with scanners_mod._scanner_child_environment_sandbox() as env:
+        assert env["GH_CONFIG_DIR"] == str(config_home / "gh")
+        assert Path(env["GH_CONFIG_DIR"], "hosts.yml").is_file()
+        # The gh config dir carries no Brigade authority: the store stays sandboxed.
+        assert env["XDG_CONFIG_HOME"] != str(config_home)
+        assert env["XDG_DATA_HOME"] != os.environ.get("XDG_DATA_HOME")
+
+
+def test_scanner_child_sandbox_seeds_the_parent_directory_bindings(tmp_path) -> None:
+    """A Brigade child under the sandbox validates directories the parent created and bound."""
+    from brigade.work_cmd import ledger as ledger_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanners_mod._prebind_child_visible_directories(tmp_path)
+    real_path = ledger_mod._directory_authority_store_path(tmp_path)
+    _path, parent_payload = ledger_mod._read_external_directory_authority(tmp_path)
+    assert isinstance(parent_payload, dict)
+    assert ".brigade/work/imports/proofs" in parent_payload["directories"]
+
+    with scanners_mod._scanner_child_environment_sandbox(tmp_path) as env:
+        child_path = ledger_mod._directory_authority_store_path(tmp_path, env=env)
+        assert child_path != real_path
+        assert str(child_path).startswith(env["XDG_DATA_HOME"])
+        assert json.loads(child_path.read_text())["directories"] == parent_payload["directories"]
+        sandbox = Path(env["HOME"])
+
+    # The seeded copy dies with the sandbox; the operator store is untouched.
+    assert not sandbox.exists()
+    assert json.loads(real_path.read_text())["directories"] == parent_payload["directories"]
+
+
+def _stub_gh_bin(directory: Path) -> Path:
+    """A `gh` that fails the way the real one does when it cannot authenticate."""
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "gh"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys\n"
+        "token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')\n"
+        "config = os.environ.get('GH_CONFIG_DIR')\n"
+        "hosts = pathlib.Path(config, 'hosts.yml') if config else None\n"
+        "if not token and not (hosts and hosts.is_file()):\n"
+        "    sys.stderr.write('gh: To get started with GitHub CLI, please run: gh auth login\\n')\n"
+        "    sys.exit(4)\n"
+        "json.dump({'authenticated': True, 'argv': sys.argv[1:]}, sys.stdout)\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_shipped_scanner_child_can_authenticate_gh_under_the_scrubbed_env(tmp_path, monkeypatch) -> None:
+    """The env scrub must not break a scanner that shells out to `gh`."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    bin_dir = tmp_path / "bin"
+    _stub_gh_bin(bin_dir)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("GH_TOKEN", "token-value")
+    scanner = {
+        "id": "gh-probe",
+        "source": "gh-probe",
+        "command": "gh issue list --json number",
+        "enabled": True,
+        "timeout": 60,
+    }
+
+    receipt = scanners_mod._scanner_run_one(tmp_path, scanner, force=True)
+
+    assert receipt["exit_code"] == 0, receipt.get("stderr_summary")
+    assert receipt["status"] == "completed"
+    assert "authenticated" in receipt["stdout_summary"]
+
+
+def test_shipped_scanner_child_gh_fails_without_credentials(tmp_path, monkeypatch) -> None:
+    """Control: the same probe fails when no credential reaches the child."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    bin_dir = tmp_path / "bin"
+    _stub_gh_bin(bin_dir)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "absent-gh-config"))
+    scanner = {
+        "id": "gh-probe",
+        "source": "gh-probe",
+        "command": "gh issue list --json number",
+        "enabled": True,
+        "timeout": 60,
+    }
+
+    receipt = scanners_mod._scanner_run_one(tmp_path, scanner, force=True)
+
+    assert receipt["exit_code"] == 4
+    assert "gh auth login" in receipt["stderr_summary"]
+
+
+def test_shipped_handoff_ingest_scanner_completes_under_the_scrubbed_env(tmp_path, monkeypatch) -> None:
+    """Run the shipped, enabled-by-default scanner end to end with the scrubbed child env."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    bin_dir = tmp_path / "bin"
+    _stub_gh_bin(bin_dir)
+    monkeypatch.setenv("GH_TOKEN", "token-value")
+    venv_bin = Path(sys.executable).parent
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{venv_bin}{os.pathsep}{os.environ['PATH']}")
+    scanner = _builtin_scanner("handoff-ingest")
+    assert scanner["command"] == "brigade handoff sync-issues --json"
+    assert scanner["enabled"] is True
+
+    receipt = scanners_mod._scanner_run_one(tmp_path, scanner, force=True)
+
+    assert receipt["exit_code"] == 0, receipt.get("stderr_summary")
+    assert receipt["status"] == "completed"
+
+
+def test_scanner_stamp_inbox_probe_treats_not_a_directory_as_missing(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanner = _builtin_scanner("handoff-ingest")
+    run = _verified_builtin_scanner_run(scanner)
+    emitted = work_cmd.ledger._make_import("probe inbox", kind="finding", source="handoff-ingest")
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text(json.dumps(emitted) + "\n")
+    original = scanners_mod._open_scanner_inbox
+    calls = {"n": 0}
+
+    def raise_on_probe(target, flags, *, create=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return original(target, flags, create=create)
+        raise NotADirectoryError(errno.ENOTDIR, "Not a directory", ".brigade")
+
+    monkeypatch.setattr(scanners_mod, "_open_scanner_inbox", raise_on_probe)
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner=scanner,
+        run=run,
+        before_ids=set(),
+        before_imports=[],
+        before_raw=b"",
+    )
+
+    assert calls["n"] >= 2
+    assert stamped
+
+
+def test_scanner_stamp_binding_restore_failure_fails_closed(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanner = _builtin_scanner("handoff-ingest")
+    run = _verified_builtin_scanner_run(scanner)
+    emitted = work_cmd.ledger._make_import("binding restore failure", kind="finding", source="handoff-ingest")
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    raw = json.dumps(emitted).encode() + b"\n"
+    inbox.write_bytes(raw)
+
+    def fail_proof(*_args, **_kwargs):
+        raise OSError("proof persistence failed")
+
+    def fail_restore(*_args, **_kwargs):
+        raise OSError("file authority restore failed")
+
+    monkeypatch.setattr(work_cmd.ledger, "_write_persisted_import_proofs", fail_proof)
+    monkeypatch.setattr(work_cmd.ledger, "_restore_external_file_authorities", fail_restore)
+
+    with pytest.raises(OSError, match="scanner import binding rollback could not restore"):
+        scanners_mod._scanner_stamp_new_imports(
+            target=tmp_path,
+            scanner=scanner,
+            run=run,
+            before_ids=set(),
+            before_imports=[],
+            before_raw=b"",
+        )
+
+    assert inbox.read_bytes() == raw
 
 
 def test_scanner_stamp_surfaces_failed_proof_rollback_and_restores_inbox(tmp_path, monkeypatch):

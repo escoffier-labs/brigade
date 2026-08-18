@@ -1004,3 +1004,328 @@ def test_operator_cancelled_live_ctrl_c_kind_is_not_infrastructure():
         )
         == 0
     )
+
+
+class _EnforceableAdapter:
+    """Test adapter exposing a reliable pre-call reservation boundary (#884)."""
+
+    def __init__(self, dimensions):
+        self._dimensions = frozenset(dimensions)
+        self.provider_calls = 0
+
+    def budget_enforceable_dimensions(self):
+        return self._dimensions
+
+    def call_provider(self):
+        self.provider_calls += 1
+
+
+class _ObservationOnlyAdapter:
+    """Adapter without a reservation boundary: observation-only (#864)."""
+
+
+def test_adapter_capability_contract_defaults_to_observation_only():
+    assert run_budget.adapter_enforceable_dimensions(None) == frozenset()
+    assert run_budget.adapter_enforceable_dimensions(_ObservationOnlyAdapter()) == frozenset()
+    assert run_budget.adapter_enforceable_dimensions(object()) == frozenset()
+    supported = run_budget.adapter_enforceable_dimensions(_EnforceableAdapter({"model_call_count", "tool_call_count"}))
+    assert supported == frozenset({"model_call_count", "tool_call_count"})
+
+
+def test_adapter_capability_contract_fails_closed_on_misuse():
+    with pytest.raises(run_budget.BudgetCompatibilityError) as exc:
+        run_budget.adapter_enforceable_dimensions(_EnforceableAdapter({"child_frame_count"}))
+    assert exc.value.code == "unknown_dimension"
+
+    with pytest.raises(run_budget.BudgetCompatibilityError) as exc:
+        run_budget.adapter_enforceable_dimensions(_EnforceableAdapter({"wall_clock_seconds"}))
+    assert exc.value.code == "schema_incompatible"
+
+    with pytest.raises(run_budget.BudgetCompatibilityError):
+        run_budget.adapter_enforceable_dimensions(_EnforceableAdapter(["model_call_count", 7]))
+
+    class BadAttr:
+        budget_enforceable_dimensions = "model_call_count"
+
+    with pytest.raises(run_budget.BudgetCompatibilityError):
+        run_budget.adapter_enforceable_dimensions(BadAttr())
+
+    class BadReturn:
+        def budget_enforceable_dimensions(self):
+            return "model_call_count"
+
+    with pytest.raises(run_budget.BudgetCompatibilityError):
+        run_budget.adapter_enforceable_dimensions(BadReturn())
+
+
+def test_adapter_enforced_reservation_denies_before_external_call():
+    recorded: list[tuple[str, dict, str]] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        recorded.append((event_type, payload, idempotency_key))
+
+    declaration = run_budget.RunBudgetDeclaration(observed_caps={"model_call_count": 2}, threshold_pct=50)
+    coordinator = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    adapter = _EnforceableAdapter({"model_call_count"})
+    assert coordinator.enforcement_mode(adapter, "model_call_count") == "enforceable"
+
+    # Enforceable units are reserved before the external call starts.
+    for request_id in ("reserve-1", "reserve-2"):
+        decision = coordinator.reserve_adapter_units(
+            adapter=adapter, dimension="model_call_count", request_id=request_id
+        )
+        assert decision.allowed is True
+        adapter.call_provider()  # external work only after the grant
+    assert adapter.provider_calls == 2
+    assert coordinator.projection.used["model_call_count"] == 2
+
+    with pytest.raises(run_budget.BudgetPolicyError) as denied:
+        coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="reserve-3")
+    assert denied.value.exhausted is True
+    assert denied.value.dimension == "model_call_count"
+    assert denied.value.code == "budget_exhausted"
+    # A denied reservation starts no provider work.
+    assert adapter.provider_calls == 2
+
+    # The denial records the existing bounded budget lifecycle facts.
+    types = [event_type for event_type, _payload, _key in recorded]
+    assert "run_budget.threshold_reached" in types
+    assert "run_budget.exhausted" in types
+    assert "run_budget.reservation_denied" in types
+    denied_payload = next(payload for etype, payload, _ in recorded if etype == "run_budget.reservation_denied")
+    assert denied_payload["mode"] == "enforceable"
+    assert denied_payload["dimension"] == "model_call_count"
+    assert denied_payload["request_id"] == "reserve-3"
+    threshold_payload = next(payload for etype, payload, _ in recorded if etype == "run_budget.threshold_reached")
+    assert threshold_payload["mode"] == "enforceable"
+
+    # Grants are journaled as estimated usage, distinct from provider reconcile.
+    grants = [payload for etype, payload, _ in recorded if etype == "run_budget.usage_reconciled"]
+    assert [(p["usage_source"], p["used"], p["reason_class"]) for p in grants] == [
+        ("estimated", 1, "reservation_grant"),
+        ("estimated", 2, "reservation_grant"),
+    ]
+
+    # Replaying a previously denied identity stays denied without new work.
+    with pytest.raises(run_budget.BudgetPolicyError):
+        coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="reserve-3")
+    assert adapter.provider_calls == 2
+
+
+def test_adapter_reservation_recovery_rebuilds_without_double_charge():
+    journal: list[dict] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        journal.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+
+    declaration = run_budget.RunBudgetDeclaration(observed_caps={"tool_call_count": 3})
+    coordinator = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    adapter = _EnforceableAdapter({"tool_call_count"})
+    coordinator.reserve_adapter_units(adapter=adapter, dimension="tool_call_count", request_id="call-1", units=2)
+
+    # In-process replay of the same stable identity does not double-charge.
+    replay = coordinator.reserve_adapter_units(
+        adapter=adapter, dimension="tool_call_count", request_id="call-1", units=2
+    )
+    assert replay.allowed is True
+    assert replay.replayed is True
+    assert coordinator.projection.used["tool_call_count"] == 2
+    assert len(journal) == 1
+
+    # Restart: recovery rebuilds reservations and usage from the journal.
+    recovered = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    recovered.reload(journal)
+    assert recovered.projection.used["tool_call_count"] == 2
+    replayed = recovered.reserve_adapter_units(
+        adapter=adapter, dimension="tool_call_count", request_id="call-1", units=2
+    )
+    assert replayed.allowed is True
+    assert replayed.replayed is True
+    assert recovered.projection.used["tool_call_count"] == 2
+    assert len(journal) == 1
+
+    # Remaining capacity is still reservable, then the ceiling holds.
+    recovered.reserve_adapter_units(adapter=adapter, dimension="tool_call_count", request_id="call-2")
+    with pytest.raises(run_budget.BudgetPolicyError) as denied:
+        recovered.reserve_adapter_units(adapter=adapter, dimension="tool_call_count", request_id="call-3")
+    assert denied.value.exhausted is True
+    assert recovered.projection.used["tool_call_count"] == 3
+
+
+def test_adapter_reservation_keeps_estimated_and_provider_usage_distinct_after_restart():
+    journal: list[dict] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        journal.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+
+    declaration = run_budget.RunBudgetDeclaration(observed_caps={"input_tokens": 100})
+    coordinator = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    adapter = _EnforceableAdapter({"input_tokens"})
+    coordinator.reserve_adapter_units(adapter=adapter, dimension="input_tokens", request_id="tok-1", units=40)
+    coordinator.reconcile_usage(
+        dimension="input_tokens",
+        usage_source="provider_reconciled",
+        used=35,
+        request_id="tok-1",
+        estimated_used=40,
+        provider_used=35,
+    )
+
+    recovered = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    recovered.reload(journal)
+    assert recovered.projection.estimated_used["input_tokens"] == 40
+    assert recovered.projection.provider_used["input_tokens"] == 35
+    assert recovered.projection.used["input_tokens"] == 35
+
+    # The next reservation charges against reconciled actuals, not the
+    # estimate: 35 + 65 == 100 fits the ceiling without double-charging.
+    decision = recovered.reserve_adapter_units(adapter=adapter, dimension="input_tokens", request_id="tok-2", units=65)
+    assert decision.allowed is True
+    with pytest.raises(run_budget.BudgetPolicyError):
+        recovered.reserve_adapter_units(adapter=adapter, dimension="input_tokens", request_id="tok-3")
+
+
+def test_observation_only_adapter_retains_observed_behavior():
+    journal: list[dict] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        journal.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+
+    declaration = run_budget.RunBudgetDeclaration(observed_caps={"model_call_count": 1})
+    coordinator = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    adapter = _ObservationOnlyAdapter()
+    assert coordinator.enforcement_mode(adapter, "model_call_count") == "observed"
+
+    with pytest.raises(run_budget.BudgetError) as exc:
+        coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="m-1")
+    assert exc.value.code == "reservation_unsupported"
+
+    # Observation-only reporting still flows and never hard-gates, even over cap.
+    coordinator.reconcile_usage(
+        dimension="model_call_count",
+        usage_source="estimated",
+        used=5,
+        request_id="obs-1",
+        estimated_used=5,
+    )
+    assert coordinator.projection.used["model_call_count"] == 5
+    assert not coordinator.projection.exhausted_dimensions
+    assert [event["event_type"] for event in journal] == ["run_budget.usage_reconciled"]
+
+
+def test_adapter_reservation_requires_declared_cap_and_valid_inputs():
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=run_budget.RunBudgetDeclaration(),
+        append_event=lambda *_args: None,
+    )
+    adapter = _EnforceableAdapter({"model_call_count"})
+
+    # No declared cap: unbounded, allowed without charging usage (#864 rule).
+    assert coordinator.enforcement_mode(adapter, "model_call_count") == "observed"
+    decision = coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="u-1")
+    assert decision.allowed is True
+    assert decision.events == ()
+    assert coordinator.projection.used.get("model_call_count", 0) == 0
+
+    # Coordinator-owned and unknown dimensions fail closed.
+    with pytest.raises(run_budget.BudgetError) as exc:
+        coordinator.reserve_adapter_units(adapter=adapter, dimension="wall_clock_seconds", request_id="w-1")
+    assert exc.value.code == "reservation_invalid"
+    with pytest.raises(run_budget.BudgetCompatibilityError):
+        coordinator.reserve_adapter_units(adapter=adapter, dimension="child_frame_count", request_id="c-1")
+
+    with pytest.raises(run_budget.BudgetError):
+        coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="u-2", units=0)
+    with pytest.raises(run_budget.BudgetError):
+        coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="")
+
+
+def test_adapter_reservation_identity_is_scoped_to_dimension():
+    journal: list[dict] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        journal.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+
+    declaration = run_budget.RunBudgetDeclaration(
+        observed_caps={"model_call_count": 2, "tool_call_count": 2},
+    )
+    coordinator = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    adapter = _EnforceableAdapter({"model_call_count", "tool_call_count"})
+
+    first = coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="turn-1")
+    assert first.allowed is True
+    assert first.replayed is False
+    assert coordinator.projection.used["model_call_count"] == 1
+    assert coordinator.projection.used.get("tool_call_count", 0) == 0
+
+    # Same request_id on a different dimension is a new reservation, not a replay.
+    second = coordinator.reserve_adapter_units(adapter=adapter, dimension="tool_call_count", request_id="turn-1")
+    assert second.allowed is True
+    assert second.replayed is False
+    assert coordinator.projection.used["tool_call_count"] == 1
+    assert coordinator.projection.used["model_call_count"] == 1
+
+    replay = coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="turn-1")
+    assert replay.replayed is True
+    assert coordinator.projection.used["model_call_count"] == 1
+    assert coordinator.projection.used["tool_call_count"] == 1
+
+
+def test_adapter_uncapped_reservation_does_not_suppress_capped_dimension():
+    journal: list[dict] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        journal.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+
+    declaration = run_budget.RunBudgetDeclaration(observed_caps={"tool_call_count": 2})
+    coordinator = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    adapter = _EnforceableAdapter({"model_call_count", "tool_call_count"})
+
+    uncapped = coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="turn-1")
+    assert uncapped.allowed is True
+    assert uncapped.replayed is False
+    assert uncapped.events == ()
+    assert coordinator.projection.used.get("model_call_count", 0) == 0
+    assert coordinator.projection.used.get("tool_call_count", 0) == 0
+
+    # Uncapped grant must not turn a later same-id reservation on a capped
+    # dimension into a no-op replay.
+    capped = coordinator.reserve_adapter_units(adapter=adapter, dimension="tool_call_count", request_id="turn-1")
+    assert capped.allowed is True
+    assert capped.replayed is False
+    assert coordinator.projection.used["tool_call_count"] == 1
+    assert any(event["payload"].get("reason_class") == "reservation_grant" for event in journal)
+
+
+def test_adapter_reload_after_reconcile_usage_does_not_invent_grants():
+    journal: list[dict] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        journal.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+
+    declaration = run_budget.RunBudgetDeclaration(observed_caps={"model_call_count": 3})
+    coordinator = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    adapter = _EnforceableAdapter({"model_call_count"})
+
+    coordinator.reconcile_usage(
+        dimension="model_call_count",
+        usage_source="estimated",
+        used=1,
+        request_id="obs-1",
+        estimated_used=1,
+    )
+    journal_after_reconcile = [dict(event) for event in journal]
+    assert journal_after_reconcile[0]["payload"]["reason_class"] == "usage_reconcile"
+
+    live = coordinator.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="obs-1")
+    assert live.allowed is True
+    assert live.replayed is False
+    assert coordinator.projection.used["model_call_count"] == 2
+
+    recovered = run_budget.BudgetCoordinator(declaration=declaration, append_event=append_event)
+    recovered.reload(journal_after_reconcile)
+    assert recovered.projection.used["model_call_count"] == 1
+    restarted = recovered.reserve_adapter_units(adapter=adapter, dimension="model_call_count", request_id="obs-1")
+    assert restarted.allowed is True
+    assert restarted.replayed is False
+    assert recovered.projection.used["model_call_count"] == 2

@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import __version__
-from . import component_bins, proc, work_cmd
+from . import component_bins, proc, trust_gate, work_cmd
 from .localio import (
     read_json_dict as _read_json,
     stable_hash as _stable_hash,
@@ -24,6 +24,12 @@ from .localio import (
 OK = "ok"
 WARN = "warn"
 CONTEXT_KINDS = {"task", "repo", "release", "tool-use"}
+
+
+def _context_import_allowed(item: dict[str, Any]) -> bool:
+    return trust_gate.context_allowed(item)
+
+
 SYNC_MARKER = "brigade-context-sync:"
 SYNC_CONFIG_REL_PATH = ".brigade/context/sync-targets.json"
 CONTEXT_PACK_STALE_HOURS = 72
@@ -289,7 +295,7 @@ def _context_payload(
         "recent_review_findings": [
             work_cmd._import_summary(item)
             for item in work_cmd._read_imports(target)
-            if item.get("source") == "code-review"
+            if item.get("source") == "code-review" and _context_import_allowed(item)
         ][:10],
         "selected_tools": [{"tool_id": tool_id}] if tool_id else [],
         "excluded_private_evidence": excluded,

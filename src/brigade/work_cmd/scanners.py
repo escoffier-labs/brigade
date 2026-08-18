@@ -1,13 +1,17 @@
 """Scanner run, doctor, and health operations."""
 
 from __future__ import annotations
+import contextlib
 import errno
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from collections import Counter
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +45,162 @@ class _ScannerRunDirectoryAuthority:
 
 
 _SCANNER_RUN_DIRECTORY_AUTHORITIES: dict[int, _ScannerRunDirectoryAuthority] = {}
+_SCANNER_RUN_PUBLICATION_SNAPSHOTS: dict[int, dict[str, Any]] = {}
+
+_SCANNER_CHILD_ENV_ALLOWLIST = (
+    # Command resolution and locale.
+    "PATH",
+    "PATHEXT",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LANGUAGE",
+    "TZ",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    # Scratch space. Without these a child falls back to a system temp dir it
+    # may not be allowed to write.
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    # Identity that git and gh read directly instead of through HOME.
+    "USER",
+    "LOGNAME",
+    # Credentials the shipped scanners genuinely need. `handoff-ingest` shells
+    # out to `gh`, and git-over-ssh remotes need the agent socket.
+    "SSH_AUTH_SOCK",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_HOST",
+    "GH_CONFIG_DIR",
+    # Network egress.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+)
+
+# Sandboxed in the child so `component_paths.data_root()` can never resolve to
+# the verifier authority store. Nothing on the allowlist above may reach it.
+_SCANNER_CHILD_ENV_SANDBOXED = (
+    "HOME",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "LOCALAPPDATA",
+    "APPDATA",
+)
+
+
+def _parent_gh_config_dir() -> str | None:
+    """Resolve the operator's existing `gh` config dir, which the sandboxed HOME hides."""
+    configured = os.environ.get("GH_CONFIG_DIR")
+    if configured:
+        return configured
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    if config_home:
+        candidate = Path(config_home) / "gh"
+    else:
+        home = os.environ.get("HOME")
+        if not home:
+            return None
+        candidate = Path(home) / ".config" / "gh"
+    try:
+        if not candidate.is_dir():
+            return None
+    except OSError:
+        return None
+    return str(candidate)
+
+
+def _scanner_child_environment(sandbox: Path) -> dict[str, str]:
+    """Build the child env: an explicit allowlist plus HOME/XDG paths inside ``sandbox``.
+
+    The sandbox is what keeps `component_paths.data_root()` in the child away
+    from the verifier authority store. Everything a shipped scanner needs that
+    would otherwise be lost with HOME is passed explicitly: `gh` credentials
+    (`GH_TOKEN`/`GITHUB_TOKEN`, or `GH_CONFIG_DIR` pointed at the operator's
+    real `gh` config, which holds no Brigade authority), `SSH_AUTH_SOCK`,
+    `USER`/`LOGNAME`, `TMPDIR`, and proxy settings.
+    """
+    env = {key: value for key in _SCANNER_CHILD_ENV_ALLOWLIST if (value := os.environ.get(key))}
+    data_home = sandbox / ".local" / "share"
+    config_home = sandbox / ".config"
+    cache_home = sandbox / ".cache"
+    state_home = sandbox / ".local" / "state"
+    for directory in (data_home, config_home, cache_home, state_home):
+        directory.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(sandbox)
+    env["XDG_DATA_HOME"] = str(data_home)
+    env["XDG_CONFIG_HOME"] = str(config_home)
+    env["XDG_CACHE_HOME"] = str(cache_home)
+    env["XDG_STATE_HOME"] = str(state_home)
+    if "GH_CONFIG_DIR" not in env:
+        gh_config = _parent_gh_config_dir()
+        if gh_config is not None:
+            env["GH_CONFIG_DIR"] = gh_config
+    return env
+
+
+def _seed_child_authority_store(target: Path, env: dict[str, str]) -> None:
+    """Give a Brigade child the parent's directory bindings inside its own sandbox.
+
+    A Brigade child launched as a scanner (the shipped chat-surface and handoff
+    scanners are Brigade invocations) finds an empty store under the sandboxed
+    HOME, so it cannot validate the directories the parent already created and
+    bound. Copying the parent's record into the sandbox restores that view
+    without handing the child a path to the operator's real store, and the copy
+    is destroyed with the sandbox.
+    """
+    try:
+        _path, payload = ledger_mod._read_external_directory_authority(target)
+    except OSError:
+        return
+    if payload is None:
+        return
+    try:
+        child_path = ledger_mod._directory_authority_store_path(target, env=env)
+        ledger_mod._write_external_directory_authority(child_path, payload)
+    except OSError:
+        return
+
+
+@contextlib.contextmanager
+def _scanner_child_environment_sandbox(target: Path | None = None) -> Iterator[dict[str, str]]:
+    """Yield a child env whose sandbox directory is removed when the child exits."""
+    sandbox = Path(tempfile.mkdtemp(prefix="brigade-scanner-child-"))
+    try:
+        env = _scanner_child_environment(sandbox)
+        if target is not None:
+            _seed_child_authority_store(target, env)
+        yield env
+    finally:
+        shutil.rmtree(sandbox, ignore_errors=True)
+
+
+def _prebind_child_visible_directories(target: Path) -> None:
+    """Create and bind workspace directories before a child could create them first.
+
+    Scanner children run with a sandboxed HOME, so a directory they create is
+    bound only in their throwaway store and the verifier would later refuse it.
+    The parent creates and binds those directories up front instead, which keeps
+    #871's rule that an unbound pre-existing directory is never adopted.
+    """
+    try:
+        descriptor = ledger_mod._open_import_proof_directory(target, create=True)
+    except OSError:
+        return
+    os.close(descriptor)
 
 
 def _open_scanner_runs_directory(target: Path, *, create: bool) -> int:
@@ -115,7 +275,13 @@ def _validate_scanner_run_file(parent: int, name: str, descriptor: int) -> None:
         raise OSError("scanner run file no longer matches its held descriptor")
 
 
-def _write_scanner_run_file(authority: _ScannerRunDirectoryAuthority, name: str, data: bytes) -> None:
+def _write_scanner_run_file(
+    authority: _ScannerRunDirectoryAuthority,
+    name: str,
+    data: bytes,
+    *,
+    after_publish: Callable[[int], None] | None = None,
+) -> None:
     """Failure-atomically publish one scanner artifact below a retained run descriptor."""
     _validate_scanner_run_directory(authority)
     existing = -1
@@ -154,6 +320,8 @@ def _write_scanner_run_file(authority: _ScannerRunDirectoryAuthority, name: str,
         os.replace(temporary_name, name, src_dir_fd=authority.directory, dst_dir_fd=authority.directory)
         _validate_scanner_run_file(authority.directory, name, descriptor)
         os.fsync(authority.directory)
+        if after_publish is not None:
+            after_publish(descriptor)
     except BaseException:
         try:
             os.unlink(temporary_name, dir_fd=authority.directory)
@@ -212,18 +380,68 @@ def _restore_scanner_run_file_snapshot(
     raise OSError("scanner run artifact rollback could not restore its retained snapshot")
 
 
+def _apply_scanner_publication_snapshot(snapshot: dict[str, Any], *, owned: Sequence[str] = ()) -> None:
+    """Restore inbox, proofs, and file bindings captured before a scanner publication."""
+    target = snapshot["target"]
+    if not isinstance(target, Path):
+        raise OSError("scanner publication snapshot is missing its target")
+    proof_items = snapshot.get("proof_items")
+    owned_scopes = list(owned)
+    if isinstance(proof_items, list) and proof_items:
+        ledger_mod._remove_persisted_import_proofs(target, proof_items)
+        owned_scopes.extend(ledger_mod._persisted_import_proof_scopes(proof_items))
+    inbox = snapshot.get("inbox")
+    inbox_exists = bool(snapshot.get("inbox_exists"))
+    if isinstance(inbox, bytes):
+        _restore_scanner_inbox_bytes(target, inbox, inbox_exists)
+    files = snapshot.get("files")
+    if not isinstance(files, dict) and files is not None:
+        raise OSError("scanner publication snapshot file bindings are malformed")
+    ledger_mod._restore_external_file_authorities(target, files, owned=owned_scopes)
+
+
 def _write_scanner_run_receipt(run: dict[str, Any]) -> None:
     authority = _SCANNER_RUN_DIRECTORY_AUTHORITIES.get(id(run))
     if authority is None:
         raise OSError("scanner run directory authority is unavailable")
-    _write_scanner_run_file(
-        authority,
-        "receipt.json",
-        (json.dumps(run, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    data = (json.dumps(run, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    target_value = run.get("target")
+    target = Path(target_value) if isinstance(target_value, str) and target_value else None
+    bind = target is not None and run.get("status") == "completed" and run.get("exit_code") == 0
+    prior_files = ledger_mod._snapshot_external_file_authorities(target) if bind and target is not None else None
+
+    def after_publish(descriptor: int) -> None:
+        if not bind or target is None:
+            return
+        ledger_mod._record_verifier_owned_file(
+            target,
+            components=(".brigade", "scanners", "runs", authority.run_id, "receipt.json"),
+            descriptor=descriptor,
+            data=data,
+        )
+
+    receipt_scope = ledger_mod._directory_authority_scope(
+        (".brigade", "scanners", "runs", authority.run_id, "receipt.json")
     )
+    try:
+        _write_scanner_run_file(authority, "receipt.json", data, after_publish=after_publish)
+    except BaseException:
+        if bind and target is not None:
+            snapshot = _SCANNER_RUN_PUBLICATION_SNAPSHOTS.pop(id(run), None)
+            try:
+                if snapshot is not None:
+                    _apply_scanner_publication_snapshot(snapshot, owned=[receipt_scope])
+                else:
+                    ledger_mod._restore_external_file_authorities(target, prior_files, owned=[receipt_scope])
+            except OSError as exc:
+                raise OSError("scanner receipt binding rollback could not restore its retained snapshot") from exc
+        raise
+    else:
+        _SCANNER_RUN_PUBLICATION_SNAPSHOTS.pop(id(run), None)
 
 
 def _release_scanner_run_directory_authority(run: dict[str, Any]) -> None:
+    _SCANNER_RUN_PUBLICATION_SNAPSHOTS.pop(id(run), None)
     authority = _SCANNER_RUN_DIRECTORY_AUTHORITIES.pop(id(run), None)
     if authority is not None:
         os.close(authority.directory)
@@ -1105,6 +1323,14 @@ def _scanner_stamp_new_imports(
         staged_proof_items.append(rebuilt)
     rendered = b"".join(final_rows)
     if rendered != imports_raw:
+        before_files = ledger_mod._snapshot_external_file_authorities(target)
+        inbox_exists = True
+        try:
+            existing_inbox = _open_scanner_inbox(target, os.O_RDONLY)
+        except OSError:
+            inbox_exists = False
+        else:
+            os.close(existing_inbox)
         try:
             _write_scanner_inbox_bytes(target, rendered)
         except OSError:
@@ -1123,12 +1349,27 @@ def _scanner_stamp_new_imports(
             except BaseException:
                 _restore_scanner_inbox_snapshot_direct(target, imports_raw, exists=True)
                 raise
+            try:
+                ledger_mod._restore_external_file_authorities(
+                    target,
+                    before_files,
+                    owned=ledger_mod._persisted_import_proof_scopes(staged_proof_items),
+                )
+            except OSError as exc:
+                raise OSError("scanner import binding rollback could not restore its retained snapshot") from exc
             run["self_import"] = {
                 "created": 0,
                 "rejected": rejected + len(stamped_ids) + 1,
                 "rejection_reasons": {"provenance_stamp_failed": rejected + len(stamped_ids) + 1},
             }
             return []
+        _SCANNER_RUN_PUBLICATION_SNAPSHOTS[id(run)] = {
+            "target": target,
+            "inbox": imports_raw,
+            "inbox_exists": inbox_exists,
+            "proof_items": list(staged_proof_items),
+            "files": before_files,
+        }
         if run_proof is not None:
             for rebuilt in staged_proof_items:
                 _record_scanner_import_proof(scanner, run, rebuilt)
@@ -1362,15 +1603,18 @@ def _scanner_run_one(
         _write_scanner_run_file(authority, "stderr.log", (error + "\n").encode("utf-8"))
         _write_scanner_run_receipt(receipt)
         return receipt
+    _prebind_child_visible_directories(target)
     try:
-        completed_process = subprocess.run(
-            argv,
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            timeout=float(scanner.get("timeout") or 300),
-            shell=False,
-        )
+        with _scanner_child_environment_sandbox(target) as child_env:
+            completed_process = subprocess.run(
+                argv,
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                timeout=float(scanner.get("timeout") or 300),
+                shell=False,
+                env=child_env,
+            )
         stdout = completed_process.stdout or ""
         stderr = completed_process.stderr or ""
         _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
@@ -2032,145 +2276,149 @@ def _scanners_run_payload(
     before_counts = _scanner_import_counts(target)
     runs: list[dict[str, Any]] = []
     contexts: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for scanner in selected:
-        try:
-            before_raw = _scanner_inbox_bytes(target)
-            before_imports = _scanner_inbox_imports(target)
-        except OSError:
-            before_raw = b""
-            before_imports = []
-        before_ids = {
-            str(item.get("id")) for item in before_imports if isinstance(item, dict) and isinstance(item.get("id"), str)
-        }
-        run = _scanner_run_one(target, scanner, force=force)
-        _register_scanner_run_proof(scanner, run)
-        stamped_ids = _scanner_stamp_new_imports(
-            target=target,
-            scanner=scanner,
-            run=run,
-            before_ids=before_ids,
-            before_imports=before_imports,
-            before_raw=before_raw,
-        )
-        run["provenance_imports_stamped"] = len(stamped_ids)
-        if stamped_ids:
-            run["stamped_import_ids"] = stamped_ids
-        _write_scanner_run_receipt(run)
-        runs.append(run)
-        contexts.append((scanner, run))
-    ingest_errors: list[str] = []
-    ingest_payloads: list[tuple[dict[str, Any], dict[str, Any], Path, list[dict[str, Any]]]] = []
-    if ingest_output:
-        for scanner, run in contexts:
-            if run.get("status") != "completed":
-                continue
-            path, records, errors = _scanner_validate_import_output(target, scanner)
-            if errors:
-                ingest_errors.extend(errors)
-                continue
-            if path is not None:
-                ingest_payloads.append(
-                    (
-                        scanner,
-                        run,
-                        path,
-                        _scanner_enrich_import_records(target=target, scanner=scanner, run=run, records=records),
-                    )
-                )
-        if ingest_errors:
-            after_counts = _scanner_import_counts(target)
-            payload = {
-                "target": str(target),
-                "runs_root": str(helpers._scanner_runs_root(target)),
-                "selected": len(selected),
-                "completed": len([run for run in runs if run.get("status") == "completed"]),
-                "failed": len([run for run in runs if run.get("status") != "completed"]),
-                "skipped": [
-                    {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
-                    for item in skipped
-                    if isinstance(item.get("scanner"), dict)
-                ],
-                "imports_before": before_counts,
-                "imports_after": after_counts,
-                "ingest_output": True,
-                "ingest_errors": ingest_errors,
-                "runs": runs,
-            }
-            for run in runs:
-                _release_scanner_run_directory_authority(run)
-            return payload, 2
-        for scanner, run, path, records in ingest_payloads:
-            scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
+    try:
+        for scanner in selected:
             try:
-                existing_imports = _scanner_inbox_imports(target)
+                before_raw = _scanner_inbox_bytes(target)
+                before_imports = _scanner_inbox_imports(target)
             except OSError:
+                before_raw = b""
+                before_imports = []
+            before_ids = {
+                str(item.get("id"))
+                for item in before_imports
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            }
+            run = _scanner_run_one(target, scanner, force=force)
+            _register_scanner_run_proof(scanner, run)
+            stamped_ids = _scanner_stamp_new_imports(
+                target=target,
+                scanner=scanner,
+                run=run,
+                before_ids=before_ids,
+                before_imports=before_imports,
+                before_raw=before_raw,
+            )
+            run["provenance_imports_stamped"] = len(stamped_ids)
+            if stamped_ids:
+                run["stamped_import_ids"] = stamped_ids
+            _write_scanner_run_receipt(run)
+            runs.append(run)
+            contexts.append((scanner, run))
+        ingest_errors: list[str] = []
+        ingest_payloads: list[tuple[dict[str, Any], dict[str, Any], Path, list[dict[str, Any]]]] = []
+        if ingest_output:
+            for scanner, run in contexts:
+                if run.get("status") != "completed":
+                    continue
+                path, records, errors = _scanner_validate_import_output(target, scanner)
+                if errors:
+                    ingest_errors.extend(errors)
+                    continue
+                if path is not None:
+                    ingest_payloads.append(
+                        (
+                            scanner,
+                            run,
+                            path,
+                            _scanner_enrich_import_records(target=target, scanner=scanner, run=run, records=records),
+                        )
+                    )
+            if ingest_errors:
+                after_counts = _scanner_import_counts(target)
+                payload = {
+                    "target": str(target),
+                    "runs_root": str(helpers._scanner_runs_root(target)),
+                    "selected": len(selected),
+                    "completed": len([run for run in runs if run.get("status") == "completed"]),
+                    "failed": len([run for run in runs if run.get("status") != "completed"]),
+                    "skipped": [
+                        {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
+                        for item in skipped
+                        if isinstance(item.get("scanner"), dict)
+                    ],
+                    "imports_before": before_counts,
+                    "imports_after": after_counts,
+                    "ingest_output": True,
+                    "ingest_errors": ingest_errors,
+                    "runs": runs,
+                }
+                return payload, 2
+            for scanner, run, path, records in ingest_payloads:
+                scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
+                try:
+                    existing_imports = _scanner_inbox_imports(target)
+                except OSError:
+                    run["ingest_output"] = {
+                        "path": str(path),
+                        "created": 0,
+                        "skipped": 0,
+                        "dismissed": 0,
+                        "rejected": len(records),
+                        "rejection_reasons": {"inbox_persistence_failed": len(records)},
+                        "records": len(records),
+                        "created_import_ids": [],
+                        "skipped_source_fingerprints": [],
+                        "dismissed_source_fingerprints": [],
+                    }
+                    _write_scanner_run_receipt(run)
+                    continue
+                imported, skipped_records, skipped_dismissed, rejected = ledger_mod._append_import_records(
+                    target,
+                    records,
+                    provenance_source=scanner_source,
+                    contain_provenance_errors=True,
+                    migrate_untrusted_identities=True,
+                    preserve_existing_raw=lambda data: _append_scanner_inbox_bytes(target, data),
+                    restore_existing_raw=lambda data, exists: _restore_scanner_inbox_bytes(target, data, exists),
+                    existing_imports=existing_imports,
+                )
+                if _scanner_run_proof(scanner, run) is not None:
+                    for item in imported:
+                        _record_scanner_import_proof(scanner, run, item)
                 run["ingest_output"] = {
                     "path": str(path),
-                    "created": 0,
-                    "skipped": 0,
-                    "dismissed": 0,
-                    "rejected": len(records),
-                    "rejection_reasons": {"inbox_persistence_failed": len(records)},
+                    "created": len(imported),
+                    "skipped": len(skipped_records),
+                    "dismissed": len(skipped_dismissed),
+                    "rejected": len(rejected),
+                    "rejection_reasons": {rejected[0]: len(rejected)} if rejected else {},
                     "records": len(records),
-                    "created_import_ids": [],
-                    "skipped_source_fingerprints": [],
-                    "dismissed_source_fingerprints": [],
+                    "created_import_ids": [str(item.get("id")) for item in imported if isinstance(item.get("id"), str)],
+                    "skipped_source_fingerprints": [
+                        fingerprint
+                        for record in skipped_records
+                        if (fingerprint := ledger_mod._import_fingerprint(record))
+                    ],
+                    "dismissed_source_fingerprints": [
+                        fingerprint
+                        for record in skipped_dismissed
+                        if (fingerprint := ledger_mod._import_fingerprint(record))
+                    ],
                 }
                 _write_scanner_run_receipt(run)
-                continue
-            imported, skipped_records, skipped_dismissed, rejected = ledger_mod._append_import_records(
-                target,
-                records,
-                provenance_source=scanner_source,
-                contain_provenance_errors=True,
-                migrate_untrusted_identities=True,
-                preserve_existing_raw=lambda data: _append_scanner_inbox_bytes(target, data),
-                restore_existing_raw=lambda data, exists: _restore_scanner_inbox_bytes(target, data, exists),
-                existing_imports=existing_imports,
-            )
-            if _scanner_run_proof(scanner, run) is not None:
-                for item in imported:
-                    _record_scanner_import_proof(scanner, run, item)
-            run["ingest_output"] = {
-                "path": str(path),
-                "created": len(imported),
-                "skipped": len(skipped_records),
-                "dismissed": len(skipped_dismissed),
-                "rejected": len(rejected),
-                "rejection_reasons": {rejected[0]: len(rejected)} if rejected else {},
-                "records": len(records),
-                "created_import_ids": [str(item.get("id")) for item in imported if isinstance(item.get("id"), str)],
-                "skipped_source_fingerprints": [
-                    fingerprint for record in skipped_records if (fingerprint := ledger_mod._import_fingerprint(record))
-                ],
-                "dismissed_source_fingerprints": [
-                    fingerprint
-                    for record in skipped_dismissed
-                    if (fingerprint := ledger_mod._import_fingerprint(record))
-                ],
-            }
-            _write_scanner_run_receipt(run)
-    after_counts = _scanner_import_counts(target)
-    payload = {
-        "target": str(target),
-        "runs_root": str(helpers._scanner_runs_root(target)),
-        "selected": len(selected),
-        "completed": len([run for run in runs if run.get("status") == "completed"]),
-        "failed": len([run for run in runs if run.get("status") != "completed"]),
-        "skipped": [
-            {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
-            for item in skipped
-            if isinstance(item.get("scanner"), dict)
-        ],
-        "imports_before": before_counts,
-        "imports_after": after_counts,
-        "ingest_output": ingest_output,
-        "ingest_errors": ingest_errors,
-        "runs": runs,
-    }
-    for run in runs:
-        _release_scanner_run_directory_authority(run)
-    return payload, 0 if payload["failed"] == 0 else 1
+        after_counts = _scanner_import_counts(target)
+        payload = {
+            "target": str(target),
+            "runs_root": str(helpers._scanner_runs_root(target)),
+            "selected": len(selected),
+            "completed": len([run for run in runs if run.get("status") == "completed"]),
+            "failed": len([run for run in runs if run.get("status") != "completed"]),
+            "skipped": [
+                {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
+                for item in skipped
+                if isinstance(item.get("scanner"), dict)
+            ],
+            "imports_before": before_counts,
+            "imports_after": after_counts,
+            "ingest_output": ingest_output,
+            "ingest_errors": ingest_errors,
+            "runs": runs,
+        }
+        return payload, 0 if payload["failed"] == 0 else 1
+    finally:
+        for run in runs:
+            _release_scanner_run_directory_authority(run)
 
 
 def scanners_run(

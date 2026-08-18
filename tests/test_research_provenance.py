@@ -1,9 +1,10 @@
-from brigade.research.provenance import audit_citations
+from brigade.research.provenance import audit_citations, stamp_finding
 from brigade.research.types import Finding, SourceEnvelope
+from brigade import trust_gate
 
 
-def finding_for(source_id: str) -> Finding:
-    return Finding(
+def finding_for(source_id: str, *, trust_label: str = "untrusted") -> Finding:
+    finding = Finding(
         source_ids=(source_id,),
         title="Known source",
         summary="Supported fact",
@@ -13,6 +14,26 @@ def finding_for(source_id: str) -> Finding:
         extracted_at="2026-08-13T12:02:00+00:00",
         parent_source_ids=(),
     )
+    stamped = stamp_finding(finding, run_id="test-run", index=0)
+    if trust_label != "untrusted":
+        env = trust_gate.apply_trust_label(
+            stamped.provenance or {},
+            to_label=trust_label,
+            assigned_by="ingest:test",
+            assigned_at="2026-08-17T00:00:00+00:00",
+        )
+        return Finding(
+            source_ids=stamped.source_ids,
+            title=stamped.title,
+            summary=stamped.summary,
+            evidence=stamped.evidence,
+            trust=stamped.trust,
+            extraction_lane=stamped.extraction_lane,
+            extracted_at=stamped.extracted_at,
+            parent_source_ids=stamped.parent_source_ids,
+            provenance=env,
+        )
+    return stamped
 
 
 def test_source_envelope_has_stable_digest_and_id() -> None:
@@ -55,6 +76,17 @@ def test_citation_audit_rejects_zero_citations() -> None:
     assert audit.accepted is False
     assert audit.citations == ()
     assert audit.unresolved == ()
+
+
+def test_citation_audit_rejects_unknown_and_quarantined_findings() -> None:
+    leaked = "unknown body must not be cited"
+    unknown = finding_for("src-aaaaaaaaaaaaaaaa", trust_label="unknown")
+    quarantined = finding_for("src-bbbbbbbbbbbbbbbb", trust_label="quarantined")
+    report = "See [source:src-aaaaaaaaaaaaaaaa] and [source:src-bbbbbbbbbbbbbbbb]."
+    audit = audit_citations(report, findings=[unknown, quarantined])
+    assert audit.accepted is False
+    assert [item.status for item in audit.citations] == ["rejected", "rejected"]
+    assert leaked not in unknown.title
 
 
 def test_finding_rejects_empty_source_ids() -> None:

@@ -836,7 +836,7 @@ Import inbox commands:
 - `brigade work import memory-refresh` converts memory-refresh candidates into task imports with card identity, reason, evidence summary, and acceptance criteria.
 - `brigade work import chat-sweep` converts `.brigade/chat-memory-sweeps/latest.json` issues into imports. Actionable sweep issues become task imports with acceptance criteria, while raw private chat text is omitted.
 - `brigade work import triage` groups pending imports by source and kind; use `--source`, `--kind`, and repeatable `--metadata key=value` to narrow noisy queues.
-- `brigade work import provenance` audits producer imports for stable source identity, source fingerprints, safe summaries, evidence references, and scanner run provenance.
+- `brigade work import provenance` audits producer imports for stable source identity, source fingerprints, safe summaries, evidence references, scanner run provenance, and a valid envelope. `--backfill` infers missing envelopes without treating them as trusted. `brigade research provenance backfill` does the same for research findings.
 - `brigade work import show <import-id>` inspects one import.
 - `brigade work import plan <import-id>` previews the exact task or handoff promotion would create, including acceptance criteria, template guidance, or handoff target.
 - `brigade work import plan-handoff <import-id>` previews the Memory Handoff draft target for durable non-task imports.

@@ -5,6 +5,7 @@ import shutil
 import threading
 import time as system_time
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1274,6 +1275,82 @@ def test_runs_show_prints_summary(tmp_path, capsys):
     assert not (run_dir / "revisions").exists()
 
 
+def test_runs_show_prints_child_lineage(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_run_artifacts(run_dir)
+    payload = json.loads((run_dir / "run.json").read_text())
+    payload["lineage"] = {
+        "kind": "child",
+        "parent_run_id": "20260817-120000-parent-aaaaaa",
+        "branch_point_event_id": "20260817-120000-parent-aaaaaa-000003-bbbbbbbbbbbb",
+        "shared_prefix": {
+            "event_sequence": 3,
+            "event_digest": "b" * 64,
+            "previous_digest": "a" * 64,
+        },
+    }
+    _write_json(run_dir / "run.json", payload)
+
+    assert runs_cmd.show(run_dir) == 0
+    out = capsys.readouterr().out
+    assert "lineage:" in out
+    assert "kind: child" in out
+    assert "parent run: 20260817-120000-parent-aaaaaa" in out
+    assert "branch point: 20260817-120000-parent-aaaaaa-000003-bbbbbbbbbbbb" in out
+    assert "shared prefix: seq=3 digest=bbbbbbbbbbbb" in out
+
+
+def test_runs_show_json_includes_child_lineage(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_run_artifacts(run_dir)
+    payload = json.loads((run_dir / "run.json").read_text())
+    payload["lineage"] = {
+        "kind": "child",
+        "parent_run_id": "20260817-120000-parent-aaaaaa",
+        "branch_point_event_id": "20260817-120000-parent-aaaaaa-000003-bbbbbbbbbbbb",
+        "shared_prefix": {
+            "event_sequence": 3,
+            "event_digest": "b" * 64,
+            "previous_digest": "a" * 64,
+        },
+    }
+    _write_json(run_dir / "run.json", payload)
+
+    assert runs_cmd.show(run_dir, json_output=True) == 0
+    detail = json.loads(capsys.readouterr().out)
+    assert detail["schema"] == "brigade.run-detail.v1"
+    assert detail["run"]["lineage"] == {
+        "kind": "child",
+        "parent_run_id": "20260817-120000-parent-aaaaaa",
+        "branch_point_event_id": "20260817-120000-parent-aaaaaa-000003-bbbbbbbbbbbb",
+        "shared_prefix": {
+            "event_sequence": 3,
+            "event_digest": "b" * 64,
+            "previous_digest": "a" * 64,
+        },
+    }
+
+
+def test_runs_list_json_includes_parent_run_id(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    child = runs_root / "20260817-130000-child-bbbbbb"
+    _write_minimal_run(child, task="branched work", status="ok", started_at="2026-08-17T13:00:00Z")
+    payload = json.loads((child / "run.json").read_text())
+    payload["lineage"] = {
+        "kind": "child",
+        "parent_run_id": "20260817-120000-parent-aaaaaa",
+        "branch_point_event_id": "20260817-120000-parent-aaaaaa-000003-bbbbbbbbbbbb",
+        "shared_prefix": {"event_sequence": 3, "event_digest": "b" * 64, "previous_digest": "a" * 64},
+    }
+    _write_json(child / "run.json", payload)
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["schema"] == "brigade.runs-list.v1"
+    assert listed["runs"][0]["parent_run_id"] == "20260817-120000-parent-aaaaaa"
+
+
 def test_runs_show_reports_missing_run_json(tmp_path, capsys):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -1520,6 +1597,23 @@ def test_runs_recover_cli_dispatches_resolved_run(tmp_path, monkeypatch):
 
     assert rc == 0
     assert seen == {"run": str(run_dir), "cwd": tmp_path, "runs_dir": None}
+
+
+def test_runs_child_cli_dispatches_parent_and_event(tmp_path, monkeypatch):
+    parent_dir = tmp_path / "run"
+    parent_dir.mkdir()
+    seen = {}
+
+    def fake_child(run, event_id, **kwargs):
+        seen.update(run=run, event_id=event_id, **kwargs)
+        return 0
+
+    monkeypatch.setattr(runs_cmd, "child", fake_child, raising=False)
+
+    rc = cli.main(["runs", "child", str(parent_dir), "event-123", "--cwd", str(tmp_path)])
+
+    assert rc == 0
+    assert seen == {"run": str(parent_dir), "event_id": "event-123", "cwd": tmp_path, "runs_dir": None}
 
 
 def test_runs_redact_cli_dispatches_operator_procedure(tmp_path, monkeypatch):
@@ -2421,6 +2515,212 @@ def test_runs_latest_cli_with_explicit_runs_dir(tmp_path, capsys):
     assert f"run: {run_dir}" in capsys.readouterr().out
 
 
+def test_runs_child_creates_lineaged_child_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    branch_event = events[-1]
+
+    assert runs_cmd.child(parent_dir.name, branch_event.event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out and out[-1].startswith("child: ")
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    assert child_dir.parent == runs_root
+    assert child_dir.name != parent_dir.name
+
+    child_meta = json.loads((child_dir / "run.json").read_text())
+    assert child_meta["lineage"] == {
+        "kind": "child",
+        "parent_run_id": parent_dir.name,
+        "branch_point_event_id": branch_event.event_id,
+        "shared_prefix": {
+            "event_sequence": branch_event.sequence,
+            "event_digest": branch_event.event_digest,
+            "previous_digest": branch_event.previous_digest,
+        },
+    }
+    child_events = _events(child_dir)
+    assert all(event.run_id == child_dir.name for event in child_events)
+    assert [event.event_type for event in child_events[-2:]] == ["run.snapshot.checkpointed", "run.planning.started"]
+    assert child_events[-2].payload["paired_event_type"] == "run.planning.started"
+    assert child_events[-1].payload == {"detail": "branched child snapshot"}
+    repaired = run_checkpoint.recover_from_checkpoint(child_dir, None)
+    assert repaired["status"] == "planning"
+
+
+def test_runs_child_uses_fresh_started_at_not_parent(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    parent_started = json.loads((parent_dir / "run.json").read_text())["started_at"]
+    assert parent_started == "2026-08-17T12:00:00Z"
+    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    child_meta = json.loads((child_dir / "run.json").read_text())
+
+    after = datetime.now(timezone.utc) + timedelta(seconds=1)
+    assert child_meta["started_at"] != parent_started
+    assert child_meta["started_at"] == child_meta["status_started_at"]
+    started = datetime.fromisoformat(child_meta["started_at"].replace("Z", "+00:00"))
+    assert before <= started <= after
+
+
+def test_runs_child_rejects_checkpoint_event_as_branch_point(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    checkpoint_event = next(event for event in events if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE)
+
+    assert runs_cmd.child(parent_dir.name, checkpoint_event.event_id, cwd=workspace) == 2
+    err = capsys.readouterr().err
+    assert "unsupported branch point event" in err
+    assert "not the checkpoint itself" in err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
+def test_runs_child_fails_closed_for_unsupported_event_without_partial_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    _write_checkpointed_parent_run(workspace, parent_dir)
+    with runguard.run_lock(workspace, run_dir=parent_dir):
+        run_lifecycle.record_lifecycle_event(
+            parent_dir,
+            event_type="run.result-processing.started",
+            payload={"detail": "uncovered tail"},
+            idempotency_key="unsupported-tail",
+            workspace=workspace,
+        )
+    unsupported_event = _events(parent_dir)[-1]
+
+    assert runs_cmd.child(parent_dir.name, unsupported_event.event_id, cwd=workspace) == 2
+    err = capsys.readouterr().err
+    assert "unsupported branch point event" in err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
+def test_runs_child_fails_closed_for_unknown_event_without_partial_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    _write_checkpointed_parent_run(workspace, parent_dir)
+
+    assert runs_cmd.child(parent_dir.name, "missing-event-id", cwd=workspace) == 2
+    assert "unknown branch point event" in capsys.readouterr().err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
+def test_runs_child_fails_closed_for_corrupt_parent_journal_without_partial_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    with _journal_path(parent_dir).open("ab") as handle:
+        handle.write(b"{not-json")
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 2
+    assert "parent lifecycle journal has a partial trailing record" in capsys.readouterr().err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
+def test_runs_child_cleans_up_partial_dir_when_checkpoint_fails_after_mkdir(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    lock_held_during_cleanup: list[bool] = []
+    original_rmtree = shutil.rmtree
+
+    def boom(*_args, **_kwargs):
+        raise run_checkpoint.CheckpointError("injected post-mkdir failure", category="test")
+
+    def tracking_rmtree(path, *args, **kwargs):
+        target = Path(path)
+        if target.parent == runs_root:
+            lock_held_during_cleanup.append(runguard.is_active_run_owner(workspace, target))
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(run_checkpoint, "write_checkpoint", boom)
+    monkeypatch.setattr(runs_cmd.shutil, "rmtree", tracking_rmtree)
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 2
+    err = capsys.readouterr().err
+    assert "could not create child run" in err
+    assert "injected post-mkdir failure" in err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+    assert lock_held_during_cleanup == [True]
+
+
+def test_runs_child_does_not_inherit_parent_control_socket_or_parent_paths(tmp_path, capsys):
+    from brigade import run_control
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    parent_socket = "/tmp/brigade-parent-worker.sock"
+    events = _write_checkpointed_parent_run(
+        workspace,
+        parent_dir,
+        extra={
+            "control_transport": {
+                "schema": "brigade.run_control_transport.v1",
+                "kind": "unix",
+                "path": parent_socket,
+            },
+            "control_socket": parent_socket,
+            "active_stage": "dispatch",
+            "active_seats": ["coder"],
+            "phase_owner": "coder",
+            "artifacts": str(parent_dir),
+            "handoff": str(parent_dir / "handoff.md"),
+            "error": "parent timed out",
+            "failure_phase": "dispatch",
+            "failure_kind": "timeout",
+            "failure": {"phase": "dispatch", "kind": "timeout", "detail": "parent timed out"},
+            "worker_failure_summary": "coder timed out",
+        },
+    )
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    child_meta = json.loads((child_dir / "run.json").read_text())
+
+    assert "control_transport" not in child_meta
+    assert "control_socket" not in child_meta
+    assert "active_stage" not in child_meta
+    assert "active_seats" not in child_meta
+    assert "phase_owner" not in child_meta
+    assert "error" not in child_meta
+    assert "failure" not in child_meta
+    assert "failure_phase" not in child_meta
+    assert "failure_kind" not in child_meta
+    assert "worker_failure_summary" not in child_meta
+    assert "handoff" not in child_meta
+    assert child_meta.get("artifacts") == str(child_dir)
+    with pytest.raises(run_control.ControlError):
+        run_control.control_transport_from_run(child_dir)
+
+
 def test_runs_show_prints_ground_truth(tmp_path, capsys):
     run_dir = tmp_path / "run"
     _write_run_artifacts(run_dir)
@@ -2566,6 +2866,58 @@ def _journal_path(run_dir: Path) -> Path:
 
 def _events(run_dir: Path) -> list:
     return run_journal.read_journal(_journal_path(run_dir)).events
+
+
+def _write_checkpointed_parent_run(
+    workspace: Path,
+    run_dir: Path,
+    *,
+    extra: dict | None = None,
+) -> list[run_journal.RunEvent]:
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_json_obj = {
+        "schema": "brigade.run.v1",
+        "schema_version": 1,
+        "kind": "work",
+        "task": "branchable parent",
+        "cwd": str(workspace),
+        "lock_workspace": str(workspace),
+        "status": "planning",
+        "started_at": "2026-08-17T12:00:00Z",
+        "status_started_at": "2026-08-17T12:00:00Z",
+        "read_only": False,
+        "dry_run": False,
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+    }
+    if extra:
+        run_json_obj.update(extra)
+    _localio().write_json(run_dir / "run.json", run_json_obj)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="run.created",
+            payload={"status": "started"},
+            idempotency_key="parent-created",
+            workspace=workspace,
+        )
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes(run_json_obj),
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="run.planning.started",
+            payload={"detail": "planning"},
+            idempotency_key="parent-planning",
+            workspace=workspace,
+        )
+    return _events(run_dir)
 
 
 def _overwrite_lock_owner(workspace, run_dir, *, pid, owner_token="owner"):

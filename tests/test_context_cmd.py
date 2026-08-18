@@ -196,3 +196,40 @@ def test_context_freshness_generator_drift_is_deterministic(tmp_target):
     payload["freshness"]["generator"]["version"] = "older"
     issues = context_cmd._context_pack_issues(tmp_target, payload)
     assert any(item["issue_type"] == "generator_drift" for item in issues)
+
+
+def test_context_payload_omits_unknown_and_quarantined_review_findings(tmp_target):
+    from brigade import trust_gate, work_cmd
+
+    tmp_target.mkdir(parents=True)
+    now = "2026-08-17T00:00:00+00:00"
+    clean = "reviewed finding body"
+    unknown = "unknown finding must not enter context"
+    quarantined = "quarantined finding must not enter context"
+    imports = [
+        work_cmd._make_import(clean, kind="finding", source="code-review"),
+        work_cmd._make_import(unknown, kind="finding", source="code-review"),
+        work_cmd._make_import(quarantined, kind="finding", source="code-review"),
+    ]
+    imports[1]["metadata"]["provenance"] = trust_gate.apply_trust_label(
+        imports[1]["metadata"]["provenance"],
+        to_label="unknown",
+        assigned_by="ingest:test",
+        assigned_at=now,
+    )
+    imports[2]["metadata"]["provenance"] = trust_gate.apply_trust_label(
+        imports[2]["metadata"]["provenance"],
+        to_label="quarantined",
+        assigned_by="ingest:test",
+        assigned_at=now,
+    )
+    work_cmd._write_imports(tmp_target, imports)
+
+    payload = context_cmd._context_payload(tmp_target, kind="repo")
+    texts = [item.get("text") for item in payload["recent_review_findings"]]
+    assert clean in texts
+    assert unknown not in texts
+    assert quarantined not in texts
+    serialized = json.dumps(payload)
+    assert "unknown finding must not enter context" not in serialized
+    assert "quarantined finding must not enter context" not in serialized

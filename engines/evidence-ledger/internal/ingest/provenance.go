@@ -25,28 +25,28 @@ const ProvenanceEventSchema = "brigade.provenance-event.v1"
 
 // ProvenanceEvent is an immutable trust transition row.
 type ProvenanceEvent struct {
-	Schema               string         `json:"schema"`
-	SchemaVersion        int            `json:"schema_version"`
-	At                   string         `json:"at"`
-	ItemRef              string         `json:"item_ref"`
-	FromLabel            string         `json:"from_label"`
-	ToLabel              string         `json:"to_label"`
-	EnvelopeContentHash  string         `json:"envelope_content_hash"`
-	ContentScope         string         `json:"content_scope"`
-	OperatorCommand      string         `json:"operator_command"`
-	Evidence             map[string]any `json:"evidence"`
+	Schema              string         `json:"schema"`
+	SchemaVersion       int            `json:"schema_version"`
+	At                  string         `json:"at"`
+	ItemRef             string         `json:"item_ref"`
+	FromLabel           string         `json:"from_label"`
+	ToLabel             string         `json:"to_label"`
+	EnvelopeContentHash string         `json:"envelope_content_hash"`
+	ContentScope        string         `json:"content_scope"`
+	OperatorCommand     string         `json:"operator_command"`
+	Evidence            map[string]any `json:"evidence"`
 }
 
 // BackfillProvenanceResult reports one resumable backfill batch.
 type BackfillProvenanceResult struct {
-	Scanned    int                       `json:"scanned"`
-	Updated    int                       `json:"updated"`
-	Skipped    int                       `json:"skipped"`
-	Malformed  int                       `json:"malformed"`
-	Events     int                       `json:"events"`
-	Cursor     string                    `json:"cursor"`
-	Remaining  int                       `json:"remaining"`
-	Evidence   []BackfillItemEvidence    `json:"evidence,omitempty"`
+	Scanned   int                    `json:"scanned"`
+	Updated   int                    `json:"updated"`
+	Skipped   int                    `json:"skipped"`
+	Malformed int                    `json:"malformed"`
+	Events    int                    `json:"events"`
+	Cursor    string                 `json:"cursor"`
+	Remaining int                    `json:"remaining"`
+	Evidence  []BackfillItemEvidence `json:"evidence,omitempty"`
 }
 
 // BackfillItemEvidence is bounded per-item evidence for isolated malformed rows.
@@ -230,6 +230,56 @@ func TransitionTrustLabel(db *sql.DB, itemID, toLabel, operatorCommand string, e
 		return err
 	}
 	return tx.Commit()
+}
+
+// ReviewTrustLabel upgrades an item only when expectedHash matches both the
+// embedded envelope digest and the recomputed item.text.utf8.v1 digest.
+func ReviewTrustLabel(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand string, evidence map[string]any) error {
+	resolvedID, err := resolveItemID(db, itemID)
+	if err != nil {
+		return err
+	}
+	var metadataJSON, text string
+	if err := db.QueryRow(`select metadata_json, coalesce(text,'') from items where id = ?`, resolvedID).Scan(&metadataJSON, &text); err != nil {
+		return err
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+		return err
+	}
+	rawEnv, ok := meta["provenance"]
+	if !ok {
+		return fmt.Errorf("item %s has no provenance envelope", resolvedID)
+	}
+	envBytes, err := json.Marshal(rawEnv)
+	if err != nil {
+		return err
+	}
+	var env provenance.Envelope
+	if err := json.Unmarshal(envBytes, &env); err != nil {
+		return err
+	}
+	recomputed := provenance.ContentSHA256(text)
+	current := ""
+	if env.Hashes.Content != nil {
+		current = *env.Hashes.Content
+	}
+	want := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(expectedHash), "sha256:"))
+	if current != want || recomputed != want {
+		return fmt.Errorf("content hash does not match the current envelope digest")
+	}
+	return TransitionTrustLabel(db, resolvedID, toLabel, operatorCommand, evidence)
+}
+
+func resolveItemID(db *sql.DB, itemID string) (string, error) {
+	var id string
+	if err := db.QueryRow(`select id from items where id = ?`, itemID).Scan(&id); err == nil {
+		return id, nil
+	}
+	if err := db.QueryRow(`select id from items where external_id = ? order by id limit 1`, itemID).Scan(&id); err == nil {
+		return id, nil
+	}
+	return "", fmt.Errorf("item not found: %s", itemID)
 }
 
 // BackfillProvenance walks items after afterID in batches, writing inferred

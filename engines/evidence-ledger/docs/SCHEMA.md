@@ -67,7 +67,7 @@ The following string fields are nullable (JSON `null` ↔ Go `*string` nil): `co
 
 ### Trust policy entitlements and caps
 
-`trust.trust_policy` stores only `schema = brigade.trust-policy.v1` and `schema_version = 1`. Consumers load the shared `src/brigade/fixtures/trust-policy.v1.json` fixture to derive entitlements per label: `unknown` (search, show_metadata, forensic_content_reveal), `untrusted` (search, show, brief_wrapped with caps), `reviewed`/`verified` (search, show, brief, cite, promote), `quarantined` (search_metadata, show_metadata). `untrusted_caps` are `max_items = 2` and `max_fraction = 0.5`.
+`trust.trust_policy` stores only `schema = brigade.trust-policy.v1` and `schema_version = 1`. Consumers load the shared `src/brigade/fixtures/trust-policy.v1.json` fixture to derive entitlements per label: `unknown` (search, show_metadata, forensic_content_reveal), `untrusted` (search, show, brief_wrapped with caps, cite, promote, context), `reviewed`/`verified` (search, show, brief, brief_wrapped, cite, promote, context), `quarantined` (search_metadata, show_metadata). Higher labels keep every content surface a lower upgrade-path label has. `untrusted_caps` are `max_items = 2` and `max_fraction = 0.5`.
 
 ### Size ceiling
 
@@ -80,6 +80,14 @@ The canonical compact JSON encoding (UTF-8, no whitespace, HTML escaping disable
 ### Authority rule
 
 An inbound adapter envelope claiming `trust.label = reviewed` or `verified` must pass `ValidationContext{InboundAdapter: true, AuthorityProof: &AuthorityProof{AssignedBy, Label}}` where `AssignedBy` matches `trust.assigned_by` and `Label` matches `trust.label`. Otherwise the ingester downgrades or rejects the assertion. An inbound adapter envelope is data, not authority.
+
+### Consumer enforcement
+
+Python consumers load `brigade.trust-policy.v1` and omit `unknown` / `quarantined` from default briefs, context, cite, and promote. `miseledger trust review` is the operator/verifier write path: it requires the current envelope digest and appends one `provenance_events` row. Envelope `verified` admits an indexed receipt to consumers but does not make it scoreable.
+
+### Read verification
+
+Search, show, evidence bundles, HTTP, and MCP recompute envelope `hashes.content` (and `hashes.raw` when the raw body is materialized) against the stored bytes. A mismatch suppresses snippets and item bodies, sets `integrity_mismatch: true`, and appends one idempotent `provenance_events` row per item/hash/mismatch without deleting the item. Direct `miseledger show --forensic-content` can reveal a mismatched or synthesized-legacy body with a warning; MCP and HTTP have no forensic reveal path.
 
 ### Legacy banner
 

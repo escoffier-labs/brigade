@@ -31,6 +31,33 @@ def _patch_engine(monkeypatch, *, run_calls: list | None = None):
 # --- show / explain / stats passthroughs ------------------------------------
 
 
+def test_evidence_show_forwards_forensic_content_flag(monkeypatch, capsys):
+    calls: list[dict] = []
+    _patch_engine(monkeypatch, run_calls=calls)
+
+    rc = cli.main(["evidence", "show", "--forensic-content", "18ae49710e71", "--json"])
+
+    assert rc == 0
+    assert calls[0]["args"] == [
+        "/fake/miseledger",
+        "show",
+        "18ae49710e71",
+        "--json",
+        "--forensic-content",
+    ]
+    assert json.loads(capsys.readouterr().out) == {"ok": True}
+
+
+def test_evidence_search_has_no_forensic_content_flag(monkeypatch):
+    calls: list[dict] = []
+    _patch_engine(monkeypatch, run_calls=calls)
+
+    rc = cli.main(["evidence", "search", "needle", "--json"])
+
+    assert rc == 0
+    assert "--forensic-content" not in calls[0]["args"]
+
+
 @pytest.mark.parametrize("verb", ("show", "explain", "stats"))
 def test_evidence_verb_forwards_exact_argv_and_stdout(monkeypatch, capsys, verb):
     calls: list[dict] = []

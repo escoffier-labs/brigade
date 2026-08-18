@@ -20,6 +20,8 @@ brigade work inbox doctor
 brigade work inbox archive
 brigade work import triage
 brigade work import provenance
+brigade work import provenance --backfill
+brigade research provenance backfill
 brigade work import plan <import-id>
 brigade work import plan-handoff <import-id>
 brigade work import promote-handoff <import-id>
@@ -27,7 +29,7 @@ brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 ```
 
-`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `import provenance` audits producer imports for stable source identity, source fingerprints, safe summaries, evidence references, and scanner run provenance. `plan` previews the task or handoff a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `plan-handoff` and `promote-handoff` preview and write reviewed Memory Handoff drafts for durable non-task imports. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`. Actionable issues become task imports. `brigade chat sweep import-issues <surface-id>` produces that same chat-sweep import shape from configured local chat export fixtures. `workflow scan --import-candidates` mines repeated command sequences from local verify receipts and daily run receipts, then writes reviewed workflow imports. `workflow propose-runbook` writes a workshop `runbook.json` from a chosen sequence candidate using its concrete `example_commands` only. It does not execute the runbook.
+`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `import provenance` audits producer imports for stable source identity, source fingerprints, safe summaries, evidence references, scanner run provenance, and a valid `metadata.provenance` envelope. `--backfill` stamps inferred envelopes on rows missing one without treating them as trusted. `brigade research provenance backfill` does the same for research checkpoint and findings rows. `plan` previews the task or handoff a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `plan-handoff` and `promote-handoff` preview and write reviewed Memory Handoff drafts for durable non-task imports. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`. Actionable issues become task imports. `brigade chat sweep import-issues <surface-id>` produces that same chat-sweep import shape from configured local chat export fixtures. `workflow scan --import-candidates` mines repeated command sequences from local verify receipts and daily run receipts, then writes reviewed workflow imports. `workflow propose-runbook` writes a workshop `runbook.json` from a chosen sequence candidate using its concrete `example_commands` only. It does not execute the runbook.
 
 ## Record Shape
 
@@ -251,11 +253,13 @@ Each export finding must provide `provider`, `surface_id`, `issue_id`, `issue_ty
 
 ## Provenance Envelope
 
-New work import items will carry a `brigade.provenance-envelope.v1` envelope under `metadata.provenance`. The envelope records source, origin, trust, and an exact-byte SHA-256 content digest so consumers can derive entitlements from a shared trust policy. Slice 1 ships the schema, validator, and legacy read synthesis in `src/brigade/provenance.py`. Ingestion stamping and consumer enforcement land in later slices.
+New work import items carry a `brigade.provenance-envelope.v1` envelope under `metadata.provenance`. Python producers stamp through `ledger._make_import`. Research findings persist the same envelope at `checkpoint.json.findings[].provenance` and `findings.json`, plus an exact `{title}\\n{summary}\\n{evidence}` text projection. Receipt adapter rows from `_verify_miseledger_item` and `_run_miseledger_item` start `untrusted`. Consumer enforcement lands in later slices.
 
 ### Location
 
 - Work imports: `metadata.provenance` on each inbox record.
+- Research findings: `findings[].provenance` and `findings[].text`.
+- Receipt adapter rows: `item.metadata.provenance`.
 - Fixture/policy files ship as package data: `src/brigade/fixtures/provenance-envelope.v1.golden.json` and `src/brigade/fixtures/trust-policy.v1.json`.
 
 ### Field sets
@@ -276,7 +280,7 @@ Closed sets enforced by `validate_envelope`:
 
 ### Trust policy entitlements and caps
 
-`trust.trust_policy` stores only `schema = brigade.trust-policy.v1` and `schema_version = 1`. Consumers load `src/brigade/fixtures/trust-policy.v1.json` to derive entitlements per label: `unknown` (search, show_metadata, forensic_content_reveal), `untrusted` (search, show, brief_wrapped with caps), `reviewed`/`verified` (search, show, brief, cite, promote), `quarantined` (search_metadata, show_metadata). `untrusted_caps` are `max_items = 2` and `max_fraction = 0.5`.
+`trust.trust_policy` stores only `schema = brigade.trust-policy.v1` and `schema_version = 1`. Consumers load `src/brigade/fixtures/trust-policy.v1.json` to derive entitlements per label: `unknown` (search, show_metadata, forensic_content_reveal), `untrusted` (search, show, brief_wrapped with caps, cite, promote, context), `reviewed`/`verified` (search, show, brief, brief_wrapped, cite, promote, context), `quarantined` (search_metadata, show_metadata). Higher labels keep every content surface a lower upgrade-path label has. `untrusted_caps` are `max_items = 2` and `max_fraction = 0.5`.
 
 ### Size ceiling
 
@@ -289,6 +293,14 @@ The canonical compact JSON encoding (`ensure_ascii = False`, UTF-8, sorted keys,
 ### Authority rule
 
 An inbound adapter envelope claiming `trust.label = reviewed` or `verified` must pass `authority_proof = {"assigned_by": <str>, "label": <str>}` with exactly those two keys, where `assigned_by` matches `trust.assigned_by` and `label` matches `trust.label`. Otherwise the ingester downgrades or rejects the assertion. An inbound adapter envelope is data, not authority.
+
+### Consumer enforcement
+
+Default briefs, context packs, citations, and promotion omit `unknown` and `quarantined` items. Untrusted brief content is wrapped with `wrap_untrusted` and capped at 2 items and 50 percent of brief bytes. A pending injection scan is resolved synchronously before any content-emitting consumer; hit, error, or unavailability emits metadata only. `brigade evidence trust review <item-ref> --content-hash <digest>` moves unchanged `untrusted` content to `reviewed` and appends one `brigade.provenance-event.v1` row. `brigade receipts verify` may move an indexed verify-receipt item to `verified` only after the receipt v2 `baseline_commit` / `tree_fingerprint` / `changes_patch_sha256` tuple and exact retained `changes.patch` match; indexing alone stays `untrusted`. Envelope `verified` does not make a receipt scoreable and does not bypass `subject_binding`, `check_role`, patch identity, or the #474 failure taxonomy.
+
+### Read verification
+
+Public read surfaces recompute `hashes.content` (and `hashes.raw` when materialized) against the exact stored bytes. Search suppresses a mismatched snippet and sets `integrity_mismatch: true`. Direct `miseledger show` / `brigade evidence show` hide a mismatched or synthesized-legacy body unless `--forensic-content` is passed. `--forensic-content` never changes trust and only reveals a body when injection status is the explicit known-safe value `clean`; empty, unknown, and parse-lost statuses block. MCP, HTTP, bundles, briefs, and context stay metadata-only on mismatch. One idempotent downgrade event is appended per item/hash/mismatch; the row is never deleted.
 
 ### Legacy banner
 

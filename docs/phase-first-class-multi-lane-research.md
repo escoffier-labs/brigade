@@ -5,7 +5,7 @@
 - Design approved: 2026-08-13
 - Implementation: complete in
   `docs/phase-first-class-multi-lane-research-implementation.md`
-- Dashboard: explicitly deferred to Phase 5
+- Dashboard: Phase 5 shipped as `/view/research` (`brigade.research.show.v2`)
 - Supersedes the narrow scope in `docs/phase-oracle-browser-researcher.md`
   without removing that adapter or its history
 
@@ -32,7 +32,7 @@ These decisions were confirmed during design:
 | Which lifecycle owns research runs? | The standard Brigade run kernel. |
 | What command does the operator use? | `brigade research`. |
 | Is Oracle a required dependency? | No. It is an optional browser transport selected by a profile. |
-| Is Center part of the first implementation? | No. A read-only Research page is reserved for Phase 5. |
+| Is Center part of the first implementation? | No. A read-only Research page was reserved for Phase 5 and has now shipped. |
 
 Historical evidence for the original Oracle adapter is Brigade evidence item
 `6e071cdf4080bfe74cd7c64e`. No Brigade evidence records a later integration of
@@ -388,11 +388,11 @@ The old `.brigade/research/` store remains readable during migration.
 - Validate one live grounded run and one browser-AI discovery run.
 - Publish a migration plan for legacy runs after dual-read has settled.
 
-### Phase 5: Center Research page, deferred
+### Phase 5: Center Research page
 
-Center receives a seventh top-level view named **Research**. Its operator
-question is: "What are we researching, what has it found, and can I trust the
-evidence?"
+Center ships a top-level **Research** view at `/view/research` (nav order 5.5).
+Its operator question is: "What are we researching, what has it found, and can
+I trust the evidence?"
 
 The first dashboard slice is read-only and contains:
 
@@ -403,13 +403,26 @@ The first dashboard slice is read-only and contains:
 - a run inspector for findings, sources, citations, fallbacks, and receipts
 - clear legacy-run and unverified-model labels
 
-Center consumes only versioned CLI JSON, beginning with:
+Center consumes only versioned CLI JSON:
 
 ```bash
-brigade research status --all --json
-brigade research show <run-id> --json
-brigade research doctor --json
+brigade research status --all --json   # brigade.research.status.v1
+brigade research show <run-id> --json  # brigade.research.show.v2
+brigade research doctor --json         # brigade.research.doctor.v1
 ```
+
+`brigade.research.show.v2` (`schema_version: 2`) is an in-place bump of
+`show.v1`. The CLI no longer emits v1. Center accepts a v1 payload with a
+degraded inspector (findings and citations only; sources and the
+digest-verified report require v2). External wrappers pinned to
+`brigade.research.show.v1` must update. The v2 keys are `schema`,
+`schema_version`, `run`, `research`, `findings`, `citation_audit`, `sources`,
+`sources_verification`, `report`, and `artifact_verification`. Missing
+artifacts are `null`. `sources_verification` is `verified`, `unverified`
+(readable file, no digest ref), `missing`, `unavailable` (legacy run), or
+`digest-mismatch` (ref exists and the file does not match; content is
+withheld). Source `uri` values are structurally sanitized (userinfo stripped;
+secret query-parameter values redacted).
 
 Center must not read `.brigade/research/`, `.brigade/runs/`, Oracle sessions,
 or browser profiles directly. This keeps the CLI contract authoritative and
@@ -465,6 +478,6 @@ The research lane is ready for its first release when:
 - the three JSON contracts reserved for Center are versioned and tested
 - a real Oracle browser acceptance run is attached as evidence
 
-Phase 5 remains in this tracked spec until the Center Research page ships. It
-must not be dropped from roadmap planning when Phases 1 through 4 are cut into
-implementation cards.
+Phase 5 shipped as `/view/research`. This tracked spec keeps the page's
+contract (`status.v1`, `show.v2`, `doctor.v1`) as the authority for later
+action-control work.
