@@ -26,7 +26,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood` (extras): 1 command path(s)
-- `brigade evidence`: 10 command path(s)
+- `brigade evidence`: 11 command path(s)
 - `brigade extras`: 3 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -38,7 +38,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
-- `brigade memory`: 18 command path(s)
+- `brigade memory`: 23 command path(s)
 - `brigade model`: 7 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade openclaw-fragments` (extras): 1 command path(s)
@@ -52,14 +52,14 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
-- `brigade research` (extras): 14 command path(s)
+- `brigade research` (extras): 15 command path(s)
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 4 command path(s)
 - `brigade route`: 1 command path(s)
 - `brigade run`: 1 command path(s)
 - `brigade run-cloud`: 4 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 14 command path(s)
+- `brigade runs`: 15 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
 - `brigade security`: 15 command path(s)
@@ -183,6 +183,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade evidence show`
 - `brigade evidence stats`
 - `brigade evidence status`
+- `brigade evidence trust review`
 - `brigade extras off`
 - `brigade extras on`
 - `brigade extras status`
@@ -260,6 +261,11 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory serve-mcp`
 - `brigade memory status`
 - `brigade memory topology`
+- `brigade memory vault-doctor`
+- `brigade memory vault-index`
+- `brigade memory vault-propose`
+- `brigade memory vault-search`
+- `brigade memory vault-show`
 - `brigade model scorecard`
 - `brigade model trial plan`
 - `brigade model trial regrade`
@@ -437,6 +443,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade research init` (extras)
 - `brigade research list` (extras)
 - `brigade research open` (extras)
+- `brigade research provenance backfill` (extras)
 - `brigade research resume` (extras)
 - `brigade research run` (extras)
 - `brigade research show` (extras)
@@ -463,6 +470,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runbook resume` (extras)
 - `brigade runbook run` (extras)
 - `brigade runs audit`
+- `brigade runs child`
 - `brigade runs events`
 - `brigade runs export`
 - `brigade runs import`
