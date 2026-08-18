@@ -102,6 +102,8 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
                 _attempt_payload(attempt, attempt_number=index)
                 for index, attempt in enumerate(result.attempts, start=1)
             ]
+        if result.provenance is not None:
+            entry["provenance"] = dict(result.provenance)
         payload.append(entry)
     return payload
 

@@ -27,6 +27,7 @@ from . import evidence_brief as evidence_brief_mod
 from . import graphtrail_delta
 from . import causal_receipt
 from . import localio
+from . import message_envelope
 from . import proc, receipt_schema, runguard
 from . import run_control
 from . import run_checkpoint
@@ -1442,6 +1443,71 @@ def _orchestrator_hides_write_tools(
     return agents.hides_write_tools(orchestrator.cli, read_only=effective_read_only, sandbox=sandbox)
 
 
+def _orchestrator_harness(roster: Roster) -> str | None:
+    agent = roster.agents.get(roster.orchestrator)
+    return agent.cli if agent is not None else None
+
+
+def _emit_plan_request(
+    prompt: str,
+    roster: Roster,
+    *,
+    output_dir: Path | None,
+) -> str:
+    delivery = message_envelope.emit(
+        prompt,
+        kind="plan-request",
+        producer="aboyeur.build_plan_prompt",
+        from_seat=message_envelope.BRIGADE_SEAT,
+        to_seat=roster.orchestrator,
+        run_dir=output_dir,
+        run_id=output_dir.name if output_dir is not None else None,
+        session_harness=_orchestrator_harness(roster),
+    )
+    if not delivery.delivered:
+        raise RuntimeError(delivery.reason or "plan-request rejected by provenance gate")
+    return prompt
+
+
+def _parse_gated_plan(
+    text: str,
+    roster: Roster,
+    *,
+    output_dir: Path | None,
+    read_only: bool = False,
+    skill_policy: RoutePolicyDecision | None = None,
+) -> list[Assignment]:
+    delivery = message_envelope.emit(
+        text,
+        kind="plan-result",
+        producer="aboyeur.plan",
+        from_seat=roster.orchestrator,
+        to_seat=message_envelope.BRIGADE_SEAT,
+        run_dir=output_dir,
+        run_id=output_dir.name if output_dir is not None else None,
+        session_harness=_orchestrator_harness(roster),
+    )
+    if not delivery.delivered:
+        raise ValueError(delivery.reason or "plan-result rejected by provenance gate")
+    return parse_plan(text, roster, read_only=read_only, skill_policy=skill_policy)
+
+
+def _admitted_result_output(result: WorkerResult) -> str:
+    env = result.provenance
+    if not isinstance(env, dict):
+        _legacy, display = message_envelope.synthesize_legacy_message_provenance()
+        return display
+    admission = message_envelope.admit_message(
+        result.text,
+        env,
+        kind="worker-result",
+        producer="run_transport.dispatch",
+    )
+    if not admission.delivered:
+        return admission.display or admission.reason or message_envelope.LEGACY_MESSAGE_DISPLAY
+    return message_envelope.wrap_message_body(result.text, env)
+
+
 def plan(
     task: str,
     roster: Roster,
@@ -1457,6 +1523,7 @@ def plan(
     skill_policy: RoutePolicyDecision | None = None,
     codex_transport: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
+    output_dir: Path | None = None,
 ) -> list[Assignment]:
     transport = codex_transport or roster.codex_transport
     no_file_writes = _orchestrator_hides_write_tools(
@@ -1468,16 +1535,20 @@ def plan(
     first = _call_with_process_registry(
         _run_orchestrator,
         roster,
-        build_plan_prompt(
-            task,
+        _emit_plan_request(
+            build_plan_prompt(
+                task,
+                roster,
+                read_only=read_only,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                evidence=evidence,
+                route=route,
+                no_file_writes=no_file_writes,
+                skill_policy=skill_policy,
+            ),
             roster,
-            read_only=read_only,
-            code_graph=code_graph,
-            drift_impact=drift_impact,
-            evidence=evidence,
-            route=route,
-            no_file_writes=no_file_writes,
-            skill_policy=skill_policy,
+            output_dir=output_dir,
         ),
         cwd=cwd,
         read_only=read_only,
@@ -1490,7 +1561,13 @@ def plan(
         _record_plan_attempt(attempts, stage="initial", result=first)
         raise RuntimeError(f"orchestrator failed during plan: {first.detail}")
     try:
-        assignments = parse_plan(first.text, roster, read_only=read_only, skill_policy=skill_policy)
+        assignments = _parse_gated_plan(
+            first.text,
+            roster,
+            output_dir=output_dir,
+            read_only=read_only,
+            skill_policy=skill_policy,
+        )
         _validate_plan_dependencies(route, assignments)
         _record_plan_attempt(
             attempts,
@@ -1507,17 +1584,21 @@ def plan(
         second = _call_with_process_registry(
             _run_orchestrator,
             roster,
-            build_plan_prompt(
-                task,
+            _emit_plan_request(
+                build_plan_prompt(
+                    task,
+                    roster,
+                    corrective_note=f"{exc} {PLAN_JSON_ONLY_RULE}",
+                    read_only=read_only,
+                    code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    evidence=evidence,
+                    route=route,
+                    no_file_writes=no_file_writes,
+                    skill_policy=skill_policy,
+                ),
                 roster,
-                corrective_note=f"{exc} {PLAN_JSON_ONLY_RULE}",
-                read_only=read_only,
-                code_graph=code_graph,
-                drift_impact=drift_impact,
-                evidence=evidence,
-                route=route,
-                no_file_writes=no_file_writes,
-                skill_policy=skill_policy,
+                output_dir=output_dir,
             ),
             cwd=cwd,
             read_only=read_only,
@@ -1530,7 +1611,13 @@ def plan(
             _record_plan_attempt(attempts, stage="correction", result=second)
             raise RuntimeError(f"orchestrator failed during plan correction: {second.detail}") from exc
         try:
-            assignments = parse_plan(second.text, roster, read_only=read_only, skill_policy=skill_policy)
+            assignments = _parse_gated_plan(
+                second.text,
+                roster,
+                output_dir=output_dir,
+                read_only=read_only,
+                skill_policy=skill_policy,
+            )
             _validate_plan_dependencies(route, assignments)
             _record_plan_attempt(
                 attempts,
@@ -1558,21 +1645,25 @@ def plan(
     revised_result = _call_with_process_registry(
         _run_orchestrator,
         roster,
-        build_plan_prompt(
-            task,
-            roster,
-            corrective_note=(
-                "the plan does not cover required route stages: "
-                + ", ".join(missing)
-                + '. Add or tag assignments with "covers" so every required stage is covered.'
+        _emit_plan_request(
+            build_plan_prompt(
+                task,
+                roster,
+                corrective_note=(
+                    "the plan does not cover required route stages: "
+                    + ", ".join(missing)
+                    + '. Add or tag assignments with "covers" so every required stage is covered.'
+                ),
+                read_only=read_only,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                evidence=evidence,
+                route=route,
+                no_file_writes=no_file_writes,
+                skill_policy=skill_policy,
             ),
-            read_only=read_only,
-            code_graph=code_graph,
-            drift_impact=drift_impact,
-            evidence=evidence,
-            route=route,
-            no_file_writes=no_file_writes,
-            skill_policy=skill_policy,
+            roster,
+            output_dir=output_dir,
         ),
         cwd=cwd,
         read_only=read_only,
@@ -1585,7 +1676,13 @@ def plan(
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result)
         return assignments
     try:
-        revised = parse_plan(revised_result.text, roster, read_only=read_only, skill_policy=skill_policy)
+        revised = _parse_gated_plan(
+            revised_result.text,
+            roster,
+            output_dir=output_dir,
+            read_only=read_only,
+            skill_policy=skill_policy,
+        )
         _validate_plan_dependencies(route, revised)
     except ValueError as exc:
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result, parse_error=str(exc))
@@ -1615,7 +1712,7 @@ def _render_prior_results(results: list[WorkerResult]) -> str:
                 f"Status: {'ok' if result.ok else 'failed'}",
                 f"Detail: {result.detail}" if result.detail else "Detail:",
                 "Output:",
-                result.text or "(no output)",
+                _admitted_result_output(result) or "(no output)",
             ]
         )
         for result in results
@@ -1914,17 +2011,21 @@ def _apply_candidate_set_gate(
         revised_result = _call_with_process_registry(
             _run_orchestrator,
             roster,
-            build_plan_prompt(
-                task,
+            _emit_plan_request(
+                build_plan_prompt(
+                    task,
+                    roster,
+                    corrective_note=note,
+                    read_only=read_only,
+                    code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    evidence=evidence,
+                    route=route,
+                    no_file_writes=no_file_writes,
+                    skill_policy=skill_policy,
+                ),
                 roster,
-                corrective_note=note,
-                read_only=read_only,
-                code_graph=code_graph,
-                drift_impact=drift_impact,
-                evidence=evidence,
-                route=route,
-                no_file_writes=no_file_writes,
-                skill_policy=skill_policy,
+                output_dir=output_dir,
             ),
             cwd=cwd,
             read_only=read_only,
@@ -1935,9 +2036,10 @@ def _apply_candidate_set_gate(
         )
         if revised_result.ok:
             try:
-                revised = parse_plan(
+                revised = _parse_gated_plan(
                     revised_result.text,
                     roster,
+                    output_dir=output_dir,
                     read_only=read_only,
                     skill_policy=skill_policy,
                 )
@@ -2013,6 +2115,7 @@ def dispatch(
     reprobe_seat: Callable[[Agent], bool] | None = None,
     on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
     run_id: str | None = None,
+    output_dir: Path | None = None,
 ) -> list[WorkerResult]:
     from . import run_transport
 
@@ -2051,6 +2154,7 @@ def dispatch(
         reprobe_seat=reprobe_seat,
         on_failed_attempt_persisted=on_failed_attempt_persisted,
         run_id=run_id,
+        output_dir=output_dir,
     )
 
 
@@ -2072,7 +2176,7 @@ def build_synth_prompt(
                     f"Status: {'ok' if result.ok else 'failed'}",
                     f"Detail: {result.detail}" if result.detail else "Detail:",
                     "Output:",
-                    result.text or "(no output)",
+                    _admitted_result_output(result) or "(no output)",
                 ]
             )
             for result in results
@@ -4131,6 +4235,7 @@ def run(
                 skill_policy=skill_policy,
                 codex_transport=transport_for_payload,
                 process_registry=process_registry,
+                output_dir=output_dir,
             )
         except RuntimeError as exc:
             final_attempt = plan_attempts[-1] if plan_attempts else None
@@ -4653,6 +4758,7 @@ def run(
                 reprobe_seat=reprobe_seat_for_retry,
                 on_failed_attempt_persisted=persist_failed_attempt,
                 run_id=output_dir.name if output_dir is not None else None,
+                output_dir=output_dir,
             )
         except runguard.RetainRunLockError:
             raise
@@ -4790,6 +4896,7 @@ def run(
             print("synthesis:")
             print(f"  -> {roster.orchestrator}")
 
+    synth_captured = None
     if direct_worker:
         direct_result = (
             worker_results[0]
@@ -4838,17 +4945,56 @@ def run(
             drift_impact=drift_impact,
             evidence=evidence,
         )
-        final = _call_with_process_registry(
-            _run_orchestrator,
-            roster,
+        synth_request = message_envelope.emit(
             synth_prompt,
-            cwd=cwd,
-            read_only=read_only,
-            sandbox_read_only=sandbox_read_only,
-            sandbox=sandbox,
-            codex_transport=transport_for_payload,
-            process_registry=process_registry,
+            kind="synthesis-request",
+            producer="aboyeur.build_synth_prompt",
+            from_seat=message_envelope.BRIGADE_SEAT,
+            to_seat=roster.orchestrator,
+            run_dir=output_dir,
+            run_id=output_dir.name if output_dir is not None else None,
+            session_harness=_orchestrator_harness(roster),
         )
+        synth_captured = None
+        if not synth_request.delivered:
+            final = agents.AgentResult(
+                text="",
+                ok=False,
+                detail=synth_request.reason or "synthesis-request rejected by provenance gate",
+                failure_phase="synthesis",
+                failure_kind="unclassified",
+            )
+        else:
+            final = _call_with_process_registry(
+                _run_orchestrator,
+                roster,
+                synth_prompt,
+                cwd=cwd,
+                read_only=read_only,
+                sandbox_read_only=sandbox_read_only,
+                sandbox=sandbox,
+                codex_transport=transport_for_payload,
+                process_registry=process_registry,
+            )
+            synth_captured = message_envelope.emit(
+                final.text,
+                kind="synthesis-result",
+                producer="aboyeur.run",
+                from_seat=roster.orchestrator,
+                to_seat=message_envelope.BRIGADE_SEAT,
+                run_dir=output_dir,
+                run_id=output_dir.name if output_dir is not None else None,
+                session_harness=_orchestrator_harness(roster),
+            )
+            if not synth_captured.delivered:
+                final = replace(
+                    final,
+                    text="",
+                    ok=False,
+                    detail=synth_captured.reason or "synthesis-result rejected by provenance gate",
+                    failure_phase=final.failure_phase or "synthesis",
+                    failure_kind=final.failure_kind or "unclassified",
+                )
         final = replace(final, duration_seconds=max(0.0, round(time.monotonic() - synthesis_started, 3)))
     # Drift checkpoint: after synthesis. A concurrent commit or branch switch
     # during synthesis must fail the run before the synthesized answer is
@@ -4877,6 +5023,8 @@ def run(
                 worker_results=_worker_payload(worker_results),
             )
         )
+        if synth_captured is not None:
+            synthesis_payload["provenance"] = synth_captured.envelope
         causal_receipt.write_synthesis_lineage_artifacts(
             output_dir,
             synthesis_payload,

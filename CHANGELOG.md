@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Inter-seat planner, worker, and synthesis messages now carry a
+  `brigade.provenance-envelope.v1` with `message.text.utf8.v1` over the exact
+  outbound UTF-8 bytes. Channel gates run before `parse_plan` or model
+  delivery. Receive-side trust is re-derived or verified against authority
+  and is never taken from a stored `reviewed`/`verified` label; model and
+  tool-origin content stay `untrusted` regardless of the on-disk claim.
+  Envelopes are bound to their channel so a valid envelope for one message
+  kind is rejected at every other gate. Model and tool outputs start
+  `untrusted` and completing a phase never upgrades them. Worker and
+  prior-stage text is wrapped and byte-capped
+  before later prompts. `message-envelopes.jsonl` beside `run.json` stores
+  message id, phase, seats, and envelope only. Legacy run messages display
+  unknown provenance and are not replayed. (#585)
 - `brigade.causal_receipt.v1` is a lineage-only companion record for plan, run,
   verify, outcome, and handoff artifacts. New writes stamp typed `recorded`
   parent links so one plan→run→verify→outcome→handoff chain (and multi-parent

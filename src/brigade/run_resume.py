@@ -17,6 +17,7 @@ from . import (
     aboyeur,
     agents,
     codex_appserver,
+    message_envelope,
     receipt_schema,
     run_budget,
     run_events,
@@ -664,6 +665,7 @@ def _resume_locked(
             detail=r.get("detail", ""),
             thread_id=r.get("thread_id"),
             status=r.get("status", ""),
+            provenance=r.get("provenance") if isinstance(r.get("provenance"), dict) else None,
         )
         for r in results
     ]
@@ -686,6 +688,22 @@ def _resume_locked(
             file=sys.stderr,
         )
         return 2
+    synth_request = message_envelope.emit(
+        synth_prompt,
+        kind="synthesis-request",
+        producer="aboyeur.build_synth_prompt",
+        from_seat=message_envelope.BRIGADE_SEAT,
+        to_seat=roster.orchestrator,
+        run_dir=run_dir,
+        run_id=run_dir.name,
+        session_harness=orchestrator.cli,
+    )
+    if not synth_request.delivered:
+        print(
+            f"error: synthesis-request rejected by provenance gate: {synth_request.reason}",
+            file=sys.stderr,
+        )
+        return 2
     final = agents.run_agent(
         orchestrator.cli,
         synth_prompt,
@@ -696,14 +714,33 @@ def _resume_locked(
         reasoning=orchestrator.reasoning,
         env=dict(orchestrator.env) if orchestrator.env is not None else None,
     )
+    synth_captured = message_envelope.emit(
+        final.text,
+        kind="synthesis-result",
+        producer="aboyeur.run",
+        from_seat=roster.orchestrator,
+        to_seat=message_envelope.BRIGADE_SEAT,
+        run_dir=run_dir,
+        run_id=run_dir.name,
+        session_harness=orchestrator.cli,
+    )
+    if not synth_captured.delivered:
+        final = replace(
+            final,
+            text="",
+            ok=False,
+            detail=synth_captured.reason or "synthesis-result rejected by provenance gate",
+        )
+    synthesis_payload = receipt_schema.synthesis_document(
+        orchestrator=roster.orchestrator,
+        result={"ok": final.ok, "detail": final.detail, "text": final.text},
+        ground_truth=ground_truth,
+    )
+    synthesis_payload["provenance"] = synth_captured.envelope
     aboyeur.write_sidecar_revision(
         run_dir,
         "synthesis.json",
-        receipt_schema.synthesis_document(
-            orchestrator=roster.orchestrator,
-            result={"ok": final.ok, "detail": final.detail, "text": final.text},
-            ground_truth=ground_truth,
-        ),
+        synthesis_payload,
     )
     now = datetime.now(timezone.utc).isoformat()
     run_meta.setdefault("resumed_at", []).append(now)
