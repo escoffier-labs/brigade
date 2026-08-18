@@ -17,9 +17,32 @@ from typing import Any
 from . import constants, helpers, ledger as ledger_mod, config as config_mod
 from . import scanners as scanners_mod
 from . import sweeps as sweeps_mod
+from ..card_identity import IdentityIndex, card_identity, valid_card_id
 
 
-def _memory_refresh_cards(payload: dict[str, Any], *, queue_path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+def _memory_refresh_identity_index(target: Path | None) -> IdentityIndex[str]:
+    from ..memory_cmd import MemoryCareConfig, _iter_cards, _parse_frontmatter
+
+    index: IdentityIndex[str] = IdentityIndex()
+    if target is None or not target.is_dir():
+        return index
+    for path in _iter_cards(target, MemoryCareConfig()):
+        rel = path.relative_to(target).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        meta, _has_frontmatter = _parse_frontmatter(text)
+        index.claim_identity(card_identity(meta, rel), rel)
+    return index
+
+
+def _memory_refresh_cards(
+    payload: dict[str, Any],
+    *,
+    queue_path: Path,
+    target: Path | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
     cards = payload.get("cards")
     if cards is None:
         cards = payload.get("candidates")
@@ -30,6 +53,7 @@ def _memory_refresh_cards(payload: dict[str, Any], *, queue_path: Path) -> tuple
 
     records: list[dict[str, Any]] = []
     errors: list[str] = []
+    identities = _memory_refresh_identity_index(target)
     for index, card in enumerate(cards, start=1):
         label = f"memory-refresh card entry {index}"
         if not isinstance(card, dict):
@@ -40,7 +64,23 @@ def _memory_refresh_cards(payload: dict[str, Any], *, queue_path: Path) -> tuple
             or ledger_mod._string_field(card.get("path"))
             or ledger_mod._string_field(card.get("card_file"))
         )
-        card_id = ledger_mod._string_field(card.get("id")) or ledger_mod._string_field(card.get("card_id")) or card_file
+        raw_id = ledger_mod._string_field(card.get("id")) or ledger_mod._string_field(card.get("card_id"))
+        aliases = card.get("card_aliases")
+        alias_keys = [str(alias) for alias in aliases] if isinstance(aliases, list) else []
+        lookup_keys = [key for key in (raw_id, card_file, *alias_keys) if key]
+        collided = next((key for key in lookup_keys if identities.is_collision(key)), None)
+        if collided is not None:
+            errors.append(f"{label} identity {collided!r} collides and is unresolvable")
+            continue
+        resolved: str | None = None
+        for key in lookup_keys:
+            resolved = identities.resolve(key)
+            if resolved is not None:
+                break
+        if resolved is not None:
+            card_file = card_file or resolved
+        explicit = valid_card_id(raw_id)
+        card_id = explicit or raw_id or card_file
         if not card_file:
             errors.append(f"{label} requires file")
             continue
@@ -138,7 +178,7 @@ def _import_memory_refresh_queue(
     if not isinstance(payload, dict):
         print(f"error: memory-care refresh queue must be an object: {queue_path}", file=sys.stderr)
         return 2
-    records, errors = _memory_refresh_cards(payload, queue_path=queue_path)
+    records, errors = _memory_refresh_cards(payload, queue_path=queue_path, target=target)
     if source != "memory-refresh":
         for record in records:
             record["source"] = source
