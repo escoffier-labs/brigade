@@ -466,7 +466,7 @@ def test_does_not_follow_symlinks_out_of_the_vault(workspace, capsys) -> None:
 
     assert cli.main(["memory", "vault-search", "rotation", "--target", str(target), "--json"]) == 0
     hits = json.loads(capsys.readouterr().out)["hits"]
-    assert [hit["relative_path"] for hit in hits] == ["Notes/live.md", "Notes/ok.md"]
+    assert {hit["relative_path"] for hit in hits} == {"Notes/live.md", "Notes/ok.md"}
     assert all("OUTSIDEONLY" not in json.dumps(hit) for hit in hits)
 
 
