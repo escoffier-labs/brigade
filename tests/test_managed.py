@@ -459,7 +459,7 @@ def test_bootstrap_doctor_lint_rejects_exit_mismatch(monkeypatch, payload, code)
         "hidden-stderr",
         "orphan-workspace",
         "bootstrap-after-setup",
-        f"exited {code}",
+        f"exit {code}",
     )
 
 
