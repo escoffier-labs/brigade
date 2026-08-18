@@ -78,6 +78,27 @@ def test_audit_uses_the_engine_id_precedence_and_coercion_rules(tmp_path):
     assert audit["summary"]["explicit_ids"] == 2
 
 
+def test_audit_reports_duplicates_without_a_namespace_file(tmp_path):
+    workspace = tmp_path / "one"
+    cards = workspace / "memory" / "cards"
+    cards.mkdir(parents=True)
+    assert not (workspace / "memory" / "NAMESPACE").exists()
+    _card(cards, "a.md", "id: card-99999999-9999-4999-8999-999999999999")
+    _card(cards, "b.md", "id: card-99999999-9999-4999-8999-999999999999")
+
+    audit = memory_identity_audit.audit_workspaces([workspace])
+
+    assert audit["summary"]["duplicate_ids_within_namespace"] == 1
+    assert audit["collisions"] == [
+        {
+            "scope": "namespace",
+            "namespace": "",
+            "id": "card-99999999-9999-4999-8999-999999999999",
+            "paths": ["memory/cards/a.md", "memory/cards/b.md"],
+        }
+    ]
+
+
 def test_audit_reports_duplicates_inside_a_namespace_without_writing_cards(tmp_path):
     workspace, cards = _workspace(tmp_path, "one", "memory-33333333-3333-4333-8333-333333333333")
     _card(cards, "a.md", "id: card-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")

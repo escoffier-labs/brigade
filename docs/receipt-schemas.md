@@ -908,6 +908,80 @@ It is not a second provenance envelope. Compact JSON is capped at 65536 bytes.
 | `id` | string | yes | Safe identity label. Matches `parent_manifest.id` |
 | `parents` | array | yes | Same parent-object schema as the causal receipt |
 
+## Run View read contracts (#631)
+
+Versioned, read-only CLI JSON contracts for higher-level surfaces (the Center
+Runs view). Each payload is an explicit allowlist over run artifacts: it never
+includes environment values, auth or control tokens, secret references, full
+prompts, transcript bodies, raw stdout/stderr, log paths, or absolute
+workspace paths. Task and detail strings are bounded before emission; the
+authoritative artifacts are never modified.
+
+### `brigade.runs-list.v1` — `brigade runs list --json`
+
+```json
+{"schema": "brigade.runs-list.v1", "runs": [], "skipped_invalid": 0}
+```
+
+Each entry in `runs` carries browser-safe summary fields only: `run_id` (the
+run directory name, never an absolute path), `status`, bounded `task`,
+`started_at`, `finished_at`, `duration_seconds`, `failure_phase`, `mode`
+(`normal` / `read-only`, with `, dry-run` appended), `resume_available`, and
+optional `parent_run_id` when the run is a durable child of another run.
+Invalid run directories are counted in `skipped_invalid` and skipped.
+
+### `brigade.run-detail.v1` — `brigade runs show <run> --json`, `brigade runs latest --json`
+
+Both commands share one serializer:
+
+```json
+{
+  "schema": "brigade.run-detail.v1",
+  "run": {},
+  "roster": {},
+  "plan": {},
+  "workers": {},
+  "synthesis": {},
+  "verification": [],
+  "briefs": []
+}
+```
+
+- `run`: identifier, status, bounded task, mode, timestamps, duration,
+  `failure` (`phase` / `kind` / bounded `detail`), bounded `error`,
+  `suspected_noop`, `resume_available`, and optional `lineage`
+  (`kind`, `parent_run_id`, `branch_point_event_id`, `shared_prefix`)
+  when the run is a durable child.
+- `roster`: orchestrator, worker limits, allowed models, and per-seat `cli`,
+  `model`, `reasoning`, bounded `role`, and `timeout_seconds`.
+- `plan`: worker `assignments` with stage, worker, and bounded task.
+- `workers`: per-result state (ok/status, bounded detail, duration, exit code,
+  timeout flag, requested model, transport, failure class).
+- `verification`: verify receipt summaries (receipt run id, status, duration,
+  command label, and exit code) from recorded ground truth.
+- `briefs`: attachment markers for the Code Intelligence (`code-graph`),
+  drift (`drift-impact`), and Evidence Ledger (`evidence`) briefs.
+
+### `brigade.run-watch.v1` — `brigade runs watch <run> --json`
+
+Every newline-delimited watch record (`watch`, `run`, `plan`, `event`,
+`workers`, `synthesis`, `final`, `summary`) carries
+`"schema": "brigade.run-watch.v1"` and is filtered through the same
+allowlist / one-line helpers as list and detail. Consumers must ignore
+unknown future record types. `brigade runs events` keeps its own
+`brigade.run_event.v1` lifecycle contract and is unchanged.
+
+- `watch` and `summary` identify the run as `run_id` (directory name,
+  never an absolute path). The stale-lock `inspect_command` is
+  `brigade runs show <run_id>`.
+- `run`, `plan`, `workers`, and `synthesis` reuse the detail-contract
+  field allowlists and bounded strings.
+- `event` records emit only `method` and `item_type`. Auth tokens,
+  prompts, transcript bodies, raw stdout/stderr, log paths, and
+  absolute paths in `params` are omitted.
+- `final` text is one-lined and bounded; a value that cannot be
+  rendered safely is omitted.
+
 ---
 
 ## Related commands

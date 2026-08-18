@@ -11,6 +11,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from brigade.card_identity import IdentityIndex
 from brigade.memory_cmd import _parse_frontmatter
 
 from .corpus import load_cards, repo_root
@@ -33,10 +34,10 @@ def _scope_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: metadata.get(key) for key in SCOPE_DIMENSIONS}
 
 
-def _card_index(root: Path) -> dict[str, dict[str, Any]]:
+def _card_index(root: Path) -> IdentityIndex[dict[str, Any]]:
     """Index cards by canonical id and every alias for dual-read resolution."""
     root = root.expanduser().resolve()
-    index: dict[str, dict[str, Any]] = {}
+    index: IdentityIndex[dict[str, Any]] = IdentityIndex()
     for card in load_cards(root):
         path = root / card.path
         text = path.read_text(encoding="utf-8")
@@ -48,8 +49,9 @@ def _card_index(root: Path) -> dict[str, dict[str, Any]]:
             "path": card.path,
             "scope": _scope_from_metadata(metadata if isinstance(metadata, dict) else {}),
         }
-        for key in (card.card_id, *card.aliases):
-            index[key] = record
+        index.claim(card.card_id, record)
+        for alias in card.aliases:
+            index.claim(alias, record)
     return index
 
 
@@ -64,8 +66,10 @@ def _unavailable(reason: str) -> dict[str, Any]:
     }
 
 
-def _resolve(cards: dict[str, dict[str, Any]], key: str) -> dict[str, Any] | None:
-    return cards.get(key)
+def _resolve(cards: IdentityIndex[dict[str, Any]], key: str) -> dict[str, Any] | None:
+    if cards.is_collision(key):
+        raise ValueError(f"card identity {key!r} collides and is unresolvable")
+    return cards.resolve(key)
 
 
 def evaluate_memory_quality(root: Path = DEFAULT_QUALITY_ROOT) -> dict[str, Any]:
@@ -169,7 +173,7 @@ def evaluate_memory_quality(root: Path = DEFAULT_QUALITY_ROOT) -> dict[str, Any]
         if any(isinstance(q, dict) and isinstance(q.get("scope"), dict) for q in retrievals)
         else _unavailable("retrieval contract has no requested scope field")
     )
-    canonical_ids = {record["external_id"] for record in cards.values()}
+    canonical_ids = {record["external_id"] for record in cards.records()}
     return {
         "schema": QUALITY_SCHEMA,
         "issue": 845,

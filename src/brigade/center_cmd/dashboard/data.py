@@ -47,10 +47,41 @@ def run_json(
     Doctor-style commands signal an unhealthy-but-projected state with a
     nonzero exit while printing their versioned JSON; pass ``(0, 1)`` there.
     """
-    cmd = [sys.executable, "-m", "brigade", *args, "--target", str(target), "--json"]
+    return _invoke(
+        [*args, "--target", str(target), "--json"],
+        phase_args=args,
+        timeout=timeout,
+        ok_codes=ok_codes,
+    )
+
+
+def run_json_cwd(
+    target: Path,
+    args: Sequence[str],
+    *,
+    timeout: float = 20.0,
+    ok_codes: Sequence[int] = (0,),
+) -> dict:
+    """Like :func:`run_json` for subcommands scoped by ``--cwd`` instead of ``--target``."""
+    return _invoke(
+        [*args, "--cwd", str(target), "--json"],
+        phase_args=args,
+        timeout=timeout,
+        ok_codes=ok_codes,
+    )
+
+
+def _invoke(
+    full_args: Sequence[str],
+    *,
+    phase_args: Sequence[str],
+    timeout: float,
+    ok_codes: Sequence[int] = (0,),
+) -> dict:
+    cmd = [sys.executable, "-m", "brigade", *full_args]
     env = os.environ.copy()
     env["BRIGADE_EXTRAS"] = "1"
-    phase_name = "cli:" + " ".join(args)
+    phase_name = "cli:" + " ".join(phase_args)
     try:
         with center_timing.phase(phase_name):
             result = subprocess.run(

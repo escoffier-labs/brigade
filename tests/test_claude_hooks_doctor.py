@@ -220,6 +220,79 @@ def test_doctor_uses_last_write_time_for_receipt_threshold(tmp_path: Path, capsy
     assert "dormant" in check["detail"]
 
 
+def test_doctor_ignores_foreign_write_outrunning_this_session_receipt(tmp_path: Path, capsys):
+    target = _wired(tmp_path)
+    now = localio.utc_now()
+    session_id = "captured-then-outrun"
+    from brigade.claude_hooks import runtime
+
+    fingerprint = runtime._session_fingerprint(session_id)
+    write_session_state(
+        target,
+        session_id,
+        {
+            "session_id": session_id,
+            "session_fingerprint": fingerprint,
+            "target": str(target.resolve()),
+            "started_at": (now - timedelta(hours=2)).isoformat(),
+            "last_write_at": (now - timedelta(minutes=5)).isoformat(),
+            "briefed": True,
+            "write_observed": True,
+            "verify_denied_count": 0,
+        },
+    )
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "session-capture"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "started_at": (now - timedelta(hours=1)).isoformat(),
+                "completed_at": (now - timedelta(hours=1)).isoformat(),
+                "target": str(target.resolve()),
+                "harness_session": {"harness": "claude", "fingerprint": fingerprint},
+            }
+        )
+        + "\n"
+    )
+    other_id = "busy-other"
+    other_fp = runtime._session_fingerprint(other_id)
+    write_session_state(
+        target,
+        other_id,
+        {
+            "session_id": other_id,
+            "session_fingerprint": other_fp,
+            "target": str(target.resolve()),
+            "started_at": (now - timedelta(hours=1)).isoformat(),
+            "last_write_at": (now - timedelta(minutes=1)).isoformat(),
+            "briefed": True,
+            "write_observed": True,
+            "verify_denied_count": 0,
+        },
+    )
+    other_dir = target / ".brigade" / "work" / "verify-runs" / "other-capture"
+    other_dir.mkdir(parents=True)
+    (other_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "started_at": (now - timedelta(minutes=1)).isoformat(),
+                "completed_at": (now - timedelta(minutes=1)).isoformat(),
+                "target": str(target.resolve()),
+                "harness_session": {"harness": "claude", "fingerprint": other_fp},
+            }
+        )
+        + "\n"
+    )
+
+    check = _loop_check(target, capsys)
+
+    assert check["status"] == "OK"
+    assert "enforced" in check["detail"]
+    assert "dormant" not in check["detail"]
+
+
 def test_status_payload_reports_legacy_handlers(tmp_path: Path):
     target = _wired(tmp_path)
     settings = target / ".claude" / "settings.json"
