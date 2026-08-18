@@ -2337,6 +2337,7 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
     _seed_graphtrail_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path, sync_delay_seconds=0.2)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    _derace_graphtrail_sync_timing(monkeypatch, graphtrail, time_out_sync_call=1)
 
     assert (
         work_cmd.verify_run(

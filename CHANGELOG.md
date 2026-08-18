@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Search integrity verification loads item text and provenance in one
   `IN (...)` query keyed by the result ids, instead of one select per
   hit (search limit is up to 200). (#964)
+- `brigade memory project-vault` accepts `--max-related` to tune the per-note
+  related-link cap (default 12). Explicit refs still outrank tag/category
+  matches but no longer claim to always survive the cap. (#966)
 - `brigade memory project-vault` produces a browsable vault on a real corpus.
   Notes take their title from the card's leading heading when frontmatter has
   no `title`, instead of the filename slug, and that heading is no longer
@@ -56,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
+- The graphtrail stale-baseline verify test no longer races wall-clock sync delays
+  against a tight subprocess timeout on loaded CI runners; sync timeout is injected
+  deterministically so the stale-graph assertion is reliable on Python 3.12. (#954)
 - Quarantined items stay quarantined when a pending injection scan comes back clean, so a labeled quarantine cannot be released to untrusted and become content-eligible. Reviewed and verified items keep every consumer surface untrusted already has, including `context`. `brigade receipts verify` reports `verify-pending` (and does not append a local verified event) when the MiseLedger trust notify fails. Provenance-event JSONL now appends and fsyncs instead of rewriting the whole file. (#587)
 - Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
   closed on every `brigade work` surface (and other commands that read the
