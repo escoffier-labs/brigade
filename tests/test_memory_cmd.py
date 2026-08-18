@@ -129,6 +129,16 @@ def test_memory_care_init_status_and_doctor(tmp_path, capsys):
     assert "memory_care_config" in out
 
 
+def test_memory_care_doctor_warns_on_missing_card_ids(tmp_path):
+    cards = tmp_path / "memory" / "cards"
+    _write_card(cards / "legacy.md", {"topic": "legacy", "confidence": "high", "evidence": ["README.md"]})
+    assert memory_cmd.scan(target=tmp_path) == 0
+    health = memory_cmd.health(tmp_path)
+    check = next(item for item in health["checks"] if item["name"] == "memory_card_ids")
+    assert check["status"] == "warn"
+    assert health["valid"] is True
+
+
 def test_memory_care_scan_detects_card_decay_issues(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     config = tmp_path / ".brigade" / "memory-care.toml"
@@ -671,7 +681,18 @@ def test_memory_care_backfill_dry_run_derives_dates_and_writes_nothing(tmp_path,
     assert "fingerprint" in item["fields"]
     assert len(item["fingerprint"]) == 64
     assert (cards / "bare.md").read_text() == before
-    assert not (tmp_path / ".brigade" / "memory-care" / "backfills").exists()
+    receipt_path = tmp_path / ".brigade" / "memory-care" / "backfills" / "dry-run-mapping.json"
+    assert receipt_path.is_file()
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["schema"] == "brigade.memory-identity-mapping.v1"
+    assert receipt["dry_run"] is True
+    assert receipt["missing_ids_validation"] == "warning"
+    assert receipt["coverage"]["path_fallbacks"] >= 1
+    dumped = json.dumps(receipt)
+    assert "Body." not in dumped
+    assert str(tmp_path) not in dumped
+    assert all(item["path"].startswith("memory/cards/") for item in receipt["mappings"])
+    assert payload["identity_receipt"]["mappings"] == receipt["mappings"]
 
 
 def test_memory_care_backfill_apply_writes_metadata_receipt_and_is_idempotent(tmp_path, capsys):
@@ -777,6 +798,10 @@ def test_memory_care_backfill_rejects_alias_collisions_without_writing(tmp_path,
     payload = json.loads(capsys.readouterr().out)
     assert payload["identity_collisions"] == {"shared": ["memory/cards/one.md", "memory/cards/two.md"]}
     assert {path.name: path.read_text() for path in cards.glob("*.md")} == before
+    receipt = payload["identity_receipt"]
+    assert receipt["dry_run"] is True
+    assert receipt["coverage"]["alias_collisions"] == 1
+    assert str(tmp_path) not in json.dumps(receipt)
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")

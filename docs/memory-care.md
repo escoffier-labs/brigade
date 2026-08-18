@@ -53,6 +53,12 @@ Contradiction detection is deliberately conservative. Brigade only flags explici
 
 `status` also reports a read-only `archive_candidates` view derived from the saved scan payload (no second card-tree walk). A card is a candidate only when it has a parseable `last_reviewed` and `age_days > 2 * stale_after_days` (exactly 2x TTL is not a candidate). Missing, invalid, or future reviewed dates are unassessable and are never inferred from mtime or Git history. Each candidate includes age, last-reviewed, freshness context, and evidence pointers. The view sets `read_only`, `approval_required`, and `would_archive=false`; there is no `--apply` path and status never archives or writes state.
 
+## Card identity
+
+New canonical cards mint one opaque `card-<uuid4>` ID in frontmatter. A valid ID is never replaced on rewrite or reinforcement. Legacy cards without an ID stay readable through a workspace-relative path fallback (`path:memory/cards/<stem>.md`, plus filename stem and `topic` aliases). Care queues, search and recall logs, refresh imports, and retrieval-eval fixtures prefer the explicit ID and keep those legacy keys as aliases. Alias collisions fail the consumer without rewriting card files.
+
+`brigade memory care backfill` (dry-run by default) writes a mapping receipt under `.brigade/memory-care/backfills/dry-run-mapping.json` before any batch rewrite. The receipt reports explicit-ID coverage, path fallbacks, malformed IDs, duplicate IDs, and alias collisions. It contains relative paths and IDs only: no card bodies and no absolute paths. Missing IDs stay a doctor warning until audited coverage is 100 percent. `--apply` is the named reviewed rewrite that may mint IDs on existing cards; it refuses to write when aliases collide.
+
 ## Search recall signal
 
 `brigade memory search` appends a local-only event to `.brigade/memory/search-log.jsonl` on each real query (timestamp, normalized query, top-K card ids; no card body). The log is capped and drops oldest entries. `memory care status` (and `--json`) surfaces a rolling `search_recall` object: `searches`, `followup_rate`, plus the window and K constants. A follow-up within the window whose top-K ids share nothing with the prior search counts as a miss; overlap or no follow-up counts as satisfied. This is second-class evidence (like `brief_hit_rate`): it informs whether the keyword scorer is good enough and feeds failed queries into the offline retrieval eval harness, but it never flips doctor/`valid`. The dashboard list-all query (`:`) is not logged.

@@ -54,6 +54,23 @@ def test_fixture_corpus_size_and_gold_resolve():
     assert paraphrase > exact  # weighted toward hard cases
 
 
+def test_gold_alias_collision_fails_without_rewriting_cards(tmp_path: Path):
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True)
+    first = "---\nid: card-123e4567-e89b-42d3-a456-426614174000\ntopic: shared\n---\nfirst body\n"
+    second = "---\nid: card-223e4567-e89b-42d3-a456-426614174000\ntopic: shared\n---\nsecond body\n"
+    cards.joinpath("one.md").write_text(first)
+    cards.joinpath("two.md").write_text(second)
+    (tmp_path / "queries.json").write_text(
+        json.dumps({"k": 1, "queries": [{"id": "q", "query": "first body", "gold": ["shared"]}]})
+    )
+
+    with pytest.raises(ValueError, match="colliding gold card ids"):
+        run_eval(fixture_root=tmp_path, adapters=["grep"])
+    assert cards.joinpath("one.md").read_text() == first
+    assert cards.joinpath("two.md").read_text() == second
+
+
 def test_explicit_card_id_resolves_legacy_fixture_gold_alias(tmp_path: Path):
     cards = tmp_path / "memory" / "cards"
     cards.mkdir(parents=True)

@@ -25,7 +25,15 @@ from .localio import (
     utc_now_iso_z as _utc_iso,
 )
 from .memory_doctor.safety import atomic_write_text
-from .card_identity import CardIdentity, card_identity, identity_collision_aliases
+from .card_identity import (
+    CardIdentity,
+    IdentityIndex,
+    card_identity,
+    identity_collision_aliases,
+    mapping_old_id,
+    mint_claimed_card_id,
+    valid_card_id,
+)
 from .templates import template_root
 
 CONFIG_REL_PATH = ".brigade/memory-care.toml"
@@ -1187,6 +1195,36 @@ def health(target: Path) -> dict[str, Any]:
             )
     else:
         checks.append({"status": "ok", "name": "memory_care_open_issues", "detail": "none"})
+    scan_cards = scan_payload.get("cards") if isinstance(scan_payload, dict) else None
+    if isinstance(scan_cards, list):
+        explicit_ids = 0
+        fallback_ids = 0
+        for row in scan_cards:
+            if not isinstance(row, dict) or not row.get("has_frontmatter"):
+                continue
+            if valid_card_id(row.get("card_id")):
+                explicit_ids += 1
+            else:
+                fallback_ids += 1
+        if fallback_ids:
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "memory_card_ids",
+                    "detail": (
+                        f"{fallback_ids} cards use path-fallback identity; "
+                        "missing IDs stay a warning until audited coverage is 100 percent"
+                    ),
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "status": "ok",
+                    "name": "memory_card_ids",
+                    "detail": (f"{explicit_ids} cards have explicit IDs" if explicit_ids else "no cards"),
+                }
+            )
     issues = [check for check in checks if check["status"] != "ok"]
     metadata = (
         scan_payload.get("metadata")
@@ -1370,6 +1408,8 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
     skipped_no_frontmatter = 0
     from .card_fingerprint import read_text_nofollow
 
+    claimed_ids: IdentityIndex[str] = IdentityIndex()
+    pending: list[tuple[Path, str, str, dict[str, Any]]] = []
     for path in _iter_cards(target, config):
         rel = str(path.relative_to(target))
         try:
@@ -1380,6 +1420,12 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
         if not has_frontmatter:
             skipped_no_frontmatter += 1
             continue
+        identity = card_identity(meta, rel)
+        if identity.explicit:
+            claimed_ids.claim(identity.card_id, rel)
+        pending.append((path, rel, text, meta))
+
+    for path, rel, text, meta in pending:
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
         expiry = _parse_date(_frontmatter_value(meta, "fresh_until", "expires_at", "expires"))
         has_fingerprint = bool(str(meta.get("fingerprint") or "").strip())
@@ -1411,11 +1457,11 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
             candidate["fields"].append("fingerprint")
             if reviewed is not None and expiry is not None:
                 candidate["source"] = "content-hash"
-        if candidate["fields"] and not card_identity(meta, rel).explicit:
-            from .card_identity import mint_card_id
-
-            candidate["id"] = mint_card_id()
+        identity = card_identity(meta, rel)
+        if candidate["fields"] and not identity.explicit:
+            candidate["id"] = mint_claimed_card_id(claimed_ids, rel)
             candidate["fields"].append("id")
+            candidate["old_id"] = mapping_old_id(identity, rel)
         candidates.append(candidate)
     return candidates, skipped_no_frontmatter
 
@@ -1436,6 +1482,55 @@ def _backfill_write(target: Path, candidate: dict[str, Any]) -> None:
     )
 
 
+def _identity_coverage(target: Path, identity_collisions: dict[str, tuple[str, ...]]) -> dict[str, int]:
+    """Consume #844's read-only audit plus alias collisions. No card bodies."""
+    from . import memory_identity_audit
+
+    audit = memory_identity_audit.audit_workspaces([target])
+    summary = audit["summary"]
+    return {
+        "explicit_ids": int(summary["explicit_ids"]),
+        "path_fallbacks": int(summary["path_fallbacks"]),
+        "malformed_ids": int(summary["malformed_ids"]),
+        "duplicate_ids": int(summary["duplicate_ids_within_namespace"]),
+        "alias_collisions": len(identity_collisions),
+    }
+
+
+def _identity_mapping_receipt(
+    *,
+    candidates: list[dict[str, Any]],
+    coverage: dict[str, int],
+    identity_collisions: dict[str, tuple[str, ...]],
+    dry_run: bool,
+    written_count: int,
+    skipped_no_frontmatter: int,
+    stale_after_days: int,
+) -> dict[str, Any]:
+    mappings = [
+        {
+            "path": str(candidate["file"]),
+            "old_id": str(candidate.get("old_id") or f"path:{candidate['file']}"),
+            "new_id": candidate.get("id"),
+        }
+        for candidate in sorted(candidates, key=lambda item: str(item["file"]))
+        if candidate.get("id")
+    ]
+    return {
+        "schema": "brigade.memory-identity-mapping.v1",
+        "dry_run": dry_run,
+        "generated_at": _utc_iso(),
+        "written_count": written_count,
+        "skipped_no_frontmatter": skipped_no_frontmatter,
+        "stale_after_days": stale_after_days,
+        "coverage": coverage,
+        "alias_collisions": {key: list(paths) for key, paths in identity_collisions.items()},
+        "missing_ids_validation": "warning",
+        "identity_mapping": [{"file": item["path"], "card_id": item["new_id"]} for item in mappings],
+        "mappings": mappings,
+    }
+
+
 def backfill(*, target: Path, apply: bool = False, json_output: bool = False) -> int:
     """Plan or apply safe metadata backfill for cards missing review/freshness/fingerprint."""
     target = target.expanduser().resolve()
@@ -1448,12 +1543,23 @@ def backfill(*, target: Path, apply: bool = False, json_output: bool = False) ->
         print(f"error: {exc}", file=sys.stderr)
         return 2
     identity_collisions = _scan_payload(target, config)["identity_collisions"]
-    if apply and identity_collisions:
+    coverage = _identity_coverage(target, identity_collisions)
+    blocking = bool(identity_collisions) or coverage["duplicate_ids"] > 0
+    if apply and blocking:
         collision_payload = {
             "target": str(target),
             "apply": apply,
             "written_count": 0,
             "identity_collisions": identity_collisions,
+            "identity_receipt": _identity_mapping_receipt(
+                candidates=[],
+                coverage=coverage,
+                identity_collisions=identity_collisions,
+                dry_run=True,
+                written_count=0,
+                skipped_no_frontmatter=0,
+                stale_after_days=config.stale_after_days,
+            ),
             "error": "identity alias collisions must be resolved before reviewed backfill",
         }
         if json_output:
@@ -1464,29 +1570,34 @@ def backfill(*, target: Path, apply: bool = False, json_output: bool = False) ->
     candidates, skipped_no_frontmatter = _backfill_candidates(target, config)
     written = 0
     receipt_path: Path | None = None
+    receipts_dir = target / ".brigade" / "memory-care" / "backfills"
+    identity_receipt = _identity_mapping_receipt(
+        candidates=candidates,
+        coverage=coverage,
+        identity_collisions=identity_collisions,
+        dry_run=not apply,
+        written_count=0,
+        skipped_no_frontmatter=skipped_no_frontmatter,
+        stale_after_days=config.stale_after_days,
+    )
     if apply and candidates:
         for candidate in candidates:
             _backfill_write(target, candidate)
             written += 1
-        receipts_dir = target / ".brigade" / "memory-care" / "backfills"
+        identity_receipt["dry_run"] = False
+        identity_receipt["written_count"] = written
         receipts_dir.mkdir(parents=True, exist_ok=True)
         from .localio import utc_now, write_json
 
         stamp = utc_now().strftime("%Y%m%dT%H%M%S")
         receipt_path = receipts_dir / f"{stamp}.json"
-        write_json(
-            receipt_path,
-            {
-                "generated_at": _utc_iso(),
-                "written_count": written,
-                "skipped_no_frontmatter": skipped_no_frontmatter,
-                "stale_after_days": config.stale_after_days,
-                "identity_mapping": [
-                    {"file": candidate["file"], "card_id": candidate.get("id")}
-                    for candidate in sorted(candidates, key=lambda candidate: str(candidate["file"]))
-                ],
-            },
-        )
+        write_json(receipt_path, identity_receipt)
+    elif not apply:
+        receipts_dir.mkdir(parents=True, exist_ok=True)
+        from .localio import write_json
+
+        receipt_path = receipts_dir / "dry-run-mapping.json"
+        write_json(receipt_path, identity_receipt)
     payload: dict[str, Any] = {
         "target": str(target),
         "apply": apply,
@@ -1496,6 +1607,7 @@ def backfill(*, target: Path, apply: bool = False, json_output: bool = False) ->
         "stale_after_days": config.stale_after_days,
         "receipt_path": str(receipt_path) if receipt_path else None,
         "candidates": candidates,
+        "identity_receipt": identity_receipt,
         "next_command": "brigade memory care backfill --apply"
         if candidates and not apply
         else "brigade memory care scan",

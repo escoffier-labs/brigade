@@ -2436,6 +2436,39 @@ def test_work_import_memory_refresh_reads_candidates(tmp_path, monkeypatch, caps
     ]
 
 
+def test_work_import_memory_refresh_rejects_alias_collisions_without_writing(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True)
+    first = "---\nid: card-123e4567-e89b-42d3-a456-426614174000\ntopic: shared\n---\none\n"
+    second = "---\nid: card-223e4567-e89b-42d3-a456-426614174000\ntopic: shared\n---\ntwo\n"
+    (cards / "one.md").write_text(first)
+    (cards / "two.md").write_text(second)
+    queue = tmp_path / "memory-refresh.json"
+    _write_json(
+        queue,
+        {
+            "refresh_candidates": [
+                {
+                    "id": "shared",
+                    "file": "memory/cards/one.md",
+                    "refresh_reason": "stale",
+                }
+            ]
+        },
+    )
+    inbox = tmp_path / ".brigade" / "work" / "imports.jsonl"
+    before = inbox.read_text() if inbox.is_file() else ""
+
+    assert work_cmd.import_memory_refresh(target=tmp_path, queue=queue, json_output=True) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 0
+    assert any("collides" in error for error in payload["errors"])
+    assert (cards / "one.md").read_text() == first
+    assert (cards / "two.md").read_text() == second
+    assert (inbox.read_text() if inbox.is_file() else "") == before
+
+
 def test_work_chat_sweep_flows_through_inbox_plan_promote_run_completion(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     artifacts_dir = tmp_path / ".brigade" / "runs"

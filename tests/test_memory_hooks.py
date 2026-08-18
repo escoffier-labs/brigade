@@ -77,10 +77,32 @@ def test_recall_json_omits_body_and_summary(tmp_path: Path, capsys):
     assert payload["query"] == "astro portfolio"
     assert payload["matches"]
     for match in payload["matches"]:
-        assert set(match) <= {"path", "title", "tags", "score"}
+        assert set(match) <= {"path", "card_id", "card_aliases", "title", "tags", "score"}
+        assert "card_id" in match
+        assert "card_aliases" in match
         assert "summary" not in match
         assert "body" not in match
         assert "body text" not in json.dumps(match)
+
+
+def test_recall_json_resolves_explicit_id_and_legacy_alias(tmp_path: Path):
+    hub = tmp_path / "hub"
+    session = tmp_path / "astro-portfolio"
+    hub.mkdir()
+    session.mkdir()
+    card_id = "card-123e4567-e89b-42d3-a456-426614174000"
+    cards = hub / "memory" / "cards"
+    cards.mkdir(parents=True)
+    (cards / "renamed.md").write_text(
+        f'---\nid: {card_id}\ntitle: Astro Notes\ntags: ["astro"]\n---\nastro body\n',
+        encoding="utf-8",
+    )
+    payload = memory_hooks.recall_cards_payload(target=hub, cwd=session)
+    assert payload["matches"]
+    match = payload["matches"][0]
+    assert match["card_id"] == card_id
+    assert "memory/cards/renamed.md" in match["card_aliases"]
+    assert "renamed" in match["card_aliases"]
 
 
 def test_recall_caps_matches_and_stable_equal_score_order(tmp_path: Path):
