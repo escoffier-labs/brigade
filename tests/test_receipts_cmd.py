@@ -1994,3 +1994,110 @@ def test_receipts_verify_reports_mismatch_when_graph_delta_sidecar_is_edited(tmp
     assert problem["artifact_type"] == "work-verify-log"
     assert problem["artifact_id"].endswith("graph-delta.json")
     assert problem["check"] == "log_sha256"
+
+
+def _index_verify_receipt(target, receipt_path):
+    payload = json.loads(receipt_path.read_text())
+    raw_hash, _source = receipts_cmd._receipt_hash(payload, receipt_path)
+    receipts_cmd._write_miseledger_cursor_hashes(target, {raw_hash})
+    return raw_hash
+
+
+def test_receipts_verify_upgrades_indexed_verify_receipt_once(tmp_path, monkeypatch):
+    from brigade import trust_gate
+
+    monkeypatch.setattr(trust_gate, "notify_miseledger_trust", lambda *args, **kwargs: None)
+    head = _init_git_repo_with_head(tmp_path)
+    run_id = "20260817-120000-work-verify-trust"
+    receipt_path = _write_verify_export_receipt(tmp_path, run_id, started_at="2026-08-17T12:00:00Z")
+    run_dir = receipt_path.parent
+    patch = b"diff --git a/example.txt b/example.txt\n+trusted\n"
+    (run_dir / "changes.patch").write_bytes(patch)
+    receipt = json.loads(receipt_path.read_text())
+    receipt["baseline_commit"] = head
+    receipt["tree_fingerprint"] = "b" * 40
+    receipt["changes_patch_sha256"] = localio.file_sha256(run_dir / "changes.patch")
+    if receipt["changes_patch_sha256"].startswith("sha256:"):
+        receipt["changes_patch_sha256"] = receipt["changes_patch_sha256"][7:]
+    receipt["digests"]["receipt_sha256"] = _receipt_digest(receipt)
+    localio.write_json(receipt_path, receipt)
+    _index_verify_receipt(tmp_path, receipt_path)
+
+    first = receipts_cmd.verify_payload(tmp_path)
+    assert first["summary"]["mismatch"] == 0
+    verified = [item for item in first["trust_upgrades"] if item.get("status") == "verified"]
+    assert len(verified) == 1
+    event = verified[0]["event"]
+    assert event["to_label"] == "verified"
+    assert event["operator_command"] == "brigade receipts verify"
+    assert event["evidence"]["baseline_commit"] == head
+    events = trust_gate.read_events(trust_gate.work_events_path(tmp_path))
+    assert len(events) == 1
+
+    second = receipts_cmd.verify_payload(tmp_path)
+    noops = [item for item in second["trust_upgrades"] if item.get("status") == "noop"]
+    assert len(noops) == 1
+    assert len(trust_gate.read_events(trust_gate.work_events_path(tmp_path))) == 1
+    reloaded = json.loads(receipt_path.read_text())
+    assert "subject_binding" not in reloaded
+    assert reloaded.get("trust") != "verified"
+
+
+def test_receipts_index_alone_does_not_verify(tmp_path):
+    from brigade import trust_gate
+
+    receipt_path = _write_verify_export_receipt(
+        tmp_path, "20260817-120000-work-verify-index", started_at="2026-08-17T12:00:00Z"
+    )
+    _index_verify_receipt(tmp_path, receipt_path)
+    record = receipts_cmd._verify_miseledger_item(json.loads(receipt_path.read_text()), receipt_path, tmp_path, 1)
+    assert record["item"]["metadata"]["provenance"]["trust"]["label"] == "untrusted"
+    assert trust_gate.read_events(trust_gate.work_events_path(tmp_path)) == []
+
+
+def test_receipts_verify_skips_incomplete_v2_identity(tmp_path):
+    from brigade import trust_gate
+
+    receipt_path = _write_verify_export_receipt(
+        tmp_path, "20260817-120000-work-verify-incomplete", started_at="2026-08-17T12:00:00Z"
+    )
+    _index_verify_receipt(tmp_path, receipt_path)
+    payload = receipts_cmd.verify_payload(tmp_path)
+    assert payload["trust_upgrades"] == []
+    assert trust_gate.read_events(trust_gate.work_events_path(tmp_path)) == []
+
+
+def test_receipts_verify_reports_notify_failure_not_verified(tmp_path, monkeypatch):
+    from brigade import trust_gate
+
+    def fail_notify(*args, **kwargs):
+        raise trust_gate.TrustReviewError("miseledger binary is not available")
+
+    monkeypatch.setattr(trust_gate, "notify_miseledger_trust", fail_notify)
+    head = _init_git_repo_with_head(tmp_path)
+    run_id = "20260817-120000-work-verify-notify-fail"
+    receipt_path = _write_verify_export_receipt(tmp_path, run_id, started_at="2026-08-17T12:00:00Z")
+    run_dir = receipt_path.parent
+    patch = b"diff --git a/example.txt b/example.txt\n+trusted\n"
+    (run_dir / "changes.patch").write_bytes(patch)
+    receipt = json.loads(receipt_path.read_text())
+    receipt["baseline_commit"] = head
+    receipt["tree_fingerprint"] = "b" * 40
+    receipt["changes_patch_sha256"] = localio.file_sha256(run_dir / "changes.patch")
+    if receipt["changes_patch_sha256"].startswith("sha256:"):
+        receipt["changes_patch_sha256"] = receipt["changes_patch_sha256"][7:]
+    receipt["digests"]["receipt_sha256"] = _receipt_digest(receipt)
+    localio.write_json(receipt_path, receipt)
+    _index_verify_receipt(tmp_path, receipt_path)
+
+    payload = receipts_cmd.verify_payload(tmp_path)
+    pending = [item for item in payload["trust_upgrades"] if item.get("status") == "verify-pending"]
+    verified = [item for item in payload["trust_upgrades"] if item.get("status") == "verified"]
+    assert len(pending) == 1
+    assert verified == []
+    assert pending[0]["error"] == "miseledger binary is not available"
+    assert trust_gate.read_events(trust_gate.work_events_path(tmp_path)) == []
+
+    retry = receipts_cmd.verify_payload(tmp_path)
+    assert [item.get("status") for item in retry["trust_upgrades"]] == ["verify-pending"]
+    assert trust_gate.read_events(trust_gate.work_events_path(tmp_path)) == []

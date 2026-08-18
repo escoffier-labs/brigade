@@ -80,6 +80,7 @@ var commandTable = []commandSpec{
 	{name: "prune", usage: "prune", description: "Prune archive data.", run: cmdPrune},
 	{name: "sql", usage: "sql", description: "Run read-only SQL.", run: cmdSQL},
 	{name: "doctor", usage: "doctor", description: "Run diagnostic checks.", run: cmdDoctor},
+	{name: "trust", usage: "trust review", description: "Review or verify an item trust label.", run: cmdTrust},
 }
 
 func Run(args []string, out, errw io.Writer) int {
@@ -316,6 +317,64 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 	}
 	if result["ok"] == false {
 		return 1
+	}
+	return 0
+}
+
+func cmdTrust(args []string, out, errw io.Writer) int {
+	if len(args) == 0 {
+		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--operator-command CMD] [--json]")
+	}
+	switch args[0] {
+	case "review":
+		return cmdTrustReview(args[1:], out, errw)
+	default:
+		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--operator-command CMD] [--json]")
+	}
+}
+
+func cmdTrustReview(args []string, out, errw io.Writer) int {
+	values, bools, rest, err := splitFlags(args, map[string]bool{
+		"item":             true,
+		"content-hash":     true,
+		"to-label":         true,
+		"operator-command": true,
+	}, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "trust review: %s", err)
+	}
+	if len(rest) != 0 || values["item"] == "" || values["content-hash"] == "" {
+		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--operator-command CMD] [--json]")
+	}
+	toLabel := values["to-label"]
+	if toLabel == "" {
+		toLabel = "reviewed"
+	}
+	if toLabel != "reviewed" && toLabel != "verified" {
+		return fatalf(errw, "trust review: --to-label must be reviewed or verified")
+	}
+	operatorCommand := values["operator-command"]
+	if operatorCommand == "" {
+		operatorCommand = "operator:brigade evidence trust review"
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		return fatalf(errw, "trust review: %s", err)
+	}
+	defer db.Close()
+	if err := ingest.ReviewTrustLabel(db, values["item"], values["content-hash"], toLabel, operatorCommand, map[string]any{"kind": "operator-review"}); err != nil {
+		return fatalf(errw, "trust review: %s", err)
+	}
+	payload := map[string]any{
+		"ok":           true,
+		"item":         values["item"],
+		"to_label":     toLabel,
+		"content_hash": values["content-hash"],
+	}
+	if bools["json"] {
+		writeJSON(out, payload)
+	} else {
+		fmt.Fprintf(out, "item=%s to_label=%s\n", values["item"], toLabel)
 	}
 	return 0
 }

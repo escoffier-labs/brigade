@@ -280,7 +280,7 @@ Closed sets enforced by `validate_envelope`:
 
 ### Trust policy entitlements and caps
 
-`trust.trust_policy` stores only `schema = brigade.trust-policy.v1` and `schema_version = 1`. Consumers load `src/brigade/fixtures/trust-policy.v1.json` to derive entitlements per label: `unknown` (search, show_metadata, forensic_content_reveal), `untrusted` (search, show, brief_wrapped with caps), `reviewed`/`verified` (search, show, brief, cite, promote), `quarantined` (search_metadata, show_metadata). `untrusted_caps` are `max_items = 2` and `max_fraction = 0.5`.
+`trust.trust_policy` stores only `schema = brigade.trust-policy.v1` and `schema_version = 1`. Consumers load `src/brigade/fixtures/trust-policy.v1.json` to derive entitlements per label: `unknown` (search, show_metadata, forensic_content_reveal), `untrusted` (search, show, brief_wrapped with caps, cite, promote, context), `reviewed`/`verified` (search, show, brief, brief_wrapped, cite, promote, context), `quarantined` (search_metadata, show_metadata). Higher labels keep every content surface a lower upgrade-path label has. `untrusted_caps` are `max_items = 2` and `max_fraction = 0.5`.
 
 ### Size ceiling
 
@@ -293,6 +293,10 @@ The canonical compact JSON encoding (`ensure_ascii = False`, UTF-8, sorted keys,
 ### Authority rule
 
 An inbound adapter envelope claiming `trust.label = reviewed` or `verified` must pass `authority_proof = {"assigned_by": <str>, "label": <str>}` with exactly those two keys, where `assigned_by` matches `trust.assigned_by` and `label` matches `trust.label`. Otherwise the ingester downgrades or rejects the assertion. An inbound adapter envelope is data, not authority.
+
+### Consumer enforcement
+
+Default briefs, context packs, citations, and promotion omit `unknown` and `quarantined` items. Untrusted brief content is wrapped with `wrap_untrusted` and capped at 2 items and 50 percent of brief bytes. A pending injection scan is resolved synchronously before any content-emitting consumer; hit, error, or unavailability emits metadata only. `brigade evidence trust review <item-ref> --content-hash <digest>` moves unchanged `untrusted` content to `reviewed` and appends one `brigade.provenance-event.v1` row. `brigade receipts verify` may move an indexed verify-receipt item to `verified` only after the receipt v2 `baseline_commit` / `tree_fingerprint` / `changes_patch_sha256` tuple and exact retained `changes.patch` match; indexing alone stays `untrusted`. Envelope `verified` does not make a receipt scoreable and does not bypass `subject_binding`, `check_role`, patch identity, or the #474 failure taxonomy.
 
 ### Read verification
 

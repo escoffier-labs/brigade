@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
-from .. import component_paths, provenance, runguard
+from .. import component_paths, provenance, runguard, trust_gate
 from ..untrusted import scan_handoff_injection_heuristics
 
 
@@ -54,6 +54,7 @@ def _task_ledger_lock(target: Path) -> Iterator[None]:
 
 REASON_CORRUPT_LEDGER = "corrupt_ledger"
 REASON_UNSUPPORTED_LEDGER_VERSION = "unsupported_ledger_version"
+REASON_TRUST_POLICY = "trust_policy"
 
 
 class TaskLedgerError(ValueError):
@@ -3547,7 +3548,14 @@ def _find_import(target: Path, import_id: str) -> tuple[dict[str, Any] | None, l
     return None, imports
 
 
+def _import_trust_blocker(item: Mapping[str, Any] | None) -> str | None:
+    return trust_gate.promotion_blocker(item)
+
+
 def _mark_import_promoted(target: Path, item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    blocker = _import_trust_blocker(item)
+    if blocker:
+        raise TaskLedgerError(blocker, reason=REASON_TRUST_POLICY)
     text = str(item.get("text") or "").strip()
     metadata: dict[str, Any] = {
         "import_id": item.get("id"),
@@ -3900,6 +3908,9 @@ def _import_handoff_plan_payload(target: Path, item: dict[str, Any]) -> dict[str
         blockers.append("raw private chat fields are not allowed: " + ", ".join(private_fields))
     if not _handoff_is_document_target(target_document):
         blockers.append(f"handoff target document is invalid: {target_document}")
+    trust_blocker = _import_trust_blocker(item)
+    if trust_blocker:
+        blockers.append(trust_blocker)
     return {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),

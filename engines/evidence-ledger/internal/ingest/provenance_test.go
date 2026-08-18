@@ -197,6 +197,39 @@ func TestTransitionTrustLabelCycleRecordsEveryOccurrence(t *testing.T) {
 	}
 }
 
+func TestReviewTrustLabelRequiresExactCurrentDigest(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:review","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"review fixture text","tags":["reader"]},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
+	if _, err := ImportAdapterReader(db, strings.NewReader(jsonl), "reader://fixture", "reader-test"); err != nil {
+		t.Fatal(err)
+	}
+	var itemID, text string
+	if err := db.QueryRow(`select id, coalesce(text,'') from items limit 1`).Scan(&itemID, &text); err != nil {
+		t.Fatal(err)
+	}
+	want := provenance.ContentSHA256(text)
+	if err := ReviewTrustLabel(db, itemID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reviewed", "operator:brigade evidence trust review", nil); err == nil {
+		t.Fatal("forged digest must not review")
+	}
+	if err := ReviewTrustLabel(db, itemID, want, "reviewed", "operator:brigade evidence trust review", map[string]any{"kind": "operator-review"}); err != nil {
+		t.Fatal(err)
+	}
+	var label string
+	if err := db.QueryRow(`select value from item_metadata where item_id = ? and key = ?`, itemID, MetaKeyProvenanceTrustLabel).Scan(&label); err != nil {
+		t.Fatal(err)
+	}
+	if label != "reviewed" {
+		t.Fatalf("trust label = %q, want reviewed", label)
+	}
+}
+
 func TestBackfillProvenanceBatchedResumableIdempotent(t *testing.T) {
 	db, err := archive.Open(t.TempDir() + "/miseledger.db")
 	if err != nil {

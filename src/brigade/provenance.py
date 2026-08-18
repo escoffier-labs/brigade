@@ -480,7 +480,9 @@ def injection_status(env: Mapping[str, Any] | None) -> str:
     if not isinstance(injection, Mapping):
         return ""
     status = injection.get("status")
-    return status if isinstance(status, str) else ""
+    if not isinstance(status, str):
+        return ""
+    return status.strip().lower()
 
 
 def is_legacy_unknown(env: Mapping[str, Any] | None) -> bool:

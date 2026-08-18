@@ -360,14 +360,18 @@ def test_adversarial_source_is_wrapped_in_synthesis_and_review() -> None:
     lanes = fake_lanes(
         calls,
         gemini_report=f"Answer [source:{adv_source_id}]",
+        repair_report=f"Repaired [source:{adv_source_id}]",
         review="accepted",
         extractor_response=json.dumps({"summary": injection, "evidence": injection}),
         synth_prompts=synth_prompts,
         review_prompts=review_prompts,
     )
 
-    ResearchEngine(lanes=lanes, sources=[AdversarialProvider()], caps=Caps(max_rounds=1)).run("q")
+    with pytest.raises(ResearchRunError) as caught:
+        ResearchEngine(lanes=lanes, sources=[AdversarialProvider()], caps=Caps(max_rounds=1)).run("q")
 
+    assert caught.value.failure_phase == "review"
+    assert caught.value.failure_kind == "review-rejected"
     assert synth_prompts and review_prompts
     body_fence = re.compile(
         r"<<UNTRUSTED-[0-9a-f]{8}>>\n(?P<body>.*?)\n<<END-UNTRUSTED-[0-9a-f]{8}>>",
