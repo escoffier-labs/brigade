@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent `reviewer` or `reviewer_codex` seat. (#920)
 
 ### Fixed
+- `memory vault-search` rebuilds the derived index when `.brigade/vault.toml`
+  roots change, so removing a scope from the allowlist stops serving that
+  root. `vault-doctor` warns on index/config root drift instead of reporting
+  all-green against a stale index. (#943)
 - Quarantined items stay quarantined when a pending injection scan comes back clean, so a labeled quarantine cannot be released to untrusted and become content-eligible. Reviewed and verified items keep every consumer surface untrusted already has, including `context`. `brigade receipts verify` reports `verify-pending` (and does not append a local verified event) when the MiseLedger trust notify fails. Provenance-event JSONL now appends and fsyncs instead of rewriting the whole file. (#587)
 - Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
   closed on every `brigade work` surface (and other commands that read the

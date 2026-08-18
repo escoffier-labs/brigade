@@ -203,7 +203,7 @@ def build_index(target: Path) -> dict[str, Any]:
         "schema": INDEX_SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "built_at": built_at,
-        "vault_fingerprint": _vault_fingerprint(config.vault),
+        "vault_fingerprint": _vault_fingerprint(config),
         "notes": [_index_record(note) for note in notes],
         "skipped": skipped,
     }
@@ -394,12 +394,27 @@ def doctor_payload(target: Path) -> dict[str, Any]:
             }
         )
         if config is not None:
-            if index_doc.get("vault_fingerprint") != _vault_fingerprint(config.vault):
+            if index_doc.get("vault_fingerprint") != _vault_fingerprint(config):
                 checks.append(
                     {
                         "status": "warn",
                         "name": "vault_index_stale",
-                        "detail": "index was built for a different vault; run brigade memory vault-index",
+                        "detail": (
+                            "index was built for a different vault or root "
+                            "allowlist; run brigade memory vault-index"
+                        ),
+                    }
+                )
+            extra_scopes = _index_root_drift(index_doc, config)
+            if extra_scopes:
+                checks.append(
+                    {
+                        "status": "warn",
+                        "name": "vault_index_roots",
+                        "detail": (
+                            "index still contains revoked scope(s): "
+                            f"{', '.join(extra_scopes)}; run brigade memory vault-index"
+                        ),
                     }
                 )
             collisions = _id_collisions(index_doc.get("notes") if isinstance(index_doc.get("notes"), list) else [])
@@ -467,7 +482,7 @@ def _resolve_scope(config: VaultConfig, scope: str | None) -> str | None:
 
 def _notes_for_search(target: Path, config: VaultConfig) -> list[dict[str, Any]]:
     document = _read_index(target)
-    if document is None or document.get("vault_fingerprint") != _vault_fingerprint(config.vault):
+    if document is None or document.get("vault_fingerprint") != _vault_fingerprint(config):
         build_index(target)
         document = _read_index(target)
         if document is None:
@@ -896,8 +911,32 @@ def _file_mode(path: Path) -> int | None:
         return None
 
 
-def _vault_fingerprint(vault: Path) -> str:
-    return hashlib.sha256(str(vault).encode()).hexdigest()
+def _vault_fingerprint(config: VaultConfig) -> str:
+    """Hash the vault path and the sorted allowlist (scope, path, optional)."""
+    roots = [
+        {"optional": root.optional, "path": root.path, "scope": root.scope}
+        for root in sorted(config.roots, key=lambda item: (item.scope, item.path, item.optional))
+    ]
+    payload = json.dumps(
+        {"roots": roots, "vault": str(config.vault)},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _index_root_drift(index_doc: dict[str, Any], config: VaultConfig) -> list[str]:
+    """Return indexed scopes that are no longer in the configured allowlist."""
+    configured = {root.scope for root in config.roots}
+    notes = index_doc.get("notes")
+    if not isinstance(notes, list):
+        return []
+    indexed = {
+        str(note.get("scope") or "")
+        for note in notes
+        if isinstance(note, dict) and str(note.get("scope") or "")
+    }
+    return sorted(scope for scope in indexed if scope not in configured)
 
 
 def _is_within(path: Path, root: Path) -> bool:

@@ -344,6 +344,87 @@ def test_archived_notes_are_excluded_unless_requested(workspace, capsys) -> None
     assert paths == {"Notes/live.md", "Archive/old.md", "Notes/flagged.md"}
 
 
+def test_removing_a_root_from_vault_toml_stops_serving_that_root(tmp_path: Path, capsys) -> None:
+    """Revoking a root must invalidate the index; config is authoritative (#983)."""
+    target = tmp_path / "repo"
+    vault = tmp_path / "vault"
+    target.mkdir()
+    (vault / "notes").mkdir(parents=True)
+    (vault / "other").mkdir(parents=True)
+    _write_note(vault, "notes/alpha.md", title="Alpha Note", body="Alpha Note alpha token")
+    _write_note(vault, "other/beta.md", title="Beta Note", body="Beta Note alpha token")
+    _write_vault_config(target, vault, [("notes", "notes", False), ("other", "other", False)])
+
+    assert cli.main(["memory", "vault-index", "--target", str(target), "--json"]) == 0
+    indexed = json.loads(capsys.readouterr().out)
+    assert indexed["indexed"] == 2
+    assert {scope["scope"] for scope in indexed["scopes"]} == {"notes", "other"}
+
+    assert cli.main(["memory", "vault-search", "alpha", "--target", str(target), "--json"]) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["match_count"] == 2
+    assert {hit["scope"] for hit in first["hits"]} == {"notes", "other"}
+
+    _write_vault_config(target, vault, [("notes", "notes", False)])
+
+    assert cli.main(["memory", "vault-doctor", "--target", str(target), "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    names = {check["name"]: check for check in doctor["checks"]}
+    assert names["vault_index_stale"]["status"] == "warn"
+    assert "allowlist" in names["vault_index_stale"]["detail"]
+    assert names["vault_index_roots"]["status"] == "warn"
+    assert "other" in names["vault_index_roots"]["detail"]
+
+    assert cli.main(["memory", "vault-search", "alpha", "--scope", "other", "--target", str(target)]) == 2
+    assert "unknown scope: other" in capsys.readouterr().err
+
+    assert cli.main(["memory", "vault-search", "alpha", "--target", str(target), "--json"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["match_count"] == 1
+    assert [hit["scope"] for hit in second["hits"]] == ["notes"]
+    assert [hit["relative_path"] for hit in second["hits"]] == ["notes/alpha.md"]
+
+
+def test_vault_fingerprint_includes_sorted_roots(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    two_roots = memory_vault.VaultConfig(
+        schema_version=1,
+        vault=vault,
+        roots=(
+            memory_vault.VaultRoot(scope="other", path="other", optional=False),
+            memory_vault.VaultRoot(scope="notes", path="notes", optional=False),
+        ),
+    )
+    notes_only = memory_vault.VaultConfig(
+        schema_version=1,
+        vault=vault,
+        roots=(memory_vault.VaultRoot(scope="notes", path="notes", optional=False),),
+    )
+    optional_flip = memory_vault.VaultConfig(
+        schema_version=1,
+        vault=vault,
+        roots=(memory_vault.VaultRoot(scope="notes", path="notes", optional=True),),
+    )
+    path_change = memory_vault.VaultConfig(
+        schema_version=1,
+        vault=vault,
+        roots=(memory_vault.VaultRoot(scope="notes", path="renamed", optional=False),),
+    )
+    same_as_two = memory_vault.VaultConfig(
+        schema_version=1,
+        vault=vault,
+        roots=(
+            memory_vault.VaultRoot(scope="notes", path="notes", optional=False),
+            memory_vault.VaultRoot(scope="other", path="other", optional=False),
+        ),
+    )
+    assert memory_vault._vault_fingerprint(two_roots) == memory_vault._vault_fingerprint(same_as_two)
+    assert memory_vault._vault_fingerprint(two_roots) != memory_vault._vault_fingerprint(notes_only)
+    assert memory_vault._vault_fingerprint(notes_only) != memory_vault._vault_fingerprint(optional_flip)
+    assert memory_vault._vault_fingerprint(notes_only) != memory_vault._vault_fingerprint(path_change)
+
+
 def test_does_not_follow_symlinks_out_of_the_vault(workspace, capsys) -> None:
     target, vault = workspace
     outside = target.parent / "outside"
