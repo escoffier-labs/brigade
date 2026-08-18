@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade memory vault-propose` writes an additive note into an allowlisted
+  operator-vault inbox configured in `.brigade/vault.toml`. The body is read
+  from stdin, staged owner-only outside the vault, and delivered through the
+  projection kernel. `--scope` names the inbox root (unknown scopes error);
+  proposals mint a stable `canonical_id`, never land in `Brigade Memory/`,
+  never overwrite an existing note, and `--dry-run` reports the destination
+  and rendered bytes without touching the vault. Containment fails closed
+  when symlink or descriptor checks cannot be performed. (#945)
 - `brigade memory vault-index`, `vault-search`, `vault-show`, and `vault-doctor`
   close the operator-vault projection round trip. Config lives in
   `.brigade/vault.toml` (`vault`, `[[roots]]` with `scope` / `path` /

@@ -48,6 +48,7 @@ brigade memory project-vault --target . --vault /path/to/vault --json
 brigade memory vault-index --target .
 brigade memory vault-search "rotation policy" --scope notes --json
 brigade memory vault-show card-00000000-0000-4000-8000-00000000000a --json
+brigade memory vault-propose --title "Rotation Policy" --scope notes --json
 brigade memory vault-doctor --target . --json
 ```
 
@@ -57,7 +58,7 @@ The read path is a separate surface. Configure it once in `.brigade/vault.toml` 
 
 Note titles come from a card's leading heading when its frontmatter has no `title`, falling back to the inventory title. Related links are ranked (explicit refs, then shared tags, then shared category) and capped per note, so a large shared category does not turn into a complete graph. A map that would cover every note is omitted. The vault path stays out of topology and vault-search output as `redacted:operator-vault`.
 
-Rerunning projection is idempotent: unchanged notes produce no mutation. Writing agent-proposed notes back into a vault is tracked in [#945](https://github.com/escoffier-labs/brigade/issues/945).
+Rerunning projection is idempotent: unchanged notes produce no mutation. `vault-propose` is the additive write-back: it stages a note outside the vault, then delivers it into the `--scope` inbox root. It does not edit existing notes or replace `project-vault`.
 
 ### Where memory flows
 
@@ -79,9 +80,10 @@ flowchart LR
     CANON -->|"memory project-vault"| PROJ
     PROJ -->|"memory vault-search · vault-show"| AGENTS
     OWNED -->|"memory vault-search · vault-show"| AGENTS
+    AGENTS -->|"memory vault-propose"| OWNED
 ```
 
-An operator configures a vault once in `.brigade/vault.toml` and gets cited retrieval from `brigade` alone. The vault stays untrusted data: hits are labeled per result, snippets are bounded, and `project-vault` remains the only writer into the vault. Writing agent-proposed notes back is tracked in [#945](https://github.com/escoffier-labs/brigade/issues/945).
+An operator configures a vault once in `.brigade/vault.toml` and gets cited retrieval plus inbox write-back from `brigade` alone. The vault stays untrusted data: hits are labeled per result, snippets are bounded, and `project-vault` remains the only writer for generated `Brigade Memory/` content. Agent proposals land only in an allowlisted inbox via `vault-propose`.
 
 ## Care
 

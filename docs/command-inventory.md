@@ -263,6 +263,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory topology`
 - `brigade memory vault-doctor`
 - `brigade memory vault-index`
+- `brigade memory vault-propose`
 - `brigade memory vault-search`
 - `brigade memory vault-show`
 - `brigade model scorecard`
