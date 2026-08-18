@@ -1982,9 +1982,7 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
     session's source tree.  Bind the receipt to the routed Claude session, the
     target, and (when Git can provide it) the exact tree that is being audited.
     """
-    started = localio.parse_iso_datetime(
-        started_at.isoformat() if isinstance(started_at, datetime) else started_at
-    )
+    started = localio.parse_iso_datetime(started_at.isoformat() if isinstance(started_at, datetime) else started_at)
     if started is None:
         return False
     target = target.expanduser().resolve()
