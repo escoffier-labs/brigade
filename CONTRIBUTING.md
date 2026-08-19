@@ -44,7 +44,9 @@ Dispatched sessions should open the pull request, run local verification, and pu
 
 ## Changelog
 
-User-visible PRs append a bullet under `CHANGELOG.md` `## [Unreleased]` (effects, not commit subjects). Same-day sibling PRs often edit adjacent Unreleased lines; `.gitattributes` marks `CHANGELOG.md` `merge=union` so those appends combine instead of conflicting. That attribute is for this file only.
+User-visible PRs append a bullet under the root `CHANGELOG.md` `## [Unreleased]` (effects, not commit subjects). `.gitattributes` marks `/CHANGELOG.md merge=union` so sibling PRs that each add their own Unreleased line combine instead of conflicting. Nested `CHANGELOG.md` files are not marked.
+
+Union is safe for that append-only Unreleased list when each entry is its own line. When two branches edit the same line or adjacent lines of an existing bullet, union keeps both versions or interleaves wrapped lines and does not conflict. Treat that clean merge as a rewrite to re-read; a human must reconcile.
 
 ## What kinds of changes land easily
 

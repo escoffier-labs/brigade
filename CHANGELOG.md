@@ -81,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover <operation-id>`. Refs #911.
 
 ### Changed
-- `CHANGELOG.md` is marked `merge=union` in `.gitattributes` so same-day Unreleased appends from sibling PRs combine instead of conflicting. (#994)
+- The root `CHANGELOG.md` is marked `/CHANGELOG.md merge=union` in `.gitattributes` so same-day Unreleased appends from sibling PRs combine instead of conflicting. Nested changelogs are not marked. (#994)
 - Search integrity verification loads item text and provenance in one
   `IN (...)` query keyed by the result ids, instead of one select per
   hit (search limit is up to 200). (#964)

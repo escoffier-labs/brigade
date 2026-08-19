@@ -1,3 +1,5 @@
-# Adjacent Unreleased appends from sibling PRs should combine, not conflict.
+# Root Unreleased appends from sibling PRs should combine, not conflict.
 # Built-in git merge driver; no extra gitconfig needed. See #994.
-CHANGELOG.md merge=union
+# Slash-anchored so nested CHANGELOG.md files stay unspecified.
+/CHANGELOG.md merge=union
+
