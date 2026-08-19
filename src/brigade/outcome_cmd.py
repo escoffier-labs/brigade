@@ -23,7 +23,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from . import localio, outcome as core, receipt_schema, scorecard as scorecard_mod, verify_trial
+from . import causal_receipt, localio, outcome as core, receipt_schema, scorecard as scorecard_mod, verify_trial
 
 _LOCK_WAIT_SECONDS = 30.0
 _LOCK_SENTINEL_BYTE = b"\0"
@@ -1136,6 +1136,35 @@ def _recover_interrupted_append(path: Path) -> None:
         raise OutcomeLedgerError(f"{detail}: {path}: {exc}") from exc
 
 
+def _outcome_causal_receipt(record: core.OutcomeRecord, receipt: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Build a recorded companion from the already-resolved parent receipt."""
+
+    if not isinstance(receipt, dict):
+        return None
+    parent_digest: str | None = None
+    if record.source == "run":
+        artifacts = receipt.get("artifacts")
+        parent_id = Path(artifacts).name if isinstance(artifacts, str) and artifacts else None
+        parent_kind = "run"
+    else:
+        parent_id = receipt.get("run_id")
+        parent_kind = "verify"
+    existing = receipt.get("causal_receipt")
+    if isinstance(existing, dict) and not causal_receipt.validate_receipt(existing):
+        parent_digest = causal_receipt.receipt_digest(existing)
+    if not isinstance(parent_id, str) or not parent_id:
+        return None
+    try:
+        return causal_receipt.recorded_outcome(
+            subject_id=f"{parent_id}--{record.artifact_id}",
+            parent_kind=parent_kind,
+            parent_id=parent_id,
+            parent_digest=parent_digest,
+        )
+    except ValueError:
+        return None
+
+
 def _record_payload(record: core.OutcomeRecord) -> dict:
     row = dataclasses.asdict(record)
     row["schema_version"] = receipt_schema.OUTCOME_RECORD_SCHEMA_VERSION
@@ -1156,7 +1185,12 @@ def _record_payload(record: core.OutcomeRecord) -> dict:
     return row
 
 
-def append_records(target: Path, records: list[core.OutcomeRecord]) -> None:
+def append_records(
+    target: Path,
+    records: list[core.OutcomeRecord],
+    *,
+    lineage: list[dict[str, Any] | None] | None = None,
+) -> None:
     """Append outcome records under an exclusive lock with interrupted-write recovery.
 
     Recovery is row-scoped, not transactional: every completed JSONL line that
@@ -1185,8 +1219,11 @@ def append_records(target: Path, records: list[core.OutcomeRecord]) -> None:
         prev_digest = _validate_completed_ledger(path)
         try:
             with path.open("a", encoding="utf-8") as handle:
-                for record in records:
+                for index, record in enumerate(records):
                     row = _record_payload(record)
+                    companion = lineage[index] if lineage is not None and index < len(lineage) else None
+                    if companion is not None:
+                        causal_receipt.stamp_causal_receipt(row, companion)
                     row["prev_digest"] = prev_digest
                     row["digest"] = localio.canonical_json_digest(row, exclude_keys={"digest"})
                     handle.write(json.dumps(row, sort_keys=True) + "\n")
@@ -2103,8 +2140,9 @@ def capture(
         route=route,
         route_fingerprint=route_fingerprint(route),
     )
+    companion = _outcome_causal_receipt(record, receipt)
     try:
-        append_records(target, [record])
+        append_records(target, [record], lineage=[companion] if companion is not None else None)
     except OutcomeLedgerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

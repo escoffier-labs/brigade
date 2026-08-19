@@ -1,0 +1,105 @@
+{
+  "schema": "brigade.causal-receipt-fixtures.v1",
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "plan_root",
+      "receipt": {
+        "schema": "brigade.causal_receipt.v1",
+        "schema_version": 1,
+        "subject": {"kind": "plan", "id": "20260101-120000-abcd1234"},
+        "parents": []
+      }
+    },
+    {
+      "name": "recorded_chain_run",
+      "receipt": {
+        "schema": "brigade.causal_receipt.v1",
+        "schema_version": 1,
+        "subject": {"kind": "run", "id": "20260101-120000-abcd1234"},
+        "parents": [
+          {
+            "relation": "planned_from",
+            "kind": "plan",
+            "id": "20260101-120000-abcd1234",
+            "link": "recorded"
+          }
+        ]
+      }
+    },
+    {
+      "name": "inferred_backfill",
+      "receipt": {
+        "schema": "brigade.causal_receipt.v1",
+        "schema_version": 1,
+        "subject": {"kind": "verify", "id": "20260101-120100-work-verify-aa11"},
+        "parents": [
+          {
+            "relation": "executed_from",
+            "kind": "run",
+            "id": "20260101-120000-abcd1234",
+            "link": "inferred"
+          }
+        ]
+      }
+    },
+    {
+      "name": "synthesis_multi_parent",
+      "receipt": {
+        "schema": "brigade.causal_receipt.v1",
+        "schema_version": 1,
+        "subject": {"kind": "synthesis", "id": "20260101-120000-abcd1234"},
+        "parents": [
+          {
+            "relation": "synthesized_from",
+            "kind": "worker-result",
+            "id": "20260101-120000-abcd1234:coder:1",
+            "link": "recorded"
+          },
+          {
+            "relation": "synthesized_from",
+            "kind": "worker-result",
+            "id": "20260101-120000-abcd1234:reviewer:2",
+            "link": "recorded"
+          }
+        ]
+      }
+    },
+    {
+      "name": "parent_manifest",
+      "receipt": {
+        "schema": "brigade.causal_receipt.v1",
+        "schema_version": 1,
+        "subject": {"kind": "synthesis", "id": "20260101-120000-abcd1234"},
+        "parents": [],
+        "parent_manifest": {
+          "id": "fan-in-manifest-1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "name": "private_field_exclusion",
+      "sensitive": {
+        "prompt": "PRIVATE PROMPT BODY",
+        "text": "PRIVATE OUTPUT",
+        "tool_arguments": {"token": "sk-example"},
+        "home": "/home/ubuntu/secret"
+      },
+      "receipt": {
+        "schema": "brigade.causal_receipt.v1",
+        "schema_version": 1,
+        "subject": {"kind": "handoff", "id": "2026-01-01-1200-brigade-run-demo"},
+        "parents": [
+          {
+            "relation": "handed_off_from",
+            "kind": "outcome",
+            "id": "20260101-120100-work-verify-aa11--brigade-work",
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "link": "recorded"
+          }
+        ]
+      }
+    }
+  ]
+}

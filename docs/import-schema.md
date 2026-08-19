@@ -317,6 +317,18 @@ Work-import `--source` is normalized with `strip().lower()` and fails closed to 
 
 The optional envelope `redaction` object stores `schema`, `schema_version`, `policy_version`, `origin`, `status` (`clean` / `redacted` / `error`), `count`, and `detectors`. It never stores removed values, excerpts, or original bytes. `hashes.content` is the digest of the persisted (already redacted) text. Scanner failure, timeout, or unavailability records `status=error`, persists `[ingestion-redaction-failed]`, and cannot be treated as clean. A missing redaction record on a legacy row is not a clean verdict. New policy versions apply to future writes only; provenance backfill does not rewrite existing text.
 
+### Inter-seat messages
+
+Planner, worker, and synthesis send/receive boundaries stamp
+`hashes.content_scope = message.text.utf8.v1` over the exact outbound UTF-8
+bytes. Closed `source.kind` values are `plan-request`, `plan-result`,
+`worker-request`, `worker-result`, `synthesis-request`, and
+`synthesis-result`. The run directory stores metadata-only
+`message-envelopes.jsonl` (`message_id`, `phase`, `from_seat`, `to_seat`,
+envelope). Quarantined, unknown, pending/error scan, and hash-mismatched
+messages are not delivered. Legacy run messages synthesize
+`UNKNOWN PROVENANCE - legacy message` and are never replayed.
+
 ### Legacy banner
 
-When an item carries no provenance, `synthesize_legacy_provenance()` returns a non-null envelope with `origin = unknown`, `modality = unknown`, `attribution = inferred`, `trust.label = unknown`, null `repository`/`session`/`collection_id`/`item_id`/`locator`, and a null content digest. The display string is `UNKNOWN PROVENANCE - legacy item` (`provenance.LEGACY_DISPLAY`). A missing envelope is never treated as trusted.
+When an item carries no provenance, `synthesize_legacy_provenance()` returns a non-null envelope with `origin = unknown`, `modality = unknown`, `attribution = inferred`, `trust.label = unknown`, null `repository`/`session`/`collection_id`/`item_id`/`locator`, and a null content digest. The display string is `UNKNOWN PROVENANCE - legacy item` (`provenance.LEGACY_DISPLAY`). A missing envelope is never treated as trusted. Legacy messages use the same unknown envelope shape with `hashes.content_scope = message.text.utf8.v1` and display `UNKNOWN PROVENANCE - legacy message`.

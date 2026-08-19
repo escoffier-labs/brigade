@@ -169,6 +169,18 @@ def test_read_commands_do_not_accept_vault_flag(workspace) -> None:
         ["memory", "vault-search", "q", "--vault", "/tmp/fake-vault", "--target", str(target)],
         ["memory", "vault-show", "id", "--vault", "/tmp/fake-vault", "--target", str(target)],
         ["memory", "vault-doctor", "--vault", "/tmp/fake-vault", "--target", str(target)],
+        [
+            "memory",
+            "vault-propose",
+            "--title",
+            "x",
+            "--scope",
+            "notes",
+            "--vault",
+            "/tmp/fake-vault",
+            "--target",
+            str(target),
+        ],
     ):
         with pytest.raises(SystemExit) as exc:
             cli.main(command)

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from .. import (
+    causal_receipt,
     config,
     generated_patch_quarantine,
     graphtrail_delta,
@@ -1131,6 +1132,18 @@ def _receipt_capture_artifact_id(receipt: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _stamp_verify_causal_receipt(receipt: dict[str, Any]) -> None:
+    verify_id = receipt.get("run_id")
+    if not isinstance(verify_id, str) or not verify_id:
+        return
+    producer = receipt.get("producer_run_id")
+    run_id = producer if isinstance(producer, str) and producer else None
+    causal_receipt.stamp_causal_receipt(
+        receipt,
+        causal_receipt.recorded_verify(verify_id=verify_id, run_id=run_id),
+    )
+
+
 def _stamp_outcome_capture(receipt: dict[str, Any], capture: str | None, capture_kind: str) -> None:
     """Record the intended outcome artifact on the receipt before digests are sealed."""
     if not capture:
@@ -1539,6 +1552,7 @@ def _run_verify_commands(
         }
         receipt.update(identity)
         receipt_schema.stamp_optional_producer_run_id(receipt)
+        _stamp_verify_causal_receipt(receipt)
         _stamp_harness_session(receipt)
         _stamp_outcome_capture(receipt, capture, capture_kind)
         try:
@@ -1699,6 +1713,7 @@ def _write_reused_receipt(
     }
     receipt.update(identity)
     receipt_schema.stamp_optional_producer_run_id(receipt)
+    _stamp_verify_causal_receipt(receipt)
     _stamp_harness_session(receipt)
     _stamp_outcome_capture(receipt, capture, capture_kind)
     reused_from = latest.get("run_id")

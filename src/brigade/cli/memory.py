@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 
@@ -221,6 +222,25 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace that holds .brigade/vault.toml."
     )
     p_memory_vault_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_vault_propose = memory_sub.add_parser(
+        "vault-propose",
+        help="Propose an additive note into an allowlisted operator-vault inbox. Body is read from stdin.",
+    )
+    p_memory_vault_propose.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace that holds .brigade/vault.toml."
+    )
+    p_memory_vault_propose.add_argument("--title", required=True, help="Note title (used for the inbox filename).")
+    p_memory_vault_propose.add_argument(
+        "--scope",
+        required=True,
+        help="Configured inbox root name (not a filesystem path). Unknown scopes error.",
+    )
+    p_memory_vault_propose.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the destination and rendered bytes without writing the vault.",
+    )
+    p_memory_vault_propose.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_search = memory_sub.add_parser("search", help="Keyword-search local memory cards.")
     p_memory_search.add_argument("query", help="Search terms (matched against title, tags, summary, and body).")
     p_memory_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to search.")
@@ -348,7 +368,7 @@ def dispatch(args) -> int:
         return obsidian_vault.project(
             target=args.target, vault=args.vault, json_output=args.json, max_related=max_related
         )
-    if args.memory_command in {"vault-index", "vault-search", "vault-show", "vault-doctor"}:
+    if args.memory_command in {"vault-index", "vault-search", "vault-show", "vault-doctor", "vault-propose"}:
         from .. import memory_vault
 
         if args.memory_command == "vault-index":
@@ -369,6 +389,16 @@ def dispatch(args) -> int:
             )
         if args.memory_command == "vault-show":
             return memory_vault.show(target=args.target, note_id=args.note_id, json_output=args.json)
+        if args.memory_command == "vault-propose":
+            body = sys.stdin.read()
+            return memory_vault.propose(
+                target=args.target,
+                title=args.title,
+                scope=args.scope,
+                body=body,
+                dry_run=args.dry_run,
+                json_output=args.json,
+            )
         return memory_vault.doctor(target=args.target, json_output=args.json)
 
     if args.memory_command == "care":
