@@ -270,6 +270,20 @@ def test_repo_metadata_roadmap_version_failure_is_actionable_and_preserves_statu
     ) in section
 
 
+def test_repo_metadata_roadmap_version_step_fails_when_roadmap_is_missing():
+    """Regression for #1005: `roadmap audit --check` exits 0 with no ROADMAP.md.
+
+    That is deliberate for downstream repos, so the CI step closes the
+    fail-open locally instead of changing the audit's exit semantics.
+    """
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "repo-metadata")
+
+    guard = "if [ ! -f ROADMAP.md ]; then"
+    assert guard in section
+    assert section.index(guard) < section.index("brigade roadmap audit --check")
+
+
 def test_ci_component_manifest_provenance_job_installs_dev_test_dependencies():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "component-manifest-provenance")

@@ -467,10 +467,16 @@ def _roadmap_version_check(target: Path, text: str) -> dict[str, Any]:
             "headline": _format_major_minor(headline),
             "pyproject": project_label,
         }
+    if headline > project:
+        # A roadmap pointing at the next minor during a release cycle is normal
+        # and passes, but it is not a match, so do not claim one.
+        detail = f"ROADMAP.md headline {headline_label} is ahead of pyproject {project_label}"
+    else:
+        detail = f"ROADMAP.md headline {headline_label} matches pyproject {project_label}"
     return {
         "status": OK,
         "name": "roadmap_version_current",
-        "detail": f"ROADMAP.md headline {headline_label} matches pyproject {project_label}",
+        "detail": detail,
         "headline": _format_major_minor(headline),
         "pyproject": project_label,
     }
@@ -669,7 +675,13 @@ def audit_payload(target: Path) -> dict[str, Any]:
         checks.append({"status": WARN, "name": "roadmap_exists", "detail": "ROADMAP.md missing"})
     else:
         checks.append({"status": OK, "name": "roadmap_exists", "detail": roadmap["path"]})
-        checks.append(_roadmap_version_check(target, _read_text(_roadmap_path(target))))
+        # Only audit the version headline in a repo that makes a comparable
+        # version claim of its own. A Node or Go repo with a ROADMAP.md has no
+        # pyproject major.minor to lag, and would otherwise carry a permanent
+        # unclearable roadmap_version_headline_unparseable issue in every
+        # `brigade work brief` for a headline convention private to this repo.
+        if _parse_pyproject_major_minor(target) is not None:
+            checks.append(_roadmap_version_check(target, _read_text(_roadmap_path(target))))
     checks.extend(_section_stale_checks(roadmap["sections"]))
 
     owns_cli = _target_owns_brigade_cli(target)

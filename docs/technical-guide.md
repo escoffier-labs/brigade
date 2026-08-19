@@ -899,7 +899,7 @@ The scanner registry is explicit and local. Brigade does not install cron jobs, 
 
 Roadmap and repo-fleet commands:
 
-- `brigade roadmap audit` parses `ROADMAP.md`, classifies roadmap bullets, detects stale current or next phase sections, fails when the "Where things stand" version headline lags `pyproject.toml` major.minor or is unparseable, compares documented commands with the CLI, and can import roadmap hygiene issues with `--import-issues`. `--check` exits non-zero on a stale or missing version headline.
+- `brigade roadmap audit` parses `ROADMAP.md`, classifies roadmap bullets, detects stale current or next phase sections, fails when a target that declares a `project.version` has a "Where things stand" version headline that lags `pyproject.toml` major.minor or is unparseable, compares documented commands with the CLI, and can import roadmap hygiene issues with `--import-issues`. `--check` exits non-zero on a stale or missing version headline.
 - `brigade roadmap patterns` shows neutral pattern-family coverage and local source-pattern decisions: `bake-in`, `integrate`, `catalog-only`, `move-candidate`, and `leave-alone`.
 - `brigade roadmap commands` reports the public command documentation contract in text or JSON for wrappers and docs drift checks. Use `--write` to regenerate `docs/command-inventory.md` from the CLI parser and `--check` to fail when the inventory is missing or stale.
 - `brigade repos init` writes gitignored `.brigade/repos.toml`.

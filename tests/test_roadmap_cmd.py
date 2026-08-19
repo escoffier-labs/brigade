@@ -93,6 +93,45 @@ def test_roadmap_audit_version_ok_when_patch_differs(tmp_path):
     assert not any(item["name"] == "roadmap_version_current" for item in payload["issues"])
 
 
+def test_roadmap_audit_version_reports_ahead_without_claiming_a_match(tmp_path):
+    _write_versioned_roadmap(tmp_path, headline="**v0.28.x on main**", project_version="0.27.0")
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    check = next(item for item in payload["checks"] if item["name"] == "roadmap_version_current")
+    assert check["status"] == "ok"
+    assert "matches" not in check["detail"]
+    assert "ahead of" in check["detail"]
+    assert not any(item["name"] == "roadmap_version_current" for item in payload["issues"])
+
+
+def test_roadmap_audit_skips_version_check_without_a_parseable_pyproject_version(tmp_path):
+    """A ROADMAP.md-bearing repo that declares no project.version gets no version check.
+
+    Regression for #1005: a Node repo with a ROADMAP.md must not carry a
+    permanent roadmap_version_headline_unparseable issue in `brigade work brief`.
+    """
+    (tmp_path / "package.json").write_text('{"name": "node-thing", "version": "2.1.0"}\n')
+    (tmp_path / "ROADMAP.md").write_text("# Roadmap\n\n## Now\n- Ship the thing.\n\n## Next\n- Ship more.\n")
+
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    names = {item["name"] for item in payload["checks"]}
+    assert "roadmap_version_current" not in names
+    assert "roadmap_version_headline_unparseable" not in names
+    assert not any(item["name"] in roadmap_cmd.ROADMAP_VERSION_CHECK_NAMES for item in payload["issues"])
+    assert cli.main(["roadmap", "audit", "--target", str(tmp_path), "--check"]) == 0
+
+
+def test_roadmap_audit_skips_version_check_when_pyproject_has_no_project_version(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[build-system]\nrequires = ["hatchling"]\n')
+    (tmp_path / "ROADMAP.md").write_text("# Roadmap\n\n## Now\n- Ship the thing.\n")
+
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    names = {item["name"] for item in payload["checks"]}
+    assert not names & roadmap_cmd.ROADMAP_VERSION_CHECK_NAMES
+
+
 def test_roadmap_audit_check_exits_nonzero_when_headline_lags(tmp_path):
     _write_versioned_roadmap(tmp_path, headline="**v0.26.x on main**", project_version="0.27.0")
     assert cli.main(["roadmap", "audit", "--target", str(tmp_path), "--check"]) == 1

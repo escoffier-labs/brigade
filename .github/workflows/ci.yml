@@ -344,6 +344,10 @@ jobs:
           BRIGADE_EXTRAS: "1"
       - name: Roadmap Version
         run: |
+          if [ ! -f ROADMAP.md ]; then
+            echo "::error file=ROADMAP.md::ROADMAP.md is missing; this repo must ship a roadmap with a **vX.Y.x on main** headline"
+            exit 1
+          fi
           set +e
           brigade roadmap audit --check
           status=$?
