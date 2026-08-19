@@ -228,6 +228,67 @@ func TestReviewTrustLabelRequiresExactCurrentDigest(t *testing.T) {
 	if label != "reviewed" {
 		t.Fatalf("trust label = %q, want reviewed", label)
 	}
+	var metadataJSON string
+	if err := db.QueryRow(`select metadata_json from items where id = ?`, itemID).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	status := injectionStatusFromMeta(meta)
+	if status != "pending" {
+		t.Fatalf("label-only review changed injection status to %q", status)
+	}
+}
+
+func TestReviewTrustMarkInjectionCleanAppendsAuditEvent(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:clean","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"review fixture text for clean","tags":["reader"]},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
+	if _, err := ImportAdapterReader(db, strings.NewReader(jsonl), "reader://fixture", "reader-test"); err != nil {
+		t.Fatal(err)
+	}
+	var itemID, text string
+	if err := db.QueryRow(`select id, coalesce(text,'') from items limit 1`).Scan(&itemID, &text); err != nil {
+		t.Fatal(err)
+	}
+	want := provenance.ContentSHA256(text)
+	if err := ReviewTrust(db, itemID, want, "reviewed", "operator:brigade evidence trust review", map[string]any{"kind": "operator-review"}, TrustReviewOpts{MarkInjectionClean: true}); err != nil {
+		t.Fatal(err)
+	}
+	var metadataJSON string
+	if err := db.QueryRow(`select metadata_json from items where id = ?`, itemID).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if injectionStatusFromMeta(meta) != "clean" {
+		t.Fatalf("mark-injection-clean left status = %q", injectionStatusFromMeta(meta))
+	}
+	var n int
+	if err := db.QueryRow(`select count(*) from provenance_events where item_id = ? and evidence_json like '%operator-injection-review%'`, itemID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("injection review events = %d, want 1", n)
+	}
+}
+
+func injectionStatusFromMeta(meta map[string]any) string {
+	prov, _ := meta["provenance"].(map[string]any)
+	trust, _ := prov["trust"].(map[string]any)
+	injection, _ := trust["injection"].(map[string]any)
+	status, _ := injection["status"].(string)
+	return status
 }
 
 func TestBackfillProvenanceBatchedResumableIdempotent(t *testing.T) {

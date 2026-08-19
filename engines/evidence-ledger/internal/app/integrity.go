@@ -261,6 +261,22 @@ func shouldOmitContentBody(view integrityView, opts showItemOpts) bool {
 	return !opts.IncludeUntrustedBody
 }
 
+func inspectStoredItem(db *sql.DB, itemID string) (integrityView, error) {
+	var text, metadataJSON, rawJSON string
+	if err := db.QueryRow(`select coalesce(text,''), metadata_json, coalesce(raw_json,'') from items where id = ?`, itemID).Scan(&text, &metadataJSON, &rawJSON); err != nil {
+		return integrityView{}, err
+	}
+	return inspectItemIntegrity(text, rawJSON, metadataJSON, nil, false), nil
+}
+
+func storedItemContentEligible(db *sql.DB, itemID string) bool {
+	view, err := inspectStoredItem(db, itemID)
+	if err != nil {
+		return false
+	}
+	return contentEligible(view)
+}
+
 func attachIntegrityFields(out map[string]any, view integrityView) {
 	if view.Envelope != nil {
 		out["provenance"] = view.Envelope

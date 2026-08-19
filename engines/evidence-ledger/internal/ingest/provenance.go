@@ -232,9 +232,25 @@ func TransitionTrustLabel(db *sql.DB, itemID, toLabel, operatorCommand string, e
 	return tx.Commit()
 }
 
-// ReviewTrustLabel upgrades an item only when expectedHash matches both the
-// embedded envelope digest and the recomputed item.text.utf8.v1 digest.
+// TrustReviewOpts controls optional operator decisions during trust review.
+// MarkInjectionClean is a deliberate injection-status transition to clean;
+// moving the trust label alone never changes injection status.
+type TrustReviewOpts struct {
+	MarkInjectionClean bool
+}
+
+// ReviewTrustLabel upgrades an item's trust label only when expectedHash
+// matches both the embedded envelope digest and the recomputed item text.
+// It does not change injection status.
 func ReviewTrustLabel(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand string, evidence map[string]any) error {
+	return ReviewTrust(db, itemID, expectedHash, toLabel, operatorCommand, evidence, TrustReviewOpts{})
+}
+
+// ReviewTrust upgrades an item only when expectedHash matches both the
+// embedded envelope digest and the recomputed item.text.utf8.v1 digest.
+// MarkInjectionClean records a separate injection-status transition to clean
+// with an audit event; a label-only review leaves injection pending.
+func ReviewTrust(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand string, evidence map[string]any, opts TrustReviewOpts) error {
 	resolvedID, err := resolveItemID(db, itemID)
 	if err != nil {
 		return err
@@ -268,7 +284,76 @@ func ReviewTrustLabel(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand
 	if current != want || recomputed != want {
 		return fmt.Errorf("content hash does not match the current envelope digest")
 	}
-	return TransitionTrustLabel(db, resolvedID, toLabel, operatorCommand, evidence)
+	fromLabel := env.Trust.Label
+	fromInjection := env.Trust.Injection.Status
+	labelChanged := fromLabel != toLabel
+	injectionChanged := opts.MarkInjectionClean && fromInjection != "clean"
+	if !labelChanged && !injectionChanged {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	at := time.Now().UTC().Format(time.RFC3339Nano)
+	if labelChanged {
+		env.Trust.Label = toLabel
+		env.Trust.AssignedBy = operatorCommand
+		env.Trust.AssignedAt = &at
+	}
+	if injectionChanged {
+		env.Trust.Injection.Status = "clean"
+		env.Trust.Injection.Count = 0
+		env.Trust.Injection.Rules = []string{}
+	}
+	if err := provenance.Validate(env, provenance.ValidationContext{}); err != nil {
+		return err
+	}
+	contentHash := ""
+	if env.Hashes.Content != nil {
+		contentHash = *env.Hashes.Content
+	} else {
+		contentHash = provenance.ContentSHA256(text)
+	}
+	meta["provenance"] = env
+	updated, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`update items set metadata_json = ? where id = ?`, string(updated), resolvedID); err != nil {
+		return err
+	}
+	if err := replaceProvenanceProjections(tx, resolvedID, env); err != nil {
+		return err
+	}
+	if labelChanged {
+		labelEvidence := cloneEvidence(evidence)
+		if _, ok := labelEvidence["kind"]; !ok {
+			labelEvidence["kind"] = "operator-review"
+		}
+		if err := AppendProvenanceEvent(tx, resolvedID, fromLabel, toLabel, contentHash, env.Hashes.ContentScope, operatorCommand, labelEvidence); err != nil {
+			return err
+		}
+	}
+	if injectionChanged {
+		injEvidence := cloneEvidence(evidence)
+		injEvidence["kind"] = "operator-injection-review"
+		injEvidence["from_injection_status"] = fromInjection
+		injEvidence["to_injection_status"] = "clean"
+		if err := AppendProvenanceEvent(tx, resolvedID, env.Trust.Label, env.Trust.Label, contentHash, env.Hashes.ContentScope, operatorCommand, injEvidence); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func cloneEvidence(evidence map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range evidence {
+		out[key] = value
+	}
+	return out
 }
 
 func resolveItemID(db *sql.DB, itemID string) (string, error) {

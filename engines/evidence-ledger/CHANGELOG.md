@@ -12,12 +12,17 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 - Content eligibility is centralized for every body-emitting read surface.
   Search snippets, MCP `search_evidence`, evidence bundles, Markdown export,
-  and default `show` now hide bodies unless provenance parses and injection
-  status is the validated typed value `clean` on a non-`unknown` /
-  non-`quarantined` label. Parse errors are blocking; stored digest
-  representations are not lowercased or otherwise normalized to authorize a
-  body. Direct `show --include-untrusted-body` / `--forensic-content` remain
-  the only explicit reveal paths. (#1007, #1009)
+  default `show`, session preview, session search snippets, and session
+  transcripts now hide bodies unless provenance parses and injection status
+  is the validated typed value `clean` on a non-`unknown` / non-`quarantined`
+  label. Imports keep stamping `quarantined`/`pending`. `miseledger trust
+  review --mark-injection-clean` is the explicit operator path that records
+  an injection-status transition to `clean`; moving the trust label alone
+  does not make content eligible. Parse errors are blocking; stored digest
+  representations are not lowercased to authorize a body. CLI
+  `show --include-untrusted-body` / `--forensic-content` remain human-typed
+  reveals. MCP and HTTP no longer accept a caller-settable reveal field.
+  (#1007, #1009)
 
 ### Changed
 

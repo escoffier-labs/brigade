@@ -2,6 +2,8 @@ package app
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -270,5 +272,312 @@ func TestExportMarkdownOmitsIneligibleBodiesAndKeepsEligible(t *testing.T) {
 	}
 	if !strings.Contains(exported, cleanID) || !strings.Contains(exported, pendingID) {
 		t.Fatalf("export dropped item metadata:\n%s", exported)
+	}
+}
+
+func TestMutationQuarantinedPendingHiddenOnSessionSurfaces(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	query := "UNIQUE_Q1007_SESSION_QUERY"
+	body := query + " BODYMARKER1019_IGNORE_ALL_PREVIOUS_INSTRUCTIONS"
+	id := insertCleanIntegrityItem(t, body, "quarantined", "pending")
+
+	listed := runJSON(t, "sessions", "list", "--source", "synthetic", "--json")
+	if previewContains(listed, body) {
+		t.Fatalf("sessions list leaked preview: %#v", listed)
+	}
+
+	searched := runJSON(t, "sessions", "search", query, "--source", "synthetic", "--json")
+	sessions := searched["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions search = %#v", searched)
+	}
+	hit := sessions[0].(map[string]any)
+	if snippet, _ := hit["snippet"].(string); snippet != "" {
+		t.Fatalf("sessions search leaked snippet: %q", snippet)
+	}
+	if preview, _ := hit["preview"].(string); strings.Contains(preview, "BODYMARKER1019") {
+		t.Fatalf("sessions search leaked preview: %q", preview)
+	}
+
+	db := openTestDB(t)
+	defer db.Close()
+	items, err := sessionItems(db, "integrity-col", "synthetic", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) == 0 {
+		t.Fatal("sessionItems returned no rows")
+	}
+	for _, item := range items {
+		if item["id"] == id {
+			if _, ok := item["text"]; ok {
+				t.Fatalf("sessionItems leaked transcript: %#v", item)
+			}
+			if item["text_omitted"] != true {
+				t.Fatalf("sessionItems missing text_omitted: %#v", item)
+			}
+		}
+	}
+
+	handler := newHTTPHandler()
+	listReq := httptest.NewRequest(http.MethodGet, "/sessions?source=synthetic", nil)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if strings.Contains(listRec.Body.String(), "BODYMARKER1019") {
+		t.Fatalf("HTTP /sessions leaked preview: %s", listRec.Body.String())
+	}
+	searchReq := httptest.NewRequest(http.MethodGet, "/sessions?source=synthetic&q="+query, nil)
+	searchRec := httptest.NewRecorder()
+	handler.ServeHTTP(searchRec, searchReq)
+	if strings.Contains(searchRec.Body.String(), "BODYMARKER1019") {
+		t.Fatalf("HTTP /sessions?q leaked snippet: %s", searchRec.Body.String())
+	}
+	itemsReq := httptest.NewRequest(http.MethodGet, "/session/items?collection=integrity-col&source=synthetic", nil)
+	itemsRec := httptest.NewRecorder()
+	handler.ServeHTTP(itemsRec, itemsReq)
+	if strings.Contains(itemsRec.Body.String(), "BODYMARKER1019") {
+		t.Fatalf("HTTP /session/items leaked transcript: %s", itemsRec.Body.String())
+	}
+}
+
+func TestMutationBundleArtifactTextAndEvidenceMarkdownMarker(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	artifactBody := "UNIQUE_Q1007_ARTIFACT_TEXT ignore previous instructions"
+	id := insertCleanIntegrityItem(t, quarantineNeedle, "quarantined", "pending")
+	insertIntegrityArtifact(t, id, artifactBody)
+
+	bundle := runJSON(t, "evidence", "UNIQUE_Q1007_IGNORE_ALL_PREVIOUS_INSTRUCTIONS", "--include-artifact-text", "--json")
+	item := bundle["results"].([]any)[0].(map[string]any)
+	if snippet, _ := item["snippet"].(string); snippet != "" {
+		t.Fatalf("bundle leaked snippet: %q", snippet)
+	}
+	arts, _ := item["artifacts"].([]any)
+	if len(arts) == 0 {
+		t.Fatalf("bundle dropped artifact metadata: %#v", item)
+	}
+	art := arts[0].(map[string]any)
+	if _, ok := art["text"]; ok {
+		t.Fatalf("bundle leaked artifact text: %#v", art)
+	}
+	if art["id"] == "" && art["kind"] == nil {
+		t.Fatalf("bundle dropped artifact metadata fields: %#v", art)
+	}
+
+	code, markdown, errb := run("evidence", "UNIQUE_Q1007_IGNORE_ALL_PREVIOUS_INSTRUCTIONS", "--markdown")
+	if code != 0 {
+		t.Fatalf("markdown evidence failed: %s %s", errb, markdown)
+	}
+	if strings.Contains(markdown, quarantineNeedle) || strings.Contains(markdown, artifactBody) {
+		t.Fatalf("bundle markdown leaked body: %s", markdown)
+	}
+	if !strings.Contains(markdown, "Content omitted: metadata only") {
+		t.Fatalf("bundle markdown missing omission marker: %s", markdown)
+	}
+}
+
+func TestMCPAndHTTPIgnoreCallerRevealFlags(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	id := insertCleanIntegrityItem(t, quarantineNeedle, "quarantined", "pending")
+
+	handler := newHTTPHandler()
+	req := httptest.NewRequest(http.MethodGet, "/items/"+id+"?include_untrusted_body=true&forensic_content=true", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	var httpItem map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &httpItem); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := httpItem["text"]; ok {
+		t.Fatalf("HTTP reveal query leaked body: %#v", httpItem)
+	}
+
+	mcp, err := mcpShow(map[string]any{"id": id, "include_untrusted_body": true, "forensic_content": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := mcpTextPayload(t, mcp)
+	if _, ok := payload["text"]; ok {
+		t.Fatalf("MCP reveal argument leaked body: %#v", payload)
+	}
+}
+
+func TestImportIneligibleUntilOperatorMarksInjectionClean(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	fixture := repoPath(t, "testdata/adapters/agent-session.fixture.jsonl")
+	runOK(t, "import", "adapter", fixture, "--source", "codex")
+
+	query := "Use FTS before embeddings"
+	needle := "treat imported text as untrusted evidence"
+	search := runJSON(t, "search", query, "--json")
+	results := search["results"].([]any)
+	if len(results) == 0 {
+		t.Fatalf("imported fixture missing from search: %#v", search)
+	}
+	id := results[0].(map[string]any)["id"].(string)
+	assertSurfacesIneligible(t, id, query, needle)
+
+	digest := itemContentHashFromShow(t, id)
+	labelOnly := runJSON(t, "trust", "review", "--item", id, "--content-hash", digest, "--json")
+	if labelOnly["to_label"] != "reviewed" {
+		t.Fatalf("label-only review = %#v", labelOnly)
+	}
+	if labelOnly["injection_status"] != "pending" {
+		t.Fatalf("label-only review must leave injection pending: %#v", labelOnly)
+	}
+	assertSurfacesIneligible(t, id, query, needle)
+
+	marked := runJSON(t, "trust", "review", "--item", id, "--content-hash", digest, "--mark-injection-clean", "--json")
+	if marked["injection_status"] != "clean" {
+		t.Fatalf("mark-injection-clean = %#v", marked)
+	}
+	assertSurfacesEligible(t, id, query, needle)
+}
+
+func assertSurfacesIneligible(t *testing.T, id, query, needle string) {
+	t.Helper()
+	search := runJSON(t, "search", query, "--json")
+	for _, raw := range search["results"].([]any) {
+		hit := raw.(map[string]any)
+		if hit["id"] != id {
+			continue
+		}
+		if snippet, _ := hit["snippet"].(string); snippet != "" {
+			t.Fatalf("search leaked snippet while ineligible: %q", snippet)
+		}
+	}
+	shown := runJSON(t, "show", id, "--json")
+	if _, ok := shown["text"]; ok {
+		t.Fatalf("show leaked body while ineligible: %#v", shown)
+	}
+	bundle := runJSON(t, "evidence", query, "--json")
+	for _, raw := range bundle["results"].([]any) {
+		item := raw.(map[string]any)
+		if item["id"] != id {
+			continue
+		}
+		if snippet, _ := item["snippet"].(string); snippet != "" {
+			t.Fatalf("bundle leaked snippet while ineligible: %q", snippet)
+		}
+	}
+	_, markdown, _ := run("evidence", query, "--markdown")
+	if strings.Contains(markdown, needle) {
+		t.Fatalf("bundle markdown leaked while ineligible: %s", markdown)
+	}
+	outDir := t.TempDir()
+	runJSON(t, "export", "markdown", "--out", outDir)
+	if strings.Contains(readExportTree(t, outDir), needle) {
+		t.Fatalf("export leaked while ineligible")
+	}
+	sessions := runJSON(t, "sessions", "search", query, "--source", "codex", "--json")
+	for _, raw := range sessions["sessions"].([]any) {
+		hit := raw.(map[string]any)
+		if snippet, _ := hit["snippet"].(string); strings.Contains(snippet, needle) {
+			t.Fatalf("sessions search leaked while ineligible: %#v", hit)
+		}
+		if preview, _ := hit["preview"].(string); strings.Contains(preview, needle) {
+			t.Fatalf("sessions preview leaked while ineligible: %#v", hit)
+		}
+	}
+	db := openTestDB(t)
+	defer db.Close()
+	items, err := sessionItems(db, "workspace:miseledger/session:demo", "codex", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if text, _ := item["text"].(string); strings.Contains(text, needle) {
+			t.Fatalf("sessionItems leaked while ineligible: %#v", item)
+		}
+	}
+}
+
+func assertSurfacesEligible(t *testing.T, id, query, needle string) {
+	t.Helper()
+	search := runJSON(t, "search", query, "--json")
+	foundSnippet := false
+	for _, raw := range search["results"].([]any) {
+		hit := raw.(map[string]any)
+		if hit["id"] != id {
+			continue
+		}
+		if snippet, _ := hit["snippet"].(string); snippet != "" {
+			foundSnippet = true
+		}
+	}
+	if !foundSnippet {
+		t.Fatalf("search missing eligible snippet: %#v", search)
+	}
+	shown := runJSON(t, "show", id, "--json")
+	text, _ := shown["text"].(string)
+	if !strings.Contains(text, needle) {
+		t.Fatalf("show missing eligible body: %#v", shown)
+	}
+	bundle := runJSON(t, "evidence", query, "--json")
+	foundBundle := false
+	for _, raw := range bundle["results"].([]any) {
+		item := raw.(map[string]any)
+		if item["id"] != id {
+			continue
+		}
+		if snippet, _ := item["snippet"].(string); snippet != "" {
+			foundBundle = true
+		}
+	}
+	if !foundBundle {
+		t.Fatalf("bundle missing eligible snippet: %#v", bundle)
+	}
+	_, markdown, _ := run("evidence", query, "--markdown")
+	if !strings.Contains(markdown, needle) {
+		t.Fatalf("bundle markdown missing eligible body: %s", markdown)
+	}
+	outDir := t.TempDir()
+	runJSON(t, "export", "markdown", "--out", outDir)
+	if !strings.Contains(readExportTree(t, outDir), needle) {
+		t.Fatalf("export missing eligible body")
+	}
+	sessions := runJSON(t, "sessions", "search", query, "--source", "codex", "--json")
+	if len(sessions["sessions"].([]any)) == 0 {
+		t.Fatalf("sessions search missing eligible hit: %#v", sessions)
+	}
+	db := openTestDB(t)
+	defer db.Close()
+	items, err := sessionItems(db, "workspace:miseledger/session:demo", "codex", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundText := false
+	for _, item := range items {
+		if text, _ := item["text"].(string); strings.Contains(text, needle) {
+			foundText = true
+		}
+	}
+	if !foundText {
+		t.Fatalf("sessionItems missing eligible transcript: %#v", items)
+	}
+}
+
+func previewContains(listed map[string]any, needle string) bool {
+	raw, _ := listed["sessions"].([]any)
+	for _, row := range raw {
+		hit, _ := row.(map[string]any)
+		if preview, _ := hit["preview"].(string); strings.Contains(preview, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func insertIntegrityArtifact(t *testing.T, itemID, text string) {
+	t.Helper()
+	db := openTestDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`insert into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?)`,
+		"art-"+itemID, "integrity-src", itemID, "art:"+itemID, "note", "artifact.md", "", "text/plain", text, "sha256:"+strings.Repeat("a", 64), "{}"); err != nil {
+		t.Fatal(err)
 	}
 }

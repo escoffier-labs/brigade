@@ -323,13 +323,13 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 
 func cmdTrust(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--operator-command CMD] [--json]")
+		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--json]")
 	}
 	switch args[0] {
 	case "review":
 		return cmdTrustReview(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--operator-command CMD] [--json]")
+		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--json]")
 	}
 }
 
@@ -339,12 +339,12 @@ func cmdTrustReview(args []string, out, errw io.Writer) int {
 		"content-hash":     true,
 		"to-label":         true,
 		"operator-command": true,
-	}, map[string]bool{"json": true})
+	}, map[string]bool{"json": true, "mark-injection-clean": true})
 	if err != nil {
 		return fatalf(errw, "trust review: %s", err)
 	}
 	if len(rest) != 0 || values["item"] == "" || values["content-hash"] == "" {
-		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--operator-command CMD] [--json]")
+		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--json]")
 	}
 	toLabel := values["to-label"]
 	if toLabel == "" {
@@ -362,19 +362,25 @@ func cmdTrustReview(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "trust review: %s", err)
 	}
 	defer db.Close()
-	if err := ingest.ReviewTrustLabel(db, values["item"], values["content-hash"], toLabel, operatorCommand, map[string]any{"kind": "operator-review"}); err != nil {
+	if err := ingest.ReviewTrust(db, values["item"], values["content-hash"], toLabel, operatorCommand, map[string]any{"kind": "operator-review"}, ingest.TrustReviewOpts{MarkInjectionClean: bools["mark-injection-clean"]}); err != nil {
 		return fatalf(errw, "trust review: %s", err)
 	}
+	injectionStatus := ""
+	if view, err := inspectStoredItem(db, values["item"]); err == nil {
+		injectionStatus = view.InjectionStatus
+	}
 	payload := map[string]any{
-		"ok":           true,
-		"item":         values["item"],
-		"to_label":     toLabel,
-		"content_hash": values["content-hash"],
+		"ok":                   true,
+		"item":                 values["item"],
+		"to_label":             toLabel,
+		"content_hash":         values["content-hash"],
+		"injection_status":     injectionStatus,
+		"mark_injection_clean": bools["mark-injection-clean"],
 	}
 	if bools["json"] {
 		writeJSON(out, payload)
 	} else {
-		fmt.Fprintf(out, "item=%s to_label=%s\n", values["item"], toLabel)
+		fmt.Fprintf(out, "item=%s to_label=%s injection_status=%s\n", values["item"], toLabel, injectionStatus)
 	}
 	return 0
 }

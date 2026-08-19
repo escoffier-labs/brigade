@@ -237,15 +237,19 @@ limit ?`
 // falling back to its first item, so callers can show what a session contains
 // without opening it. It returns "" on any error.
 func sessionPreview(db *sql.DB, collectionID string) string {
-	var text string
-	err := db.QueryRow(`select i.text
+	var text, metadataJSON, rawJSON string
+	err := db.QueryRow(`select coalesce(i.text,''), i.metadata_json, coalesce(i.raw_json,'')
 from items i
 left join actors a on a.id = i.actor_id
 where i.collection_id = ?
   and (`+liveDefaultItemPredicate+`)
 order by (case when a.type = 'human' then 0 else 1 end), coalesce(i.created_at,''), i.id
-limit 1`, collectionID).Scan(&text)
+limit 1`, collectionID).Scan(&text, &metadataJSON, &rawJSON)
 	if err != nil {
+		return ""
+	}
+	view := inspectItemIntegrity(text, rawJSON, metadataJSON, nil, false)
+	if !contentEligible(view) {
 		return ""
 	}
 	text = strings.Join(strings.Fields(text), " ")
@@ -261,7 +265,7 @@ func sessionItems(db *sql.DB, externalID, sourceKind string, limit int) ([]map[s
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	rows, err := db.Query(`select i.id, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), i.text
+	rows, err := db.Query(`select i.id, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), coalesce(i.text,''), i.metadata_json, coalesce(i.raw_json,'')
 from items i
 join collections c on c.id = i.collection_id
 join sources s on s.id = i.source_id
@@ -276,14 +280,21 @@ limit ?`, externalID, sourceKind, limit)
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, kind, actorType, actorName, createdAt, text string
-		if err := rows.Scan(&id, &kind, &actorType, &actorName, &createdAt, &text); err != nil {
+		var id, kind, actorType, actorName, createdAt, text, metadataJSON, rawJSON string
+		if err := rows.Scan(&id, &kind, &actorType, &actorName, &createdAt, &text, &metadataJSON, &rawJSON); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{
+		item := map[string]any{
 			"id": id, "kind": kind, "actor_type": actorType,
-			"actor_name": actorName, "created_at": createdAt, "text": text,
-		})
+			"actor_name": actorName, "created_at": createdAt,
+		}
+		view := inspectItemIntegrity(text, rawJSON, metadataJSON, nil, false)
+		if contentEligible(view) {
+			item["text"] = text
+		} else {
+			item["text_omitted"] = true
+		}
+		out = append(out, item)
 	}
 	return out, rows.Err()
 }
@@ -322,6 +333,10 @@ limit ?`
 			return nil, err
 		}
 		row := grouped[h.collectionID]
+		snippet := h.snippet
+		if !storedItemContentEligible(db, h.itemID) {
+			snippet = ""
+		}
 		if row == nil {
 			if len(order) >= limit {
 				continue
@@ -342,7 +357,7 @@ limit ?`
 				SampleItemID:         h.itemID,
 				RawPath:              h.rawPath,
 				RawOrdinal:           h.rawOrdinal,
-				Snippet:              h.snippet,
+				Snippet:              snippet,
 			}
 			if err := addSessionMetadata(db, row, h.collectionID, filters); err != nil {
 				return nil, err
@@ -350,6 +365,8 @@ limit ?`
 			row.Preview = sessionPreview(db, h.collectionID)
 			grouped[h.collectionID] = row
 			order = append(order, h.collectionID)
+		} else if row.Snippet == "" && snippet != "" {
+			row.Snippet = snippet
 		}
 		row.MatchCount++
 	}
