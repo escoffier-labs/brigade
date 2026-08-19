@@ -5,7 +5,7 @@ GraphTrail is a local code-graph sidecar: it indexes a repository into a small S
 ## What kinds of changes land easily
 
 - **Bug fixes** in the extractors, `store` (sync/schema), `query` (search/graph/context/stats), the CLI, or the MCP server.
-- **Extractor improvements**: better symbol, import, or call-edge coverage for an already-supported language (Python, TypeScript/JavaScript, Rust, Go).
+- **Extractor improvements**: better symbol, import, or call-edge coverage for an already-supported language (Python, TypeScript/JavaScript, Astro, Rust, Go).
 - **Resolution improvements**: sharper same-file-first / capped cross-file call-edge matching.
 - **MCP server fixes** that keep query connections read-only, refresh writes explicit and default-off, and dependencies small.
 - **Test coverage** for any of the above.

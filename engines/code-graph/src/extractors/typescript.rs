@@ -1,7 +1,7 @@
 //! TypeScript/JavaScript extractor: AST-based symbols, imports, and call edges.
 
 use anyhow::Result;
-use tree_sitter::Node as TsNode;
+use tree_sitter::{Language, Node as TsNode};
 
 use crate::extractors::common::{LangSpec, extract_with, node_text, string_literal_text};
 use crate::model::{CallTarget, FileGraph, Import};
@@ -216,6 +216,15 @@ pub fn extract_typescript(path: &str, content: &str, content_hash: &str) -> Resu
     } else {
         tree_sitter_javascript::LANGUAGE.into()
     };
+    extract_typescript_as(path, content, content_hash, language)
+}
+
+pub(crate) fn extract_typescript_as(
+    path: &str,
+    content: &str,
+    content_hash: &str,
+    language: Language,
+) -> Result<FileGraph> {
     extract_with(&TypeScriptSpec, path, content, content_hash, language)
 }
 

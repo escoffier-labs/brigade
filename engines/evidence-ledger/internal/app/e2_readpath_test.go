@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/escoffier-labs/miseledger/internal/ingest"
+	"github.com/escoffier-labs/miseledger/internal/provenance"
 )
 
 // E2 (#843): generic search/show/evidence/doctor read-path contract after E1.
@@ -255,8 +256,8 @@ limit 1`, ingest.MemorySourceKind, testMemoryNamespace).Scan(&cardWithReceipt); 
 		"relations": []map[string]any{{
 			"type": "supports",
 			"target": map[string]any{
-				"source":     ingest.MemorySourceKind,
-				"collection": testMemoryNamespace,
+				"source":      ingest.MemorySourceKind,
+				"collection":  testMemoryNamespace,
 				"external_id": targetID,
 			},
 		}},
@@ -324,6 +325,13 @@ func TestE2ExportOmitsSupersededAndTombstonedBodies(t *testing.T) {
 	}
 	runOK(t, "crawl", "memory", ws, "--json")
 
+	liveSearch := runJSON(t, "search", newUnique, "--source", ingest.MemorySourceKind, "--json")
+	if len(liveSearch["results"].([]any)) != 1 {
+		t.Fatalf("expected one live export search hit: %v", liveSearch)
+	}
+	liveID := liveSearch["results"].([]any)[0].(map[string]any)["id"].(string)
+	reviewItemInjectionClean(t, liveID)
+
 	outDir := filepath.Join(t.TempDir(), "export")
 	runJSON(t, "export", "markdown", "--out", outDir)
 	exported := readExportTree(t, outDir)
@@ -390,6 +398,8 @@ func TestE2SessionsAndRelatedFilterDuplicateLiveAndTombstones(t *testing.T) {
 
 	db := openTestDB(t)
 	seedPreE2DuplicateSessionArchive(t, db)
+	stampUntrustedCleanEnvelope(t, db, "item-e2-live", "SESSION_NEW_UNIQUE_E2")
+	stampUntrustedCleanEnvelope(t, db, "item-e2-peer", "SESSION_PEER_UNIQUE_E2")
 	db.Close()
 
 	listed := runJSON(t, "sessions", "list", "--source", "codex", "--json")
@@ -625,5 +635,77 @@ values('item-e2-peer','source-e2','collection-e2-dup','actor-e2','msg:e2-peer','
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatalf("seed failed on %s: %v", stmt, err)
 		}
+	}
+}
+
+func reviewItemInjectionClean(t *testing.T, itemID string) {
+	t.Helper()
+	digest := itemContentHashFromShow(t, itemID)
+	runOK(t, "trust", "review", "--item", itemID, "--content-hash", digest, "--mark-injection-clean", "--json")
+}
+
+func reviewAllLiveItemsInjectionClean(t *testing.T) {
+	t.Helper()
+	db := openTestDB(t)
+	rows, err := db.Query(`select id from items where tombstoned_at is null`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			db.Close()
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	db.Close()
+	for _, id := range ids {
+		reviewItemInjectionClean(t, id)
+	}
+}
+
+func itemContentHashFromShow(t *testing.T, itemID string) string {
+	t.Helper()
+	shown := runJSON(t, "show", itemID, "--json")
+	prov, _ := shown["provenance"].(map[string]any)
+	hashes, _ := prov["hashes"].(map[string]any)
+	digest, _ := hashes["content"].(string)
+	if digest == "" {
+		t.Fatalf("missing envelope content hash for %s: %#v", itemID, shown)
+	}
+	return digest
+}
+
+func stampUntrustedCleanEnvelope(t *testing.T, db *sql.DB, itemID, text string) {
+	t.Helper()
+	at := "2026-08-17T00:00:00Z"
+	raw := []byte(`{"fixture":"` + itemID + `"}`)
+	env, err := provenance.NewEvidenceEnvelope(provenance.EvidenceInput{
+		SourceSystem: "miseledger", SourceKind: "codex", SourceProducer: "e2_test",
+		Origin: "workspace", RepositoryID: "unknown",
+		CollectionID: "collection-e2-dup", ItemID: itemID,
+		LocatorKind: "uri", LocatorValue: "miseledger://synthetic/collection-e2-dup/" + itemID,
+		Attribution: "observed", Modality: "tool-output",
+		TrustLabel: "untrusted", TrustAssignedBy: "test:e2", TrustAssignedAt: &at,
+		InjectionStatus: "clean", InjectionRules: []string{},
+		Text: text, RawBytes: raw, CapturedAt: &at, IngestedAt: &at,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := json.Marshal(map[string]any{"provenance": env})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update items set metadata_json = ?, raw_json = ? where id = ?`, string(meta), string(raw), itemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert or replace into item_metadata(item_id, key, value) values(?,?,?)`, itemID, ingest.MetaKeyProvenanceTrustLabel, "untrusted"); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -9,9 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Claude hook stdin is read through a byte-limited binary reader, rejects trailing input, and caps nested string and collection sizes before the timed worker starts, so an oversized hook payload cannot force unbounded allocation or JSON parsing outside the timeout. (#1014)
+- Evidence-ledger read surfaces hide item bodies unless provenance parses and injection status is the validated typed value `clean`. Session preview, session search snippets, and session transcripts are gated the same way. Imports stay `quarantined`/`pending` until `miseledger trust review --mark-injection-clean`; a label-only review does not make content eligible. MCP and HTTP no longer accept a caller-settable `include_untrusted_body` reveal. Routine `trust review` refuses a parse-error-grade stored envelope instead of silently rewriting it to `clean`. (#1007, #1009)
 - Origin-scoped ingest redaction now maps `work import context` (and `--source external-web` / `external-service`) to the external detector tier, normalizes free-form `--source` with `strip().lower()`, and fails closed to `unknown` on unmapped values. An equal-but-unredacted scanner result is treated as failure, and research findings redact title/summary/evidence per field so a multi-line summary cannot migrate into evidence. (#498)
 
 ### Added
+- `brigade code` indexes `.astro` component files (frontmatter and `<script>` as TypeScript, template tags as calls to imported components), so `affected`, `callers`, and `impact` can see an Astro file and its downstream Astro consumers instead of reporting it missing. (#1003)
+- `brigade roadmap audit` now fails closed when the ROADMAP.md "Where things stand" headline (`**vX.Y.x on main**`) lags the `pyproject.toml` major.minor, or when that headline is missing or unparseable. The check is only emitted for a target that declares a parseable `project.version`, so a repo making no comparable version claim is unaffected. Patch-only differences stay green, and a headline ahead of the project version passes and is reported as ahead. `brigade roadmap audit --check` exits non-zero so the repo-metadata CI job can fail a lagging headline with an update hint. (#1000)
 - Evidence ingest now applies an origin-scoped redaction policy (`brigade.evidence-redaction.v1`) before persistence. Sources classify to the provenance envelope origin; each origin selects detectors; the stored item keeps only redacted bytes plus a count/detector record (never the removed values). Scanner failure, timeout, or unavailability cannot produce a clean verdict and persists a placeholder instead of the original. The policy version is stamped on every decision and applies to future writes only — existing rows and provenance backfill are not rewritten. (#498)
 
 - Inter-seat planner, worker, and synthesis messages now carry a
@@ -82,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover <operation-id>`. Refs #911.
 
 ### Changed
+- The root `CHANGELOG.md` is marked `/CHANGELOG.md merge=union` in `.gitattributes` so same-day Unreleased appends from sibling PRs combine instead of conflicting. Nested changelogs are not marked. (#994)
 - Search integrity verification loads item text and provenance in one
   `IN (...)` query keyed by the result ids, instead of one select per
   hit (search limit is up to 200). (#964)
@@ -127,7 +131,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The graphtrail stale-baseline verify test no longer races wall-clock sync delays
   against a tight subprocess timeout on loaded CI runners; sync timeout is injected
   deterministically so the stale-graph assertion is reliable on Python 3.12. (#954)
->>>>>>> origin/main
 - Quarantined items stay quarantined when a pending injection scan comes back clean, so a labeled quarantine cannot be released to untrusted and become content-eligible. Reviewed and verified items keep every consumer surface untrusted already has, including `context`. `brigade receipts verify` reports `verify-pending` (and does not append a local verified event) when the MiseLedger trust notify fails. Provenance-event JSONL now appends and fsyncs instead of rewriting the whole file. (#587)
 - Corrupt or future-version `.brigade/work/tasks.json` ledgers now fail
   closed on every `brigade work` surface (and other commands that read the
