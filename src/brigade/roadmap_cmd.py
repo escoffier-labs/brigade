@@ -44,6 +44,9 @@ DOC_COMMAND_TOP_LEVELS = {
 }
 COMMAND_INVENTORY_RELATIVE_PATH = Path("docs") / "command-inventory.md"
 ROADMAP_ARCHIVE_RELATIVE_PATH = Path("docs") / "roadmap-archive.md"
+ROADMAP_VERSION_HEADLINE_RE = re.compile(r"\*\*v(\d+)\.(\d+)\.(?:x|\d+) on main\*\*")
+PROJECT_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)")
+ROADMAP_VERSION_CHECK_NAMES = frozenset({"roadmap_version_current", "roadmap_version_headline_unparseable"})
 
 PATTERN_FAMILIES: tuple[dict[str, Any], ...] = (
     {
@@ -388,6 +391,97 @@ def _parse_roadmap(target: Path) -> dict[str, Any]:
     }
 
 
+def _parse_major_minor(version: str) -> tuple[int, int] | None:
+    match = PROJECT_VERSION_RE.match(version.strip())
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _parse_roadmap_headline_version(text: str) -> tuple[int, int] | None:
+    in_section = False
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("#"):
+            title = stripped.lstrip("#").strip()
+            if in_section:
+                break
+            in_section = title.casefold() == "where things stand"
+            continue
+        if not in_section:
+            continue
+        match = ROADMAP_VERSION_HEADLINE_RE.search(stripped)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def _parse_pyproject_major_minor(target: Path) -> tuple[int, int] | None:
+    from . import toml_compat
+
+    text = _read_text(target / "pyproject.toml")
+    if not text:
+        return None
+    try:
+        data = toml_compat.loads(text)
+    except Exception:
+        return None
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return None
+    version = project.get("version")
+    if not isinstance(version, str) or not version.strip():
+        return None
+    return _parse_major_minor(version)
+
+
+def _format_major_minor(pair: tuple[int, int]) -> str:
+    return f"{pair[0]}.{pair[1]}"
+
+
+def _roadmap_version_check(target: Path, text: str) -> dict[str, Any]:
+    headline = _parse_roadmap_headline_version(text)
+    if headline is None:
+        return {
+            "status": FAIL,
+            "name": "roadmap_version_headline_unparseable",
+            "detail": (
+                "ROADMAP.md Where things stand headline is missing or unparseable (expected **vX.Y.x on main**)"
+            ),
+        }
+    project = _parse_pyproject_major_minor(target)
+    if project is None:
+        return {
+            "status": FAIL,
+            "name": "roadmap_version_current",
+            "detail": "could not read project.version from pyproject.toml",
+            "headline": _format_major_minor(headline),
+        }
+    headline_label = f"v{headline[0]}.{headline[1]}.x"
+    project_label = _format_major_minor(project)
+    if headline < project:
+        return {
+            "status": FAIL,
+            "name": "roadmap_version_current",
+            "detail": f"ROADMAP.md headline {headline_label} lags pyproject {project_label}",
+            "headline": _format_major_minor(headline),
+            "pyproject": project_label,
+        }
+    if headline > project:
+        # A roadmap pointing at the next minor during a release cycle is normal
+        # and passes, but it is not a match, so do not claim one.
+        detail = f"ROADMAP.md headline {headline_label} is ahead of pyproject {project_label}"
+    else:
+        detail = f"ROADMAP.md headline {headline_label} matches pyproject {project_label}"
+    return {
+        "status": OK,
+        "name": "roadmap_version_current",
+        "detail": detail,
+        "headline": _format_major_minor(headline),
+        "pyproject": project_label,
+    }
+
+
 def _section_stale_checks(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     for section in sections:
@@ -581,6 +675,13 @@ def audit_payload(target: Path) -> dict[str, Any]:
         checks.append({"status": WARN, "name": "roadmap_exists", "detail": "ROADMAP.md missing"})
     else:
         checks.append({"status": OK, "name": "roadmap_exists", "detail": roadmap["path"]})
+        # Only audit the version headline in a repo that makes a comparable
+        # version claim of its own. A Node or Go repo with a ROADMAP.md has no
+        # pyproject major.minor to lag, and would otherwise carry a permanent
+        # unclearable roadmap_version_headline_unparseable issue in every
+        # `brigade work brief` for a headline convention private to this repo.
+        if _parse_pyproject_major_minor(target) is not None:
+            checks.append(_roadmap_version_check(target, _read_text(_roadmap_path(target))))
     checks.extend(_section_stale_checks(roadmap["sections"]))
 
     owns_cli = _target_owns_brigade_cli(target)
@@ -680,7 +781,19 @@ def _roadmap_import_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
-def audit(*, target: Path, json_output: bool = False, import_issues: bool = False) -> int:
+def _audit_exit_code(payload: dict[str, Any], *, check_version: bool) -> int:
+    if not check_version:
+        return 0
+    if any(
+        check.get("name") in ROADMAP_VERSION_CHECK_NAMES and check.get("status") != OK
+        for check in payload.get("checks", [])
+        if isinstance(check, dict)
+    ):
+        return 1
+    return 0
+
+
+def audit(*, target: Path, json_output: bool = False, import_issues: bool = False, check_version: bool = False) -> int:
     payload = audit_payload(target)
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -694,7 +807,7 @@ def audit(*, target: Path, json_output: bool = False, import_issues: bool = Fals
         payload["dismissed"] = len(dismissed)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
+        return _audit_exit_code(payload, check_version=check_version)
     print(f"roadmap audit: {payload['target']}")
     print(f"roadmap: {payload['roadmap']['path']}")
     print(f"sections: {len(payload['roadmap']['sections'])}")
@@ -706,7 +819,7 @@ def audit(*, target: Path, json_output: bool = False, import_issues: bool = Fals
         print(f"imported: {len(imported)}")
         print(f"skipped: {len(skipped)}")
         print(f"dismissed: {len(dismissed)}")
-    return 0
+    return _audit_exit_code(payload, check_version=check_version)
 
 
 def patterns_payload(target: Path) -> dict[str, Any]:
