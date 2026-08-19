@@ -243,11 +243,7 @@ func handleItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer db.Close()
-	includeBody := false
-	if q := r.URL.Query().Get("include_untrusted_body"); q == "1" || strings.EqualFold(q, "true") {
-		includeBody = true
-	}
-	item, err := showItem(db, id, showItemOpts{IncludeUntrustedBody: includeBody})
+	item, err := showItem(db, id, showItemOpts{})
 	if err != nil {
 		httpError(w, http.StatusNotFound, err.Error())
 		return

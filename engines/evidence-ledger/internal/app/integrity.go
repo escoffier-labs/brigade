@@ -35,7 +35,14 @@ type integrityView struct {
 	InjectionStatus   string
 	LegacyUnknown     bool
 	IntegrityMismatch bool
+	ParseError        bool
 	Mismatches        []hashMismatch
+}
+
+type digestRef struct {
+	raw     string
+	present bool
+	valid   bool
 }
 
 func inspectItemIntegrity(text, rawJSON, metadataJSON string, artifacts []map[string]any, verifyArtifactBodies bool) integrityView {
@@ -68,24 +75,28 @@ func resolveReadEnvelope(metadata map[string]any) integrityView {
 	}
 	envMap := anyToMap(raw)
 	view.Envelope = envMap
+	// Display fields may come from the stored map so metadata remains visible
+	// after a parse failure. Authorization never uses these raw strings.
 	view.Origin = stringField(envMap, "origin")
 	view.Modality = stringField(envMap, "modality")
 	if trust := mapField(envMap, "trust"); trust != nil {
-		view.TrustLabel = stringField(trust, "label")
-		if injection := mapField(trust, "injection"); injection != nil {
-			view.InjectionStatus = stringField(injection, "status")
+		if label := stringField(trust, "label"); label != "" {
+			view.TrustLabel = label
 		}
+	}
+	if parsed, err := ingest.ParseRetainableEnvelope(raw); err != nil {
+		view.ParseError = true
+		view.Warning = "malformed provenance: " + err.Error()
+		view.InjectionStatus = ""
+	} else {
+		view.LegacyUnknown = isLegacyUnknownEnvelope(parsed)
+		view.TrustLabel = parsed.Trust.Label
+		view.Origin = parsed.Origin
+		view.Modality = parsed.Modality
+		view.InjectionStatus = parsed.Trust.Injection.Status
 	}
 	if view.TrustLabel == "" {
 		view.TrustLabel = "unknown"
-	}
-	if parsed, err := ingest.ParseRetainableEnvelope(raw); err != nil {
-		view.Warning = "malformed provenance: " + err.Error()
-	} else {
-		view.LegacyUnknown = isLegacyUnknownEnvelope(parsed)
-		if view.InjectionStatus == "" {
-			view.InjectionStatus = parsed.Trust.Injection.Status
-		}
 	}
 	if view.LegacyUnknown && view.Display == "" {
 		view.Display = provenance.LegacyDisplay
@@ -102,24 +113,24 @@ func isLegacyUnknownEnvelope(env provenance.Envelope) bool {
 func verifyMaterializedHashes(text, rawJSON string, envMap map[string]any, artifacts []map[string]any, verifyArtifactBodies bool) []hashMismatch {
 	var out []hashMismatch
 	hashes := mapField(envMap, "hashes")
-	if content := digestField(hashes, "content"); content != "" {
+	if content := inspectDigest(hashes, "content"); content.present {
 		actual := provenance.ContentSHA256(text)
-		if actual != content {
+		if !content.valid || actual != content.raw {
 			scope := stringField(hashes, "content_scope")
 			if scope == "" {
 				scope = "item.text.utf8.v1"
 			}
-			out = append(out, hashMismatch{Kind: "content", Expected: content, Actual: actual, Scope: scope})
+			out = append(out, hashMismatch{Kind: "content", Expected: content.raw, Actual: actual, Scope: scope})
 		}
 	}
-	if raw := digestField(hashes, "raw"); raw != "" && rawJSON != "" {
+	if raw := inspectDigest(hashes, "raw"); raw.present && rawJSON != "" {
 		actual := provenance.SHA256Bytes([]byte(rawJSON))
-		if actual != raw {
+		if !raw.valid || actual != raw.raw {
 			scope := stringField(hashes, "raw_scope")
 			if scope == "" {
 				scope = provenance.RawScope
 			}
-			out = append(out, hashMismatch{Kind: "raw", Expected: raw, Actual: actual, Scope: scope})
+			out = append(out, hashMismatch{Kind: "raw", Expected: raw.raw, Actual: actual, Scope: scope})
 		}
 	}
 	if !verifyArtifactBodies {
@@ -139,14 +150,15 @@ func verifyMaterializedHashes(text, rawJSON string, envMap map[string]any, artif
 		}
 		if rawEnv, ok := meta["provenance"]; ok && rawEnv != nil {
 			artEnv := anyToMap(rawEnv)
-			if content := digestField(mapField(artEnv, "hashes"), "content"); content != "" {
+			artHashes := mapField(artEnv, "hashes")
+			if content := inspectDigest(artHashes, "content"); content.present {
 				actual := provenance.ContentSHA256(text)
-				if actual != content {
-					scope := stringField(mapField(artEnv, "hashes"), "content_scope")
+				if !content.valid || actual != content.raw {
+					scope := stringField(artHashes, "content_scope")
 					if scope == "" {
 						scope = "item.text.utf8.v1"
 					}
-					out = append(out, hashMismatch{Kind: "artifact", Expected: content, Actual: actual, Scope: scope, Artifact: id})
+					out = append(out, hashMismatch{Kind: "artifact", Expected: content.raw, Actual: actual, Scope: scope, Artifact: id})
 				}
 			}
 		}
@@ -203,19 +215,30 @@ func recordIntegrityMismatchEvents(db *sql.DB, itemID, fromLabel string, mismatc
 }
 
 func injectionBlocksForensic(status string) bool {
-	switch status {
-	case "clean":
-		return false
-	default:
-		return true
-	}
+	return status != "clean"
 }
 
 func forensicRevealAllowed(view integrityView, opts showItemOpts) bool {
+	if view.ParseError {
+		return false
+	}
 	return opts.ForensicContent && !injectionBlocksForensic(view.InjectionStatus)
 }
 
+func contentEligible(view integrityView) bool {
+	if view.ParseError || view.IntegrityMismatch || view.LegacyUnknown {
+		return false
+	}
+	if view.TrustLabel == "unknown" || view.TrustLabel == "quarantined" {
+		return false
+	}
+	return view.InjectionStatus == "clean"
+}
+
 func shouldOmitIntegrityBody(view integrityView, opts showItemOpts) bool {
+	if view.ParseError {
+		return true
+	}
 	if view.IntegrityMismatch && !forensicRevealAllowed(view, opts) {
 		return true
 	}
@@ -223,6 +246,35 @@ func shouldOmitIntegrityBody(view integrityView, opts showItemOpts) bool {
 		return true
 	}
 	return false
+}
+
+func shouldOmitContentBody(view integrityView, opts showItemOpts) bool {
+	if shouldOmitIntegrityBody(view, opts) {
+		return true
+	}
+	if contentEligible(view) {
+		return false
+	}
+	if forensicRevealAllowed(view, opts) {
+		return false
+	}
+	return !opts.IncludeUntrustedBody
+}
+
+func inspectStoredItem(db *sql.DB, itemID string) (integrityView, error) {
+	var text, metadataJSON, rawJSON string
+	if err := db.QueryRow(`select coalesce(text,''), metadata_json, coalesce(raw_json,'') from items where id = ?`, itemID).Scan(&text, &metadataJSON, &rawJSON); err != nil {
+		return integrityView{}, err
+	}
+	return inspectItemIntegrity(text, rawJSON, metadataJSON, nil, false), nil
+}
+
+func storedItemContentEligible(db *sql.DB, itemID string) bool {
+	view, err := inspectStoredItem(db, itemID)
+	if err != nil {
+		return false
+	}
+	return contentEligible(view)
 }
 
 func attachIntegrityFields(out map[string]any, view integrityView) {
@@ -316,8 +368,10 @@ func applySearchIntegrity(db *sql.DB, results []SearchResult) error {
 		results[i].Origin = view.Origin
 		results[i].Modality = view.Modality
 		results[i].TrustLabel = view.TrustLabel
-		if view.IntegrityMismatch {
+		if !contentEligible(view) {
 			results[i].Snippet = ""
+		}
+		if view.IntegrityMismatch {
 			results[i].IntegrityMismatch = true
 			if err := recordIntegrityMismatchEvents(db, results[i].ID, view.TrustLabel, view.Mismatches); err != nil {
 				return err
@@ -380,18 +434,35 @@ func stringField(m map[string]any, key string) string {
 	return fmt.Sprint(m[key])
 }
 
-func digestField(m map[string]any, key string) string {
-	s := strings.ToLower(stringField(m, key))
+func inspectDigest(m map[string]any, key string) digestRef {
+	if m == nil {
+		return digestRef{}
+	}
+	raw, ok := m[key]
+	if !ok || raw == nil {
+		return digestRef{}
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return digestRef{present: true, valid: false}
+	}
+	if s == "" {
+		return digestRef{}
+	}
+	return digestRef{raw: s, present: true, valid: canonicalHexDigest(s)}
+}
+
+func canonicalHexDigest(s string) bool {
 	if len(s) != 64 {
-		return ""
+		return false
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return ""
+			return false
 		}
 	}
-	return s
+	return true
 }
 
 func bundleResultMaps(bundle map[string]any) []map[string]any {

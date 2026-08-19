@@ -172,10 +172,9 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "show_item",
-			"description": "Show one normalized MiseLedger item by ID. Returns envelope fields and integrity_mismatch. Quarantined injection-pending body/raw are omitted unless include_untrusted_body is true. Integrity-mismatched bodies stay metadata-only; there is no forensic reveal path on MCP.",
+			"description": "Show one normalized MiseLedger item by ID. Returns envelope fields and integrity_mismatch. Non-clean, quarantined, unknown, malformed, and integrity-mismatched bodies stay metadata-only. There is no caller-settable reveal on MCP; only a parsed envelope with validated typed injection status clean is eligible.",
 			"inputSchema": map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{
-				"id":                     stringProp("MiseLedger item ID returned by search_evidence"),
-				"include_untrusted_body": boolProp("Include quarantined injection-pending text and raw payload. Does not reveal integrity-mismatched bodies."),
+				"id": stringProp("MiseLedger item ID returned by search_evidence"),
 			}},
 		},
 		{
@@ -253,7 +252,7 @@ func mcpShow(args map[string]any) (map[string]any, error) {
 	if id == "" {
 		return nil, errors.New("missing id")
 	}
-	item, err := showItem(db, id, showItemOpts{IncludeUntrustedBody: argBool(args, "include_untrusted_body")})
+	item, err := showItem(db, id, showItemOpts{})
 	if err != nil {
 		return nil, err
 	}
