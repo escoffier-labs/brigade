@@ -2729,7 +2729,8 @@ def health(target: Path) -> dict:
                 "name": "outcome_loop_half_fed",
                 "detail": (
                     f"{verify_run_count} verify run(s) but 0 eligible receipt(s); "
-                    "run verification through a registered verifier manifest so receipts "
+                    "run `brigade work verify run --target . --manifest <id>` "
+                    "with a tracked manifest under verify/manifests/ so receipts "
                     "carry verifier-authored subject_binding and check_role"
                 ),
             }

@@ -27,6 +27,62 @@ def test_doctor_passes_against_workspace_profile(tmp_target: Path, capsys):
     assert "[fail]" not in out
 
 
+def _crlf_projected_size(text: str) -> int:
+    """Byte size after LF -> CRLF, the Windows working-tree size doctor counts."""
+    encoded = text.encode("utf-8")
+    return len(encoded) + text.count("\n") - text.count("\r\n")
+
+
+def test_fresh_quickstart_workspace_passes_doctor(tmp_target: Path, capsys):
+    """#1025: a fresh multi-harness quickstart must not fail its own doctor.
+
+    The reported failure was AGENTS.md at 12066/12000 on Windows. Unix LF is
+    already close to the cap; CRLF adds one byte per line and tips it over.
+    This test uses the issue's harness set and asserts the CRLF-projected size,
+    so putting the file-maintenance table back into AGENTS.md fails here.
+    """
+    install_selection(
+        tmp_target,
+        Selection(
+            depth="workspace",
+            harnesses=["openclaw", "claude", "codex", "grok"],
+            owner="openclaw",
+            includes=[],
+        ),
+    )
+    agents = (tmp_target / "AGENTS.md").read_text(encoding="utf-8")
+    limit = doctor_mod.BOOTSTRAP_BUDGETS["AGENTS.md"]
+    assert _crlf_projected_size(agents) <= limit
+    card = tmp_target / "memory" / "cards" / "workspace-file-maintenance.md"
+    assert card.is_file()
+    card_text = card.read_text(encoding="utf-8")
+    assert "`USER.md`" in card_text
+    assert "`SAFETY_RULES.md`" in card_text
+    assert "workspace-file-maintenance.md" in agents
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[fail]" not in out
+
+
+def test_rendered_agents_md_stays_under_budget_for_all_harnesses(tmp_path: Path):
+    """Mutation guard: every known harness together still fits, including CRLF."""
+    from brigade.selection import KNOWN_HARNESSES
+
+    target = tmp_path / "all-harnesses"
+    install_selection(
+        target,
+        Selection(
+            depth="workspace",
+            harnesses=list(KNOWN_HARNESSES),
+            owner="openclaw",
+            includes=[],
+        ),
+    )
+    agents = (target / "AGENTS.md").read_text(encoding="utf-8")
+    assert _crlf_projected_size(agents) <= doctor_mod.BOOTSTRAP_BUDGETS["AGENTS.md"]
+
+
 def test_doctor_memory_care_freshness_compares_in_utc(monkeypatch):
     # Regression for issue #83: the scanner stamps scan_date in UTC, but doctor
     # compared it against the host's LOCAL date. Run in the evening in a timezone

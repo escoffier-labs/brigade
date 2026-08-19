@@ -136,8 +136,7 @@ def _check_outcome_loop(ctx: DoctorContext) -> List[CheckResult]:
                 (
                     WARN,
                     _OUTCOME_LOOP_HALF_FED_NAME,
-                    f'{detail}; run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>` '
-                    "through a registered verifier manifest",
+                    detail,
                 )
             )
 
