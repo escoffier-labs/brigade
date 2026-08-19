@@ -746,11 +746,16 @@ def call_greet():
         }
 
         Write-Step "brigade care install (Windows printed plan)"
+        # PowerShell 5.1 + $ErrorActionPreference Stop promotes native stderr to
+        # NativeCommandError. care install must write its fail-closed message to
+        # stderr and exit 3, so invoke it through cmd.exe file redirects.
+        $careInstallOut = Join-Path $acceptRoot "care-install.out"
         $careInstallErr = Join-Path $acceptRoot "care-install.err"
-        $careInstallLines = & brigade care install --target $workRepo --dry-run 2> $careInstallErr
+        cmd.exe /c "brigade care install --target `"$workRepo`" --dry-run > `"$careInstallOut`" 2> `"$careInstallErr`""
         if ($LASTEXITCODE -ne 3) {
             throw "care install --dry-run must exit 3 on Windows (printed plan, no mutation), got $LASTEXITCODE"
         }
+        $careInstallLines = @(Get-Content -LiteralPath $careInstallOut)
         $careInstallText = $careInstallLines | Out-String
         if ($careInstallText -match "unsupported on win32") {
             throw "care install --dry-run refused on the default auto backend: $careInstallText"
@@ -778,12 +783,13 @@ def call_greet():
             }
         }
 
+        $careJsonOut = Join-Path $acceptRoot "care-install.json"
         $careJsonErr = Join-Path $acceptRoot "care-install-json.err"
-        $careJsonOut = & brigade care install --target $workRepo --dry-run --json 2> $careJsonErr
+        cmd.exe /c "brigade care install --target `"$workRepo`" --dry-run --json > `"$careJsonOut`" 2> `"$careJsonErr`""
         if ($LASTEXITCODE -ne 3) {
             throw "care install --dry-run --json must exit 3 on Windows, got $LASTEXITCODE"
         }
-        $carePlan = ($careJsonOut | Out-String).Trim() | ConvertFrom-Json
+        $carePlan = (Get-Content -LiteralPath $careJsonOut -Raw).Trim() | ConvertFrom-Json
         if ($carePlan.backend -ne "schtasks") {
             throw "care install --json backend=$($carePlan.backend), expected schtasks"
         }
@@ -792,12 +798,13 @@ def call_greet():
         }
 
         Write-Step "brigade care status (Windows Task Scheduler)"
+        $careStatusOut = Join-Path $acceptRoot "care-status.json"
         $careStatusErr = Join-Path $acceptRoot "care-status.err"
-        $careStatusOut = & brigade care status --target $workRepo --json 2> $careStatusErr
+        cmd.exe /c "brigade care status --target `"$workRepo`" --json > `"$careStatusOut`" 2> `"$careStatusErr`""
         if ($LASTEXITCODE -ne 0) {
             throw "care status --json must report the printed-plan state on Windows, got $LASTEXITCODE"
         }
-        $careStatus = ($careStatusOut | Out-String).Trim() | ConvertFrom-Json
+        $careStatus = (Get-Content -LiteralPath $careStatusOut -Raw).Trim() | ConvertFrom-Json
         if ($careStatus.backend -ne "schtasks") {
             throw "care status --json backend=$($careStatus.backend), expected schtasks"
         }
@@ -817,12 +824,13 @@ def call_greet():
             if ($LASTEXITCODE -ne 0) {
                 throw "schtasks /Query did not find BrigadeCare-daily-care after printed /Create"
             }
+            $careStatusAfterOut = Join-Path $acceptRoot "care-status-after.json"
             $careStatusAfterErr = Join-Path $acceptRoot "care-status-after.err"
-            $careStatusAfterOut = & brigade care status --target $workRepo --json 2> $careStatusAfterErr
+            cmd.exe /c "brigade care status --target `"$workRepo`" --json > `"$careStatusAfterOut`" 2> `"$careStatusAfterErr`""
             if ($LASTEXITCODE -ne 0) {
                 throw "care status --json after /Create failed with $LASTEXITCODE"
             }
-            $careStatusAfter = ($careStatusAfterOut | Out-String).Trim() | ConvertFrom-Json
+            $careStatusAfter = (Get-Content -LiteralPath $careStatusAfterOut -Raw).Trim() | ConvertFrom-Json
             $dailyTask = $careStatusAfter.tasks | Where-Object { $_.id -eq "daily-care" } | Select-Object -First 1
             if (-not $dailyTask -or -not $dailyTask.exists) {
                 throw "care status did not report BrigadeCare-daily-care as present after /Create"
