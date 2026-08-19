@@ -7,7 +7,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from brigade import localio, provenance, trust_gate
+from brigade import evidence_redaction, localio, provenance, trust_gate
 from brigade.untrusted import scan_handoff_injection_heuristics
 
 from .types import CitationAudit, CitationRecord, Finding, finding_text
@@ -69,6 +69,34 @@ def audit_citations(report: str, findings: Sequence[Finding]) -> CitationAudit:
 def map_legacy_trust_origin_modality(trust: str) -> tuple[str, str]:
     """Map legacy Finding.trust to envelope origin/modality only."""
     return _LEGACY_TRUST_ORIGIN_MODALITY.get(trust, ("unknown", "unknown"))
+
+
+def _redact_finding_fields(
+    title: str, summary: str, evidence: str, *, origin: str
+) -> tuple[str, str, str, dict[str, Any], bool]:
+    """Redact title, summary, and evidence separately so newlines cannot migrate."""
+    verdicts = (
+        evidence_redaction.apply_origin_redaction(title, origin=origin),
+        evidence_redaction.apply_origin_redaction(summary, origin=origin),
+        evidence_redaction.apply_origin_redaction(evidence, origin=origin),
+    )
+    if any(verdict.status == "error" for verdict in verdicts):
+        failed = next(verdict for verdict in verdicts if verdict.status == "error")
+        return evidence_redaction.FAILED_PLACEHOLDER, "", "", failed.record(), True
+    persist_title, persist_summary, persist_evidence = (verdict.persisted_text for verdict in verdicts)
+    count = sum(verdict.count for verdict in verdicts)
+    detectors = tuple(
+        sorted({detector for verdict in verdicts for detector in verdict.detectors})[: evidence_redaction.MAX_DETECTORS]
+    )
+    record = evidence_redaction.RedactionVerdict(
+        policy_version=evidence_redaction.POLICY_VERSION,
+        origin=verdicts[0].origin,
+        status="redacted" if count else "clean",
+        count=count,
+        detectors=detectors,
+        persisted_text=finding_text(persist_title, persist_summary, persist_evidence),
+    ).record()
+    return persist_title, persist_summary, persist_evidence, record, False
 
 
 def _injection_trust(text: str) -> tuple[str, str, int, list[str]]:
@@ -155,6 +183,22 @@ def stamp_finding_payload(
         payload["provenance"] = dict(existing)
         return payload
 
+    redaction_record: dict[str, Any] | None = None
+    redaction_failed = False
+    if not inferred:
+        origin_for_redaction, _modality = map_legacy_trust_origin_modality(str(payload.get("trust") or ""))
+        title, summary, evidence, redaction_record, redaction_failed = _redact_finding_fields(
+            title,
+            summary,
+            evidence,
+            origin=origin_for_redaction,
+        )
+        payload["title"] = title
+        payload["summary"] = summary
+        payload["evidence"] = evidence
+        text = finding_text(title, summary, evidence)
+        payload["text"] = text
+
     legacy_trust = str(payload.get("trust") or "")
     origin, modality = map_legacy_trust_origin_modality(legacy_trust)
     now = ingested_at or localio.utc_now_iso()
@@ -179,6 +223,8 @@ def stamp_finding_payload(
         source_producer = producer
         if trust_label in {"reviewed", "verified"}:
             trust_label = "untrusted"
+        if redaction_failed:
+            trust_label = "quarantined"
 
     payload["provenance"] = provenance.build_envelope(
         source_system="research",
@@ -206,6 +252,7 @@ def stamp_finding_payload(
         content_scope="item.text.utf8.v1",
         captured_at=captured,
         ingested_at=now,
+        redaction=redaction_record,
     )
     return payload
 
@@ -220,9 +267,9 @@ def stamp_finding(
     stamped = stamp_finding_payload(finding, run_id=run_id, index=index, producer=producer)
     return Finding(
         source_ids=finding.source_ids,
-        title=finding.title,
-        summary=finding.summary,
-        evidence=finding.evidence,
+        title=str(stamped["title"]),
+        summary=str(stamped["summary"]),
+        evidence=str(stamped["evidence"]),
         trust=finding.trust,
         extraction_lane=finding.extraction_lane,
         extracted_at=finding.extracted_at,

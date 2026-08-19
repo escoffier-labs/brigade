@@ -302,6 +302,21 @@ Default briefs, context packs, citations, and promotion omit `unknown` and `quar
 
 Public read surfaces recompute `hashes.content` (and `hashes.raw` when materialized) against the exact stored bytes. Search suppresses a mismatched snippet and sets `integrity_mismatch: true`. Direct `miseledger show` / `brigade evidence show` hide a mismatched or synthesized-legacy body unless `--forensic-content` is passed. `--forensic-content` never changes trust and only reveals a body when injection status is the explicit known-safe value `clean`; empty, unknown, and parse-lost statuses block. MCP, HTTP, bundles, briefs, and context stay metadata-only on mismatch. One idempotent downgrade event is appended per item/hash/mismatch; the row is never deleted.
 
+### Origin-scoped redaction (#498)
+
+New work-import, research-finding, and receipt-index writes run `brigade.evidence-redaction.v1` before the item text is persisted. The policy keys off envelope `origin`:
+
+| Origin | Detectors |
+| --- | --- |
+| `operator-input`, `workspace` | secrets |
+| `agent-session` | secrets, PII |
+| `external-service`, `external-web` | secrets, PII, infrastructure |
+| `unknown` | fail-closed maximum set |
+
+Work-import `--source` is normalized with `strip().lower()` and fails closed to `unknown` when unmapped. `external-web` and `external-service` are selectable source names. `work import context` is an external-content surface: weaker mapped sources upgrade to `external-web` so secrets, PII, and infrastructure are in scope.
+
+The optional envelope `redaction` object stores `schema`, `schema_version`, `policy_version`, `origin`, `status` (`clean` / `redacted` / `error`), `count`, and `detectors`. It never stores removed values, excerpts, or original bytes. `hashes.content` is the digest of the persisted (already redacted) text. Scanner failure, timeout, or unavailability records `status=error`, persists `[ingestion-redaction-failed]`, and cannot be treated as clean. A missing redaction record on a legacy row is not a clean verdict. New policy versions apply to future writes only; provenance backfill does not rewrite existing text.
+
 ### Inter-seat messages
 
 Planner, worker, and synthesis send/receive boundaries stamp

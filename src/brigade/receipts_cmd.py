@@ -17,6 +17,7 @@ from . import __version__
 from . import code_references
 from . import component_bins
 from . import localio
+from . import evidence_redaction
 from . import provenance
 from . import receipt_signing
 from . import trust_gate
@@ -1167,6 +1168,8 @@ def _stamp_receipt_provenance(
     collection_id: str,
     source_kind: str,
     producer: str,
+    redaction: dict[str, Any] | None = None,
+    redaction_failed: bool = False,
 ) -> dict[str, Any]:
     """Stamp a receipt adapter envelope. Indexing always starts untrusted."""
     captured = str(payload.get("started_at") or payload.get("completed_at") or payload.get("finished_at") or "")
@@ -1185,6 +1188,8 @@ def _stamp_receipt_provenance(
     session_id = session_raw if provenance.is_safe_identity_label(session_raw) else None
     locator_kind, locator_value = _receipt_locator(path, target, item_external_id)
     injection_status, injection_count, injection_rules = _receipt_injection(text)
+    if redaction_failed:
+        injection_status = "error"
     return provenance.build_envelope(
         source_system="receipts",
         source_kind=source_kind,
@@ -1200,7 +1205,7 @@ def _stamp_receipt_provenance(
         locator_value=locator_value,
         attribution="observed",
         modality="tool-output",
-        trust_label="untrusted",
+        trust_label="quarantined" if redaction_failed else "untrusted",
         trust_assigned_by="ingest:receipts_cmd.index_miseledger_receipts",
         trust_assigned_at=ingested_at,
         injection_status=injection_status,
@@ -1211,7 +1216,12 @@ def _stamp_receipt_provenance(
         content_scope="item.text.utf8.v1",
         captured_at=captured,
         ingested_at=ingested_at,
+        redaction=redaction,
     )
+
+
+def _receipt_redact(text: str) -> tuple[str, dict[str, Any], bool]:
+    return evidence_redaction.apply_and_record(text, origin="agent-session")
 
 
 def _receipt_injection(text: str) -> tuple[str, int, list[str]]:
@@ -1257,6 +1267,7 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
     if command_text:
         text = f"{text} Commands: {command_text}."
     text = _append_delta_text(text, payload)
+    text, redaction_record, redaction_failed = _receipt_redact(text)
     metadata["provenance"] = _stamp_receipt_provenance(
         text=text,
         payload=payload,
@@ -1266,6 +1277,8 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
         collection_id="brigade_work_verify_runs",
         source_kind="verify-receipt",
         producer="receipts_cmd._verify_miseledger_item",
+        redaction=redaction_record,
+        redaction_failed=redaction_failed,
     )
     artifacts = [_receipt_artifact(item_external_id, path, target, receipt_hash)]
     artifacts.extend(_verify_log_artifacts(item_external_id, payload, path, target))
@@ -1327,6 +1340,7 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
     if task:
         text += f" Task: {task}."
     text = _append_delta_text(text, payload)
+    text, redaction_record, redaction_failed = _receipt_redact(text)
     metadata["provenance"] = _stamp_receipt_provenance(
         text=text,
         payload=payload,
@@ -1336,6 +1350,8 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
         collection_id="brigade_runs",
         source_kind="run-receipt",
         producer="receipts_cmd._run_miseledger_item",
+        redaction=redaction_record,
+        redaction_failed=redaction_failed,
     )
     artifacts = [_receipt_artifact(item_external_id, path, target, receipt_hash)]
     output_dir = payload.get("artifacts")

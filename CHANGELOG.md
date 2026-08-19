@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Origin-scoped ingest redaction now maps `work import context` (and `--source external-web` / `external-service`) to the external detector tier, normalizes free-form `--source` with `strip().lower()`, and fails closed to `unknown` on unmapped values. An equal-but-unredacted scanner result is treated as failure, and research findings redact title/summary/evidence per field so a multi-line summary cannot migrate into evidence. (#498)
+
 ### Added
+- Evidence ingest now applies an origin-scoped redaction policy (`brigade.evidence-redaction.v1`) before persistence. Sources classify to the provenance envelope origin; each origin selects detectors; the stored item keeps only redacted bytes plus a count/detector record (never the removed values). Scanner failure, timeout, or unavailability cannot produce a clean verdict and persists a placeholder instead of the original. The policy version is stamped on every decision and applies to future writes only — existing rows and provenance backfill are not rewritten. (#498)
+
 - Inter-seat planner, worker, and synthesis messages now carry a
   `brigade.provenance-envelope.v1` with `message.text.utf8.v1` over the exact
   outbound UTF-8 bytes. Channel gates run before `parse_plan` or model

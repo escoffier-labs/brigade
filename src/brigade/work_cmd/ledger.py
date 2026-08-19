@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
-from .. import component_paths, provenance, runguard, trust_gate
+from .. import component_paths, evidence_redaction, provenance, runguard, trust_gate
 from ..untrusted import scan_handoff_injection_heuristics
 
 
@@ -2691,7 +2691,8 @@ _IMPORT_FINGERPRINT_METADATA_SKIP = frozenset(
 # Default origin/modality for work-inbox producers. Authoritative source,
 # origin, and modality always come from this mapping (plus the local
 # work-inbox producer stamp). Validated inbound envelopes may reuse only
-# non-authoritative identity fields. Unknown sources stay workspace/tool-output.
+# non-authoritative identity fields. Unknown sources fail closed to
+# origin ``unknown``; modality still defaults to tool-output.
 _IMPORT_SOURCE_ORIGIN_MODALITY: dict[str, tuple[str, str]] = {
     "manual": ("operator-input", "human-written"),
     "backup-health": ("workspace", "tool-output"),
@@ -2733,8 +2734,14 @@ def _import_fingerprint(item: dict[str, Any]) -> str | None:
     )
 
 
-def _import_origin_modality(source: str) -> tuple[str, str]:
-    return _IMPORT_SOURCE_ORIGIN_MODALITY.get(source, ("workspace", "tool-output"))
+def _import_origin_modality(source: str, *, kind: str | None = None) -> tuple[str, str]:
+    cleaned = source.strip().lower() if isinstance(source, str) else ""
+    if kind == "context":
+        origin = evidence_redaction.origin_for_external_ingest(source)
+    else:
+        origin = evidence_redaction.classify_source_origin(source)
+    modality = _IMPORT_SOURCE_ORIGIN_MODALITY.get(cleaned, ("workspace", "tool-output"))[1]
+    return origin, modality
 
 
 _IMPORT_IDENTITY_MAX_LEN = 256
@@ -3044,6 +3051,9 @@ def _stamp_import_provenance(
     metadata: dict[str, Any],
     ingested_at: str,
     inbound_provenance: object = None,
+    redaction: Mapping[str, Any] | None = None,
+    redaction_failed: bool = False,
+    kind: str | None = None,
 ) -> dict[str, Any]:
     """Build a locally assigned work-inbox provenance envelope for one import.
 
@@ -3054,7 +3064,9 @@ def _stamp_import_provenance(
     """
     reusable = _reusable_inbound_provenance(inbound_provenance)
     trust_label, injection_status, injection_count, injection_rules = _import_injection_trust(text)
-    origin, modality = _import_origin_modality(source)
+    if redaction_failed:
+        trust_label = "quarantined"
+    origin, modality = _import_origin_modality(source, kind=kind)
     source_system = "work-inbox"
     source_kind = source
     source_producer = "ledger._make_import"
@@ -3126,6 +3138,7 @@ def _stamp_import_provenance(
             content_scope="item.text.utf8.v1",
             captured_at=captured_at,
             ingested_at=ingested_at,
+            redaction=redaction,
         )
     except ValueError as exc:
         raise _ImportProvenanceError(str(exc)) from exc
@@ -3652,6 +3665,7 @@ _PROVENANCE_ENVELOPE_KEYS = frozenset(
         "modality",
         "trust",
         "hashes",
+        "redaction",
         "captured_at",
         "ingested_at",
     }
@@ -3663,6 +3677,9 @@ _PROVENANCE_LOCATOR_KEYS = frozenset({"kind", "value"})
 _PROVENANCE_TRUST_KEYS = frozenset({"label", "assigned_by", "assigned_at", "trust_policy", "injection"})
 _PROVENANCE_TRUST_POLICY_KEYS = frozenset({"schema", "schema_version"})
 _PROVENANCE_INJECTION_KEYS = frozenset({"status", "count", "rules"})
+_PROVENANCE_REDACTION_KEYS = frozenset(
+    {"schema", "schema_version", "policy_version", "origin", "status", "count", "detectors"}
+)
 _PROVENANCE_HASHES_KEYS = frozenset(
     {"content_algorithm", "content_scope", "content", "raw_algorithm", "raw_scope", "raw"}
 )
@@ -3703,6 +3720,8 @@ def _handoff_private_fields_in_validated_provenance(
                     child_allowed = _PROVENANCE_INJECTION_KEYS
                 elif key_text == "hashes":
                     child_allowed = _PROVENANCE_HASHES_KEYS
+                elif key_text == "redaction":
+                    child_allowed = _PROVENANCE_REDACTION_KEYS
                 else:
                     child_allowed = None
                 if isinstance(item, (dict, list)) and child_allowed is not None:
@@ -4027,12 +4046,14 @@ def _make_import(
     provenance_authority = (
         provenance_source.strip() if isinstance(provenance_source, str) and provenance_source.strip() else source_text
     )
-    item_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(text)}-{uuid4().hex[:6]}"
+    origin, _modality = _import_origin_modality(provenance_authority, kind=kind)
+    persist_text, redaction_record, redaction_failed = evidence_redaction.apply_and_record(text, origin=origin)
+    item_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(persist_text)}-{uuid4().hex[:6]}"
     item: dict[str, Any] = {
         "id": item_id,
         "kind": kind,
         "source": source_text,
-        "text": text,
+        "text": persist_text,
         "status": "pending",
         "created_at": created,
         "updated_at": created,
@@ -4052,12 +4073,15 @@ def _make_import(
     inbound_provenance = stamped_metadata.pop("provenance", None)
     stamped_metadata = _sanitize_import_identity_metadata(stamped_metadata)
     stamped_metadata["provenance"] = _stamp_import_provenance(
-        text=text,
+        text=persist_text,
         source=provenance_authority,
         item_id=item_id,
         metadata=stamped_metadata,
         ingested_at=created,
         inbound_provenance=inbound_provenance,
+        redaction=redaction_record,
+        redaction_failed=redaction_failed,
+        kind=kind,
     )
     item["metadata"] = stamped_metadata
     return item
