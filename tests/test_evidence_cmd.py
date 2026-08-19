@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from brigade import code_cmd, doctor as doctor_mod, evidence_cmd, search_cmd
 from brigade.station import DoctorContext
 
@@ -151,6 +153,59 @@ def test_crawl_plan_is_review_only(tmp_path):
     assert ["miseledger", "crawl", "sessions"] in payload["commands"]
     assert "review-only crawl plan never executes the evidence engine" in payload["boundaries"][0]
     assert "miseledger crawl sessions" in rendered
+
+
+def test_crawl_plan_printed_commands_dispatch(tmp_path):
+    payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
+    assert payload["commands"]
+    for command in payload["commands"]:
+        evidence_cmd.miseledger_argv_dispatches(command)
+
+
+def test_crawl_plan_omits_sourceharvest_and_uses_positional_memory(tmp_path):
+    payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
+    commands = payload["commands"]
+    target = str(tmp_path.resolve())
+
+    assert ["miseledger", "crawl", "memory", target] in commands
+    for command in commands:
+        assert "--root" not in command
+        assert "--repo" not in command
+        assert command[1:3] != ["crawl", "files"]
+        assert command[1:3] != ["crawl", "gitlog"]
+
+    omitted_argv = [row["argv"] for row in payload["omitted"]]
+    assert ["miseledger", "crawl", "files", target] in omitted_argv
+    assert ["miseledger", "crawl", "gitlog", target] in omitted_argv
+    assert all("retired sourceharvest" in row["reason"] for row in payload["omitted"])
+    rendered = evidence_cmd._render_plan_md(payload)
+    assert "Omitted" in rendered
+    assert "retired sourceharvest" in rendered
+
+
+def test_issue_1024_mutation_old_flag_forms_fail_dispatch(tmp_path):
+    """Regression: the #1024 printed flag forms would fail this dispatch check."""
+    target = str(tmp_path)
+    old_plan = [
+        ["miseledger", "init"],
+        ["miseledger", "crawl", "sessions"],
+        ["miseledger", "crawl", "memory", target],
+        ["miseledger", "crawl", "files", "--root", target],
+        ["miseledger", "crawl", "gitlog", "--repo", target],
+        ["miseledger", "status", "--json"],
+        ["miseledger", "doctor"],
+    ]
+    failures = []
+    for command in old_plan:
+        try:
+            evidence_cmd.miseledger_argv_dispatches(command)
+        except ValueError as exc:
+            failures.append((command[2], str(exc)))
+    assert {kind for kind, _ in failures} == {"files", "gitlog"}
+    with pytest.raises(ValueError, match="usage: miseledger crawl files"):
+        evidence_cmd.miseledger_argv_dispatches(["miseledger", "crawl", "files", "--root", target])
+    with pytest.raises(ValueError, match="usage: miseledger crawl gitlog"):
+        evidence_cmd.miseledger_argv_dispatches(["miseledger", "crawl", "gitlog", "--repo", target])
 
 
 def test_crawl_plan_write_creates_files(tmp_path):
