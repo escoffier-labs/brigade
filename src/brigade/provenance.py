@@ -453,20 +453,59 @@ def build_envelope(
     return env
 
 
-def verify_content_digest(text: str, env: Mapping[str, Any] | None) -> bool:
-    """Return True when ``hashes.content`` is absent or matches exact UTF-8 bytes."""
+def verify_content_digest(
+    text: str,
+    env: Mapping[str, Any] | None,
+    *,
+    require_present: bool = False,
+) -> bool:
+    """Return True when ``hashes.content`` matches exact UTF-8 bytes.
+
+    When *require_present* is false, a missing digest is treated as unchecked
+    (True). Admission and promotion pass ``require_present=True`` so a missing
+    or malformed digest cannot authorize a body copy.
+    """
 
     if not isinstance(env, Mapping):
-        return True
+        return not require_present
     hashes = env.get("hashes")
     if not isinstance(hashes, Mapping):
-        return True
+        return not require_present
     content = hashes.get("content")
     if content is None:
-        return True
+        return not require_present
     if not _valid_digest(content):
         return False
     return content == content_sha256(text)
+
+
+def verify_redaction_against_bytes(text: str, env: Mapping[str, Any] | None) -> list[str]:
+    """Validate a stored redaction record against the current body bytes.
+
+    A missing ``redaction`` key is allowed. A present record must be
+    well-formed and must still describe *text*: re-applying origin redaction
+    must leave the current bytes unchanged.
+    """
+
+    if not isinstance(env, Mapping) or "redaction" not in env:
+        return []
+    from . import evidence_redaction
+
+    record = env.get("redaction")
+    errors = evidence_redaction.validate_redaction_record(record)
+    if errors:
+        return errors
+    if not isinstance(record, Mapping):
+        return ["redaction must be a JSON object"]
+    origin = record.get("origin")
+    if origin not in evidence_redaction.ORIGINS:
+        return [f"redaction.origin {origin!r} is not in the closed set"]
+    verdict = evidence_redaction.apply_origin_redaction(text, origin=str(origin))
+    if verdict.status == "error":
+        return ["redaction record does not match current item text"]
+    if verdict.persisted_text != text:
+        return ["redaction record does not match current item text"]
+    return []
 
 
 def verify_raw_digest(raw: bytes | None, env: Mapping[str, Any] | None) -> bool:
