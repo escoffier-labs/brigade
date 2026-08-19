@@ -29,6 +29,7 @@ MESSAGE_WRAP_MAX_BYTES = 20_000
 SOURCE_SYSTEM = "run"
 ASSIGNED_BY = "ingest:message_envelope.emit"
 BRIGADE_SEAT = "brigade"
+IN_MEMORY_RUN_ID = "in-memory"
 MESSAGE_BINDING_KEY = "message"
 MESSAGE_BINDING_FIELDS = ("run_id", "message_id", "assignment_id", "from_seat", "to_seat")
 
@@ -496,7 +497,7 @@ def emit(
     if kind not in MESSAGE_KINDS:
         raise ValueError(f"unknown message kind {kind!r}; expected one of {sorted(MESSAGE_KINDS)}")
     now = localio.utc_now_iso()
-    resolved_run_id = _safe_label(run_id or (run_dir.name if run_dir is not None else None), "in-memory")
+    resolved_run_id = _safe_label(run_id or (run_dir.name if run_dir is not None else None), IN_MEMORY_RUN_ID)
     message_id = _safe_label(f"{kind}-{uuid4().hex[:12]}", f"message-{uuid4().hex[:12]}")
     from_label = _safe_label(from_seat, BRIGADE_SEAT)
     to_label = _safe_label(to_seat, BRIGADE_SEAT)

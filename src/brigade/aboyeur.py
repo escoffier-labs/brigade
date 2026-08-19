@@ -1520,7 +1520,7 @@ def _admitted_result_output(
         env,
         kind="worker-result",
         producer="run_transport.dispatch",
-        run_id=run_id,
+        run_id=run_id or message_envelope.IN_MEMORY_RUN_ID,
         message_id=expected_message_id if isinstance(expected_message_id, str) else None,
         assignment_id=message_envelope.assignment_id_for(result.worker, result.task),
         from_seat=_result_from_seat(result),
@@ -2155,7 +2155,7 @@ def dispatch(
     if bound_prompt is None:
         bound_prompt = partial(
             _worker_prompt,
-            run_id=run_id or (output_dir.name if output_dir is not None else None),
+            run_id=run_id or (output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID),
             to_seat=roster.orchestrator,
         )
     return run_transport.dispatch(
@@ -4765,7 +4765,7 @@ def run(
     worker_prompt_builder = partial(
         _worker_prompt,
         skill_policy=skill_policy,
-        run_id=output_dir.name if output_dir is not None else None,
+        run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
         to_seat=roster.orchestrator,
     )
     try:
@@ -4990,7 +4990,7 @@ def run(
             code_graph=code_graph,
             drift_impact=drift_impact,
             evidence=evidence,
-            run_id=output_dir.name if output_dir is not None else None,
+            run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
             to_seat=roster.orchestrator,
         )
         synth_request = message_envelope.emit(
