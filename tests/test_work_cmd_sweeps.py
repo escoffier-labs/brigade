@@ -651,6 +651,7 @@ def test_work_sweep_cli(tmp_path, monkeypatch):
                 "force": True,
                 "ingest": False,
                 "json_output": True,
+                "isolated_scanners": False,
             },
         ),
         (
@@ -663,6 +664,7 @@ def test_work_sweep_cli(tmp_path, monkeypatch):
                 "force": False,
                 "ingest": True,
                 "json_output": False,
+                "isolated_scanners": False,
             },
         ),
         ("sweeps", {"target": tmp_path, "limit": 5, "json_output": True}),

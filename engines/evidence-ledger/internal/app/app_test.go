@@ -20,7 +20,10 @@ import (
 	"testing"
 	"time"
 
+	"crypto/rand"
+
 	"github.com/escoffier-labs/miseledger/internal/archive"
+	"github.com/escoffier-labs/miseledger/internal/ingest"
 )
 
 func TestInitCreatesPrivateDirsAndDoctorJSON(t *testing.T) {
@@ -1812,8 +1815,59 @@ func runJSONArray(t *testing.T, args ...string) []any {
 
 func run(args ...string) (int, string, string) {
 	var out, errb bytes.Buffer
-	code := Run(args, &out, &errb)
+	// Tests are non-interactive: empty stdin is not a TTY, so a missing
+	// trust-review capability is refused the same way a scanner child is.
+	code := RunWithStdin(args, bytes.NewReader(nil), &out, &errb)
 	return code, out.String(), errb.String()
+}
+
+func runTrustReview(t *testing.T, itemID, digest string, extra ...string) (int, string, string) {
+	t.Helper()
+	markClean := false
+	toLabel := "reviewed"
+	for i, arg := range extra {
+		if arg == "--mark-injection-clean" {
+			markClean = true
+		}
+		if arg == "--to-label" && i+1 < len(extra) {
+			toLabel = extra[i+1]
+		}
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatal(err)
+	}
+	cap, err := ingest.MintTrustCapability(secret, itemID, digest, toLabel, markClean, 2*time.Minute, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := ingest.EncodeHandoff(secret, cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := append([]string{"trust", "review", "--item", itemID, "--content-hash", digest}, extra...)
+	var out, errb bytes.Buffer
+	code := RunWithStdin(args, bytes.NewReader(append(handoff, '\n')), &out, &errb)
+	return code, out.String(), errb.String()
+}
+
+func runTrustReviewOK(t *testing.T, itemID, digest string, extra ...string) string {
+	t.Helper()
+	code, out, errb := runTrustReview(t, itemID, digest, extra...)
+	if code != 0 {
+		t.Fatalf("trust review failed: code=%d err=%s out=%s", code, errb, out)
+	}
+	return out
+}
+
+func runTrustReviewJSON(t *testing.T, itemID, digest string, extra ...string) map[string]any {
+	t.Helper()
+	out := runTrustReviewOK(t, itemID, digest, append(extra, "--json")...)
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("trust review returned invalid json: %v\n%s", err, out)
+	}
+	return got
 }
 
 func mustWrite(t *testing.T, path, body string) {

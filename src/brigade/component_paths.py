@@ -47,6 +47,24 @@ def cache_root(*, env: Mapping[str, str] | None = None, system: str | None = Non
     return _normalize(cache_home, windows=False) if cache_home else _join(home, ".cache", windows=False)
 
 
+def config_root(*, env: Mapping[str, str] | None = None, system: str | None = None) -> str:
+    """Return the OS-specific user config root without admin rights."""
+    environment = env if env is not None else os.environ
+    os_name = _normalize_system(system)
+    if os_name == "windows":
+        localappdata = environment.get("LOCALAPPDATA")
+        if not localappdata:
+            raise ValueError("windows component config root requires LOCALAPPDATA")
+        return _normalize(localappdata, windows=True)
+    home = environment.get("HOME")
+    if not home:
+        raise ValueError("component config root requires HOME")
+    if os_name == "darwin":
+        return _join(home, "Library", "Application Support", windows=False)
+    config_home = environment.get("XDG_CONFIG_HOME")
+    return _normalize(config_home, windows=False) if config_home else _join(home, ".config", windows=False)
+
+
 def components_dir(data_root_path: str) -> str:
     return _join(data_root_path, "brigade", "components", windows=_is_windows_path(data_root_path))
 

@@ -560,6 +560,8 @@ def review_item_ref(
     expected_hash: str,
     *,
     operator_command: str = OPERATOR_REVIEW,
+    to_label: str = "reviewed",
+    mark_injection_clean: bool = False,
 ) -> dict[str, Any]:
     parsed = parse_item_ref(item_ref)
     if parsed is None:
@@ -576,7 +578,14 @@ def review_item_ref(
         return review_research_finding(
             target, run_id, int(index_text), expected_hash, operator_command=operator_command
         )
-    return review_miseledger_item(target, ident, expected_hash, operator_command=operator_command)
+    return review_miseledger_item(
+        target,
+        ident,
+        expected_hash,
+        operator_command=operator_command,
+        to_label=to_label,
+        mark_injection_clean=mark_injection_clean,
+    )
 
 
 def notify_miseledger_trust(
@@ -586,12 +595,22 @@ def notify_miseledger_trust(
     *,
     to_label: str,
     operator_command: str,
+    mark_injection_clean: bool = False,
 ) -> None:
-    from . import component_bins
+    from . import authority_broker, component_bins
 
     binary = component_bins.resolve("miseledger")
     if binary is None:
         raise TrustReviewError("miseledger binary is not available")
+    secret = authority_broker.new_capability_secret()
+    capability = authority_broker.mint_trust_capability(
+        secret,
+        item_id=item_id,
+        from_digest=expected_hash,
+        to_label=to_label,
+        mark_injection_clean=mark_injection_clean,
+    )
+    handoff = authority_broker.encode_handoff(secret, capability)
     command = [
         binary,
         "trust",
@@ -606,6 +625,12 @@ def notify_miseledger_trust(
         operator_command,
         "--json",
     ]
+    if mark_injection_clean:
+        command.append("--mark-injection-clean")
+    child_env = os.environ.copy()
+    child_env["BRIGADE_REQUIRE_TRUST_CAPABILITY"] = "1"
+    for leaked in ("BRIGADE_CAPABILITY_SECRET", "BRIGADE_TRUST_CAPABILITY"):
+        child_env.pop(leaked, None)
     try:
         completed = subprocess.run(
             command,
@@ -614,7 +639,8 @@ def notify_miseledger_trust(
             timeout=30,
             cwd=target,
             check=False,
-            stdin=subprocess.DEVNULL,
+            input=handoff.decode("ascii"),
+            env=child_env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise TrustReviewError(f"miseledger trust review failed: {exc}") from exc
@@ -631,6 +657,7 @@ def review_miseledger_item(
     to_label: str = "reviewed",
     operator_command: str = OPERATOR_REVIEW,
     evidence: Mapping[str, Any] | None = None,
+    mark_injection_clean: bool = False,
 ) -> dict[str, Any]:
     expected = _require_digest(expected_hash)
     item_ref = f"{ITEM_REF_MISELEDGER}{item_id}"
@@ -642,6 +669,7 @@ def review_miseledger_item(
         expected,
         to_label=to_label,
         operator_command=operator_command,
+        mark_injection_clean=mark_injection_clean,
     )
     event = build_provenance_event(
         item_ref=item_ref,

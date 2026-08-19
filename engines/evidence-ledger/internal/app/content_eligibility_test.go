@@ -407,7 +407,7 @@ func TestRoutineReviewRefusesTamperedEnvelope(t *testing.T) {
 				t.Fatalf("tampered envelope must be a parse error: %#v", before)
 			}
 
-			code, stdout, stderr := run("trust", "review", "--item", id, "--content-hash", digest, "--mark-injection-clean", "--json")
+			code, stdout, stderr := runTrustReview(t, id, digest, "--mark-injection-clean", "--json")
 			if code == 0 {
 				t.Fatalf("routine review must refuse tampered envelope: stdout=%s stderr=%s", stdout, stderr)
 			}
@@ -479,7 +479,7 @@ func TestImportIneligibleUntilOperatorMarksInjectionClean(t *testing.T) {
 	assertSurfacesIneligible(t, id, query, needle)
 
 	digest := itemContentHashFromShow(t, id)
-	labelOnly := runJSON(t, "trust", "review", "--item", id, "--content-hash", digest, "--json")
+	labelOnly := runTrustReviewJSON(t, id, digest)
 	if labelOnly["to_label"] != "reviewed" {
 		t.Fatalf("label-only review = %#v", labelOnly)
 	}
@@ -488,7 +488,7 @@ func TestImportIneligibleUntilOperatorMarksInjectionClean(t *testing.T) {
 	}
 	assertSurfacesIneligible(t, id, query, needle)
 
-	marked := runJSON(t, "trust", "review", "--item", id, "--content-hash", digest, "--mark-injection-clean", "--json")
+	marked := runTrustReviewJSON(t, id, digest, "--mark-injection-clean")
 	if marked["injection_status"] != "clean" {
 		t.Fatalf("mark-injection-clean = %#v", marked)
 	}
@@ -699,5 +699,23 @@ func artifactMaps(raw any) []map[string]any {
 		return arts
 	default:
 		return nil
+	}
+}
+
+func TestMutationScannerTrustReviewWithoutCapabilityIsRefused(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	id := insertCleanIntegrityItem(t, "UNIQUE_CAP1029_scanner_self_elevate body", "quarantined", "pending")
+	digest := itemContentHashFromShow(t, id)
+	code, stdout, stderr := run("trust", "review", "--item", id, "--content-hash", digest, "--to-label", "verified", "--mark-injection-clean", "--operator-command", "scanner:forged", "--json")
+	if code == 0 {
+		t.Fatalf("scanner-forged trust review must be refused: stdout=%s stderr=%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "capability") {
+		t.Fatalf("refusal must name capability: %s", stderr)
+	}
+	positive := runTrustReviewJSON(t, id, digest, "--to-label", "verified", "--mark-injection-clean")
+	if positive["to_label"] != "verified" {
+		t.Fatalf("operator path with capability = %#v", positive)
 	}
 }
