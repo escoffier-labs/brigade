@@ -438,10 +438,10 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
     try:
         parent, name = _open_import_inbox_parent(target, create=False)
         try:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             )
         except FileNotFoundError:
             return []
@@ -1537,12 +1537,131 @@ def _directory_identity(descriptor: int) -> dict[str, int]:
     return {"device": metadata.st_dev, "inode": metadata.st_ino}
 
 
+def _posix_dirfd_available() -> bool:
+    """Return whether POSIX openat/O_NOFOLLOW primitives can hold a parent."""
+    return (
+        os.name == "posix"
+        and bool(getattr(os, "O_NOFOLLOW", 0))
+        and bool(getattr(os, "O_DIRECTORY", 0))
+        and os.open in os.supports_dir_fd
+        and os.mkdir in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+        and os.rename in os.supports_dir_fd
+    )
+
+
+def _nt_dirfd_available() -> bool:
+    """Return whether Windows handle-relative no-follow operations can be used."""
+    if sys.platform != "win32":
+        return False
+    from . import nt_dirfd
+
+    return nt_dirfd.available()
+
+
+def _dirfd_available() -> bool:
+    return _posix_dirfd_available() or _nt_dirfd_available()
+
+
+def _dirfd_unavailable(kind: str) -> OSError:
+    return OSError(f"descriptor-relative {kind} are unavailable")
+
+
+def _open_directory_nofollow(path: Path) -> int:
+    """Open a directory without following a final symlink or reparse point."""
+    if _posix_dirfd_available():
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        return os.open(path, flags)
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.open_root_directory(path)
+    raise _dirfd_unavailable("directory operations")
+
+
+def _dirfd_open_dir(parent: int, name: str) -> int:
+    if _posix_dirfd_available():
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        return os.open(name, flags, dir_fd=parent)
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.open_child_directory(parent, name)
+    raise _dirfd_unavailable("directory operations")
+
+
+def _dirfd_mkdir(parent: int, name: str) -> None:
+    if _posix_dirfd_available():
+        os.mkdir(name, 0o700, dir_fd=parent)
+        return
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        nt_dirfd.mkdir_child(parent, name)
+        return
+    raise _dirfd_unavailable("directory operations")
+
+
+def _dirfd_open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    if _posix_dirfd_available():
+        if flags & os.O_CREAT:
+            return os.open(name, flags, mode, dir_fd=parent)
+        return os.open(name, flags, dir_fd=parent)
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.open_file(parent, name, flags, mode)
+    raise _dirfd_unavailable("import inbox operations")
+
+
+def _dirfd_replace(parent: int, source: str, destination: str) -> None:
+    if _posix_dirfd_available():
+        os.replace(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+        return
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        nt_dirfd.replace_children(parent, source, destination)
+        return
+    raise _dirfd_unavailable("import inbox operations")
+
+
+def _dirfd_unlink(parent: int, name: str) -> None:
+    if _posix_dirfd_available():
+        os.unlink(name, dir_fd=parent)
+        return
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        nt_dirfd.unlink_child(parent, name)
+        return
+    raise _dirfd_unavailable("import inbox operations")
+
+
+def _dirfd_stat(parent: int, name: str) -> os.stat_result:
+    if _posix_dirfd_available():
+        return os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.stat_child(parent, name)
+    raise _dirfd_unavailable("import inbox validation")
+
+
+def _dirfd_fsync(descriptor: int) -> None:
+    """Flush a held descriptor; directory fsync is best-effort on Windows."""
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        if sys.platform == "win32" and getattr(exc, "winerror", None) in {1, 5}:
+            return
+        raise
+
+
 def _workspace_directory_identity(target: Path) -> dict[str, int]:
     """Return the identity of the workspace root through a no-follow descriptor."""
-    descriptor = os.open(
-        target.expanduser().resolve(),
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-    )
+    descriptor = _open_directory_nofollow(target.expanduser().resolve())
     try:
         return _directory_identity(descriptor)
     finally:
@@ -1894,11 +2013,11 @@ def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *,
         {"schema_version": _DIRECTORY_AUTHORITY_SCHEMA_VERSION, **identity}, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     try:
-        descriptor = os.open(
+        descriptor = _dirfd_open_file(
+            anchor_parent,
             anchor_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             0o600,
-            dir_fd=anchor_parent,
         )
     except FileExistsError:
         return
@@ -1907,7 +2026,7 @@ def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *,
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.fsync(anchor_parent)
+        _dirfd_fsync(anchor_parent)
     finally:
         os.close(descriptor)
 
@@ -1988,49 +2107,42 @@ def _open_legacy_scanner_runs_directory(target: Path) -> int:
 
 def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...], anchor_name: str, create: bool) -> int:
     """Open an externally bound directory through no-follow descriptors."""
-    if (
-        os.name != "posix"
-        or not getattr(os, "O_NOFOLLOW", 0)
-        or not getattr(os, "O_DIRECTORY", 0)
-        or os.open not in os.supports_dir_fd
-        or os.mkdir not in os.supports_dir_fd
-    ):
+    if not _dirfd_available():
         raise OSError("descriptor-relative directory authority operations are unavailable")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(target.expanduser().resolve(), flags)
+    descriptor = _open_directory_nofollow(target.expanduser().resolve())
     workspace = _directory_identity(descriptor)
     anchor_parent = -1
     parent = -1
     try:
         for component in components[:-2]:
             try:
-                child = os.open(component, flags, dir_fd=descriptor)
+                child = _dirfd_open_dir(descriptor, component)
             except FileNotFoundError:
                 if not create:
                     raise
-                os.mkdir(component, 0o700, dir_fd=descriptor)
-                child = os.open(component, flags, dir_fd=descriptor)
+                _dirfd_mkdir(descriptor, component)
+                child = _dirfd_open_dir(descriptor, component)
             os.close(descriptor)
             descriptor = child
         anchor_parent = descriptor
         descriptor = -1
         parent_name = components[-2]
         try:
-            parent = os.open(parent_name, flags, dir_fd=anchor_parent)
+            parent = _dirfd_open_dir(anchor_parent, parent_name)
         except FileNotFoundError:
             if not create:
                 raise
-            os.mkdir(parent_name, 0o700, dir_fd=anchor_parent)
-            parent = os.open(parent_name, flags, dir_fd=anchor_parent)
+            _dirfd_mkdir(anchor_parent, parent_name)
+            parent = _dirfd_open_dir(anchor_parent, parent_name)
         name = components[-1]
         created = False
         try:
-            child = os.open(name, flags, dir_fd=parent)
+            child = _dirfd_open_dir(parent, name)
         except FileNotFoundError:
             if not create:
                 raise
-            os.mkdir(name, 0o700, dir_fd=parent)
-            child = os.open(name, flags, dir_fd=parent)
+            _dirfd_mkdir(parent, name)
+            child = _dirfd_open_dir(parent, name)
             created = True
         try:
             _validate_external_directory_authority(target, components, child, workspace=workspace)
@@ -2079,7 +2191,7 @@ def _validate_import_proof_descriptor(descriptor: int) -> None:
 def _validate_import_proof_name_matches_descriptor(parent: int, name: str, descriptor: int) -> None:
     """Require the published sidecar name to still identify its held descriptor."""
     _validate_import_proof_descriptor(descriptor)
-    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    named = _dirfd_stat(parent, name)
     opened = os.fstat(descriptor)
     if (
         not stat.S_ISREG(named.st_mode)
@@ -2128,11 +2240,11 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
             if payload is None or name is None:
                 raise OSError("cannot persist import proof for malformed local item")
             data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
                 0o600,
-                dir_fd=parent,
             )
             created.append(name)
             try:
@@ -2145,12 +2257,12 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
             finally:
                 os.close(descriptor)
             published.append((name, data))
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         for name, data in published:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             )
             try:
                 _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
@@ -2165,10 +2277,10 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
     except BaseException:
         for name in created:
             try:
-                os.unlink(name, dir_fd=parent)
+                _dirfd_unlink(parent, name)
             except FileNotFoundError:
                 pass
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         try:
             _restore_external_file_authorities(
                 target,
@@ -2194,10 +2306,10 @@ def _remove_persisted_import_proofs(target: Path, items: list[dict[str, Any]]) -
             if name is None:
                 continue
             try:
-                os.unlink(name, dir_fd=parent)
+                _dirfd_unlink(parent, name)
             except FileNotFoundError:
                 pass
-        os.fsync(parent)
+        _dirfd_fsync(parent)
     finally:
         os.close(parent)
 
@@ -2215,10 +2327,10 @@ def _has_persisted_import_proof(item: dict[str, Any], *, target: Path | None = N
         return False
     try:
         try:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             )
         except OSError:
             return False
@@ -2452,14 +2564,15 @@ def _legacy_import_source_content_identity(
 
 def _open_import_inbox_parent(target: Path, *, create: bool) -> tuple[int, str]:
     """Hold the inbox parent for an import/proof publication transaction."""
-    if (
-        os.name != "posix"
-        or not getattr(os, "O_NOFOLLOW", 0)
-        or not getattr(os, "O_DIRECTORY", 0)
-        or os.open not in os.supports_dir_fd
-        or os.mkdir not in os.supports_dir_fd
-    ):
-        raise OSError("descriptor-relative import inbox operations are unavailable")
+    if _posix_dirfd_available():
+        return _open_import_inbox_parent_posix(target, create=create)
+    if _nt_dirfd_available():
+        return _open_import_inbox_parent_nt(target, create=create)
+    raise OSError("descriptor-relative import inbox operations are unavailable")
+
+
+def _open_import_inbox_parent_posix(target: Path, *, create: bool) -> tuple[int, str]:
+    """POSIX openat walk that rejects every symlinked inbox parent component."""
     target_root = target.expanduser().resolve()
     inbox_path = helpers._imports_path(target_root)
     try:
@@ -2485,6 +2598,35 @@ def _open_import_inbox_parent(target: Path, *, create: bool) -> tuple[int, str]:
         raise
 
 
+def _open_import_inbox_parent_nt(target: Path, *, create: bool) -> tuple[int, str]:
+    """Windows handle walk that rejects every reparse-point inbox parent component."""
+    from . import nt_dirfd
+
+    target_root = target.expanduser().resolve()
+    inbox_path = helpers._imports_path(target_root)
+    try:
+        relative = inbox_path.relative_to(target_root)
+    except ValueError as exc:
+        raise OSError("import inbox escapes target") from exc
+    parent = nt_dirfd.open_root_directory(target_root)
+    try:
+        for component in relative.parts[:-1]:
+            nt_dirfd.validate_component(component)
+            try:
+                child = nt_dirfd.open_child_directory(parent, component)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                nt_dirfd.mkdir_child(parent, component)
+                child = nt_dirfd.open_child_directory(parent, component)
+            os.close(parent)
+            parent = child
+        return parent, nt_dirfd.validate_component(relative.parts[-1])
+    except BaseException:
+        os.close(parent)
+        raise
+
+
 def _validate_import_inbox_descriptor(descriptor: int) -> None:
     metadata = os.fstat(descriptor)
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
@@ -2493,10 +2635,10 @@ def _validate_import_inbox_descriptor(descriptor: int) -> None:
 
 def _validate_import_inbox_name_matches_descriptor(parent: int, name: str, descriptor: int) -> None:
     """Ensure a directory entry still names the retained regular inbox object."""
-    if os.stat not in os.supports_dir_fd:
+    if not _dirfd_available():
         raise OSError("descriptor-relative import inbox validation is unavailable")
     opened = os.fstat(descriptor)
-    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    named = _dirfd_stat(parent, name)
     if (
         not stat.S_ISREG(named.st_mode)
         or named.st_nlink != 1
@@ -2520,10 +2662,10 @@ def _write_import_inbox_bytes_at(
     temporary_name = f".{name}.{uuid4().hex}.tmp"
     try:
         try:
-            existing = os.open(
+            existing = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             )
         except FileNotFoundError:
             pass
@@ -2541,11 +2683,11 @@ def _write_import_inbox_bytes_at(
             previous_exists = False
         if previous_raw is None:
             previous_raw = b""
-        descriptor = os.open(
+        descriptor = _dirfd_open_file(
+            parent,
             temporary_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             0o600,
-            dir_fd=parent,
         )
         _validate_import_inbox_descriptor(descriptor)
         with os.fdopen(os.dup(descriptor), "wb") as handle:
@@ -2553,12 +2695,12 @@ def _write_import_inbox_bytes_at(
             handle.flush()
             os.fsync(handle.fileno())
         _validate_import_inbox_descriptor(descriptor)
-        os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+        _dirfd_replace(parent, temporary_name, name)
         _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
-        os.fsync(parent)
+        _dirfd_fsync(parent)
     except BaseException:
         try:
-            os.unlink(temporary_name, dir_fd=parent)
+            _dirfd_unlink(parent, temporary_name)
         except FileNotFoundError:
             pass
         _restore_import_inbox_snapshot(parent, name, previous_raw, previous_exists)
@@ -2576,10 +2718,10 @@ def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
     descriptor = -1
     try:
         try:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
             )
         except FileNotFoundError:
             return parent, name, b"", False
@@ -2609,20 +2751,20 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
     """Restore an ordinary import transaction through its original parent."""
     if not exists:
         try:
-            os.unlink(name, dir_fd=parent)
+            _dirfd_unlink(parent, name)
         except FileNotFoundError:
             pass
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         return
     for _attempt in range(3):
         temporary_name = f".{name}.{uuid4().hex}.tmp"
         descriptor = -1
         try:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 temporary_name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
                 0o600,
-                dir_fd=parent,
             )
             with os.fdopen(os.dup(descriptor), "wb") as handle:
                 handle.write(data)
@@ -2630,10 +2772,10 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
                 os.fsync(handle.fileno())
             _validate_import_inbox_descriptor(descriptor)
             _validate_import_inbox_name_matches_descriptor(parent, temporary_name, descriptor)
-            os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+            _dirfd_replace(parent, temporary_name, name)
             temporary_name = ""
             _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
-            os.fsync(parent)
+            _dirfd_fsync(parent)
             return
         except OSError:
             pass
@@ -2642,15 +2784,15 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
                 os.close(descriptor)
             if temporary_name:
                 try:
-                    os.unlink(temporary_name, dir_fd=parent)
+                    _dirfd_unlink(parent, temporary_name)
                 except FileNotFoundError:
                     pass
     descriptor = -1
     try:
-        descriptor = os.open(
+        descriptor = _dirfd_open_file(
+            parent,
             name,
-            os.O_WRONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=parent,
+            os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
         )
         _validate_import_inbox_descriptor(descriptor)
         os.ftruncate(descriptor, 0)
@@ -2662,14 +2804,14 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
             remaining = remaining[written:]
         os.fsync(descriptor)
         _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         return
     except OSError:
         try:
-            os.unlink(name, dir_fd=parent)
+            _dirfd_unlink(parent, name)
         except FileNotFoundError:
             pass
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         raise OSError("import inbox rollback could not restore its retained snapshot") from None
     finally:
         if descriptor != -1:

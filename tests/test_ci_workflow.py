@@ -390,6 +390,11 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "git init" in text
     assert "brigade operator quickstart" in text
     assert "Assert-OperatorDoctorReady" in text
+    assert "import inbox no-follow parent" in text
+    assert "_open_import_inbox_parent" in text
+    assert "mklink" in text
+    assert "memory care import-issues" in text
+    assert "center readiness import-issues" in text
     assert "$payload.ready" in text
     assert "$payload.blocking_issue_count" in text
     assert "--db $dbPath sync $workRepo" in text
