@@ -17,6 +17,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_roadmap_audit.add_argument(
         "--import-issues", action="store_true", help="Import roadmap audit issues into the work inbox."
     )
+    p_roadmap_audit.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail when the ROADMAP version headline lags pyproject or is unparseable.",
+    )
     p_roadmap_patterns = roadmap_sub.add_parser("patterns", help="Show neutral inspiration pattern coverage.")
     p_roadmap_patterns.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
@@ -45,7 +50,12 @@ def dispatch(args) -> int:
     from .. import roadmap_cmd
 
     if args.roadmap_command == "audit":
-        return roadmap_cmd.audit(target=args.target, json_output=args.json, import_issues=args.import_issues)
+        return roadmap_cmd.audit(
+            target=args.target,
+            json_output=args.json,
+            import_issues=args.import_issues,
+            check_version=args.check,
+        )
     if args.roadmap_command == "patterns":
         return roadmap_cmd.patterns(target=args.target, json_output=args.json)
     if args.roadmap_command == "archive":

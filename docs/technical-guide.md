@@ -745,7 +745,7 @@ Start-of-day commands:
 - `brigade work sweep` explicitly runs due scanner producers, ingests configured JSONL outputs by default, and writes one local sweep report for review.
 - `brigade work sweep-review latest` shows created imports, skipped or dismissed fingerprints, grouping, and next commands for the latest sweep.
 - `brigade work sweep closeout latest` records that all actionable sweep imports were promoted, dismissed, archived, or explicitly deferred.
-- `brigade roadmap audit` reports roadmap status, stale phase sections, documented command drift, and optional roadmap-audit work imports.
+- `brigade roadmap audit` reports roadmap status, stale phase sections, documented command drift, ROADMAP version-headline freshness against `pyproject.toml` major.minor, and optional roadmap-audit work imports. `brigade roadmap audit --check` fails when that headline lags or is unparseable.
 - `brigade roadmap patterns` shows neutral inspiration pattern coverage and source-pattern decisions without naming private references.
 - `brigade roadmap commands` shows parser-derived command groups, writes `docs/command-inventory.md`, and can fail stale inventory checks for docs drift.
 - `brigade repos scan` inspects configured local repos for safe setup metadata, and `brigade repos import-issues` routes repo-fleet gaps into the work inbox.
@@ -899,7 +899,7 @@ The scanner registry is explicit and local. Brigade does not install cron jobs, 
 
 Roadmap and repo-fleet commands:
 
-- `brigade roadmap audit` parses `ROADMAP.md`, classifies roadmap bullets, detects stale current or next phase sections, compares documented commands with the CLI, and can import roadmap hygiene issues with `--import-issues`.
+- `brigade roadmap audit` parses `ROADMAP.md`, classifies roadmap bullets, detects stale current or next phase sections, fails when a target that declares a `project.version` has a "Where things stand" version headline that lags `pyproject.toml` major.minor or is unparseable, compares documented commands with the CLI, and can import roadmap hygiene issues with `--import-issues`. `--check` exits non-zero on a stale or missing version headline.
 - `brigade roadmap patterns` shows neutral pattern-family coverage and local source-pattern decisions: `bake-in`, `integrate`, `catalog-only`, `move-candidate`, and `leave-alone`.
 - `brigade roadmap commands` reports the public command documentation contract in text or JSON for wrappers and docs drift checks. Use `--write` to regenerate `docs/command-inventory.md` from the CLI parser and `--check` to fail when the inventory is missing or stale.
 - `brigade repos init` writes gitignored `.brigade/repos.toml`.
