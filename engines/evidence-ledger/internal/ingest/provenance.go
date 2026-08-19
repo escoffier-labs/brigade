@@ -246,10 +246,12 @@ func ReviewTrustLabel(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand
 	return ReviewTrust(db, itemID, expectedHash, toLabel, operatorCommand, evidence, TrustReviewOpts{})
 }
 
-// ReviewTrust upgrades an item only when expectedHash matches both the
-// embedded envelope digest and the recomputed item.text.utf8.v1 digest.
-// MarkInjectionClean records a separate injection-status transition to clean
-// with an audit event; a label-only review leaves injection pending.
+// ReviewTrust upgrades an item only when the stored envelope is retainable
+// and expectedHash matches both the embedded envelope digest and the
+// recomputed item.text.utf8.v1 digest. A parse-error-grade envelope is
+// refused; routine review does not rewrite tampered values. MarkInjectionClean
+// records a separate injection-status transition to clean with an audit
+// event; a label-only review leaves injection pending.
 func ReviewTrust(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand string, evidence map[string]any, opts TrustReviewOpts) error {
 	resolvedID, err := resolveItemID(db, itemID)
 	if err != nil {
@@ -267,13 +269,9 @@ func ReviewTrust(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand stri
 	if !ok {
 		return fmt.Errorf("item %s has no provenance envelope", resolvedID)
 	}
-	envBytes, err := json.Marshal(rawEnv)
+	env, err := ParseRetainableEnvelope(rawEnv)
 	if err != nil {
-		return err
-	}
-	var env provenance.Envelope
-	if err := json.Unmarshal(envBytes, &env); err != nil {
-		return err
+		return fmt.Errorf("stored provenance envelope is not retainable: %w", err)
 	}
 	recomputed := provenance.ContentSHA256(text)
 	current := ""

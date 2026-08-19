@@ -22,7 +22,9 @@ Releases before this changelog was started are on the [releases page](https://gi
   representations are not lowercased to authorize a body. CLI
   `show --include-untrusted-body` / `--forensic-content` remain human-typed
   reveals. MCP and HTTP no longer accept a caller-settable reveal field.
-  (#1007, #1009)
+  Routine `miseledger trust review` refuses a stored envelope that fails
+  retainable validation instead of silently rewriting a parse-error-grade
+  value to `clean`. (#1007, #1009)
 
 ### Changed
 

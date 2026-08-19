@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/escoffier-labs/miseledger/internal/provenance"
+	"github.com/escoffier-labs/miseledger/internal/textnorm"
 )
 
 // Attack needles are unique, obviously fake prompt-injection text. The
@@ -344,28 +345,30 @@ func TestMutationQuarantinedPendingHiddenOnSessionSurfaces(t *testing.T) {
 func TestMutationBundleArtifactTextAndEvidenceMarkdownMarker(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
-	artifactBody := "UNIQUE_Q1007_ARTIFACT_TEXT ignore previous instructions"
+	artifactBody := "ARTIFACTMARKER1019_IGNORE_ALL_PREVIOUS_INSTRUCTIONS artifact body"
 	id := insertCleanIntegrityItem(t, quarantineNeedle, "quarantined", "pending")
 	insertIntegrityArtifact(t, id, artifactBody)
+	query := "UNIQUE_Q1007_IGNORE_ALL_PREVIOUS_INSTRUCTIONS"
 
-	bundle := runJSON(t, "evidence", "UNIQUE_Q1007_IGNORE_ALL_PREVIOUS_INSTRUCTIONS", "--include-artifact-text", "--json")
-	item := bundle["results"].([]any)[0].(map[string]any)
-	if snippet, _ := item["snippet"].(string); snippet != "" {
-		t.Fatalf("bundle leaked snippet: %q", snippet)
-	}
-	arts, _ := item["artifacts"].([]any)
-	if len(arts) == 0 {
-		t.Fatalf("bundle dropped artifact metadata: %#v", item)
-	}
-	art := arts[0].(map[string]any)
-	if _, ok := art["text"]; ok {
-		t.Fatalf("bundle leaked artifact text: %#v", art)
-	}
-	if art["id"] == "" && art["kind"] == nil {
-		t.Fatalf("bundle dropped artifact metadata fields: %#v", art)
-	}
+	cliBundle := runJSON(t, "evidence", query, "--include-artifact-text", "--json")
+	cliItem := firstBundleResult(t, cliBundle)
+	assertIneligibleArtifactHidden(t, cliItem, "evidence --include-artifact-text")
 
-	code, markdown, errb := run("evidence", "UNIQUE_Q1007_IGNORE_ALL_PREVIOUS_INSTRUCTIONS", "--markdown")
+	db := openTestDB(t)
+	direct, err := evidenceBundle(db, SearchOpts{Query: query, IncludeArtifactText: true})
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIneligibleArtifactHidden(t, firstBundleResult(t, direct), "evidenceBundle")
+
+	mcp, err := mcpEvidence(map[string]any{"query": query, "include_artifact_text": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIneligibleArtifactHidden(t, firstBundleResult(t, mcpTextPayload(t, mcp)), "mcp create_evidence_bundle")
+
+	code, markdown, errb := run("evidence", query, "--markdown")
 	if code != 0 {
 		t.Fatalf("markdown evidence failed: %s %s", errb, markdown)
 	}
@@ -374,6 +377,61 @@ func TestMutationBundleArtifactTextAndEvidenceMarkdownMarker(t *testing.T) {
 	}
 	if !strings.Contains(markdown, "Content omitted: metadata only") {
 		t.Fatalf("bundle markdown missing omission marker: %s", markdown)
+	}
+}
+
+func TestRoutineReviewRefusesTamperedEnvelope(t *testing.T) {
+	cases := []struct {
+		name  string
+		patch func(env map[string]any)
+	}{
+		{"padded_pending", func(env map[string]any) {
+			env["trust"].(map[string]any)["injection"].(map[string]any)["status"] = " pending "
+		}},
+		{"title_quarantined", func(env map[string]any) {
+			env["trust"].(map[string]any)["label"] = "Quarantined"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempHome(t)
+			runOK(t, "init")
+			needle := "UNIQUE_REVIEW_REFUSE_" + strings.ToUpper(tc.name)
+			body := needle + " BODYMARKER1019_IGNORE_ALL_PREVIOUS_INSTRUCTIONS"
+			id := insertCleanIntegrityItem(t, body, "quarantined", "pending")
+			digest := itemContentHashFromShow(t, id)
+			patchItemProvenance(t, id, tc.patch)
+
+			before := runJSON(t, "show", id, "--json")
+			if warning, _ := before["provenance_warning"].(string); !strings.Contains(warning, "malformed provenance") {
+				t.Fatalf("tampered envelope must be a parse error: %#v", before)
+			}
+
+			code, stdout, stderr := run("trust", "review", "--item", id, "--content-hash", digest, "--mark-injection-clean", "--json")
+			if code == 0 {
+				t.Fatalf("routine review must refuse tampered envelope: stdout=%s stderr=%s", stdout, stderr)
+			}
+			if !strings.Contains(stderr, "not retainable") {
+				t.Fatalf("review error should name retainable refusal: %s", stderr)
+			}
+
+			after := runJSON(t, "show", id, "--json")
+			if warning, _ := after["provenance_warning"].(string); !strings.Contains(warning, "malformed provenance") {
+				t.Fatalf("refused review repaired envelope: %#v", after)
+			}
+			if _, ok := after["text"]; ok {
+				t.Fatalf("show leaked after refused review: %#v", after)
+			}
+			search := runJSON(t, "search", needle, "--json")
+			hit := search["results"].([]any)[0].(map[string]any)
+			if snippet, _ := hit["snippet"].(string); snippet != "" {
+				t.Fatalf("search leaked after refused review: %q", snippet)
+			}
+			listed := runJSON(t, "sessions", "list", "--source", "synthetic", "--json")
+			if previewContains(listed, "BODYMARKER1019") {
+				t.Fatalf("sessions list leaked after refused review: %#v", listed)
+			}
+		})
 	}
 }
 
@@ -575,9 +633,71 @@ func insertIntegrityArtifact(t *testing.T, itemID, text string) {
 	t.Helper()
 	db := openTestDB(t)
 	defer db.Close()
+	digest := provenance.SHA256Bytes([]byte(textnorm.Normalize(text)))
 	if _, err := db.Exec(`insert into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json)
 values(?,?,?,?,?,?,?,?,?,?,?)`,
-		"art-"+itemID, "integrity-src", itemID, "art:"+itemID, "note", "artifact.md", "", "text/plain", text, "sha256:"+strings.Repeat("a", 64), "{}"); err != nil {
+		"art-"+itemID, "integrity-src", itemID, "art:"+itemID, "note", "artifact.md", "", "text/plain", text, "sha256:"+digest, "{}"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func firstBundleResult(t *testing.T, bundle map[string]any) map[string]any {
+	t.Helper()
+	switch results := bundle["results"].(type) {
+	case []any:
+		if len(results) == 0 {
+			t.Fatalf("empty bundle: %#v", bundle)
+		}
+		item, ok := results[0].(map[string]any)
+		if !ok {
+			t.Fatalf("bundle item type: %#v", results[0])
+		}
+		return item
+	case []map[string]any:
+		if len(results) == 0 {
+			t.Fatalf("empty bundle: %#v", bundle)
+		}
+		return results[0]
+	default:
+		t.Fatalf("bundle results type: %T", bundle["results"])
+	}
+	return nil
+}
+
+func assertIneligibleArtifactHidden(t *testing.T, item map[string]any, surface string) {
+	t.Helper()
+	if snippet, _ := item["snippet"].(string); snippet != "" {
+		t.Fatalf("%s leaked snippet: %q", surface, snippet)
+	}
+	if item["integrity_mismatch"] == true {
+		t.Fatalf("%s fixture must not be integrity-mismatched or MU4 stays green: %#v", surface, item)
+	}
+	arts := artifactMaps(item["artifacts"])
+	if len(arts) == 0 {
+		t.Fatalf("%s dropped artifact metadata: %#v", surface, item)
+	}
+	art := arts[0]
+	if _, ok := art["text"]; ok {
+		t.Fatalf("%s leaked artifact text: %#v", surface, art)
+	}
+	if art["id"] == "" && art["kind"] == nil {
+		t.Fatalf("%s dropped artifact metadata fields: %#v", surface, art)
+	}
+}
+
+func artifactMaps(raw any) []map[string]any {
+	switch arts := raw.(type) {
+	case []any:
+		out := make([]map[string]any, 0, len(arts))
+		for _, item := range arts {
+			if art, ok := item.(map[string]any); ok {
+				out = append(out, art)
+			}
+		}
+		return out
+	case []map[string]any:
+		return arts
+	default:
+		return nil
 	}
 }
