@@ -382,7 +382,10 @@ def test_equal_but_distinct_unredacted_text_fails_closed() -> None:
             start=0,
             end=len(secret),
         )
-        return GuardResult(text=text, redacted_text=str(text), findings=[finding])
+        # str(text) on a str returns the SAME object in CPython, which made
+        # this test vacuous against the old `persisted is text` identity
+        # check. Build a genuinely equal-but-distinct string instead.
+        return GuardResult(text=text, redacted_text="".join(list(text)), findings=[finding])
 
     verdict = evidence_redaction.apply_origin_redaction(secret, origin="workspace", scanner=scanner)
     assert verdict.status == "error"
