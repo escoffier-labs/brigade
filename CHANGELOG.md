@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Vault index, search, show, and doctor now walk allowlisted roots from a held vault directory descriptor and refuse a symlink in every path component (`openat`/`O_NOFOLLOW` + `fstat`). Replacing an allowlisted folder such as `Shared/Inbox` with a symlink to another in-vault path can no longer re-scope private notes; reread of indexed files uses the same walk. (#1011)
 - Origin-scoped ingest redaction now maps `work import context` (and `--source external-web` / `external-service`) to the external detector tier, normalizes free-form `--source` with `strip().lower()`, and fails closed to `unknown` on unmapped values. An equal-but-unredacted scanner result is treated as failure, and research findings redact title/summary/evidence per field so a multi-line summary cannot migrate into evidence. (#498)
 
 ### Added
