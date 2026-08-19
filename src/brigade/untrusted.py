@@ -125,13 +125,43 @@ _BENIGN_LINE_MARKERS = (
     re.compile(r"(?i)\b(?:scans?|checks?) for\b"),
 )
 
+# Task/policy prose that mentions injection phrases without issuing them.
+# The documenting verb must precede ignore/disregard on the same line, and a
+# third-person subject+modal must be present so "Document: ignore previous
+# instructions" stays a warning.
+_DOCUMENTING_VERB = re.compile(
+    r"(?i)\b(?:"
+    r"document|describe|explain|summarize|capture|draft|"
+    r"(?:note|record|state|specify) that|"
+    r"write(?:\s+(?:up|docs?|a\s+(?:test|doc|note|guide|page)))?"
+    r")\b"
+)
+_POLICY_SUBJECT_MODAL = re.compile(
+    r"(?i)\b(?:a |the |each |every )?(?:workers?|agents?|models?|assistants?|harnesses?)\b"
+    r".{0,80}\b(?:must|should|needs? to|is (?:required|expected) to|has to)\b"
+)
+_INJECTION_VERB = re.compile(r"(?i)\b(?:ignore|disregard)\b")
+
 
 def _excerpt(line: str) -> str:
     return line.strip()[:_MARKER_MAX]
 
 
+def _benign_task_description(line: str) -> bool:
+    """True when the line documents injection policy rather than issuing one."""
+    documenting = _DOCUMENTING_VERB.search(line)
+    if documenting is None or _POLICY_SUBJECT_MODAL.search(line) is None:
+        return False
+    injected = _INJECTION_VERB.search(line)
+    if injected is None:
+        return False
+    return documenting.start() < injected.start()
+
+
 def _benign_injection_discussion(line: str, *, text: str) -> bool:
     if any(marker.search(line) for marker in _BENIGN_LINE_MARKERS):
+        return True
+    if _benign_task_description(line):
         return True
     if "`" in line and any(token in line.lower() for token in ("ignore", "disregard", "<system", "[inst]")):
         return True
