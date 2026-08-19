@@ -21,17 +21,22 @@ Execution model: Brigade runs only on explicit invocation. An external scheduler
 
 ## Where things stand
 
-**v0.21.x on main** carries the product core plus the evidence and multi-harness work that closed late spring / early summer 2026:
+**v0.27.x on main** carries the product core plus the provenance, dashboard, and memory work that closed through mid-August 2026:
 
 - Portable setup (`operator quickstart`), handoffs with lint and source coverage, daily operator loop, work inbox, fleet and release receipts, tool catalog, skill registry, research, runbooks, chat sweeps, backup visibility, station manifests.
 - **Receipts and learning**: verify/run receipts with digests and optional HMAC signing, code-graph deltas, outcome capture from verify and run receipts, Wilson ranking, reconcile promote/rollback, git provenance, MiseLedger export/import of receipts.
 - **Evidence loop**: GraphTrail context packs and deltas on runs, MiseLedger evidence briefs into work context, first-class `evidence` and `pantry` station CLIs, mechanical context evals (`brief_hit_rate`), no-op write-task flags, atomic `run.json` writes.
-- **Guard and memory**: content-guard vendored as `brigade guard` / `scrub`; memory-doctor folded into `brigade memory`.
+- **Provenance and evidence trust**: `brigade.provenance-envelope.v1` on Python producers (#582), trust-policy enforcement on briefs, context, citations, and promotion, provenance-hash verification on read surfaces, inter-seat message envelopes (#988 / #585), causal lineage receipts (#989 / #493), origin-scoped ingest redaction (#997 / #498).
+- **Center operator dashboard**: `brigade center serve` is a loopback-bound read-only view over existing `--json` contracts (Status, Runs, Research, Work, Code Graph, Agent Activity). Runs list, detail, and watch use versioned JSON contracts (#958 / #631).
+- **Memory**: stable card IDs (`card-<uuid4>`, #984 / #867), Obsidian vault round trip (`memory project-vault` #953, `memory vault-search` #983 / #943, `memory vault-propose` #993 / #945), memory care, reinforcement dedup on ingest.
+- **Guard and memory tooling**: content-guard vendored as `brigade guard` / `scrub`; memory-doctor folded into `brigade memory`.
+- **Scanner and verifier authority**: receipt and import-proof bytes bind to verifier-owned identity (#949); scanner run authority releases on proof failure and inside the scan loop (#946, #982).
+- **Stop-gate**: the Claude Stop closeout gate no longer treats another session's writes in a shared workspace as this session's unverified work (#987 / #959).
 - **Harness fidelity**: Grok and Hermes MCP adapters, Grok headless approval for write tasks, Codex empty-args fingerprints, url-only MCP import as remote, verify `--argv-json`, skill template metadata shipping.
 - **Model scorecard**: `brigade model scorecard` aggregates per-(cli, model) outcomes from run artifacts (read-only).
 - **Product surfaces**: share / remember / prove / improve framing on the README and brigade.tools hub; station product pages (including content-guard and token-glace); GEO work (compare pages, PyPI URLs, Wikidata, Bing IndexNow + URL submission follow-up).
 
-See the [archive](docs/roadmap-archive.md) for the pre-v0.21 completion record. Command inventory stays the source of truth for the CLI surface.
+See the [archive](docs/roadmap-archive.md) for shipped-slice closeouts and the pre-v0.21 completion record. Command inventory stays the source of truth for the CLI surface.
 
 ## Now: respond to real usage and close the loops we opened
 
@@ -48,9 +53,7 @@ The proving-ground milestone still holds: the maintainer workspace runs Brigade 
 ## Next: deepen what already sits on the loop
 
 - **Security plugin depth**: richer rule packs for agent workspaces (hooks, MCP configs, prompt-injection patterns), policy packs per audience, optional offline threat-intel enrichment.
-- **Wiring durability and instruction hygiene**: every guidance block Brigade writes into a foreign file becomes a hash-stamped managed section (version, profile, content hash) so re-runs are byte-identical no-ops, a checker reports missing/stale/current, and removal is surgical. The work brief becomes the single source of truth for workflow guidance, with static installed blocks shrunk to short pointers and split into a minimal profile for hook-capable harnesses and a full profile for file-only ones. Hook output follows a strict contract: a valid empty payload when there is nothing to say, a doctor pointer instead of an error dump on failure, capped context injection at whole-record boundaries with an elision banner naming the cap, an anti-truncation notice, and a one-shot marker that restores the brief after host compaction. Doctor grows an agent-facing mode that omits passing checks, emits observed/expected/fix-command findings, treats dormancy as a first-class warning, and stays silent about harnesses that are not present.
-- **Work inbox graph**: inbox items gain typed dependency edges (blocks, parent-child, discovered-from) with a computed ready set and a "why is this blocked" explanation, bulk graph creation from a plan file, and an atomic claim with compare-and-set guards, a distinct guard-mismatch exit code, and fail-closed filter scoping so multiple worker seats can pull from one queue without stepping on each other. Ready/blocked JSON feeds the operator dashboard once both exist.
-- **Memory care depth**: smarter staleness, contradiction, and evidence checks for cards, with safe gated metadata repairs. Reinforcement dedup shipped in #724 (ingest fingerprints + near-match proposals + gated fingerprint backfill). Remaining retrieval-adjacent slice: a standalone-chunk lint for handoffs (flag unresolved references like "that file" or "the fix above" in durable facts, since a card that needs its session to be understood is a card retrieval cannot surface usefully).
+- **Memory care depth**: smarter staleness, contradiction, and evidence checks for cards, with safe gated metadata repairs. Reinforcement dedup shipped in #724 (ingest fingerprints + near-match proposals + gated fingerprint backfill). Standalone-chunk lint for handoffs shipped in #730 / #773.
 - **Retrieval honesty**: memory search stays keyword-first until an eval proves otherwise. The local retrieval harness at `evals/memory-retrieval/` (fixture corpus, plain-grep baseline, precision/recall at K; run with `python -m brigade.memory_retrieval_eval`) gates any semantic upgrade (#722), and a label-free recall signal (a repeat search with disjoint results shortly after the first counts as a miss) feeds memory-care status from real usage (#723).
 - **Scorecard and lane ops**: per-model orchestrator success rate, clearer DNF vs worker-fail, documented probe protocol for new CLI lanes (file write in cwd, never trust reply text alone).
 - **MCP and harness fidelity**: continue adapter round-trips (empty args, url-only remotes, headless approvals) as harnesses change; prefer fix-the-adapter over more docs.
@@ -63,7 +66,7 @@ Chat surface scanners and backup visibility already shipped; remaining slices (s
 
 The CLI is the skeleton that carries everything. Every future surface sits on top of an existing command plus its JSON contract, never a parallel implementation.
 
-- A workspace UI that is a view over the CLI: model comparison (scorecard-backed), a document editor, a viewer for research reports and operator-center state. First slice: a read-only operator dashboard served locally on explicit command, loopback-bound, rendering only what existing `--json` contracts already emit (work status, handoff inbox, memory cards, outcome rank, run timelines). It ships with a strict security floor from day one: nonce-based CSP with no inline handlers, a Host-header allowlist against DNS rebinding, and a refusal to bind beyond loopback without a token plus an explicit host list.
+- A workspace UI that is a view over the CLI: model comparison (scorecard-backed) and a document editor on top of the read-only operator dashboard that already ships as `brigade center serve`.
 - Optional local semantic memory retrieval (on-device embeddings over `memory/cards/`), staying file-first and optional, and landing only after the retrieval harness above shows a real win over the grep baseline.
 - Owner-scoped tool gating so a publicly reachable instance refuses high-risk tools by default.
 - Multi-channel operator notifications beyond the terminal, still opt-in (`agent-notify` and friends).
