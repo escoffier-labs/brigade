@@ -1462,6 +1462,7 @@ def _emit_plan_request(
         to_seat=roster.orchestrator,
         run_dir=output_dir,
         run_id=output_dir.name if output_dir is not None else None,
+        assignment_id=message_envelope.default_assignment_id("plan-request"),
         session_harness=_orchestrator_harness(roster),
     )
     if not delivery.delivered:
@@ -1485,6 +1486,7 @@ def _parse_gated_plan(
         to_seat=message_envelope.BRIGADE_SEAT,
         run_dir=output_dir,
         run_id=output_dir.name if output_dir is not None else None,
+        assignment_id=message_envelope.default_assignment_id("plan-result"),
         session_harness=_orchestrator_harness(roster),
     )
     if not delivery.delivered:
@@ -1492,16 +1494,37 @@ def _parse_gated_plan(
     return parse_plan(text, roster, read_only=read_only, skill_policy=skill_policy)
 
 
-def _admitted_result_output(result: WorkerResult) -> str:
+def _result_from_seat(result: WorkerResult) -> str:
+    """Seat that actually produced the terminal text (fallback-aware)."""
+
+    for attempt in result.attempts:
+        if attempt.selected and attempt.worker:
+            return attempt.worker
+    return result.worker
+
+
+def _admitted_result_output(
+    result: WorkerResult,
+    *,
+    run_id: str | None = None,
+    to_seat: str | None = None,
+) -> str:
     env = result.provenance
     if not isinstance(env, dict):
         _legacy, display = message_envelope.synthesize_legacy_message_provenance()
         return display
+    binding = message_envelope.message_binding(env)
+    expected_message_id = binding["message_id"] if binding is not None else env.get("item_id")
     admission = message_envelope.admit_message(
         result.text,
         env,
         kind="worker-result",
         producer="run_transport.dispatch",
+        run_id=run_id or message_envelope.IN_MEMORY_RUN_ID,
+        message_id=expected_message_id if isinstance(expected_message_id, str) else None,
+        assignment_id=message_envelope.assignment_id_for(result.worker, result.task),
+        from_seat=_result_from_seat(result),
+        to_seat=to_seat,
     )
     if not admission.delivered:
         return admission.display or admission.reason or message_envelope.LEGACY_MESSAGE_DISPLAY
@@ -1703,7 +1726,12 @@ def plan(
     return assignments
 
 
-def _render_prior_results(results: list[WorkerResult]) -> str:
+def _render_prior_results(
+    results: list[WorkerResult],
+    *,
+    run_id: str | None = None,
+    to_seat: str | None = None,
+) -> str:
     return "\n\n".join(
         "\n".join(
             [
@@ -1712,7 +1740,7 @@ def _render_prior_results(results: list[WorkerResult]) -> str:
                 f"Status: {'ok' if result.ok else 'failed'}",
                 f"Detail: {result.detail}" if result.detail else "Detail:",
                 "Output:",
-                _admitted_result_output(result) or "(no output)",
+                _admitted_result_output(result, run_id=run_id, to_seat=to_seat) or "(no output)",
             ]
         )
         for result in results
@@ -1730,10 +1758,14 @@ def _worker_prompt(
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
     skill_policy: RoutePolicyDecision | None = None,
+    run_id: str | None = None,
+    to_seat: str | None = None,
 ) -> str:
     prior_context = ""
     if prior_results:
-        prior_context = f"\n\nEarlier-stage context:\n{_render_prior_results(prior_results)}"
+        prior_context = (
+            f"\n\nEarlier-stage context:\n{_render_prior_results(prior_results, run_id=run_id, to_seat=to_seat)}"
+        )
     policy = f"\n\n{_read_only_rules()}" if read_only else ""
     scope_policy = worker_skill_policy_constraint(skill_policy, assignment)
     tool_gate = ""
@@ -2119,10 +2151,17 @@ def dispatch(
 ) -> list[WorkerResult]:
     from . import run_transport
 
+    bound_prompt = build_prompt
+    if bound_prompt is None:
+        bound_prompt = partial(
+            _worker_prompt,
+            run_id=run_id or (output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID),
+            to_seat=roster.orchestrator,
+        )
     return run_transport.dispatch(
         assignments,
         roster,
-        build_prompt=build_prompt or _worker_prompt,
+        build_prompt=bound_prompt,
         run_appserver_worker=_run_codex_appserver_worker,
         event_writer=_worker_event_writer,
         cwd=cwd,
@@ -2166,6 +2205,8 @@ def build_synth_prompt(
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
+    run_id: str | None = None,
+    to_seat: str | None = None,
 ) -> str:
     if results:
         rendered = "\n\n".join(
@@ -2176,7 +2217,7 @@ def build_synth_prompt(
                     f"Status: {'ok' if result.ok else 'failed'}",
                     f"Detail: {result.detail}" if result.detail else "Detail:",
                     "Output:",
-                    _admitted_result_output(result) or "(no output)",
+                    _admitted_result_output(result, run_id=run_id, to_seat=to_seat) or "(no output)",
                 ]
             )
             for result in results
@@ -4721,7 +4762,12 @@ def run(
             print(f"error: worker attempt receipt failed: {exc}", file=sys.stderr)
 
     active_seat = active_seats[0] if len(active_seats) == 1 else None
-    worker_prompt_builder = partial(_worker_prompt, skill_policy=skill_policy)
+    worker_prompt_builder = partial(
+        _worker_prompt,
+        skill_policy=skill_policy,
+        run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
+        to_seat=roster.orchestrator,
+    )
     try:
         try:
             worker_results = _call_with_process_registry(
@@ -4944,6 +4990,8 @@ def run(
             code_graph=code_graph,
             drift_impact=drift_impact,
             evidence=evidence,
+            run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
+            to_seat=roster.orchestrator,
         )
         synth_request = message_envelope.emit(
             synth_prompt,
@@ -4953,6 +5001,7 @@ def run(
             to_seat=roster.orchestrator,
             run_dir=output_dir,
             run_id=output_dir.name if output_dir is not None else None,
+            assignment_id=message_envelope.default_assignment_id("synthesis-request"),
             session_harness=_orchestrator_harness(roster),
         )
         synth_captured = None
@@ -4984,6 +5033,7 @@ def run(
                 to_seat=message_envelope.BRIGADE_SEAT,
                 run_dir=output_dir,
                 run_id=output_dir.name if output_dir is not None else None,
+                assignment_id=message_envelope.default_assignment_id("synthesis-result"),
                 session_harness=_orchestrator_harness(roster),
             )
             if not synth_captured.delivered:
