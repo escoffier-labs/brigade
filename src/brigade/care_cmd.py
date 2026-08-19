@@ -28,7 +28,10 @@ CARE_KIND = "CARE"
 CARE_MARKER_VERSION = 1
 CARE_MARKER_STYLE = managed_block.MARKER_STYLE_HASH
 DEFAULT_BACKEND = "auto"
-SUPPORTED_BACKENDS = ("auto", "crontab", "systemd", "launchd")
+SUPPORTED_BACKENDS = ("auto", "crontab", "systemd", "launchd", "schtasks")
+SCHTASKS_BACKEND = "schtasks"
+SCHTASKS_WEEKDAYS = ("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")
+SCHTASKS_S4U_FLAGS = '/RU "%USERNAME%" /RL LIMITED /NP'
 
 MEMORY_CARE_RUNBOOK_REL = {
     "daily-care": ".brigade/memory-care/runbooks/daily-care-pass.json",
@@ -262,7 +265,195 @@ def _resolve_backend(backend: str) -> str | None:
         return "systemd"
     if sys.platform == "darwin":
         return "launchd"
+    if sys.platform == "win32":
+        return SCHTASKS_BACKEND
     return None
+
+
+def _uses_schtasks(backend: str) -> bool:
+    return backend == SCHTASKS_BACKEND or _is_windows()
+
+
+def _windows_path(value: Path | str) -> str:
+    """Emit a Windows path with single backslashes (no cron-style escaping)."""
+    return os.fspath(value).replace("/", "\\")
+
+
+def _schtasks_schedule_flags(schedule: str) -> str:
+    """Map a five-field cron expression to schtasks /SC flags.
+
+    Unsupported expressions fail closed rather than falling back to a daily
+    06:15 template — that fallback is what silently mis-scheduled 4 of 5
+    default care entries (#1021).
+    """
+    fields = schedule.split()
+    if len(fields) != 5:
+        raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
+    minute, hour, day, month, weekday = fields
+    if hour == day == month == weekday == "*" and minute.startswith("*/"):
+        try:
+            every = int(minute[2:])
+        except ValueError as exc:
+            raise ValueError(f"unsupported care schedule for schtasks: {schedule}") from exc
+        if every <= 0:
+            raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
+        return f"/SC MINUTE /MO {every}"
+    try:
+        minute_i = int(minute)
+        hour_i = int(hour)
+    except ValueError as exc:
+        raise ValueError(f"unsupported care schedule for schtasks: {schedule}") from exc
+    if not (0 <= minute_i <= 59 and 0 <= hour_i <= 23):
+        raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
+    start = f"{hour_i:02d}:{minute_i:02d}"
+    if day == month == weekday == "*":
+        return f"/SC DAILY /ST {start}"
+    if day == month == "*" and weekday != "*":
+        try:
+            weekday_i = int(weekday)
+        except ValueError as exc:
+            raise ValueError(f"unsupported care schedule for schtasks: {schedule}") from exc
+        if weekday_i == 7:
+            weekday_i = 0
+        if weekday_i < 0 or weekday_i > 6:
+            raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
+        return f"/SC WEEKLY /D {SCHTASKS_WEEKDAYS[weekday_i]} /ST {start}"
+    raise ValueError(f"unsupported care schedule for schtasks: {schedule}")
+
+
+def _schtasks_task_run(entry: CareEntry, *, workspace: Path) -> str:
+    workspace_text = _windows_path(workspace)
+    cd_target = f'"{workspace_text}"' if (" " in workspace_text or "\t" in workspace_text) else workspace_text
+    if entry.kind == "runbook":
+        assert entry.runbook_rel is not None
+        body = f"brigade runbook run --approved {entry.runbook_rel} --target ."
+    else:
+        assert entry.shell is not None
+        body = entry.shell
+    return f"cmd /c cd /d {cd_target} && {body}"
+
+
+def _schtasks_task_name(entry: CareEntry) -> str:
+    return f"BrigadeCare-{entry.entry_id}"
+
+
+def _schtasks_create_command(entry: CareEntry, *, workspace: Path) -> str:
+    task_name = _schtasks_task_name(entry)
+    schedule_flags = _schtasks_schedule_flags(entry.schedule)
+    task_run = _schtasks_task_run(entry, workspace=workspace)
+    return f'schtasks /Create /TN "{task_name}" {schedule_flags} /TR "{task_run}" {SCHTASKS_S4U_FLAGS} /F'
+
+
+def _schtasks_delete_command(entry: CareEntry) -> str:
+    return f'schtasks /Delete /TN "{_schtasks_task_name(entry)}" /F'
+
+
+def _parse_schtasks_list(text: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if key:
+            parsed[key] = value.strip()
+    return parsed
+
+
+def _query_schtasks(task_name: str) -> dict[str, Any]:
+    """Read one Task Scheduler entry. Missing tasks are a valid uninstalled state."""
+    try:
+        result = subprocess.run(
+            ["schtasks", "/Query", "/TN", task_name, "/FO", "LIST", "/V"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except FileNotFoundError:
+        return {
+            "task_name": task_name,
+            "exists": False,
+            "status": "unreadable",
+            "last_run": None,
+            "next_run": None,
+            "error": "schtasks command not found",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "task_name": task_name,
+            "exists": False,
+            "status": "unreadable",
+            "last_run": None,
+            "next_run": None,
+            "error": "schtasks /Query timed out",
+        }
+    if result.returncode != 0:
+        return {
+            "task_name": task_name,
+            "exists": False,
+            "status": "missing",
+            "last_run": None,
+            "next_run": None,
+            "error": None,
+        }
+    parsed = _parse_schtasks_list(result.stdout)
+    last_run = parsed.get("Last Run Time") or None
+    if last_run in {"N/A", "Never"}:
+        last_run = None
+    return {
+        "task_name": task_name,
+        "exists": True,
+        "status": parsed.get("Status") or parsed.get("Scheduled Task State") or "present",
+        "last_run": last_run,
+        "next_run": parsed.get("Next Run Time") or None,
+        "logon_mode": parsed.get("Logon Mode"),
+        "error": None,
+    }
+
+
+def _schtasks_task_records(*, entries: tuple[CareEntry, ...]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for entry in entries:
+        query = _query_schtasks(_schtasks_task_name(entry))
+        records.append(
+            {
+                "id": entry.entry_id,
+                "task_name": query["task_name"],
+                "schedule": entry.schedule,
+                "schedule_flags": _schtasks_schedule_flags(entry.schedule),
+                "exists": query["exists"],
+                "status": query["status"],
+                "last_run": query["last_run"],
+                "next_run": query.get("next_run"),
+                "error": query.get("error"),
+            }
+        )
+    return records
+
+
+def _schtasks_aggregate_status(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    if tasks and all(task.get("status") == "unreadable" for task in tasks):
+        state = "unreadable"
+        enabled = False
+    elif tasks and all(task.get("exists") for task in tasks):
+        state = "current"
+        enabled = True
+    elif any(task.get("exists") for task in tasks):
+        state = "partial"
+        enabled = True
+    else:
+        state = "missing"
+        enabled = False
+    return {
+        "backend": SCHTASKS_BACKEND,
+        "status": state,
+        "enabled": enabled,
+        "error": next((task.get("error") for task in tasks if task.get("error")), None),
+        "tasks": tasks,
+    }
 
 
 def _path_prefix(home: Path | None = None) -> str:
@@ -502,23 +693,109 @@ def _entry_status(target: Path, entry: CareEntry) -> dict[str, Any]:
     return payload
 
 
-def _windows_print(*, workspace: Path, entries: tuple[CareEntry, ...] | None = None) -> int:
+def _windows_plan_tasks(*, workspace: Path, entries: tuple[CareEntry, ...]) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    for entry in entries:
+        command = _schtasks_create_command(entry, workspace=workspace)
+        tasks.append(
+            {
+                "id": entry.entry_id,
+                "task_name": _schtasks_task_name(entry),
+                "description": entry.description,
+                "schedule": entry.schedule,
+                "on_calendar": entry.on_calendar,
+                "schedule_flags": _schtasks_schedule_flags(entry.schedule),
+                "command": command,
+            }
+        )
+    return tasks
+
+
+def _windows_install(
+    *,
+    workspace: Path,
+    entries: tuple[CareEntry, ...],
+    json_output: bool,
+    dry_run: bool,
+) -> int:
     """Print Task Scheduler equivalents; never silently no-op on Windows."""
-    selected = entries if entries is not None else CARE_ENTRIES
-    print("care install: Windows Task Scheduler is not written automatically.")
-    print("Print the equivalent schtasks commands below, then create the tasks yourself.")
-    print(f"workspace: {workspace}")
-    print("")
-    for entry in selected:
-        task_name = f"BrigadeCare-{entry.entry_id}"
-        command = _cron_command(entry, workspace=workspace)
-        # schtasks /SC requires a schedule family; print a reviewable template.
-        print(f":: {entry.description}")
-        print(f'schtasks /Create /TN "{task_name}" /SC DAILY /ST 06:15 /TR "cmd /c {command}" /F')
-        print(f"schedule_hint: cron '{entry.schedule}' / OnCalendar={entry.on_calendar}")
+    try:
+        tasks = _windows_plan_tasks(workspace=workspace, entries=entries)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    payload = {
+        "target": str(workspace),
+        "backend": SCHTASKS_BACKEND,
+        "dry_run": dry_run,
+        "mutates_scheduler": False,
+        "status": "printed-plan",
+        "tasks": tasks,
+    }
+    if json_output:
+        _print_payload(payload, json_output=True)
+    else:
+        print("care install: Windows Task Scheduler is not written automatically.")
+        print("Print the equivalent schtasks commands below, then create the tasks yourself.")
+        print(f"workspace: {workspace}")
         print("")
-    print("next: create the tasks above in Task Scheduler, then re-run care status after the first fire.")
+        for task in tasks:
+            print(f":: {task['description']}")
+            print(task["command"])
+            print(f"schedule_hint: cron '{task['schedule']}' / OnCalendar={task['on_calendar']}")
+            print("")
+        print("next: create the tasks above in Task Scheduler, then re-run care status after the first fire.")
     print("error: care install does not mutate the Windows scheduler in this release", file=sys.stderr)
+    return 3
+
+
+def _windows_status(
+    *,
+    target: Path,
+    entries: tuple[CareEntry, ...],
+    json_output: bool,
+) -> int:
+    try:
+        tasks = _schtasks_task_records(entries=entries)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    backend = _schtasks_aggregate_status(tasks)
+    payload: dict[str, Any] = {
+        "target": str(target),
+        "backend": SCHTASKS_BACKEND,
+        "status": backend["status"],
+        "enabled": backend["enabled"],
+        "tasks": tasks,
+        "entries": [_entry_status(target, entry) for entry in entries],
+    }
+    _print_payload(payload, json_output=json_output)
+    return 0
+
+
+def _windows_uninstall(
+    *,
+    entries: tuple[CareEntry, ...],
+    json_output: bool,
+    dry_run: bool,
+    target: Path,
+) -> int:
+    commands = [_schtasks_delete_command(entry) for entry in entries]
+    payload = {
+        "target": str(target),
+        "backend": SCHTASKS_BACKEND,
+        "dry_run": dry_run,
+        "mutates_scheduler": False,
+        "commands": commands,
+    }
+    if json_output:
+        _print_payload(payload, json_output=True)
+    else:
+        print("care uninstall: Windows Task Scheduler is not mutated automatically.")
+        print("Remove BrigadeCare-* tasks with schtasks /Delete, or Task Scheduler UI.")
+        for command in commands:
+            print(command)
+    print("error: care uninstall does not mutate the Windows scheduler in this release", file=sys.stderr)
     return 3
 
 
@@ -551,6 +828,20 @@ def _print_payload(payload: dict[str, Any], *, json_output: bool) -> None:
             for unit in value:
                 if isinstance(unit, dict):
                     print(f"  - {unit.get('name')}: {unit.get('path')} ({unit.get('status')})")
+            continue
+        if key == "tasks" and isinstance(value, list):
+            print(f"tasks: {len(value)}")
+            for task in value:
+                if not isinstance(task, dict):
+                    continue
+                if "exists" in task:
+                    last_run = task.get("last_run") or "none"
+                    print(
+                        f"  - {task.get('id')}: exists={task.get('exists')} "
+                        f"last_run={last_run} schedule={task.get('schedule')}"
+                    )
+                    continue
+                print(f"  - {task.get('id')}: {task.get('command')}")
             continue
         if isinstance(value, (dict, list)):
             print(f"{key}: {json.dumps(value, sort_keys=True)}")
@@ -763,12 +1054,12 @@ def install(
     backend = _resolve_backend(backend) or ""
     if not backend:
         print(
-            f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd)",
+            f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd), Windows (schtasks)",
             file=sys.stderr,
         )
         return 3
-    if _is_windows():
-        return _windows_print(workspace=target, entries=entries)
+    if _uses_schtasks(backend):
+        return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
 
     rc = _ensure_care_runbooks(target)
     if rc != 0:
@@ -1333,13 +1624,17 @@ def status_payload(*, target: Path, home: Path | None = None) -> dict[str, Any]:
     """
     target = target.expanduser().resolve()
     if _is_windows():
+        tasks = _schtasks_task_records(entries=CARE_ENTRIES)
+        schtasks = _schtasks_aggregate_status(tasks)
         return {
-            "enabled": False,
+            "enabled": bool(schtasks.get("enabled")),
             "backends": {
                 "crontab": {"backend": "crontab", "status": "unsupported-backend", "error": None},
                 "systemd": {"backend": "systemd", "status": "unsupported-backend", "error": None},
+                SCHTASKS_BACKEND: schtasks,
             },
             "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
+            "tasks": tasks,
         }
     crontab = _crontab_backend_status(target=target, home=home)
     installed_systemd = _installed_systemd_entries(target=target, home=home)
@@ -1381,20 +1676,12 @@ def status(
     backend = _resolve_backend(backend) or ""
     if not backend:
         print(
-            f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd)",
+            f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd), Windows (schtasks)",
             file=sys.stderr,
         )
         return 3
-    if _is_windows():
-        windows_payload: dict[str, Any] = {
-            "target": str(target),
-            "backend": "windows",
-            "status": "unsupported-backend",
-            "detail": "care status does not read Task Scheduler in this release; use schtasks /Query",
-            "entries": [_entry_status(target, entry) for entry in entries],
-        }
-        _print_payload(windows_payload, json_output=json_output)
-        return 3
+    if _uses_schtasks(backend):
+        return _windows_status(target=target, entries=entries, json_output=json_output)
 
     if backend == "launchd":
         if not entry_ids:
@@ -1458,17 +1745,12 @@ def uninstall(
     backend = _resolve_backend(backend) or ""
     if not backend:
         print(
-            f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd)",
+            f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd), Windows (schtasks)",
             file=sys.stderr,
         )
         return 3
-    if _is_windows():
-        print("care uninstall: Windows Task Scheduler is not mutated automatically.")
-        print("Remove BrigadeCare-* tasks with schtasks /Delete, or Task Scheduler UI.")
-        for entry in entries:
-            print(f'schtasks /Delete /TN "BrigadeCare-{entry.entry_id}" /F')
-        print("error: care uninstall does not mutate the Windows scheduler in this release", file=sys.stderr)
-        return 3
+    if _uses_schtasks(backend):
+        return _windows_uninstall(entries=entries, json_output=json_output, dry_run=dry_run, target=target)
 
     if backend == "launchd":
         return _launchd_uninstall(target=target, dry_run=dry_run, json_output=json_output, home=home, entries=entries)

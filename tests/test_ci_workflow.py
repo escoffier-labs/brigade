@@ -402,6 +402,10 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "--no-reuse" in text
     assert "brigade receipts export miseledger" in text
     assert "import adapter" in text
+    assert "brigade care install" in text
+    assert "BrigadeCare-ingest-sweep" in text
+    assert "/SC MINUTE /MO 30" in text
+    assert "brigade care status" in text
     assert "$importPayload.inserted_items" in text
     assert "$importPayload.already_known" in text
     assert "$acceptanceMarker" in text

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -440,6 +441,197 @@ def test_care_windows_install_prints_schtasks_and_does_not_claim_success(tmp_pat
     assert "schtasks" in out
     assert "BrigadeCare-daily-care" in out
     assert calls == []
+
+
+def _create_line_for(out: str, entry_id: str) -> str:
+    marker = f'/TN "BrigadeCare-{entry_id}"'
+    for line in out.splitlines():
+        if marker in line and line.startswith("schtasks /Create"):
+            return line
+    raise AssertionError(f"missing schtasks /Create line for {entry_id} in:\n{out}")
+
+
+def test_care_auto_backend_on_win32_reaches_printed_plan(tmp_path, monkeypatch, capsys):
+    """#1021: mocking only `_is_windows` hid that auto never resolved on win32."""
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    rc = care_cmd.install(target=tmp_path, backend="auto")
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert "unsupported on win32" not in captured.err
+    assert "schtasks /Create" in captured.out
+    assert care_cmd._resolve_backend("auto") == care_cmd.SCHTASKS_BACKEND
+
+
+EXPECTED_SCHTASKS_FLAGS = {
+    "15 6 * * *": "/SC DAILY /ST 06:15",
+    "*/30 * * * *": "/SC MINUTE /MO 30",
+    "0 7 * * 1": "/SC WEEKLY /D MON /ST 07:00",
+    "0 8 * * *": "/SC DAILY /ST 08:00",
+    "0 4 * * *": "/SC DAILY /ST 04:00",
+    "0 7 * * *": "/SC DAILY /ST 07:00",
+    "0 9 * * *": "/SC DAILY /ST 09:00",
+}
+
+
+def test_schtasks_schedule_flags_match_every_catalog_hint():
+    for entry in (*care_cmd.CARE_ENTRIES, *care_cmd.MEMORY_JOB_ENTRIES):
+        assert care_cmd._schtasks_schedule_flags(entry.schedule) == EXPECTED_SCHTASKS_FLAGS[entry.schedule]
+
+
+def test_schtasks_schedule_flags_fail_closed_on_unsupported_cron():
+    with pytest.raises(ValueError, match="unsupported care schedule"):
+        care_cmd._schtasks_schedule_flags("0 0 1 * *")
+    with pytest.raises(ValueError, match="unsupported care schedule"):
+        care_cmd._schtasks_schedule_flags("15 6 * * * *")
+
+
+def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkeypatch, capsys):
+    """Regression: the printer used to stamp /SC DAILY /ST 06:15 on every line."""
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    assert care_cmd.install(target=tmp_path, backend="auto") == 3
+    out = capsys.readouterr().out
+    for entry in care_cmd.CARE_ENTRIES:
+        line = _create_line_for(out, entry.entry_id)
+        flags = EXPECTED_SCHTASKS_FLAGS[entry.schedule]
+        assert flags in line, line
+        assert f"schedule_hint: cron '{entry.schedule}'" in out
+        # The old bug would put 06:15 on ingest-sweep, weekly, observability, nightly.
+        if flags != "/SC DAILY /ST 06:15":
+            assert "/ST 06:15" not in line
+        assert '/RU "%USERNAME%"' in line
+        assert "/RL LIMITED" in line
+        assert "/NP" in line
+        assert line.endswith(" /F")
+        assert line.startswith("schtasks /Create ")
+        assert '/TR "cmd /c cd /d ' in line
+
+
+def test_care_windows_printed_path_uses_single_backslashes(tmp_path):
+    entry = care_cmd.CARE_ENTRIES[0]
+    workspace = Path(r"C:\Users\operator\project")
+    command = care_cmd._schtasks_create_command(entry, workspace=workspace)
+    assert r"C:\Users\operator\project" in command
+    assert r"C:\\Users" not in command
+    spaced = care_cmd._schtasks_create_command(entry, workspace=Path(r"C:\Users\operator\my project"))
+    assert r'cd /d "C:\Users\operator\my project"' in spaced
+    assert r"C:\\Users" not in spaced
+
+
+def test_care_windows_install_json_returns_structured_plan(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    assert care_cmd.install(target=tmp_path, backend="auto", json_output=True, dry_run=True) == 3
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["backend"] == "schtasks"
+    assert payload["mutates_scheduler"] is False
+    assert payload["status"] == "printed-plan"
+    assert {task["id"] for task in payload["tasks"]} == {entry.entry_id for entry in care_cmd.CARE_ENTRIES}
+    for task, entry in zip(payload["tasks"], care_cmd.CARE_ENTRIES, strict=True):
+        assert task["schedule"] == entry.schedule
+        assert task["schedule_flags"] == EXPECTED_SCHTASKS_FLAGS[entry.schedule]
+        assert task["schedule_flags"] in task["command"]
+        assert '/RU "%USERNAME%"' in task["command"]
+
+
+def test_care_windows_status_reports_task_presence_instead_of_refusing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+
+    def fake_query(task_name: str) -> dict:
+        if task_name == "BrigadeCare-daily-care":
+            return {
+                "task_name": task_name,
+                "exists": True,
+                "status": "Ready",
+                "last_run": "8/19/2026 6:15:00 AM",
+                "next_run": "8/20/2026 6:15:00 AM",
+                "error": None,
+            }
+        return {
+            "task_name": task_name,
+            "exists": False,
+            "status": "missing",
+            "last_run": None,
+            "next_run": None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(care_cmd, "_query_schtasks", fake_query)
+    assert care_cmd.status(target=tmp_path, backend="auto", json_output=True) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["backend"] == "schtasks"
+    assert payload["status"] == "partial"
+    daily = next(task for task in payload["tasks"] if task["id"] == "daily-care")
+    assert daily["exists"] is True
+    assert daily["last_run"] == "8/19/2026 6:15:00 AM"
+    ingest = next(task for task in payload["tasks"] if task["id"] == "ingest-sweep")
+    assert ingest["exists"] is False
+    assert "unsupported on win32" not in captured.err
+
+
+def test_care_status_payload_on_win32_uses_schtasks(tmp_path, monkeypatch):
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    monkeypatch.setattr(
+        care_cmd,
+        "_query_schtasks",
+        lambda task_name: {
+            "task_name": task_name,
+            "exists": False,
+            "status": "missing",
+            "last_run": None,
+            "next_run": None,
+            "error": None,
+        },
+    )
+    payload = care_cmd.status_payload(target=tmp_path)
+    assert payload["enabled"] is False
+    assert payload["backends"]["schtasks"]["status"] == "missing"
+    assert payload["backends"]["crontab"]["status"] == "unsupported-backend"
+    assert {task["id"] for task in payload["tasks"]} >= {"daily-care", "ingest-sweep"}
+
+
+def test_care_cli_accepts_schtasks_backend(monkeypatch, tmp_path):
+    seen: dict[str, dict] = {}
+
+    def fake_install(**kwargs):
+        seen["install"] = kwargs
+        return 0
+
+    monkeypatch.setattr("brigade.care_cmd.install", fake_install)
+    assert cli.main(["care", "install", "--target", str(tmp_path), "--backend", "schtasks", "--dry-run"]) == 0
+    assert seen["install"]["backend"] == "schtasks"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires native schtasks.exe")
+def test_care_printed_schtasks_commands_are_accepted_by_windows(tmp_path):
+    """Native gate: a printed /Create line must be valid schtasks syntax."""
+    import subprocess
+
+    rc = care_cmd.install(target=tmp_path, backend="auto")
+    assert rc == 3
+    # Recreate from the helper so the assertion is the printed command, not a rewrite.
+    entry = care_cmd.CARE_ENTRIES[0]
+    command = care_cmd._schtasks_create_command(entry, workspace=tmp_path)
+    create = subprocess.run(["cmd", "/c", command], capture_output=True, text=True, check=False, timeout=30)
+    try:
+        assert create.returncode == 0, create.stdout + create.stderr
+        query = subprocess.run(
+            ["schtasks", "/Query", "/TN", care_cmd._schtasks_task_name(entry), "/FO", "LIST", "/V"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        assert query.returncode == 0, query.stderr
+        assert care_cmd._schtasks_task_name(entry) in query.stdout
+    finally:
+        subprocess.run(
+            ["schtasks", "/Delete", "/TN", care_cmd._schtasks_task_name(entry), "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
 
 
 def test_care_cli_dispatch(monkeypatch, tmp_path):

@@ -744,6 +744,93 @@ def call_greet():
         if ($searchOutput -notmatch [regex]::Escape($acceptanceMarker)) {
             throw "miseledger search missing acceptance marker: $searchOutput"
         }
+
+        Write-Step "brigade care install (Windows printed plan)"
+        $careInstallErr = Join-Path $acceptRoot "care-install.err"
+        $careInstallLines = & brigade care install --target $workRepo --dry-run 2> $careInstallErr
+        if ($LASTEXITCODE -ne 3) {
+            throw "care install --dry-run must exit 3 on Windows (printed plan, no mutation), got $LASTEXITCODE"
+        }
+        $careInstallText = $careInstallLines | Out-String
+        if ($careInstallText -match "unsupported on win32") {
+            throw "care install --dry-run refused on the default auto backend: $careInstallText"
+        }
+        $expectedSchedules = @{
+            "BrigadeCare-daily-care"             = "/SC DAILY /ST 06:15"
+            "BrigadeCare-ingest-sweep"           = "/SC MINUTE /MO 30"
+            "BrigadeCare-weekly-outcome-ratchet" = "/SC WEEKLY /D MON /ST 07:00"
+            "BrigadeCare-daily-observability"    = "/SC DAILY /ST 08:00"
+            "BrigadeCare-nightly-ops"            = "/SC DAILY /ST 04:00"
+        }
+        foreach ($taskName in $expectedSchedules.Keys) {
+            $createLine = $careInstallLines | Where-Object { $_ -match [regex]::Escape("/TN `"$taskName`"") } | Select-Object -First 1
+            if (-not $createLine) {
+                throw "care install missing schtasks /Create for $taskName"
+            }
+            if ($createLine -notmatch [regex]::Escape($expectedSchedules[$taskName])) {
+                throw "care install schedule mismatch for ${taskName}: $createLine"
+            }
+            if ($createLine -notmatch '/RU "%USERNAME%"' -or $createLine -notmatch "/RL LIMITED" -or $createLine -notmatch "/NP") {
+                throw "care install missing S4U flags for ${taskName}: $createLine"
+            }
+            if ($createLine -match "C:\\\\") {
+                throw "care install emitted doubled backslashes for ${taskName}: $createLine"
+            }
+        }
+
+        $careJsonErr = Join-Path $acceptRoot "care-install-json.err"
+        $careJsonOut = & brigade care install --target $workRepo --dry-run --json 2> $careJsonErr
+        if ($LASTEXITCODE -ne 3) {
+            throw "care install --dry-run --json must exit 3 on Windows, got $LASTEXITCODE"
+        }
+        $carePlan = ($careJsonOut | Out-String).Trim() | ConvertFrom-Json
+        if ($carePlan.backend -ne "schtasks") {
+            throw "care install --json backend=$($carePlan.backend), expected schtasks"
+        }
+        if ($carePlan.tasks.Count -lt 5) {
+            throw "care install --json expected 5 tasks, got $($carePlan.tasks.Count)"
+        }
+
+        Write-Step "brigade care status (Windows Task Scheduler)"
+        $careStatusErr = Join-Path $acceptRoot "care-status.err"
+        $careStatusOut = & brigade care status --target $workRepo --json 2> $careStatusErr
+        if ($LASTEXITCODE -ne 0) {
+            throw "care status --json must report the printed-plan state on Windows, got $LASTEXITCODE"
+        }
+        $careStatus = ($careStatusOut | Out-String).Trim() | ConvertFrom-Json
+        if ($careStatus.backend -ne "schtasks") {
+            throw "care status --json backend=$($careStatus.backend), expected schtasks"
+        }
+
+        $createDaily = $careInstallLines | Where-Object { $_ -match '^schtasks /Create /TN "BrigadeCare-daily-care"' } | Select-Object -First 1
+        if (-not $createDaily) {
+            throw "care install missing BrigadeCare-daily-care /Create line"
+        }
+        $createCmd = Join-Path $acceptRoot "create-brigade-care.cmd"
+        Set-Content -LiteralPath $createCmd -Value $createDaily -Encoding ascii
+        try {
+            & cmd.exe /c $createCmd
+            if ($LASTEXITCODE -ne 0) {
+                throw "printed schtasks command was rejected by Windows: $createDaily"
+            }
+            & schtasks /Query /TN "BrigadeCare-daily-care" | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "schtasks /Query did not find BrigadeCare-daily-care after printed /Create"
+            }
+            $careStatusAfterErr = Join-Path $acceptRoot "care-status-after.err"
+            $careStatusAfterOut = & brigade care status --target $workRepo --json 2> $careStatusAfterErr
+            if ($LASTEXITCODE -ne 0) {
+                throw "care status --json after /Create failed with $LASTEXITCODE"
+            }
+            $careStatusAfter = ($careStatusAfterOut | Out-String).Trim() | ConvertFrom-Json
+            $dailyTask = $careStatusAfter.tasks | Where-Object { $_.id -eq "daily-care" } | Select-Object -First 1
+            if (-not $dailyTask -or -not $dailyTask.exists) {
+                throw "care status did not report BrigadeCare-daily-care as present after /Create"
+            }
+        }
+        finally {
+            & schtasks /Delete /TN "BrigadeCare-daily-care" /F | Out-Null
+        }
     }
     finally {
         Pop-Location
