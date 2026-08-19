@@ -259,6 +259,17 @@ def test_repo_metadata_command_inventory_failure_is_actionable_and_preserves_sta
     assert 'exit "$status"' in section
 
 
+def test_repo_metadata_roadmap_version_failure_is_actionable_and_preserves_status():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "repo-metadata")
+
+    assert "brigade roadmap audit --check" in section
+    assert (
+        'echo "::error file=ROADMAP.md::ROADMAP.md version headline is stale or unparseable; '
+        'update the Where things stand headline to **vX.Y.x on main** matching pyproject.toml major.minor"'
+    ) in section
+
+
 def test_ci_component_manifest_provenance_job_installs_dev_test_dependencies():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "component-manifest-provenance")

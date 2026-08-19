@@ -48,6 +48,56 @@ def test_target_owns_brigade_cli_ignores_malformed_pyproject(tmp_path):
     assert roadmap_cmd._target_owns_brigade_cli(tmp_path) is False
 
 
+def _write_versioned_roadmap(tmp_path: Path, *, headline: str, project_version: str) -> None:
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nname = "brigade-cli"\nversion = "{project_version}"\n')
+    (tmp_path / "ROADMAP.md").write_text(f"# Roadmap\n\n## Where things stand\n\n{headline} is current.\n")
+
+
+def test_roadmap_audit_version_current_when_headline_matches_minor(tmp_path):
+    _write_versioned_roadmap(tmp_path, headline="**v0.27.x on main**", project_version="0.27.0")
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    check = next(item for item in payload["checks"] if item["name"] == "roadmap_version_current")
+    assert check["status"] == "ok"
+    assert not any(item["name"] == "roadmap_version_current" for item in payload["issues"])
+    assert not any(item["name"] == "roadmap_version_headline_unparseable" for item in payload["issues"])
+
+
+def test_roadmap_audit_version_issue_when_headline_minor_behind(tmp_path):
+    _write_versioned_roadmap(tmp_path, headline="**v0.26.x on main**", project_version="0.27.0")
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    issue = next(item for item in payload["issues"] if item["name"] == "roadmap_version_current")
+    assert issue["status"] == "fail"
+    assert "0.26" in issue["detail"]
+    assert "0.27" in issue["detail"]
+    assert not any(item["name"] == "roadmap_version_headline_unparseable" for item in payload["issues"])
+
+
+def test_roadmap_audit_version_fail_closed_when_headline_unparseable(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "brigade-cli"\nversion = "0.27.0"\n')
+    (tmp_path / "ROADMAP.md").write_text("# Roadmap\n\n## Current Phase\n- Keep going.\n")
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    issue = next(item for item in payload["issues"] if item["name"] == "roadmap_version_headline_unparseable")
+    assert issue["status"] == "fail"
+    assert not any(item["name"] == "roadmap_version_current" for item in payload["issues"])
+
+
+def test_roadmap_audit_version_ok_when_patch_differs(tmp_path):
+    _write_versioned_roadmap(tmp_path, headline="**v0.27.x on main**", project_version="0.27.5")
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    check = next(item for item in payload["checks"] if item["name"] == "roadmap_version_current")
+    assert check["status"] == "ok"
+    assert not any(item["name"] == "roadmap_version_current" for item in payload["issues"])
+
+
+def test_roadmap_audit_check_exits_nonzero_when_headline_lags(tmp_path):
+    _write_versioned_roadmap(tmp_path, headline="**v0.26.x on main**", project_version="0.27.0")
+    assert cli.main(["roadmap", "audit", "--target", str(tmp_path), "--check"]) == 1
+
+
 def test_roadmap_audit_classifies_stale_sections_and_command_mismatch(tmp_path):
     (tmp_path / "ROADMAP.md").write_text(
         "# Roadmap\n\n"
@@ -274,7 +324,10 @@ def test_roadmap_cli_dispatch(tmp_path, monkeypatch):
     assert cli.main(["roadmap", "commands", "--target", str(tmp_path), "--json"]) == 0
 
     assert seen == [
-        ("audit", {"target": tmp_path, "json_output": True, "import_issues": True}),
+        (
+            "audit",
+            {"target": tmp_path, "json_output": True, "import_issues": True, "check_version": False},
+        ),
         ("patterns", {"target": tmp_path, "json_output": True}),
         ("archive", {"target": tmp_path, "json_output": True}),
         ("commands", {"target": tmp_path, "json_output": True, "write_inventory": False, "check_inventory": False}),

@@ -342,6 +342,18 @@ jobs:
           exit "$status"
         env:
           BRIGADE_EXTRAS: "1"
+      - name: Roadmap Version
+        run: |
+          set +e
+          brigade roadmap audit --check
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error file=ROADMAP.md::ROADMAP.md version headline is stale or unparseable; update the Where things stand headline to **vX.Y.x on main** matching pyproject.toml major.minor"
+          fi
+          exit "$status"
+        env:
+          BRIGADE_EXTRAS: "1"
       - name: Template Audit
         run: brigade security template-audit --target . --json
 
