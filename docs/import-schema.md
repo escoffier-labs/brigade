@@ -313,6 +313,8 @@ New work-import, research-finding, and receipt-index writes run `brigade.evidenc
 | `external-service`, `external-web` | secrets, PII, infrastructure |
 | `unknown` | fail-closed maximum set |
 
+Work-import `--source` is normalized with `strip().lower()` and fails closed to `unknown` when unmapped. `external-web` and `external-service` are selectable source names. `work import context` is an external-content surface: weaker mapped sources upgrade to `external-web` so secrets, PII, and infrastructure are in scope.
+
 The optional envelope `redaction` object stores `schema`, `schema_version`, `policy_version`, `origin`, `status` (`clean` / `redacted` / `error`), `count`, and `detectors`. It never stores removed values, excerpts, or original bytes. `hashes.content` is the digest of the persisted (already redacted) text. Scanner failure, timeout, or unavailability records `status=error`, persists `[ingestion-redaction-failed]`, and cannot be treated as clean. A missing redaction record on a legacy row is not a clean verdict. New policy versions apply to future writes only; provenance backfill does not rewrite existing text.
 
 ### Legacy banner

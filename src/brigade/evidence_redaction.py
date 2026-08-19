@@ -26,8 +26,9 @@ STATUSES = frozenset({"clean", "redacted", "error"})
 FAILED_PLACEHOLDER = "[ingestion-redaction-failed]"
 MAX_DETECTORS = 32
 
-# Work-inbox producers. Unknown sources stay workspace, matching the existing
-# ledger default. Envelope origin ``unknown`` is a separate fail-closed class.
+# Work-inbox producers. Unknown or empty sources fail closed to ``unknown``
+# (maximum detector scope), matching ``resolve_origin``. External-content
+# ingest surfaces upgrade weaker origins via ``origin_for_external_ingest``.
 SOURCE_ORIGINS: dict[str, str] = {
     "manual": "operator-input",
     "backup-health": "workspace",
@@ -45,7 +46,13 @@ SOURCE_ORIGINS: dict[str, str] = {
     "scanner-health": "workspace",
     "security-scan": "workspace",
     "tool-catalog": "workspace",
+    "external-service": "external-service",
+    "external-web": "external-web",
 }
+
+# Origins that already carry the external (or fail-closed) detector set.
+_EXTERNAL_INGEST_ORIGINS = frozenset({"external-service", "external-web", "unknown"})
+_EXTERNAL_INGEST_DEFAULT = "external-web"
 
 # Origin-scoped detector categories. ``unknown`` is fail-closed maximum scope.
 ORIGIN_CATEGORIES: dict[str, frozenset[str]] = {
@@ -104,11 +111,27 @@ class RedactionVerdict:
 
 
 def classify_source_origin(source: str) -> str:
-    """Map a producer source name to a closed envelope origin."""
-    cleaned = source.strip() if isinstance(source, str) else ""
+    """Map a producer source name to a closed envelope origin.
+
+    ``--source`` is free-form. Lookup is ``strip().lower()``. Unknown or empty
+    values fail closed to ``unknown`` (maximum scope), matching ``resolve_origin``.
+    """
+    cleaned = source.strip().lower() if isinstance(source, str) else ""
     if not cleaned:
-        return "workspace"
-    return SOURCE_ORIGINS.get(cleaned, "workspace")
+        return "unknown"
+    return SOURCE_ORIGINS.get(cleaned, "unknown")
+
+
+def origin_for_external_ingest(source: str) -> str:
+    """Classify a source for an external-content ingest surface.
+
+    Keeps an already-external or fail-closed origin. Weaker mapped origins
+    upgrade to ``external-web`` so secrets, PII, and infrastructure are in scope.
+    """
+    origin = classify_source_origin(source)
+    if origin in _EXTERNAL_INGEST_ORIGINS:
+        return origin
+    return _EXTERNAL_INGEST_DEFAULT
 
 
 def resolve_origin(origin: str) -> str:
@@ -199,7 +222,7 @@ def apply_origin_redaction(
     detectors = tuple(sorted({finding.rule_id for finding in redacting})[:MAX_DETECTORS])
     count = len(redacting)
     persisted = result.redacted_text if isinstance(result.redacted_text, str) else FAILED_PLACEHOLDER
-    if persisted is text and count:
+    if persisted == text and count:
         return _error_verdict(resolved)
     status = "redacted" if count else "clean"
     return RedactionVerdict(

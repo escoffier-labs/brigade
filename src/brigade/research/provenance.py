@@ -71,12 +71,32 @@ def map_legacy_trust_origin_modality(trust: str) -> tuple[str, str]:
     return _LEGACY_TRUST_ORIGIN_MODALITY.get(trust, ("unknown", "unknown"))
 
 
-def _split_redacted_finding_text(text: str) -> tuple[str, str, str]:
-    parts = text.split("\n", 2)
-    title = parts[0] if parts else ""
-    summary = parts[1] if len(parts) > 1 else ""
-    evidence = parts[2] if len(parts) > 2 else ""
-    return title, summary, evidence
+def _redact_finding_fields(
+    title: str, summary: str, evidence: str, *, origin: str
+) -> tuple[str, str, str, dict[str, Any], bool]:
+    """Redact title, summary, and evidence separately so newlines cannot migrate."""
+    verdicts = (
+        evidence_redaction.apply_origin_redaction(title, origin=origin),
+        evidence_redaction.apply_origin_redaction(summary, origin=origin),
+        evidence_redaction.apply_origin_redaction(evidence, origin=origin),
+    )
+    if any(verdict.status == "error" for verdict in verdicts):
+        failed = next(verdict for verdict in verdicts if verdict.status == "error")
+        return evidence_redaction.FAILED_PLACEHOLDER, "", "", failed.record(), True
+    persist_title, persist_summary, persist_evidence = (verdict.persisted_text for verdict in verdicts)
+    count = sum(verdict.count for verdict in verdicts)
+    detectors = tuple(
+        sorted({detector for verdict in verdicts for detector in verdict.detectors})[: evidence_redaction.MAX_DETECTORS]
+    )
+    record = evidence_redaction.RedactionVerdict(
+        policy_version=evidence_redaction.POLICY_VERSION,
+        origin=verdicts[0].origin,
+        status="redacted" if count else "clean",
+        count=count,
+        detectors=detectors,
+        persisted_text=finding_text(persist_title, persist_summary, persist_evidence),
+    ).record()
+    return persist_title, persist_summary, persist_evidence, record, False
 
 
 def _injection_trust(text: str) -> tuple[str, str, int, list[str]]:
@@ -167,16 +187,12 @@ def stamp_finding_payload(
     redaction_failed = False
     if not inferred:
         origin_for_redaction, _modality = map_legacy_trust_origin_modality(str(payload.get("trust") or ""))
-        persist_text, redaction_record, redaction_failed = evidence_redaction.apply_and_record(
-            text,
+        title, summary, evidence, redaction_record, redaction_failed = _redact_finding_fields(
+            title,
+            summary,
+            evidence,
             origin=origin_for_redaction,
         )
-        if redaction_failed:
-            title = evidence_redaction.FAILED_PLACEHOLDER
-            summary = ""
-            evidence = ""
-        elif persist_text != text:
-            title, summary, evidence = _split_redacted_finding_text(persist_text)
         payload["title"] = title
         payload["summary"] = summary
         payload["evidence"] = evidence

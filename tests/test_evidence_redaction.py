@@ -7,10 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from brigade import evidence_redaction, provenance, receipts_cmd
+from brigade import evidence_redaction, provenance, receipts_cmd, work_cmd
+from brigade.guard.types import Finding as GuardFinding
+from brigade.guard.types import GuardResult
 from brigade.research.provenance import stamp_finding, stamp_finding_payload
 from brigade.research.types import Finding
 from brigade.work_cmd import ledger
+
+PLANTED_EMAIL = "planted.canary9931@probe-corp-canary.com"
+PLANTED_IP = "192.168.4.70"
+PLANTED_BEARER = "zqXK9tPLANTEDBEARER7731aabbccddeeff0011"
 
 FAKE_SECRET = 'api_key="sk-test-abcdefghijklmnopqrstuv"'
 FAKE_EMAIL = "operator@contoso.example"
@@ -28,8 +34,45 @@ def _scan_boom(_text: str, **_kwargs: object) -> object:
 def test_classify_source_origin_matches_work_inbox_producers() -> None:
     for source, (origin, _modality) in ledger._IMPORT_SOURCE_ORIGIN_MODALITY.items():
         assert evidence_redaction.classify_source_origin(source) == origin
-    assert evidence_redaction.classify_source_origin("unmapped-producer") == "workspace"
-    assert evidence_redaction.classify_source_origin("") == "workspace"
+    assert evidence_redaction.classify_source_origin("external-web") == "external-web"
+    assert evidence_redaction.classify_source_origin("external-service") == "external-service"
+    assert evidence_redaction.classify_source_origin("unmapped-producer") == "unknown"
+    assert evidence_redaction.classify_source_origin("") == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("source", "origin"),
+    [
+        ("chat-memory-sweep", "agent-session"),
+        ("Chat-Memory-Sweep", "agent-session"),
+        ("CHAT-MEMORY-SWEEP", "agent-session"),
+        ("chat-memory-sweep ", "agent-session"),
+        (" chat-memory-sweep", "agent-session"),
+        ("", "unknown"),
+        ("zzz-garbage-source", "unknown"),
+        ("Handoff-Ingest", "agent-session"),
+        ("external-web", "external-web"),
+        ("External-Web", "external-web"),
+        ("EXTERNAL-SERVICE", "external-service"),
+        ("external-service ", "external-service"),
+    ],
+)
+def test_classify_source_origin_normalizes_and_fails_closed(source: str, origin: str) -> None:
+    assert evidence_redaction.classify_source_origin(source) == origin
+
+
+@pytest.mark.parametrize(
+    ("source", "origin"),
+    [
+        ("manual", "external-web"),
+        ("external-web", "external-web"),
+        ("external-service", "external-service"),
+        ("zzz-garbage-source", "unknown"),
+        ("chat-memory-sweep", "external-web"),
+    ],
+)
+def test_origin_for_external_ingest_upgrades_weaker_tiers(source: str, origin: str) -> None:
+    assert evidence_redaction.origin_for_external_ingest(source) == origin
 
 
 def test_unknown_or_invalid_origin_fails_closed_to_unknown() -> None:
@@ -252,3 +295,121 @@ def test_build_envelope_accepts_optional_redaction_record() -> None:
     tainted["excerpts"] = ["secret"]
     with pytest.raises(ValueError, match="removed values"):
         provenance.build_envelope(**kwargs, redaction=tainted)
+
+
+def _cleartext_hits(root: Path, *needles: str) -> list[Path]:
+    hits: list[Path] = []
+    encoded = [needle.encode() for needle in needles]
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        if any(needle in data for needle in encoded):
+            hits.append(path)
+    return hits
+
+
+@pytest.mark.parametrize(
+    ("source", "origin"),
+    [
+        ("external-web", "external-web"),
+        ("manual", "external-web"),
+        ("external-service", "external-service"),
+    ],
+)
+def test_import_context_redacts_planted_email_and_private_ip(tmp_path: Path, source: str, origin: str) -> None:
+    text = f"External page says mail {PLANTED_EMAIL} ip {PLANTED_IP}"
+    assert (
+        work_cmd.import_context(
+            target=tmp_path,
+            text=text,
+            source=source,
+            context_kind="transcript",
+        )
+        == 0
+    )
+    assert _cleartext_hits(tmp_path, PLANTED_EMAIL, PLANTED_IP) == []
+    item = ledger._read_imports(tmp_path)[0]
+    dumped = json.dumps(item)
+    assert PLANTED_EMAIL not in item["text"]
+    assert PLANTED_IP not in item["text"]
+    assert PLANTED_EMAIL not in dumped
+    assert PLANTED_IP not in dumped
+    env = item["metadata"]["provenance"]
+    assert env["origin"] == origin
+    assert env["redaction"]["origin"] == origin
+    assert env["redaction"]["status"] == "redacted"
+    assert "email" in env["redaction"]["detectors"]
+    assert "private-ipv4" in env["redaction"]["detectors"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["chat-memory-sweep", "Chat-Memory-Sweep", "CHAT-MEMORY-SWEEP", "Handoff-Ingest"],
+)
+def test_import_add_case_variant_source_redacts_email(tmp_path: Path, source: str) -> None:
+    assert (
+        work_cmd.import_add(
+            target=tmp_path,
+            text=f"case variant contact {PLANTED_EMAIL}",
+            kind="finding",
+            source=source,
+        )
+        == 0
+    )
+    item = ledger._read_imports(tmp_path)[0]
+    assert PLANTED_EMAIL not in item["text"]
+    assert PLANTED_EMAIL not in json.dumps(item)
+    env = item["metadata"]["provenance"]
+    assert env["origin"] == "agent-session"
+    assert env["redaction"]["origin"] == "agent-session"
+    assert env["redaction"]["status"] == "redacted"
+    assert "email" in env["redaction"]["detectors"]
+
+
+def test_equal_but_distinct_unredacted_text_fails_closed() -> None:
+    secret = f"Bearer {PLANTED_BEARER}"
+
+    def scanner(text: str, **_kwargs: object) -> GuardResult:
+        finding = GuardFinding(
+            rule_id="bearer-token",
+            category="secret",
+            action="redact",
+            match=secret,
+            replacement="[redacted-secret]",
+            line=1,
+            column=1,
+            start=0,
+            end=len(secret),
+        )
+        return GuardResult(text=text, redacted_text=str(text), findings=[finding])
+
+    verdict = evidence_redaction.apply_origin_redaction(secret, origin="workspace", scanner=scanner)
+    assert verdict.status == "error"
+    assert verdict.count == 0
+    assert secret not in verdict.persisted_text
+    assert PLANTED_BEARER not in verdict.persisted_text
+    assert verdict.persisted_text == evidence_redaction.FAILED_PLACEHOLDER
+    assert secret not in json.dumps(verdict.record())
+
+
+def test_stamp_finding_keeps_multiline_summary_out_of_evidence() -> None:
+    finding = Finding(
+        source_ids=("src-1111111111111111",),
+        title="Token note",
+        summary=f"summary line one contact {PLANTED_EMAIL}\nsummary line TWO stays in summary",
+        evidence="evidence body here",
+        trust="web",
+        extraction_lane="luna",
+        extracted_at="2026-08-13T12:00:00+00:00",
+    )
+    stamped = stamp_finding(finding, run_id="run-redact", index=0)
+    assert PLANTED_EMAIL not in stamped.summary
+    assert PLANTED_EMAIL not in stamped.evidence
+    assert PLANTED_EMAIL not in stamped.text
+    assert "summary line TWO stays in summary" in stamped.summary
+    assert "summary line TWO stays in summary" not in stamped.evidence
+    assert stamped.evidence == "evidence body here"
+    assert isinstance(stamped.provenance, dict)
+    assert stamped.provenance["redaction"]["status"] == "redacted"
+    assert "email" in stamped.provenance["redaction"]["detectors"]
