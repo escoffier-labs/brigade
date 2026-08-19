@@ -57,6 +57,11 @@ def test_dispatch_stamps_worker_request_and_result(monkeypatch, tmp_path):
     assert results[0].provenance["source"]["kind"] == "worker-result"
     assert results[0].provenance["hashes"]["content_scope"] == "message.text.utf8.v1"
     assert results[0].provenance["trust"]["label"] == "untrusted"
+    assert results[0].provenance["message"]["from_seat"] == "coder"
+    assert results[0].provenance["message"]["to_seat"] == "chef"
+    assert results[0].provenance["message"]["assignment_id"] == message_envelope.assignment_id_for(
+        "coder", "implement it"
+    )
     records = [json.loads(line) for line in (tmp_path / "message-envelopes.jsonl").read_text().splitlines()]
     kinds = [record["envelope"]["source"]["kind"] for record in records]
     assert kinds == ["worker-request", "worker-result"]
@@ -95,6 +100,7 @@ def test_dispatch_does_not_deliver_hash_mismatched_result():
         delivery.envelope,
         kind="worker-result",
         producer="run_transport.dispatch",
+        **delivery.envelope["message"],
     )
     assert admission.delivered is False
     assert "hash" in admission.reason
@@ -147,6 +153,7 @@ def test_worker_result_gate_rejects_cross_channel_synthesis_request():
         delivery.envelope,
         kind="worker-result",
         producer="run_transport.dispatch",
+        **delivery.envelope["message"],
     )
     assert admission.delivered is False
     assert "source.kind" in admission.reason
@@ -159,7 +166,7 @@ def test_worker_result_gate_rejects_cross_channel_synthesis_request():
         ok=True,
         provenance=delivery.envelope,
     )
-    prompt = aboyeur.build_synth_prompt("build feature", [replayed])
+    prompt = aboyeur.build_synth_prompt("build feature", [replayed], run_id="demo-run", to_seat="chef")
     assert body not in prompt
     assert "[envelope trust.label=" not in prompt or body not in prompt
 
@@ -180,6 +187,7 @@ def test_worker_result_gate_rejects_cross_channel_synthesis_request():
         forged,
         kind="worker-result",
         producer="not-an-allowlisted-producer",
+        **delivery.envelope["message"],
     )
     assert foreign.delivered is False
     assert "not an allowlisted" in foreign.reason

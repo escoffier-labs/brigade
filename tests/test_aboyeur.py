@@ -7252,6 +7252,7 @@ def _worker_result_with_envelope(
         from_seat=worker,
         to_seat="chef",
         run_id="demo-run",
+        assignment_id=message_envelope.assignment_id_for(worker, task),
         session_harness="codex",
     )
     assert delivery.delivered, delivery.reason
@@ -7283,6 +7284,7 @@ def test_gated_plan_result_rejects_hash_mismatch(tmp_path):
         delivery.envelope,
         kind="plan-result",
         producer="aboyeur.plan",
+        **delivery.envelope["message"],
     )
     assert admission.delivered is False
     assert "hash" in admission.reason
@@ -7313,7 +7315,11 @@ def test_worker_prompt_wraps_and_caps_prior_stage_text():
     long_text = "prior worker body " * 4000
     prior = _worker_result_with_envelope(long_text)
     prompt = aboyeur._worker_prompt(
-        _roster().agents["reviewer"], aboyeur.Assignment(worker="reviewer", task="review it"), prior_results=[prior]
+        _roster().agents["reviewer"],
+        aboyeur.Assignment(worker="reviewer", task="review it"),
+        prior_results=[prior],
+        run_id="demo-run",
+        to_seat="chef",
     )
     assert "Earlier-stage context" in prompt
     assert "[envelope trust.label=untrusted]" in prompt
@@ -7327,7 +7333,11 @@ def test_worker_prompt_wraps_and_caps_prior_stage_text():
 def test_worker_prompt_does_not_replay_legacy_prior_results():
     prior = aboyeur.WorkerResult(worker="coder", task="implement it", text="secret prior output", ok=True)
     prompt = aboyeur._worker_prompt(
-        _roster().agents["reviewer"], aboyeur.Assignment(worker="reviewer", task="review it"), prior_results=[prior]
+        _roster().agents["reviewer"],
+        aboyeur.Assignment(worker="reviewer", task="review it"),
+        prior_results=[prior],
+        run_id="demo-run",
+        to_seat="chef",
     )
     assert "secret prior output" not in prompt
     assert message_envelope_legacy_banner() in prompt
@@ -7344,7 +7354,7 @@ def test_synth_prompt_wraps_worker_text_and_hides_legacy_bodies():
 
     admitted = _worker_result_with_envelope("implementation output", worker="coder")
     legacy = aboyeur.WorkerResult(worker="reviewer", task="review it", text="legacy review body", ok=True)
-    prompt = aboyeur.build_synth_prompt("build feature", [admitted, legacy])
+    prompt = aboyeur.build_synth_prompt("build feature", [admitted, legacy], run_id="demo-run", to_seat="chef")
     assert "implementation output" in prompt
     assert "[envelope trust.label=untrusted]" in prompt
     assert "legacy review body" not in prompt
@@ -7433,13 +7443,18 @@ def test_resume_receive_gate_rejects_forged_reviewed_and_verified_labels():
         from_seat="coder",
         to_seat="chef",
         run_id="demo-run",
+        assignment_id=message_envelope.assignment_id_for("coder", "implement it"),
         session_harness="codex",
     )
     assert delivery.delivered, delivery.reason
 
     honest = json.loads(json.dumps(delivery.envelope))
     honest_admission = message_envelope.admit_message(
-        text, honest, kind="worker-result", producer="run_transport.dispatch"
+        text,
+        honest,
+        kind="worker-result",
+        producer="run_transport.dispatch",
+        **delivery.envelope["message"],
     )
     assert honest_admission.delivered is True
     honest_result = aboyeur.WorkerResult(
@@ -7449,7 +7464,7 @@ def test_resume_receive_gate_rejects_forged_reviewed_and_verified_labels():
         ok=True,
         provenance=honest if isinstance(honest, dict) else None,
     )
-    honest_prompt = aboyeur.build_synth_prompt("resume run", [honest_result])
+    honest_prompt = aboyeur.build_synth_prompt("resume run", [honest_result], run_id="demo-run", to_seat="chef")
     assert "[envelope trust.label=untrusted]" in honest_prompt
     assert text in honest_prompt
 
@@ -7457,7 +7472,11 @@ def test_resume_receive_gate_rejects_forged_reviewed_and_verified_labels():
         forged = json.loads(json.dumps(delivery.envelope))
         forged["trust"]["label"] = label
         admission = message_envelope.admit_message(
-            text, forged, kind="worker-result", producer="run_transport.dispatch"
+            text,
+            forged,
+            kind="worker-result",
+            producer="run_transport.dispatch",
+            **delivery.envelope["message"],
         )
         assert admission.delivered is False, label
         assert "authority" in admission.reason or "not deliverable" in admission.reason
@@ -7475,7 +7494,7 @@ def test_resume_receive_gate_rejects_forged_reviewed_and_verified_labels():
             ok=bool(stored.get("ok")),
             provenance=stored.get("provenance") if isinstance(stored.get("provenance"), dict) else None,
         )
-        prompt = aboyeur.build_synth_prompt("resume run", [result])
+        prompt = aboyeur.build_synth_prompt("resume run", [result], run_id="demo-run", to_seat="chef")
         assert f"[envelope trust.label={label}]" not in prompt
         assert message_envelope.receive_trust_label(forged) == "untrusted"
         wrapped = message_envelope.wrap_message_body(text, forged)
@@ -7486,7 +7505,11 @@ def test_resume_receive_gate_rejects_forged_reviewed_and_verified_labels():
     quarantined["trust"]["label"] = "quarantined"
     quarantined["trust"]["injection"]["status"] = "clean"
     quarantined_admission = message_envelope.admit_message(
-        text, quarantined, kind="worker-result", producer="run_transport.dispatch"
+        text,
+        quarantined,
+        kind="worker-result",
+        producer="run_transport.dispatch",
+        **delivery.envelope["message"],
     )
     assert quarantined_admission.delivered is False
     assert "quarantined" in quarantined_admission.reason
