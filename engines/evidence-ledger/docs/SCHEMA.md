@@ -87,7 +87,7 @@ Python consumers load `brigade.trust-policy.v1` and omit `unknown` / `quarantine
 
 ### Read verification
 
-Search, show, evidence bundles, HTTP, and MCP recompute envelope `hashes.content` (and `hashes.raw` when the raw body is materialized) against the stored bytes. A mismatch suppresses snippets and item bodies, sets `integrity_mismatch: true`, and appends one idempotent `provenance_events` row per item/hash/mismatch without deleting the item. Direct `miseledger show --forensic-content` can reveal a mismatched or synthesized-legacy body with a warning; MCP and HTTP have no forensic reveal path.
+Search, show, evidence bundles, HTTP, and MCP recompute envelope `hashes.content` (and `hashes.raw` when the raw body is materialized) against the stored bytes. A mismatch suppresses snippets and item bodies, sets `integrity_mismatch: true`, and appends one idempotent `provenance_events` row per item/hash/mismatch without deleting the item. Content eligibility is centralized: a body or snippet is emitted only when the envelope parses and `trust.injection.status` is the validated typed value `clean` on a non-`unknown` / non-`quarantined` label. Provenance parse errors are blocking. Stored digest representations are compared exactly and are not lowercased or otherwise normalized to authorize a body. Direct `miseledger show --forensic-content` can reveal a mismatched or synthesized-legacy body with a warning when injection status is validated `clean`; `--include-untrusted-body` is the explicit show reveal for non-clean or quarantined content. MCP, HTTP, search, bundles, and Markdown export have no forensic reveal path.
 
 ### Legacy banner
 

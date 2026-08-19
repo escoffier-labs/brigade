@@ -255,8 +255,8 @@ limit 1`, ingest.MemorySourceKind, testMemoryNamespace).Scan(&cardWithReceipt); 
 		"relations": []map[string]any{{
 			"type": "supports",
 			"target": map[string]any{
-				"source":     ingest.MemorySourceKind,
-				"collection": testMemoryNamespace,
+				"source":      ingest.MemorySourceKind,
+				"collection":  testMemoryNamespace,
 				"external_id": targetID,
 			},
 		}},
@@ -330,8 +330,19 @@ func TestE2ExportOmitsSupersededAndTombstonedBodies(t *testing.T) {
 	if strings.Contains(exported, oldUnique) {
 		t.Fatalf("markdown export leaked superseded body:\n%s", exported)
 	}
-	if !strings.Contains(exported, newUnique) {
-		t.Fatalf("markdown export missing live body:\n%s", exported)
+	liveSearch := runJSON(t, "search", newUnique, "--source", ingest.MemorySourceKind, "--json")
+	if len(liveSearch["results"].([]any)) != 1 {
+		t.Fatalf("expected one live export search hit: %v", liveSearch)
+	}
+	liveID := liveSearch["results"].([]any)[0].(map[string]any)["id"].(string)
+	if !strings.Contains(exported, liveID) {
+		t.Fatalf("markdown export missing live item id %s:\n%s", liveID, exported)
+	}
+	if strings.Contains(exported, newUnique) {
+		t.Fatalf("markdown export leaked quarantined live body:\n%s", exported)
+	}
+	if !strings.Contains(exported, "Content omitted: metadata only") {
+		t.Fatalf("markdown export missing content-omitted marker for live item:\n%s", exported)
 	}
 	managedBefore := managedExportMarkdownBasenames(t, outDir)
 	if len(managedBefore) == 0 {
@@ -475,8 +486,17 @@ func TestE2SessionsAndRelatedFilterDuplicateLiveAndTombstones(t *testing.T) {
 	if strings.Contains(exported, "SESSION_OLD_UNIQUE_E2") || strings.Contains(exported, "SESSION_TOMB_UNIQUE_E2") {
 		t.Fatalf("export leaked duplicate/tombstone session text:\n%s", exported)
 	}
-	if !strings.Contains(exported, "SESSION_NEW_UNIQUE_E2") {
-		t.Fatalf("export missing live session text:\n%s", exported)
+	if strings.Contains(exported, "item-e2-old") || strings.Contains(exported, "item-e2-tomb") {
+		t.Fatalf("export listed non-live session ids:\n%s", exported)
+	}
+	if !strings.Contains(exported, "item-e2-live") {
+		t.Fatalf("export missing live session id:\n%s", exported)
+	}
+	if strings.Contains(exported, "SESSION_NEW_UNIQUE_E2") {
+		t.Fatalf("export leaked legacy-unknown live session body:\n%s", exported)
+	}
+	if !strings.Contains(exported, "Content omitted: metadata only") {
+		t.Fatalf("export missing content-omitted marker for live session:\n%s", exported)
 	}
 }
 

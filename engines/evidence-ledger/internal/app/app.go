@@ -2480,13 +2480,15 @@ where i.id = ?`, r.ID)
 		}
 		view := inspectItemIntegrity(itemText, rawJSON, metadataJSON, artifacts, opts.IncludeArtifactText)
 		attachIntegrityFields(item, view)
-		if view.IntegrityMismatch {
+		if !contentEligible(view) {
 			item["snippet"] = ""
 			if opts.IncludeArtifactText {
 				for _, art := range artifacts {
 					delete(art, "text")
 				}
 			}
+		}
+		if view.IntegrityMismatch {
 			if err := recordIntegrityMismatchEvents(db, itemID, view.TrustLabel, view.Mismatches); err != nil {
 				return nil, err
 			}
@@ -2663,7 +2665,12 @@ func writeEvidenceMarkdown(w io.Writer, bundle map[string]any) {
 			fmt.Fprintf(w, "- Integrity mismatch: true\n\n")
 			continue
 		}
-		fmt.Fprintf(w, "\n%s\n\n", item["snippet"])
+		snippet, _ := item["snippet"].(string)
+		if snippet == "" {
+			fmt.Fprintf(w, "- Content omitted: metadata only\n\n")
+			continue
+		}
+		fmt.Fprintf(w, "\n%s\n\n", snippet)
 	}
 }
 
@@ -2758,15 +2765,13 @@ from items where id = ?`, targetID).Scan(&targetTombstone, &targetLive)
 			return nil, err
 		}
 	}
-	omitInjection := !opts.IncludeUntrustedBody && isQuarantinedInjectionPending(metadata)
-	omitIntegrity := shouldOmitIntegrityBody(view, opts)
-	if omitInjection {
+	omit := shouldOmitContentBody(view, opts)
+	if omit && (view.IntegrityMismatch || view.LegacyUnknown || view.ParseError) {
+		out["integrity_body_omitted"] = true
+	} else if omit {
 		out["untrusted_body_omitted"] = true
 	}
-	if omitIntegrity {
-		out["integrity_body_omitted"] = true
-	}
-	if omitInjection || omitIntegrity {
+	if omit {
 		return out, nil
 	}
 	if opts.ForensicContent && view.IntegrityMismatch {
@@ -2781,28 +2786,6 @@ from items where id = ?`, targetID).Scan(&targetTombstone, &targetLive)
 type showItemOpts struct {
 	IncludeUntrustedBody bool
 	ForensicContent      bool
-}
-
-func isQuarantinedInjectionPending(metadata map[string]any) bool {
-	if metadata == nil {
-		return false
-	}
-	prov, ok := metadata["provenance"].(map[string]any)
-	if !ok {
-		return false
-	}
-	trust, ok := prov["trust"].(map[string]any)
-	if !ok {
-		return false
-	}
-	if fmt.Sprint(trust["label"]) != "quarantined" {
-		return false
-	}
-	injection, ok := trust["injection"].(map[string]any)
-	if !ok {
-		return false
-	}
-	return fmt.Sprint(injection["status"]) == "pending"
 }
 
 func queryMaps(db *sql.DB, sqlText string, args ...any) []map[string]any {
@@ -2878,7 +2861,7 @@ order by s.kind, c.name, i.created_at, i.id`)
 	type row struct {
 		source, collection, collectionKind, id, kind, created, actor, text, summary string
 		origin, modality, trustLabel, display                                       string
-		integrityMismatch                                                           bool
+		integrityMismatch, contentOmitted                                           bool
 	}
 	grouped := map[string][]row{}
 	for rows.Next() {
@@ -2893,9 +2876,12 @@ order by s.kind, c.name, i.created_at, i.id`)
 		r.trustLabel = view.TrustLabel
 		r.display = view.Display
 		r.integrityMismatch = view.IntegrityMismatch
-		if view.IntegrityMismatch {
+		if !contentEligible(view) {
 			r.text = ""
 			r.summary = ""
+			r.contentOmitted = true
+		}
+		if view.IntegrityMismatch {
 			if err := recordIntegrityMismatchEvents(db, r.id, view.TrustLabel, view.Mismatches); err != nil {
 				return 0, err
 			}
@@ -2934,6 +2920,10 @@ order by s.kind, c.name, i.created_at, i.id`)
 			}
 			if r.integrityMismatch {
 				fmt.Fprintf(&b, "- Integrity mismatch: true\n\n")
+				continue
+			}
+			if r.contentOmitted {
+				fmt.Fprintf(&b, "- Content omitted: metadata only\n\n")
 				continue
 			}
 			if r.display != "" {

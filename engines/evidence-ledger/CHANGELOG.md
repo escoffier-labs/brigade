@@ -8,6 +8,17 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+### Fixed
+
+- Content eligibility is centralized for every body-emitting read surface.
+  Search snippets, MCP `search_evidence`, evidence bundles, Markdown export,
+  and default `show` now hide bodies unless provenance parses and injection
+  status is the validated typed value `clean` on a non-`unknown` /
+  non-`quarantined` label. Parse errors are blocking; stored digest
+  representations are not lowercased or otherwise normalized to authorize a
+  body. Direct `show --include-untrusted-body` / `--forensic-content` remain
+  the only explicit reveal paths. (#1007, #1009)
+
 ### Changed
 
 - Search integrity verification loads item text and provenance in one
