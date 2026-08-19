@@ -3562,6 +3562,8 @@ def _find_import(target: Path, import_id: str) -> tuple[dict[str, Any] | None, l
 
 
 def _import_trust_blocker(item: Mapping[str, Any] | None) -> str | None:
+    """Refuse promotion unless the current bytes still match a complete envelope."""
+
     return trust_gate.promotion_blocker(item)
 
 

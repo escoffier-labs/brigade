@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Promotion and other content admissions now validate the complete provenance envelope and require a present, exact `hashes.content` match against the current item bytes before copying a body. A same-UID rewrite of `imports.jsonl` that leaves the original envelope can no longer be promoted into a task; missing, malformed, or stale redaction records also block promotion. (#1008)
 - Origin-scoped ingest redaction now maps `work import context` (and `--source external-web` / `external-service`) to the external detector tier, normalizes free-form `--source` with `strip().lower()`, and fails closed to `unknown` on unmapped values. An equal-but-unredacted scanner result is treated as failure, and research findings redact title/summary/evidence per field so a multi-line summary cannot migrate into evidence. (#498)
 
 ### Added
