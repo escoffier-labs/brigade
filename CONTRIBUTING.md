@@ -42,6 +42,10 @@ gh pr view <number> --json reviewDecision,mergeStateStatus
 
 Dispatched sessions should open the pull request, run local verification, and push commits. After the final push, comment `@coderabbitai full review`. The `coderabbitai[bot]` identity records the formal GitHub review. Wait for its current `APPROVED` review before merging. A green CodeRabbit commit status alone does not satisfy this gate.
 
+## Changelog
+
+User-visible PRs append a bullet under `CHANGELOG.md` `## [Unreleased]` (effects, not commit subjects). Same-day sibling PRs often edit adjacent Unreleased lines; `.gitattributes` marks `CHANGELOG.md` `merge=union` so those appends combine instead of conflicting. That attribute is for this file only.
+
 ## What kinds of changes land easily
 
 - **Bug fixes** for `brigade init`, `doctor`, `scrub`, quickstart, security scanning, or the ingester.
