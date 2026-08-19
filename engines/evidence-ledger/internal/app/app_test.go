@@ -786,6 +786,7 @@ func TestSessionsListAndSearch(t *testing.T) {
 	chatGPTFixture := repoPath(t, "testdata/exports/chatgpt-conversations.json")
 	runOK(t, "import", "codex", codexFixture, "--json")
 	runOK(t, "crawl", "chatgpt-export", chatGPTFixture, "--json")
+	reviewAllLiveItemsInjectionClean(t)
 
 	listed := runJSON(t, "sessions", "list", "--source", "codex", "--json")
 	listSessions := listed["sessions"].([]any)
@@ -953,6 +954,7 @@ func TestCrawlCursorImportsFromDefaultRoot(t *testing.T) {
 	}
 
 	runOK(t, "crawl", "cursor", "--json")
+	reviewAllLiveItemsInjectionClean(t)
 
 	sessions := runJSON(t, "sessions", "search", "migration checklist", "--source", "cursor", "--json")
 	hits := sessions["sessions"].([]any)
