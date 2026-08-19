@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -97,7 +98,7 @@ def test_manual_recovery_failure_keeps_recovery_material(tmp_path: Path, monkeyp
     def boom(*_args, **_kwargs):
         raise OSError("restore failed")
 
-    monkeypatch.setattr(projection.localio, "write_bytes_atomic", boom)
+    monkeypatch.setattr(projection, "_publish_bytes_via_parent", boom)
     receipt = projection.recover(plan.operation_id, target=workspace)
     assert receipt.terminal_state == "recovery-required"
     assert receipt.recovery_command == f"brigade projection recover {plan.operation_id}"
@@ -235,7 +236,7 @@ def test_permission_and_disk_write_failures_restore(tmp_path: Path, monkeypatch:
     def boom_permission(*_args, **_kwargs):
         raise PermissionError("denied")
 
-    monkeypatch.setattr(projection.localio, "write_bytes_atomic", boom_permission)
+    monkeypatch.setattr(projection, "_publish_bytes_via_parent", boom_permission)
     receipt = projection.execute(plan, target=workspace)
     assert receipt.terminal_state == "restored"
     assert _snapshot(workspace) == before
@@ -243,7 +244,7 @@ def test_permission_and_disk_write_failures_restore(tmp_path: Path, monkeypatch:
     def boom_disk(*_args, **_kwargs):
         raise OSError(errno.ENOSPC, "no space")
 
-    monkeypatch.setattr(projection.localio, "write_bytes_atomic", boom_disk)
+    monkeypatch.setattr(projection, "_publish_bytes_via_parent", boom_disk)
     receipt = projection.execute(plan, target=workspace)
     assert receipt.terminal_state == "restored"
     assert _snapshot(workspace) == before
@@ -353,3 +354,173 @@ def test_recover_refuses_post_failure_destination_drift_without_force(tmp_path: 
 def test_dependency_decision_is_native_stdlib() -> None:
     assert projection.DEPENDENCY_DECISION["implementation"] == "native"
     assert projection.DEPENDENCY_DECISION["runtime_package"] is None
+
+
+def _swap_parent_for_outside(parent: Path, original: Path, outside: Path) -> None:
+    parent.rename(original)
+    parent.symlink_to(outside, target_is_directory=True)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="parent-swap probe requires POSIX O_NOFOLLOW",
+)
+def test_parent_swap_between_plan_and_commit_does_not_escape(tmp_path: Path) -> None:
+    """Mutation probe for #1013: swap a checked parent for a symlink before commit.
+
+    Unfixed pathname writes publish the new file outside the vault. The held-parent
+    descriptor path must refuse the commit and leave the outside tree untouched.
+    """
+    workspace = tmp_path / "vault"
+    parent = workspace / "Cards"
+    parent.mkdir(parents=True)
+    dest = parent / "note.md"
+    payload = b"escaped-via-parent-swap\n"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "note.md"
+    original = tmp_path / "Cards.original"
+
+    plan = projection.build_plan(
+        operation_id="op-parent-swap",
+        projector="probe",
+        source_fingerprint="probe-src",
+        mutations=[
+            projection.mutation(
+                destination=dest,
+                mutation="create",
+                expected_before=projection.ABSENT,
+                desired_after=_digest(payload),
+                staged_bytes=payload,
+            )
+        ],
+        target=workspace,
+    )
+    _swap_parent_for_outside(parent, original, outside)
+
+    with pytest.raises(projection.PlanError, match="symlink"):
+        projection.execute(plan, target=workspace)
+
+    assert not outside_file.exists()
+    assert list(outside.iterdir()) == []
+    assert not dest.exists()
+    assert not (original / "note.md").exists()
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="parent-swap probe requires POSIX O_NOFOLLOW",
+)
+def test_parent_swap_after_parent_is_held_does_not_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A parent swapped after the descriptor is held cannot redirect the write."""
+    workspace = tmp_path / "vault"
+    parent = workspace / "Cards"
+    parent.mkdir(parents=True)
+    dest = parent / "note.md"
+    payload = b"escaped-via-held-parent-swap\n"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "note.md"
+    original = tmp_path / "Cards.original"
+    plan = projection.build_plan(
+        operation_id="op-held-parent-swap",
+        projector="probe",
+        source_fingerprint="probe-src",
+        mutations=[
+            projection.mutation(
+                destination=dest,
+                mutation="create",
+                expected_before=projection.ABSENT,
+                desired_after=_digest(payload),
+                staged_bytes=payload,
+            )
+        ],
+        target=workspace,
+    )
+    real_publish = projection._publish_bytes_via_parent
+    swapped = {"done": False}
+
+    def swap_then_publish(parent_fd: int, name: str, data: bytes) -> None:
+        if not swapped["done"]:
+            swapped["done"] = True
+            if parent.exists() and not parent.is_symlink():
+                _swap_parent_for_outside(parent, original, outside)
+        return real_publish(parent_fd, name, data)
+
+    monkeypatch.setattr(projection, "_publish_bytes_via_parent", swap_then_publish)
+    receipt = projection.execute(plan, target=workspace)
+    assert swapped["done"] is True
+    assert receipt.terminal_state == "committed"
+    assert not outside_file.exists()
+    assert list(outside.iterdir()) == []
+    assert (original / "note.md").read_bytes() == payload
+    assert not dest.exists()
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="parent-swap probe requires POSIX O_NOFOLLOW",
+)
+def test_create_under_missing_nested_parent_stays_inside_tree(tmp_path: Path) -> None:
+    workspace = tmp_path / "vault"
+    workspace.mkdir()
+    dest = workspace / "Cards" / "nested" / "note.md"
+    payload = b"nested-create\n"
+    plan = projection.build_plan(
+        operation_id="op-nested-create",
+        projector="probe",
+        source_fingerprint="probe-src",
+        mutations=[
+            projection.mutation(
+                destination=dest,
+                mutation="create",
+                expected_before=projection.ABSENT,
+                desired_after=_digest(payload),
+                staged_bytes=payload,
+            )
+        ],
+        target=workspace,
+    )
+    receipt = projection.execute(plan, target=workspace)
+    assert receipt.terminal_state == "committed"
+    assert dest.read_bytes() == payload
+    assert not dest.is_symlink()
+    assert dest.parent.is_dir()
+    assert not dest.parent.is_symlink()
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="parent-swap probe requires POSIX O_NOFOLLOW",
+)
+def test_sibling_creates_under_shared_missing_parent_commit(tmp_path: Path) -> None:
+    workspace = tmp_path / "vault"
+    workspace.mkdir()
+    first = workspace / "Brigade Memory" / "Cards" / "Alpha.md"
+    second = workspace / "Brigade Memory" / "Cards" / "Beta.md"
+    plan = projection.build_plan(
+        operation_id="op-shared-parent",
+        projector="probe",
+        source_fingerprint="probe-src",
+        mutations=[
+            projection.mutation(
+                destination=first,
+                mutation="create",
+                expected_before=projection.ABSENT,
+                desired_after=_digest(b"alpha\n"),
+                staged_bytes=b"alpha\n",
+            ),
+            projection.mutation(
+                destination=second,
+                mutation="create",
+                expected_before=projection.ABSENT,
+                desired_after=_digest(b"beta\n"),
+                staged_bytes=b"beta\n",
+            ),
+        ],
+        target=workspace,
+    )
+    receipt = projection.execute(plan, target=workspace)
+    assert receipt.terminal_state == "committed"
+    assert first.read_bytes() == b"alpha\n"
+    assert second.read_bytes() == b"beta\n"

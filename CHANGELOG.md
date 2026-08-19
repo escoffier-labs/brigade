@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Projection commit now holds the validated parent-directory descriptors and publishes create/replace/remove through descriptor-relative open/rename, so swapping a checked parent for a symlink between plan and commit cannot redirect a write outside the destination tree. (#1013)
 - Origin-scoped ingest redaction now maps `work import context` (and `--source external-web` / `external-service`) to the external detector tier, normalizes free-form `--source` with `strip().lower()`, and fails closed to `unknown` on unmapped values. An equal-but-unredacted scanner result is treated as failure, and research findings redact title/summary/evidence per field so a multi-line summary cannot migrate into evidence. (#498)
 
 ### Added
