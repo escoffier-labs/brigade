@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Inter-seat message envelopes now bind `{run_id, message_id, assignment_id, from_seat, to_seat}` into the authenticated envelope and require those expected values at every receiver. A valid old text/envelope pair can no longer be transplanted into another run, seat, or assignment. Fallback worker output is attributed to the terminal producer, and resumed output is re-enveloped under the current run identity. (#1010)
 - Origin-scoped ingest redaction now maps `work import context` (and `--source external-web` / `external-service`) to the external detector tier, normalizes free-form `--source` with `strip().lower()`, and fails closed to `unknown` on unmapped values. An equal-but-unredacted scanner result is treated as failure, and research findings redact title/summary/evidence per field so a multi-line summary cannot migrate into evidence. (#498)
 
 ### Added

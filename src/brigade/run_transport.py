@@ -469,6 +469,7 @@ def dispatch(
             to_seat=assignment.worker,
             run_dir=output_dir,
             run_id=orchestrator_run_id,
+            assignment_id=message_envelope.assignment_id_for(assignment.worker, assignment.task),
             session_harness=agent.cli,
         )
         if not request.delivered:
@@ -715,10 +716,11 @@ def dispatch(
                 result.text,
                 kind="worker-result",
                 producer=worker_producer,
-                from_seat=assignment.worker,
+                from_seat=terminal_agent.name,
                 to_seat=orchestrator_seat,
                 run_dir=output_dir,
                 run_id=orchestrator_run_id,
+                assignment_id=message_envelope.assignment_id_for(assignment.worker, assignment.task),
                 session_harness=terminal_agent.cli,
             )
             delivered_text = result.text if captured.delivered else ""
