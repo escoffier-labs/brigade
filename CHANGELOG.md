@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Claude hook stdin is read through a byte-limited binary reader, rejects trailing input, and caps nested string and collection sizes before the timed worker starts, so an oversized hook payload cannot force unbounded allocation or JSON parsing outside the timeout. (#1014)
 - Origin-scoped ingest redaction now maps `work import context` (and `--source external-web` / `external-service`) to the external detector tier, normalizes free-form `--source` with `strip().lower()`, and fails closed to `unknown` on unmapped values. An equal-but-unredacted scanner result is treated as failure, and research findings redact title/summary/evidence per field so a multi-line summary cannot migrate into evidence. (#498)
 
 ### Added
