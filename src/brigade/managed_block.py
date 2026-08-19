@@ -24,16 +24,19 @@ legacy/unowned span does not match desired.
 
 Writes use an atomic same-directory replace and refuse to follow a symlinked
 final path component (including a symlink swapped in after the initial
-``lstat``). Unchanged content is a true no-op: no write, no mtime churn.
+``lstat``) or a parent directory swapped for a symlink. Unchanged content is
+a true no-op: no write, no mtime churn.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
 import stat
 import tempfile
+import uuid
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -869,6 +872,97 @@ def read_text_nofollow(path: Path) -> str:
     return data.decode("utf-8")
 
 
+def _managed_parent_containment_available() -> bool:
+    supports: set[object] = getattr(os, "supports_dir_fd", set())
+    return (
+        os.name == "posix"
+        and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in supports
+        and os.mkdir in supports
+        and os.unlink in supports
+    )
+
+
+def _managed_directory_flags(*, follow_descriptor: bool = False) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+    if not follow_descriptor:
+        flags |= os.O_NOFOLLOW
+    return flags
+
+
+def _is_held_descriptor_dir(path: Path) -> bool:
+    return path.parent in {Path("/proc/self/fd"), Path("/dev/fd")} and path.name.isdigit()
+
+
+def _is_swapped_parent_error(exc: OSError) -> bool:
+    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+        return True
+    text = str(exc).lower()
+    return "symlink" in text or "swapped" in text
+
+
+def _create_managed_parent(parent: Path) -> int:
+    parts = parent.parts
+    if not parts:
+        raise OSError("unsafe managed-block parent")
+    flags = _managed_directory_flags()
+    descriptor = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        for component in parts[1:]:
+            if component in {"", ".", ".."}:
+                raise OSError("unsafe managed-block parent")
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, 0o755, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(component, flags, dir_fd=descriptor)
+            except OSError as exc:
+                if _is_swapped_parent_error(exc):
+                    raise OSError("refusing swapped managed-block parent") from exc
+                raise
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _open_managed_parent(parent: Path) -> int:
+    parent = Path(parent)
+    if _is_held_descriptor_dir(parent):
+        descriptor = os.open(parent, _managed_directory_flags(follow_descriptor=True))
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise OSError("managed-block parent is not a directory")
+        return descriptor
+    try:
+        return os.open(parent, _managed_directory_flags())
+    except FileNotFoundError:
+        return _create_managed_parent(parent if parent.is_absolute() else parent.resolve())
+    except OSError as exc:
+        if _is_swapped_parent_error(exc):
+            raise OSError("refusing swapped managed-block parent") from exc
+        raise
+
+
+def _reject_symlink_parents(path: Path) -> None:
+    parent = path
+    while parent != parent.parent:
+        try:
+            mode = os.lstat(parent).st_mode
+        except FileNotFoundError:
+            parent = parent.parent
+            continue
+        if stat.S_ISLNK(mode):
+            raise OSError("refusing swapped managed-block parent")
+        parent = parent.parent
+
+
 def write_text_nofollow_atomic(
     path: Path,
     data: str,
@@ -878,7 +972,8 @@ def write_text_nofollow_atomic(
     """Atomically replace ``path`` without following a symlinked final component.
 
     ``lstat_probe`` is a test seam for the symlink-swap race between the
-    preflight check and the publish step.
+    preflight check and the publish step. Parent directories are opened with
+    ``O_NOFOLLOW`` and the replacement is published through that descriptor.
     """
     probe = lstat_probe or _lstat_mode
     mode = probe(path)
@@ -890,28 +985,94 @@ def write_text_nofollow_atomic(
         detail = f"managed-block target is not a regular file: {path}"
         return WriteOutcome(WRITE_REFUSED, detail=detail)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    tmp_path = Path(tmp_name)
+    if not _managed_parent_containment_available():
+        try:
+            _reject_symlink_parents(path.parent)
+        except OSError as exc:
+            return WriteOutcome(WRITE_REFUSED, detail=str(exc))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            mode_after = probe(path)
+            if mode_after is not None and stat.S_ISLNK(mode_after):
+                warning = f"skipping symlinked managed-block target after swap: {path}"
+                warnings.warn(warning, stacklevel=2)
+                tmp_path.unlink(missing_ok=True)
+                return WriteOutcome(WRITE_SKIPPED_SYMLINK, detail=warning, warning=warning)
+            if mode_after is not None and not stat.S_ISREG(mode_after):
+                tmp_path.unlink(missing_ok=True)
+                return WriteOutcome(WRITE_REFUSED, detail=f"managed-block target is not a regular file: {path}")
+            os.replace(tmp_path, path)
+        except BaseException as exc:
+            tmp_path.unlink(missing_ok=True)
+            return WriteOutcome(WRITE_ERROR, detail=str(exc))
+        return WriteOutcome(WRITE_WRITTEN)
+
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        parent_fd = _open_managed_parent(path.parent)
+    except OSError as exc:
+        status = WRITE_REFUSED if _is_swapped_parent_error(exc) or "swapped" in str(exc).lower() else WRITE_ERROR
+        return WriteOutcome(status, detail=str(exc))
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    descriptor = -1
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_fd)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        # Re-check immediately before publish to catch a symlink swap.
         mode_after = probe(path)
         if mode_after is not None and stat.S_ISLNK(mode_after):
             warning = f"skipping symlinked managed-block target after swap: {path}"
             warnings.warn(warning, stacklevel=2)
-            tmp_path.unlink(missing_ok=True)
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
             return WriteOutcome(WRITE_SKIPPED_SYMLINK, detail=warning, warning=warning)
         if mode_after is not None and not stat.S_ISREG(mode_after):
-            tmp_path.unlink(missing_ok=True)
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
             return WriteOutcome(WRITE_REFUSED, detail=f"managed-block target is not a regular file: {path}")
-        os.replace(tmp_path, path)
+        try:
+            named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            named = None
+        if named is not None and stat.S_ISLNK(named.st_mode):
+            warning = f"skipping symlinked managed-block target after swap: {path}"
+            warnings.warn(warning, stacklevel=2)
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            return WriteOutcome(WRITE_SKIPPED_SYMLINK, detail=warning, warning=warning)
+        os.replace(temporary_name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    except OSError as exc:
+        try:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        status = WRITE_REFUSED if _is_swapped_parent_error(exc) or "swapped" in str(exc).lower() else WRITE_ERROR
+        return WriteOutcome(status, detail=str(exc))
     except BaseException as exc:
-        tmp_path.unlink(missing_ok=True)
+        try:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
         return WriteOutcome(WRITE_ERROR, detail=str(exc))
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        os.close(parent_fd)
     return WriteOutcome(WRITE_WRITTEN)
 
 

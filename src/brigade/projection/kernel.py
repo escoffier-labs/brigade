@@ -663,13 +663,69 @@ def _close_held(held: Mapping[str, _HeldParent]) -> None:
     _close_descriptors([item.fd for item in held.values()])
 
 
+def _path_via_held_parent(parent_fd: int, filename: str) -> Path:
+    """Return a path that opens through the held parent descriptor, not a followable pathname."""
+    if not filename or filename in {".", ".."} or "/" in filename or "\\" in filename:
+        raise OSError("unsafe destination name")
+    for base in (Path("/proc/self/fd"), Path("/dev/fd")):
+        candidate = base / str(parent_fd)
+        if candidate.exists():
+            return candidate / filename
+    raise OSError("held parent descriptor path is unavailable")
+
+
+def _assert_regular_on_held_parent(parent_fd: int, name: str) -> None:
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise OSError("refusing swapped projection parent") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise OSError("refusing swapped projection parent")
+
+
+def _assert_absent_on_held_parent(parent_fd: int, name: str) -> None:
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise OSError("refusing swapped projection parent") from exc
+    raise OSError("refusing swapped projection parent")
+
+
+def _apply_writer(spec: MutationSpec, *, held: _HeldParent | None, parent_fd: int | None) -> None:
+    writer = spec.writer
+    if writer is None or spec.staged_bytes is None:
+        raise PlanError("staged bytes required")
+    if parent_fd is None or held is None:
+        writer(spec.destination, spec.staged_bytes)
+        return
+    _assert_held_parent_current(spec.destination, held)
+    writer(_path_via_held_parent(parent_fd, held.filename), spec.staged_bytes)
+    _assert_regular_on_held_parent(parent_fd, held.filename)
+    _assert_held_parent_current(spec.destination, held)
+
+
+def _apply_remover(spec: MutationSpec, *, held: _HeldParent | None, parent_fd: int | None) -> None:
+    remover = spec.remover
+    if remover is None:
+        raise PlanError("remover required")
+    if parent_fd is None or held is None:
+        remover(spec.destination)
+        return
+    _assert_held_parent_current(spec.destination, held)
+    remover(_path_via_held_parent(parent_fd, held.filename))
+    _assert_absent_on_held_parent(parent_fd, held.filename)
+    _assert_held_parent_current(spec.destination, held)
+
+
 def _apply_mutation(spec: MutationSpec) -> None:
     held = _current_held_parent(spec)
     parent_fd, extra = _materialize_held_parent(spec, held)
     try:
         if spec.mutation == "remove":
             if spec.remover is not None:
-                spec.remover(spec.destination)
+                _apply_remover(spec, held=held, parent_fd=parent_fd)
             elif parent_fd is not None and held is not None:
                 _unlink_via_parent(parent_fd, held.filename)
             else:
@@ -678,7 +734,7 @@ def _apply_mutation(spec: MutationSpec) -> None:
         if spec.staged_bytes is None:
             raise PlanError("staged bytes required")
         if spec.writer is not None:
-            spec.writer(spec.destination, spec.staged_bytes)
+            _apply_writer(spec, held=held, parent_fd=parent_fd)
         elif parent_fd is not None and held is not None:
             _publish_bytes_via_parent(parent_fd, held.filename, spec.staged_bytes)
         else:

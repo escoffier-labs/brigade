@@ -461,6 +461,140 @@ def test_parent_swap_after_parent_is_held_does_not_escape(tmp_path: Path, monkey
     os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
     reason="parent-swap probe requires POSIX O_NOFOLLOW",
 )
+def test_parent_swap_after_hold_on_writer_callback_does_not_escape(tmp_path: Path) -> None:
+    """Mutation probe: a writer= callback must not pathname-commit after the hold.
+
+    Stays red if `_apply_writer` is restored to `spec.writer(spec.destination, ...)`.
+    """
+    workspace = tmp_path / "vault"
+    parent = workspace / "Cards"
+    parent.mkdir(parents=True)
+    dest = parent / "note.md"
+    payload = b"escaped-via-parent-swap\n"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "note.md"
+    original = tmp_path / "Cards.original"
+
+    def swapping_writer(path: Path, data: bytes) -> None:
+        if parent.exists() and not parent.is_symlink():
+            _swap_parent_for_outside(parent, original, outside)
+        path.write_bytes(data)
+
+    plan = projection.build_plan(
+        operation_id="op-writer-parent-swap",
+        projector="probe",
+        source_fingerprint="probe-src",
+        mutations=[
+            projection.mutation(
+                destination=dest,
+                mutation="create",
+                expected_before=projection.ABSENT,
+                desired_after=_digest(payload),
+                staged_bytes=payload,
+                writer=swapping_writer,
+            )
+        ],
+        target=workspace,
+    )
+    receipt = projection.execute(plan, target=workspace)
+    assert receipt.terminal_state != "committed"
+    assert not outside_file.exists()
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="parent-swap probe requires POSIX O_NOFOLLOW",
+)
+def test_parent_swap_after_hold_on_managed_block_writer_does_not_escape(tmp_path: Path) -> None:
+    """Production marked-block writer plus an after-hold parent swap must not escape."""
+    from brigade import managed_block
+
+    workspace = tmp_path / "vault"
+    parent = workspace / ".claude"
+    parent.mkdir(parents=True)
+    dest = parent / "CLAUDE.md"
+    payload = b"escaped-via-parent-swap\n"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "CLAUDE.md"
+    original = tmp_path / "claude.original"
+
+    def production_writer(path: Path, data: bytes) -> None:
+        if parent.exists() and not parent.is_symlink():
+            _swap_parent_for_outside(parent, original, outside)
+        outcome = managed_block.write_text_nofollow_atomic(path, data.decode("utf-8"))
+        if outcome.status not in {managed_block.WRITE_WRITTEN, managed_block.WRITE_NOOP}:
+            raise OSError(outcome.detail or "instruction write refused")
+
+    plan = projection.build_plan(
+        operation_id="op-managed-block-writer-swap",
+        projector="probe",
+        source_fingerprint="probe-src",
+        mutations=[
+            projection.mutation(
+                destination=dest,
+                mutation="create",
+                expected_before=projection.ABSENT,
+                desired_after=_digest(payload),
+                staged_bytes=payload,
+                writer=production_writer,
+            )
+        ],
+        target=workspace,
+    )
+    receipt = projection.execute(plan, target=workspace)
+    assert receipt.terminal_state != "committed"
+    assert not outside_file.exists()
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="parent-swap probe requires POSIX O_NOFOLLOW",
+)
+def test_parent_swap_after_hold_on_remover_callback_does_not_escape(tmp_path: Path) -> None:
+    workspace = tmp_path / "vault"
+    parent = workspace / "Cards"
+    parent.mkdir(parents=True)
+    dest = parent / "note.md"
+    dest.write_bytes(b"keep-inside\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "note.md"
+    outside_file.write_bytes(b"outside-victim\n")
+    original = tmp_path / "Cards.original"
+
+    def swapping_remover(path: Path) -> None:
+        if parent.exists() and not parent.is_symlink():
+            _swap_parent_for_outside(parent, original, outside)
+        path.unlink()
+
+    plan = projection.build_plan(
+        operation_id="op-remover-parent-swap",
+        projector="probe",
+        source_fingerprint="probe-src",
+        mutations=[
+            projection.mutation(
+                destination=dest,
+                mutation="remove",
+                expected_before=_digest(b"keep-inside\n"),
+                desired_after=projection.ABSENT,
+                remover=swapping_remover,
+            )
+        ],
+        target=workspace,
+    )
+    receipt = projection.execute(plan, target=workspace)
+    assert receipt.terminal_state != "committed"
+    assert outside_file.read_bytes() == b"outside-victim\n"
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="parent-swap probe requires POSIX O_NOFOLLOW",
+)
 def test_create_under_missing_nested_parent_stays_inside_tree(tmp_path: Path) -> None:
     workspace = tmp_path / "vault"
     workspace.mkdir()
