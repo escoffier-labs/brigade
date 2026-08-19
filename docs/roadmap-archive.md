@@ -19,6 +19,38 @@ brigade roadmap audit
 
 ## Archived Items
 
+### Read-Only Operator Dashboard First Slice
+
+- id: `read-only-operator-dashboard-first-slice`
+- status: implemented
+- closed phase: n/a
+- owner: center
+- reason: Closed with `brigade center serve` as a loopback-bound read-only dashboard (#729, #784) over existing `--json` contracts, with nonce CSP, a Host-header allowlist, and no bind beyond loopback without a token plus an explicit host list. Status, Runs, Research, Work, Code Graph, and Agent Activity views shipped; runs list, detail, and watch use versioned JSON contracts (#958, #631). Remaining workspace UI (scorecard-backed model comparison, document editor) stays on the live roadmap.
+
+### Work Inbox Graph
+
+- id: `work-inbox-graph`
+- status: implemented
+- closed phase: n/a
+- owner: work
+- reason: Closed with typed dependency edges (`blocks`, `parent-child`, `discovered-from`), a computed ready set with blocked reasons, bulk graph creation from a plan file (`brigade work task add --graph`), atomic compare-and-set claims with a distinct guard-mismatch exit, and fail-closed filter scoping (#783, #796, #797, #856, #948). Ready and blocked JSON feed the operator dashboard Work view.
+
+### Wiring Durability And Instruction Hygiene
+
+- id: `wiring-durability-instruction-hygiene`
+- status: implemented
+- closed phase: n/a
+- owner: harness
+- reason: Closed with hash-stamped managed instruction blocks (version, profile, content hash; `brigade harness sync --check` classifies missing/stale/current) (#732), work brief as the instruction source of truth with minimal and full depth profiles (#733), hook output envelope (valid empty payload, doctor pointer, elision banner, compaction restore) (#736), and `brigade doctor --agent` (#808 / #734).
+
+### Handoff Standalone-Chunk Lint
+
+- id: `handoff-standalone-chunk-lint`
+- status: implemented
+- closed phase: n/a
+- owner: memory
+- reason: Closed with `brigade handoff lint` warnings for context-dependent durable facts (#730, #773). Remaining memory-care depth (smarter staleness, contradiction, and evidence checks) stays on the live roadmap.
+
 ### Deeper Roadmap Ownership Modeling
 
 - id: `deeper-roadmap-ownership-modeling`

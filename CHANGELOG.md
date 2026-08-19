@@ -193,6 +193,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same repo-local recovery recipe. (#860)
 
 ### Documentation
+- ROADMAP.md "Where things stand" now tracks v0.27.x: the provenance and
+  evidence-trust program, the read-only Center dashboard, the memory
+  vault and stable-card-id program, scanner and verifier authority
+  hardening, and the cross-session Stop-gate fix. Shipped Next and Later
+  slices (dashboard first slice, work-inbox graph, wiring durability,
+  handoff standalone-chunk lint) moved to docs/roadmap-archive.md.
+  Part of #1000.
 - Quickstart commit guidance now states that `.claude/` stays local-only
   except the managed `.claude/memory-handoffs/TEMPLATE.md` Claude onboarding
   requires tracked, cross-linking the repo-local shadow recovery from #858.
