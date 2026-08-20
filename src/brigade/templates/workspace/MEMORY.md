@@ -63,7 +63,7 @@ Build out this table as you learn the shape of your durable knowledge. Starter s
 
 | Category | Topics |
 |----------|--------|
-| foundation | memory architecture, handoff flow, content safety, memory scanner, memory care, chat-surface crawlers, pipeline standups |
+| foundation | memory architecture, handoff flow, content safety, memory scanner, memory care, chat-surface crawlers, pipeline standups, workspace file maintenance |
 | system | identity, memory-search system, sub-agent patterns, agent-wrapper patterns |
 | user | personal context, communication style, preferences |
 | infrastructure | hosts, ports, deploys, mounts, local services |
@@ -87,6 +87,7 @@ Add categories as the workspace grows. One topic per card; one card per topic.
 - [pipeline-standups](memory/cards/pipeline-standups.md) - nightshift + morning cross-harness recaps
 - [chat-surface-crawlers](memory/cards/chat-surface-crawlers.md) - discrawl-shaped local archives for Discord, Slack, WhatsApp, etc.
 - [content-safety](memory/cards/content-safety.md) - publish gates and what they block
+- [workspace-file-maintenance](memory/cards/workspace-file-maintenance.md) - which bootstrap file to update when a fact changes
 
 ## Current Priorities
 
