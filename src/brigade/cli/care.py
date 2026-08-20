@@ -23,9 +23,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_install.add_argument(
         "--backend",
-        choices=["auto", "systemd", "launchd"],
+        choices=["auto", "systemd", "launchd", "schtasks"],
         default="auto",
-        help="Scheduler backend (default: systemd on Linux, launchd on macOS).",
+        help="Scheduler backend (default: systemd on Linux, launchd on macOS, schtasks on Windows).",
     )
     p_install.add_argument("--dry-run", action="store_true", help="Show the plan without writing.")
     p_install.add_argument(
@@ -49,9 +49,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_status.add_argument(
         "--backend",
-        choices=["auto", "systemd", "launchd"],
+        choices=["auto", "systemd", "launchd", "schtasks"],
         default="auto",
-        help="Scheduler backend (default: systemd on Linux, launchd on macOS).",
+        help="Scheduler backend (default: systemd on Linux, launchd on macOS, schtasks on Windows).",
     )
     p_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_status.add_argument(
@@ -71,9 +71,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_uninstall.add_argument(
         "--backend",
-        choices=["auto", "systemd", "launchd"],
+        choices=["auto", "systemd", "launchd", "schtasks"],
         default="auto",
-        help="Scheduler backend (default: systemd on Linux, launchd on macOS).",
+        help="Scheduler backend (default: systemd on Linux, launchd on macOS, schtasks on Windows).",
     )
     p_uninstall.add_argument("--dry-run", action="store_true", help="Show the plan without writing.")
     p_uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")

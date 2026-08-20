@@ -171,8 +171,8 @@ function Get-BoundedStderr {
     if (-not (Test-Path $Path)) {
         return ""
     }
-    $text = (Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue)
-    if (-not $text) {
+    $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $text) {
         return ""
     }
     $text = $text.Trim()
@@ -180,6 +180,80 @@ function Get-BoundedStderr {
         return $text
     }
     return $text.Substring(0, $MaxChars) + "..."
+}
+
+function Test-AcceptanceProcessIsElevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Read-AcceptanceFileText {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        return ""
+    }
+    $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $raw) {
+        return ""
+    }
+    return $raw.Trim()
+}
+
+function Invoke-PrintedSchtasksBatch {
+    param(
+        [string]$BatchPath,
+        [string]$StdoutPath,
+        [string]$StderrPath
+    )
+    # Execute the printed schtasks line from a .cmd file. Do not pass the
+    # schtasks line through `cmd /c <line>` (nested /TR quotes break).
+    # Do not use `runas /trustlevel:0x20000` — on real Windows 11 that
+    # errors `The system cannot find the file specified` whether or not
+    # the session is elevated. /IT is valid in both tokens, so run the
+    # batch in the current process.
+    if (-not $BatchPath -or -not (Test-Path -LiteralPath $BatchPath)) {
+        throw "printed schtasks batch is missing: $BatchPath"
+    }
+    foreach ($redirect in @($StdoutPath, $StderrPath)) {
+        if ($redirect -and (Test-Path -LiteralPath $redirect)) {
+            Remove-Item -LiteralPath $redirect -Force
+        }
+    }
+    $resolved = Resolve-Path -LiteralPath $BatchPath
+    if ($null -eq $resolved) {
+        throw "printed schtasks batch did not resolve: $BatchPath"
+    }
+    $batchAbs = [string]$resolved.Path
+    if (-not $batchAbs) {
+        throw "printed schtasks batch resolved to an empty path: $BatchPath"
+    }
+    # PS 5.1 Start-Process ArgumentList arrays re-quote each element. Passing
+    # @("/c", '"C:\path\file.cmd"') becomes a CreateProcess line cmd cannot
+    # resolve (`The system cannot find the file specified`). Put the batch
+    # path in the inherited environment and keep ArgumentList a constant.
+    # Hidden window + redirects: PS 5.1 rejects a current-console start
+    # combined with stdout/stderr file redirects.
+    $previousBatch = $env:BRIGADE_ACCEPT_BATCH
+    try {
+        $env:BRIGADE_ACCEPT_BATCH = $batchAbs
+        $process = Start-Process -FilePath "C:\Windows\System32\cmd.exe" -ArgumentList '/c call "%BRIGADE_ACCEPT_BATCH%"' -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+        if ($null -eq $process) {
+            throw "failed to start printed schtasks batch: $batchAbs"
+        }
+        if ($null -eq $process.ExitCode) {
+            throw "printed schtasks batch produced no exit code: $batchAbs"
+        }
+        return [int]$process.ExitCode
+    }
+    finally {
+        if ($null -eq $previousBatch) {
+            Remove-Item -Path "Env:BRIGADE_ACCEPT_BATCH" -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:BRIGADE_ACCEPT_BATCH = $previousBatch
+        }
+    }
 }
 
 function Invoke-ExternalCommand {
@@ -211,7 +285,11 @@ function Invoke-ExternalCommand {
 
 function Get-BrigadeCliVersion {
     $raw = Invoke-ExternalCommand -Command { & brigade --version } -FailureMessage "brigade --version failed"
-    $line = ($raw | Select-Object -First 1).ToString().Trim()
+    $first = $raw | Select-Object -First 1
+    if ($null -eq $first) {
+        throw "brigade --version produced no stdout"
+    }
+    $line = ([string]$first).Trim()
     if ($line -match '^brigade\s+(.+)$') {
         return $Matches[1].Trim()
     }
@@ -825,6 +903,151 @@ else:
         if ($searchOutput -notmatch [regex]::Escape($acceptanceMarker)) {
             throw "miseledger search missing acceptance marker: $searchOutput"
         }
+
+        Write-Step "brigade care install (Windows printed plan)"
+        # PowerShell 5.1 + $ErrorActionPreference Stop promotes native stderr to
+        # NativeCommandError. care install must write its fail-closed message to
+        # stderr and exit 3, so invoke it through cmd.exe file redirects.
+        $careInstallOut = Join-Path $acceptRoot "care-install.out"
+        $careInstallErr = Join-Path $acceptRoot "care-install.err"
+        cmd.exe /c "brigade care install --target `"$workRepo`" --dry-run > `"$careInstallOut`" 2> `"$careInstallErr`""
+        if ($LASTEXITCODE -ne 3) {
+            throw "care install --dry-run must exit 3 on Windows (printed plan, no mutation), got $LASTEXITCODE"
+        }
+        $careInstallLines = @(Get-Content -LiteralPath $careInstallOut)
+        $careInstallText = $careInstallLines | Out-String
+        if ($careInstallText -match "unsupported on win32") {
+            throw "care install --dry-run refused on the default auto backend: $careInstallText"
+        }
+        $expectedSchedules = @{
+            "BrigadeCare-daily-care"             = "/SC DAILY /ST 06:15"
+            "BrigadeCare-ingest-sweep"           = "/SC MINUTE /MO 30"
+            "BrigadeCare-weekly-outcome-ratchet" = "/SC WEEKLY /D MON /ST 07:00"
+            "BrigadeCare-daily-observability"    = "/SC DAILY /ST 08:00"
+            "BrigadeCare-nightly-ops"            = "/SC DAILY /ST 04:00"
+        }
+        foreach ($taskName in $expectedSchedules.Keys) {
+            $createLine = $careInstallLines | Where-Object { $_ -match [regex]::Escape("/TN `"$taskName`"") } | Select-Object -First 1
+            if (-not $createLine) {
+                throw "care install missing schtasks /Create for $taskName"
+            }
+            if ($createLine -notmatch [regex]::Escape($expectedSchedules[$taskName])) {
+                throw "care install schedule mismatch for ${taskName}: $createLine"
+            }
+            if ($createLine -notmatch '/RU "%USERNAME%" /IT') {
+                throw "care install missing /RU /IT pair for ${taskName}: $createLine"
+            }
+            if ($createLine -match "/NP") {
+                throw "care install must emit /IT not /NP (S4U /NP requires elevation) for ${taskName}: $createLine"
+            }
+            if ($createLine -match "/RL") {
+                throw "care install must not emit /RL for ${taskName}: $createLine"
+            }
+            if ($createLine -notmatch [regex]::Escape("C:\Windows\System32\cmd.exe")) {
+                throw "care install /TR must use absolute cmd.exe for ${taskName}: $createLine"
+            }
+            if ($createLine -match "C:\\\\") {
+                throw "care install emitted doubled backslashes for ${taskName}: $createLine"
+            }
+        }
+
+        $careJsonOut = Join-Path $acceptRoot "care-install.json"
+        $careJsonErr = Join-Path $acceptRoot "care-install-json.err"
+        cmd.exe /c "brigade care install --target `"$workRepo`" --dry-run --json > `"$careJsonOut`" 2> `"$careJsonErr`""
+        if ($LASTEXITCODE -ne 3) {
+            throw "care install --dry-run --json must exit 3 on Windows, got $LASTEXITCODE"
+        }
+        $careJsonText = Read-AcceptanceFileText -Path $careJsonOut
+        if (-not $careJsonText) {
+            throw "care install --json produced no stdout"
+        }
+        $carePlan = $careJsonText | ConvertFrom-Json
+        if ($carePlan.backend -ne "schtasks") {
+            throw "care install --json backend=$($carePlan.backend), expected schtasks"
+        }
+        if ($carePlan.tasks.Count -lt 5) {
+            throw "care install --json expected 5 tasks, got $($carePlan.tasks.Count)"
+        }
+
+        Write-Step "brigade care status (Windows Task Scheduler)"
+        $careStatusOut = Join-Path $acceptRoot "care-status.json"
+        $careStatusErr = Join-Path $acceptRoot "care-status.err"
+        cmd.exe /c "brigade care status --target `"$workRepo`" --json > `"$careStatusOut`" 2> `"$careStatusErr`""
+        if ($LASTEXITCODE -ne 0) {
+            throw "care status --json must report the printed-plan state on Windows, got $LASTEXITCODE"
+        }
+        $careStatusText = Read-AcceptanceFileText -Path $careStatusOut
+        if (-not $careStatusText) {
+            throw "care status --json produced no stdout"
+        }
+        $careStatus = $careStatusText | ConvertFrom-Json
+        if ($careStatus.backend -ne "schtasks") {
+            throw "care status --json backend=$($careStatus.backend), expected schtasks"
+        }
+
+        $createDaily = $careInstallLines | Where-Object { $_ -match '^schtasks /Create /TN "BrigadeCare-daily-care"' } | Select-Object -First 1
+        if (-not $createDaily) {
+            throw "care install missing BrigadeCare-daily-care /Create line"
+        }
+        $createCmd = Join-Path $acceptRoot "create-brigade-care.cmd"
+        $createOut = Join-Path $acceptRoot "schtasks-create.out"
+        $createErr = Join-Path $acceptRoot "schtasks-create.err"
+        Set-Content -LiteralPath $createCmd -Value $createDaily -Encoding ascii
+        $elevated = Test-AcceptanceProcessIsElevated
+        Write-Host ("care create context: elevated={0}; running printed .cmd in current token (/IT is valid elevated and not)" -f $elevated)
+        # The .cmd is the printed /Create line only. It does not /Run the task
+        # and must not invoke the /TR body (brigade, the runbook, or cd).
+        try {
+            $createExit = Invoke-PrintedSchtasksBatch -BatchPath $createCmd -StdoutPath $createOut -StderrPath $createErr
+            Write-Host ("care create batch exit={0} (printed /Create only; /TR body is not executed)" -f $createExit)
+            if ($createExit -ne 0) {
+                $createStdout = Read-AcceptanceFileText -Path $createOut
+                $createStderr = Read-AcceptanceFileText -Path $createErr
+                throw "printed schtasks command was rejected (exit $createExit, elevated=$elevated): $createDaily`nstdout: $createStdout`nstderr: $createStderr"
+            }
+            $queryOut = Join-Path $acceptRoot "schtasks-query.out"
+            $queryErr = Join-Path $acceptRoot "schtasks-query.err"
+            cmd.exe /c "schtasks /Query /TN `"BrigadeCare-daily-care`" > `"$queryOut`" 2> `"$queryErr`""
+            if ($LASTEXITCODE -ne 0) {
+                throw "schtasks /Query did not find BrigadeCare-daily-care after printed /Create"
+            }
+            $careStatusAfterOut = Join-Path $acceptRoot "care-status-after.json"
+            $careStatusAfterErr = Join-Path $acceptRoot "care-status-after.err"
+            cmd.exe /c "brigade care status --target `"$workRepo`" --json > `"$careStatusAfterOut`" 2> `"$careStatusAfterErr`""
+            if ($LASTEXITCODE -ne 0) {
+                throw "care status --json after /Create failed with $LASTEXITCODE"
+            }
+            $careStatusAfterText = Read-AcceptanceFileText -Path $careStatusAfterOut
+            if (-not $careStatusAfterText) {
+                throw "care status --json after /Create produced no stdout"
+            }
+            $careStatusAfter = $careStatusAfterText | ConvertFrom-Json
+            $dailyTask = $careStatusAfter.tasks | Where-Object { $_.id -eq "daily-care" } | Select-Object -First 1
+            if (-not $dailyTask -or -not $dailyTask.exists) {
+                throw "care status did not report BrigadeCare-daily-care as present after /Create"
+            }
+        }
+        finally {
+            # schtasks /Query on a missing /TN prints
+            # "ERROR: The system cannot find the file specified" and exits 1.
+            # The "file" is the task (BrigadeCare-daily-care), not brigade,
+            # cmd.exe, the runbook, or the printed .cmd. GitHub Actions
+            # `shell: powershell` then does `exit $LASTEXITCODE`, so a live
+            # Query after a successful /Delete fails the job even though this
+            # script printed "passed". Redirect both cleanup calls and reset
+            # LASTEXITCODE so the expected missing-task signal cannot leak.
+            $deleteOut = Join-Path $acceptRoot "schtasks-delete.out"
+            $deleteErr = Join-Path $acceptRoot "schtasks-delete.err"
+            $goneOut = Join-Path $acceptRoot "schtasks-query-gone.out"
+            $goneErr = Join-Path $acceptRoot "schtasks-query-gone.err"
+            cmd.exe /c "schtasks /Delete /TN `"BrigadeCare-daily-care`" /F > `"$deleteOut`" 2> `"$deleteErr`""
+            cmd.exe /c "schtasks /Query /TN `"BrigadeCare-daily-care`" > `"$goneOut`" 2> `"$goneErr`""
+            $goneExit = $LASTEXITCODE
+            cmd.exe /c "exit 0"
+            if ($goneExit -eq 0) {
+                throw "BrigadeCare-daily-care was left behind after /Delete"
+            }
+        }
     }
     finally {
         Pop-Location
@@ -840,3 +1063,4 @@ finally {
         Remove-Item -LiteralPath $acceptRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+exit 0

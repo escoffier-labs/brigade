@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -389,7 +390,9 @@ def test_care_crontab_percent_in_path_is_escaped(tmp_path, monkeypatch):
 
     assert care_cmd.install(target=target, backend="crontab", json_output=True) == 0
     body = care_cmd._crontab_body(workspace=target)
-    assert r'cd "ws\%pct"' in body or rf'cd "{target}"'.replace("%", "\\%") in body
+    escaped = care_cmd._cron_escape_path(str(target))
+    assert f'cd "{escaped}"' in body
+    assert "\\%" in escaped
     assert "\\%" in body
 
 
@@ -424,6 +427,7 @@ def test_care_systemd_install_refuses_malformed_unit_without_write(tmp_path, mon
 
 
 def test_care_windows_install_prints_schtasks_and_does_not_claim_success(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: True)
     calls = []
 
@@ -440,6 +444,266 @@ def test_care_windows_install_prints_schtasks_and_does_not_claim_success(tmp_pat
     assert "schtasks" in out
     assert "BrigadeCare-daily-care" in out
     assert calls == []
+
+
+def _create_line_for(out: str, entry_id: str) -> str:
+    marker = f'/TN "BrigadeCare-{entry_id}"'
+    for line in out.splitlines():
+        if marker in line and line.startswith("schtasks /Create"):
+            return line
+    raise AssertionError(f"missing schtasks /Create line for {entry_id} in:\n{out}")
+
+
+def test_care_auto_backend_on_win32_reaches_printed_plan(tmp_path, monkeypatch, capsys):
+    """#1021: mocking only `_is_windows` hid that auto never resolved on win32."""
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    rc = care_cmd.install(target=tmp_path, backend="auto")
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert "unsupported on win32" not in captured.err
+    assert "schtasks /Create" in captured.out
+    assert care_cmd._resolve_backend("auto") == care_cmd.SCHTASKS_BACKEND
+
+
+EXPECTED_SCHTASKS_FLAGS = {
+    "15 6 * * *": "/SC DAILY /ST 06:15",
+    "*/30 * * * *": "/SC MINUTE /MO 30",
+    "0 7 * * 1": "/SC WEEKLY /D MON /ST 07:00",
+    "0 8 * * *": "/SC DAILY /ST 08:00",
+    "0 4 * * *": "/SC DAILY /ST 04:00",
+    "0 7 * * *": "/SC DAILY /ST 07:00",
+    "0 9 * * *": "/SC DAILY /ST 09:00",
+}
+
+
+def test_schtasks_schedule_flags_match_every_catalog_hint():
+    for entry in (*care_cmd.CARE_ENTRIES, *care_cmd.MEMORY_JOB_ENTRIES):
+        assert care_cmd._schtasks_schedule_flags(entry.schedule) == EXPECTED_SCHTASKS_FLAGS[entry.schedule]
+
+
+def test_schtasks_schedule_flags_fail_closed_on_unsupported_cron():
+    with pytest.raises(ValueError, match="unsupported care schedule"):
+        care_cmd._schtasks_schedule_flags("0 0 1 * *")
+    with pytest.raises(ValueError, match="unsupported care schedule"):
+        care_cmd._schtasks_schedule_flags("15 6 * * * *")
+
+
+def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkeypatch, capsys):
+    """Regression: the printer used to stamp /SC DAILY /ST 06:15 on every line."""
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    assert care_cmd.install(target=tmp_path, backend="auto") == 3
+    out = capsys.readouterr().out
+    for entry in care_cmd.CARE_ENTRIES:
+        line = _create_line_for(out, entry.entry_id)
+        flags = EXPECTED_SCHTASKS_FLAGS[entry.schedule]
+        assert flags in line, line
+        assert f"schedule_hint: cron '{entry.schedule}'" in out
+        # The old bug would put 06:15 on ingest-sweep, weekly, observability, nightly.
+        if flags != "/SC DAILY /ST 06:15":
+            assert "/ST 06:15" not in line
+        assert '/RU "%USERNAME%" /IT /F' in line
+        assert "/NP" not in line
+        assert "/RL" not in line
+        assert "/F:String" not in line
+        assert line.endswith(" /F")
+        assert line.startswith("schtasks /Create ")
+        assert r'/TR "C:\Windows\System32\cmd.exe /c cd /d ' in line
+
+
+def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path):
+    """Emitted lines must use /IT (not /NP) and an absolute cmd.exe /TR."""
+    workspace = Path(r"C:\Users\operator\project")
+    for entry in (*care_cmd.CARE_ENTRIES, *care_cmd.MEMORY_JOB_ENTRIES):
+        command = care_cmd._schtasks_create_command(entry, workspace=workspace)
+        flags = EXPECTED_SCHTASKS_FLAGS[entry.schedule]
+        assert f'/TN "BrigadeCare-{entry.entry_id}"' in command
+        assert flags in command
+        assert r'/TR "C:\Windows\System32\cmd.exe /c ' in command
+        assert '/RU "%USERNAME%" /IT /F' in command
+        assert "/NP" not in command
+        assert "/RL" not in command
+        assert "/F:String" not in command
+        assert command.startswith("schtasks /Create ")
+        assert command.endswith(" /F")
+
+
+def test_care_windows_printed_path_uses_single_backslashes(tmp_path):
+    entry = care_cmd.CARE_ENTRIES[0]
+    workspace = Path(r"C:\Users\operator\project")
+    command = care_cmd._schtasks_create_command(entry, workspace=workspace)
+    assert r"C:\Users\operator\project" in command
+    assert r"C:\\Users" not in command
+    spaced = care_cmd._schtasks_create_command(entry, workspace=Path(r"C:\Users\operator\my project"))
+    assert r"cd /d \"C:\Users\operator\my project\"" in spaced
+    assert r"C:\\Users" not in spaced
+    assert "/F:String" not in command
+    assert "/RL" not in command
+    assert command.endswith('/RU "%USERNAME%" /IT /F')
+    assert "/NP" not in command
+    assert r"C:\Windows\System32\cmd.exe /c " in command
+
+
+def test_care_windows_install_json_returns_structured_plan(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    assert care_cmd.install(target=tmp_path, backend="auto", json_output=True, dry_run=True) == 3
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["backend"] == "schtasks"
+    assert payload["mutates_scheduler"] is False
+    assert payload["status"] == "printed-plan"
+    assert {task["id"] for task in payload["tasks"]} == {entry.entry_id for entry in care_cmd.CARE_ENTRIES}
+    for task, entry in zip(payload["tasks"], care_cmd.CARE_ENTRIES, strict=True):
+        assert task["schedule"] == entry.schedule
+        assert task["schedule_flags"] == EXPECTED_SCHTASKS_FLAGS[entry.schedule]
+        assert task["schedule_flags"] in task["command"]
+        assert '/RU "%USERNAME%" /IT' in task["command"]
+        assert "/NP" not in task["command"]
+
+
+def test_care_windows_status_reports_task_presence_instead_of_refusing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+
+    def fake_query(task_name: str) -> dict:
+        if task_name == "BrigadeCare-daily-care":
+            return {
+                "task_name": task_name,
+                "exists": True,
+                "status": "Ready",
+                "last_run": "8/19/2026 6:15:00 AM",
+                "next_run": "8/20/2026 6:15:00 AM",
+                "error": None,
+            }
+        return {
+            "task_name": task_name,
+            "exists": False,
+            "status": "missing",
+            "last_run": None,
+            "next_run": None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(care_cmd, "_query_schtasks", fake_query)
+    assert care_cmd.status(target=tmp_path, backend="auto", json_output=True) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["backend"] == "schtasks"
+    assert payload["status"] == "partial"
+    daily = next(task for task in payload["tasks"] if task["id"] == "daily-care")
+    assert daily["exists"] is True
+    assert daily["last_run"] == "8/19/2026 6:15:00 AM"
+    ingest = next(task for task in payload["tasks"] if task["id"] == "ingest-sweep")
+    assert ingest["exists"] is False
+    assert "unsupported on win32" not in captured.err
+
+
+def test_care_status_payload_on_win32_uses_schtasks(tmp_path, monkeypatch):
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    monkeypatch.setattr(
+        care_cmd,
+        "_query_schtasks",
+        lambda task_name: {
+            "task_name": task_name,
+            "exists": False,
+            "status": "missing",
+            "last_run": None,
+            "next_run": None,
+            "error": None,
+        },
+    )
+    payload = care_cmd.status_payload(target=tmp_path)
+    assert payload["enabled"] is False
+    assert payload["backends"]["schtasks"]["status"] == "missing"
+    assert payload["backends"]["crontab"]["status"] == "unsupported-backend"
+    assert {task["id"] for task in payload["tasks"]} >= {"daily-care", "ingest-sweep"}
+
+
+def test_uses_schtasks_is_backend_not_host(monkeypatch):
+    """#1045: explicit non-native backends stay host-agnostic on win32."""
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: True)
+    assert care_cmd._uses_schtasks("schtasks") is True
+    assert care_cmd._uses_schtasks("auto") is False
+    assert care_cmd._uses_schtasks("launchd") is False
+    assert care_cmd._uses_schtasks("systemd") is False
+    assert care_cmd._uses_schtasks("crontab") is False
+
+
+def test_care_explicit_backends_generate_plans_on_win32(tmp_path, monkeypatch, capsys):
+    """Explicit launchd/systemd/crontab must not be swallowed by the Windows printer."""
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    assert care_cmd.install(target=target, backend="launchd", home=home, json_output=True) == 0
+    launchd_out = capsys.readouterr()
+    assert "does not mutate the Windows scheduler" not in launchd_out.err
+    agents = care_cmd._launchd_dir(home)
+    assert any(agents.glob("dev.brigade.care.*.plist"))
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
+    systemd_out = capsys.readouterr()
+    assert "does not mutate the Windows scheduler" not in systemd_out.err
+    unit_dir = home / ".config" / "systemd" / "user"
+    assert any(unit_dir.glob("brigade-care-*.service"))
+
+    store = {"text": ""}
+    monkeypatch.setattr(care_cmd, "_read_crontab", lambda: (store["text"], None))
+    monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: store.__setitem__("text", text) or None)
+    assert care_cmd.install(target=target, backend="crontab", home=home, json_output=True) == 0
+    crontab_out = capsys.readouterr()
+    assert "does not mutate the Windows scheduler" not in crontab_out.err
+    assert "# BEGIN BRIGADE CARE" in store["text"]
+
+
+def test_care_cli_accepts_schtasks_backend(monkeypatch, tmp_path):
+    seen: dict[str, dict] = {}
+
+    def fake_install(**kwargs):
+        seen["install"] = kwargs
+        return 0
+
+    monkeypatch.setattr("brigade.care_cmd.install", fake_install)
+    assert cli.main(["care", "install", "--target", str(tmp_path), "--backend", "schtasks", "--dry-run"]) == 0
+    assert seen["install"]["backend"] == "schtasks"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires native schtasks.exe")
+def test_care_printed_schtasks_commands_are_accepted_by_windows(tmp_path):
+    """Native gate: a printed /Create line must be valid schtasks syntax."""
+    import subprocess
+
+    rc = care_cmd.install(target=tmp_path, backend="auto")
+    assert rc == 3
+    # Recreate from the helper so the assertion is the printed command, not a rewrite.
+    entry = care_cmd.CARE_ENTRIES[0]
+    command = care_cmd._schtasks_create_command(entry, workspace=tmp_path)
+    # cmd /c <schtasks-line> splits /TR nested quotes (`ERROR: Invalid
+    # argument/option - '/c'`). Write the printed line to a batch file and
+    # execute that file instead.
+    batch = tmp_path / "create-brigade-care.cmd"
+    batch.write_text(command + "\r\n", encoding="ascii")
+    create = subprocess.run([str(batch)], capture_output=True, text=True, check=False, timeout=30)
+    try:
+        assert create.returncode == 0, create.stdout + create.stderr
+        query = subprocess.run(
+            ["schtasks", "/Query", "/TN", care_cmd._schtasks_task_name(entry), "/FO", "LIST", "/V"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        assert query.returncode == 0, query.stderr
+        assert care_cmd._schtasks_task_name(entry) in query.stdout
+    finally:
+        subprocess.run(
+            ["schtasks", "/Delete", "/TN", care_cmd._schtasks_task_name(entry), "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
 
 
 def test_care_cli_dispatch(monkeypatch, tmp_path):
@@ -509,7 +773,10 @@ def test_care_systemd_unit_quotes_workspace_paths_with_spaces(tmp_path, monkeypa
     text = service.read_text(encoding="utf-8")
     parsed = managed_block.parse_blocks(text, kind=care_cmd.CARE_KIND, style=care_cmd.CARE_MARKER_STYLE)
     assert parsed.status == "ok"
-    assert f'WorkingDirectory="{target}"' in parsed.body
+    # Compare against the same quoting helper install uses so a win32
+    # workspace path (backslashes, spaces) is not asserted as a POSIX literal.
+    assert care_cmd._systemd_working_directory(target.expanduser().resolve()) in parsed.body
+    assert "my workspace" in parsed.body
     assert (
         "ExecStart=/usr/bin/env brigade runbook run --approved "
         ".brigade/memory-care/runbooks/daily-care-pass.json --target ."
@@ -532,7 +799,8 @@ def test_care_systemd_environment_path_quotes_home_with_spaces(tmp_path, monkeyp
     )
     assert parsed.status == "ok"
     assert 'Environment="PATH=' in parsed.body
-    assert str(home / ".local" / "bin") in parsed.body
+    assert care_cmd._systemd_environment_path(care_cmd._path_prefix(home)) in parsed.body
+    assert "my home" in parsed.body
 
 
 def test_care_systemd_percent_in_path_is_escaped(tmp_path, monkeypatch):
