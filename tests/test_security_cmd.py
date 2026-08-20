@@ -171,7 +171,6 @@ def test_security_scan_secrets_false_positive_suppressions(tmp_path):
                 "AWS_SECRET_ACCESS_KEY_FILE=/run/secrets/aws-key",
                 "DB_PASSWORD_PATH=~/.brigade/db-password",
                 "TLS_KEY_FILEPATH=./certs/tls.key",
-                'password="${HOME}/.brigade/.restic-password"',
                 "",
             ]
         )
@@ -230,6 +229,40 @@ def test_security_scan_secrets_false_positive_suppressions(tmp_path):
     assert sum(1 for f in secrets if f["path"] == "quoted_runtime_prefix.py" and f["line"] == 2) == 1
     assert not any("guard/examples" in f["path"] for f in secrets)
     assert not any("security_cmd" in f["path"] for f in secrets)
+
+
+def test_security_scan_reports_passwords_that_start_like_path_expressions(tmp_path):
+    """Probe #1049: value-shape skips silenced real passwords; name-suffix stays the only skip."""
+    (tmp_path / "looks_like_path.txt").write_text(
+        "\n".join(
+            [
+                "password=$uperSecret123456",
+                'password="$uperSecret123456"',
+                "password=~notAPathButLooksLikeOne",
+                'password="${HOME}/.brigade/.restic-password"',
+                "",
+            ]
+        )
+    )
+    (tmp_path / "name_suffix.sh").write_text(
+        "\n".join(
+            [
+                'RESTIC_PASSWORD_FILE="${HOME}/.brigade/.restic-password"',
+                "DB_PASSWORD_PATH=~/.brigade/db-password",
+                "TLS_KEY_FILEPATH=./certs/tls.key",
+                "",
+            ]
+        )
+    )
+
+    report = security_cmd.scan_target(tmp_path)
+    secrets = [finding for finding in report["findings"] if finding["category"] == "secrets"]
+    look_lines = {finding["line"] for finding in secrets if finding["path"] == "looks_like_path.txt"}
+    assert look_lines == {1, 2, 3, 4}
+    assert all(
+        finding["title"] == "Plaintext password" for finding in secrets if finding["path"] == "looks_like_path.txt"
+    )
+    assert not any(finding["path"] == "name_suffix.sh" for finding in secrets)
 
 
 def test_fresh_workspace_security_scan_has_no_findings_on_generated_files(tmp_path):

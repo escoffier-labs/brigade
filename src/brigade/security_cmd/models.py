@@ -245,7 +245,6 @@ PLAINTEXT_PASSWORD_RE = re.compile(
 
 
 _SECRET_PATH_NAME_SUFFIXES = ("_file", "_path", "_filepath")
-_PATH_EXPRESSION_RE = re.compile(r"^(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|~|/|\./|\.\./)")
 
 
 def _assignment_left_hand_name(match: re.Match[str]) -> str:
@@ -262,19 +261,14 @@ def _is_secret_path_name(name: str) -> bool:
     return name.lower().endswith(_SECRET_PATH_NAME_SUFFIXES)
 
 
-def _is_path_expression(value: str) -> bool:
-    return _PATH_EXPRESSION_RE.match(value.strip()) is not None
-
-
 def _is_secret_path_assignment(match: re.Match[str]) -> bool:
-    """True when the assignment names or points at a secret *file/path*, not a secret value."""
-    if _is_secret_path_name(_assignment_left_hand_name(match)):
-        return True
-    try:
-        value = match.group(2)
-    except IndexError:
-        return False
-    return _is_path_expression(value)
+    """True when the left-hand name is a secret *file/path* variable, not a secret value.
+
+    Only ``*_FILE`` / ``*_PATH`` / ``*_FILEPATH`` names are skipped (the #1025
+    ``RESTIC_PASSWORD_FILE`` false positive). Values that merely start with
+    ``$``, ``~``, or ``/`` stay reportable so committed passwords are not silenced.
+    """
+    return _is_secret_path_name(_assignment_left_hand_name(match))
 
 
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
