@@ -2994,6 +2994,18 @@ conflict_window = "02:00-02:10"
             "import_path": str(tmp_path / ".brigade" / "repo-scan.jsonl"),
         },
     )
+    receipt_path = run_dir / "receipt.json"
+    receipt_data = receipt_path.read_bytes()
+    receipt_fd = os.open(receipt_path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        work_cmd.ledger._record_verifier_owned_file(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", "no-import-run", "receipt.json"),
+            descriptor=receipt_fd,
+            data=receipt_data,
+        )
+    finally:
+        os.close(receipt_fd)
 
     assert work_cmd.inbox_doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
