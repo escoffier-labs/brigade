@@ -160,8 +160,8 @@ function Get-BoundedStderr {
     if (-not (Test-Path $Path)) {
         return ""
     }
-    $text = (Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue)
-    if (-not $text) {
+    $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $text) {
         return ""
     }
     $text = $text.Trim()
@@ -210,7 +210,10 @@ function Invoke-PrintedSchtasksBatch {
         }
     }
     $batchAbs = (Resolve-Path -LiteralPath $BatchPath).Path
-    $process = Start-Process -FilePath "C:\Windows\System32\cmd.exe" -ArgumentList @("/c", "`"$batchAbs`"") -Wait -PassThru -NoNewWindow -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+    # Windows PowerShell 5.1 forbids a current-console start together with
+    # stdout/stderr redirects. Hidden window + redirects is the supported
+    # combination; /IT is valid elevated and not.
+    $process = Start-Process -FilePath "C:\Windows\System32\cmd.exe" -ArgumentList @("/c", "`"$batchAbs`"") -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
     if ($null -eq $process) {
         throw "failed to start printed schtasks batch: $batchAbs"
     }

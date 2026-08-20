@@ -411,6 +411,11 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "Read-AcceptanceFileText" in text
     assert "runas.exe /trustlevel:0x20000" not in text
     assert "Start-Process -FilePath" in text
+    assert "-WindowStyle Hidden" in text
+    invoke_batch = _extract_powershell_function(text, "Invoke-PrintedSchtasksBatch")
+    assert "-NoNewWindow" not in invoke_batch
+    assert "-RedirectStandardOutput" in invoke_batch
+    assert "-WindowStyle Hidden" in invoke_batch
     # care install writes to stderr and exits 3; PS 5.1 Stop mode cannot invoke it
     # as a native command. The script must go through cmd.exe file redirects.
     assert (
