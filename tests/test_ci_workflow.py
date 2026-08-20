@@ -416,6 +416,10 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "-NoNewWindow" not in invoke_batch
     assert "-RedirectStandardOutput" in invoke_batch
     assert "-WindowStyle Hidden" in invoke_batch
+    # Array ArgumentList plus nested quotes is the Win11 file-not-found path.
+    assert "-ArgumentList @(" not in invoke_batch
+    assert "BRIGADE_ACCEPT_BATCH" in invoke_batch
+    assert "if ($null -eq $process.ExitCode)" in invoke_batch
     # care install writes to stderr and exits 3; PS 5.1 Stop mode cannot invoke it
     # as a native command. The script must go through cmd.exe file redirects.
     assert (

@@ -209,15 +209,40 @@ function Invoke-PrintedSchtasksBatch {
             Remove-Item -LiteralPath $redirect -Force
         }
     }
-    $batchAbs = (Resolve-Path -LiteralPath $BatchPath).Path
-    # Windows PowerShell 5.1 forbids a current-console start together with
-    # stdout/stderr redirects. Hidden window + redirects is the supported
-    # combination; /IT is valid elevated and not.
-    $process = Start-Process -FilePath "C:\Windows\System32\cmd.exe" -ArgumentList @("/c", "`"$batchAbs`"") -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
-    if ($null -eq $process) {
-        throw "failed to start printed schtasks batch: $batchAbs"
+    $resolved = Resolve-Path -LiteralPath $BatchPath
+    if ($null -eq $resolved) {
+        throw "printed schtasks batch did not resolve: $BatchPath"
     }
-    return [int]$process.ExitCode
+    $batchAbs = [string]$resolved.Path
+    if (-not $batchAbs) {
+        throw "printed schtasks batch resolved to an empty path: $BatchPath"
+    }
+    # PS 5.1 Start-Process ArgumentList arrays re-quote each element. Passing
+    # @("/c", '"C:\path\file.cmd"') becomes a CreateProcess line cmd cannot
+    # resolve (`The system cannot find the file specified`). Put the batch
+    # path in the inherited environment and keep ArgumentList a constant.
+    # Hidden window + redirects: PS 5.1 rejects a current-console start
+    # combined with stdout/stderr file redirects.
+    $previousBatch = $env:BRIGADE_ACCEPT_BATCH
+    try {
+        $env:BRIGADE_ACCEPT_BATCH = $batchAbs
+        $process = Start-Process -FilePath "C:\Windows\System32\cmd.exe" -ArgumentList '/c call "%BRIGADE_ACCEPT_BATCH%"' -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+        if ($null -eq $process) {
+            throw "failed to start printed schtasks batch: $batchAbs"
+        }
+        if ($null -eq $process.ExitCode) {
+            throw "printed schtasks batch produced no exit code: $batchAbs"
+        }
+        return [int]$process.ExitCode
+    }
+    finally {
+        if ($null -eq $previousBatch) {
+            Remove-Item -Path "Env:BRIGADE_ACCEPT_BATCH" -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:BRIGADE_ACCEPT_BATCH = $previousBatch
+        }
+    }
 }
 
 function Invoke-ExternalCommand {
@@ -249,7 +274,11 @@ function Invoke-ExternalCommand {
 
 function Get-BrigadeCliVersion {
     $raw = Invoke-ExternalCommand -Command { & brigade --version } -FailureMessage "brigade --version failed"
-    $line = ($raw | Select-Object -First 1).ToString().Trim()
+    $first = $raw | Select-Object -First 1
+    if ($null -eq $first) {
+        throw "brigade --version produced no stdout"
+    }
+    $line = ([string]$first).Trim()
     if ($line -match '^brigade\s+(.+)$') {
         return $Matches[1].Trim()
     }
