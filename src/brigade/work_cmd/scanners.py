@@ -1168,14 +1168,56 @@ def _scanner_import_counts(target: Path) -> dict[str, Any]:
     return ledger_mod._import_counts(imports)
 
 
-def _reconcile_known_row(before: dict[str, Any], after: dict[str, Any], *, trusted_scanner: bool) -> bool:
-    """Allow only built-in lifecycle mutation of an existing local inbox row."""
-    if not trusted_scanner or before.get("id") != after.get("id"):
-        return False
-    lifecycle_keys = {"status", "updated_at", "dismissed_at", "dismiss_reason"}
-    return {key: value for key, value in before.items() if key not in lifecycle_keys} == {
-        key: value for key, value in after.items() if key not in lifecycle_keys
-    }
+_LIFECYCLE_FIELD_KEYS = frozenset({"status", "updated_at", "dismissed_at", "dismiss_reason"})
+_SCANNER_LIFECYCLE_TRANSITIONS: dict[tuple[str, str], frozenset[str]] = {
+    ("pending", "dismissed"): frozenset({"status", "updated_at", "dismissed_at", "dismiss_reason"}),
+}
+
+
+def _scanner_row_status(item: dict[str, Any]) -> str:
+    status = item.get("status", "pending")
+    return status if isinstance(status, str) and status.strip() else "pending"
+
+
+def _reconcile_known_row(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    scanner: dict[str, Any],
+    run_proof: _ScannerRunProof | None,
+) -> dict[str, Any] | None:
+    """Return a narrow lifecycle rewrite, or None when the action is unauthorized.
+
+    A replacement row is accepted only as a legal producer action: a trusted
+    built-in scanner, the exact verifier-held run proof, ``before.source ==
+    scanner.source``, an allowed state transition, and unchanged non-lifecycle
+    fields. The returned row is ``before`` plus the transition's allowed fields
+    from ``after``.
+    """
+    if run_proof is None or before.get("id") != after.get("id"):
+        return None
+    if not _trusted_builtin_scanner(scanner):
+        return None
+    if before.get("source") != scanner.get("source"):
+        return None
+    before_status = _scanner_row_status(before)
+    after_status = _scanner_row_status(after)
+    allowed_fields = _SCANNER_LIFECYCLE_TRANSITIONS.get((before_status, after_status))
+    if allowed_fields is None:
+        return None
+    before_body = {key: value for key, value in before.items() if key not in _LIFECYCLE_FIELD_KEYS}
+    after_body = {key: value for key, value in after.items() if key not in _LIFECYCLE_FIELD_KEYS}
+    if before_body != after_body:
+        return None
+    applied = dict(before)
+    for key in allowed_fields:
+        if key in after:
+            applied[key] = after[key]
+    if after_status == "dismissed":
+        dismissed_at = applied.get("dismissed_at")
+        if not isinstance(dismissed_at, str) or not dismissed_at.strip():
+            return None
+    return applied
 
 
 def _scanner_stamp_new_imports(
@@ -1234,18 +1276,23 @@ def _scanner_stamp_new_imports(
         item = _raw_row_object(raw)
         if item is not None and isinstance(item.get("id"), str):
             candidates = before_by_id.get(item["id"], [])
-            matching_index = next(
-                (
-                    index
-                    for index, before_item in candidates
-                    if index not in replacements
-                    and _reconcile_known_row(before_item, item, trusted_scanner=trusted_scanner)
-                ),
-                None,
-            )
+            matching_index = None
+            applied: dict[str, Any] | None = None
+            for index, before_item in candidates:
+                if index in replacements:
+                    continue
+                applied = _reconcile_known_row(
+                    before_item,
+                    item,
+                    scanner=scanner,
+                    run_proof=run_proof,
+                )
+                if applied is not None:
+                    matching_index = index
+                    break
             if candidates:
-                if matching_index is not None:
-                    replacements[matching_index] = raw
+                if matching_index is not None and applied is not None:
+                    replacements[matching_index] = json.dumps(applied, sort_keys=True).encode("utf-8") + b"\n"
                 else:
                     rejected += 1
                 continue
@@ -2048,17 +2095,102 @@ def _scanner_source_map(target: Path) -> dict[str, dict[str, Any]]:
     return by_source
 
 
+def _open_scanner_config_parent(target: Path, *, create: bool) -> tuple[int, str]:
+    """Open ``.brigade`` by descriptors and return the ``scanners.toml`` leaf name."""
+    target_root = target.expanduser().resolve()
+    config_path = helpers._scanner_config_path(target_root)
+    try:
+        relative = config_path.relative_to(target_root)
+    except ValueError as exc:
+        raise OSError("scanner config escapes target") from exc
+    if len(relative.parts) < 2:
+        raise OSError("scanner config path is incomplete")
+    parent = ledger_mod._open_directory_nofollow(target_root)
+    try:
+        for component in relative.parts[:-1]:
+            try:
+                child = ledger_mod._dirfd_open_dir(parent, component)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                ledger_mod._dirfd_mkdir(parent, component)
+                child = ledger_mod._dirfd_open_dir(parent, component)
+            os.close(parent)
+            parent = child
+        return parent, relative.parts[-1]
+    except BaseException:
+        os.close(parent)
+        raise
+
+
+def _publish_scanner_config(target: Path, data: bytes, *, force: bool) -> None:
+    """Atomically publish ``scanners.toml`` without following a planted symlink."""
+    parent, name = _open_scanner_config_parent(target, create=True)
+    temporary_name = f".{name}.{uuid4().hex}.tmp"
+    descriptor = -1
+    try:
+        try:
+            named = ledger_mod._dirfd_stat(parent, name)
+        except FileNotFoundError:
+            named = None
+        if named is not None:
+            if stat.S_ISLNK(named.st_mode):
+                raise OSError("scanner config is a symlink")
+            if not stat.S_ISREG(named.st_mode):
+                raise OSError("scanner config is not a regular file")
+            if not force:
+                raise FileExistsError(name)
+        descriptor = ledger_mod._dirfd_open_file(
+            parent,
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            named = ledger_mod._dirfd_stat(parent, name)
+        except FileNotFoundError:
+            named = None
+        if named is not None:
+            if stat.S_ISLNK(named.st_mode):
+                raise OSError("scanner config is a symlink")
+            if not stat.S_ISREG(named.st_mode):
+                raise OSError("scanner config is not a regular file")
+            if not force:
+                raise FileExistsError(name)
+        ledger_mod._dirfd_replace(parent, temporary_name, name)
+        temporary_name = ""
+        ledger_mod._dirfd_fsync(parent)
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        if temporary_name:
+            try:
+                ledger_mod._dirfd_unlink(parent, temporary_name)
+            except FileNotFoundError:
+                pass
+        os.close(parent)
+
+
 def scanners_init(*, target: Path, force: bool = False, update_gitignore: bool = True) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     path = helpers._scanner_config_path(target)
-    if path.exists() and not force:
+    try:
+        _publish_scanner_config(target, config_mod._format_scanner_toml().encode("utf-8"), force=force)
+    except FileExistsError:
         print(f"error: scanner config already exists: {path}", file=sys.stderr)
         return 2
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(config_mod._format_scanner_toml())
+    except OSError as exc:
+        print(f"error: scanner config refused: {exc}", file=sys.stderr)
+        return 2
     print(f"scanner_config: {path}")
     print(f"scanners: {len(constants.SCANNER_DEFAULTS)}")
     if update_gitignore:
@@ -2377,6 +2509,7 @@ def _scanners_run_payload(
                 scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
                 try:
                     existing_imports = _scanner_inbox_imports(target)
+                    inbox_snapshot = _scanner_inbox_bytes(target)
                 except OSError:
                     run["ingest_output"] = {
                         "path": str(path),
@@ -2392,6 +2525,14 @@ def _scanners_run_payload(
                     }
                     _write_scanner_run_receipt(run)
                     continue
+                inbox_exists = True
+                try:
+                    existing_inbox = _open_scanner_inbox(target, os.O_RDONLY)
+                except OSError:
+                    inbox_exists = False
+                else:
+                    os.close(existing_inbox)
+                before_files = ledger_mod._snapshot_external_file_authorities(target)
                 imported, skipped_records, skipped_dismissed, rejected = ledger_mod._append_import_records(
                     target,
                     records,
@@ -2402,6 +2543,14 @@ def _scanners_run_payload(
                     restore_existing_raw=lambda data, exists: _restore_scanner_inbox_bytes(target, data, exists),
                     existing_imports=existing_imports,
                 )
+                if imported:
+                    _SCANNER_RUN_PUBLICATION_SNAPSHOTS[id(run)] = {
+                        "target": target,
+                        "inbox": inbox_snapshot,
+                        "inbox_exists": inbox_exists,
+                        "proof_items": list(imported),
+                        "files": before_files,
+                    }
                 if _scanner_run_proof(scanner, run) is not None:
                     for item in imported:
                         _record_scanner_import_proof(scanner, run, item)

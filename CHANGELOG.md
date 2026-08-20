@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- Scanner lifecycle rewrites now require the verifier-held run proof, `before.source == scanner.source`, and a legal `pending → dismissed` transition. A replacement row is applied as that narrow action, so a matching built-in scanner cannot dismiss another source's finding, resurrect a dismissed row, or assign an arbitrary status. Fixes #1039.
+- Explicit `import_path` ingestion retains the same publication snapshot as self-import (pre-commit inbox, persisted proofs, and file bindings) until the final scanner receipt binds. A failed receipt write rolls the import and proofs back together. Fixes #1040.
+- `work scanners init` and `--force` publish `.brigade/scanners.toml` through a descriptor-relative no-follow walk and replace only a verified regular file, so a planted dangling or live symlink cannot redirect the write outside the workspace. Fixes #1042.
 - `work import promote --all` now reviews and promotes one inbox generation under the task-ledger lock. Matching rows are bound to that snapshot's identity and digest; a same-id swap or rewrite between review and promote is refused and does not create a task. Fixes #1037.
 - Run transport now applies quarantine, allowlist, and provider preflight to every `invoke` candidate, so an invalid-final fallback cannot launch a seat that is already quarantined for the run. Fixes #1038.
 - Receipt `endpoint_host` provenance records parsed hosts or the fixed `invalid-endpoint` marker. A `*_BASE_URL_REF` that resolves to a value with no hostname is no longer copied into the receipt. Fixes #1041.
