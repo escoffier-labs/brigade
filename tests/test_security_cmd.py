@@ -8,6 +8,8 @@ from brigade import learn_cmd
 from brigade import release_cmd
 from brigade import security_cmd
 from brigade import work_cmd
+from brigade.install import install_selection
+from brigade.selection import Selection
 
 
 def test_security_scan_finds_agent_workspace_risks(tmp_path, capsys):
@@ -162,6 +164,17 @@ def test_security_scan_secrets_false_positive_suppressions(tmp_path):
     )
     (target / "dual_match.py").write_text("token=abc123abc123abc123abc123abc123\n")
     (target / "attribute_read.py").write_text("approval_token=reservation.token,\n")
+    (target / "password_file.sh").write_text(
+        "\n".join(
+            [
+                'RESTIC_PASSWORD_FILE="${HOME}/.brigade/.restic-password"',
+                "AWS_SECRET_ACCESS_KEY_FILE=/run/secrets/aws-key",
+                "DB_PASSWORD_PATH=~/.brigade/db-password",
+                "TLS_KEY_FILEPATH=./certs/tls.key",
+                "",
+            ]
+        )
+    )
     # A quoted value is a committed literal even when its text opens with a runtime
     # expression, so the runtime exemption must not reach inside the quotes.
     (target / "quoted_runtime_prefix.py").write_text(
@@ -200,6 +213,7 @@ def test_security_scan_secrets_false_positive_suppressions(tmp_path):
     assert "secrets_module.py" not in {p for p, _ in paths_lines}
     assert "env_read.py" not in {p for p, _ in paths_lines}
     assert "attribute_read.py" not in {p for p, _ in paths_lines}
+    assert "password_file.sh" not in {p for p, _ in paths_lines}
     assert ("real_secret.py", 1) in paths_lines
     # JWT-shaped values are dot-separated like attribute reads but must still report.
     assert ("jwt.env", 1) in paths_lines
@@ -215,6 +229,65 @@ def test_security_scan_secrets_false_positive_suppressions(tmp_path):
     assert sum(1 for f in secrets if f["path"] == "quoted_runtime_prefix.py" and f["line"] == 2) == 1
     assert not any("guard/examples" in f["path"] for f in secrets)
     assert not any("security_cmd" in f["path"] for f in secrets)
+
+
+def test_security_scan_reports_passwords_that_start_like_path_expressions(tmp_path):
+    """Probe #1049: value-shape skips silenced real passwords; name-suffix stays the only skip."""
+    (tmp_path / "looks_like_path.txt").write_text(
+        "\n".join(
+            [
+                "password=$uperSecret123456",
+                'password="$uperSecret123456"',
+                "password=~notAPathButLooksLikeOne",
+                'password="${HOME}/.brigade/.restic-password"',
+                "",
+            ]
+        )
+    )
+    (tmp_path / "name_suffix.sh").write_text(
+        "\n".join(
+            [
+                'RESTIC_PASSWORD_FILE="${HOME}/.brigade/.restic-password"',
+                "DB_PASSWORD_PATH=~/.brigade/db-password",
+                "TLS_KEY_FILEPATH=./certs/tls.key",
+                "",
+            ]
+        )
+    )
+
+    report = security_cmd.scan_target(tmp_path)
+    secrets = [finding for finding in report["findings"] if finding["category"] == "secrets"]
+    look_lines = {finding["line"] for finding in secrets if finding["path"] == "looks_like_path.txt"}
+    assert look_lines == {1, 2, 3, 4}
+    assert all(
+        finding["title"] == "Plaintext password" for finding in secrets if finding["path"] == "looks_like_path.txt"
+    )
+    assert not any(finding["path"] == "name_suffix.sh" for finding in secrets)
+
+
+def test_fresh_workspace_security_scan_has_no_findings_on_generated_files(tmp_path):
+    """#1025: shipped templates must not trip the scanner, including RESTIC_PASSWORD_FILE."""
+    target = tmp_path / "ws"
+    assert (
+        install_selection(
+            target,
+            Selection(
+                depth="workspace",
+                harnesses=["openclaw", "claude", "codex", "grok"],
+                owner="openclaw",
+                includes=[],
+            ),
+        )
+        == 0
+    )
+    report = security_cmd.scan_target(target)
+    generated = [
+        finding
+        for finding in report["findings"]
+        if finding["path"] == "scripts/backup-restic.sh" or finding["path"].endswith("AGENTS.md")
+    ]
+    assert generated == []
+    assert not any(finding["title"] == "Plaintext password" for finding in report["findings"])
 
 
 def test_security_scan_secret_title_rank_order_is_pinned(tmp_path):

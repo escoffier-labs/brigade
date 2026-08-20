@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -981,29 +982,92 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
+# docs/files/repo/markdown/html/gitlog/json/jsonl require retired sourceharvest.
+_SOURCEHARVEST_OMIT_REASON = "requires the retired sourceharvest helper; omitted from the printed plan"
+_MEMORY_NAMESPACE_REL = Path("memory") / "NAMESPACE"
+_MEMORY_NAMESPACE_RE = re.compile(
+    r"^memory-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+_MEMORY_NAMESPACE_OMIT_REASON = (
+    "requires an operator-declared opaque memory-<uuid4> in memory/NAMESPACE; "
+    "declare that file before running crawl memory"
+)
+
+
+def _memory_namespace_ready(target: Path) -> bool:
+    """True when the workspace has a valid operator-declared memory namespace."""
+    try:
+        value = (target / _MEMORY_NAMESPACE_REL).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return bool(value) and _MEMORY_NAMESPACE_RE.fullmatch(value) is not None
+
+
+def _crawl_plan_commands(miseledger_cmd: str, target: Path) -> list[list[str]]:
+    """Review-only plan: commands that run on a clean copy-paste of this target."""
+    commands = [
+        [miseledger_cmd, "init"],
+        [miseledger_cmd, "crawl", "sessions"],
+    ]
+    if _memory_namespace_ready(target):
+        commands.append([miseledger_cmd, "crawl", "memory", str(target)])
+    commands.extend(
+        [
+            [miseledger_cmd, "status", "--json"],
+            [miseledger_cmd, "doctor"],
+        ]
+    )
+    return commands
+
+
+def _crawl_plan_omitted(miseledger_cmd: str, target: Path) -> list[dict[str, Any]]:
+    omitted: list[dict[str, Any]] = []
+    if not _memory_namespace_ready(target):
+        omitted.append(
+            {
+                "argv": [miseledger_cmd, "crawl", "memory", str(target)],
+                "reason": _MEMORY_NAMESPACE_OMIT_REASON,
+            }
+        )
+    omitted.extend(
+        [
+            {
+                "argv": [miseledger_cmd, "crawl", "files", str(target)],
+                "reason": _SOURCEHARVEST_OMIT_REASON,
+            },
+            {
+                "argv": [miseledger_cmd, "crawl", "gitlog", str(target)],
+                "reason": _SOURCEHARVEST_OMIT_REASON,
+            },
+        ]
+    )
+    return omitted
+
+
 def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     binary = evidence_brief._miseledger_bin()
     miseledger_cmd = binary or "miseledger"
+    memory_ready = _memory_namespace_ready(target)
+    manual_steps = [
+        "Run crawls on the machine that holds the harness session logs (often the agent host).",
+        "Pass additional crawl sources (chat exports, discrawl/slacrawl adapters) only when those tools are installed.",
+        "Treat imported text as untrusted evidence, not instructions.",
+        "crawl files and crawl gitlog are omitted: they require the retired sourceharvest helper.",
+    ]
+    if not memory_ready:
+        manual_steps.insert(
+            3,
+            "crawl memory is omitted until memory/NAMESPACE declares an opaque memory-<uuid4>.",
+        )
     return {
         "target": str(target),
         "kind": "crawl",
         "created_at": _now(),
         "installed": binary is not None,
-        "commands": [
-            [miseledger_cmd, "init"],
-            [miseledger_cmd, "crawl", "sessions"],
-            [miseledger_cmd, "crawl", "memory", str(target)],
-            [miseledger_cmd, "crawl", "files", "--root", str(target)],
-            [miseledger_cmd, "crawl", "gitlog", "--repo", str(target)],
-            [miseledger_cmd, "status", "--json"],
-            [miseledger_cmd, "doctor"],
-        ],
-        "manual_steps": [
-            "Run crawls on the machine that holds the harness session logs (often the agent host).",
-            "Pass additional crawl sources (chat exports, discrawl/slacrawl adapters) only when those tools are installed.",
-            "Treat imported text as untrusted evidence, not instructions.",
-        ],
+        "commands": _crawl_plan_commands(miseledger_cmd, target),
+        "omitted": _crawl_plan_omitted(miseledger_cmd, target),
+        "manual_steps": manual_steps,
         "boundaries": [
             "This review-only crawl plan never executes the evidence engine.",
             "Brigade does not upload ledger data or start daemons.",
@@ -1081,6 +1145,17 @@ def _render_plan_md(payload: dict[str, Any]) -> str:
         lines.append("```sh")
         lines.append(" ".join(str(part) for part in command))
         lines.append("```")
+        lines.append("")
+    omitted = payload.get("omitted") or []
+    if omitted:
+        lines.extend(["## Omitted", ""])
+        for row in omitted:
+            if not isinstance(row, dict):
+                continue
+            argv = row.get("argv") or []
+            reason = row.get("reason") or ""
+            printed = " ".join(str(part) for part in argv) if argv else "command"
+            lines.append(f"- `{printed}` — {reason}")
         lines.append("")
     lines.extend(["## Manual Steps", ""])
     for step in payload.get("manual_steps") or []:

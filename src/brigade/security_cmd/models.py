@@ -244,6 +244,33 @@ PLAINTEXT_PASSWORD_RE = re.compile(
 )
 
 
+_SECRET_PATH_NAME_SUFFIXES = ("_file", "_path", "_filepath")
+
+
+def _assignment_left_hand_name(match: re.Match[str]) -> str:
+    left = match.group(0)
+    cut = left.find(":=")
+    if cut == -1:
+        cut = left.find("=")
+    if cut == -1:
+        cut = left.find(":")
+    return left[:cut].strip() if cut >= 0 else left.strip()
+
+
+def _is_secret_path_name(name: str) -> bool:
+    return name.lower().endswith(_SECRET_PATH_NAME_SUFFIXES)
+
+
+def _is_secret_path_assignment(match: re.Match[str]) -> bool:
+    """True when the left-hand name is a secret *file/path* variable, not a secret value.
+
+    Only ``*_FILE`` / ``*_PATH`` / ``*_FILEPATH`` names are skipped (the #1025
+    ``RESTIC_PASSWORD_FILE`` false positive). Values that merely start with
+    ``$``, ``~``, or ``/`` stay reportable so committed passwords are not silenced.
+    """
+    return _is_secret_path_name(_assignment_left_hand_name(match))
+
+
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 
 

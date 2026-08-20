@@ -309,6 +309,9 @@ def test_health_half_fed_uses_receipt_only_advice(tmp_path):
     assert health["eligible_receipt_count"] == 0
     assert health["top_issue"]["name"] == "outcome_loop_half_fed"
     assert "subject_binding" in health["top_issue"]["detail"]
+    assert "--manifest" in health["top_issue"]["detail"]
+    assert "verify/manifests" in health["top_issue"]["detail"]
+    assert "registered verifier" not in health["top_issue"]["detail"]
     assert "outcome capture" not in health["top_issue"]["detail"].lower()
 
 
