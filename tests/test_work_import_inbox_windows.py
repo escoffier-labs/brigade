@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from brigade import authority_key
 from brigade.work_cmd import helpers, ledger
 from brigade.work_cmd import nt_dirfd
 
@@ -135,56 +136,148 @@ def test_open_import_inbox_parent_rejects_inbox_escape(tmp_path: Path, monkeypat
         ledger._open_import_inbox_parent(tmp_path, create=True)
 
 
-def test_ledger_has_no_bare_windows_open_flags() -> None:
+def _assert_no_bare_windows_open_flags(source_path: Path) -> None:
     """Linux-visible guard: bare os.O_NOFOLLOW/O_DIRECTORY crash on Windows."""
-    source = Path(ledger.__file__).read_text()
+    source = source_path.read_text()
     for lineno, line in enumerate(source.splitlines(), 1):
         if "os.O_NOFOLLOW" in line and "getattr" not in line:
-            raise AssertionError(f"bare os.O_NOFOLLOW at {lineno}: {line}")
+            raise AssertionError(f"bare os.O_NOFOLLOW at {source_path}:{lineno}: {line}")
         if "os.O_DIRECTORY" in line and "getattr" not in line:
-            raise AssertionError(f"bare os.O_DIRECTORY at {lineno}: {line}")
+            raise AssertionError(f"bare os.O_DIRECTORY at {source_path}:{lineno}: {line}")
+
+
+def test_ledger_has_no_bare_windows_open_flags() -> None:
+    _assert_no_bare_windows_open_flags(Path(ledger.__file__))
+    _assert_no_bare_windows_open_flags(Path(authority_key.__file__))
+
+
+def _append_manual_import(tmp_path: Path, text: str) -> dict[str, object]:
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": text, "kind": "task", "source": "manual", "metadata": {}},
+        importer_source="manual",
+    )
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [record],
+        provenance_source="manual",
+        migrate_untrusted_identities=True,
+    )
+    assert imported
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    return imported[0]
+
+
+def _bind_workspace_authority(tmp_path: Path) -> dict[str, int]:
+    (tmp_path / ".brigade").mkdir(exist_ok=True)
+    workspace = ledger._workspace_directory_identity(tmp_path)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root = os.open(tmp_path / ".brigade", flags)
+    try:
+        ledger._record_external_directory_authority(tmp_path, (".brigade",), root, workspace=workspace)
+    finally:
+        os.close(root)
+    return workspace
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="executes the Windows import proof and authority path")
 def test_windows_import_proof_and_authority_store_round_trip(tmp_path: Path) -> None:
     """Run the full import write on Windows; do not grep a CI script."""
-    record = ledger._sanitize_untrusted_import_record(
-        {"text": "windows proof path", "kind": "task", "source": "manual", "metadata": {}},
-        importer_source="manual",
-    )
-    imported, skipped, dismissed, rejected = ledger._append_import_records(
-        tmp_path,
-        [record],
-        provenance_source="manual",
-        migrate_untrusted_identities=True,
-    )
-    assert imported
-    assert skipped == []
-    assert dismissed == []
-    assert rejected == []
-    assert ledger._has_persisted_import_proof(imported[0], target=tmp_path)
+    imported = _append_manual_import(tmp_path, "windows proof path")
+    assert ledger._has_persisted_import_proof(imported, target=tmp_path)
     _path, payload = ledger._read_external_directory_authority(tmp_path)
     assert payload is not None
     assert ledger._read_imports(tmp_path)
 
 
-def test_append_import_records_succeeds_on_current_platform(tmp_path: Path) -> None:
-    record = ledger._sanitize_untrusted_import_record(
-        {"text": "windows inbox regression", "kind": "task", "source": "manual", "metadata": {}},
-        importer_source="manual",
-    )
-    imported, skipped, dismissed, rejected = ledger._append_import_records(
-        tmp_path,
-        [record],
-        provenance_source="manual",
-        migrate_untrusted_identities=True,
-    )
-    assert imported
-    assert skipped == []
-    assert dismissed == []
-    assert rejected == []
+def test_append_import_records_executes_proof_and_authority_store(tmp_path: Path) -> None:
+    """Linux CI must execute the import-proof authority write, not only grep a script."""
+    imported = _append_manual_import(tmp_path, "windows inbox regression")
     inbox = helpers._imports_path(tmp_path)
     assert inbox.is_file()
     assert not inbox.is_symlink()
     assert "windows inbox regression" in inbox.read_text()
     assert ledger._read_imports(tmp_path)
+    assert ledger._has_persisted_import_proof(imported, target=tmp_path)
+    path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert payload is not None
+    assert payload["target"] == str(tmp_path.resolve())
+    raw = path.read_text(encoding="utf-8")
+    assert "envelope_version" in raw or "schema_version" in raw
+
+
+def test_authority_store_survives_missing_posix_open_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Execute the HMAC store after deleting os.O_NOFOLLOW/O_DIRECTORY (Windows)."""
+    monkeypatch.delattr(ledger.os, "O_NOFOLLOW", raising=False)
+    monkeypatch.delattr(ledger.os, "O_DIRECTORY", raising=False)
+    monkeypatch.setattr(ledger, "_nt_dirfd_available", lambda: True)
+    monkeypatch.setattr(authority_key, "_nt_nofollow_available", lambda: True)
+
+    def open_path_file(path: Path | str, flags: int, mode: int = 0o600) -> int:
+        create = bool(flags & os.O_CREAT)
+        exclusive = bool(flags & os.O_EXCL)
+        write = bool(flags & (os.O_WRONLY | os.O_RDWR))
+        open_flags = os.O_RDONLY
+        if write:
+            open_flags = os.O_WRONLY
+        if create:
+            open_flags |= os.O_CREAT
+        if exclusive:
+            open_flags |= os.O_EXCL
+        return os.open(path, open_flags, mode) if create else os.open(path, open_flags)
+
+    def open_root_directory(path: Path | str) -> int:
+        return os.open(path, os.O_RDONLY)
+
+    monkeypatch.setattr(nt_dirfd, "open_path_file", open_path_file)
+    monkeypatch.setattr(nt_dirfd, "open_root_directory", open_root_directory)
+
+    _bind_workspace_authority(tmp_path)
+    path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert payload is not None
+    assert payload["target"] == str(tmp_path.resolve())
+    assert path.is_file()
+
+
+def test_authority_store_closes_temp_handle_before_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows raises WinError 32 if os.replace runs while the temp fd is open."""
+    write_fds: list[int] = []
+
+    def wrap_open(real_open):
+        def tracking_open(path: Path, flags: int, mode: int = 0o600) -> int:
+            descriptor = real_open(path, flags, mode)
+            if flags & os.O_CREAT:
+                write_fds.append(descriptor)
+            return descriptor
+
+        return tracking_open
+
+    real_replace = os.replace
+
+    def refuse_replace_if_temp_open(source: Path | str, destination: Path | str) -> None:
+        for descriptor in write_fds:
+            try:
+                os.fstat(descriptor)
+            except OSError:
+                continue
+            raise OSError(32, "file is being used by another process", str(source))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(ledger, "_open_file_nofollow", wrap_open(ledger._open_file_nofollow))
+    monkeypatch.setattr(authority_key, "_open_file_nofollow", wrap_open(authority_key._open_file_nofollow))
+    monkeypatch.setattr(os, "replace", refuse_replace_if_temp_open)
+
+    _bind_workspace_authority(tmp_path)
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert payload is not None
+
+
+def test_append_import_records_succeeds_on_current_platform(tmp_path: Path) -> None:
+    imported = _append_manual_import(tmp_path, "windows inbox regression")
+    inbox = helpers._imports_path(tmp_path)
+    assert inbox.is_file()
+    assert not inbox.is_symlink()
+    assert "windows inbox regression" in inbox.read_text()
+    assert ledger._read_imports(tmp_path)
+    assert ledger._has_persisted_import_proof(imported, target=tmp_path)
