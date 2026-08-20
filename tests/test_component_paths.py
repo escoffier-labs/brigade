@@ -29,14 +29,22 @@ def test_linux_defaults_use_xdg_paths():
     env = {"HOME": "/home/alice"}
     data = component_paths.data_root(env=env, system="linux")
     cache = component_paths.cache_root(env=env, system="linux")
+    config = component_paths.config_root(env=env, system="linux")
     assert data == "/home/alice/.local/share"
     assert cache == "/home/alice/.cache"
+    assert config == "/home/alice/.config"
 
 
 def test_linux_honors_xdg_overrides():
-    env = {"HOME": "/home/alice", "XDG_DATA_HOME": "/data", "XDG_CACHE_HOME": "/cache"}
+    env = {
+        "HOME": "/home/alice",
+        "XDG_DATA_HOME": "/data",
+        "XDG_CACHE_HOME": "/cache",
+        "XDG_CONFIG_HOME": "/config",
+    }
     assert component_paths.data_root(env=env, system="linux") == "/data"
     assert component_paths.cache_root(env=env, system="linux") == "/cache"
+    assert component_paths.config_root(env=env, system="linux") == "/config"
 
 
 def test_macos_defaults_use_library_paths():

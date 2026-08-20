@@ -1,14 +1,36 @@
 package ingest
 
 import (
+	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/escoffier-labs/miseledger/internal/archive"
 	"github.com/escoffier-labs/miseledger/internal/provenance"
 )
+
+func testSecret(t *testing.T) []byte {
+	t.Helper()
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatal(err)
+	}
+	return secret
+}
+
+func mustReviewOpts(t *testing.T, itemID, digest, toLabel string, markClean bool) (TrustReviewOpts, []byte) {
+	t.Helper()
+	secret := testSecret(t)
+	cap, err := MintTrustCapability(secret, itemID, digest, toLabel, markClean, 2*time.Minute, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return TrustReviewOpts{MarkInjectionClean: markClean, Capability: cap, CapabilitySecret: secret}, secret
+}
 
 func TestImportProjectsProvenanceScalarsAndAppendsEvent(t *testing.T) {
 	db, err := archive.Open(t.TempDir() + "/miseledger.db")
@@ -218,7 +240,8 @@ func TestReviewTrustLabelRequiresExactCurrentDigest(t *testing.T) {
 	if err := ReviewTrustLabel(db, itemID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reviewed", "operator:brigade evidence trust review", nil); err == nil {
 		t.Fatal("forged digest must not review")
 	}
-	if err := ReviewTrustLabel(db, itemID, want, "reviewed", "operator:brigade evidence trust review", map[string]any{"kind": "operator-review"}); err != nil {
+	opts, _ := mustReviewOpts(t, itemID, want, "reviewed", false)
+	if err := ReviewTrust(db, itemID, want, "reviewed", "operator:brigade evidence trust review", map[string]any{"kind": "operator-review"}, opts); err != nil {
 		t.Fatal(err)
 	}
 	var label string
@@ -228,6 +251,145 @@ func TestReviewTrustLabelRequiresExactCurrentDigest(t *testing.T) {
 	if label != "reviewed" {
 		t.Fatalf("trust label = %q, want reviewed", label)
 	}
+	var metadataJSON string
+	if err := db.QueryRow(`select metadata_json from items where id = ?`, itemID).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	status := injectionStatusFromMeta(meta)
+	if status != "pending" {
+		t.Fatalf("label-only review changed injection status to %q", status)
+	}
+}
+
+func TestReviewTrustMarkInjectionCleanAppendsAuditEvent(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:clean","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"review fixture text for clean","tags":["reader"]},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
+	if _, err := ImportAdapterReader(db, strings.NewReader(jsonl), "reader://fixture", "reader-test"); err != nil {
+		t.Fatal(err)
+	}
+	var itemID, text string
+	if err := db.QueryRow(`select id, coalesce(text,'') from items limit 1`).Scan(&itemID, &text); err != nil {
+		t.Fatal(err)
+	}
+	want := provenance.ContentSHA256(text)
+	opts, _ := mustReviewOpts(t, itemID, want, "reviewed", true)
+	if err := ReviewTrust(db, itemID, want, "reviewed", "operator:brigade evidence trust review", map[string]any{"kind": "operator-review"}, opts); err != nil {
+		t.Fatal(err)
+	}
+	var metadataJSON string
+	if err := db.QueryRow(`select metadata_json from items where id = ?`, itemID).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if injectionStatusFromMeta(meta) != "clean" {
+		t.Fatalf("mark-injection-clean left status = %q", injectionStatusFromMeta(meta))
+	}
+	var n int
+	if err := db.QueryRow(`select count(*) from provenance_events where item_id = ? and evidence_json like '%operator-injection-review%'`, itemID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("injection review events = %d, want 1", n)
+	}
+}
+
+func TestReviewTrustRefusesTamperedIncomingEnvelope(t *testing.T) {
+	cases := []struct {
+		name  string
+		patch func(env map[string]any)
+	}{
+		{"padded_pending", func(env map[string]any) {
+			env["trust"].(map[string]any)["injection"].(map[string]any)["status"] = " pending "
+		}},
+		{"title_quarantined", func(env map[string]any) {
+			env["trust"].(map[string]any)["label"] = "Quarantined"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := archive.Open(t.TempDir() + "/miseledger.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := archive.Migrate(db); err != nil {
+				t.Fatal(err)
+			}
+			jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:` + tc.name + `","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"tampered envelope review fixture ` + tc.name + `","tags":["reader"]},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
+			if _, err := ImportAdapterReader(db, strings.NewReader(jsonl), "reader://fixture", "reader-test"); err != nil {
+				t.Fatal(err)
+			}
+			var itemID, text, metadataJSON string
+			if err := db.QueryRow(`select id, coalesce(text,''), metadata_json from items limit 1`).Scan(&itemID, &text, &metadataJSON); err != nil {
+				t.Fatal(err)
+			}
+			meta := map[string]any{}
+			if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+				t.Fatal(err)
+			}
+			env, ok := meta["provenance"].(map[string]any)
+			if !ok {
+				t.Fatal("missing provenance")
+			}
+			tc.patch(env)
+			updated, err := json.Marshal(meta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`update items set metadata_json = ? where id = ?`, string(updated), itemID); err != nil {
+				t.Fatal(err)
+			}
+			var eventsBefore int
+			if err := db.QueryRow(`select count(*) from provenance_events where item_id = ?`, itemID).Scan(&eventsBefore); err != nil {
+				t.Fatal(err)
+			}
+			want := provenance.ContentSHA256(text)
+			opts, _ := mustReviewOpts(t, itemID, want, "reviewed", true)
+			err = ReviewTrust(db, itemID, want, "reviewed", "operator:brigade evidence trust review", map[string]any{"kind": "operator-review"}, opts)
+			if err == nil {
+				t.Fatal("routine review must refuse a parse-error envelope")
+			}
+			if !strings.Contains(err.Error(), "not retainable") {
+				t.Fatalf("error = %v, want retainable refusal", err)
+			}
+			var afterJSON string
+			if err := db.QueryRow(`select metadata_json from items where id = ?`, itemID).Scan(&afterJSON); err != nil {
+				t.Fatal(err)
+			}
+			if afterJSON != string(updated) {
+				t.Fatalf("refused review mutated envelope:\n%s\n%s", afterJSON, updated)
+			}
+			var eventsAfter int
+			if err := db.QueryRow(`select count(*) from provenance_events where item_id = ?`, itemID).Scan(&eventsAfter); err != nil {
+				t.Fatal(err)
+			}
+			if eventsAfter != eventsBefore {
+				t.Fatalf("refused review appended events: before=%d after=%d", eventsBefore, eventsAfter)
+			}
+		})
+	}
+}
+
+func injectionStatusFromMeta(meta map[string]any) string {
+	prov, _ := meta["provenance"].(map[string]any)
+	trust, _ := prov["trust"].(map[string]any)
+	injection, _ := trust["injection"].(map[string]any)
+	status, _ := injection["status"].(string)
+	return status
 }
 
 func TestBackfillProvenanceBatchedResumableIdempotent(t *testing.T) {
@@ -682,5 +844,96 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	}
 	if trust != "reviewed" {
 		t.Fatalf("trust reset to %q, want preserved reviewed", trust)
+	}
+}
+
+func importReviewFixture(t *testing.T, name, text string) (*sql.DB, string, string) {
+	t.Helper()
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:` + name + `","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"` + text + `","tags":["reader"]},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
+	if _, err := ImportAdapterReader(db, strings.NewReader(jsonl), "reader://fixture", "reader-test"); err != nil {
+		t.Fatal(err)
+	}
+	var itemID, body string
+	if err := db.QueryRow(`select id, coalesce(text,'') from items limit 1`).Scan(&itemID, &body); err != nil {
+		t.Fatal(err)
+	}
+	return db, itemID, provenance.ContentSHA256(body)
+}
+
+func TestReviewTrustRefusesMissingCapability(t *testing.T) {
+	db, itemID, want := importReviewFixture(t, "missing-cap", "capability absent fixture")
+	err := ReviewTrust(db, itemID, want, "verified", "scanner:forged", map[string]any{"kind": "operator-review"}, TrustReviewOpts{MarkInjectionClean: true})
+	if err == nil || !strings.Contains(err.Error(), "trust capability is required") {
+		t.Fatalf("missing capability must be refused, got %v", err)
+	}
+	opts, _ := mustReviewOpts(t, itemID, want, "verified", true)
+	if err := ReviewTrust(db, itemID, want, "verified", "operator:brigade evidence trust review", map[string]any{"kind": "operator-review"}, opts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReviewTrustRefusesReplayAndExpiryAndRebind(t *testing.T) {
+	db, itemID, want := importReviewFixture(t, "replay", "capability replay fixture")
+	opts, secret := mustReviewOpts(t, itemID, want, "reviewed", false)
+	if err := ReviewTrust(db, itemID, want, "reviewed", "operator:brigade evidence trust review", map[string]any{"kind": "operator-review"}, opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReviewTrust(db, itemID, want, "reviewed", "operator:brigade evidence trust review", map[string]any{"kind": "operator-review"}, opts); err == nil || !strings.Contains(err.Error(), "already been used") {
+		t.Fatalf("replay must be refused, got %v", err)
+	}
+
+	expired, err := MintTrustCapability(secret, itemID, want, "verified", true, time.Second, time.Now().UTC().Add(-2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ReviewTrust(db, itemID, want, "verified", "operator:brigade evidence trust review", nil, TrustReviewOpts{MarkInjectionClean: true, Capability: expired, CapabilitySecret: secret})
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired capability must be refused, got %v", err)
+	}
+
+	rebound, err := MintTrustCapability(secret, "other-item", want, "verified", true, 2*time.Minute, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ReviewTrust(db, itemID, want, "verified", "operator:brigade evidence trust review", nil, TrustReviewOpts{MarkInjectionClean: true, Capability: rebound, CapabilitySecret: secret})
+	if err == nil || !strings.Contains(err.Error(), "item_id") {
+		t.Fatalf("rebinding item must be refused, got %v", err)
+	}
+
+	wrongTransition, err := MintTrustCapability(secret, itemID, want, "reviewed", false, 2*time.Minute, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ReviewTrust(db, itemID, want, "verified", "operator:brigade evidence trust review", nil, TrustReviewOpts{MarkInjectionClean: true, Capability: wrongTransition, CapabilitySecret: secret})
+	if err == nil || !strings.Contains(err.Error(), "to_label") && !strings.Contains(err.Error(), "mark_injection_clean") {
+		t.Fatalf("transition scope must be refused, got %v", err)
+	}
+}
+
+func TestReviewTrustOperatorCommandIsAuditOnly(t *testing.T) {
+	db, itemID, want := importReviewFixture(t, "audit-only", "operator command audit fixture")
+	err := ReviewTrust(db, itemID, want, "verified", "scanner:I-am-the-operator", map[string]any{"kind": "operator-review"}, TrustReviewOpts{MarkInjectionClean: true})
+	if err == nil {
+		t.Fatal("operator-command must grant nothing without a capability")
+	}
+	opts, _ := mustReviewOpts(t, itemID, want, "verified", true)
+	opts.Capability.MintMeta = map[string]any{"pid": 1, "time": 1}
+	if err := ReviewTrust(db, itemID, want, "verified", "scanner:I-am-the-operator", map[string]any{"kind": "operator-review"}, opts); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`select count(*) from provenance_events where item_id = ? and operator_command = ?`, itemID, "scanner:I-am-the-operator").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("operator-command must land in provenance events as audit metadata")
 	}
 }

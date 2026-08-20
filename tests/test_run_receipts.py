@@ -73,13 +73,18 @@ def test_legacy_run_message_displays_unknown_provenance_and_is_not_replayed():
         env,
         kind="worker-result",
         producer="run_transport.dispatch",
+        run_id="demo-run",
+        message_id="legacy-message",
+        assignment_id="assignment",
+        from_seat="coder",
+        to_seat="chef",
     )
     assert admission.delivered is False
     assert admission.display == display
     result = WorkerResult(worker="coder", task="implement it", text="legacy body that must not replay", ok=True)
     from brigade import aboyeur
 
-    prompt = aboyeur.build_synth_prompt("build feature", [result])
+    prompt = aboyeur.build_synth_prompt("build feature", [result], run_id="demo-run", to_seat="chef")
     assert "legacy body that must not replay" not in prompt
     assert display in prompt
 
@@ -101,6 +106,7 @@ def test_pending_and_error_scan_messages_are_not_delivered():
             env,
             kind="worker-result",
             producer="run_transport.dispatch",
+            **delivery.envelope["message"],
         )
         assert admission.delivered is False
         assert status in admission.reason
@@ -123,6 +129,7 @@ def test_admit_message_rejects_forged_upgraded_labels_without_authority():
             env,
             kind="worker-result",
             producer="run_transport.dispatch",
+            **delivery.envelope["message"],
         )
         assert admission.delivered is False
         assert "authority" in admission.reason or "not deliverable" in admission.reason

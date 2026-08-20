@@ -1574,6 +1574,7 @@ def test_work_scanners_cli(tmp_path, monkeypatch):
                 "force": True,
                 "ingest_output": True,
                 "json_output": True,
+                "isolated_scanners": False,
             },
         ),
         (
@@ -1587,6 +1588,7 @@ def test_work_scanners_cli(tmp_path, monkeypatch):
                 "force": False,
                 "ingest_output": False,
                 "json_output": False,
+                "isolated_scanners": False,
             },
         ),
         ("runs", {"target": tmp_path, "json_output": True, "limit": 5}),
@@ -3149,12 +3151,16 @@ def test_scanner_child_sandbox_seeds_the_parent_directory_bindings(tmp_path) -> 
         child_path = ledger_mod._directory_authority_store_path(tmp_path, env=env)
         assert child_path != real_path
         assert str(child_path).startswith(env["XDG_DATA_HOME"])
-        assert json.loads(child_path.read_text())["directories"] == parent_payload["directories"]
+        child_payload = ledger_mod._read_external_directory_authority_path(child_path, env=env)
+        assert child_payload is not None
+        assert child_payload["directories"] == parent_payload["directories"]
         sandbox = Path(env["HOME"])
 
     # The seeded copy dies with the sandbox; the operator store is untouched.
     assert not sandbox.exists()
-    assert json.loads(real_path.read_text())["directories"] == parent_payload["directories"]
+    remaining = ledger_mod._read_external_directory_authority_path(real_path)
+    assert remaining is not None
+    assert remaining["directories"] == parent_payload["directories"]
 
 
 def _stub_gh_bin(directory: Path) -> Path:

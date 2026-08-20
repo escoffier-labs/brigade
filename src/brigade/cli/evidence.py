@@ -79,6 +79,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Exact current envelope hashes.content digest (bare lowercase SHA-256).",
     )
     p_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_review.add_argument(
+        "--to-label", choices=("reviewed", "verified"), default="reviewed", help="Requested trust label."
+    )
+    p_review.add_argument(
+        "--mark-injection-clean",
+        action="store_true",
+        help="Authorize an injection-status transition to clean. Requires a minted capability for miseledger items.",
+    )
     p_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # Inert F2 hook: projection-only rebuild + identity audit register later.
@@ -126,6 +134,8 @@ def dispatch(args) -> int:
                 target=args.target,
                 item_ref=args.item_ref,
                 content_hash=args.content_hash,
+                to_label=getattr(args, "to_label", "reviewed"),
+                mark_injection_clean=getattr(args, "mark_injection_clean", False),
                 json_output=args.json,
             )
         args._brigade_parser.error(f"unknown evidence trust command: {args.evidence_trust_command}")

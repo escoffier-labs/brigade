@@ -524,7 +524,15 @@ fn module_targets(source_file: &str, import: &Import, call_kind: CallKind) -> Mo
     } else if import.module.starts_with('.') {
         targets.relative = true;
         if let Some(prefix) = normalize_relative_path_module(source_file, &import.module) {
-            push_module_variants(&mut targets.files, &prefix, &["ts", "tsx", "js", "jsx"]);
+            if has_js_like_extension(&prefix) {
+                targets.files.push(prefix);
+            } else {
+                push_module_variants(
+                    &mut targets.files,
+                    &prefix,
+                    &["ts", "tsx", "js", "jsx", "astro"],
+                );
+            }
         }
     }
     targets.finish();
@@ -633,6 +641,12 @@ fn normalize_relative_path_module(source_file: &str, module: &str) -> Option<Str
     } else {
         Some(parts.join("/"))
     }
+}
+
+fn has_js_like_extension(path: &str) -> bool {
+    [".ts", ".tsx", ".js", ".jsx", ".astro"]
+        .iter()
+        .any(|ext| path.ends_with(ext))
 }
 
 fn push_module_variants(files: &mut Vec<String>, prefix: &str, exts: &[&str]) {

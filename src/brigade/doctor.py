@@ -741,7 +741,13 @@ def mcp_station_checks(ctx: DoctorContext) -> List[CheckResult]:
 def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     from . import security_cmd
 
-    results: List[CheckResult] = [(OK, "security: built-in scanner", "available")]
+    from . import scanner_isolation
+
+    isolation_status, isolation_name, isolation_detail = scanner_isolation.doctor_check()
+    results: List[CheckResult] = [
+        (OK, "security: built-in scanner", "available"),
+        (isolation_status, isolation_name, isolation_detail),
+    ]
     config = security_cmd.config_path(ctx.target)
     config_valid = True
     if config.is_file():

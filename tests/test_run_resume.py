@@ -243,6 +243,82 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     assert json.loads(synthesis_revisions[1].read_text()) == json.loads((run_dir / "synthesis.json").read_text())
 
 
+def test_resume_re_envelopes_output_and_drops_transplanted_identity(tmp_path, monkeypatch):
+    from brigade import aboyeur, message_envelope
+
+    stale = message_envelope.emit(
+        "part",
+        kind="worker-result",
+        producer="run_transport.dispatch",
+        from_seat="cook",
+        to_seat="chef",
+        run_id="other-run",
+        assignment_id=message_envelope.assignment_id_for("cook", "write code"),
+    )
+    assert stale.delivered, stale.reason
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "part",
+                "thread_id": "t-1",
+                "status": "interrupted",
+                "provenance": stale.envelope,
+            },
+        ],
+    )
+    recovered = json.loads((run_dir / "run.json").read_text())
+    recovered.update(
+        {
+            "error": "run owner process 99999999 is no longer active",
+            "failure_phase": "stale-lock-recovery",
+            "failure": {
+                "phase": "stale-lock-recovery",
+                "kind": "owner-process-exited",
+                "owner_pid": 99999999,
+            },
+            "finished_at": "2026-07-03T00:05:00+00:00",
+            "duration_seconds": 300.0,
+        }
+    )
+    (run_dir / "run.json").write_text(json.dumps(recovered))
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+    assert run_resume.resume(run_dir) == 0
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    env = results[0]["provenance"]
+    assert results[0]["text"] == "finished now"
+    assert env["message"]["run_id"] == run_dir.name
+    assert env["message"]["from_seat"] == "cook"
+    assert env["message"]["to_seat"] == "chef"
+    assert env["message"]["run_id"] != "other-run"
+    assert env["hashes"]["content"] != stale.envelope["hashes"]["content"]
+    admitted = aboyeur.build_synth_prompt(
+        "big task",
+        [
+            aboyeur.WorkerResult(
+                worker=results[0]["worker"],
+                task=results[0]["task"],
+                text=results[0]["text"],
+                ok=True,
+                provenance=env,
+            )
+        ],
+        run_id=run_dir.name,
+        to_seat="chef",
+    )
+    assert "finished now" in admitted
+    assert "part" not in admitted
+
+
 def test_resume_with_nothing_resumable_reports_and_exits_2(tmp_path, capsys):
     run_dir = _write_run_dir(
         tmp_path,

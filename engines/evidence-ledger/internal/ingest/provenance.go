@@ -232,9 +232,36 @@ func TransitionTrustLabel(db *sql.DB, itemID, toLabel, operatorCommand string, e
 	return tx.Commit()
 }
 
-// ReviewTrustLabel upgrades an item only when expectedHash matches both the
-// embedded envelope digest and the recomputed item.text.utf8.v1 digest.
+// TrustReviewOpts controls optional operator decisions during trust review.
+// MarkInjectionClean is a deliberate injection-status transition to clean;
+// moving the trust label alone never changes injection status.
+// Capability and CapabilitySecret authorize the transition. OperatorCommand
+// is audit metadata only and never grants authority. There is no missing-
+// capability exception: stdin kind, TTY, and environment variables do not
+// authorize a review.
+type TrustReviewOpts struct {
+	MarkInjectionClean bool
+	Capability         *TrustCapability
+	CapabilitySecret   []byte
+}
+
+// ReviewTrustLabel upgrades an item's trust label only when expectedHash
+// matches both the embedded envelope digest and the recomputed item text.
+// It does not change injection status.
 func ReviewTrustLabel(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand string, evidence map[string]any) error {
+	return ReviewTrust(db, itemID, expectedHash, toLabel, operatorCommand, evidence, TrustReviewOpts{})
+}
+
+// ReviewTrust upgrades an item only when the stored envelope is retainable
+// and expectedHash matches both the embedded envelope digest and the
+// recomputed item.text.utf8.v1 digest. A parse-error-grade envelope is
+// refused; routine review does not rewrite tampered values. MarkInjectionClean
+// records a separate injection-status transition to clean with an audit
+// event; a label-only review leaves injection pending.
+func ReviewTrust(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand string, evidence map[string]any, opts TrustReviewOpts) error {
+	if opts.Capability == nil {
+		return fmt.Errorf("trust capability is required")
+	}
 	resolvedID, err := resolveItemID(db, itemID)
 	if err != nil {
 		return err
@@ -251,13 +278,9 @@ func ReviewTrustLabel(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand
 	if !ok {
 		return fmt.Errorf("item %s has no provenance envelope", resolvedID)
 	}
-	envBytes, err := json.Marshal(rawEnv)
+	env, err := ParseRetainableEnvelope(rawEnv)
 	if err != nil {
-		return err
-	}
-	var env provenance.Envelope
-	if err := json.Unmarshal(envBytes, &env); err != nil {
-		return err
+		return fmt.Errorf("stored provenance envelope is not retainable: %w", err)
 	}
 	recomputed := provenance.ContentSHA256(text)
 	current := ""
@@ -268,7 +291,116 @@ func ReviewTrustLabel(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand
 	if current != want || recomputed != want {
 		return fmt.Errorf("content hash does not match the current envelope digest")
 	}
-	return TransitionTrustLabel(db, resolvedID, toLabel, operatorCommand, evidence)
+	fromLabel := env.Trust.Label
+	fromInjection := env.Trust.Injection.Status
+	labelChanged := fromLabel != toLabel
+	injectionChanged := opts.MarkInjectionClean && fromInjection != "clean"
+	if opts.Capability != nil {
+		if err := verifyTrustCapability(opts.CapabilitySecret, opts.Capability, resolvedID, want, toLabel, opts.MarkInjectionClean, time.Now().UTC()); err != nil {
+			if err2 := verifyTrustCapability(opts.CapabilitySecret, opts.Capability, itemID, want, toLabel, opts.MarkInjectionClean, time.Now().UTC()); err2 != nil {
+				return err
+			}
+		}
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if opts.Capability != nil {
+		if err := consumeCapabilityNonce(tx, opts.Capability, resolvedID, want); err != nil {
+			return err
+		}
+	}
+	if !labelChanged && !injectionChanged {
+		return tx.Commit()
+	}
+	at := time.Now().UTC().Format(time.RFC3339Nano)
+	if labelChanged {
+		env.Trust.Label = toLabel
+		env.Trust.AssignedBy = operatorCommand
+		env.Trust.AssignedAt = &at
+	}
+	if injectionChanged {
+		env.Trust.Injection.Status = "clean"
+		env.Trust.Injection.Count = 0
+		env.Trust.Injection.Rules = []string{}
+	}
+	if err := provenance.Validate(env, provenance.ValidationContext{}); err != nil {
+		return err
+	}
+	contentHash := ""
+	if env.Hashes.Content != nil {
+		contentHash = *env.Hashes.Content
+	} else {
+		contentHash = provenance.ContentSHA256(text)
+	}
+	meta["provenance"] = env
+	updated, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`update items set metadata_json = ? where id = ?`, string(updated), resolvedID); err != nil {
+		return err
+	}
+	if err := replaceProvenanceProjections(tx, resolvedID, env); err != nil {
+		return err
+	}
+	if labelChanged {
+		labelEvidence := cloneEvidence(evidence)
+		if _, ok := labelEvidence["kind"]; !ok {
+			labelEvidence["kind"] = "operator-review"
+		}
+		if err := AppendProvenanceEvent(tx, resolvedID, fromLabel, toLabel, contentHash, env.Hashes.ContentScope, operatorCommand, labelEvidence); err != nil {
+			return err
+		}
+	}
+	if injectionChanged {
+		injEvidence := cloneEvidence(evidence)
+		injEvidence["kind"] = "operator-injection-review"
+		injEvidence["from_injection_status"] = fromInjection
+		injEvidence["to_injection_status"] = "clean"
+		if err := AppendProvenanceEvent(tx, resolvedID, env.Trust.Label, env.Trust.Label, contentHash, env.Hashes.ContentScope, operatorCommand, injEvidence); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func cloneEvidence(evidence map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range evidence {
+		out[key] = value
+	}
+	return out
+}
+
+func consumeCapabilityNonce(tx *sql.Tx, cap *TrustCapability, itemID, fromDigest string) error {
+	if cap == nil {
+		return nil
+	}
+	var seen string
+	err := tx.QueryRow(`select seen_at from used_capabilities where nonce = ?`, cap.Nonce).Scan(&seen)
+	if err == nil {
+		return fmt.Errorf("trust capability nonce has already been used")
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+	_, err = tx.Exec(
+		`insert into used_capabilities(nonce, seen_at, item_id, from_digest) values(?, ?, ?, ?)`,
+		cap.Nonce,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		itemID,
+		fromDigest,
+	)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return fmt.Errorf("trust capability nonce has already been used")
+		}
+		return err
+	}
+	return nil
 }
 
 func resolveItemID(db *sql.DB, itemID string) (string, error) {

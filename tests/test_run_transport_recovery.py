@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from brigade import acpx_adapter, agents, run_transport
+from brigade import acpx_adapter, agents, message_envelope, run_transport
 from brigade.roster import Agent, Roster
 from brigade.run_receipts import worker_payload, write_worker_logs
 from brigade.run_transport import Assignment, WorkerAttempt, WorkerResult
@@ -249,6 +249,12 @@ def test_direct_grok_fallback_recovers_after_two_invalid_finals(monkeypatch, tmp
     assert [attempt.kind for attempt in result.attempts] == ["initial", "continuation", "fallback"]
     assert [attempt.worker for attempt in result.attempts] == ["grok-review", "grok-review", "cursor-grok"]
     assert [attempt.selected for attempt in result.attempts] == [False, False, True]
+    assert result.worker == "grok-review"
+    assert result.provenance is not None
+    assert result.provenance["message"]["from_seat"] == "cursor-grok"
+    assert result.provenance["message"]["assignment_id"] == message_envelope.assignment_id_for(
+        "grok-review", "Review the diff."
+    )
 
 
 def test_direct_grok_fallback_uses_selected_seat_endpoint_provenance(monkeypatch, tmp_path):
