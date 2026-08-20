@@ -171,6 +171,45 @@ function Get-BoundedStderr {
     return $text.Substring(0, $MaxChars) + "..."
 }
 
+function Test-AcceptanceProcessIsElevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Invoke-PrintedSchtasksBatchUnelevated {
+    param(
+        [string]$BatchPath,
+        [string]$StdoutPath,
+        [string]$StderrPath,
+        [string]$WorkRoot
+    )
+    # Execute the printed schtasks line from a .cmd file. Passing the line
+    # through `cmd /c <schtasks …>` mangles /TR quotes. Always drop to medium
+    # integrity so /IT is proven without an elevated token.
+    $exitFile = Join-Path $WorkRoot "printed-schtasks-exit.txt"
+    $wrapper = Join-Path $WorkRoot "run-printed-schtasks.cmd"
+    if (Test-Path -LiteralPath $exitFile) {
+        Remove-Item -LiteralPath $exitFile -Force
+    }
+    $batchAbs = (Resolve-Path -LiteralPath $BatchPath).Path
+    @(
+        "@echo off"
+        "call `"$batchAbs`" > `"$StdoutPath`" 2> `"$StderrPath`""
+        "echo %ERRORLEVEL%> `"$exitFile`""
+    ) | Set-Content -LiteralPath $wrapper -Encoding ascii
+    $wrapperAbs = (Resolve-Path -LiteralPath $wrapper).Path
+    $null = & runas.exe /trustlevel:0x20000 "C:\Windows\System32\cmd.exe /c `"$wrapperAbs`""
+    $deadline = (Get-Date).AddSeconds(45)
+    while (-not (Test-Path -LiteralPath $exitFile) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not (Test-Path -LiteralPath $exitFile)) {
+        throw "printed schtasks batch did not report an exit code (unelevated runas /trustlevel:0x20000)"
+    }
+    return [int]((Get-Content -LiteralPath $exitFile -Raw).Trim())
+}
+
 function Invoke-ExternalCommand {
     param(
         [scriptblock]$Command,
@@ -775,11 +814,14 @@ def call_greet():
             if ($createLine -notmatch [regex]::Escape($expectedSchedules[$taskName])) {
                 throw "care install schedule mismatch for ${taskName}: $createLine"
             }
-            if ($createLine -notmatch '/RU "%USERNAME%" /NP') {
-                throw "care install missing S4U /RU /NP pair for ${taskName}: $createLine"
+            if ($createLine -notmatch '/RU "%USERNAME%" /IT') {
+                throw "care install missing /RU /IT pair for ${taskName}: $createLine"
+            }
+            if ($createLine -match "/NP") {
+                throw "care install must emit /IT not /NP (S4U /NP requires elevation) for ${taskName}: $createLine"
             }
             if ($createLine -match "/RL") {
-                throw "care install must not emit /RL (breaks /NP binding) for ${taskName}: $createLine"
+                throw "care install must not emit /RL for ${taskName}: $createLine"
             }
             if ($createLine -notmatch [regex]::Escape("C:\Windows\System32\cmd.exe")) {
                 throw "care install /TR must use absolute cmd.exe for ${taskName}: $createLine"
@@ -823,14 +865,16 @@ def call_greet():
         $createOut = Join-Path $acceptRoot "schtasks-create.out"
         $createErr = Join-Path $acceptRoot "schtasks-create.err"
         Set-Content -LiteralPath $createCmd -Value $createDaily -Encoding ascii
+        $elevated = Test-AcceptanceProcessIsElevated
+        Write-Host ("care create context: elevated={0}; running printed line unelevated" -f $elevated)
         try {
-            cmd.exe /c "`"$createCmd`" > `"$createOut`" 2> `"$createErr`""
-            if ($LASTEXITCODE -ne 0) {
+            $createExit = Invoke-PrintedSchtasksBatchUnelevated -BatchPath $createCmd -StdoutPath $createOut -StderrPath $createErr -WorkRoot $acceptRoot
+            if ($createExit -ne 0) {
                 $createStdout = ""
                 $createStderr = ""
                 if (Test-Path -LiteralPath $createOut) { $createStdout = Get-Content -LiteralPath $createOut -Raw }
                 if (Test-Path -LiteralPath $createErr) { $createStderr = Get-Content -LiteralPath $createErr -Raw }
-                throw "printed schtasks command was rejected by Windows: $createDaily`nstdout: $createStdout`nstderr: $createStderr"
+                throw "printed schtasks command was rejected unelevated (exit $createExit): $createDaily`nstdout: $createStdout`nstderr: $createStderr"
             }
             & schtasks /Query /TN "BrigadeCare-daily-care" | Out-Null
             if ($LASTEXITCODE -ne 0) {
@@ -850,6 +894,10 @@ def call_greet():
         }
         finally {
             & schtasks /Delete /TN "BrigadeCare-daily-care" /F | Out-Null
+            & schtasks /Query /TN "BrigadeCare-daily-care" | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                throw "BrigadeCare-daily-care was left behind after /Delete"
+            }
         }
     }
     finally {

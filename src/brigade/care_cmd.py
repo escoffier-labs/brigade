@@ -31,11 +31,11 @@ DEFAULT_BACKEND = "auto"
 SUPPORTED_BACKENDS = ("auto", "crontab", "systemd", "launchd", "schtasks")
 SCHTASKS_BACKEND = "schtasks"
 SCHTASKS_WEEKDAYS = ("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")
-# schtasks /Create /? groups [/RU username [/RP password]] separately from
-# [/IT | /NP]. Putting /RL between /RU and /NP makes Windows ignore /NP and
-# prompt for a password (GitHub windows-latest: "Please enter the run as
-# password for runneradmin"). LIMITED is the default run level, so omit /RL.
-SCHTASKS_S4U_FLAGS = '/RU "%USERNAME%" /NP'
+# /NP (S4U) requires elevation: a non-admin `schtasks /Create /RU user /NP`
+# prompts for a password and exits 1. /IT runs while the user is logged on
+# and works without elevation — the intended zero-setup default. Care tasks
+# do not fire while fully logged off.
+SCHTASKS_S4U_FLAGS = '/RU "%USERNAME%" /IT'
 SCHTASKS_CMD_EXE = r"C:\Windows\System32\cmd.exe"
 
 MEMORY_CARE_RUNBOOK_REL = {
@@ -352,8 +352,8 @@ def _schtasks_create_command(entry: CareEntry, *, workspace: Path) -> str:
     task_name = _schtasks_task_name(entry)
     schedule_flags = _schtasks_schedule_flags(entry.schedule)
     task_run = _schtasks_task_run(entry, workspace=workspace)
-    # Official create flags: /TN /TR /SC [/MO|/D] [/ST] /RU /NP /F.
-    # Do not emit /RL or /F:String — those are not a valid trailing pair.
+    # Official create flags: /TN /TR /SC [/MO|/D] [/ST] /RU /IT /F.
+    # Do not emit /NP (needs elevation) or /RL /F:String.
     return f'schtasks /Create /TN "{task_name}" /TR "{task_run}" {schedule_flags} {SCHTASKS_S4U_FLAGS} /F'
 
 

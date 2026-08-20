@@ -498,7 +498,8 @@ def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkey
         # The old bug would put 06:15 on ingest-sweep, weekly, observability, nightly.
         if flags != "/SC DAILY /ST 06:15":
             assert "/ST 06:15" not in line
-        assert '/RU "%USERNAME%" /NP /F' in line
+        assert '/RU "%USERNAME%" /IT /F' in line
+        assert "/NP" not in line
         assert "/RL" not in line
         assert "/F:String" not in line
         assert line.endswith(" /F")
@@ -507,7 +508,7 @@ def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkey
 
 
 def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path):
-    """Reject /RL-between-/RU-and-/NP and bare cmd; those fail on windows-latest."""
+    """Emitted lines must use /IT (not /NP) and an absolute cmd.exe /TR."""
     workspace = Path(r"C:\Users\operator\project")
     for entry in (*care_cmd.CARE_ENTRIES, *care_cmd.MEMORY_JOB_ENTRIES):
         command = care_cmd._schtasks_create_command(entry, workspace=workspace)
@@ -515,7 +516,8 @@ def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path
         assert f'/TN "BrigadeCare-{entry.entry_id}"' in command
         assert flags in command
         assert r'/TR "C:\Windows\System32\cmd.exe /c ' in command
-        assert '/RU "%USERNAME%" /NP /F' in command
+        assert '/RU "%USERNAME%" /IT /F' in command
+        assert "/NP" not in command
         assert "/RL" not in command
         assert "/F:String" not in command
         assert command.startswith("schtasks /Create ")
@@ -533,7 +535,8 @@ def test_care_windows_printed_path_uses_single_backslashes(tmp_path):
     assert r"C:\\Users" not in spaced
     assert "/F:String" not in command
     assert "/RL" not in command
-    assert command.endswith('/RU "%USERNAME%" /NP /F')
+    assert command.endswith('/RU "%USERNAME%" /IT /F')
+    assert "/NP" not in command
     assert r"C:\Windows\System32\cmd.exe /c " in command
 
 
@@ -550,7 +553,8 @@ def test_care_windows_install_json_returns_structured_plan(tmp_path, monkeypatch
         assert task["schedule"] == entry.schedule
         assert task["schedule_flags"] == EXPECTED_SCHTASKS_FLAGS[entry.schedule]
         assert task["schedule_flags"] in task["command"]
-        assert '/RU "%USERNAME%"' in task["command"]
+        assert '/RU "%USERNAME%" /IT' in task["command"]
+        assert "/NP" not in task["command"]
 
 
 def test_care_windows_status_reports_task_presence_instead_of_refusing(tmp_path, monkeypatch, capsys):
@@ -632,7 +636,12 @@ def test_care_printed_schtasks_commands_are_accepted_by_windows(tmp_path):
     # Recreate from the helper so the assertion is the printed command, not a rewrite.
     entry = care_cmd.CARE_ENTRIES[0]
     command = care_cmd._schtasks_create_command(entry, workspace=tmp_path)
-    create = subprocess.run(["cmd", "/c", command], capture_output=True, text=True, check=False, timeout=30)
+    # cmd /c <schtasks-line> splits /TR nested quotes (`ERROR: Invalid
+    # argument/option - '/c'`). Write the printed line to a batch file and
+    # execute that file instead.
+    batch = tmp_path / "create-brigade-care.cmd"
+    batch.write_text(command + "\r\n", encoding="ascii")
+    create = subprocess.run([str(batch)], capture_output=True, text=True, check=False, timeout=30)
     try:
         assert create.returncode == 0, create.stdout + create.stderr
         query = subprocess.run(

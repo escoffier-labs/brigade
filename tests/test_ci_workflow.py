@@ -406,6 +406,9 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "BrigadeCare-ingest-sweep" in text
     assert "/SC MINUTE /MO 30" in text
     assert "brigade care status" in text
+    assert '/RU "%USERNAME%" /IT' in text
+    assert "Invoke-PrintedSchtasksBatchUnelevated" in text
+    assert "runas.exe /trustlevel:0x20000" in text
     # care install writes to stderr and exits 3; PS 5.1 Stop mode cannot invoke it
     # as a native command. The script must go through cmd.exe file redirects.
     assert (
@@ -564,6 +567,7 @@ def test_windows_native_acceptance_assigned_return_functions_do_not_leak_stdout(
         "Get-PipxBinDir",
         "Initialize-PipxBootstrap",
         "Get-ManagedExecutablePath",
+        "Invoke-PrintedSchtasksBatchUnelevated",
     )
 
     for name in assigned_returns:
