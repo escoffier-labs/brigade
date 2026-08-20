@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/escoffier-labs/miseledger/internal/ingest"
 	"github.com/escoffier-labs/miseledger/internal/provenance"
@@ -538,7 +539,8 @@ const (
 )
 
 // cacheRefProjectedSearchOptStrings is the closed set of SearchOpts string
-// fields that a cache-ref may contribute to a model-facing show payload.
+// fields that a cache-ref may contribute to a model-facing payload. Each
+// field is drop-or-allowlist sanitized by sanitizeModelFacingEvidence.
 // Origin/Modality/TrustLabel are search-only and must not be copied from the
 // cache file. A newly added SearchOpts string field fails
 // TestCacheRefProjectionStringInventory until it is classified here or in
@@ -553,6 +555,16 @@ var cacheRefProjectedSearchOptStrings = map[string]struct{}{
 	"To":         {},
 	"Project":    {},
 	"Tags":       {},
+}
+
+// modelFacingEvidenceLiveKeys is the closed top-level shape of every
+// model-facing evidence projection (show/materialize and list). Unknown
+// cache-ref siblings never survive onto the payload.
+var modelFacingEvidenceLiveKeys = map[string]struct{}{
+	"id": {}, "resource_uri": {}, "query": {}, "filters": {},
+	"generated_at": {}, "untrusted_context": {}, "results": {},
+	"grouped_by_source": {}, "integrity_omitted": {},
+	"integrity_mismatches": {}, "warnings": {}, "result_count": {},
 }
 
 var cacheRefNonProjectedSearchOptStrings = map[string]struct{}{
@@ -575,11 +587,42 @@ var cacheRefSearchOptJSONPaths = map[string]string{
 	"Tags":       "filters.tags",
 }
 
+// sanitizeModelFacingEvidence is the single choke point for every
+// model-facing evidence projection: materializeEvidenceBundle (item_ids
+// and no-item_ids), evidence show / MCP show_evidence_bundle, and
+// listEvidenceBundles. The cache file is same-UID writable, so every
+// attacker-writable cache-ref-derived field is dropped or
+// allowlist-validated recursively. A newly added free-form field cannot
+// bypass this function: unknown keys are deleted and unclassified filter
+// strings default to empty.
+func sanitizeModelFacingEvidence(payload map[string]any, id string, authority []*CodeReference) {
+	if payload == nil {
+		return
+	}
+	for key := range payload {
+		if _, ok := modelFacingEvidenceLiveKeys[key]; !ok {
+			delete(payload, key)
+		}
+	}
+	payload["id"] = id
+	payload["resource_uri"] = evidenceBundleResourceURI(id)
+	payload["query"] = ""
+	if _, ok := payload["filters"]; ok {
+		payload["filters"] = projectUntrustedCacheRefFilters(payload["filters"], authority)
+	}
+	if raw, ok := payload["generated_at"]; ok {
+		payload["generated_at"] = projectCacheRefTimestamp(stringFromAny(raw))
+	}
+	if raw, ok := payload["result_count"]; ok {
+		payload["result_count"] = intFromAny(raw)
+	}
+}
+
 // projectUntrustedCacheRefFilters rebuilds model-facing filters from a
 // same-UID-writable cache-ref. Unknown keys are dropped. Free-form strings
-// are allowlisted or accepted only when they pass a hard bound; over-long
-// values are dropped rather than truncated. code_reference is re-derived
-// from eligible ledger records when present, otherwise re-validated.
+// are dropped or allowlist-validated; a length bound is not sufficient.
+// code_reference is re-derived from eligible ledger records when present,
+// otherwise re-validated.
 func projectUntrustedCacheRefFilters(raw any, authority []*CodeReference) map[string]any {
 	src := anyToMap(raw)
 	out := map[string]any{}
@@ -622,14 +665,7 @@ func projectUntrustedCacheRefCollection(raw any) map[string]any {
 	src := anyToMap(raw)
 	out := map[string]any{}
 	out["kind"] = allowlistedProjectionField(stringFromAny(src["kind"]), projectionCollectionKinds)
-	if name := stringFromAny(src["name"]); cacheRefFreeFormAccepted(name, cacheRefFreeFormMax) {
-		out["name"] = name
-	} else {
-		out["name"] = ""
-	}
-	if ext := stringFromAny(src["external_id"]); cacheRefFreeFormAccepted(ext, cacheRefFreeFormMax) {
-		out["external_id"] = ext
-	}
+	out["name"] = ""
 	return out
 }
 
@@ -639,12 +675,27 @@ func projectCacheRefFilterString(key, value string) string {
 		return allowlistedProjectionField(value, projectionSourceKinds)
 	case "kind":
 		return allowlistedProjectionField(value, projectionItemKinds)
+	case "from", "to":
+		return projectCacheRefTimestamp(value)
 	default:
-		if !cacheRefFreeFormAccepted(value, cacheRefFreeFormMax) {
-			return ""
-		}
-		return value
+		// project, tags, actor_type, collection, and any newly added
+		// free-form filter key. A length bound is not an allowlist:
+		// attacker text under cacheRefFreeFormMax must not survive.
+		return ""
 	}
+}
+
+func projectCacheRefTimestamp(s string) string {
+	if s == "" || len(s) > ineligibleClosedFieldMax {
+		return ""
+	}
+	if _, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return s
+	}
+	if _, err := time.Parse(time.RFC3339, s); err == nil {
+		return s
+	}
+	return ""
 }
 
 func projectCacheRefCodeReference(raw any, authority []*CodeReference) *CodeReference {

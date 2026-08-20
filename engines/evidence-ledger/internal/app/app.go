@@ -2790,39 +2790,16 @@ func materializeEvidenceBundle(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	projectMaterializedBundle(bundle, id, authorityCodeReferences(db, bundle))
+	sanitizeModelFacingEvidence(bundle, id, authorityCodeReferences(db, bundle))
 	return bundle, nil
 }
 
-// materializedBundleLiveKeys is the closed top-level shape of a live-regen
-// evidence bundle. Unknown cache-ref siblings never survive onto the
-// model-facing payload.
-var materializedBundleLiveKeys = map[string]struct{}{
-	"id": {}, "resource_uri": {}, "query": {}, "filters": {},
-	"generated_at": {}, "untrusted_context": {}, "results": {},
-	"grouped_by_source": {}, "integrity_omitted": {},
-	"integrity_mismatches": {}, "warnings": {},
-}
-
-// projectMaterializedBundle treats the entire cache-ref as untrusted. The
-// cache file is same-UID writable, so no free-form string is copied
-// verbatim onto the model-facing payload: resource_uri is reconstructed
-// from the path-validated id, query is cleared, unknown top-level keys
-// are dropped, and filters (including code_reference and collection) are
-// re-derived from eligible ledger records or hard-bounded and
-// allowlist-validated.
+// projectMaterializedBundle is the show/materialize entry into the shared
+// model-facing sanitizer. Both the item_ids and no-item_ids branches of
+// materializeEvidenceBundle, plus evidence show / MCP show_evidence_bundle,
+// reach the model only through this function.
 func projectMaterializedBundle(bundle map[string]any, id string, authority []*CodeReference) {
-	for key := range bundle {
-		if _, ok := materializedBundleLiveKeys[key]; !ok {
-			delete(bundle, key)
-		}
-	}
-	bundle["id"] = id
-	bundle["resource_uri"] = evidenceBundleResourceURI(id)
-	bundle["query"] = ""
-	if _, ok := bundle["filters"]; ok {
-		bundle["filters"] = projectUntrustedCacheRefFilters(bundle["filters"], authority)
-	}
+	sanitizeModelFacingEvidence(bundle, id, authority)
 }
 
 func searchOptsFromBundleRef(ref map[string]any) (SearchOpts, error) {
@@ -2830,13 +2807,13 @@ func searchOptsFromBundleRef(ref map[string]any) (SearchOpts, error) {
 	opts := SearchOpts{
 		Query:               cacheRefSearchString(stringFromAny(ref["query"]), cacheRefQueryMax),
 		Source:              projectCacheRefFilterString("source", stringFromAny(filters["source"])),
-		Collection:          cacheRefSearchString(stringFromAny(filters["collection"]), cacheRefFreeFormMax),
+		Collection:          projectCacheRefFilterString("collection", stringFromAny(filters["collection"])),
 		Kind:                projectCacheRefFilterString("kind", stringFromAny(filters["kind"])),
-		ActorType:           cacheRefSearchString(stringFromAny(filters["actor_type"]), cacheRefFreeFormMax),
-		Project:             cacheRefSearchString(stringFromAny(filters["project"]), cacheRefFreeFormMax),
-		Tags:                cacheRefSearchString(stringFromAny(filters["tags"]), cacheRefFreeFormMax),
-		From:                cacheRefSearchString(stringFromAny(filters["from"]), cacheRefFreeFormMax),
-		To:                  cacheRefSearchString(stringFromAny(filters["to"]), cacheRefFreeFormMax),
+		ActorType:           projectCacheRefFilterString("actor_type", stringFromAny(filters["actor_type"])),
+		Project:             projectCacheRefFilterString("project", stringFromAny(filters["project"])),
+		Tags:                projectCacheRefFilterString("tags", stringFromAny(filters["tags"])),
+		From:                projectCacheRefFilterString("from", stringFromAny(filters["from"])),
+		To:                  projectCacheRefFilterString("to", stringFromAny(filters["to"])),
 		Limit:               intFromAny(filters["limit"]),
 		IncludeRelated:      boolFromAny(filters["include_related"]),
 		IncludeArtifactText: boolFromAny(filters["include_artifact_text"]),
@@ -2948,13 +2925,15 @@ func listEvidenceBundles() ([]map[string]any, error) {
 		if err != nil {
 			continue
 		}
-		out = append(out, map[string]any{
+		row := map[string]any{
 			"id":           id,
-			"resource_uri": evidenceBundleResourceURI(id),
-			"query":        cacheRefSearchString(stringFromAny(ref["query"]), cacheRefQueryMax),
-			"generated_at": cacheRefSearchString(stringFromAny(ref["generated_at"]), ineligibleClosedFieldMax),
+			"resource_uri": stringFromAny(ref["resource_uri"]),
+			"query":        stringFromAny(ref["query"]),
+			"generated_at": stringFromAny(ref["generated_at"]),
 			"result_count": bundleRefResultCount(ref),
-		})
+		}
+		sanitizeModelFacingEvidence(row, id, nil)
+		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return fmt.Sprint(out[i]["generated_at"]) > fmt.Sprint(out[j]["generated_at"])
