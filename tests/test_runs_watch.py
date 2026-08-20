@@ -1,4 +1,5 @@
 import json
+import shlex
 
 from brigade import cli
 from brigade import runs_cmd
@@ -286,6 +287,16 @@ def test_watch_json_omits_planted_token_path_and_prompt(tmp_path, capsys):
     assert "run" not in summary
 
 
+def _assert_inspect_command_well_formed(inspect_command, *, run_id, run_dir):
+    """The suggested command must be a safe, single-token `runs show <run_id>`."""
+    argv = shlex.split(inspect_command)
+    assert argv == ["brigade", "runs", "show", run_id]
+    assert inspect_command == f"brigade runs show {run_id}"
+    assert str(run_dir) not in inspect_command
+    assert "<" not in inspect_command and ">" not in inspect_command
+    assert "/" not in argv[-1] and "\\" not in argv[-1]
+
+
 def test_watch_json_stale_lock_inspect_command_uses_run_id(tmp_path, capsys):
     run_dir = tmp_path / ".brigade" / "runs" / "20260817-100000-watch-bbbbbb"
     leaks = _plant_watch_secrets(run_dir, tmp_path, status="failed", failure_phase="stale-lock-recovery")
@@ -296,5 +307,47 @@ def test_watch_json_stale_lock_inspect_command_uses_run_id(tmp_path, capsys):
     _assert_no_planted_secrets(out, leaks)
     summary = next(json.loads(line) for line in out.splitlines() if json.loads(line).get("type") == "summary")
     assert summary["run_id"] == run_dir.name
-    assert summary["inspect_command"] == f"brigade runs show {run_dir.name}"
-    assert str(run_dir) not in summary["inspect_command"]
+    _assert_inspect_command_well_formed(summary["inspect_command"], run_id=run_dir.name, run_dir=run_dir)
+
+
+def test_watch_json_stale_lock_inspect_command_is_runnable(tmp_path, capsys, monkeypatch):
+    """Regression: emitting `runs show <run_id>` was unrunnable before show resolved ids.
+
+    The #958 path redaction swapped the absolute run path for `run_id` but left
+    `inspect_command` pointing at `runs show`, which previously required a
+    filesystem path. Executing the emitted argv from the workspace cwd would
+    have caught that: rc 2 / `run directory not found: <run_id>`.
+    """
+    run_dir = tmp_path / ".brigade" / "runs" / "20260817-100000-watch-bbbbbb"
+    leaks = _plant_watch_secrets(run_dir, tmp_path, status="failed", failure_phase="stale-lock-recovery")
+
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.0, json_output=True) == 1
+    out = capsys.readouterr().out
+    summary = next(json.loads(line) for line in out.splitlines() if json.loads(line).get("type") == "summary")
+    inspect_command = summary["inspect_command"]
+    _assert_inspect_command_well_formed(inspect_command, run_id=run_dir.name, run_dir=run_dir)
+    _assert_no_planted_secrets(inspect_command, leaks)
+
+    argv = shlex.split(inspect_command)
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(argv[1:])
+    captured = capsys.readouterr()
+    assert "run directory not found" not in captured.err
+    assert rc == 1
+    assert "status: failed" in captured.out
+    assert "failure phase: stale-lock-recovery" in captured.out
+
+
+def test_runs_show_cli_resolves_bare_run_id_and_path(tmp_path, capsys):
+    run_dir = tmp_path / ".brigade" / "runs" / "20260817-100000-watch-dddddd"
+    _plant_watch_secrets(run_dir, tmp_path, status="failed", failure_phase="stale-lock-recovery")
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path)]) == 1
+    by_id = capsys.readouterr()
+    assert "run directory not found" not in by_id.err
+    assert "failure phase: stale-lock-recovery" in by_id.out
+
+    assert cli.main(["runs", "show", str(run_dir)]) == 1
+    by_path = capsys.readouterr()
+    assert "run directory not found" not in by_path.err
+    assert "failure phase: stale-lock-recovery" in by_path.out
