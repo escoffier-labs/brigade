@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from brigade import code_cmd, doctor as doctor_mod, evidence_cmd, search_cmd
 from brigade.station import DoctorContext
@@ -144,6 +148,60 @@ def test_evidence_doctor_exits_nonzero_on_fail(monkeypatch, tmp_path):
     assert evidence_cmd.doctor(target=tmp_path) == 1
 
 
+_ENGINE_ROOT = Path(__file__).resolve().parents[1] / "engines" / "evidence-ledger"
+_BUNDLED_MISELEDGER = _ENGINE_ROOT / "bin" / "miseledger"
+_VALID_MEMORY_NAMESPACE = "memory-12345678-1234-4234-a234-123456789abc"
+
+
+def _bundled_miseledger() -> Path:
+    """Build or reuse engines/evidence-ledger/bin/miseledger (in-tree engine)."""
+    if _BUNDLED_MISELEDGER.is_file() and os.access(_BUNDLED_MISELEDGER, os.X_OK):
+        return _BUNDLED_MISELEDGER
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip(
+            "bundled miseledger missing; build with "
+            "`go build -o bin/miseledger ./cmd/miseledger` in engines/evidence-ledger"
+        )
+    _BUNDLED_MISELEDGER.parent.mkdir(parents=True, exist_ok=True)
+    built = subprocess.run(
+        [go, "build", "-o", str(_BUNDLED_MISELEDGER), "./cmd/miseledger"],
+        cwd=_ENGINE_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if built.returncode != 0:
+        pytest.fail(f"go build miseledger failed:\n{built.stderr}")
+    return _BUNDLED_MISELEDGER
+
+
+def _isolated_miseledger_env(home: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / "config")
+    env["XDG_DATA_HOME"] = str(home / "data")
+    env["XDG_CACHE_HOME"] = str(home / "cache")
+    return env
+
+
+def _exec_printed_commands(commands: list[list[str]], env: dict[str, str]) -> None:
+    assert commands
+    for command in commands:
+        completed = subprocess.run(
+            [str(part) for part in command],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+        assert completed.returncode == 0, (
+            f"{command} exited {completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+        )
+
+
 def test_crawl_plan_is_review_only(tmp_path):
     payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
     rendered = evidence_cmd._render_plan_md(payload)
@@ -151,6 +209,96 @@ def test_crawl_plan_is_review_only(tmp_path):
     assert ["miseledger", "crawl", "sessions"] in payload["commands"]
     assert "review-only crawl plan never executes the evidence engine" in payload["boundaries"][0]
     assert "miseledger crawl sessions" in rendered
+
+
+def test_crawl_plan_omits_memory_without_namespace_and_sourceharvest(tmp_path):
+    payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
+    commands = payload["commands"]
+    target = str(tmp_path.resolve())
+
+    assert ["miseledger", "init"] in commands
+    assert ["miseledger", "crawl", "sessions"] in commands
+    assert ["miseledger", "status", "--json"] in commands
+    assert ["miseledger", "doctor"] in commands
+    for command in commands:
+        assert "--root" not in command
+        assert "--repo" not in command
+        assert command[1:3] != ["crawl", "memory"]
+        assert command[1:3] != ["crawl", "files"]
+        assert command[1:3] != ["crawl", "gitlog"]
+
+    omitted = {tuple(row["argv"]): row["reason"] for row in payload["omitted"]}
+    assert "memory/NAMESPACE" in omitted[("miseledger", "crawl", "memory", target)]
+    assert "retired sourceharvest" in omitted[("miseledger", "crawl", "files", target)]
+    assert "retired sourceharvest" in omitted[("miseledger", "crawl", "gitlog", target)]
+    rendered = evidence_cmd._render_plan_md(payload)
+    assert "Omitted" in rendered
+    assert "memory/NAMESPACE" in rendered
+    assert "retired sourceharvest" in rendered
+
+
+def test_crawl_plan_prints_memory_when_namespace_is_declared(tmp_path):
+    namespace = tmp_path / "memory" / "NAMESPACE"
+    namespace.parent.mkdir(parents=True)
+    namespace.write_text(_VALID_MEMORY_NAMESPACE + "\n")
+    payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
+    target = str(tmp_path.resolve())
+    assert ["miseledger", "crawl", "memory", target] in payload["commands"]
+    omitted_argv = [tuple(row["argv"]) for row in payload["omitted"]]
+    assert ("miseledger", "crawl", "memory", target) not in omitted_argv
+
+
+def test_crawl_plan_printed_commands_exec_on_bundled_engine(tmp_path, monkeypatch):
+    """Each printed argv must run on the in-tree engine at engines/evidence-ledger/bin/."""
+    binary = _bundled_miseledger()
+    monkeypatch.setenv("MISELEDGER_BIN", str(binary))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    payload = evidence_cmd.crawl_plan_payload(target=workspace)
+    assert all(cmd[1:3] != ["crawl", "memory"] for cmd in payload["commands"])
+    env = _isolated_miseledger_env(tmp_path / "home")
+    env["MISELEDGER_BIN"] = str(binary)
+    _exec_printed_commands(payload["commands"], env)
+
+
+def test_crawl_plan_memory_command_execs_when_namespace_declared(tmp_path, monkeypatch):
+    binary = _bundled_miseledger()
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
+    workspace = tmp_path / "ws"
+    namespace = workspace / "memory" / "NAMESPACE"
+    namespace.parent.mkdir(parents=True)
+    namespace.write_text(_VALID_MEMORY_NAMESPACE + "\n")
+    payload = evidence_cmd.crawl_plan_payload(target=workspace)
+    assert [str(binary), "crawl", "memory", str(workspace.resolve())] in payload["commands"]
+    env = _isolated_miseledger_env(tmp_path / "home")
+    _exec_printed_commands(payload["commands"], env)
+
+
+def test_issue_1024_mutation_memory_on_clean_workspace_fails_on_bundled_engine(tmp_path):
+    """Printing crawl memory on a clean workspace dies; the omit exists for this."""
+    binary = _bundled_miseledger()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    env = _isolated_miseledger_env(tmp_path / "home")
+    completed = subprocess.run(
+        [str(binary), "crawl", "memory", str(workspace)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "memory/NAMESPACE" in completed.stderr
+    broken_flags = [
+        [str(binary), "crawl", "files", "--root", str(workspace)],
+        [str(binary), "crawl", "gitlog", "--repo", str(workspace)],
+    ]
+    for command in broken_flags:
+        failed = subprocess.run(command, capture_output=True, text=True, env=env, timeout=30, check=False)
+        assert failed.returncode != 0, f"{command} unexpectedly succeeded"
+        assert "usage:" in failed.stderr
 
 
 def test_crawl_plan_write_creates_files(tmp_path):
