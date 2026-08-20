@@ -7,8 +7,8 @@ import pytest
 from brigade import acpx_adapter, agents
 from brigade import run_transport
 from brigade.roster import Agent, Roster
-from brigade.run_receipts import write_worker_logs
-from brigade.run_transport import Assignment
+from brigade.run_receipts import worker_payload, write_worker_logs
+from brigade.run_transport import INVALID_ENDPOINT_HOST, Assignment
 
 
 def _roster_with_env(env):
@@ -601,6 +601,60 @@ def test_cloudflare_gateway_preflight_fallback_agent_fails_without_launch(monkey
     # attempt history is preserved, not dropped by returning a bare preflight result.
     assert len(result.attempts) >= 1
     assert any(attempt.worker == "grok_cli" for attempt in result.attempts)
+
+
+def test_endpoint_host_never_records_opaque_base_url_ref_secret(monkeypatch):
+    """#1041 mutation: a *_BASE_URL_REF with no hostname must not enter provenance.
+
+    Pre-fix, ``urlparse(...).hostname or base_url`` copied the referenced
+    secret into ``endpoint_host``. Reverting that fallback makes this test
+    fail: the planted value appears in the receipt payload.
+    """
+
+    secret = "sk-" + "opaque-no-host-token-value"
+    monkeypatch.setenv("LANE_URL", secret)
+    monkeypatch.setenv("LANE_KEY", "sk-" + "lane-value")
+    captured = {}
+    roster = _roster_with_env({"ANTHROPIC_BASE_URL_REF": "LANE_URL", "ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"})
+    result = _dispatch(roster, monkeypatch, captured)[0]
+    payload = worker_payload([result])[0]
+    serialized = str(result) + str(payload)
+
+    assert result.endpoint_host == INVALID_ENDPOINT_HOST
+    assert payload["endpoint_host"] == INVALID_ENDPOINT_HOST
+    assert secret not in serialized
+    assert secret not in (result.endpoint_host or "")
+
+
+def test_env_endpoint_host_rejects_malformed_ref_without_falling_back(monkeypatch):
+    """Direct helper mutation: never substitute the raw referenced value."""
+
+    secret = "sk-" + "still-not-a-hostname"
+    monkeypatch.setenv("LANE_URL", secret)
+    host = run_transport._env_endpoint_host({"OPENAI_BASE_URL_REF": "LANE_URL"})
+
+    assert host == INVALID_ENDPOINT_HOST
+    assert host != secret
+    assert secret not in (host or "")
+
+
+def test_endpoint_host_keeps_valid_host_and_marks_opaque_ref(monkeypatch):
+    secret = "sk-" + "mixed-opaque-ref-value"
+    monkeypatch.setenv("LANE_URL", secret)
+    monkeypatch.setenv("LANE_KEY", "sk-" + "lane-value")
+    captured = {}
+    roster = _roster_with_env(
+        {
+            "ANTHROPIC_BASE_URL": "https://anthropic-lane.example.com/anthropic",
+            "OPENAI_BASE_URL_REF": "LANE_URL",
+            "OPENAI_API_KEY_REF": "LANE_KEY",
+        }
+    )
+    result = _dispatch(roster, monkeypatch, captured)[0]
+
+    assert result.endpoint_host == f"anthropic-lane.example.com,{INVALID_ENDPOINT_HOST}"
+    assert secret not in str(result)
+    assert secret not in str(worker_payload([result]))
 
 
 def test_endpoint_host_records_all_distinct_hosts(monkeypatch):
