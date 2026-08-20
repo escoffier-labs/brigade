@@ -17,11 +17,11 @@ The README continues to load one local SVG asset. That asset will carry outlined
 - Create: `tests/test_readme_brand_header.py`
 
 - [x] Add a focused test that parses `docs/assets/brigade-wordmark.svg` and asserts:
-  - the panel uses `#0f1318`, `#2a323d`, and an `8` radius;
-  - the wordmark uses `#dde3ea`, the maker line uses `#9aa4b2`, and exactly one element uses amber `#e0a45c`;
-  - the amber element is the circle identified as `i-dot`;
-  - the SVG contains outlined paths and no `<text>` elements, `Arial`, or the retired blue `#5d8dff`;
-  - the title remains `Brigade (by Escoffier Labs)`;
+  - the panel uses `#0f1318`, `#2a323d`, and an `8` radius.
+  - the wordmark uses `#dde3ea`, the maker line uses `#9aa4b2`, and exactly one element uses amber `#e0a45c`.
+  - the amber element is the circle identified as `i-dot`.
+  - the SVG contains outlined paths and no `<text>` elements, `Arial`, or the retired blue `#5d8dff`.
+  - the title remains `Brigade (by Escoffier Labs)`.
   - `README.md` contains the seven expected `shieldcn.dev` URLs exactly once.
 - [x] Run RED through Brigade:
   `brigade work verify run --target . --command "pytest -q tests/test_readme_brand_header.py" --capture brigade-work`
@@ -33,16 +33,16 @@ The README continues to load one local SVG asset. That asset will carry outlined
 **Files:**
 - Modify: `docs/assets/brigade-wordmark.svg`
 
-- [x] Generate the word `brıgade` from Inter ExtraBold 800 and `(by Escoffier Labs)` from Inter Medium 500 as Cairo SVG outlines. Use Inter 4.1 only as a temporary generation input, matching the deployed site's Inter family; do not add the font or a package dependency to the repository.
+- [x] Generate the word `brıgade` from Inter ExtraBold 800 and `(by Escoffier Labs)` from Inter Medium 500 as Cairo SVG outlines. Use Inter 4.1 only as a temporary generation input matching the deployed site's Inter family. Do not add the font or a package dependency to the repository.
 - [x] Compose a `920 x 280` SVG with:
-  - panel fill `#0f1318`, stroke `#2a323d`, radius `8`;
-  - centered off-white outlined wordmark;
-  - one amber circle over the dotless `ı`, with no amber terminal period;
-  - centered muted maker line below the wordmark;
+  - panel fill `#0f1318`, stroke `#2a323d`, radius `8`.
+  - centered off-white outlined wordmark.
+  - one amber circle over the dotless `ı`, with no amber terminal period.
+  - centered muted maker line below the wordmark.
   - `<title>` and `<desc>` for accessibility.
 - [x] Render the SVG to PNG and inspect the Chromium result for clipping, centering, and the single-dot treatment.
 - [x] Run GREEN through Brigade with the same focused pytest command. Expect `1 passed`.
-- [ ] Commit the asset with `docs: match README wordmark to brigade.tools`.
+- [x] Commit the asset with `docs: match README wordmark to brigade.tools`.
 
 ### Task 3: Verify the complete README header
 
@@ -52,8 +52,8 @@ The README continues to load one local SVG asset. That asset will carry outlined
 - Verify: `docs/assets/brigade-wordmark.svg`
 - Verify: `tests/test_readme_brand_header.py`
 
-- [ ] Request all seven shieldcn URLs and require HTTP 200.
-- [ ] Run Vale and content guard on the changed public files through Brigade.
-- [ ] Re-run the focused brand test through Brigade after every accepted edit.
-- [ ] Inspect the final diff and confirm no product claims or comparison content changed.
-- [ ] Write and lint the memory handoff if the brand contract produced durable knowledge.
+- [x] Request all seven shieldcn URLs and require HTTP 200.
+- [x] Run Vale and content guard on the changed public files through Brigade.
+- [x] Re-run the focused brand test through Brigade after every accepted edit.
+- [x] Inspect the final diff and confirm no product claims or comparison content changed.
+- [x] Write and lint the memory handoff if the brand contract produced durable knowledge.

@@ -32,9 +32,7 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
     assert maker.findall(f".//{SVG_NS}use")
 
     accent_elements = [element for element in root.iter() if element.attrib.get("fill") == "#e0a45c"]
-    assert [(element.tag, element.attrib.get("id")) for element in accent_elements] == [
-        (f"{SVG_NS}circle", "i-dot")
-    ]
+    assert [(element.tag, element.attrib.get("id")) for element in accent_elements] == [(f"{SVG_NS}circle", "i-dot")]
 
     assert root.findall(f".//{SVG_NS}path")
     assert not root.findall(f".//{SVG_NS}text")
