@@ -57,6 +57,34 @@ def test_nt_dirfd_api_binder_does_not_nameerror() -> None:
     assert ctypes.sizeof(info) > 0
 
 
+def test_nt_dirfd_directory_access_is_traversal_without_delete() -> None:
+    """Intermediate/parent directory opens must not request DELETE (Win11 ACCESS_DENIED)."""
+    traverse = nt_dirfd._DIRECTORY_TRAVERSE_ACCESS
+    modify = nt_dirfd._DIRECTORY_MODIFY_ACCESS
+    assert traverse & nt_dirfd._FILE_LIST_DIRECTORY
+    assert traverse & nt_dirfd._FILE_TRAVERSE
+    assert traverse & nt_dirfd._SYNCHRONIZE
+    assert not (traverse & nt_dirfd._DELETE)
+    assert not (modify & nt_dirfd._DELETE)
+    assert modify & nt_dirfd._FILE_ADD_FILE
+    assert modify & nt_dirfd._FILE_ADD_SUBDIRECTORY
+    assert modify & nt_dirfd._FILE_DELETE_CHILD
+    assert nt_dirfd._directory_access(writable=False) == traverse
+    assert nt_dirfd._directory_access(writable=True) == modify
+    assert nt_dirfd._SHARE_ALL == (nt_dirfd._FILE_SHARE_READ | nt_dirfd._FILE_SHARE_WRITE | nt_dirfd._FILE_SHARE_DELETE)
+    assert nt_dirfd._FILE_OPEN_REPARSE_POINT == 0x00200000
+    assert nt_dirfd._FILE_WRITE_ACCESS & nt_dirfd._FILE_WRITE_DATA
+    assert nt_dirfd._FILE_READ_ACCESS & nt_dirfd._FILE_READ_DATA
+    assert not hasattr(nt_dirfd, "_GENERIC_WRITE")
+
+
+def test_nt_dirfd_access_denied_names_the_component() -> None:
+    with pytest.raises(PermissionError, match="path component access denied: imports"):
+        nt_dirfd._raise_ntstatus(nt_dirfd._STATUS_ACCESS_DENIED, name="imports")
+    with pytest.raises(PermissionError, match="path component access denied$"):
+        nt_dirfd._raise_ntstatus(nt_dirfd._STATUS_ACCESS_DENIED)
+
+
 def test_nt_dirfd_validate_component_rejects_traversal() -> None:
     nt_dirfd.validate_component("imports")
     nt_dirfd.validate_component("inbox.jsonl")

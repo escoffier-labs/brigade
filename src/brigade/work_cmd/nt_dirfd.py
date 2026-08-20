@@ -31,15 +31,15 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
-_GENERIC_READ = 0x80000000
-_GENERIC_WRITE = 0x40000000
 _DELETE = 0x00010000
 _SYNCHRONIZE = 0x00100000
 _FILE_READ_ATTRIBUTES = 0x0080
+_FILE_READ_DATA = 0x0001
 _FILE_LIST_DIRECTORY = 0x0001
 _FILE_ADD_FILE = 0x0002
 _FILE_ADD_SUBDIRECTORY = 0x0004
 _FILE_TRAVERSE = 0x0020
+_FILE_DELETE_CHILD = 0x0040
 _FILE_WRITE_DATA = 0x0002
 _FILE_APPEND_DATA = 0x0004
 
@@ -68,16 +68,16 @@ _STATUS_IO_REPARSE_TAG_NOT_HANDLED = 0xC0000279
 _STATUS_REPARSE_POINT_NOT_RESOLVED = 0xC0000280
 
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-_DIRECTORY_ACCESS = (
-    _FILE_LIST_DIRECTORY
-    | _FILE_ADD_FILE
-    | _FILE_ADD_SUBDIRECTORY
-    | _FILE_TRAVERSE
-    | _FILE_READ_ATTRIBUTES
-    | _DELETE
-    | _SYNCHRONIZE
-)
+# Intermediate and parent directory opens must not request DELETE (delete-self).
+# A second open of ``imports`` during the import-proof walk races the still-held
+# inbox-parent handle and any indexer that omitted FILE_SHARE_DELETE; DELETE
+# then surfaces as STATUS_ACCESS_DENIED. Traversal needs LIST|TRAVERSE; a
+# parent that will mkdir/create/rename children also needs ADD_*|DELETE_CHILD.
+_DIRECTORY_TRAVERSE_ACCESS = _FILE_LIST_DIRECTORY | _FILE_TRAVERSE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
+_DIRECTORY_MODIFY_ACCESS = _DIRECTORY_TRAVERSE_ACCESS | _FILE_ADD_FILE | _FILE_ADD_SUBDIRECTORY | _FILE_DELETE_CHILD
 _SHARE_ALL = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
+_FILE_READ_ACCESS = _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
+_FILE_WRITE_ACCESS = _FILE_READ_ATTRIBUTES | _FILE_WRITE_DATA | _FILE_APPEND_DATA | _DELETE | _SYNCHRONIZE
 
 
 class _UNICODE_STRING(ctypes.Structure):
@@ -151,6 +151,11 @@ def available() -> bool:
     return sys.platform == "win32"
 
 
+def _directory_access(*, writable: bool) -> int:
+    """Return the directory access mask for a traversal or mutation parent."""
+    return _DIRECTORY_MODIFY_ACCESS if writable else _DIRECTORY_TRAVERSE_ACCESS
+
+
 def validate_component(name: str) -> str:
     """Reject empty, dotted, or separator-bearing names so walks stay contained."""
     if not isinstance(name, str) or not name:
@@ -162,12 +167,12 @@ def validate_component(name: str) -> str:
     return name
 
 
-def open_root_directory(path: Path | str) -> int:
+def open_root_directory(path: Path | str, *, writable: bool = True) -> int:
     """Open ``path`` as a directory without following a final reparse point."""
     api = _require_api()
     handle = api.CreateFileW(
         _wide_path(path),
-        _DIRECTORY_ACCESS,
+        _directory_access(writable=writable),
         _SHARE_ALL,
         None,
         _OPEN_EXISTING,
@@ -184,14 +189,14 @@ def open_root_directory(path: Path | str) -> int:
         raise
 
 
-def open_child_directory(parent: int, name: str) -> int:
+def open_child_directory(parent: int, name: str, *, writable: bool = True) -> int:
     """Open ``name`` under ``parent`` as a directory without following a reparse point."""
     api = _require_api()
     handle = _nt_create(
         api,
         parent,
         name,
-        access=_DIRECTORY_ACCESS,
+        access=_directory_access(writable=writable),
         disposition=_FILE_OPEN,
         options=_FILE_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
         attributes=_FILE_ATTRIBUTE_DIRECTORY,
@@ -211,7 +216,7 @@ def mkdir_child(parent: int, name: str) -> None:
         api,
         parent,
         name,
-        access=_DIRECTORY_ACCESS,
+        access=_DIRECTORY_TRAVERSE_ACCESS,
         disposition=_FILE_CREATE,
         options=_FILE_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
         attributes=_FILE_ATTRIBUTE_DIRECTORY,
@@ -235,11 +240,7 @@ def open_path_file(path: Path | str, flags: int, mode: int = 0o600) -> int:
         raise OSError("non-exclusive create is not used by import inbox publication")
     else:
         disposition = _OPEN_EXISTING
-    access = _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
-    if write:
-        access |= _GENERIC_WRITE | _DELETE | _FILE_WRITE_DATA | _FILE_APPEND_DATA
-    else:
-        access |= _GENERIC_READ
+    access = _FILE_WRITE_ACCESS if write else _FILE_READ_ACCESS
     handle = api.CreateFileW(
         _wide_path(path),
         access,
@@ -275,11 +276,7 @@ def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
         raise OSError("non-exclusive create is not used by import inbox publication")
     else:
         disposition = _FILE_OPEN
-    access = _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
-    if write:
-        access |= _GENERIC_WRITE | _DELETE | _FILE_WRITE_DATA | _FILE_APPEND_DATA
-    else:
-        access |= _GENERIC_READ
+    access = _FILE_WRITE_ACCESS if write else _FILE_READ_ACCESS
     handle = _nt_create(
         api,
         parent,
@@ -462,7 +459,7 @@ def _nt_create(
         0,
     )
     del buffer
-    _raise_ntstatus(status)
+    _raise_ntstatus(status, name=name)
     if _is_invalid_handle(handle.value):
         raise OSError("NtCreateFile returned an invalid handle")
     return handle.value
@@ -486,16 +483,17 @@ def _rename_information(api: Any, parent: int, destination: str, *, replace: boo
     return ctypes.byref(info), ctypes.sizeof(info)
 
 
-def _raise_ntstatus(status: int) -> None:
+def _raise_ntstatus(status: int, *, name: str | None = None) -> None:
     code = status & 0xFFFFFFFF
-    if status >= 0 and code != _STATUS_STOPPED_ON_SYMLINK:
+    if code < 0x80000000:
         return
+    suffix = f": {name}" if name else ""
     if code in {_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND}:
-        raise FileNotFoundError("path component does not exist")
+        raise FileNotFoundError(f"path component does not exist{suffix}")
     if code == _STATUS_OBJECT_NAME_COLLISION:
-        raise FileExistsError("path component already exists")
+        raise FileExistsError(f"path component already exists{suffix}")
     if code == _STATUS_ACCESS_DENIED:
-        raise PermissionError("path component access denied")
+        raise PermissionError(f"path component access denied{suffix}")
     if code in {_STATUS_OBJECT_NAME_INVALID, _STATUS_OBJECT_PATH_INVALID}:
         raise OSError("path component is not a single contained name")
     if code == _STATUS_NOT_A_DIRECTORY:
