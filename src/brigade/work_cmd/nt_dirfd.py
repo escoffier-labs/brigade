@@ -24,6 +24,7 @@ from typing import Any
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
 _FILE_SHARE_DELETE = 0x00000004
+_CREATE_NEW = 1
 _OPEN_EXISTING = 3
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
@@ -221,6 +222,46 @@ def mkdir_child(parent: int, name: str) -> None:
         api.CloseHandle(handle)
 
 
+def open_path_file(path: Path | str, flags: int, mode: int = 0o600) -> int:
+    """Open a file path without following a final reparse point."""
+    del mode
+    api = _require_api()
+    write = bool(flags & (os.O_WRONLY | os.O_RDWR))
+    create = bool(flags & os.O_CREAT)
+    exclusive = bool(flags & os.O_EXCL)
+    if create and exclusive:
+        disposition = _CREATE_NEW
+    elif create:
+        raise OSError("non-exclusive create is not used by import inbox publication")
+    else:
+        disposition = _OPEN_EXISTING
+    access = _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
+    if write:
+        access |= _GENERIC_WRITE | _DELETE | _FILE_WRITE_DATA | _FILE_APPEND_DATA
+    else:
+        access |= _GENERIC_READ
+    handle = api.CreateFileW(
+        _wide_path(path),
+        access,
+        _SHARE_ALL,
+        None,
+        disposition,
+        _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if _is_invalid_handle(handle):
+        raise _win_error()
+    fd_flags = os.O_WRONLY if write and not (flags & os.O_RDWR) else os.O_RDONLY
+    if flags & os.O_RDWR:
+        fd_flags = os.O_RDWR
+    try:
+        _reject_reparse(api, handle, expected_directory=False)
+        return _handle_to_fd(api, handle, fd_flags)
+    except BaseException:
+        api.CloseHandle(handle)
+        raise
+
+
 def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
     """Open or create ``name`` under ``parent`` without following a reparse point."""
     del mode
@@ -336,8 +377,23 @@ def _is_invalid_handle(handle: Any) -> bool:
     return value in {0, -1} or value == _INVALID_HANDLE_VALUE
 
 
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_PATH_NOT_FOUND = 3
+_ERROR_ACCESS_DENIED = 5
+_ERROR_FILE_EXISTS = 80
+_ERROR_ALREADY_EXISTS = 183
+
+
 def _win_error() -> OSError:
-    return ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
+    code = ctypes.get_last_error()  # type: ignore[attr-defined]
+    error = ctypes.WinError(code)  # type: ignore[attr-defined]
+    if code in {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}:
+        return FileNotFoundError(error)
+    if code in {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}:
+        return FileExistsError(error)
+    if code == _ERROR_ACCESS_DENIED:
+        return PermissionError(error)
+    return error
 
 
 def _handle_to_fd(api: Any, handle: Any, flags: int) -> int:

@@ -135,6 +135,39 @@ def test_open_import_inbox_parent_rejects_inbox_escape(tmp_path: Path, monkeypat
         ledger._open_import_inbox_parent(tmp_path, create=True)
 
 
+def test_ledger_has_no_bare_windows_open_flags() -> None:
+    """Linux-visible guard: bare os.O_NOFOLLOW/O_DIRECTORY crash on Windows."""
+    source = Path(ledger.__file__).read_text()
+    for lineno, line in enumerate(source.splitlines(), 1):
+        if "os.O_NOFOLLOW" in line and "getattr" not in line:
+            raise AssertionError(f"bare os.O_NOFOLLOW at {lineno}: {line}")
+        if "os.O_DIRECTORY" in line and "getattr" not in line:
+            raise AssertionError(f"bare os.O_DIRECTORY at {lineno}: {line}")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="executes the Windows import proof and authority path")
+def test_windows_import_proof_and_authority_store_round_trip(tmp_path: Path) -> None:
+    """Run the full import write on Windows; do not grep a CI script."""
+    record = ledger._sanitize_untrusted_import_record(
+        {"text": "windows proof path", "kind": "task", "source": "manual", "metadata": {}},
+        importer_source="manual",
+    )
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [record],
+        provenance_source="manual",
+        migrate_untrusted_identities=True,
+    )
+    assert imported
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert ledger._has_persisted_import_proof(imported[0], target=tmp_path)
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert payload is not None
+    assert ledger._read_imports(tmp_path)
+
+
 def test_append_import_records_succeeds_on_current_platform(tmp_path: Path) -> None:
     record = ledger._sanitize_untrusted_import_record(
         {"text": "windows inbox regression", "kind": "task", "source": "manual", "metadata": {}},

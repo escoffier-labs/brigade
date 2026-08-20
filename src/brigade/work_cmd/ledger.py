@@ -1571,7 +1571,7 @@ def _dirfd_unavailable(kind: str) -> OSError:
 def _open_directory_nofollow(path: Path) -> int:
     """Open a directory without following a final symlink or reparse point."""
     if _posix_dirfd_available():
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         return os.open(path, flags)
     if _nt_dirfd_available():
         from . import nt_dirfd
@@ -1580,9 +1580,23 @@ def _open_directory_nofollow(path: Path) -> int:
     raise _dirfd_unavailable("directory operations")
 
 
+def _open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
+    """Open a file path without following a final symlink or reparse point."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        if flags & os.O_CREAT:
+            return os.open(path, flags | nofollow | getattr(os, "O_CLOEXEC", 0), mode)
+        return os.open(path, flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.open_path_file(path, flags, mode)
+    raise OSError("no-follow file open is unavailable")
+
+
 def _dirfd_open_dir(parent: int, name: str) -> int:
     if _posix_dirfd_available():
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         return os.open(name, flags, dir_fd=parent)
     if _nt_dirfd_available():
         from . import nt_dirfd
@@ -1677,9 +1691,9 @@ def _require_workspace_directory_identity(target: Path, expected: dict[str, int]
 def _read_external_directory_authority_path(path: Path) -> dict[str, Any] | None:
     """Read one external authority record without deriving authority from its path."""
     try:
-        descriptor = os.open(
+        descriptor = _open_file_nofollow(
             path,
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
         )
     except FileNotFoundError:
         return None
@@ -1707,19 +1721,22 @@ def _write_external_directory_authority(path: Path, payload: dict[str, Any]) -> 
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     descriptor = -1
     try:
-        descriptor = os.open(
+        descriptor = _open_file_nofollow(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:
             handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
+        # Windows refuses os.replace while the source handle is still open (WinError 32).
+        os.close(descriptor)
+        descriptor = -1
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory = _open_directory_nofollow(path.parent)
         try:
-            os.fsync(directory)
+            _dirfd_fsync(directory)
         finally:
             os.close(directory)
     finally:
@@ -2033,7 +2050,7 @@ def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *,
 
 def _adopt_preexisting_scanner_run_directories(target: Path, root: int, *, workspace: dict[str, int]) -> None:
     """Capture released scanner run directories by identity, never by receipt bytes."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     for run_id in os.listdir(root):
         if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", run_id):
             continue
@@ -2055,7 +2072,7 @@ def _adopt_preexisting_scanner_run_directories(target: Path, root: int, *, works
 
 def _open_legacy_scanner_runs_directory(target: Path) -> int:
     """Adopt a released scanner-runs root without deriving trust from receipts."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(target.expanduser().resolve(), flags)
     workspace = _directory_identity(descriptor)
     anchor_parent = -1
@@ -2425,7 +2442,9 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", scanner_run_id)
     ):
         return None
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
     root = -1
     current = -1
     receipt_descriptor = -1
@@ -2452,7 +2471,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
         )
         receipt_descriptor = os.open(
             "receipt.json",
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             dir_fd=current,
         )
         before = os.fstat(receipt_descriptor)
@@ -2579,7 +2598,7 @@ def _open_import_inbox_parent_posix(target: Path, *, create: bool) -> tuple[int,
         relative = inbox_path.relative_to(target_root)
     except ValueError as exc:
         raise OSError("import inbox escapes target") from exc
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     parent = os.open(target_root, flags)
     try:
         for component in relative.parts[:-1]:
