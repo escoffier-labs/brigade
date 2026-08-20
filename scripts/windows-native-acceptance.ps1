@@ -90,6 +90,17 @@ function Get-PipxBinDir {
     return $binDir.Trim()
 }
 
+function Get-InstalledBrigadePython {
+    param([string]$PipxHome)
+    foreach ($name in @("brigade-cli", "brigade")) {
+        $candidate = Join-Path $PipxHome "venvs\$name\Scripts\python.exe"
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    throw "installed brigade python was not found under $PipxHome"
+}
+
 function Initialize-PipxBootstrap {
     param(
         [string]$SystemPython,
@@ -743,7 +754,9 @@ except OSError:
 else:
     raise SystemExit("import inbox parent followed a junction")
 '@ | Set-Content -Path $inboxProbeScript -Encoding UTF8
-        & python $inboxProbeScript $inboxProbeRoot
+        # PATH `python` is the system interpreter; brigade is isolated in pipx.
+        $brigadePython = Get-InstalledBrigadePython -PipxHome $env:PIPX_HOME
+        & $brigadePython $inboxProbeScript $inboxProbeRoot
         if ($LASTEXITCODE -ne 0) { throw "import inbox Windows probe failed" }
 
         Write-Step "memory care import-issues"

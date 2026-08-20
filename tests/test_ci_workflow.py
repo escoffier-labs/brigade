@@ -409,6 +409,9 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     # tests/test_work_import_inbox_windows.py, including a missing-O_NOFOLLOW run.
     assert "import inbox no-follow parent" in text
     assert "_open_import_inbox_parent" in text
+    assert "Get-InstalledBrigadePython" in text
+    assert "& $brigadePython $inboxProbeScript $inboxProbeRoot" in text
+    assert "& python $inboxProbeScript" not in text
     assert "mklink" in text
     assert "memory care import-issues" in text
     assert "center readiness import-issues" in text
@@ -568,12 +571,24 @@ def test_windows_native_acceptance_bootstrap_return_is_single_python_path():
     assert _powershell_line_consumes_success_stream(pip_line)
 
 
+def test_windows_native_acceptance_import_probe_uses_installed_brigade_python():
+    """The inbox probe imports brigade; PATH python is the system interpreter."""
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    helper = _extract_powershell_function(text, "Get-InstalledBrigadePython")
+    assert 'Join-Path $PipxHome "venvs\\$name\\Scripts\\python.exe"' in helper
+    assert '"brigade-cli"' in helper
+    assert "& python $inboxProbeScript" not in text
+    assert "& $brigadePython $inboxProbeScript $inboxProbeRoot" in text
+    assert "Get-InstalledBrigadePython -PipxHome $env:PIPX_HOME" in text
+
+
 def test_windows_native_acceptance_assigned_return_functions_do_not_leak_stdout():
     text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
     assigned_returns = (
         "Get-PythonExeDir",
         "Get-PythonScriptsDir",
         "Get-PipxBinDir",
+        "Get-InstalledBrigadePython",
         "Initialize-PipxBootstrap",
         "Get-ManagedExecutablePath",
     )
