@@ -416,7 +416,8 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "memory care scan" in text
     assert "memory care import-issues" in text
     assert text.index("memory care scan") < text.index("memory care import-issues")
-    assert "center readiness import-issues" in text
+    # extras-gated; the acceptance install leaves extras disabled.
+    assert "center readiness import-issues" not in text
     assert "$payload.ready" in text
     assert "$payload.blocking_issue_count" in text
     assert "--db $dbPath sync $workRepo" in text

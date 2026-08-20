@@ -770,10 +770,6 @@ else:
         & brigade memory care import-issues --target $workRepo
         if ($LASTEXITCODE -ne 0) { throw "memory care import-issues failed" }
 
-        Write-Step "center readiness import-issues"
-        & brigade center readiness import-issues --target $workRepo
-        if ($LASTEXITCODE -ne 0) { throw "center readiness import-issues failed" }
-
         $dbPath = Join-Path $workRepo ".graphtrail\graphtrail.db"
         Write-Step "graphtrail sync"
         & $graphtrailExe --db $dbPath sync $workRepo
