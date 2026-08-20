@@ -299,7 +299,7 @@ func mcpEvidenceShow(args map[string]any) (map[string]any, error) {
 	if id == "" {
 		return nil, errors.New("missing id")
 	}
-	bundle, err := loadEvidenceBundle(id)
+	bundle, err := materializeEvidenceBundle(id)
 	if err != nil {
 		return nil, err
 	}

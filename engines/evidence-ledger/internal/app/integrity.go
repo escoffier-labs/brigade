@@ -137,54 +137,124 @@ func verifyMaterializedHashes(text, rawJSON string, envMap map[string]any, artif
 		return out
 	}
 	for _, art := range artifacts {
-		text, _ := art["text"].(string)
-		if strings.TrimSpace(text) == "" {
-			continue
-		}
-		id, _ := art["id"].(string)
-		meta := decodeMetadata(fmt.Sprint(art["metadata_json"]))
-		if rawMeta, ok := art["metadata"]; ok {
-			if mapped := anyToMap(rawMeta); len(mapped) > 0 {
-				meta = mapped
+		out = append(out, verifyArtifactTextIntegrity(art)...)
+	}
+	return out
+}
+
+func verifyArtifactTextIntegrity(art map[string]any) []hashMismatch {
+	text, _ := art["text"].(string)
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	id, _ := art["id"].(string)
+	kind, _ := art["kind"].(string)
+	url, _ := art["url"].(string)
+	var out []hashMismatch
+	textDigests := artifactTextDigests(art)
+	if len(textDigests) == 0 {
+		out = append(out, hashMismatch{Kind: "artifact", Expected: "", Actual: provenance.ContentSHA256(text), Scope: "artifact.text", Artifact: id})
+	} else if !artifactTextMatches(text, textDigests) {
+		out = append(out, hashMismatch{Kind: "artifact", Expected: textDigests[0], Actual: provenance.ContentSHA256(text), Scope: "artifact.text", Artifact: id})
+	}
+	if kind == "url" && url != "" {
+		if urlDigest := artifactURLDigest(art); urlDigest != "" {
+			actualURL := provenance.SHA256Bytes([]byte(url))
+			if actualURL != urlDigest {
+				out = append(out, hashMismatch{Kind: "artifact", Expected: urlDigest, Actual: actualURL, Scope: "artifact.url", Artifact: id})
 			}
-		}
-		if rawEnv, ok := meta["provenance"]; ok && rawEnv != nil {
-			artEnv := anyToMap(rawEnv)
-			artHashes := mapField(artEnv, "hashes")
-			if content := inspectDigest(artHashes, "content"); content.present {
-				actual := provenance.ContentSHA256(text)
-				if !content.valid || actual != content.raw {
-					scope := stringField(artHashes, "content_scope")
-					if scope == "" {
-						scope = "item.text.utf8.v1"
-					}
-					out = append(out, hashMismatch{Kind: "artifact", Expected: content.raw, Actual: actual, Scope: scope, Artifact: id})
-				}
-			}
-		}
-		stored, _ := art["content_hash"].(string)
-		if stored == "" || !strings.HasPrefix(stored, "sha256:") {
-			continue
-		}
-		want := strings.TrimPrefix(stored, "sha256:")
-		if len(want) != 64 {
-			continue
-		}
-		kind, _ := art["kind"].(string)
-		url, _ := art["url"].(string)
-		computedText := provenance.SHA256Bytes([]byte(textnorm.Normalize(text)))
-		if kind == "url" && url != "" {
-			computedURL := provenance.SHA256Bytes([]byte(url))
-			if computedText != want && computedURL != want {
-				out = append(out, hashMismatch{Kind: "artifact", Expected: want, Actual: computedText, Scope: "artifact.content_hash", Artifact: id})
-			}
-			continue
-		}
-		if computedText != want {
-			out = append(out, hashMismatch{Kind: "artifact", Expected: want, Actual: computedText, Scope: "artifact.content_hash", Artifact: id})
 		}
 	}
 	return out
+}
+
+func artifactMetadata(art map[string]any) map[string]any {
+	if rawMeta, ok := art["metadata"]; ok {
+		if mapped := anyToMap(rawMeta); len(mapped) > 0 {
+			return mapped
+		}
+	}
+	raw := art["metadata_json"]
+	if raw == nil {
+		return map[string]any{}
+	}
+	switch v := raw.(type) {
+	case string:
+		return decodeMetadata(v)
+	case []byte:
+		return decodeMetadata(string(v))
+	default:
+		if mapped := anyToMap(v); len(mapped) > 0 {
+			return mapped
+		}
+		return decodeMetadata(fmt.Sprint(v))
+	}
+}
+
+func artifactTextDigests(art map[string]any) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(digest string) {
+		if digest == "" || seen[digest] {
+			return
+		}
+		seen[digest] = true
+		out = append(out, digest)
+	}
+	meta := artifactMetadata(art)
+	if rawEnv, ok := meta["provenance"]; ok && rawEnv != nil {
+		artHashes := mapField(anyToMap(rawEnv), "hashes")
+		if content := inspectDigest(artHashes, "content"); content.present && content.valid {
+			add(content.raw)
+		}
+	}
+	add(storedDigestString(meta["text_hash"]))
+	kind, _ := art["kind"].(string)
+	if kind != "url" {
+		add(storedDigestString(art["content_hash"]))
+	}
+	return out
+}
+
+func artifactURLDigest(art map[string]any) string {
+	if digest := storedDigestString(artifactMetadata(art)["url_hash"]); digest != "" {
+		return digest
+	}
+	kind, _ := art["kind"].(string)
+	if kind == "url" {
+		return storedDigestString(art["content_hash"])
+	}
+	return ""
+}
+
+func artifactTextMatches(text string, digests []string) bool {
+	exact := provenance.ContentSHA256(text)
+	normalized := provenance.SHA256Bytes([]byte(textnorm.Normalize(text)))
+	for _, digest := range digests {
+		if digest == exact || digest == normalized {
+			return true
+		}
+	}
+	return false
+}
+
+func storedDigestString(raw any) string {
+	if raw == nil {
+		return ""
+	}
+	s, ok := raw.(string)
+	if !ok {
+		s = fmt.Sprint(raw)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" || s == "<nil>" {
+		return ""
+	}
+	s = strings.TrimPrefix(s, "sha256:")
+	if !canonicalHexDigest(s) {
+		return ""
+	}
+	return s
 }
 
 func recordIntegrityMismatchEvents(db *sql.DB, itemID, fromLabel string, mismatches []hashMismatch) error {
@@ -369,7 +439,7 @@ func applySearchIntegrity(db *sql.DB, results []SearchResult) error {
 		results[i].Modality = view.Modality
 		results[i].TrustLabel = view.TrustLabel
 		if !contentEligible(view) {
-			results[i].Snippet = ""
+			redactIneligibleSearchResult(&results[i])
 		}
 		if view.IntegrityMismatch {
 			results[i].IntegrityMismatch = true
@@ -379,6 +449,43 @@ func applySearchIntegrity(db *sql.DB, results []SearchResult) error {
 		}
 	}
 	return nil
+}
+
+const ineligibleClosedFieldMax = 64
+
+func redactIneligibleSearchResult(r *SearchResult) {
+	r.Snippet = ""
+	r.CollectionName = ""
+	r.ActorName = ""
+	r.ActorType = ""
+	r.SourceKind = boundClosedField(r.SourceKind, ineligibleClosedFieldMax)
+	r.CollectionKind = boundClosedField(r.CollectionKind, ineligibleClosedFieldMax)
+	r.Kind = boundClosedField(r.Kind, ineligibleClosedFieldMax)
+	r.CreatedAt = boundClosedField(r.CreatedAt, ineligibleClosedFieldMax)
+	r.Origin = boundClosedField(r.Origin, ineligibleClosedFieldMax)
+	r.Modality = boundClosedField(r.Modality, ineligibleClosedFieldMax)
+	r.TrustLabel = boundClosedField(r.TrustLabel, 32)
+	r.Score = boundClosedField(r.Score, 32)
+}
+
+func redactIneligibleBundleItem(item map[string]any) {
+	item["snippet"] = ""
+	if col := anyToMap(item["collection"]); len(col) > 0 || item["collection"] != nil {
+		col["name"] = ""
+		item["collection"] = col
+	}
+	if actor := anyToMap(item["actor"]); len(actor) > 0 || item["actor"] != nil {
+		actor["name"] = ""
+		actor["type"] = ""
+		item["actor"] = actor
+	}
+}
+
+func boundClosedField(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max]
 }
 
 func decodeMetadata(raw string) map[string]any {

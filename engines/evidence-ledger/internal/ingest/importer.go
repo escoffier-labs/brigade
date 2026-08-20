@@ -779,6 +779,9 @@ func replaceItemSideTables(tx *sql.Tx, rec adapter.Record, itemID, sourceID, col
 	for _, art := range rec.Artifacts {
 		artifactID := stableID("artifact", itemID, art.ExternalID, art.Kind, art.Path, art.URL, art.Hash)
 		artifactHash := art.Hash
+		if artifactHash == "" && art.Kind == "url" && art.URL != "" {
+			artifactHash = "sha256:" + hashString(art.URL)
+		}
 		if artifactHash == "" && art.Text != "" {
 			artifactHash = "sha256:" + hashString(textnorm.Normalize(art.Text))
 		}
@@ -787,7 +790,14 @@ func replaceItemSideTables(tx *sql.Tx, rec adapter.Record, itemID, sourceID, col
 		if err != nil {
 			return fmt.Errorf("build artifact provenance envelope: %w", err)
 		}
-		artMeta := mergeMetadataJSON(art.Metadata, artEnvelope, nil)
+		artSeed := map[string]any{}
+		if art.Text != "" {
+			artSeed["text_hash"] = "sha256:" + hashString(textnorm.Normalize(art.Text))
+		}
+		if art.URL != "" {
+			artSeed["url_hash"] = "sha256:" + hashString(art.URL)
+		}
+		artMeta := mergeMetadataJSON(art.Metadata, artEnvelope, artSeed)
 		if _, err := tx.Exec(`insert or ignore into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json) values(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, sourceID, itemID, art.ExternalID, art.Kind, art.Path, art.URL, art.MimeType, art.Text, artifactHash, string(artMeta)); err != nil {
 			return err
 		}
@@ -805,8 +815,13 @@ func replaceItemSideTables(tx *sql.Tx, rec adapter.Record, itemID, sourceID, col
 		if err != nil {
 			return fmt.Errorf("build link provenance envelope: %w", err)
 		}
-		linkMeta := mergeMetadataJSON(nil, linkEnvelope, map[string]any{"link_text": link.Text})
-		if _, err := tx.Exec(`insert or ignore into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json) values(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, sourceID, itemID, link.URL, "url", "", link.URL, "text/uri-list", link.Text, "sha256:"+hashString(link.URL), string(linkMeta)); err != nil {
+		urlHash := "sha256:" + hashString(link.URL)
+		linkSeed := map[string]any{"link_text": link.Text, "url_hash": urlHash}
+		if link.Text != "" {
+			linkSeed["text_hash"] = "sha256:" + hashString(textnorm.Normalize(link.Text))
+		}
+		linkMeta := mergeMetadataJSON(nil, linkEnvelope, linkSeed)
+		if _, err := tx.Exec(`insert or ignore into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json) values(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, sourceID, itemID, link.URL, "url", "", link.URL, "text/uri-list", link.Text, urlHash, string(linkMeta)); err != nil {
 			return err
 		}
 		ftsBody += "\n" + textnorm.Normalize(link.URL+" "+link.Text)

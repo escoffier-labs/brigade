@@ -9,6 +9,7 @@ Releases before this changelog was started are on the [releases page](https://gi
 ## [Unreleased]
 
 ### Security
+- Evidence search, bundles, and cached `evidence show` / MCP `show_evidence_bundle` close three HIGH facade bypasses. Bundle queries select artifact `metadata_json` whenever text is emitted, ingest stores separate URL and text digests, and a URL hash cannot satisfy artifact-text integrity. The evidence cache stores item references only and regenerates bodies through the live eligibility and integrity gate. Ineligible hits keep opaque IDs and closed-set fields and drop free-form `actor.name` / `actor.type` / `collection.name`. Fixes #1030, #1031, #1032.
 - `miseledger trust review` requires an operator-minted capability handed over stdin (`brigade.authority.capability-handoff.v1`). The MAC is bound to item id, current digest, requested transition, nonce, and expiry. Spent nonces are recorded in `used_capabilities`. `--operator-command` is audit metadata only. A missing capability is refused for every stdin kind, including piped empty input, `/dev/null`, and a PTY. stdin is not an authorization signal. Fixes #1029.
 
 ### Fixed

@@ -213,6 +213,15 @@ func TestImportAdapterReaderStampsArtifactAndLinkProvenance(t *testing.T) {
 	if linkStored["link_text"] != "example docs" {
 		t.Fatalf("link metadata link_text = %#v", linkStored["link_text"])
 	}
+	if linkStored["url_hash"] == nil || linkStored["text_hash"] == nil {
+		t.Fatalf("link metadata missing separate url/text digests: %#v", linkStored)
+	}
+	if linkStored["url_hash"] == linkStored["text_hash"] {
+		t.Fatalf("link url_hash must not equal text_hash: %#v", linkStored)
+	}
+	if artifactStored["text_hash"] == nil {
+		t.Fatalf("artifact metadata missing text_hash: %#v", artifactStored)
+	}
 }
 
 func TestImportAdapterReaderUnsafeArtifactAndLinkLocatorsImportFully(t *testing.T) {

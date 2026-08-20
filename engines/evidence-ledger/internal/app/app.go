@@ -2471,7 +2471,7 @@ func cmdEvidenceShow(args []string, out, errw io.Writer) int {
 	if len(rest) != 1 {
 		return fatalf(errw, "usage: miseledger evidence show <bundle-id> [--json] [--markdown]")
 	}
-	bundle, err := loadEvidenceBundle(rest[0])
+	bundle, err := materializeEvidenceBundle(rest[0])
 	if err != nil {
 		return fatalf(errw, "evidence show: %s", err)
 	}
@@ -2536,7 +2536,7 @@ where i.id = ?`, r.ID)
 		}
 		artifactSQL := `select id, kind, path, url, mime_type, content_hash from artifacts where item_id = ? order by kind, path, url, id`
 		if opts.IncludeArtifactText {
-			artifactSQL = `select id, kind, path, url, mime_type, content_hash, text from artifacts where item_id = ? order by kind, path, url, id`
+			artifactSQL = `select id, kind, path, url, mime_type, content_hash, text, metadata_json from artifacts where item_id = ? order by kind, path, url, id`
 		}
 		artifacts := queryMaps(db, artifactSQL, itemID)
 		item := map[string]any{
@@ -2561,8 +2561,11 @@ where i.id = ?`, r.ID)
 		}
 		view := inspectItemIntegrity(itemText, rawJSON, metadataJSON, artifacts, opts.IncludeArtifactText)
 		attachIntegrityFields(item, view)
+		if opts.IncludeArtifactText {
+			stripArtifactVerificationFields(artifacts)
+		}
 		if !contentEligible(view) {
-			item["snippet"] = ""
+			redactIneligibleBundleItem(item)
 			if opts.IncludeArtifactText {
 				for _, art := range artifacts {
 					delete(art, "text")
@@ -2635,6 +2638,8 @@ func evidenceBundlePath(id string) (string, error) {
 	return filepath.Join(evidenceCacheDir(), id+".json"), nil
 }
 
+const evidenceBundleRefSchema = "miseledger.evidence-bundle-ref.v1"
+
 func saveEvidenceBundle(bundle map[string]any) error {
 	id, _ := bundle["id"].(string)
 	path, err := evidenceBundlePath(id)
@@ -2644,7 +2649,16 @@ func saveEvidenceBundle(bundle map[string]any) error {
 	if err := security.EnsurePrivateDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(bundle, "", "  ")
+	ref := map[string]any{
+		"schema":       evidenceBundleRefSchema,
+		"id":           id,
+		"query":        bundle["query"],
+		"filters":      bundle["filters"],
+		"item_ids":     evidenceBundleItemIDs(bundle),
+		"generated_at": bundle["generated_at"],
+		"resource_uri": bundle["resource_uri"],
+	}
+	b, err := json.MarshalIndent(ref, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -2654,7 +2668,7 @@ func saveEvidenceBundle(bundle map[string]any) error {
 	return nil
 }
 
-func loadEvidenceBundle(id string) (map[string]any, error) {
+func loadEvidenceBundleRef(id string) (map[string]any, error) {
 	path, err := evidenceBundlePath(id)
 	if err != nil {
 		return nil, err
@@ -2663,11 +2677,146 @@ func loadEvidenceBundle(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var bundle map[string]any
-	if err := json.Unmarshal(b, &bundle); err != nil {
+	var ref map[string]any
+	if err := json.Unmarshal(b, &ref); err != nil {
 		return nil, err
 	}
+	if storedID, _ := ref["id"].(string); storedID == "" {
+		ref["id"] = id
+	}
+	return ref, nil
+}
+
+func materializeEvidenceBundle(id string) (map[string]any, error) {
+	ref, err := loadEvidenceBundleRef(id)
+	if err != nil {
+		return nil, err
+	}
+	opts, err := searchOptsFromBundleRef(ref)
+	if err != nil {
+		return nil, err
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	bundle, err := evidenceBundle(db, opts)
+	if err != nil {
+		return nil, err
+	}
+	if storedID, _ := ref["id"].(string); storedID != "" {
+		bundle["id"] = storedID
+		if uri, _ := ref["resource_uri"].(string); uri != "" {
+			bundle["resource_uri"] = uri
+		} else {
+			bundle["resource_uri"] = "miseledger://evidence/" + storedID
+		}
+	}
 	return bundle, nil
+}
+
+func searchOptsFromBundleRef(ref map[string]any) (SearchOpts, error) {
+	filters := anyToMap(ref["filters"])
+	opts := SearchOpts{
+		Query:               stringFromAny(ref["query"]),
+		Source:              stringFromAny(filters["source"]),
+		Collection:          stringFromAny(filters["collection"]),
+		Kind:                stringFromAny(filters["kind"]),
+		ActorType:           stringFromAny(filters["actor_type"]),
+		Project:             stringFromAny(filters["project"]),
+		Tags:                stringFromAny(filters["tags"]),
+		From:                stringFromAny(filters["from"]),
+		To:                  stringFromAny(filters["to"]),
+		Limit:               intFromAny(filters["limit"]),
+		IncludeRelated:      boolFromAny(filters["include_related"]),
+		IncludeArtifactText: boolFromAny(filters["include_artifact_text"]),
+	}
+	if raw, ok := filters["code_reference"]; ok && raw != nil {
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			return opts, err
+		}
+		reference, err := parseCodeReferenceJSON(encoded)
+		if err != nil {
+			return opts, err
+		}
+		opts.CodeReference = reference
+	}
+	return opts, nil
+}
+
+func evidenceBundleItemIDs(bundle map[string]any) []string {
+	ids := make([]string, 0)
+	for _, item := range bundleResultMaps(bundle) {
+		if id, _ := item["id"].(string); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func bundleRefResultCount(ref map[string]any) int {
+	switch ids := ref["item_ids"].(type) {
+	case []string:
+		return len(ids)
+	case []any:
+		return len(ids)
+	}
+	return len(bundleResultMaps(ref))
+}
+
+func stringFromAny(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprint(v)
+}
+
+func intFromAny(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		parsed, err := n.Int64()
+		if err != nil {
+			return 0
+		}
+		return int(parsed)
+	case string:
+		parsed, err := strconv.Atoi(n)
+		if err != nil {
+			return 0
+		}
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func boolFromAny(v any) bool {
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		return b == "true" || b == "1" || b == "yes"
+	default:
+		return false
+	}
+}
+
+func stripArtifactVerificationFields(artifacts []map[string]any) {
+	for _, art := range artifacts {
+		delete(art, "metadata_json")
+		delete(art, "metadata")
+	}
 }
 
 func listEvidenceBundles() ([]map[string]any, error) {
@@ -2685,17 +2834,16 @@ func listEvidenceBundles() ([]map[string]any, error) {
 			continue
 		}
 		id := strings.TrimSuffix(entry.Name(), ".json")
-		bundle, err := loadEvidenceBundle(id)
+		ref, err := loadEvidenceBundleRef(id)
 		if err != nil {
 			continue
 		}
-		results, _ := bundle["results"].([]any)
 		out = append(out, map[string]any{
-			"id":           bundle["id"],
-			"resource_uri": bundle["resource_uri"],
-			"query":        bundle["query"],
-			"generated_at": bundle["generated_at"],
-			"result_count": len(results),
+			"id":           ref["id"],
+			"resource_uri": ref["resource_uri"],
+			"query":        ref["query"],
+			"generated_at": ref["generated_at"],
+			"result_count": bundleRefResultCount(ref),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -2841,6 +2989,17 @@ from items where id = ?`, targetID).Scan(&targetTombstone, &targetLive)
 		out["metadata"] = metadata
 	}
 	attachIntegrityFields(out, view)
+	if !contentEligible(view) {
+		if col := anyToMap(out["collection"]); col != nil {
+			col["name"] = ""
+			out["collection"] = col
+		}
+		if actor := anyToMap(out["actor"]); actor != nil {
+			actor["name"] = ""
+			actor["type"] = ""
+			out["actor"] = actor
+		}
+	}
 	if view.IntegrityMismatch {
 		if err := recordIntegrityMismatchEvents(db, itemID, view.TrustLabel, view.Mismatches); err != nil {
 			return nil, err
