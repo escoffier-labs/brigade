@@ -618,6 +618,25 @@ def test_memory_care_scan_default_output_lives_under_brigade_state(tmp_path, cap
     assert not (tmp_path / "memory" / "cards" / "decay").exists()
 
 
+def test_memory_care_import_issues_requires_refresh_queue(tmp_path, capsys):
+    """import-issues is a consumer: missing queue is a hard error, not a skip.
+
+    The producer is ``memory care scan``. Acceptance and daily-care-pass must
+    scan first; this command must not invent an empty queue.
+    """
+    decay = tmp_path / ".brigade" / "memory-care" / "decay"
+    decay.mkdir(parents=True)
+    rc = memory_cmd.import_issues(target=tmp_path)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "memory-care refresh queue not found" in err
+    assert str(decay / "refresh-queue.json") in err
+
+    assert memory_cmd.scan(target=tmp_path) == 0
+    assert (decay / "refresh-queue.json").is_file()
+    assert memory_cmd.import_issues(target=tmp_path, json_output=True) == 0
+
+
 def test_memory_care_readers_fall_back_to_legacy_decay_dir(tmp_path, capsys):
     legacy = tmp_path / "memory" / "cards" / "decay"
     legacy.mkdir(parents=True)

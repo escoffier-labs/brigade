@@ -71,9 +71,9 @@ def _latest_completed_run_path(target: Path, output_dir: Path | None) -> str | N
 
 
 def _resolve_next_task(target: Path) -> dict[str, Any]:
-    ready = ledger_mod._ready_tasks(target)
-    if ready:
-        task = ready[0]
+    startable = ledger_mod._startable_tasks(target)
+    if startable:
+        task = startable[0]
         return {
             "task": str(task.get("text", "")).strip(),
             "source": "task_ledger",

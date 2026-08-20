@@ -4,6 +4,7 @@ from brigade import acpx_adapter, agents, message_envelope, run_transport
 from brigade.roster import Agent, Roster
 from brigade.run_receipts import worker_payload, write_worker_logs
 from brigade.run_transport import Assignment, WorkerAttempt, WorkerResult
+from brigade.seat_health_policy import SeatQuarantineState
 
 
 def _attempt(**overrides):
@@ -167,6 +168,7 @@ def _dispatch_recovery(
     read_only=True,
     direct=True,
     source_env=None,
+    quarantine_state=None,
 ):
     direct_calls = []
     fallback_calls = []
@@ -193,6 +195,7 @@ def _dispatch_recovery(
         read_only=read_only,
         sandbox="read-only" if read_only else None,
         direct=direct,
+        quarantine_state=quarantine_state,
     )[0]
     return result, direct_calls, fallback_calls
 
@@ -255,6 +258,38 @@ def test_direct_grok_fallback_recovers_after_two_invalid_finals(monkeypatch, tmp
     assert result.provenance["message"]["assignment_id"] == message_envelope.assignment_id_for(
         "grok-review", "Review the diff."
     )
+
+
+def test_direct_grok_fallback_does_not_launch_quarantined_seat(monkeypatch, tmp_path):
+    """#1038 mutation: a quarantined fallback must not be invoked.
+
+    Pre-fix, quarantine was checked only for assignment.worker, so a grok
+    invalid-final fallback launched the already-quarantined seat. Reverting
+    the invoke-time check makes this test fail: fallback_calls becomes
+    nonempty and the result is treated as a successful launch.
+    """
+
+    state = SeatQuarantineState()
+    state.quarantine("cursor-grok")
+    leaked = replace(_successful_final("Fallback must not launch."), transport="acpx", stop_reason="end_turn")
+    result, direct_calls, fallback_calls = _dispatch_recovery(
+        monkeypatch,
+        tmp_path,
+        [_invalid_final(), _invalid_final()],
+        fallback_result=leaked,
+        quarantine_state=state,
+    )
+
+    assert fallback_calls == []
+    assert result.ok is False
+    assert "cursor-grok" in result.detail
+    assert "quarantined" in result.detail
+    assert len(direct_calls) == 2
+    assert [attempt.kind for attempt in result.attempts] == ["initial", "continuation", "fallback"]
+    assert result.attempts[-1].worker == "cursor-grok"
+    assert result.attempts[-1].ok is False
+    assert result.attempts[-1].selected is False
+    assert "Fallback must not launch." not in result.text
 
 
 def test_direct_grok_fallback_uses_selected_seat_endpoint_provenance(monkeypatch, tmp_path):

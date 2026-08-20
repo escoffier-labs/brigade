@@ -349,6 +349,21 @@ def test_windows_native_acceptance_script_is_tracked_by_gitignore_negation():
     assert result.returncode == 1
 
 
+def test_windows_import_path_execution_coverage_is_collected():
+    """The acceptance-script grep is not the import-path proof (#1022)."""
+    from tests.test_work_import_inbox_windows import (
+        test_append_import_records_executes_proof_and_authority_store,
+        test_authority_store_closes_temp_handle_before_replace,
+        test_authority_store_survives_missing_posix_open_flags,
+        test_windows_import_proof_and_authority_store_round_trip,
+    )
+
+    assert callable(test_append_import_records_executes_proof_and_authority_store)
+    assert callable(test_authority_store_survives_missing_posix_open_flags)
+    assert callable(test_authority_store_closes_temp_handle_before_replace)
+    assert callable(test_windows_import_proof_and_authority_store_round_trip)
+
+
 def test_ci_windows_native_acceptance_script_covers_required_flow():
     text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
 
@@ -390,6 +405,19 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "git init" in text
     assert "brigade operator quickstart" in text
     assert "Assert-OperatorDoctorReady" in text
+    # Script-content probe only. The import-proof authority path is executed in
+    # tests/test_work_import_inbox_windows.py, including a missing-O_NOFOLLOW run.
+    assert "import inbox no-follow parent" in text
+    assert "_open_import_inbox_parent" in text
+    assert "Get-InstalledBrigadePython" in text
+    assert "& $brigadePython $inboxProbeScript $inboxProbeRoot" in text
+    assert "& python $inboxProbeScript" not in text
+    assert "mklink" in text
+    assert "memory care scan" in text
+    assert "memory care import-issues" in text
+    assert text.index("memory care scan") < text.index("memory care import-issues")
+    # extras-gated; the acceptance install leaves extras disabled.
+    assert "center readiness import-issues" not in text
     assert "$payload.ready" in text
     assert "$payload.blocking_issue_count" in text
     assert "--db $dbPath sync $workRepo" in text
@@ -598,12 +626,24 @@ def test_windows_native_acceptance_bootstrap_return_is_single_python_path():
     assert _powershell_line_consumes_success_stream(pip_line)
 
 
+def test_windows_native_acceptance_import_probe_uses_installed_brigade_python():
+    """The inbox probe imports brigade; PATH python is the system interpreter."""
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    helper = _extract_powershell_function(text, "Get-InstalledBrigadePython")
+    assert 'Join-Path $PipxHome "venvs\\$name\\Scripts\\python.exe"' in helper
+    assert '"brigade-cli"' in helper
+    assert "& python $inboxProbeScript" not in text
+    assert "& $brigadePython $inboxProbeScript $inboxProbeRoot" in text
+    assert "Get-InstalledBrigadePython -PipxHome $env:PIPX_HOME" in text
+
+
 def test_windows_native_acceptance_assigned_return_functions_do_not_leak_stdout():
     text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
     assigned_returns = (
         "Get-PythonExeDir",
         "Get-PythonScriptsDir",
         "Get-PipxBinDir",
+        "Get-InstalledBrigadePython",
         "Initialize-PipxBootstrap",
         "Get-ManagedExecutablePath",
         "Invoke-PrintedSchtasksBatch",

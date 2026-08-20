@@ -181,10 +181,16 @@ def run(
         if task:
             print("error: pass a task or task_id, not both", file=sys.stderr)
             return 2
-        selected_task, _ = ledger_mod._find_task(target, task_id)
-        if selected_task is None or selected_task.get("status", "pending") != "pending":
-            print(f"error: pending task not found: {task_id}", file=sys.stderr)
-            return 1
+        from ..claiming import ClaimError
+
+        try:
+            selected_task = ledger_mod._authorize_task_start(target, task_id)
+        except ClaimError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
+        except ledger_mod.PlanDecisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
         resolved = {
             "task": str(selected_task.get("text", "")).strip(),
             "source": "task_ledger",
@@ -192,6 +198,18 @@ def run(
             "ledger_task": selected_task,
             "dogfood": helpers._dogfood_snapshot(target),
         }
+    elif task is None and resolved.get("source") == "task_ledger" and isinstance(resolved.get("task_id"), str):
+        from ..claiming import ClaimError
+
+        try:
+            authorized = ledger_mod._authorize_task_start(target, str(resolved["task_id"]))
+        except ClaimError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
+        except ledger_mod.PlanDecisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
+        resolved["ledger_task"] = authorized
     task_text = task or str(resolved["task"])
     consumed_task_id = resolved.get("task_id") if task is None and resolved.get("source") == "task_ledger" else None
     ledger_task = (
@@ -228,9 +246,16 @@ def run(
     if end_rc != 0:
         return end_rc if dogfood_rc == 0 else dogfood_rc
     if dogfood_rc == 0 and isinstance(consumed_task_id, str):
+        from ..claiming import ClaimError
+
         with ledger_mod._task_ledger_lock(target):
             task, ledger = ledger_mod._find_task(target, consumed_task_id)
             if task is not None:
+                try:
+                    ledger_mod._evaluate_task_start_gates(target, ledger, task, require_pending=True)
+                except (ClaimError, ledger_mod.PlanDecisionError) as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return int(getattr(exc, "exit_code", 2))
                 now = helpers._now().isoformat()
                 task["status"] = "done"
                 task["updated_at"] = now
@@ -514,7 +539,7 @@ def doctor(*, target: Path) -> int:
             helpers._doctor_line(
                 constants.WARN,
                 "unknown_edge_types",
-                f"{len(unknown_edges)} inert edge(s) with unknown type: {types}",
+                f"{len(unknown_edges)} edge(s) with unknown type fail closed (block readiness): {types}",
             )
         else:
             helpers._doctor_line(constants.OK, "unknown_edge_types", "none")
