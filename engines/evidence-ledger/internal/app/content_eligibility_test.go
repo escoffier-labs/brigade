@@ -407,7 +407,7 @@ func TestRoutineReviewRefusesTamperedEnvelope(t *testing.T) {
 				t.Fatalf("tampered envelope must be a parse error: %#v", before)
 			}
 
-			code, stdout, stderr := run("trust", "review", "--item", id, "--content-hash", digest, "--mark-injection-clean", "--json")
+			code, stdout, stderr := runTrustReview(t, id, digest, "--mark-injection-clean", "--json")
 			if code == 0 {
 				t.Fatalf("routine review must refuse tampered envelope: stdout=%s stderr=%s", stdout, stderr)
 			}
@@ -479,7 +479,7 @@ func TestImportIneligibleUntilOperatorMarksInjectionClean(t *testing.T) {
 	assertSurfacesIneligible(t, id, query, needle)
 
 	digest := itemContentHashFromShow(t, id)
-	labelOnly := runJSON(t, "trust", "review", "--item", id, "--content-hash", digest, "--json")
+	labelOnly := runTrustReviewJSON(t, id, digest)
 	if labelOnly["to_label"] != "reviewed" {
 		t.Fatalf("label-only review = %#v", labelOnly)
 	}
@@ -488,7 +488,7 @@ func TestImportIneligibleUntilOperatorMarksInjectionClean(t *testing.T) {
 	}
 	assertSurfacesIneligible(t, id, query, needle)
 
-	marked := runJSON(t, "trust", "review", "--item", id, "--content-hash", digest, "--mark-injection-clean", "--json")
+	marked := runTrustReviewJSON(t, id, digest, "--mark-injection-clean")
 	if marked["injection_status"] != "clean" {
 		t.Fatalf("mark-injection-clean = %#v", marked)
 	}

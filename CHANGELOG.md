@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Trust review is bound to an operator-minted capability. `brigade evidence trust review` generates a fresh in-memory HMAC secret, writes a `{item_id, from_digest, transition, nonce, expiry}` token to the engine on stdin, and never places that secret in the child env or argv. `miseledger trust review` without a capability is refused for every stdin kind, including piped empty input, `/dev/null`, and a PTY. stdin is not an authorization signal. Direct engine invocation is unsupported. Fixes #1029.
+- The directory-authority store is wrapped in a parent-held HMAC envelope (`brigade.authority.store.v1`) keyed by a 0600 file under the operator config root, with a MAC'd sequence file for replay and unsigned-downgrade refusal. Public `SCANNER_DEFAULTS` equality no longer grants import privilege. A same-UID process that reads the persisted store key can still forge a valid envelope; that residual is encoded in the suite and is not a class close. `--isolated-scanners` (POSIX user+mount namespace, doctor `WARN`/`MANUAL` when unavailable) is the opt-in tier that refuses that forgery. Part of #957. Refs #881.
+
 ### Fixed
 - Vault index, search, show, and doctor now walk allowlisted roots from a held vault directory descriptor and refuse a symlink in every path component (`openat`/`O_NOFOLLOW` + `fstat`). Replacing an allowlisted folder such as `Shared/Inbox` with a symlink to another in-vault path can no longer re-scope private notes; reread of indexed files uses the same walk. (#1011)
 - Claude hook stdin is read through a byte-limited binary reader, rejects trailing input, and caps nested string and collection sizes before the timed worker starts, so an oversized hook payload cannot force unbounded allocation or JSON parsing outside the timeout. (#1014)

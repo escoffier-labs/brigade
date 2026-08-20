@@ -111,6 +111,8 @@ What each imported item carries:
 
 Receipts are trusted local artifacts at export time, but once inside the archive they flow through the same evidence surfaces as everything else and come back marked untrusted context like any other search result.
 
+Trust transitions are minted only by `brigade evidence trust review`. The Python parent holds a fresh 32-byte secret in memory, MACs a capability bound to item id, current digest, and the requested transition, and writes `brigade.authority.capability-handoff.v1` to the engine's stdin. The secret never enters the child environment or argv. Calling `miseledger trust review` directly is unsupported.
+
 MiseLedger can receive an optional structured code reference filter. It checks matching receipt metadata before lexical FTS and uses FTS unchanged if no exact reference exists. Repository, revision, file path, qualified name, symbol kind, and change kind form the match. Source spans record location only.
 
 Potential future commands:

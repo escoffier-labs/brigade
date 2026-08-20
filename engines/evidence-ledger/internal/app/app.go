@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/escoffier-labs/miseledger/internal/adapter"
@@ -83,6 +84,33 @@ var commandTable = []commandSpec{
 	{name: "trust", usage: "trust review", description: "Review or verify an item trust label.", run: cmdTrust},
 }
 
+var (
+	cliStdinMu sync.Mutex
+	cliStdin   io.Reader
+)
+
+func currentStdin() io.Reader {
+	if cliStdin != nil {
+		return cliStdin
+	}
+	return os.Stdin
+}
+
+// stdinCarriesHandoffPipe reports whether r can hold a parent-minted
+// capability hand-off. A character device (/dev/null, a PTY, a TTY) cannot.
+// This is not an authorization check: missing capability is always refused.
+func stdinCarriesHandoffPipe(r io.Reader) bool {
+	file, ok := r.(*os.File)
+	if !ok {
+		return true
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice == 0
+}
+
 func Run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		usage(out)
@@ -93,6 +121,18 @@ func Run(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "unknown command: %s", args[0])
 	}
 	return cmd.run(args[1:], out, errw)
+}
+
+// RunWithStdin is the CLI entry with an explicit stdin for the capability hand-off.
+func RunWithStdin(args []string, stdin io.Reader, out, errw io.Writer) int {
+	cliStdinMu.Lock()
+	prev := cliStdin
+	cliStdin = stdin
+	defer func() {
+		cliStdin = prev
+		cliStdinMu.Unlock()
+	}()
+	return Run(args, out, errw)
 }
 
 func usage(w io.Writer) {
@@ -323,13 +363,13 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 
 func cmdTrust(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--json]")
+		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--capability JSON] [--json]")
 	}
 	switch args[0] {
 	case "review":
 		return cmdTrustReview(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--json]")
+		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--capability JSON] [--json]")
 	}
 }
 
@@ -339,12 +379,13 @@ func cmdTrustReview(args []string, out, errw io.Writer) int {
 		"content-hash":     true,
 		"to-label":         true,
 		"operator-command": true,
+		"capability":       true,
 	}, map[string]bool{"json": true, "mark-injection-clean": true})
 	if err != nil {
 		return fatalf(errw, "trust review: %s", err)
 	}
 	if len(rest) != 0 || values["item"] == "" || values["content-hash"] == "" {
-		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--json]")
+		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--capability JSON] [--json]")
 	}
 	toLabel := values["to-label"]
 	if toLabel == "" {
@@ -357,12 +398,46 @@ func cmdTrustReview(args []string, out, errw io.Writer) int {
 	if operatorCommand == "" {
 		operatorCommand = "operator:brigade evidence trust review"
 	}
+	stdin := currentStdin()
+	var handoff *ingest.CapabilityHandoff
+	if stdinCarriesHandoffPipe(stdin) {
+		var handoffErr error
+		handoff, handoffErr = ingest.ReadCapabilityHandoff(stdin)
+		if handoffErr != nil {
+			return fatalf(errw, "trust review: %s", handoffErr)
+		}
+	}
+	var capability *ingest.TrustCapability
+	var secret []byte
+	if handoff != nil {
+		decoded, err := hex.DecodeString(handoff.Secret)
+		if err != nil {
+			return fatalf(errw, "trust review: capability hand-off secret is malformed")
+		}
+		secret = decoded
+		capability = handoff.Capability
+	}
+	if values["capability"] != "" {
+		parsed, err := ingest.ParseCapabilityJSON(values["capability"])
+		if err != nil {
+			return fatalf(errw, "trust review: %s", err)
+		}
+		capability = parsed
+	}
+	if capability == nil {
+		return fatalf(errw, "trust review: operator capability is required; use `brigade evidence trust review`")
+	}
 	db, _, err := openMigrated()
 	if err != nil {
 		return fatalf(errw, "trust review: %s", err)
 	}
 	defer db.Close()
-	if err := ingest.ReviewTrust(db, values["item"], values["content-hash"], toLabel, operatorCommand, map[string]any{"kind": "operator-review"}, ingest.TrustReviewOpts{MarkInjectionClean: bools["mark-injection-clean"]}); err != nil {
+	evidence := map[string]any{"kind": "operator-review", "operator_command": operatorCommand}
+	if err := ingest.ReviewTrust(db, values["item"], values["content-hash"], toLabel, operatorCommand, evidence, ingest.TrustReviewOpts{
+		MarkInjectionClean: bools["mark-injection-clean"],
+		Capability:         capability,
+		CapabilitySecret:   secret,
+	}); err != nil {
 		return fatalf(errw, "trust review: %s", err)
 	}
 	injectionStatus := ""
