@@ -3913,6 +3913,11 @@ def _after_reviewed_import_snapshot(target: Path, snapshot: _ReviewedImportSnaps
     del target, snapshot
 
 
+def _after_batch_import_promote_applied(target: Path, snapshot: _ReviewedImportSnapshot) -> None:
+    """Test seam after in-memory batch apply and before the late-window CAS + flush."""
+    del target, snapshot
+
+
 def _require_reviewed_import_snapshot(
     target: Path,
     snapshot: _ReviewedImportSnapshot,
@@ -4045,6 +4050,7 @@ def _mark_import_promoted(
             proposed_edges=proposed,
         )
     else:
+        # Batch callers flush after the late-window CAS succeeds (#1059).
         task, created = _apply_add_task_to_ledger(
             target,
             ledger,
@@ -4057,8 +4063,6 @@ def _mark_import_promoted(
             template=template,
             proposed_edges=proposed,
         )
-        if created:
-            _write_task_ledger(target, ledger)
     now = helpers._now().isoformat()
     item["status"] = "promoted"
     item["updated_at"] = now
@@ -4074,7 +4078,12 @@ def _promote_matching_imports(
     source: str | None = None,
     metadata_filters: dict[str, str] | None = None,
 ) -> tuple[list[tuple[dict[str, Any], dict[str, Any], bool]], list[tuple[dict[str, Any], Exception]]]:
-    """Promote --all from one locked inbox generation. Fail closed if it changes."""
+    """Promote --all from one locked inbox generation. Fail closed if it changes.
+
+    Each matching item is applied all-or-nothing in memory. The task ledger is
+    flushed only after the late-window CAS succeeds, so a refused promote writes
+    no task files and a failed item cannot ride a later success.
+    """
     with _task_ledger_lock(target):
         snapshot = _capture_reviewed_import_snapshot(target)
         reviewed_join = _import_snapshot_join_set(
@@ -4102,16 +4111,23 @@ def _promote_matching_imports(
         ledger = _read_task_ledger(target)
         promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
         failed: list[tuple[dict[str, Any], Exception]] = []
+        created_any = False
         for item in matching:
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
+            tasks_before = list(ledger["tasks"])
+            edges_before = list(edges_mod.ensure_ledger_edges(ledger))
             try:
                 task, created = _mark_import_promoted(target, item, ledger=ledger)
             except (edges_mod.EdgeError, TaskLedgerError) as exc:
+                ledger["tasks"][:] = tasks_before
+                ledger["edges"] = edges_before
                 failed.append((item, exc))
                 continue
             promoted.append((item, task, created))
+            created_any = created_any or created
+        _after_batch_import_promote_applied(target, snapshot)
         _require_reviewed_import_snapshot(
             target,
             snapshot,
@@ -4120,6 +4136,8 @@ def _promote_matching_imports(
             source=source,
             metadata_filters=metadata_filters,
         )
+        if created_any:
+            _write_task_ledger(target, ledger)
         _write_imports(target, snapshot.items)
         return promoted, failed
 
@@ -4644,25 +4662,32 @@ def _apply_add_task_to_ledger(
     from . import footprint as footprint_mod
 
     footprint_mod.attach_predicted(target, task)
-    ledger["tasks"].append(task)
-    created_edges: list[dict[str, Any]] = []
-    for proposal in proposed_edges or []:
-        source_id = proposal.get("source") or ""
-        target_id = proposal.get("target") or ""
-        if source_id in {"", "self"}:
-            source_id = str(task["id"])
-        if target_id in {"", "self"}:
-            target_id = str(task["id"])
-        edge, _created = edges_mod.add_edge_to_ledger(
-            ledger,
-            source=source_id,
-            target=target_id,
-            edge_type=str(proposal.get("type") or ""),
-        )
-        created_edges.append(edge)
-    if created_edges:
-        task["edges"] = created_edges
-    return task, True
+    task_count = len(ledger["tasks"])
+    edges_before = list(edges_mod.ensure_ledger_edges(ledger))
+    try:
+        ledger["tasks"].append(task)
+        created_edges: list[dict[str, Any]] = []
+        for proposal in proposed_edges or []:
+            source_id = proposal.get("source") or ""
+            target_id = proposal.get("target") or ""
+            if source_id in {"", "self"}:
+                source_id = str(task["id"])
+            if target_id in {"", "self"}:
+                target_id = str(task["id"])
+            edge, _created = edges_mod.add_edge_to_ledger(
+                ledger,
+                source=source_id,
+                target=target_id,
+                edge_type=str(proposal.get("type") or ""),
+            )
+            created_edges.append(edge)
+        if created_edges:
+            task["edges"] = created_edges
+        return task, True
+    except Exception:
+        del ledger["tasks"][task_count:]
+        ledger["edges"] = edges_before
+        raise
 
 
 def _add_task(
