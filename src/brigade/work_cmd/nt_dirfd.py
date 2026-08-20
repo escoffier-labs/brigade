@@ -16,7 +16,9 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+from ctypes import wintypes
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 _FILE_SHARE_READ = 0x00000001
@@ -46,7 +48,6 @@ _FILE_DIRECTORY_FILE = 0x00000001
 _FILE_NON_DIRECTORY_FILE = 0x00000040
 _FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 _FILE_OPEN_REPARSE_POINT = 0x00200000
-_FILE_OPEN_FOR_BACKUP_INTENT = 0x00004000
 
 _OBJ_CASE_INSENSITIVE = 0x00000040
 
@@ -76,6 +77,72 @@ _DIRECTORY_ACCESS = (
     | _SYNCHRONIZE
 )
 _SHARE_ALL = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
+
+
+class _UNICODE_STRING(ctypes.Structure):
+    _fields_ = [
+        ("Length", wintypes.USHORT),
+        ("MaximumLength", wintypes.USHORT),
+        ("Buffer", wintypes.LPWSTR),
+    ]
+
+
+class _OBJECT_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [
+        ("Length", wintypes.ULONG),
+        ("RootDirectory", wintypes.HANDLE),
+        ("ObjectName", ctypes.POINTER(_UNICODE_STRING)),
+        ("Attributes", wintypes.ULONG),
+        ("SecurityDescriptor", wintypes.LPVOID),
+        ("SecurityQualityOfService", wintypes.LPVOID),
+    ]
+
+
+class _IO_STATUS_BLOCK(ctypes.Structure):
+    _fields_ = [
+        ("Status", ctypes.c_void_p),
+        ("Information", ctypes.c_void_p),
+    ]
+
+
+class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
+class _FILE_DISPOSITION_INFORMATION(ctypes.Structure):
+    _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
+
+
+def _make_unicode(name: str) -> tuple[_UNICODE_STRING, Any]:
+    buf = ctypes.create_unicode_buffer(name)
+    us = _UNICODE_STRING()
+    us.Length = len(name) * 2
+    us.MaximumLength = len(buf) * 2
+    us.Buffer = ctypes.cast(buf, wintypes.LPWSTR)
+    return us, buf
+
+
+def _make_rename_class(nchars: int) -> type[ctypes.Structure]:
+    class FILE_RENAME_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("ReplaceIfExists", wintypes.BOOLEAN),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.ULONG),
+            ("FileName", wintypes.WCHAR * max(nchars, 1)),
+        ]
+
+    return FILE_RENAME_INFORMATION
 
 
 def available() -> bool:
@@ -125,10 +192,7 @@ def open_child_directory(parent: int, name: str) -> int:
         name,
         access=_DIRECTORY_ACCESS,
         disposition=_FILE_OPEN,
-        options=_FILE_DIRECTORY_FILE
-        | _FILE_SYNCHRONOUS_IO_NONALERT
-        | _FILE_OPEN_REPARSE_POINT
-        | _FILE_OPEN_FOR_BACKUP_INTENT,
+        options=_FILE_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
         attributes=_FILE_ATTRIBUTE_DIRECTORY,
     )
     try:
@@ -148,10 +212,7 @@ def mkdir_child(parent: int, name: str) -> None:
         name,
         access=_DIRECTORY_ACCESS,
         disposition=_FILE_CREATE,
-        options=_FILE_DIRECTORY_FILE
-        | _FILE_SYNCHRONOUS_IO_NONALERT
-        | _FILE_OPEN_REPARSE_POINT
-        | _FILE_OPEN_FOR_BACKUP_INTENT,
+        options=_FILE_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
         attributes=_FILE_ATTRIBUTE_DIRECTORY,
     )
     try:
@@ -276,9 +337,7 @@ def _is_invalid_handle(handle: Any) -> bool:
 
 
 def _win_error() -> OSError:
-    win_error = getattr(ctypes, "WinError")
-    last_error = getattr(ctypes, "get_last_error")
-    return win_error(last_error())
+    return ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
 
 
 def _handle_to_fd(api: Any, handle: Any, flags: int) -> int:
@@ -286,7 +345,7 @@ def _handle_to_fd(api: Any, handle: Any, flags: int) -> int:
 
     raw = int(handle)
     try:
-        return getattr(msvcrt, "open_osfhandle")(raw, flags)
+        return msvcrt.open_osfhandle(raw, flags)  # type: ignore[attr-defined]
     except OSError:
         api.CloseHandle(handle)
         raise
@@ -295,7 +354,7 @@ def _handle_to_fd(api: Any, handle: Any, flags: int) -> int:
 def _handle_from_fd(fd: int) -> int:
     import msvcrt
 
-    return int(getattr(msvcrt, "get_osfhandle")(fd))
+    return int(msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
 
 def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool) -> None:
@@ -392,132 +451,81 @@ def _raise_ntstatus(status: int) -> None:
     raise OSError(f"Windows no-follow directory operation failed: NTSTATUS=0x{code:08X}")
 
 
+def _bind_api_namespace(*, kernel32: Any = None, ntdll: Any = None) -> SimpleNamespace:
+    """Bind NT structures and optional DLL entry points.
+
+    Class-body assignment of enclosing locals raises ``NameError`` on Windows
+    (``OBJECT_ATTRIBUTES = OBJECT_ATTRIBUTES`` inside a nested class). Keep the
+    binder as a SimpleNamespace so the Windows path can load.
+    """
+    if kernel32 is not None:
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.GetFileInformationByHandle.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION),
+        ]
+        kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    if ntdll is not None:
+        ntdll.NtCreateFile.argtypes = [
+            ctypes.POINTER(wintypes.HANDLE),
+            wintypes.DWORD,
+            ctypes.POINTER(_OBJECT_ATTRIBUTES),
+            ctypes.POINTER(_IO_STATUS_BLOCK),
+            wintypes.LPVOID,
+            wintypes.ULONG,
+            wintypes.ULONG,
+            wintypes.ULONG,
+            wintypes.ULONG,
+            wintypes.LPVOID,
+            wintypes.ULONG,
+        ]
+        ntdll.NtCreateFile.restype = ctypes.c_long
+        ntdll.NtSetInformationFile.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_IO_STATUS_BLOCK),
+            wintypes.LPVOID,
+            wintypes.ULONG,
+            wintypes.ULONG,
+        ]
+        ntdll.NtSetInformationFile.restype = ctypes.c_long
+    return SimpleNamespace(
+        OBJECT_ATTRIBUTES=_OBJECT_ATTRIBUTES,
+        IO_STATUS_BLOCK=_IO_STATUS_BLOCK,
+        BY_HANDLE_FILE_INFORMATION=_BY_HANDLE_FILE_INFORMATION,
+        FILE_DISPOSITION_INFORMATION=_FILE_DISPOSITION_INFORMATION,
+        CreateFileW=None if kernel32 is None else kernel32.CreateFileW,
+        CloseHandle=None if kernel32 is None else kernel32.CloseHandle,
+        GetFileInformationByHandle=None if kernel32 is None else kernel32.GetFileInformationByHandle,
+        NtCreateFile=None if ntdll is None else ntdll.NtCreateFile,
+        NtSetInformationFile=None if ntdll is None else ntdll.NtSetInformationFile,
+        make_unicode=_make_unicode,
+        make_rename_class=_make_rename_class,
+    )
+
+
 def _api() -> Any:
     global _API
     if _API is not None:
         return _API
     if sys.platform != "win32":
         raise OSError("Windows handle-relative directory operations are unavailable")
-    from ctypes import wintypes
-    import msvcrt  # noqa: F401  # imported to fail closed if the CRT helper is missing
+    import msvcrt  # noqa: F401  # fail closed if the CRT helper is missing
 
-    class UNICODE_STRING(ctypes.Structure):
-        _fields_ = [
-            ("Length", wintypes.USHORT),
-            ("MaximumLength", wintypes.USHORT),
-            ("Buffer", wintypes.LPWSTR),
-        ]
-
-    class OBJECT_ATTRIBUTES(ctypes.Structure):
-        _fields_ = [
-            ("Length", wintypes.ULONG),
-            ("RootDirectory", wintypes.HANDLE),
-            ("ObjectName", ctypes.POINTER(UNICODE_STRING)),
-            ("Attributes", wintypes.ULONG),
-            ("SecurityDescriptor", wintypes.LPVOID),
-            ("SecurityQualityOfService", wintypes.LPVOID),
-        ]
-
-    class IO_STATUS_BLOCK(ctypes.Structure):
-        _fields_ = [
-            ("Status", ctypes.c_void_p),
-            ("Information", ctypes.c_void_p),
-        ]
-
-    class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
-        _fields_ = [
-            ("dwFileAttributes", wintypes.DWORD),
-            ("ftCreationTime", wintypes.FILETIME),
-            ("ftLastAccessTime", wintypes.FILETIME),
-            ("ftLastWriteTime", wintypes.FILETIME),
-            ("dwVolumeSerialNumber", wintypes.DWORD),
-            ("nFileSizeHigh", wintypes.DWORD),
-            ("nFileSizeLow", wintypes.DWORD),
-            ("nNumberOfLinks", wintypes.DWORD),
-            ("nFileIndexHigh", wintypes.DWORD),
-            ("nFileIndexLow", wintypes.DWORD),
-        ]
-
-    class FILE_DISPOSITION_INFORMATION(ctypes.Structure):
-        _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    ntdll = ctypes.WinDLL("ntdll")
-
-    kernel32.CreateFileW.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
-    ]
-    kernel32.CreateFileW.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    kernel32.GetFileInformationByHandle.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(BY_HANDLE_FILE_INFORMATION),
-    ]
-    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
-
-    ntdll.NtCreateFile.argtypes = [
-        ctypes.POINTER(wintypes.HANDLE),
-        wintypes.DWORD,
-        ctypes.POINTER(OBJECT_ATTRIBUTES),
-        ctypes.POINTER(IO_STATUS_BLOCK),
-        wintypes.LPVOID,
-        wintypes.ULONG,
-        wintypes.ULONG,
-        wintypes.ULONG,
-        wintypes.ULONG,
-        wintypes.LPVOID,
-        wintypes.ULONG,
-    ]
-    ntdll.NtCreateFile.restype = ctypes.c_long
-    ntdll.NtSetInformationFile.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(IO_STATUS_BLOCK),
-        wintypes.LPVOID,
-        wintypes.ULONG,
-        wintypes.ULONG,
-    ]
-    ntdll.NtSetInformationFile.restype = ctypes.c_long
-
-    def make_unicode(name: str) -> tuple[UNICODE_STRING, Any]:
-        buf = ctypes.create_unicode_buffer(name)
-        us = UNICODE_STRING()
-        us.Length = len(name) * 2
-        us.MaximumLength = len(buf) * 2
-        us.Buffer = buf
-        return us, buf
-
-    def make_rename_class(nchars: int) -> type[ctypes.Structure]:
-        class FILE_RENAME_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("ReplaceIfExists", wintypes.BOOLEAN),
-                ("RootDirectory", wintypes.HANDLE),
-                ("FileNameLength", wintypes.ULONG),
-                ("FileName", wintypes.WCHAR * max(nchars, 1)),
-            ]
-
-        return FILE_RENAME_INFORMATION
-
-    class _Api:
-        OBJECT_ATTRIBUTES = OBJECT_ATTRIBUTES
-        IO_STATUS_BLOCK = IO_STATUS_BLOCK
-        BY_HANDLE_FILE_INFORMATION = BY_HANDLE_FILE_INFORMATION
-        FILE_DISPOSITION_INFORMATION = FILE_DISPOSITION_INFORMATION
-        CreateFileW = kernel32.CreateFileW
-        CloseHandle = kernel32.CloseHandle
-        GetFileInformationByHandle = kernel32.GetFileInformationByHandle
-        NtCreateFile = ntdll.NtCreateFile
-        NtSetInformationFile = ntdll.NtSetInformationFile
-        make_unicode = staticmethod(make_unicode)
-        make_rename_class = staticmethod(make_rename_class)
-
-    _API = _Api()
+    _API = _bind_api_namespace(
+        kernel32=ctypes.WinDLL("kernel32", use_last_error=True),
+        ntdll=ctypes.WinDLL("ntdll"),
+    )
     return _API
 
 

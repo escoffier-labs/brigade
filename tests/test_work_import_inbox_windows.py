@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import stat
 import subprocess
@@ -36,6 +37,23 @@ def _link_directory(link: Path, target: Path) -> None:
 def test_nt_dirfd_available_only_on_windows() -> None:
     assert nt_dirfd.available() is (sys.platform == "win32")
     assert ledger._nt_dirfd_available() is (sys.platform == "win32")
+
+
+def test_nt_dirfd_api_binder_does_not_nameerror() -> None:
+    """Regression: nested class-body assignment raised NameError on Windows CI."""
+    api = nt_dirfd._bind_api_namespace()
+    assert api.OBJECT_ATTRIBUTES is nt_dirfd._OBJECT_ATTRIBUTES
+    obj = api.OBJECT_ATTRIBUTES()
+    obj.Length = ctypes.sizeof(api.OBJECT_ATTRIBUTES)
+    us, buf = api.make_unicode("imports")
+    assert us.Length == len("imports") * 2
+    assert buf[0] == "i"
+    rename = api.make_rename_class(len("inbox.jsonl"))
+    info = rename()
+    info.ReplaceIfExists = True
+    info.FileName = "inbox.jsonl"
+    info.FileNameLength = len("inbox.jsonl") * 2
+    assert ctypes.sizeof(info) > 0
 
 
 def test_nt_dirfd_validate_component_rejects_traversal() -> None:
