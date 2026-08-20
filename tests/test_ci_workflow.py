@@ -402,6 +402,33 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "--no-reuse" in text
     assert "brigade receipts export miseledger" in text
     assert "import adapter" in text
+    assert "brigade care install" in text
+    assert "BrigadeCare-ingest-sweep" in text
+    assert "/SC MINUTE /MO 30" in text
+    assert "brigade care status" in text
+    assert '/RU "%USERNAME%" /IT' in text
+    assert "Invoke-PrintedSchtasksBatch" in text
+    assert "Read-AcceptanceFileText" in text
+    assert "runas.exe /trustlevel:0x20000" not in text
+    assert "Start-Process -FilePath" in text
+    assert "-WindowStyle Hidden" in text
+    invoke_batch = _extract_powershell_function(text, "Invoke-PrintedSchtasksBatch")
+    assert "-NoNewWindow" not in invoke_batch
+    assert "-RedirectStandardOutput" in invoke_batch
+    assert "-WindowStyle Hidden" in invoke_batch
+    # Array ArgumentList plus nested quotes is the Win11 file-not-found path.
+    assert "-ArgumentList @(" not in invoke_batch
+    assert "BRIGADE_ACCEPT_BATCH" in invoke_batch
+    assert "if ($null -eq $process.ExitCode)" in invoke_batch
+    # care install writes to stderr and exits 3; PS 5.1 Stop mode cannot invoke it
+    # as a native command. The script must go through cmd.exe file redirects.
+    assert (
+        'cmd.exe /c "brigade care install --target `"$workRepo`" --dry-run > `"$careInstallOut`" 2> `"$careInstallErr`""'
+        in text
+    )
+    # The printed .cmd is /Create only; validation must not /Run the /TR body.
+    assert "/TR body is not executed" in text
+    assert "schtasks /Run" not in text
     assert "$importPayload.inserted_items" in text
     assert "$importPayload.already_known" in text
     assert "$acceptanceMarker" in text
@@ -411,6 +438,31 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "$env:XDG_CACHE_HOME" in text
     assert "finally" in text
     assert "#requires -Version 5.1" in text
+
+
+def test_windows_native_acceptance_schtasks_missing_task_query_does_not_fail_the_job():
+    """After /Delete, schtasks /Query exits 1 with
+    'ERROR: The system cannot find the file specified'. That names the
+    missing task, not brigade or the printed /TR. GitHub Actions
+    ``shell: powershell`` then does ``exit $LASTEXITCODE``, so a live
+    Query after successful cleanup fails the job even when the script
+    printed "passed" (windows-latest at 00dc50c8).
+    """
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    care = text[
+        text.index('Write-Host ("care create context:') : text.index('Write-Step "Windows native acceptance passed"')
+    ]
+    assert "& schtasks /Query" not in care
+    assert "& schtasks /Delete" not in care
+    assert "schtasks /Query /TN" in care
+    assert "schtasks /Delete /TN" in care
+    assert "schtasks-query-gone.err" in care
+    assert 'cmd.exe /c "exit 0"' in care
+    assert "The system cannot find the file specified" in care
+    assert "exit $LASTEXITCODE" in care
+    assert "/TR body is not executed" in care
+    tail = text[text.index('Write-Step "Windows native acceptance passed"') :]
+    assert re.search(r"(?m)^exit 0$", tail)
 
 
 def test_windows_native_acceptance_source_setup_uses_standalone_manifest_online_and_offline():
@@ -554,6 +606,8 @@ def test_windows_native_acceptance_assigned_return_functions_do_not_leak_stdout(
         "Get-PipxBinDir",
         "Initialize-PipxBootstrap",
         "Get-ManagedExecutablePath",
+        "Invoke-PrintedSchtasksBatch",
+        "Read-AcceptanceFileText",
     )
 
     for name in assigned_returns:
