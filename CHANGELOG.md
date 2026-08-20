@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Vault index, search, show, and doctor now walk allowlisted roots from a held vault directory descriptor and refuse a symlink in every path component (`openat`/`O_NOFOLLOW` + `fstat`). Replacing an allowlisted folder such as `Shared/Inbox` with a symlink to another in-vault path can no longer re-scope private notes; reread of indexed files uses the same walk. (#1011)
 - Claude hook stdin is read through a byte-limited binary reader, rejects trailing input, and caps nested string and collection sizes before the timed worker starts, so an oversized hook payload cannot force unbounded allocation or JSON parsing outside the timeout. (#1014)
 - Inter-seat message envelopes now bind `{run_id, message_id, assignment_id, from_seat, to_seat}` into the authenticated envelope and require those expected values at every receiver. A valid old text/envelope pair can no longer be transplanted into another run, seat, or assignment. Fallback worker output is attributed to the terminal producer, and resumed output is re-enveloped under the current run identity. (#1010)
 - Promotion and other content admissions now validate the complete provenance envelope and require a present, exact `hashes.content` match against the current item bytes before copying a body. A same-UID rewrite of `imports.jsonl` that leaves the original envelope can no longer be promoted into a task; missing, malformed, or stale redaction records also block promotion. (#1008)
