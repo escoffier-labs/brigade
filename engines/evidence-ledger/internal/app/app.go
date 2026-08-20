@@ -2790,15 +2790,24 @@ func materializeEvidenceBundle(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	eligible := cacheRefItemsEligible(db, evidenceBundleItemIDs(bundle))
-	sanitizeModelFacingEvidence(bundle, id, authorityCodeReferences(db, bundle), eligible)
+	applyModelFacingEvidenceSanitizer(bundle, id, db)
 	return bundle, nil
 }
 
+// applyModelFacingEvidenceSanitizer is the only model-facing exit for
+// both materializeEvidenceBundle branches. Live regen may have copied
+// SearchOpts (including cache-ref-derived filters.project/from/to on
+// the no-item_ids path) onto the bundle; the sanitizer is the exclusive
+// writer of that envelope.
+func applyModelFacingEvidenceSanitizer(bundle map[string]any, id string, db *sql.DB) {
+	eligible := cacheRefItemsEligible(db, evidenceBundleItemIDs(bundle))
+	sanitizeModelFacingEvidence(bundle, id, authorityCodeReferences(db, bundle), eligible)
+}
+
 // projectMaterializedBundle is the show/materialize entry into the shared
-// eligibility gate. Both the item_ids and no-item_ids branches of
+// sanitizer. Both the item_ids and no-item_ids branches of
 // materializeEvidenceBundle, plus evidence show / MCP show_evidence_bundle,
-// reach the model only through this function.
+// reach the model only through sanitizeModelFacingEvidence.
 func projectMaterializedBundle(bundle map[string]any, id string, authority []*CodeReference, eligible bool) {
 	sanitizeModelFacingEvidence(bundle, id, authority, eligible)
 }
@@ -2944,11 +2953,11 @@ func listEvidenceBundles() ([]map[string]any, error) {
 			continue
 		}
 		eligible := cacheRefItemsEligible(ensureDB(), cacheRefItemIDs(ref))
+		// Do not copy query (or any other attacker-writable cache-ref
+		// string) onto the row. The sanitizer is the exclusive writer
+		// of that envelope.
 		row := map[string]any{
-			"id":           id,
-			"resource_uri": evidenceBundleResourceURI(id),
-			"query":        stringFromAny(ref["query"]),
-			"generated_at": stringFromAny(ref["generated_at"]),
+			"generated_at": ref["generated_at"],
 			"result_count": bundleRefResultCount(ref),
 		}
 		sanitizeModelFacingEvidence(row, id, nil, eligible)

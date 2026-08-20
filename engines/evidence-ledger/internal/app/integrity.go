@@ -588,14 +588,21 @@ var cacheRefSearchOptJSONPaths = map[string]string{
 	"Tags":       "filters.tags",
 }
 
-// sanitizeModelFacingEvidence is the single choke point for every
-// model-facing evidence projection: materializeEvidenceBundle (item_ids
-// and no-item_ids), evidence show / MCP show_evidence_bundle, and
-// listEvidenceBundles. The cache-ref-derived envelope is gated as a
-// whole on live eligibility. Ineligible/quarantined items expose none of
-// those fields, at any length — bounding is not an injection control.
-// Eligible items keep the live reconstruction (query stays empty so a
-// planted cache-ref query cannot echo).
+// sanitizeModelFacingEvidence is the exclusive writer of every
+// cache-ref-derived field on a model-facing evidence payload. Every
+// projection — materializeEvidenceBundle (item_ids and no-item_ids),
+// evidence show / MCP show_evidence_bundle, and listEvidenceBundles —
+// must call this and must not copy query/filters/generated_at/
+// resource_uri from a cache-ref onto the payload itself.
+//
+// For ineligible/quarantined items the entire cache-ref-derived
+// envelope is dropped: query is empty, filters are emptied, and
+// generated_at is cleared. Bounding is not an injection control; a
+// 200-byte attacker string must not survive. Eligible items keep an
+// allowlist-validated reconstruction of filters (query stays empty so
+// a planted cache-ref query cannot echo). Unknown keys at any depth
+// are deleted, so a newly added attacker-writable field cannot bypass
+// this function.
 func sanitizeModelFacingEvidence(payload map[string]any, id string, authority []*CodeReference, eligible bool) {
 	if payload == nil {
 		return
@@ -612,10 +619,7 @@ func sanitizeModelFacingEvidence(payload map[string]any, id string, authority []
 	}
 	src := map[string]any{"query": ""}
 	if _, ok := payload["filters"]; ok {
-		src["filters"] = map[string]any{}
-		if eligible {
-			src["filters"] = projectUntrustedCacheRefFilters(payload["filters"], authority)
-		}
+		src["filters"] = sanitizeCacheRefFilters(payload["filters"], authority, eligible)
 	}
 	if _, ok := payload["generated_at"]; ok {
 		src["generated_at"] = ""
@@ -624,6 +628,17 @@ func sanitizeModelFacingEvidence(payload map[string]any, id string, authority []
 		}
 	}
 	projectCacheRefModelFacing(payload, src, eligible)
+}
+
+// sanitizeCacheRefFilters recursively drops or allowlist-validates every
+// attacker-writable cache-ref filter field. Ineligible items get an
+// empty object. Eligible items keep only closed-set / timestamp /
+// authority-derived values; free-form strings are dropped, not bounded.
+func sanitizeCacheRefFilters(raw any, authority []*CodeReference, eligible bool) map[string]any {
+	if !eligible {
+		return map[string]any{}
+	}
+	return projectUntrustedCacheRefFilters(raw, authority)
 }
 
 // projectCacheRefModelFacing is the eligibility gate that turns a
