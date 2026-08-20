@@ -390,7 +390,9 @@ def test_care_crontab_percent_in_path_is_escaped(tmp_path, monkeypatch):
 
     assert care_cmd.install(target=target, backend="crontab", json_output=True) == 0
     body = care_cmd._crontab_body(workspace=target)
-    assert r'cd "ws\%pct"' in body or rf'cd "{target}"'.replace("%", "\\%") in body
+    escaped = care_cmd._cron_escape_path(str(target))
+    assert f'cd "{escaped}"' in body
+    assert "\\%" in escaped
     assert "\\%" in body
 
 
@@ -615,6 +617,17 @@ def test_care_status_payload_on_win32_uses_schtasks(tmp_path, monkeypatch):
     assert {task["id"] for task in payload["tasks"]} >= {"daily-care", "ingest-sweep"}
 
 
+def test_uses_schtasks_is_backend_not_host(monkeypatch):
+    """#1045: explicit non-native backends stay host-agnostic on win32."""
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: True)
+    assert care_cmd._uses_schtasks("schtasks") is True
+    assert care_cmd._uses_schtasks("auto") is False
+    assert care_cmd._uses_schtasks("launchd") is False
+    assert care_cmd._uses_schtasks("systemd") is False
+    assert care_cmd._uses_schtasks("crontab") is False
+
+
 def test_care_explicit_backends_generate_plans_on_win32(tmp_path, monkeypatch, capsys):
     """Explicit launchd/systemd/crontab must not be swallowed by the Windows printer."""
     monkeypatch.setattr(care_cmd.sys, "platform", "win32")
@@ -760,7 +773,10 @@ def test_care_systemd_unit_quotes_workspace_paths_with_spaces(tmp_path, monkeypa
     text = service.read_text(encoding="utf-8")
     parsed = managed_block.parse_blocks(text, kind=care_cmd.CARE_KIND, style=care_cmd.CARE_MARKER_STYLE)
     assert parsed.status == "ok"
-    assert f'WorkingDirectory="{target}"' in parsed.body
+    # Compare against the same quoting helper install uses so a win32
+    # workspace path (backslashes, spaces) is not asserted as a POSIX literal.
+    assert care_cmd._systemd_working_directory(target.expanduser().resolve()) in parsed.body
+    assert "my workspace" in parsed.body
     assert (
         "ExecStart=/usr/bin/env brigade runbook run --approved "
         ".brigade/memory-care/runbooks/daily-care-pass.json --target ."
@@ -783,7 +799,8 @@ def test_care_systemd_environment_path_quotes_home_with_spaces(tmp_path, monkeyp
     )
     assert parsed.status == "ok"
     assert 'Environment="PATH=' in parsed.body
-    assert str(home / ".local" / "bin") in parsed.body
+    assert care_cmd._systemd_environment_path(care_cmd._path_prefix(home)) in parsed.body
+    assert "my home" in parsed.body
 
 
 def test_care_systemd_percent_in_path_is_escaped(tmp_path, monkeypatch):
