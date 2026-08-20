@@ -27,6 +27,9 @@ _GROK_CONTINUATION_PROMPT = (
     "Do not narrate progress or repeat the task."
 )
 INJECTION_QUARANTINE_KIND = "injection-quarantine"
+# Provenance records endpoint hosts, never raw URL or secret-ref values.
+# Malformed / opaque *_BASE_URL(_REF) values use this marker instead.
+INVALID_ENDPOINT_HOST = "invalid-endpoint"
 
 
 @dataclass(frozen=True)
@@ -220,6 +223,11 @@ def _env_endpoint_host(env: dict[str, str] | None) -> str | None:
     A seat normally declares one base URL; recording all of them keeps the
     provenance honest when a table carries more than one instead of letting
     key order pick a winner.
+
+    Receipts record hosts (and the environment-key names from
+    ``_env_override_names``), never secret values. A ``*_BASE_URL_REF`` that
+    resolves to a value with no hostname is recorded as
+    ``INVALID_ENDPOINT_HOST`` instead of falling back to the raw value.
     """
 
     if not env:
@@ -233,7 +241,7 @@ def _env_endpoint_host(env: dict[str, str] | None) -> str | None:
             base_url = os.environ.get(env[key])
         if not base_url:
             continue
-        host = urlparse(base_url).hostname or base_url
+        host = urlparse(base_url).hostname or INVALID_ENDPOINT_HOST
         if host not in hosts:
             hosts.append(host)
     return ",".join(hosts) if hosts else None
