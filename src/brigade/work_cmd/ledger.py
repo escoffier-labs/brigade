@@ -55,6 +55,7 @@ def _task_ledger_lock(target: Path) -> Iterator[None]:
 REASON_CORRUPT_LEDGER = "corrupt_ledger"
 REASON_UNSUPPORTED_LEDGER_VERSION = "unsupported_ledger_version"
 REASON_TRUST_POLICY = "trust_policy"
+REASON_IMPORT_SNAPSHOT_CHANGED = "import_snapshot_changed"
 
 
 class TaskLedgerError(ValueError):
@@ -421,8 +422,49 @@ def _stale_claim_payload(target: Path, *, stale_after_hours: float | None = None
     }
 
 
-def _read_imports(target: Path) -> list[dict[str, Any]]:
+class _ReviewedImportSnapshot:
+    """One inbox generation: exact bytes, identity, digest, and parsed rows."""
+
+    def __init__(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        raw: bytes,
+        digest: str,
+        identity: tuple[int, int, int, int] | None,
+        exists: bool,
+    ) -> None:
+        self.items = items
+        self.raw = raw
+        self.digest = digest
+        self.identity = identity
+        self.exists = exists
+
+    @property
+    def generation(self) -> tuple[str, tuple[int, int, int, int] | None, bool]:
+        return (self.digest, self.identity, self.exists)
+
+
+def _import_inbox_digest(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _parse_import_inbox_bytes(raw: bytes) -> list[dict[str, Any]]:
     imports: list[dict[str, Any]] = []
+    for line in raw.decode("utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            imports.append(item)
+    return imports
+
+
+def _read_import_inbox_raw(target: Path) -> tuple[bytes, tuple[int, int, int, int] | None, bool]:
+    """Read inbox bytes once from a retained descriptor. Raises if the object moves."""
     parent = -1
     descriptor = -1
     try:
@@ -434,38 +476,58 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
                 os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             )
         except FileNotFoundError:
-            return []
+            return b"", None, False
         _validate_import_inbox_descriptor(descriptor)
         before = os.fstat(descriptor)
         chunks: list[bytes] = []
         while chunk := os.read(descriptor, 1024 * 1024):
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_mode,
-            after.st_nlink,
-        ):
-            return []
-        lines = b"".join(chunks).decode("utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return []
+        identity = (before.st_dev, before.st_ino, before.st_mode, before.st_nlink)
+        if identity != (after.st_dev, after.st_ino, after.st_mode, after.st_nlink):
+            raise OSError("import inbox changed while snapshotting")
+        return b"".join(chunks), identity, True
     finally:
         if descriptor != -1:
             os.close(descriptor)
         if parent != -1:
             os.close(parent)
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(item, dict):
-            imports.append(item)
-    return imports
+
+
+def _capture_reviewed_import_snapshot(target: Path) -> _ReviewedImportSnapshot:
+    """Bind parsed rows to the exact inbox generation that was read."""
+    try:
+        raw, identity, exists = _read_import_inbox_raw(target)
+        items = _parse_import_inbox_bytes(raw)
+    except FileNotFoundError:
+        raw, identity, exists, items = b"", None, False, []
+    except UnicodeDecodeError as exc:
+        raise TaskLedgerError(
+            "import inbox is not valid UTF-8",
+            reason=REASON_IMPORT_SNAPSHOT_CHANGED,
+            details={"target": str(target)},
+        ) from exc
+    except OSError as exc:
+        raise TaskLedgerError(
+            "import inbox could not be snapshotted",
+            reason=REASON_IMPORT_SNAPSHOT_CHANGED,
+            details={"target": str(target), "error": str(exc)},
+        ) from exc
+    return _ReviewedImportSnapshot(
+        items,
+        raw=raw,
+        digest=_import_inbox_digest(raw),
+        identity=identity,
+        exists=exists,
+    )
+
+
+def _read_imports(target: Path) -> list[dict[str, Any]]:
+    try:
+        raw, _identity, _exists = _read_import_inbox_raw(target)
+        return _parse_import_inbox_bytes(raw)
+    except (OSError, UnicodeDecodeError):
+        return []
 
 
 def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
@@ -3772,17 +3834,21 @@ def _readiness_payload(
     return payload
 
 
-def _pending_imports(target: Path) -> list[dict[str, Any]]:
-    imports = [
+def _pending_imports_from_items(imports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pending = [
         item
-        for item in _read_imports(target)
+        for item in imports
         if isinstance(item, dict)
         and item.get("status", "pending") == "pending"
         and isinstance(item.get("text"), str)
         and item["text"].strip()
     ]
-    imports.sort(key=_import_sort_key)
-    return imports
+    pending.sort(key=_import_sort_key)
+    return pending
+
+
+def _pending_imports(target: Path, imports: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    return _pending_imports_from_items(_read_imports(target) if imports is None else imports)
 
 
 def _import_counts(imports: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3806,15 +3872,72 @@ def _matching_pending_imports(
     kind: str | None = None,
     source: str | None = None,
     metadata_filters: dict[str, str] | None = None,
+    imports: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    imports = _pending_imports(target)
+    items = _pending_imports(target, imports=imports)
     if kind:
-        imports = [item for item in imports if item.get("kind") == kind]
+        items = [item for item in items if item.get("kind") == kind]
     if source:
-        imports = [item for item in imports if item.get("source") == source]
+        items = [item for item in items if item.get("source") == source]
     if metadata_filters:
-        imports = [item for item in imports if _import_metadata_matches(item, metadata_filters)]
-    return imports
+        items = [item for item in items if _import_metadata_matches(item, metadata_filters)]
+    return items
+
+
+def _import_item_content_digest(item: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(item, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _import_snapshot_join_set(
+    items: list[dict[str, Any]],
+    *,
+    kind: str | None = None,
+    source: str | None = None,
+    metadata_filters: dict[str, str] | None = None,
+) -> frozenset[tuple[object, str]]:
+    """Stable (id, content-digest) set for the filtered pending rows of one snapshot."""
+    matching = _matching_pending_imports(
+        Path(),
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+        imports=items,
+    )
+    return frozenset((item.get("id"), _import_item_content_digest(item)) for item in matching)
+
+
+def _after_reviewed_import_snapshot(target: Path, snapshot: _ReviewedImportSnapshot) -> None:
+    """Test seam between binding the reviewed snapshot and the promote CAS."""
+    del target, snapshot
+
+
+def _require_reviewed_import_snapshot(
+    target: Path,
+    snapshot: _ReviewedImportSnapshot,
+    reviewed_join: frozenset[tuple[object, str]],
+    *,
+    kind: str | None = None,
+    source: str | None = None,
+    metadata_filters: dict[str, str] | None = None,
+) -> None:
+    current = _capture_reviewed_import_snapshot(target)
+    current_join = _import_snapshot_join_set(
+        current.items,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    if current.generation != snapshot.generation or current_join != reviewed_join:
+        raise TaskLedgerError(
+            "import inbox changed since the reviewed snapshot",
+            reason=REASON_IMPORT_SNAPSHOT_CHANGED,
+            details={
+                "reviewed_digest": snapshot.digest,
+                "current_digest": current.digest,
+            },
+        )
 
 
 def _import_metadata_matches(item: dict[str, Any], filters: dict[str, str]) -> bool:
@@ -3881,7 +4004,12 @@ def _import_trust_blocker(item: Mapping[str, Any] | None) -> str | None:
     return trust_gate.promotion_blocker(item)
 
 
-def _mark_import_promoted(target: Path, item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+def _mark_import_promoted(
+    target: Path,
+    item: dict[str, Any],
+    *,
+    ledger: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], bool]:
     blocker = _import_trust_blocker(item)
     if blocker:
         raise TaskLedgerError(blocker, reason=REASON_TRUST_POLICY)
@@ -3900,23 +4028,100 @@ def _mark_import_promoted(target: Path, item: dict[str, Any]) -> tuple[dict[str,
     )
     acceptance = item.get("acceptance") if isinstance(item.get("acceptance"), list) else None
     proposed = edges_mod.proposed_edges_from_metadata(item_metadata, new_task_id="self")
-    task, created = _add_task(
-        target,
-        text,
-        source=f"import:{item.get('source') or 'manual'}",
-        metadata=metadata,
-        task_type=str(item.get("type") or "task"),
-        priority=str(item.get("priority") or "normal"),
-        acceptance=_combined_acceptance(template, acceptance),
-        template=template,
-        proposed_edges=proposed,
-    )
+    source = f"import:{item.get('source') or 'manual'}"
+    task_type = str(item.get("type") or "task")
+    priority = str(item.get("priority") or "normal")
+    combined_acceptance = _combined_acceptance(template, acceptance)
+    if ledger is None:
+        task, created = _add_task(
+            target,
+            text,
+            source=source,
+            metadata=metadata,
+            task_type=task_type,
+            priority=priority,
+            acceptance=combined_acceptance,
+            template=template,
+            proposed_edges=proposed,
+        )
+    else:
+        task, created = _apply_add_task_to_ledger(
+            target,
+            ledger,
+            text,
+            source=source,
+            metadata=metadata,
+            task_type=task_type,
+            priority=priority,
+            acceptance=combined_acceptance,
+            template=template,
+            proposed_edges=proposed,
+        )
+        if created:
+            _write_task_ledger(target, ledger)
     now = helpers._now().isoformat()
     item["status"] = "promoted"
     item["updated_at"] = now
     item["promoted_at"] = now
     item["task_id"] = task["id"]
     return task, created
+
+
+def _promote_matching_imports(
+    target: Path,
+    *,
+    kind: str | None = None,
+    source: str | None = None,
+    metadata_filters: dict[str, str] | None = None,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any], bool]], list[tuple[dict[str, Any], Exception]]]:
+    """Promote --all from one locked inbox generation. Fail closed if it changes."""
+    with _task_ledger_lock(target):
+        snapshot = _capture_reviewed_import_snapshot(target)
+        reviewed_join = _import_snapshot_join_set(
+            snapshot.items,
+            kind=kind,
+            source=source,
+            metadata_filters=metadata_filters,
+        )
+        _after_reviewed_import_snapshot(target, snapshot)
+        _require_reviewed_import_snapshot(
+            target,
+            snapshot,
+            reviewed_join,
+            kind=kind,
+            source=source,
+            metadata_filters=metadata_filters,
+        )
+        matching = _matching_pending_imports(
+            target,
+            kind=kind,
+            source=source,
+            metadata_filters=metadata_filters,
+            imports=snapshot.items,
+        )
+        ledger = _read_task_ledger(target)
+        promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+        failed: list[tuple[dict[str, Any], Exception]] = []
+        for item in matching:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                task, created = _mark_import_promoted(target, item, ledger=ledger)
+            except (edges_mod.EdgeError, TaskLedgerError) as exc:
+                failed.append((item, exc))
+                continue
+            promoted.append((item, task, created))
+        _require_reviewed_import_snapshot(
+            target,
+            snapshot,
+            reviewed_join,
+            kind=kind,
+            source=source,
+            metadata_filters=metadata_filters,
+        )
+        _write_imports(target, snapshot.items)
+        return promoted, failed
 
 
 def _handoff_is_document_target(value: str) -> bool:
@@ -4403,6 +4608,63 @@ def _make_import(
     return item
 
 
+def _apply_add_task_to_ledger(
+    target: Path,
+    ledger: dict[str, Any],
+    text: str,
+    *,
+    source: str = "manual",
+    metadata: dict[str, Any] | None = None,
+    task_type: str = "task",
+    priority: str = "normal",
+    acceptance: list[str] | None = None,
+    template: str | None = None,
+    dedupe: bool = True,
+    proposed_edges: list[dict[str, str]] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    if dedupe:
+        wanted = _task_text_key(text)
+        if wanted:
+            for existing in ledger["tasks"]:
+                if (
+                    isinstance(existing, dict)
+                    and existing.get("status", "pending") == "pending"
+                    and _task_text_key(str(existing.get("text") or "")) == wanted
+                ):
+                    return existing, False
+    task = _make_task(
+        text,
+        source=source,
+        metadata=metadata,
+        task_type=task_type,
+        priority=priority,
+        acceptance=acceptance,
+        template=template,
+    )
+    from . import footprint as footprint_mod
+
+    footprint_mod.attach_predicted(target, task)
+    ledger["tasks"].append(task)
+    created_edges: list[dict[str, Any]] = []
+    for proposal in proposed_edges or []:
+        source_id = proposal.get("source") or ""
+        target_id = proposal.get("target") or ""
+        if source_id in {"", "self"}:
+            source_id = str(task["id"])
+        if target_id in {"", "self"}:
+            target_id = str(task["id"])
+        edge, _created = edges_mod.add_edge_to_ledger(
+            ledger,
+            source=source_id,
+            target=target_id,
+            edge_type=str(proposal.get("type") or ""),
+        )
+        created_edges.append(edge)
+    if created_edges:
+        task["edges"] = created_edges
+    return task, True
+
+
 def _add_task(
     target: Path,
     text: str,
@@ -4418,17 +4680,9 @@ def _add_task(
 ) -> tuple[dict[str, Any], bool]:
     with _task_ledger_lock(target):
         ledger = _read_task_ledger(target)
-        if dedupe:
-            wanted = _task_text_key(text)
-            if wanted:
-                for existing in ledger["tasks"]:
-                    if (
-                        isinstance(existing, dict)
-                        and existing.get("status", "pending") == "pending"
-                        and _task_text_key(str(existing.get("text") or "")) == wanted
-                    ):
-                        return existing, False
-        task = _make_task(
+        task, created = _apply_add_task_to_ledger(
+            target,
+            ledger,
             text,
             source=source,
             metadata=metadata,
@@ -4436,30 +4690,12 @@ def _add_task(
             priority=priority,
             acceptance=acceptance,
             template=template,
+            dedupe=dedupe,
+            proposed_edges=proposed_edges,
         )
-        from . import footprint as footprint_mod
-
-        footprint_mod.attach_predicted(target, task)
-        ledger["tasks"].append(task)
-        created_edges: list[dict[str, Any]] = []
-        for proposal in proposed_edges or []:
-            source_id = proposal.get("source") or ""
-            target_id = proposal.get("target") or ""
-            if source_id in {"", "self"}:
-                source_id = str(task["id"])
-            if target_id in {"", "self"}:
-                target_id = str(task["id"])
-            edge, _created = edges_mod.add_edge_to_ledger(
-                ledger,
-                source=source_id,
-                target=target_id,
-                edge_type=str(proposal.get("type") or ""),
-            )
-            created_edges.append(edge)
-        if created_edges:
-            task["edges"] = created_edges
-        _write_task_ledger(target, ledger)
-        return task, True
+        if created:
+            _write_task_ledger(target, ledger)
+        return task, created
 
 
 def _annotate_task(
