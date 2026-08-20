@@ -12,7 +12,6 @@ import json
 import math
 import os
 import sys
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -982,217 +981,23 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
-# In-tree miseledger 0.6.0 CLI surface (engines/evidence-ledger/internal/app).
-# commandTable names from app.go. Crawl kinds from cmdCrawl in crawl.go.
-_MISELEDGER_TOP_LEVEL = frozenset(
-    {
-        "version",
-        "init",
-        "status",
-        "sources",
-        "scans",
-        "sessions",
-        "serve",
-        "mcp",
-        "watch",
-        "schedule",
-        "crawl",
-        "adapter",
-        "import",
-        "search",
-        "show",
-        "evidence",
-        "explain",
-        "export",
-        "relations",
-        "stats",
-        "fork",
-        "diff",
-        "compact",
-        "prune",
-        "sql",
-        "doctor",
-        "trust",
-    }
-)
-
-# Built-in crawl kinds that dispatch without the retired sourceharvest helper.
-_MISELEDGER_BUILTIN_CRAWL = frozenset(
-    {
-        "sessions",
-        "memory",
-        "adapter",
-        "cursor",
-        "discord",
-        "slack",
-        "granola",
-        "notion",
-        "gmail",
-        "github",
-        "telegram",
-        "chatgpt-export",
-        "claude-export",
-    }
-)
-
-# cmdCrawlSourceHarvest kinds. They still parse, then fail without sourceharvest.
-_MISELEDGER_SOURCEHARVEST_CRAWL = frozenset(
-    {
-        "docs",
-        "files",
-        "repo",
-        "markdown",
-        "html",
-        "gitlog",
-        "json",
-        "jsonl",
-    }
-)
-
-_MISELEDGER_CRAWL_KINDS = _MISELEDGER_BUILTIN_CRAWL | _MISELEDGER_SOURCEHARVEST_CRAWL
-
+# Printed plan is pinned to the brigade setup release (manifest v0.6.0), not
+# in-tree miseledger. Released `miseledger crawl` usage (no `memory` kind):
+# sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|
+# discord|github|slack|granola|notion|gmail|telegram|chatgpt-export|claude-export
+# docs/files/repo/markdown/html/gitlog/json/jsonl require retired sourceharvest.
 _SOURCEHARVEST_OMIT_REASON = "requires the retired sourceharvest helper; omitted from the printed plan"
+_MEMORY_OMIT_REASON = (
+    "not a crawl kind on the brigade setup v0.6.0 release; even in-tree it "
+    "requires an operator-declared memory/NAMESPACE"
+)
 
 
-def _split_miseledger_flags(
-    args: Sequence[str],
-    *,
-    value_flags: frozenset[str],
-    bool_flags: frozenset[str],
-) -> tuple[dict[str, str], dict[str, bool], list[str]]:
-    """Mirror engines/evidence-ledger/internal/app/flags.go splitFlags."""
-    values: dict[str, str] = {}
-    bools: dict[str, bool] = {}
-    rest: list[str] = []
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        if not arg.startswith("--") or arg == "--":
-            rest.append(arg)
-            i += 1
-            continue
-        name_val = arg[2:]
-        name = name_val
-        val = ""
-        if "=" in name_val:
-            name, val = name_val.split("=", 1)
-        if name in value_flags:
-            if val == "":
-                i += 1
-                if i >= len(args):
-                    raise ValueError(f"--{name} requires a value")
-                val = args[i]
-            values[name] = val
-            i += 1
-            continue
-        if name in bool_flags:
-            if val != "":
-                raise ValueError(f"--{name} does not take a value")
-            bools[name] = True
-            i += 1
-            continue
-        raise ValueError(f"unknown flag --{name}")
-    return values, bools, rest
-
-
-def _first_positional(args: Sequence[str]) -> str:
-    """Mirror engines/evidence-ledger/internal/app/flags.go firstPositional."""
-    known_bool = frozenset({"json", "dry-run", "help", "h"})
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        if not arg.startswith("--") or arg == "--":
-            return arg
-        name_val = arg[2:]
-        name = name_val
-        has_inline = False
-        if "=" in name_val:
-            name = name_val.split("=", 1)[0]
-            has_inline = True
-        if has_inline or name in known_bool:
-            i += 1
-            continue
-        i += 2
-    return ""
-
-
-def miseledger_argv_dispatches(argv: Sequence[str]) -> None:
-    """Raise ValueError if argv would not parse/dispatch on in-tree miseledger.
-
-    Dispatch means ``commandTable`` plus ``cmdCrawl`` accept the argv. Kinds
-    that shell out to sourceharvest still parse (then fail at runtime).
-    Unknown commands, unknown crawl kinds, and rejected flag forms raise.
-    """
-    if len(argv) < 2:
-        raise ValueError("usage: miseledger <command>")
-    command = argv[1]
-    if command not in _MISELEDGER_TOP_LEVEL:
-        raise ValueError(f"unknown command: {command}")
-    rest = list(argv[2:])
-    if command == "init":
-        return
-    if command == "status":
-        _, _, leftover = _split_miseledger_flags(rest, value_flags=frozenset(), bool_flags=frozenset({"json"}))
-        if leftover:
-            raise ValueError("usage: miseledger status [--json]")
-        return
-    if command == "doctor":
-        if rest == ["--help"] or rest == ["-h"]:
-            return
-        if rest and rest[0] == "provenance":
-            return
-        _, _, leftover = _split_miseledger_flags(
-            rest, value_flags=frozenset(), bool_flags=frozenset({"json", "mcp", "archive"})
-        )
-        if leftover:
-            raise ValueError("usage: miseledger doctor [--json] [--mcp] [--archive]")
-        return
-    if command != "crawl":
-        return
-    if not rest:
-        raise ValueError(
-            "usage: miseledger crawl sessions|memory|docs|files|repo|markdown|"
-            "html|gitlog|json|jsonl|adapter|cursor|discord|github|slack|granola|"
-            "notion|gmail|telegram|chatgpt-export|claude-export <path> [options]"
-        )
-    kind = rest[0]
-    kind_args = rest[1:]
-    if kind not in _MISELEDGER_CRAWL_KINDS:
-        raise ValueError(f"unknown crawl kind: {kind}")
-    if kind in _MISELEDGER_SOURCEHARVEST_CRAWL:
-        if _first_positional(kind_args) == "":
-            raise ValueError(f"usage: miseledger crawl {kind} <path> [options]")
-        return
-    if kind == "sessions":
-        _, _, leftover = _split_miseledger_flags(
-            kind_args,
-            value_flags=frozenset({"limit", "since", "redact"}),
-            bool_flags=frozenset({"json", "dry-run", "help", "h"}),
-        )
-        if leftover:
-            raise ValueError(
-                "usage: miseledger crawl sessions [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]"
-            )
-        return
-    if kind == "memory":
-        if kind_args and kind_args[0] in {"--help", "-h"}:
-            return
-        _, _, leftover = _split_miseledger_flags(
-            kind_args,
-            value_flags=frozenset({"limit"}),
-            bool_flags=frozenset({"json", "dry-run", "rebuild", "full", "help", "h"}),
-        )
-        if len(leftover) != 1:
-            raise ValueError("usage: miseledger crawl memory <workspace> [--json] [--dry-run] [--rebuild] [--limit N]")
-        return
-
-
-def _crawl_plan_commands(miseledger_cmd: str, target: Path) -> list[list[str]]:
-    """Default review-only plan: built-in miseledger commands only."""
+def _crawl_plan_commands(miseledger_cmd: str) -> list[list[str]]:
+    """Review-only plan: commands that run on setup-pinned miseledger v0.6.0."""
     return [
         [miseledger_cmd, "init"],
         [miseledger_cmd, "crawl", "sessions"],
-        [miseledger_cmd, "crawl", "memory", str(target)],
         [miseledger_cmd, "status", "--json"],
         [miseledger_cmd, "doctor"],
     ]
@@ -1200,6 +1005,10 @@ def _crawl_plan_commands(miseledger_cmd: str, target: Path) -> list[list[str]]:
 
 def _crawl_plan_omitted(miseledger_cmd: str, target: Path) -> list[dict[str, Any]]:
     return [
+        {
+            "argv": [miseledger_cmd, "crawl", "memory", str(target)],
+            "reason": _MEMORY_OMIT_REASON,
+        },
         {
             "argv": [miseledger_cmd, "crawl", "files", str(target)],
             "reason": _SOURCEHARVEST_OMIT_REASON,
@@ -1220,12 +1029,13 @@ def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
         "kind": "crawl",
         "created_at": _now(),
         "installed": binary is not None,
-        "commands": _crawl_plan_commands(miseledger_cmd, target),
+        "commands": _crawl_plan_commands(miseledger_cmd),
         "omitted": _crawl_plan_omitted(miseledger_cmd, target),
         "manual_steps": [
             "Run crawls on the machine that holds the harness session logs (often the agent host).",
             "Pass additional crawl sources (chat exports, discrawl/slacrawl adapters) only when those tools are installed.",
             "Treat imported text as untrusted evidence, not instructions.",
+            "crawl memory is omitted: it is not on the brigade setup v0.6.0 release and needs memory/NAMESPACE.",
             "crawl files and crawl gitlog are omitted: they require the retired sourceharvest helper.",
         ],
         "boundaries": [

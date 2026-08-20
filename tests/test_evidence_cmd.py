@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
-
-import pytest
 
 from brigade import code_cmd, doctor as doctor_mod, evidence_cmd, search_cmd
 from brigade.station import DoctorContext
@@ -146,6 +145,62 @@ def test_evidence_doctor_exits_nonzero_on_fail(monkeypatch, tmp_path):
     assert evidence_cmd.doctor(target=tmp_path) == 1
 
 
+# Exact crawl usage from the brigade setup v0.6.0 release asset (no `memory`).
+_SETUP_PINNED_CRAWL_USAGE = (
+    "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|"
+    "adapter|cursor|discord|github|slack|granola|notion|gmail|telegram|"
+    "chatgpt-export|claude-export <path> [options]"
+)
+_SETUP_PINNED_CRAWL_KINDS = frozenset(
+    {
+        "sessions",
+        "docs",
+        "files",
+        "repo",
+        "markdown",
+        "html",
+        "gitlog",
+        "json",
+        "jsonl",
+        "adapter",
+        "cursor",
+        "discord",
+        "github",
+        "slack",
+        "granola",
+        "notion",
+        "gmail",
+        "telegram",
+        "chatgpt-export",
+        "claude-export",
+    }
+)
+
+
+def _setup_pinned_miseledger(tmp_path: Path) -> Path:
+    """Fetch the sha256-pinned brigade setup miseledger v0.6.0 asset."""
+    from brigade import component_install, component_manifest
+
+    manifest = component_manifest.load()
+    component = manifest.components["miseledger"]
+    assert component.source.release_tag == "v0.6.0"
+    asset = component.assets[component_manifest.platform_key()]
+    dest = tmp_path / asset.asset_name
+    component_install.fetch_asset_to_cache(asset, cache_path=dest, offline=False)
+    dest.chmod(0o755)
+    return dest
+
+
+def _isolated_miseledger_env(home: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / "config")
+    env["XDG_DATA_HOME"] = str(home / "data")
+    env["XDG_CACHE_HOME"] = str(home / "cache")
+    return env
+
+
 def test_crawl_plan_is_review_only(tmp_path):
     payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
     rendered = evidence_cmd._render_plan_md(payload)
@@ -155,57 +210,92 @@ def test_crawl_plan_is_review_only(tmp_path):
     assert "miseledger crawl sessions" in rendered
 
 
-def test_crawl_plan_printed_commands_dispatch(tmp_path):
-    payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
-    assert payload["commands"]
-    for command in payload["commands"]:
-        evidence_cmd.miseledger_argv_dispatches(command)
-
-
-def test_crawl_plan_omits_sourceharvest_and_uses_positional_memory(tmp_path):
+def test_crawl_plan_omits_release_missing_and_sourceharvest_kinds(tmp_path):
     payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
     commands = payload["commands"]
     target = str(tmp_path.resolve())
 
-    assert ["miseledger", "crawl", "memory", target] in commands
+    assert ["miseledger", "init"] in commands
+    assert ["miseledger", "crawl", "sessions"] in commands
+    assert ["miseledger", "status", "--json"] in commands
+    assert ["miseledger", "doctor"] in commands
     for command in commands:
         assert "--root" not in command
         assert "--repo" not in command
+        assert command[1:] != ["crawl", "memory", target]
         assert command[1:3] != ["crawl", "files"]
         assert command[1:3] != ["crawl", "gitlog"]
+        if command[1] == "crawl":
+            assert command[2] in _SETUP_PINNED_CRAWL_KINDS
+            assert command[2] != "memory"
 
-    omitted_argv = [row["argv"] for row in payload["omitted"]]
-    assert ["miseledger", "crawl", "files", target] in omitted_argv
-    assert ["miseledger", "crawl", "gitlog", target] in omitted_argv
-    assert all("retired sourceharvest" in row["reason"] for row in payload["omitted"])
+    omitted = {tuple(row["argv"]): row["reason"] for row in payload["omitted"]}
+    assert omitted[("miseledger", "crawl", "memory", target)].startswith("not a crawl kind on the brigade setup v0.6.0")
+    assert "memory/NAMESPACE" in omitted[("miseledger", "crawl", "memory", target)]
+    assert "retired sourceharvest" in omitted[("miseledger", "crawl", "files", target)]
+    assert "retired sourceharvest" in omitted[("miseledger", "crawl", "gitlog", target)]
     rendered = evidence_cmd._render_plan_md(payload)
     assert "Omitted" in rendered
+    assert "memory/NAMESPACE" in rendered
     assert "retired sourceharvest" in rendered
 
 
-def test_issue_1024_mutation_old_flag_forms_fail_dispatch(tmp_path):
-    """Regression: the #1024 printed flag forms would fail this dispatch check."""
-    target = str(tmp_path)
-    old_plan = [
-        ["miseledger", "init"],
-        ["miseledger", "crawl", "sessions"],
-        ["miseledger", "crawl", "memory", target],
-        ["miseledger", "crawl", "files", "--root", target],
-        ["miseledger", "crawl", "gitlog", "--repo", target],
-        ["miseledger", "status", "--json"],
-        ["miseledger", "doctor"],
+def test_crawl_plan_printed_commands_exec_on_setup_pinned_release(tmp_path, monkeypatch):
+    """Each printed argv must run on the v0.6.0 asset brigade setup installs."""
+    binary = _setup_pinned_miseledger(tmp_path / "bin")
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
+    payload = evidence_cmd.crawl_plan_payload(target=tmp_path / "ws")
+    env = _isolated_miseledger_env(tmp_path / "home")
+
+    usage = subprocess.run(
+        [str(binary), "crawl"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert usage.returncode != 0
+    assert usage.stderr.strip() == _SETUP_PINNED_CRAWL_USAGE
+    assert "memory" not in usage.stderr
+
+    assert payload["commands"]
+    for command in payload["commands"]:
+        completed = subprocess.run(
+            [str(part) for part in command],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+        assert completed.returncode == 0, (
+            f"{command} exited {completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+        )
+
+
+def test_issue_1024_mutation_old_printed_argv_fails_on_setup_release(tmp_path):
+    """The old printed forms die on the setup-pinned binary (would have caught #1046)."""
+    binary = _setup_pinned_miseledger(tmp_path / "bin")
+    env = _isolated_miseledger_env(tmp_path / "home")
+    workspace = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir()
+    broken = [
+        [str(binary), "crawl", "memory", workspace],
+        [str(binary), "crawl", "files", "--root", workspace],
+        [str(binary), "crawl", "gitlog", "--repo", workspace],
     ]
-    failures = []
-    for command in old_plan:
-        try:
-            evidence_cmd.miseledger_argv_dispatches(command)
-        except ValueError as exc:
-            failures.append((command[2], str(exc)))
-    assert {kind for kind, _ in failures} == {"files", "gitlog"}
-    with pytest.raises(ValueError, match="usage: miseledger crawl files"):
-        evidence_cmd.miseledger_argv_dispatches(["miseledger", "crawl", "files", "--root", target])
-    with pytest.raises(ValueError, match="usage: miseledger crawl gitlog"):
-        evidence_cmd.miseledger_argv_dispatches(["miseledger", "crawl", "gitlog", "--repo", target])
+    for command in broken:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+            check=False,
+        )
+        assert completed.returncode != 0, f"{command} unexpectedly succeeded"
+        assert "usage:" in completed.stderr
 
 
 def test_crawl_plan_write_creates_files(tmp_path):
