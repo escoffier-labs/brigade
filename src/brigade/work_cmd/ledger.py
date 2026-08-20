@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -3913,6 +3914,11 @@ def _after_reviewed_import_snapshot(target: Path, snapshot: _ReviewedImportSnaps
     del target, snapshot
 
 
+def _after_import_promote_mutations(target: Path, snapshot: _ReviewedImportSnapshot) -> None:
+    """Test seam after in-memory promote mutations and before the late-window CAS."""
+    del target, snapshot
+
+
 def _require_reviewed_import_snapshot(
     target: Path,
     snapshot: _ReviewedImportSnapshot,
@@ -4057,8 +4063,6 @@ def _mark_import_promoted(
             template=template,
             proposed_edges=proposed,
         )
-        if created:
-            _write_task_ledger(target, ledger)
     now = helpers._now().isoformat()
     item["status"] = "promoted"
     item["updated_at"] = now
@@ -4074,7 +4078,11 @@ def _promote_matching_imports(
     source: str | None = None,
     metadata_filters: dict[str, str] | None = None,
 ) -> tuple[list[tuple[dict[str, Any], dict[str, Any], bool]], list[tuple[dict[str, Any], Exception]]]:
-    """Promote --all from one locked inbox generation. Fail closed if it changes."""
+    """Promote --all from one locked inbox generation. Fail closed if it changes.
+
+    Per-item mutations stay in memory until the late-window CAS succeeds.
+    A refused snapshot or a failed item persists no task.
+    """
     with _task_ledger_lock(target):
         snapshot = _capture_reviewed_import_snapshot(target)
         reviewed_join = _import_snapshot_join_set(
@@ -4102,16 +4110,23 @@ def _promote_matching_imports(
         ledger = _read_task_ledger(target)
         promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
         failed: list[tuple[dict[str, Any], Exception]] = []
+        created_any = False
         for item in matching:
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
+            checkpoint = copy.deepcopy(ledger)
             try:
                 task, created = _mark_import_promoted(target, item, ledger=ledger)
             except (edges_mod.EdgeError, TaskLedgerError) as exc:
+                ledger.clear()
+                ledger.update(checkpoint)
                 failed.append((item, exc))
                 continue
+            if created:
+                created_any = True
             promoted.append((item, task, created))
+        _after_import_promote_mutations(target, snapshot)
         _require_reviewed_import_snapshot(
             target,
             snapshot,
@@ -4120,6 +4135,8 @@ def _promote_matching_imports(
             source=source,
             metadata_filters=metadata_filters,
         )
+        if created_any:
+            _write_task_ledger(target, ledger)
         _write_imports(target, snapshot.items)
         return promoted, failed
 

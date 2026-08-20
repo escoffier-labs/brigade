@@ -1942,3 +1942,117 @@ def test_import_promote_all_refuses_when_reviewed_inbox_join_set_changes(tmp_pat
     assert inbox[0]["id"] == reviewed["id"]
     assert inbox[0]["text"] == "Forged unreviewed payload injected after review"
     assert inbox[0].get("status", "pending") == "pending"
+
+
+def _promote_all_task_texts(tmp_path: Path) -> list[str]:
+    tasks_path = tmp_path / ".brigade" / "work" / "tasks.json"
+    if not tasks_path.exists():
+        return []
+    ledger = json.loads(tasks_path.read_text())
+    return [str(task.get("text") or "") for task in ledger.get("tasks", [])]
+
+
+def test_import_promote_all_failed_item_persists_no_task(tmp_path, capsys):
+    """A batch item reported as failed: must not persist a task.
+
+    `_apply_add_task_to_ledger` appends the task before edge validation. If
+    a later sibling promote writes that shared ledger, a revert that skips
+    per-item rollback leaves the failed row on disk while reporting
+    `failed:`. Status and persisted state must agree: no task for a failure.
+    """
+    _init_git_repo(tmp_path)
+    assert work_cmd.task_add(target=tmp_path, text="Upstream A") == 0
+    assert work_cmd.task_add(target=tmp_path, text="Downstream B") == 0
+    capsys.readouterr()
+    tasks = work_cmd._read_task_ledger(tmp_path)["tasks"]
+    upstream = next(task for task in tasks if task["text"] == "Upstream A")
+    downstream = next(task for task in tasks if task["text"] == "Downstream B")
+    assert (
+        work_cmd.task_edge_add(
+            target=tmp_path,
+            edge_type="blocks",
+            source=upstream["id"],
+            target_id=downstream["id"],
+        )
+        == 0
+    )
+    before_texts = set(_promote_all_task_texts(tmp_path))
+
+    failed_item = work_cmd._make_import(
+        "Cycle bait import that must not persist",
+        kind="task",
+        source="memory-care",
+        metadata={"proposed_edges": [{"type": "blocks", "source": downstream["id"], "target": upstream["id"]}]},
+    )
+    failed_item["created_at"] = "2026-01-01T00:00:00+00:00"
+    healthy = work_cmd._make_import(
+        "Healthy import that should persist",
+        kind="task",
+        source="memory-care",
+    )
+    healthy["created_at"] = "2026-01-02T00:00:00+00:00"
+    work_cmd._write_imports(tmp_path, [healthy, failed_item])
+
+    rc = work_cmd.import_promote(target=tmp_path, all_matching=True, kind="task", source="memory-care")
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "promoted: 1" in captured.out
+    assert "failed: 1" in captured.out
+    assert f"{failed_item['id']} failed:" in captured.err
+    assert "Healthy import that should persist" in captured.out
+    assert "Cycle bait import that must not persist" not in captured.out
+
+    texts = _promote_all_task_texts(tmp_path)
+    assert "Cycle bait import that must not persist" not in texts
+    assert "Healthy import that should persist" in texts
+    assert set(texts) == before_texts | {"Healthy import that should persist"}
+
+    inbox = {item["text"]: item for item in work_cmd._read_imports(tmp_path)}
+    assert inbox["Cycle bait import that must not persist"].get("status", "pending") == "pending"
+    assert inbox["Cycle bait import that must not persist"].get("task_id") in {None, ""}
+    assert inbox["Healthy import that should persist"].get("status") == "promoted"
+
+
+def test_import_promote_all_late_window_cas_refusal_writes_no_task(tmp_path, monkeypatch, capsys):
+    """Late-window CAS refusal must leave zero tasks and match CHANGELOG.
+
+    Promote mutates an in-memory ledger, then re-checks the reviewed inbox
+    generation. If that late check refuses, a revert that persisted tasks
+    before CAS contradicts the Unreleased claim that a refused promote
+    does not create a task.
+    """
+    _init_git_repo(tmp_path)
+    reviewed = work_cmd._make_import("Reviewed pending task from memory-care", kind="task", source="memory-care")
+    work_cmd._write_imports(tmp_path, [reviewed])
+
+    def swap_same_id_after_mutations(_target, _snapshot):
+        forged = work_cmd._make_import(
+            "Forged unreviewed payload injected after in-memory promote",
+            kind="task",
+            source="memory-care",
+        )
+        forged["id"] = reviewed["id"]
+        work_cmd._write_imports(tmp_path, [forged])
+
+    monkeypatch.setattr(work_cmd.ledger, "_after_import_promote_mutations", swap_same_id_after_mutations)
+
+    rc = work_cmd.import_promote(target=tmp_path, all_matching=True, kind="task", source="memory-care")
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "changed since the reviewed snapshot" in err
+
+    changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+    unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    assert "does not create a task" in unreleased
+    assert "work import promote --all" in unreleased
+
+    texts = _promote_all_task_texts(tmp_path)
+    assert texts == []
+    tasks_path = tmp_path / ".brigade" / "work" / "tasks.json"
+    assert not tasks_path.exists() or json.loads(tasks_path.read_text()).get("tasks", []) == []
+
+    inbox = work_cmd._read_imports(tmp_path)
+    assert len(inbox) == 1
+    assert inbox[0]["id"] == reviewed["id"]
+    assert inbox[0]["text"] == "Forged unreviewed payload injected after in-memory promote"
+    assert inbox[0].get("status", "pending") == "pending"
