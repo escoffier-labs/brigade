@@ -155,12 +155,9 @@ def _scanner_child_environment(sandbox: Path) -> dict[str, str]:
 def _seed_child_authority_store(target: Path, env: dict[str, str]) -> None:
     """Give a Brigade child the parent's directory bindings inside its own sandbox.
 
-    A Brigade child launched as a scanner (the shipped chat-surface and handoff
-    scanners are Brigade invocations) finds an empty store under the sandboxed
-    HOME, so it cannot validate the directories the parent already created and
-    bound. Copying the parent's record into the sandbox restores that view
-    without handing the child a path to the operator's real store, and the copy
-    is destroyed with the sandbox.
+    The copy is re-signed with an ephemeral sandbox key. Nothing the child
+    signs there is authority for the parent. ``BRIGADE_AUTHORITY_KEY_FILE``
+    stays off the child env allowlist.
     """
     try:
         _path, payload = ledger_mod._read_external_directory_authority(target)
@@ -169,8 +166,11 @@ def _seed_child_authority_store(target: Path, env: dict[str, str]) -> None:
     if payload is None:
         return
     try:
+        from .. import authority_key
+
+        ephemeral = authority_key.generate_key(env=env)
         child_path = ledger_mod._directory_authority_store_path(target, env=env)
-        ledger_mod._write_external_directory_authority(child_path, payload)
+        ledger_mod._write_external_directory_authority(child_path, payload, env=env, key_material=ephemeral)
     except OSError:
         return
 
@@ -1529,6 +1529,7 @@ def _scanner_run_one(
     scanner: dict[str, Any],
     *,
     force: bool = False,
+    isolated: bool = False,
 ) -> dict[str, Any]:
     scanner_id = str(scanner.get("id") or "scanner")
     command = str(scanner.get("command") or "")
@@ -1607,15 +1608,24 @@ def _scanner_run_one(
         _prebind_child_visible_directories(target)
         try:
             with _scanner_child_environment_sandbox(target) as child_env:
-                completed_process = subprocess.run(
-                    argv,
-                    cwd=cwd,
-                    text=True,
-                    capture_output=True,
-                    timeout=float(scanner.get("timeout") or 300),
-                    shell=False,
-                    env=child_env,
-                )
+                run_kwargs: dict[str, Any] = {
+                    "cwd": cwd,
+                    "text": True,
+                    "capture_output": True,
+                    "timeout": float(scanner.get("timeout") or 300),
+                    "shell": False,
+                    "env": child_env,
+                }
+                if isolated:
+                    from .. import scanner_isolation
+
+                    status = scanner_isolation.probe_isolation()
+                    if not status.available:
+                        raise OSError(f"isolated scanners unavailable: {status.reason}")
+                    sandbox = Path(child_env["HOME"])
+                    covers = scanner_isolation.prepare_isolation_covers(sandbox)
+                    argv = scanner_isolation.isolated_argv(argv, covers)
+                completed_process = subprocess.run(argv, **run_kwargs)
             stdout = completed_process.stdout or ""
             stderr = completed_process.stderr or ""
             _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
@@ -1921,6 +1931,17 @@ def _scanner_health(target: Path) -> dict[str, Any]:
         )
     elif plan.get("valid"):
         checks.append({"status": constants.OK, "name": "scanner_runs_due", "detail": "none"})
+
+    from .. import scanner_isolation
+
+    isolation_status, _isolation_name, isolation_detail = scanner_isolation.doctor_check()
+    mapped = {
+        "OK": constants.OK,
+        "WARN": constants.WARN,
+        "FAIL": constants.FAIL,
+        "MANUAL": constants.WARN,
+    }.get(isolation_status, constants.WARN)
+    checks.append({"status": mapped, "name": "scanner_isolation", "detail": isolation_detail})
 
     next_run = plan.get("planned", [None])[0] if plan.get("planned") else None
     latest_run = receipts[0] if receipts else None
@@ -2247,6 +2268,7 @@ def _scanners_run_payload(
     force: bool = False,
     ingest_output: bool = False,
     require_selector: bool = True,
+    isolated_scanners: bool = False,
 ) -> tuple[dict[str, Any], int]:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -2295,7 +2317,7 @@ def _scanners_run_payload(
                 for item in before_imports
                 if isinstance(item, dict) and isinstance(item.get("id"), str)
             }
-            run = _scanner_run_one(target, scanner, force=force)
+            run = _scanner_run_one(target, scanner, force=force, isolated=isolated_scanners)
             # Cover stamp/receipt failures: authority exists from `_scanner_run_one`.
             runs.append(run)
             _register_scanner_run_proof(scanner, run)
@@ -2438,6 +2460,7 @@ def scanners_run(
     force: bool = False,
     ingest_output: bool = False,
     json_output: bool = False,
+    isolated_scanners: bool = False,
 ) -> int:
     payload, rc = _scanners_run_payload(
         target=target,
@@ -2447,6 +2470,7 @@ def scanners_run(
         include_disabled=include_disabled,
         force=force,
         ingest_output=ingest_output,
+        isolated_scanners=isolated_scanners,
     )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))

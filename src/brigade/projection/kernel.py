@@ -8,15 +8,19 @@ simultaneous visibility across independent paths.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
 import stat
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, Mapping
+from typing import Any, Callable, Iterable, Iterator, Literal, Mapping
 
 from brigade import localio
 
@@ -274,7 +278,8 @@ def execute(plan: Plan, *, target: Path, inject: FailureInjector | None = None) 
     except OSError:
         pass
     try:
-        return _prepare_and_commit(plan, target=target, op_dir=op_dir, inject=inject)
+        with _bind_held_parents(plan.mutations):
+            return _prepare_and_commit(plan, target=target, op_dir=op_dir, inject=inject)
     except (PlanError, DriftError, OverlapBlockedError, DestinationChangedError):
         shutil.rmtree(op_dir, ignore_errors=True)
         raise
@@ -300,24 +305,25 @@ def recover(operation_id: str, *, target: Path, force: bool = False) -> Receipt:
             raise DestinationChangedError(
                 f"destination {spec.display_path} changed after the failed operation; pass --force to restore anyway"
             )
-    _write_journal(op_dir, {**journal, "status": "restoring"})
-    try:
-        for spec in reversed(mutations):
-            _restore_one(op_dir, spec)
-    except OSError:
-        receipt = _build_receipt(
-            plan_from_journal(journal, mutations), terminal_state="recovery-required", validator_results=()
-        )
-        _persist_receipt(
-            op_dir,
-            receipt,
-            journal_update={**journal, "status": "recovery-required"},
-            keep_before=True,
-        )
+    with _bind_held_parents(mutations):
+        _write_journal(op_dir, {**journal, "status": "restoring"})
+        try:
+            for spec in reversed(mutations):
+                _restore_one(op_dir, spec)
+        except OSError:
+            receipt = _build_receipt(
+                plan_from_journal(journal, mutations), terminal_state="recovery-required", validator_results=()
+            )
+            _persist_receipt(
+                op_dir,
+                receipt,
+                journal_update={**journal, "status": "recovery-required"},
+                keep_before=True,
+            )
+            return receipt
+        receipt = _build_receipt(plan_from_journal(journal, mutations), terminal_state="restored", validator_results=())
+        _persist_receipt(op_dir, receipt, journal_update={**journal, "status": "restored", "committed_indexes": []})
         return receipt
-    receipt = _build_receipt(plan_from_journal(journal, mutations), terminal_state="restored", validator_results=())
-    _persist_receipt(op_dir, receipt, journal_update={**journal, "status": "restored", "committed_indexes": []})
-    return receipt
 
 
 def unfinished_operations(target: Path) -> list[OperationSummary]:
@@ -438,22 +444,309 @@ def _restore_after_failure(
     return receipt
 
 
-def _apply_mutation(spec: MutationSpec) -> None:
-    if spec.mutation == "remove":
-        if spec.remover is not None:
-            spec.remover(spec.destination)
-        else:
-            spec.destination.unlink()
+@dataclass
+class _HeldParent:
+    fd: int
+    chain: tuple[tuple[int, int], ...]
+    remaining: tuple[str, ...]
+    filename: str
+
+
+_HELD_PARENTS: contextvars.ContextVar[dict[str, _HeldParent] | None] = contextvars.ContextVar(
+    "brigade_projection_held_parents", default=None
+)
+
+
+@contextlib.contextmanager
+def _bind_held_parents(mutations: tuple[MutationSpec, ...]) -> Iterator[None]:
+    held = _hold_parents(mutations)
+    token = _HELD_PARENTS.set(held)
+    try:
+        yield
+    finally:
+        _HELD_PARENTS.reset(token)
+        _close_held(held)
+
+
+def _parent_containment_available() -> bool:
+    supports: set[Any] = getattr(os, "supports_dir_fd", set())
+    # os.replace takes src_dir_fd/dst_dir_fd and is therefore absent from
+    # supports_dir_fd, which only records the dir_fd keyword.
+    return (
+        os.name == "posix"
+        and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in supports
+        and os.mkdir in supports
+        and os.unlink in supports
+    )
+
+
+def _directory_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _dir_identity(fd: int) -> tuple[int, int]:
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError("projection parent is not a directory")
+    return (info.st_dev, info.st_ino)
+
+
+def _is_unsafe_parent_oserror(exc: OSError) -> bool:
+    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+        return True
+    text = str(exc).lower()
+    return "symlink" in text or "swapped" in text
+
+
+def _hold_parents(mutations: tuple[MutationSpec, ...]) -> dict[str, _HeldParent]:
+    if not _parent_containment_available():
+        for spec in mutations:
+            _reject_parent_symlink(spec.destination)
+        return {}
+    held: dict[str, _HeldParent] = {}
+    try:
+        for spec in mutations:
+            held[spec.destination.as_posix()] = _walk_existing_parent(spec.destination)
+        return held
+    except OSError as exc:
+        _close_held(held)
+        if _is_unsafe_parent_oserror(exc):
+            raise PlanError("unsafe symlink destination") from exc
+        raise
+    except Exception:
+        _close_held(held)
+        raise
+
+
+def _walk_existing_parent(destination: Path) -> _HeldParent:
+    if not destination.is_absolute():
+        raise PlanError("destination must be absolute")
+    filename = destination.name
+    if not filename or filename in {".", ".."}:
+        raise PlanError("unsafe destination name")
+    parts = destination.parent.parts
+    if not parts:
+        raise PlanError("unsafe destination path")
+    flags = _directory_flags()
+    fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    remaining: list[str] = []
+    missing = False
+    try:
+        chain = [_dir_identity(fd)]
+        for component in parts[1:]:
+            if component in {"", ".", ".."}:
+                raise PlanError("unsafe destination path")
+            if missing:
+                remaining.append(component)
+                continue
+            try:
+                child = os.open(component, flags, dir_fd=fd)
+            except FileNotFoundError:
+                missing = True
+                remaining.append(component)
+                continue
+            except OSError as exc:
+                if _is_unsafe_parent_oserror(exc):
+                    raise OSError("refusing swapped projection parent") from exc
+                raise
+            os.close(fd)
+            fd = child
+            chain.append(_dir_identity(fd))
+        return _HeldParent(fd=fd, chain=tuple(chain), remaining=tuple(remaining), filename=filename)
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _assert_held_parent_current(destination: Path, held: _HeldParent) -> None:
+    again = _walk_existing_parent(destination)
+    try:
+        if len(again.chain) < len(held.chain) or again.chain[: len(held.chain)] != held.chain:
+            raise OSError("refusing swapped projection parent")
+        created = again.chain[len(held.chain) :]
+        if len(created) + len(again.remaining) != len(held.remaining):
+            raise OSError("refusing swapped projection parent")
+        if again.remaining != held.remaining[len(created) :]:
+            raise OSError("refusing swapped projection parent")
+        current = os.fstat(held.fd)
+        if (current.st_dev, current.st_ino) != held.chain[-1]:
+            raise OSError("refusing swapped projection parent")
+    finally:
+        os.close(again.fd)
+
+
+def _materialize_parent(held: _HeldParent) -> tuple[int, list[int]]:
+    flags = _directory_flags()
+    fd = held.fd
+    extra: list[int] = []
+    try:
+        for component in held.remaining:
+            try:
+                os.mkdir(component, 0o755, dir_fd=fd)
+            except FileExistsError:
+                pass
+            try:
+                child = os.open(component, flags, dir_fd=fd)
+            except OSError as exc:
+                if _is_unsafe_parent_oserror(exc):
+                    raise OSError("refusing swapped projection parent") from exc
+                raise
+            extra.append(child)
+            fd = child
+            _dir_identity(fd)
+        return fd, extra
+    except Exception:
+        _close_descriptors(extra)
+        raise
+
+
+def _current_held_parent(spec: MutationSpec) -> _HeldParent | None:
+    held = _HELD_PARENTS.get()
+    if not held:
+        return None
+    return held.get(spec.destination.as_posix())
+
+
+def _materialize_held_parent(spec: MutationSpec, held: _HeldParent | None) -> tuple[int | None, list[int]]:
+    if held is None:
+        _reject_parent_symlink(spec.destination)
+        return None, []
+    _assert_held_parent_current(spec.destination, held)
+    return _materialize_parent(held)
+
+
+def _publish_bytes_via_parent(parent_fd: int, name: str, data: bytes) -> None:
+    temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_fd)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    except BaseException:
+        try:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _unlink_via_parent(parent_fd: int, name: str) -> None:
+    os.unlink(name, dir_fd=parent_fd)
+
+
+def _chmod_via_parent(parent_fd: int, name: str, mode: int) -> None:
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd)
+    try:
+        os.fchmod(descriptor, mode)
+    finally:
+        os.close(descriptor)
+
+
+def _close_descriptors(descriptors: list[int]) -> None:
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _close_held(held: Mapping[str, _HeldParent]) -> None:
+    _close_descriptors([item.fd for item in held.values()])
+
+
+def _path_via_held_parent(parent_fd: int, filename: str) -> Path:
+    """Return a path that opens through the held parent descriptor, not a followable pathname."""
+    if not filename or filename in {".", ".."} or "/" in filename or "\\" in filename:
+        raise OSError("unsafe destination name")
+    for base in (Path("/proc/self/fd"), Path("/dev/fd")):
+        candidate = base / str(parent_fd)
+        if candidate.exists():
+            return candidate / filename
+    raise OSError("held parent descriptor path is unavailable")
+
+
+def _assert_regular_on_held_parent(parent_fd: int, name: str) -> None:
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise OSError("refusing swapped projection parent") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise OSError("refusing swapped projection parent")
+
+
+def _assert_absent_on_held_parent(parent_fd: int, name: str) -> None:
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
         return
-    if spec.staged_bytes is None:
+    except OSError as exc:
+        raise OSError("refusing swapped projection parent") from exc
+    raise OSError("refusing swapped projection parent")
+
+
+def _apply_writer(spec: MutationSpec, *, held: _HeldParent | None, parent_fd: int | None) -> None:
+    writer = spec.writer
+    if writer is None or spec.staged_bytes is None:
         raise PlanError("staged bytes required")
-    spec.destination.parent.mkdir(parents=True, exist_ok=True)
-    if spec.writer is not None:
-        spec.writer(spec.destination, spec.staged_bytes)
-    else:
-        localio.write_bytes_atomic(spec.destination, spec.staged_bytes)
-    if spec.mode is not None:
-        os.chmod(spec.destination, spec.mode)
+    if parent_fd is None or held is None:
+        writer(spec.destination, spec.staged_bytes)
+        return
+    _assert_held_parent_current(spec.destination, held)
+    writer(_path_via_held_parent(parent_fd, held.filename), spec.staged_bytes)
+    _assert_regular_on_held_parent(parent_fd, held.filename)
+    _assert_held_parent_current(spec.destination, held)
+
+
+def _apply_remover(spec: MutationSpec, *, held: _HeldParent | None, parent_fd: int | None) -> None:
+    remover = spec.remover
+    if remover is None:
+        raise PlanError("remover required")
+    if parent_fd is None or held is None:
+        remover(spec.destination)
+        return
+    _assert_held_parent_current(spec.destination, held)
+    remover(_path_via_held_parent(parent_fd, held.filename))
+    _assert_absent_on_held_parent(parent_fd, held.filename)
+    _assert_held_parent_current(spec.destination, held)
+
+
+def _apply_mutation(spec: MutationSpec) -> None:
+    held = _current_held_parent(spec)
+    parent_fd, extra = _materialize_held_parent(spec, held)
+    try:
+        if spec.mutation == "remove":
+            if spec.remover is not None:
+                _apply_remover(spec, held=held, parent_fd=parent_fd)
+            elif parent_fd is not None and held is not None:
+                _unlink_via_parent(parent_fd, held.filename)
+            else:
+                spec.destination.unlink()
+            return
+        if spec.staged_bytes is None:
+            raise PlanError("staged bytes required")
+        if spec.writer is not None:
+            _apply_writer(spec, held=held, parent_fd=parent_fd)
+        elif parent_fd is not None and held is not None:
+            _publish_bytes_via_parent(parent_fd, held.filename, spec.staged_bytes)
+        else:
+            spec.destination.parent.mkdir(parents=True, exist_ok=True)
+            localio.write_bytes_atomic(spec.destination, spec.staged_bytes)
+        if spec.mode is not None:
+            if parent_fd is not None and held is not None:
+                _chmod_via_parent(parent_fd, held.filename, spec.mode)
+            else:
+                os.chmod(spec.destination, spec.mode)
+    finally:
+        _close_descriptors(extra)
 
 
 def _restore_one(op_dir: Path, spec: MutationSpec, index: int | None = None) -> None:
@@ -462,17 +755,33 @@ def _restore_one(op_dir: Path, spec: MutationSpec, index: int | None = None) -> 
     absent_marker = op_dir / "before" / f"{index}.absent"
     data_path = op_dir / "before" / f"{index}.bin"
     meta_path = op_dir / "before" / f"{index}.meta.json"
-    if absent_marker.is_file() or spec.expected_before == ABSENT:
-        if spec.destination.exists() or spec.destination.is_symlink():
-            spec.destination.unlink()
-        return
-    payload = data_path.read_bytes()
-    spec.destination.parent.mkdir(parents=True, exist_ok=True)
-    localio.write_bytes_atomic(spec.destination, payload)
-    meta = localio.read_json_dict(meta_path) or {}
-    mode = meta.get("mode")
-    if isinstance(mode, int):
-        os.chmod(spec.destination, mode)
+    held = _current_held_parent(spec)
+    parent_fd, extra = _materialize_held_parent(spec, held)
+    try:
+        if absent_marker.is_file() or spec.expected_before == ABSENT:
+            if parent_fd is not None and held is not None:
+                try:
+                    _unlink_via_parent(parent_fd, held.filename)
+                except FileNotFoundError:
+                    pass
+            elif spec.destination.exists() or spec.destination.is_symlink():
+                spec.destination.unlink()
+            return
+        payload = data_path.read_bytes()
+        if parent_fd is not None and held is not None:
+            _publish_bytes_via_parent(parent_fd, held.filename, payload)
+        else:
+            spec.destination.parent.mkdir(parents=True, exist_ok=True)
+            localio.write_bytes_atomic(spec.destination, payload)
+        meta = localio.read_json_dict(meta_path) or {}
+        mode = meta.get("mode")
+        if isinstance(mode, int):
+            if parent_fd is not None and held is not None:
+                _chmod_via_parent(parent_fd, held.filename, mode)
+            else:
+                os.chmod(spec.destination, mode)
+    finally:
+        _close_descriptors(extra)
 
 
 def _index_for(op_dir: Path, spec: MutationSpec) -> int:

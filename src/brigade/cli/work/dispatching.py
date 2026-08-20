@@ -105,6 +105,7 @@ def _dispatch_impl(args) -> int:
             force=args.force,
             ingest=not args.no_ingest,
             json_output=args.json,
+            isolated_scanners=getattr(args, "isolated_scanners", False),
         )
     if args.work_command == "sweeps":
         return work_cmd.sweeps(target=args.target, limit=args.limit, json_output=args.json)
@@ -250,6 +251,7 @@ def _dispatch_impl(args) -> int:
                 force=args.force,
                 ingest_output=args.ingest_output,
                 json_output=args.json,
+                isolated_scanners=getattr(args, "isolated_scanners", False),
             )
         if args.scanners_command == "runs":
             return work_cmd.scanners_runs(target=args.target, limit=args.limit, json_output=args.json)

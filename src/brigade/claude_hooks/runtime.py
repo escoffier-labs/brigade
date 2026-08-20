@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from queue import Empty
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
 
 from .. import localio
 from ..work_cmd.verification import _tree_fingerprint
@@ -23,6 +23,11 @@ from .package import PACKAGE_REF
 
 BRIEF_TIMEOUT_SECONDS = 10
 MAX_RECENT_SESSION_STATES = 512
+MAX_HOOK_STDIN_BYTES = 1_048_576
+MAX_HOOK_STDIN_STRING_CHARS = 262_144
+MAX_HOOK_STDIN_COLLECTION_ITEMS = 4096
+MAX_HOOK_STDIN_NESTING_DEPTH = 32
+_HOOK_STDIN_READ_CHUNK = 4096
 CLAUDE_SESSION_ENV = "BRIGADE_CLAUDE_SESSION"
 _HOOK_WORKER_EVENT_ENV = "BRIGADE_HOOK_WORKER_EVENT"
 _HOOK_TEST_HANG_ENV = "BRIGADE_HOOK_TEST_HANG_SECONDS"
@@ -2449,6 +2454,129 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     return None
 
 
+def _read_limited_binary(stream: BinaryIO, *, limit: int = MAX_HOOK_STDIN_BYTES) -> bytes:
+    """Read at most ``limit`` bytes from a binary stream; reject overflow.
+
+    Stops one byte past the limit so oversized input is detected without
+    retaining or decoding the rest of the stream.
+    """
+    if limit < 0:
+        raise HookDegraded("hook stdin limit is invalid")
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        want = min(_HOOK_STDIN_READ_CHUNK, limit - total + 1)
+        try:
+            chunk = stream.read(want)
+        except OSError as exc:
+            raise HookDegraded(f"hook stdin read failed: {exc}") from exc
+        if not chunk:
+            break
+        if not isinstance(chunk, (bytes, bytearray, memoryview)):
+            raise HookDegraded("hook stdin must be read as binary")
+        data = bytes(chunk)
+        total += len(data)
+        if total > limit:
+            raise HookDegraded(f"hook stdin exceeds {limit} bytes")
+        chunks.append(data)
+    return b"".join(chunks)
+
+
+def _read_hook_stdin_bytes(*, stdin_text: str | None) -> bytes:
+    if stdin_text is not None:
+        try:
+            raw = stdin_text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise HookDegraded(f"hook stdin is not valid UTF-8: {exc}") from None
+        if len(raw) > MAX_HOOK_STDIN_BYTES:
+            raise HookDegraded(f"hook stdin exceeds {MAX_HOOK_STDIN_BYTES} bytes")
+        return raw
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is not None:
+        return _read_limited_binary(buffer, limit=MAX_HOOK_STDIN_BYTES)
+    return _read_limited_text_stdin(sys.stdin, limit=MAX_HOOK_STDIN_BYTES)
+
+
+def _read_limited_text_stdin(stream: Any, *, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        try:
+            piece = stream.read(_HOOK_STDIN_READ_CHUNK)
+        except OSError as exc:
+            raise HookDegraded(f"hook stdin read failed: {exc}") from exc
+        if not piece:
+            break
+        if isinstance(piece, str):
+            try:
+                encoded = piece.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise HookDegraded(f"hook stdin is not valid UTF-8: {exc}") from None
+        elif isinstance(piece, (bytes, bytearray, memoryview)):
+            encoded = bytes(piece)
+        else:
+            raise HookDegraded("hook stdin must be read as binary")
+        total += len(encoded)
+        if total > limit:
+            raise HookDegraded(f"hook stdin exceeds {limit} bytes")
+        chunks.append(encoded)
+    return b"".join(chunks)
+
+
+def _enforce_hook_stdin_shape(value: object, *, depth: int = 0) -> None:
+    if depth > MAX_HOOK_STDIN_NESTING_DEPTH:
+        raise HookDegraded(f"hook stdin nesting exceeds {MAX_HOOK_STDIN_NESTING_DEPTH}")
+    if isinstance(value, str):
+        if len(value) > MAX_HOOK_STDIN_STRING_CHARS:
+            raise HookDegraded(f"hook stdin string exceeds {MAX_HOOK_STDIN_STRING_CHARS} characters")
+        return
+    if isinstance(value, dict):
+        if len(value) > MAX_HOOK_STDIN_COLLECTION_ITEMS:
+            raise HookDegraded(f"hook stdin object exceeds {MAX_HOOK_STDIN_COLLECTION_ITEMS} items")
+        for key, item in value.items():
+            if not isinstance(key, str) or len(key) > MAX_HOOK_STDIN_STRING_CHARS:
+                raise HookDegraded("hook stdin object key is invalid")
+            _enforce_hook_stdin_shape(item, depth=depth + 1)
+        return
+    if isinstance(value, list):
+        if len(value) > MAX_HOOK_STDIN_COLLECTION_ITEMS:
+            raise HookDegraded(f"hook stdin array exceeds {MAX_HOOK_STDIN_COLLECTION_ITEMS} items")
+        for item in value:
+            _enforce_hook_stdin_shape(item, depth=depth + 1)
+
+
+def _parse_hook_stdin(raw: bytes) -> dict[str, Any]:
+    """Decode bounded hook stdin, reject trailing input, and cap nested sizes."""
+    if len(raw) > MAX_HOOK_STDIN_BYTES:
+        raise HookDegraded(f"hook stdin exceeds {MAX_HOOK_STDIN_BYTES} bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HookDegraded(f"hook stdin is not valid UTF-8: {exc}") from None
+    stripped = text.strip()
+    if not stripped:
+        return {}
+    decoder = json.JSONDecoder()
+    try:
+        parsed, end = decoder.raw_decode(stripped)
+    except json.JSONDecodeError as exc:
+        raise HookDegraded(f"malformed hook stdin: {exc}") from None
+    except RecursionError as exc:
+        raise HookDegraded("hook stdin nesting exceeds limit") from exc
+    if stripped[end:].strip():
+        raise HookDegraded("hook stdin has trailing input")
+    if not isinstance(parsed, dict):
+        raise HookDegraded("hook stdin must be a JSON object")
+    _enforce_hook_stdin_shape(parsed)
+    return parsed
+
+
+def _load_hook_stdin(*, stdin_text: str | None = None) -> tuple[dict[str, Any], str]:
+    raw = _read_hook_stdin_bytes(stdin_text=stdin_text)
+    payload = _parse_hook_stdin(raw)
+    return payload, raw.decode("utf-8")
+
+
 def _hook_timeout_seconds() -> float:
     raw = os.environ.get(_HOOK_TIMEOUT_ENV)
     if raw is not None and raw.strip():
@@ -2481,10 +2609,7 @@ def _isolated_handle_payload(event: str, payload: dict[str, Any]) -> dict[str, A
 def _hook_worker_main() -> None:
     """Run ``handle_payload`` in an isolated child process (issue #735)."""
     event = os.environ.get(_HOOK_WORKER_EVENT_ENV, "")
-    raw = sys.stdin.read()
-    payload = json.loads(raw)
-    if not isinstance(payload, dict):
-        raise TypeError("hook stdin must be a JSON object")
+    payload, _raw = _load_hook_stdin()
     result = _isolated_handle_payload(event, payload)
     sys.stdout.write(json.dumps(result))
 
@@ -2529,9 +2654,7 @@ def _fork_timed_handle_payload_target(event: str, payload: dict[str, Any], queue
 
 
 def _fork_timed_handle_payload_worker(event: str, raw: str, *, timeout: float) -> dict[str, Any] | None:
-    payload = json.loads(raw)
-    if not isinstance(payload, dict):
-        raise HookDegraded("hook stdin must be a JSON object")
+    payload = _parse_hook_stdin(raw.encode("utf-8"))
 
     ctx = mp.get_context("fork")
     queue: mp.Queue = ctx.Queue()
@@ -2618,14 +2741,7 @@ def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
     raw = ""
     claim_path: Path | None = None
     try:
-        raw = sys.stdin.read() if stdin_text is None else stdin_text
-        try:
-            parsed = json.loads(raw) if raw.strip() else {}
-        except json.JSONDecodeError as exc:
-            raise HookDegraded(f"malformed hook stdin: {exc}") from None
-        if not isinstance(parsed, dict):
-            raise HookDegraded("hook stdin must be a JSON object")
-        payload = parsed
+        payload, raw = _load_hook_stdin(stdin_text=stdin_text)
         log_target = _resolve_log_target(payload)
         result = _run_timed_handle_payload(event, raw)
         result, claim_path = _strip_claim(result)

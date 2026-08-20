@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 func Open(path string) (*sql.DB, error) {
 	if err := security.EnsurePrivateParent(path); err != nil {
@@ -88,6 +88,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureSchemaV4(db); err != nil {
+		return err
+	}
+	if err := ensureSchemaV5(db); err != nil {
 		return err
 	}
 	if _, err := db.Exec("PRAGMA user_version = " + fmt.Sprint(SchemaVersion)); err != nil {
@@ -206,6 +209,20 @@ create table if not exists provenance_events(
   event_json text not null
 );
 create index if not exists idx_provenance_events_item_at on provenance_events(item_id, at);
+`)
+	return err
+}
+
+// ensureSchemaV5 records spent trust-review capability nonces so a stolen
+// token cannot be replayed inside its expiry window.
+func ensureSchemaV5(db *sql.DB) error {
+	_, err := db.Exec(`
+create table if not exists used_capabilities(
+  nonce text primary key,
+  seen_at text not null,
+  item_id text,
+  from_digest text
+);
 `)
 	return err
 }

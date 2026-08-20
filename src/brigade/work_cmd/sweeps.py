@@ -120,6 +120,7 @@ def sweep(
     force: bool = False,
     ingest: bool = True,
     json_output: bool = False,
+    isolated_scanners: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -138,6 +139,7 @@ def sweep(
         include_disabled=include_disabled,
         force=force,
         ingest_output=ingest,
+        isolated_scanners=isolated_scanners,
     )
     completed = helpers._now()
     runs = run_payload.get("runs") if isinstance(run_payload.get("runs"), list) else []

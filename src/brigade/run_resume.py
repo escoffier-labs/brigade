@@ -646,6 +646,25 @@ def _resume_locked(
             entry["ok"] = turn.ok and bool(turn.text.strip())
             entry["detail"] = "" if entry["ok"] else redact_approval_token(turn.detail or f"turn {turn.status}")[:200]
             entry["status"] = turn.status
+            captured = message_envelope.emit(
+                entry["text"],
+                kind="worker-result",
+                producer="run_transport.dispatch",
+                from_seat=str(entry.get("worker") or ""),
+                to_seat=roster.orchestrator,
+                run_dir=run_dir,
+                run_id=run_dir.name,
+                assignment_id=message_envelope.assignment_id_for(
+                    str(entry.get("worker") or ""),
+                    str(entry.get("task") or ""),
+                ),
+                session_harness=agent.cli if agent is not None else None,
+            )
+            entry["provenance"] = captured.envelope
+            if not captured.delivered:
+                entry["ok"] = False
+                entry["text"] = ""
+                entry["detail"] = captured.reason or "resumed worker-result rejected by provenance gate"
     finally:
         server.close()
 
@@ -680,7 +699,14 @@ def _resume_locked(
     )
 
     task = run_meta.get("task", "")
-    synth_prompt = aboyeur.build_synth_prompt(task, worker_results, read_only=read_only, ground_truth=ground_truth)
+    synth_prompt = aboyeur.build_synth_prompt(
+        task,
+        worker_results,
+        read_only=read_only,
+        ground_truth=ground_truth,
+        run_id=run_dir.name,
+        to_seat=roster.orchestrator,
+    )
     orchestrator = roster.agents[roster.orchestrator]
     if orchestrator.cli is None:
         print(
@@ -696,6 +722,7 @@ def _resume_locked(
         to_seat=roster.orchestrator,
         run_dir=run_dir,
         run_id=run_dir.name,
+        assignment_id=message_envelope.default_assignment_id("synthesis-request"),
         session_harness=orchestrator.cli,
     )
     if not synth_request.delivered:
@@ -722,6 +749,7 @@ def _resume_locked(
         to_seat=message_envelope.BRIGADE_SEAT,
         run_dir=run_dir,
         run_id=run_dir.name,
+        assignment_id=message_envelope.default_assignment_id("synthesis-result"),
         session_harness=orchestrator.cli,
     )
     if not synth_captured.delivered:

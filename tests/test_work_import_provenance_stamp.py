@@ -1778,14 +1778,20 @@ def test_import_proof_directory_relocation_rejects_record_without_workspace_bind
     descriptor = ledger._open_import_proof_directory(original, create=True)
     os.close(descriptor)
     authority_path = ledger._directory_authority_store_path(original)
-    authority = json.loads(authority_path.read_text())
-    authority.pop("workspace", None)
-    authority_path.write_text(json.dumps(authority))
+    envelope = json.loads(authority_path.read_text())
+    record = envelope["record"] if envelope.get("envelope_version") == 1 else envelope
+    record.pop("workspace", None)
+    from brigade.authority_broker import sign_store_record
+    from brigade.authority_key import load_key
+
+    secret, kid = load_key(create=True)
+    sequence = envelope.get("signature", {}).get("sequence", 1)
+    authority_path.write_text(json.dumps(sign_store_record(secret, record, sequence, kid)))
 
     relocated = tmp_path / "relocated-workspace"
     original.rename(relocated)
 
-    with pytest.raises(OSError, match="external directory authority record is missing"):
+    with pytest.raises(OSError, match="missing|malformed|does not match|workspace"):
         ledger._open_import_proof_directory(relocated, create=True)
 
 

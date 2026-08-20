@@ -590,8 +590,9 @@ def _collect_notes(config: VaultConfig) -> tuple[list[dict[str, Any]], list[dict
     notes: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     for root in config.roots:
-        resolved = _root_dir(config.vault, root.path)
-        if resolved is None:
+        try:
+            root_fd = _open_contained_dir(config.vault, root.path)
+        except OSError as exc:
             skipped.append(
                 {
                     "scope": root.scope,
@@ -600,59 +601,88 @@ def _collect_notes(config: VaultConfig) -> tuple[list[dict[str, Any]], list[dict
             )
             if root.optional:
                 continue
-            raise VaultSearchError(f"required root missing or escapes the vault: {root.scope}")
-        for path in _iter_markdown(resolved):
-            relative = path.relative_to(config.vault).as_posix()
-            note = _read_note(path, scope=root.scope, relative_path=relative)
-            if note is not None:
-                notes.append(note)
+            raise VaultSearchError(f"required root missing or escapes the vault: {root.scope}") from exc
+        try:
+            for relative, data, mtime in _iter_contained_markdown(root_fd, root.path):
+                note = _note_from_bytes(
+                    data,
+                    scope=root.scope,
+                    relative_path=relative,
+                    stem=PurePosixPath(relative).stem,
+                    mtime=mtime,
+                )
+                if note is not None:
+                    notes.append(note)
+        finally:
+            os.close(root_fd)
     notes.sort(key=lambda item: (item["scope"], item["relative_path"], item["id"]))
     return notes, skipped
 
 
 def _root_dir(vault: Path, relative: str) -> Path | None:
-    candidate = (vault / relative).resolve()
-    if not _is_within(candidate, vault):
-        return None
-    if not candidate.is_dir() or candidate.is_symlink():
-        return None
-    return candidate
-
-
-def _iter_markdown(root: Path) -> list[Path]:
-    found: list[Path] = []
-    stack = [root]
-    while stack:
-        current = stack.pop()
-        try:
-            entries = list(os.scandir(current))
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.is_symlink():
-                continue
-            name = entry.name
-            if name.startswith("."):
-                continue
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append(Path(entry.path))
-                elif entry.is_file(follow_symlinks=False) and name.endswith(".md"):
-                    found.append(Path(entry.path))
-            except OSError:
-                continue
-    return sorted(found)
-
-
-def _read_note(path: Path, *, scope: str, relative_path: str) -> dict[str, Any] | None:
+    """Return the lexical root path only when every component is a real directory."""
     try:
-        data = path.read_bytes()
+        descriptor = _open_contained_dir(vault, relative)
     except OSError:
         return None
+    os.close(descriptor)
+    return vault.joinpath(*PurePosixPath(relative.replace("\\", "/")).parts)
+
+
+def _iter_contained_markdown(dir_fd: int, relative: str) -> list[tuple[str, bytes, float]]:
+    """Walk markdown files from a held directory fd without following any symlink."""
+    found: list[tuple[str, bytes, float]] = []
+    stack: list[tuple[int, str]] = [(os.dup(dir_fd), relative)]
+    try:
+        while stack:
+            current_fd, current_rel = stack.pop()
+            try:
+                try:
+                    names = os.listdir(current_fd)
+                except OSError:
+                    continue
+                for name in names:
+                    if name.startswith(".") or name in {".", ".."}:
+                        continue
+                    child_rel = f"{current_rel}/{name}" if current_rel else name
+                    child_dir = _openat_nofollow(current_fd, name, directory=True)
+                    if child_dir is not None:
+                        stack.append((child_dir, child_rel))
+                        continue
+                    if not name.endswith(".md"):
+                        continue
+                    file_fd = _openat_nofollow(current_fd, name, directory=False)
+                    if file_fd is None:
+                        continue
+                    try:
+                        data = _read_fd(file_fd)
+                        mtime = os.fstat(file_fd).st_mtime
+                    except OSError:
+                        continue
+                    finally:
+                        os.close(file_fd)
+                    found.append((child_rel, data, mtime))
+            finally:
+                os.close(current_fd)
+    except BaseException:
+        for leftover_fd, _rel in stack:
+            os.close(leftover_fd)
+        raise
+    return sorted(found, key=lambda item: item[0])
+
+
+def _note_from_bytes(
+    data: bytes,
+    *,
+    scope: str,
+    relative_path: str,
+    stem: str,
+    mtime: float,
+) -> dict[str, Any]:
     text = data.decode("utf-8", errors="replace")
     frontmatter = parse_frontmatter(text)
     body = _without_frontmatter(text)
-    title = _note_title(frontmatter, body, path.stem)
+    title = _note_title(frontmatter, body, stem)
     tags = _string_list(frontmatter.get("tags"))
     aliases = _note_aliases(frontmatter, relative_path)
     note_id = _note_id(frontmatter, relative_path)
@@ -662,7 +692,7 @@ def _read_note(path: Path, *, scope: str, relative_path: str) -> dict[str, Any] 
         "scope": scope,
         "relative_path": relative_path,
         "content_hash": f"sha256:{hashlib.sha256(data).hexdigest()}",
-        "updated_at": _mtime_iso(path),
+        "updated_at": _mtime_iso_from_stat(mtime),
         "tags": tags,
         "archived": _is_archived(frontmatter, relative_path),
         "aliases": aliases,
@@ -674,10 +704,24 @@ def _reread_note(config: VaultConfig, note: dict[str, Any]) -> dict[str, Any] | 
     relative = str(note.get("relative_path") or "")
     if not relative:
         return None
-    path = (config.vault / relative).resolve()
-    if not _is_within(path, config.vault) or path.is_symlink() or not path.is_file():
+    try:
+        file_fd = _open_contained_file(config.vault, relative)
+    except OSError:
         return None
-    return _read_note(path, scope=str(note["scope"]), relative_path=relative)
+    try:
+        data = _read_fd(file_fd)
+        mtime = os.fstat(file_fd).st_mtime
+    except OSError:
+        return None
+    finally:
+        os.close(file_fd)
+    return _note_from_bytes(
+        data,
+        scope=str(note["scope"]),
+        relative_path=relative,
+        stem=PurePosixPath(relative.replace("\\", "/")).stem,
+        mtime=mtime,
+    )
 
 
 def _note_id(frontmatter: dict[str, Any], relative_path: str) -> str:
@@ -1038,11 +1082,7 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
-def _mtime_iso(path: Path) -> str:
-    try:
-        stamp = path.stat().st_mtime
-    except OSError:
-        return utc_now_iso_z()
+def _mtime_iso_from_stat(stamp: float) -> str:
     return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -1101,41 +1141,103 @@ def _render_proposal(*, title: str, body: str, note_id: str) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
-def _open_contained_inbox(vault: Path, relative: str) -> int:
-    """Open the inbox directory without following any symlink component."""
+def _relative_parts(relative: str) -> tuple[str, ...] | None:
+    parts = PurePosixPath(relative.replace("\\", "/")).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None
+    return parts
+
+
+def _open_vault_dir(vault: Path) -> int:
+    """Open the vault itself as a real directory, refusing a symlink root."""
     if not _containment_primitives_available():
-        raise VaultProposeError("vault containment checks are unavailable on this platform")
+        raise OSError("vault containment checks are unavailable on this platform")
     try:
         vault_stat = os.lstat(vault)
     except OSError as exc:
-        raise VaultProposeError(f"configured vault is unreadable: {exc}") from exc
+        raise OSError(f"configured vault is unreadable: {exc}") from exc
     if stat.S_ISLNK(vault_stat.st_mode) or not stat.S_ISDIR(vault_stat.st_mode):
-        raise VaultProposeError("configured vault must be a real directory")
-    parts = PurePosixPath(relative.replace("\\", "/")).parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        raise VaultProposeError("inbox path is unsafe")
-    flags = _directory_flags()
+        raise OSError("configured vault must be a real directory")
+    return os.open(vault, _directory_flags())
+
+
+def _openat_nofollow(parent_fd: int, name: str, *, directory: bool) -> int | None:
+    """openat(2) a child with O_NOFOLLOW and confirm the type via fstat."""
+    flags = _directory_flags() if directory else _file_flags(os.O_RDONLY)
     try:
-        descriptor = os.open(vault, flags)
-    except OSError as exc:
-        raise VaultProposeError(f"configured vault is not a contained directory: {exc}") from exc
-    for part in parts:
-        try:
-            nxt = os.open(part, flags, dir_fd=descriptor)
-        except OSError as exc:
-            os.close(descriptor)
-            raise VaultProposeError(f"required inbox missing or escapes the vault: {exc}") from exc
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(descriptor)
+    except OSError:
         os.close(descriptor)
-        try:
-            opened = os.fstat(nxt)
-        except OSError as exc:
-            os.close(nxt)
-            raise VaultProposeError(f"inbox parent is unreadable: {exc}") from exc
-        if not stat.S_ISDIR(opened.st_mode):
-            os.close(nxt)
-            raise VaultProposeError("inbox parent chain contains a symlink or non-directory")
-        descriptor = nxt
+        return None
+    expected = stat.S_ISDIR if directory else stat.S_ISREG
+    if stat.S_ISLNK(opened.st_mode) or not expected(opened.st_mode):
+        os.close(descriptor)
+        return None
     return descriptor
+
+
+def _open_contained_walk(vault: Path, relative: str, *, last_is_dir: bool) -> int:
+    """Walk relative from a held vault directory fd, rejecting every symlink component."""
+    parts = _relative_parts(relative)
+    if parts is None:
+        raise OSError("path is unsafe")
+    descriptor = _open_vault_dir(vault)
+    try:
+        last = len(parts) - 1
+        for index, part in enumerate(parts):
+            want_dir = last_is_dir or index < last
+            nxt = _openat_nofollow(descriptor, part, directory=want_dir)
+            if nxt is None:
+                raise OSError("path component is a symlink or unexpected type")
+            os.close(descriptor)
+            descriptor = nxt
+        result = descriptor
+        descriptor = -1
+        return result
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _open_contained_dir(vault: Path, relative: str) -> int:
+    """Open a vault-relative directory without following any symlink component."""
+    return _open_contained_walk(vault, relative, last_is_dir=True)
+
+
+def _open_contained_file(vault: Path, relative: str) -> int:
+    """Open a vault-relative file without following any symlink component."""
+    return _open_contained_walk(vault, relative, last_is_dir=False)
+
+
+def _read_fd(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _open_contained_inbox(vault: Path, relative: str) -> int:
+    """Open the inbox directory without following any symlink component."""
+    try:
+        return _open_contained_dir(vault, relative)
+    except OSError as exc:
+        message = str(exc)
+        if "unavailable on this platform" in message:
+            raise VaultProposeError(message) from exc
+        if "unreadable" in message:
+            raise VaultProposeError(f"configured vault is unreadable: {exc}") from exc
+        if "must be a real directory" in message:
+            raise VaultProposeError("configured vault must be a real directory") from exc
+        if "path is unsafe" in message:
+            raise VaultProposeError("inbox path is unsafe") from exc
+        raise VaultProposeError(f"required inbox missing or escapes the vault: {exc}") from exc
 
 
 def _reject_existing_note(inbox_fd: int, filename: str) -> None:

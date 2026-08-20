@@ -235,8 +235,14 @@ func TransitionTrustLabel(db *sql.DB, itemID, toLabel, operatorCommand string, e
 // TrustReviewOpts controls optional operator decisions during trust review.
 // MarkInjectionClean is a deliberate injection-status transition to clean;
 // moving the trust label alone never changes injection status.
+// Capability and CapabilitySecret authorize the transition. OperatorCommand
+// is audit metadata only and never grants authority. There is no missing-
+// capability exception: stdin kind, TTY, and environment variables do not
+// authorize a review.
 type TrustReviewOpts struct {
 	MarkInjectionClean bool
+	Capability         *TrustCapability
+	CapabilitySecret   []byte
 }
 
 // ReviewTrustLabel upgrades an item's trust label only when expectedHash
@@ -253,6 +259,9 @@ func ReviewTrustLabel(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand
 // records a separate injection-status transition to clean with an audit
 // event; a label-only review leaves injection pending.
 func ReviewTrust(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand string, evidence map[string]any, opts TrustReviewOpts) error {
+	if opts.Capability == nil {
+		return fmt.Errorf("trust capability is required")
+	}
 	resolvedID, err := resolveItemID(db, itemID)
 	if err != nil {
 		return err
@@ -286,14 +295,26 @@ func ReviewTrust(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand stri
 	fromInjection := env.Trust.Injection.Status
 	labelChanged := fromLabel != toLabel
 	injectionChanged := opts.MarkInjectionClean && fromInjection != "clean"
-	if !labelChanged && !injectionChanged {
-		return nil
+	if opts.Capability != nil {
+		if err := verifyTrustCapability(opts.CapabilitySecret, opts.Capability, resolvedID, want, toLabel, opts.MarkInjectionClean, time.Now().UTC()); err != nil {
+			if err2 := verifyTrustCapability(opts.CapabilitySecret, opts.Capability, itemID, want, toLabel, opts.MarkInjectionClean, time.Now().UTC()); err2 != nil {
+				return err
+			}
+		}
 	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if opts.Capability != nil {
+		if err := consumeCapabilityNonce(tx, opts.Capability, resolvedID, want); err != nil {
+			return err
+		}
+	}
+	if !labelChanged && !injectionChanged {
+		return tx.Commit()
+	}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	if labelChanged {
 		env.Trust.Label = toLabel
@@ -352,6 +373,34 @@ func cloneEvidence(evidence map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+func consumeCapabilityNonce(tx *sql.Tx, cap *TrustCapability, itemID, fromDigest string) error {
+	if cap == nil {
+		return nil
+	}
+	var seen string
+	err := tx.QueryRow(`select seen_at from used_capabilities where nonce = ?`, cap.Nonce).Scan(&seen)
+	if err == nil {
+		return fmt.Errorf("trust capability nonce has already been used")
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+	_, err = tx.Exec(
+		`insert into used_capabilities(nonce, seen_at, item_id, from_digest) values(?, ?, ?, ?)`,
+		cap.Nonce,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		itemID,
+		fromDigest,
+	)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return fmt.Errorf("trust capability nonce has already been used")
+		}
+		return err
+	}
+	return nil
 }
 
 func resolveItemID(db *sql.DB, itemID string) (string, error) {
