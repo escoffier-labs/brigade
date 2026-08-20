@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -50,7 +51,19 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Emit the versioned brigade.run-detail.v1 JSON contract.",
     )
     p_runs_show = runs_sub.add_parser("show", help="Show a readable summary of one run directory.")
-    p_runs_show.add_argument("run_dir", type=Path, help="Path to a Brigade run artifact directory.")
+    p_runs_show.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_runs_show.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_runs_show.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
     p_runs_show.add_argument(
         "--json",
         action="store_true",
@@ -328,7 +341,12 @@ def dispatch(args) -> int:
     if args.runs_command == "latest":
         return runs_cmd.show_latest(cwd=args.cwd, runs_dir=args.runs_dir, json_output=args.json)
     if args.runs_command == "show":
-        return runs_cmd.show(args.run_dir, json_output=args.json)
+        run_dir, error = runs_cmd._resolve_run_dir(args.run, cwd=args.cwd, runs_dir=args.runs_dir)
+        if error is not None:
+            print(error, file=sys.stderr)
+            return 2
+        assert run_dir is not None
+        return runs_cmd.show(run_dir, json_output=args.json)
     if args.runs_command == "child":
         return runs_cmd.child(args.run, args.event_id, cwd=args.cwd, runs_dir=args.runs_dir)
     if args.runs_command == "watch":
