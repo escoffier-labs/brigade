@@ -413,7 +413,9 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "& $brigadePython $inboxProbeScript $inboxProbeRoot" in text
     assert "& python $inboxProbeScript" not in text
     assert "mklink" in text
+    assert "memory care scan" in text
     assert "memory care import-issues" in text
+    assert text.index("memory care scan") < text.index("memory care import-issues")
     assert "center readiness import-issues" in text
     assert "$payload.ready" in text
     assert "$payload.blocking_issue_count" in text

@@ -759,6 +759,13 @@ else:
         & $brigadePython $inboxProbeScript $inboxProbeRoot
         if ($LASTEXITCODE -ne 0) { throw "import inbox Windows probe failed" }
 
+        # import-issues reads .brigade/memory-care/decay/refresh-queue.json.
+        # operator quickstart / init create the decay directory, not the queue;
+        # scan is the producer (same order as the daily-care-pass runbook).
+        Write-Step "memory care scan"
+        & brigade memory care scan --target $workRepo
+        if ($LASTEXITCODE -ne 0) { throw "memory care scan failed" }
+
         Write-Step "memory care import-issues"
         & brigade memory care import-issues --target $workRepo
         if ($LASTEXITCODE -ne 0) { throw "memory care import-issues failed" }
