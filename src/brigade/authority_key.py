@@ -16,6 +16,7 @@ import json
 import os
 import secrets
 import stat
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -67,8 +68,58 @@ def _validate_key_stat(metadata: os.stat_result, path: Path) -> None:
         raise OSError(f"external directory authority key is not a regular file: {path}")
     if metadata.st_nlink != 1:
         raise OSError(f"external directory authority key is not a single-link file: {path}")
-    if stat.S_IMODE(metadata.st_mode) & 0o077:
+    # Windows permission bits are not POSIX 0600; ACLs are the access model there.
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o077:
         raise OSError(f"external directory authority key must not be group or world readable: {path}")
+
+
+def _nt_nofollow_available() -> bool:
+    """Return whether Windows handle-relative no-follow opens can be used."""
+    if sys.platform != "win32":
+        return False
+    from .work_cmd import nt_dirfd
+
+    return nt_dirfd.available()
+
+
+def _open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
+    """Open a key or sequence file without following a final symlink or reparse point."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        if flags & os.O_CREAT:
+            return os.open(path, flags | nofollow | getattr(os, "O_CLOEXEC", 0), mode)
+        return os.open(path, flags | nofollow | getattr(os, "O_CLOEXEC", 0))
+    if _nt_nofollow_available():
+        from .work_cmd import nt_dirfd
+
+        return nt_dirfd.open_path_file(path, flags, mode)
+    raise OSError("no-follow file open is unavailable")
+
+
+def _fsync_directory(path: Path) -> None:
+    """Flush a parent directory; skip or use backup semantics when POSIX flags are absent."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    if nofollow and directory_flag:
+        directory = os.open(path, os.O_RDONLY | directory_flag | nofollow)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return
+    if _nt_nofollow_available():
+        from .work_cmd import nt_dirfd
+
+        directory = nt_dirfd.open_root_directory(path)
+        try:
+            try:
+                os.fsync(directory)
+            except OSError as exc:
+                if sys.platform == "win32" and getattr(exc, "winerror", None) in {1, 5}:
+                    return
+                raise
+        finally:
+            os.close(directory)
 
 
 def generate_key(
@@ -80,21 +131,21 @@ def generate_key(
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
-    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    flags |= os.O_TRUNC if force else os.O_EXCL
     key = secrets.token_bytes(KEY_BYTES)
-    descriptor = os.open(path, flags, 0o600)
+    if force and path.exists():
+        flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = _open_file_nofollow(path, flags)
+    else:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = _open_file_nofollow(path, flags, 0o600)
     try:
         with os.fdopen(os.dup(descriptor), "w", encoding="utf-8") as handle:
             handle.write(key.hex() + "\n")
             handle.flush()
+            handle.truncate()
             os.fsync(handle.fileno())
         os.chmod(path, 0o600)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory(path.parent)
     finally:
         os.close(descriptor)
     material = key, key_id(key)
@@ -111,9 +162,9 @@ def load_key(
     cached = _CACHE.get(_cache_key(path))
     if cached is not None:
         return cached
-    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = _open_file_nofollow(path, flags)
     except FileNotFoundError:
         if create:
             return generate_key(env=env, system=system)
@@ -148,24 +199,25 @@ def clear_key_cache() -> None:
 def _write_private_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-        0o600,
-    )
+    descriptor = -1
     try:
+        descriptor = _open_file_nofollow(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
         with os.fdopen(os.dup(descriptor), "w", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
+        # Windows refuses os.replace while the source handle is still open (WinError 32).
         os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
         try:
             temporary.unlink()
         except FileNotFoundError:

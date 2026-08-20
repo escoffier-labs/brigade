@@ -90,6 +90,17 @@ function Get-PipxBinDir {
     return $binDir.Trim()
 }
 
+function Get-InstalledBrigadePython {
+    param([string]$PipxHome)
+    foreach ($name in @("brigade-cli", "brigade")) {
+        $candidate = Join-Path $PipxHome "venvs\$name\Scripts\python.exe"
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    throw "installed brigade python was not found under $PipxHome"
+}
+
 function Initialize-PipxBootstrap {
     param(
         [string]$SystemPython,
@@ -766,6 +777,76 @@ def call_greet():
 
         Write-Step "operator doctor"
         Assert-OperatorDoctorReady -Target $workRepo -Profile "local-operator" -StderrRoot $acceptRoot
+
+        Write-Step "import inbox no-follow parent"
+        $inboxProbeRoot = Join-Path $acceptRoot "inbox-probe"
+        New-Item -ItemType Directory -Force -Path $inboxProbeRoot | Out-Null
+        $inboxProbeScript = Join-Path $acceptRoot "import_inbox_probe.py"
+        @'
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+from brigade.work_cmd import helpers, ledger
+
+target = Path(sys.argv[1]).resolve()
+parent, name = ledger._open_import_inbox_parent(target, create=True)
+try:
+    if name != "inbox.jsonl":
+        raise SystemExit(f"unexpected inbox name: {name}")
+    if not stat.S_ISDIR(os.fstat(parent).st_mode):
+        raise SystemExit("import inbox parent is not a directory")
+finally:
+    os.close(parent)
+
+record = ledger._sanitize_untrusted_import_record(
+    {"text": "windows-native-inbox", "kind": "task", "source": "manual", "metadata": {}},
+    importer_source="manual",
+)
+imported, _skipped, _dismissed, rejected = ledger._append_import_records(
+    target, [record], provenance_source="manual", migrate_untrusted_identities=True
+)
+if not imported or rejected:
+    raise SystemExit(f"append_import_records failed imported={imported} rejected={rejected}")
+
+outside = target / "outside-imports"
+(outside / "imports").mkdir(parents=True)
+work = helpers._work_root(target)
+imports = work / "imports"
+relocated = work / "imports-real"
+imports.rename(relocated)
+completed = subprocess.run(
+    ["cmd", "/c", "mklink", "/J", str(imports), str(outside / "imports")],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+if completed.returncode != 0:
+    raise SystemExit(f"mklink /J failed: {completed.stderr}")
+try:
+    ledger._open_import_inbox_parent(target, create=True)
+except OSError:
+    pass
+else:
+    raise SystemExit("import inbox parent followed a junction")
+'@ | Set-Content -Path $inboxProbeScript -Encoding UTF8
+        # PATH `python` is the system interpreter; brigade is isolated in pipx.
+        $brigadePython = Get-InstalledBrigadePython -PipxHome $env:PIPX_HOME
+        & $brigadePython $inboxProbeScript $inboxProbeRoot
+        if ($LASTEXITCODE -ne 0) { throw "import inbox Windows probe failed" }
+
+        # import-issues reads .brigade/memory-care/decay/refresh-queue.json.
+        # operator quickstart / init create the decay directory, not the queue;
+        # scan is the producer (same order as the daily-care-pass runbook).
+        Write-Step "memory care scan"
+        & brigade memory care scan --target $workRepo
+        if ($LASTEXITCODE -ne 0) { throw "memory care scan failed" }
+
+        Write-Step "memory care import-issues"
+        & brigade memory care import-issues --target $workRepo
+        if ($LASTEXITCODE -ne 0) { throw "memory care import-issues failed" }
 
         $dbPath = Join-Path $workRepo ".graphtrail\graphtrail.db"
         Write-Step "graphtrail sync"
