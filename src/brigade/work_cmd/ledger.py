@@ -1688,7 +1688,9 @@ def _require_workspace_directory_identity(target: Path, expected: dict[str, int]
         raise OSError("workspace directory identity does not match expected identity")
 
 
-def _read_external_directory_authority_path(path: Path) -> dict[str, Any] | None:
+def _read_external_directory_authority_path(
+    path: Path, *, env: Mapping[str, str] | None = None, key_material: tuple[bytes, str] | None = None
+) -> dict[str, Any] | None:
     """Read one external authority record without deriving authority from its path."""
     try:
         descriptor = _open_file_nofollow(
@@ -1708,7 +1710,7 @@ def _read_external_directory_authority_path(path: Path) -> dict[str, Any] | None
         os.close(descriptor)
     if not isinstance(payload, dict):
         raise OSError("external directory authority record is malformed")
-    return payload
+    return _unwrap_authority_envelope(path, payload, env=env, key_material=key_material)
 
 
 def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, Any] | None]:
@@ -1716,7 +1718,83 @@ def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, An
     return path, _read_external_directory_authority_path(path)
 
 
-def _write_external_directory_authority(path: Path, payload: dict[str, Any]) -> None:
+def _authority_target_digest(record: Mapping[str, Any]) -> str:
+    target = record.get("target")
+    if not isinstance(target, str) or not target:
+        raise OSError("external directory authority record is missing target")
+    return hashlib.sha256(target.encode("utf-8")).hexdigest()
+
+
+def _unwrap_authority_envelope(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    env: Mapping[str, str] | None = None,
+    key_material: tuple[bytes, str] | None = None,
+) -> dict[str, Any]:
+    from .. import authority_broker, authority_key
+
+    if payload.get("envelope_version") == 1:
+        try:
+            secret, loaded_id = key_material if key_material is not None else authority_key.load_key(env=env)
+        except OSError as exc:
+            raise OSError("external directory authority key is unavailable") from exc
+        try:
+            record = authority_broker.verify_store_envelope(secret, payload, loaded_id)
+        except ValueError as exc:
+            raise OSError(str(exc)) from exc
+        sequence = payload["signature"]["sequence"]
+        expected = authority_key.sequence_for(
+            _authority_target_digest(record), env=env, secret=secret, key_id=loaded_id
+        )
+        if expected is None:
+            raise OSError(
+                "authority sequence is missing; restore the operator store-hmac.key and sequence.json, or re-bind the workspace after confirming the directories are intact"
+            )
+        if expected != sequence:
+            raise OSError(
+                "authority sequence mismatch; restore the operator store-hmac.key and sequence.json, or re-bind the workspace after confirming the directories are intact"
+            )
+        expected_name = f"{_authority_target_digest(record)}.json"
+        if path.name != expected_name:
+            raise OSError("authority store filename does not match the bound target")
+        return record
+    if authority_key.require_signed(env=env):
+        raise OSError("unsigned authority store record is refused")
+    if "schema_version" not in payload or "target" not in payload:
+        raise OSError("external directory authority record is malformed")
+    try:
+        secret, loaded_id = key_material if key_material is not None else authority_key.load_key(env=env, create=True)
+    except OSError as exc:
+        raise OSError("external directory authority key is unavailable") from exc
+    if (
+        authority_key.sequence_for(_authority_target_digest(payload), env=env, secret=secret, key_id=loaded_id)
+        is not None
+    ):
+        raise OSError("unsigned authority store downgrade is refused")
+    _write_external_directory_authority(path, payload, env=env, key_material=(secret, loaded_id))
+    return payload
+
+
+def _write_external_directory_authority(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    env: Mapping[str, str] | None = None,
+    key_material: tuple[bytes, str] | None = None,
+) -> None:
+    from .. import authority_broker, authority_key
+
+    record = (
+        payload["record"]
+        if payload.get("envelope_version") == 1 and isinstance(payload.get("record"), dict)
+        else payload
+    )
+    if record.get("envelope_version") == 1:
+        record = dict(record.get("record") or {})
+    secret, loaded_id = key_material if key_material is not None else authority_key.load_key(env=env, create=True)
+    sequence = authority_key.next_sequence(_authority_target_digest(record), env=env, secret=secret, key_id=loaded_id)
+    envelope = authority_broker.sign_store_record(secret, record, sequence, loaded_id)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     descriptor = -1
@@ -1727,7 +1805,7 @@ def _write_external_directory_authority(path: Path, payload: dict[str, Any]) -> 
             0o600,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:
-            handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            handle.write(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
         # Windows refuses os.replace while the source handle is still open (WinError 32).
@@ -2425,13 +2503,6 @@ def _has_local_import_envelope(item: dict[str, Any], *, importer_source: str) ->
     )
 
 
-def _trusted_builtin_scanner_configuration(scanner: object) -> bool:
-    """Require the exact built-in scanner record serialized into a local receipt."""
-    if not isinstance(scanner, dict):
-        return False
-    return any(scanner == trusted for trusted in constants.SCANNER_DEFAULTS)
-
-
 def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, Any] | None:
     """Read one local scanner receipt through no-follow descriptor traversal."""
     if (
@@ -2547,8 +2618,11 @@ def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | No
     if not isinstance(proof, dict) or proof.get("scanner_id") != scanner_id or proof.get("source") != source:
         return False
     scanner = proof.get("scanner")
-    if not _trusted_builtin_scanner_configuration(scanner):
+    if not isinstance(scanner, dict):
         return False
+    # Public SCANNER_DEFAULTS equality is not producer authentication. The
+    # receipt must already be verifier-owned (HMAC store) and structurally
+    # consistent with this row.
     if (
         receipt.get("scanner_id") != scanner_id
         or receipt.get("source") != source
@@ -3723,6 +3797,8 @@ def _find_import(target: Path, import_id: str) -> tuple[dict[str, Any] | None, l
 
 
 def _import_trust_blocker(item: Mapping[str, Any] | None) -> str | None:
+    """Refuse promotion unless the current bytes still match a complete envelope."""
+
     return trust_gate.promotion_blocker(item)
 
 

@@ -26,6 +26,7 @@ _GROK_CONTINUATION_PROMPT = (
     "Return the final answer now using the required structured answer schema. "
     "Do not narrate progress or repeat the task."
 )
+INJECTION_QUARANTINE_KIND = "injection-quarantine"
 
 
 @dataclass(frozen=True)
@@ -317,6 +318,45 @@ class EventWriter(Protocol):
     ) -> Callable[[dict[str, Any]], None] | None: ...
 
 
+def _injection_rules(envelope: dict[str, Any] | None) -> list[str]:
+    if not isinstance(envelope, dict):
+        return []
+    trust = envelope.get("trust")
+    if not isinstance(trust, dict):
+        return []
+    injection = trust.get("injection")
+    if not isinstance(injection, dict):
+        return []
+    raw = injection.get("rules")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, str) and item]
+
+
+def _request_is_injection_quarantine(envelope: dict[str, Any] | None) -> bool:
+    if not isinstance(envelope, dict):
+        return False
+    trust = envelope.get("trust")
+    if not isinstance(trust, dict):
+        return False
+    if trust.get("label") == "quarantined":
+        return True
+    injection = trust.get("injection")
+    return isinstance(injection, dict) and injection.get("status") in {"flagged", "pending", "error"}
+
+
+def _request_rejection(request: message_envelope.MessageDelivery) -> tuple[str, str]:
+    detail = request.reason or "worker-request rejected by provenance gate"
+    if not _request_is_injection_quarantine(request.envelope):
+        return detail, "unclassified"
+    named = ", ".join(_injection_rules(request.envelope)) or "unspecified rule"
+    hint = (
+        f"operator-authored task text tripped injection heuristic ({named}); {detail}. "
+        "Rephrase the task if it only discusses injection policy."
+    )
+    return hint, INJECTION_QUARANTINE_KIND
+
+
 def dispatch(
     assignments: list[Assignment],
     roster: Roster,
@@ -469,17 +509,19 @@ def dispatch(
             to_seat=assignment.worker,
             run_dir=output_dir,
             run_id=orchestrator_run_id,
+            assignment_id=message_envelope.assignment_id_for(assignment.worker, assignment.task),
             session_harness=agent.cli,
         )
         if not request.delivered:
+            detail, failure_kind = _request_rejection(request)
             return WorkerResult(
                 worker=assignment.worker,
                 task=assignment.task,
                 text="",
                 ok=False,
-                detail=request.reason or "worker-request rejected by provenance gate",
+                detail=detail,
                 failure_phase="dispatch",
-                failure_kind="unclassified",
+                failure_kind=failure_kind,
                 provenance=request.envelope,
             )
         started = time.monotonic()
@@ -715,10 +757,11 @@ def dispatch(
                 result.text,
                 kind="worker-result",
                 producer=worker_producer,
-                from_seat=assignment.worker,
+                from_seat=terminal_agent.name,
                 to_seat=orchestrator_seat,
                 run_dir=output_dir,
                 run_id=orchestrator_run_id,
+                assignment_id=message_envelope.assignment_id_for(assignment.worker, assignment.task),
                 session_harness=terminal_agent.cli,
             )
             delivered_text = result.text if captured.delivered else ""

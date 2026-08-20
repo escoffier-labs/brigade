@@ -107,7 +107,9 @@ def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
     # suite (component_bins.managed_path, doctor's components check) reads the
     # developer's real installed.json or managed bin dir.
     data_root = tmp_path_factory.mktemp("component_data")
+    config_root = tmp_path_factory.mktemp("component_config")
     monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
     monkeypatch.setenv("LOCALAPPDATA", str(data_root))
 
     # A developer shell may export engine overrides (GRAPHTRAIL_BIN, ...);

@@ -575,3 +575,166 @@ def test_index_permissions_are_restored_for_doctor(workspace, capsys) -> None:
     doctor = json.loads(capsys.readouterr().out)
     perm = next(check for check in doctor["checks"] if check["name"] == "vault_index_permissions")
     assert perm["status"] == "fail"
+
+
+def _unfixed_root_dir(vault: Path, relative: str) -> Path | None:
+    """Pre-#1011 resolver: resolve() then is_symlink() on the target."""
+    candidate = (vault / relative).resolve()
+    try:
+        candidate.resolve().relative_to(vault.resolve())
+    except ValueError:
+        return None
+    if not candidate.is_dir() or candidate.is_symlink():
+        return None
+    return candidate
+
+
+def _unfixed_reread_path(vault: Path, relative: str) -> Path | None:
+    """Pre-#1011 reread: resolve() then is_symlink() on the target file."""
+    path = (vault / relative).resolve()
+    try:
+        path.resolve().relative_to(vault.resolve())
+    except ValueError:
+        return None
+    if path.is_symlink() or not path.is_file():
+        return None
+    return path
+
+
+def test_symlink_swap_of_allowlisted_root_does_not_index_private_notes(tmp_path: Path, capsys) -> None:
+    """Mutation: replacing Shared/Inbox with a symlink to Private must not
+    index private notes under the allowlisted inbox scope (#1011).
+
+    The unfixed `_root_dir` resolved first, so the Private target passed
+    containment and `is_symlink()` ran against the real directory. This
+    test fails on that code because Private notes would be indexed.
+    """
+    target = tmp_path / "repo"
+    vault = tmp_path / "vault"
+    target.mkdir()
+    inbox = vault / "Shared" / "Inbox"
+    private = vault / "Private"
+    inbox.mkdir(parents=True)
+    private.mkdir()
+    _write_note(vault, "Shared/Inbox/public.md", title="Public", body="public rotation")
+    _write_note(vault, "Private/secret.md", title="Secret", body="PRIVATEONLY classified note")
+    _write_vault_config(target, vault, [("inbox", "Shared/Inbox", False)])
+
+    (inbox / "public.md").unlink()
+    inbox.rmdir()
+    inbox.symlink_to(private)
+
+    leaked = _unfixed_root_dir(vault, "Shared/Inbox")
+    assert leaked == private.resolve()
+    assert any("PRIVATEONLY" in path.read_text(encoding="utf-8") for path in leaked.rglob("*.md"))
+    assert memory_vault._root_dir(vault, "Shared/Inbox") is None
+
+    assert cli.main(["memory", "vault-index", "--target", str(target)]) == 2
+    err = capsys.readouterr().err
+    assert "missing" in err or "escapes" in err
+    index_file = target / ".brigade" / "vault-index" / "index.json"
+    assert not index_file.is_file() or "PRIVATEONLY" not in index_file.read_text(encoding="utf-8")
+
+    assert cli.main(["memory", "vault-doctor", "--target", str(target), "--json"]) == 1
+    doctor = json.loads(capsys.readouterr().out)
+    root_check = next(check for check in doctor["checks"] if check["name"] == "root:inbox")
+    assert root_check["status"] == "fail"
+
+
+def test_symlink_in_intermediate_root_component_does_not_index_private_notes(tmp_path: Path, capsys) -> None:
+    """Mutation: a symlink in an intermediate allowlisted component is refused."""
+    target = tmp_path / "repo"
+    vault = tmp_path / "vault"
+    target.mkdir()
+    private = vault / "Private"
+    (private / "Inbox").mkdir(parents=True)
+    _write_note(vault, "Private/Inbox/secret.md", title="Secret", body="PRIVATEONLY nested leak")
+    alias = vault / "Shared"
+    alias.symlink_to(private)
+    _write_vault_config(target, vault, [("inbox", "Shared/Inbox", False)])
+
+    leaked = _unfixed_root_dir(vault, "Shared/Inbox")
+    assert leaked == (private / "Inbox").resolve()
+    assert memory_vault._root_dir(vault, "Shared/Inbox") is None
+
+    assert cli.main(["memory", "vault-index", "--target", str(target)]) == 2
+    err = capsys.readouterr().err
+    assert "missing" in err or "escapes" in err
+    index_file = target / ".brigade" / "vault-index" / "index.json"
+    assert not index_file.is_file() or "PRIVATEONLY" not in index_file.read_text(encoding="utf-8")
+
+
+def test_reread_refuses_symlink_swap_of_indexed_file(tmp_path: Path, capsys) -> None:
+    """Mutation: after a clean index, swapping the note for a symlink to
+    Private must not leak private bytes on vault-show (#1011).
+    """
+    target = tmp_path / "repo"
+    vault = tmp_path / "vault"
+    target.mkdir()
+    (vault / "Shared" / "Inbox").mkdir(parents=True)
+    (vault / "Private").mkdir()
+    public = _write_note(vault, "Shared/Inbox/public.md", title="Public", body="public rotation")
+    _write_note(vault, "Private/secret.md", title="Secret", body="PRIVATEONLY classified note")
+    _write_vault_config(target, vault, [("inbox", "Shared/Inbox", False)])
+
+    assert cli.main(["memory", "vault-index", "--target", str(target), "--json"]) == 0
+    capsys.readouterr()
+
+    public.unlink()
+    public.symlink_to(vault / "Private" / "secret.md")
+
+    leaked = _unfixed_reread_path(vault, "Shared/Inbox/public.md")
+    assert leaked == (vault / "Private" / "secret.md").resolve()
+    assert "PRIVATEONLY" in leaked.read_text(encoding="utf-8")
+
+    config = memory_vault.load_config(target)
+    assert config is not None
+    reread = memory_vault._reread_note(
+        config,
+        {"id": "Shared/Inbox/public.md", "scope": "inbox", "relative_path": "Shared/Inbox/public.md"},
+    )
+    assert reread is None
+
+    assert cli.main(["memory", "vault-show", "Shared/Inbox/public.md", "--target", str(target), "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert "PRIVATEONLY" not in shown["body"]
+    assert "public rotation" in shown["body"]
+
+
+def test_nested_dir_symlink_inside_allowlisted_root_is_not_followed(tmp_path: Path, capsys) -> None:
+    """A symlink directory under a real allowlisted root must not pull in Private."""
+    target = tmp_path / "repo"
+    vault = tmp_path / "vault"
+    target.mkdir()
+    (vault / "Shared" / "Inbox").mkdir(parents=True)
+    (vault / "Private").mkdir()
+    _write_note(vault, "Shared/Inbox/public.md", title="Public", body="public rotation")
+    _write_note(vault, "Private/secret.md", title="Secret", body="PRIVATEONLY nested dir")
+    (vault / "Shared" / "Inbox" / "trap").symlink_to(vault / "Private")
+    _write_vault_config(target, vault, [("inbox", "Shared/Inbox", False)])
+
+    assert cli.main(["memory", "vault-index", "--target", str(target), "--json"]) == 0
+    indexed = json.loads(capsys.readouterr().out)
+    assert indexed["indexed"] == 1
+    index_text = (target / ".brigade" / "vault-index" / "index.json").read_text(encoding="utf-8")
+    assert "PRIVATEONLY" not in index_text
+    assert "Private/secret.md" not in index_text
+
+
+def test_real_nested_allowlisted_root_still_indexes(tmp_path: Path, capsys) -> None:
+    target = tmp_path / "repo"
+    vault = tmp_path / "vault"
+    target.mkdir()
+    (vault / "Shared" / "Inbox").mkdir(parents=True)
+    _write_note(vault, "Shared/Inbox/public.md", title="Public", body="public rotation")
+    _write_vault_config(target, vault, [("inbox", "Shared/Inbox", False)])
+
+    assert cli.main(["memory", "vault-index", "--target", str(target), "--json"]) == 0
+    indexed = json.loads(capsys.readouterr().out)
+    assert indexed["indexed"] == 1
+    assert indexed["scopes"][0]["scope"] == "inbox"
+
+    assert cli.main(["memory", "vault-search", "rotation", "--target", str(target), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["match_count"] == 1
+    assert payload["hits"][0]["relative_path"] == "Shared/Inbox/public.md"
