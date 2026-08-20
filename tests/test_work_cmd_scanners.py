@@ -55,6 +55,21 @@ def _record_scanner_run_authority(tmp_path: Path, run_id: str) -> None:
         os.close(descriptor)
 
 
+def _bind_planted_scanner_receipt(tmp_path: Path, run_id: str) -> None:
+    path = helpers._scanner_runs_root(tmp_path) / run_id / "receipt.json"
+    data = path.read_bytes()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        work_cmd.ledger._record_verifier_owned_file(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", run_id, "receipt.json"),
+            descriptor=descriptor,
+            data=data,
+        )
+    finally:
+        os.close(descriptor)
+
+
 def test_scanner_receipt_producer_rejects_run_directory_swap(tmp_path, monkeypatch):
     from brigade.work_cmd import scanners as scanners_mod
 
@@ -220,17 +235,22 @@ def test_scanner_receipt_collection_rejects_renamed_receipt(tmp_path: Path) -> N
 
 
 def test_pre_created_unbound_scanner_runs_directory_is_not_adopted(tmp_path: Path) -> None:
-    """#1036: create=True must not adopt a tree the verifier did not create."""
+    """#1036: create=True binds a clean released root but does not adopt children."""
     from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
 
-    helpers._scanner_runs_root(tmp_path).mkdir(parents=True)
-    with pytest.raises(OSError):
-        scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
+    runs = helpers._scanner_runs_root(tmp_path)
+    planted = runs / "planted-child"
+    planted.mkdir(parents=True)
+    (planted / "receipt.json").write_text(json.dumps({"run_id": "planted-child", "status": "running"}))
+    descriptor = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
+    os.close(descriptor)
 
-    assert not (tmp_path / ".brigade" / ".runs.authority.json").is_file()
     _path, payload = ledger._read_external_directory_authority(tmp_path)
     directories = payload.get("directories") if isinstance(payload, dict) else None
-    assert not directories or ".brigade/scanners/runs" not in directories
+    assert isinstance(directories, dict) and ".brigade/scanners/runs" in directories
+    assert ".brigade/scanners/runs/planted-child" not in directories
+    assert scanners_mod._scanner_receipts(tmp_path) == []
+    assert scanners_mod._scanner_running_receipts(tmp_path) == []
 
 
 def test_plaintext_runs_anchor_does_not_let_replacement_directory_forge_receipt(tmp_path: Path):
@@ -1312,6 +1332,7 @@ conflict_window = "04:00-04:10"
             "started_at": "2026-05-28T12:00:00+00:00",
         },
     )
+    _bind_planted_scanner_receipt(tmp_path, "running")
 
     assert work_cmd.scanners_run(target=tmp_path, scanner_id="risky-scan") == 2
     assert "scanner run already in progress" in capsys.readouterr().err
@@ -1380,6 +1401,7 @@ conflict_window = "02:00-02:10"
             "stderr_path": str(run_dir / "missing-stderr.log"),
         },
     )
+    _bind_planted_scanner_receipt(tmp_path, "failed-run")
     success_dir = tmp_path / ".brigade" / "scanners" / "runs" / "old-success"
     success_dir.mkdir(parents=True)
     _record_scanner_run_authority(tmp_path, "old-success")
@@ -1400,6 +1422,7 @@ conflict_window = "02:00-02:10"
             "stderr_path": str(success_dir / "stderr.log"),
         },
     )
+    _bind_planted_scanner_receipt(tmp_path, "old-success")
     bad_run = tmp_path / ".brigade" / "scanners" / "runs" / "bad-run"
     bad_run.mkdir(parents=True)
     _record_scanner_run_authority(tmp_path, "bad-run")
@@ -3506,6 +3529,7 @@ def test_scanner_read_receipt_derives_target_from_correct_parent(tmp_path: Path)
         os.close(root)
     run_dir = helpers._scanner_runs_root(tmp_path) / run_id
     (run_dir / "receipt.json").write_text(json.dumps({"run_id": run_id, "status": "completed"}))
+    _bind_planted_scanner_receipt(tmp_path, run_id)
 
     receipt = scanners_mod._scanner_read_receipt(run_dir / "receipt.json")
     assert receipt is not None
@@ -3531,6 +3555,7 @@ def test_scanner_read_receipt_accepts_run_directory_path(tmp_path: Path) -> None
         os.close(root)
     run_dir = helpers._scanner_runs_root(tmp_path) / run_id
     (run_dir / "receipt.json").write_text(json.dumps({"run_id": run_id, "status": "completed"}))
+    _bind_planted_scanner_receipt(tmp_path, run_id)
 
     receipt = scanners_mod._scanner_read_receipt(run_dir)
     assert receipt is not None
