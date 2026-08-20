@@ -2794,13 +2794,29 @@ func materializeEvidenceBundle(id string) (map[string]any, error) {
 	return bundle, nil
 }
 
+// materializedBundleLiveKeys is the closed top-level shape of a live-regen
+// evidence bundle. Unknown cache-ref siblings never survive onto the
+// model-facing payload.
+var materializedBundleLiveKeys = map[string]struct{}{
+	"id": {}, "resource_uri": {}, "query": {}, "filters": {},
+	"generated_at": {}, "untrusted_context": {}, "results": {},
+	"grouped_by_source": {}, "integrity_omitted": {},
+	"integrity_mismatches": {}, "warnings": {},
+}
+
 // projectMaterializedBundle treats the entire cache-ref as untrusted. The
 // cache file is same-UID writable, so no free-form string is copied
 // verbatim onto the model-facing payload: resource_uri is reconstructed
-// from the path-validated id, query is cleared, and filters (including
-// code_reference and collection) are re-derived from eligible ledger
-// records or hard-bounded and allowlist-validated.
+// from the path-validated id, query is cleared, unknown top-level keys
+// are dropped, and filters (including code_reference and collection) are
+// re-derived from eligible ledger records or hard-bounded and
+// allowlist-validated.
 func projectMaterializedBundle(bundle map[string]any, id string, authority []*CodeReference) {
+	for key := range bundle {
+		if _, ok := materializedBundleLiveKeys[key]; !ok {
+			delete(bundle, key)
+		}
+	}
 	bundle["id"] = id
 	bundle["resource_uri"] = evidenceBundleResourceURI(id)
 	bundle["query"] = ""
