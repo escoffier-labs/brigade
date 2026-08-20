@@ -9,7 +9,7 @@ The root README is a short landing page. Every topic that left the previous READ
 | Old README topic | Durable home |
 | --- | --- |
 | Kitchen scene / social banner / demo SVG | Kept as assets under `docs/assets/`, not linked from README. Brand metaphor: [overview](overview.md#mise-en-place-brand-metaphor) |
-| Badge row (CI, PyPI, Python, license) | Omitted from README by design. Live status remains on GitHub Actions and PyPI |
+| Badge row (CI, PyPI, Python, Rust, Go, license) | Restored below the README's primary links |
 | "The loop" five-step circuit | [overview](overview.md#verified-work-loop) |
 | Agent paste-ready install prompt | [agents guide](agents-guide.md#paste-ready-install-prompt), [agent-assisted setup](agent-assisted-setup.md#paste-ready-install-prompt) |
 | Shell install (`pipx`, `uv tool`, `brigade setup`, quickstart) | [QUICKSTART.md](../QUICKSTART.md), [first 10 minutes](first-10-minutes.md) |
@@ -38,7 +38,6 @@ The root README is a short landing page. Every topic that left the previous READ
 ## Intentionally retired from the front page
 
 - Product art, terminal demo, and memory-workflow illustrations as README chrome
-- Shield/badge rows
 - Code fences, JSON receipt dumps, and YAML/TOML samples in README
 - Autonomous or "reflective memory learning" claims
 - Framing Brigade as a daemon, hosted memory service, distributed task database, or full autonomous fleet runtime
