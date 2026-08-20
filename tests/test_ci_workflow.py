@@ -426,6 +426,9 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
         'cmd.exe /c "brigade care install --target `"$workRepo`" --dry-run > `"$careInstallOut`" 2> `"$careInstallErr`""'
         in text
     )
+    # The printed .cmd is /Create only; validation must not /Run the /TR body.
+    assert "/TR body is not executed" in text
+    assert "schtasks /Run" not in text
     assert "$importPayload.inserted_items" in text
     assert "$importPayload.already_known" in text
     assert "$acceptanceMarker" in text
@@ -435,6 +438,31 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "$env:XDG_CACHE_HOME" in text
     assert "finally" in text
     assert "#requires -Version 5.1" in text
+
+
+def test_windows_native_acceptance_schtasks_missing_task_query_does_not_fail_the_job():
+    """After /Delete, schtasks /Query exits 1 with
+    'ERROR: The system cannot find the file specified'. That names the
+    missing task, not brigade or the printed /TR. GitHub Actions
+    ``shell: powershell`` then does ``exit $LASTEXITCODE``, so a live
+    Query after successful cleanup fails the job even when the script
+    printed "passed" (windows-latest at 00dc50c8).
+    """
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    care = text[
+        text.index('Write-Host ("care create context:') : text.index('Write-Step "Windows native acceptance passed"')
+    ]
+    assert "& schtasks /Query" not in care
+    assert "& schtasks /Delete" not in care
+    assert "schtasks /Query /TN" in care
+    assert "schtasks /Delete /TN" in care
+    assert "schtasks-query-gone.err" in care
+    assert 'cmd.exe /c "exit 0"' in care
+    assert "The system cannot find the file specified" in care
+    assert "exit $LASTEXITCODE" in care
+    assert "/TR body is not executed" in care
+    tail = text[text.index('Write-Step "Windows native acceptance passed"') :]
+    assert re.search(r"(?m)^exit 0$", tail)
 
 
 def test_windows_native_acceptance_source_setup_uses_standalone_manifest_online_and_offline():

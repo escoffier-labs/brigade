@@ -914,14 +914,19 @@ def call_greet():
         Set-Content -LiteralPath $createCmd -Value $createDaily -Encoding ascii
         $elevated = Test-AcceptanceProcessIsElevated
         Write-Host ("care create context: elevated={0}; running printed .cmd in current token (/IT is valid elevated and not)" -f $elevated)
+        # The .cmd is the printed /Create line only. It does not /Run the task
+        # and must not invoke the /TR body (brigade, the runbook, or cd).
         try {
             $createExit = Invoke-PrintedSchtasksBatch -BatchPath $createCmd -StdoutPath $createOut -StderrPath $createErr
+            Write-Host ("care create batch exit={0} (printed /Create only; /TR body is not executed)" -f $createExit)
             if ($createExit -ne 0) {
                 $createStdout = Read-AcceptanceFileText -Path $createOut
                 $createStderr = Read-AcceptanceFileText -Path $createErr
                 throw "printed schtasks command was rejected (exit $createExit, elevated=$elevated): $createDaily`nstdout: $createStdout`nstderr: $createStderr"
             }
-            & schtasks /Query /TN "BrigadeCare-daily-care" | Out-Null
+            $queryOut = Join-Path $acceptRoot "schtasks-query.out"
+            $queryErr = Join-Path $acceptRoot "schtasks-query.err"
+            cmd.exe /c "schtasks /Query /TN `"BrigadeCare-daily-care`" > `"$queryOut`" 2> `"$queryErr`""
             if ($LASTEXITCODE -ne 0) {
                 throw "schtasks /Query did not find BrigadeCare-daily-care after printed /Create"
             }
@@ -942,9 +947,23 @@ def call_greet():
             }
         }
         finally {
-            & schtasks /Delete /TN "BrigadeCare-daily-care" /F | Out-Null
-            & schtasks /Query /TN "BrigadeCare-daily-care" | Out-Null
-            if ($LASTEXITCODE -eq 0) {
+            # schtasks /Query on a missing /TN prints
+            # "ERROR: The system cannot find the file specified" and exits 1.
+            # The "file" is the task (BrigadeCare-daily-care), not brigade,
+            # cmd.exe, the runbook, or the printed .cmd. GitHub Actions
+            # `shell: powershell` then does `exit $LASTEXITCODE`, so a live
+            # Query after a successful /Delete fails the job even though this
+            # script printed "passed". Redirect both cleanup calls and reset
+            # LASTEXITCODE so the expected missing-task signal cannot leak.
+            $deleteOut = Join-Path $acceptRoot "schtasks-delete.out"
+            $deleteErr = Join-Path $acceptRoot "schtasks-delete.err"
+            $goneOut = Join-Path $acceptRoot "schtasks-query-gone.out"
+            $goneErr = Join-Path $acceptRoot "schtasks-query-gone.err"
+            cmd.exe /c "schtasks /Delete /TN `"BrigadeCare-daily-care`" /F > `"$deleteOut`" 2> `"$deleteErr`""
+            cmd.exe /c "schtasks /Query /TN `"BrigadeCare-daily-care`" > `"$goneOut`" 2> `"$goneErr`""
+            $goneExit = $LASTEXITCODE
+            cmd.exe /c "exit 0"
+            if ($goneExit -eq 0) {
                 throw "BrigadeCare-daily-care was left behind after /Delete"
             }
         }
@@ -963,3 +982,4 @@ finally {
         Remove-Item -LiteralPath $acceptRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+exit 0
