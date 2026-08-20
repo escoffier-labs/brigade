@@ -27,6 +27,9 @@ KEY_BYTES = 32
 REQUIRE_SIGNED_ENV = "BRIGADE_AUTHORITY_REQUIRE_SIGNED"
 
 _CACHE: dict[str, tuple[bytes, str]] = {}
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
 
 def authority_dir(*, env: Mapping[str, str] | None = None, system: str | None = None) -> Path:
@@ -67,8 +70,20 @@ def _validate_key_stat(metadata: os.stat_result, path: Path) -> None:
         raise OSError(f"external directory authority key is not a regular file: {path}")
     if metadata.st_nlink != 1:
         raise OSError(f"external directory authority key is not a single-link file: {path}")
-    if stat.S_IMODE(metadata.st_mode) & 0o077:
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o077:
         raise OSError(f"external directory authority key must not be group or world readable: {path}")
+
+
+def sync_parent_directory(path: Path) -> None:
+    """Durably publish a replacement. Directory fsync is POSIX-only."""
+
+    if os.name != "posix" or not _O_DIRECTORY:
+        return
+    directory = os.open(path, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def generate_key(
@@ -80,7 +95,7 @@ def generate_key(
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
-    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_WRONLY | os.O_CREAT | _O_NOFOLLOW | _O_CLOEXEC
     flags |= os.O_TRUNC if force else os.O_EXCL
     key = secrets.token_bytes(KEY_BYTES)
     descriptor = os.open(path, flags, 0o600)
@@ -90,13 +105,12 @@ def generate_key(
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(path, 0o600)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
     finally:
         os.close(descriptor)
+    try:
+        sync_parent_directory(path.parent)
+    except OSError:
+        pass
     material = key, key_id(key)
     _CACHE[_cache_key(path)] = material
     return material
@@ -111,7 +125,7 @@ def load_key(
     cached = _CACHE.get(_cache_key(path))
     if cached is not None:
         return cached
-    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC
     try:
         descriptor = os.open(path, flags)
     except FileNotFoundError:
@@ -150,7 +164,7 @@ def _write_private_json(path: Path, payload: dict) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     descriptor = os.open(
         temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
         0o600,
     )
     try:
@@ -158,14 +172,13 @@ def _write_private_json(path: Path, payload: dict) -> None:
             handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
         os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+        sync_parent_directory(path.parent)
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
         try:
             temporary.unlink()
         except FileNotFoundError:

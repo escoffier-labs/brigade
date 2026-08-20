@@ -92,6 +92,8 @@ def test_handoff_never_puts_secret_in_env_construction():
 
 
 def test_key_load_refuses_world_readable(tmp_path: Path, monkeypatch):
+    if os.name != "posix":
+        pytest.skip("POSIX file-mode bits are the authority-key residual check")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     authority_key.clear_key_cache()
     authority_key.generate_key()
@@ -100,6 +102,28 @@ def test_key_load_refuses_world_readable(tmp_path: Path, monkeypatch):
     authority_key.clear_key_cache()
     with pytest.raises(OSError, match="group or world readable"):
         authority_key.load_key()
+
+
+def test_authority_store_open_flags_are_windows_safe():
+    """Bare os.O_NOFOLLOW / os.O_DIRECTORY AttributeError on native Windows."""
+
+    import inspect
+
+    from brigade.work_cmd import ledger as ledger_mod
+
+    key_src = Path(authority_key.__file__).read_text(encoding="utf-8")
+    write = inspect.getsource(ledger_mod._write_external_directory_authority)
+    read = inspect.getsource(ledger_mod._read_external_directory_authority_path)
+    for source in (key_src, write, read):
+        assert "os.O_NOFOLLOW" not in source
+        assert "os.O_DIRECTORY" not in source
+    assert 'getattr(os, "O_NOFOLLOW"' in write
+    assert 'getattr(os, "O_NOFOLLOW"' in read
+    assert "sync_parent_directory" in write
+    close_before_replace = write.find("os.close(descriptor)")
+    replace_at = write.find("os.replace(temporary, path)")
+    assert close_before_replace != -1 and replace_at != -1
+    assert close_before_replace < replace_at
 
 
 def test_doctor_isolation_is_never_silent():

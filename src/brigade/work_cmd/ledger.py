@@ -1562,7 +1562,7 @@ def _read_external_directory_authority_path(
     try:
         descriptor = os.open(
             path,
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
         )
     except FileNotFoundError:
         return None
@@ -1668,19 +1668,17 @@ def _write_external_directory_authority(
     try:
         descriptor = os.open(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:
             handle.write(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
+        os.close(descriptor)
+        descriptor = -1
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        authority_key.sync_parent_directory(path.parent)
     finally:
         if descriptor != -1:
             os.close(descriptor)
