@@ -935,31 +935,16 @@ def import_promote(
         print("error: --run can only be used with one import id", file=sys.stderr)
         return 2
     if all_matching:
-        imports = ledger_mod._read_imports(target)
-        wanted_ids = {
-            item.get("id")
-            for item in ledger_mod._matching_pending_imports(
+        try:
+            promoted, failed = ledger_mod._promote_matching_imports(
                 target,
                 kind=kind,
                 source=source,
                 metadata_filters=metadata_filters,
             )
-        }
-        promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
-        failed: list[tuple[dict[str, Any], Exception]] = []
-        for item in imports:
-            if item.get("id") not in wanted_ids:
-                continue
-            text = str(item.get("text") or "").strip()
-            if not text:
-                continue
-            try:
-                task, created = ledger_mod._mark_import_promoted(target, item)
-            except (edges_mod.EdgeError, ledger_mod.TaskLedgerError) as exc:
-                failed.append((item, exc))
-                continue
-            promoted.append((item, task, created))
-        ledger_mod._write_imports(target, imports)
+        except ledger_mod.TaskLedgerError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         created_count = len([item for item in promoted if item[2]])
         print(f"promoted: {len(promoted)}")
         print(f"created: {created_count}")
