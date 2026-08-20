@@ -408,7 +408,10 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "brigade care status" in text
     # care install writes to stderr and exits 3; PS 5.1 Stop mode cannot invoke it
     # as a native command. The script must go through cmd.exe file redirects.
-    assert 'cmd.exe /c "brigade care install --target `"$workRepo`" --dry-run > `"$careInstallOut`" 2> `"$careInstallErr`""' in text
+    assert (
+        'cmd.exe /c "brigade care install --target `"$workRepo`" --dry-run > `"$careInstallOut`" 2> `"$careInstallErr`""'
+        in text
+    )
     assert "$importPayload.inserted_items" in text
     assert "$importPayload.already_known" in text
     assert "$acceptanceMarker" in text

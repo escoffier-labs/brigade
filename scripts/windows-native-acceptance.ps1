@@ -775,8 +775,14 @@ def call_greet():
             if ($createLine -notmatch [regex]::Escape($expectedSchedules[$taskName])) {
                 throw "care install schedule mismatch for ${taskName}: $createLine"
             }
-            if ($createLine -notmatch '/RU "%USERNAME%"' -or $createLine -notmatch "/RL LIMITED" -or $createLine -notmatch "/NP") {
-                throw "care install missing S4U flags for ${taskName}: $createLine"
+            if ($createLine -notmatch '/RU "%USERNAME%" /NP') {
+                throw "care install missing S4U /RU /NP pair for ${taskName}: $createLine"
+            }
+            if ($createLine -match "/RL") {
+                throw "care install must not emit /RL (breaks /NP binding) for ${taskName}: $createLine"
+            }
+            if ($createLine -notmatch [regex]::Escape("C:\Windows\System32\cmd.exe")) {
+                throw "care install /TR must use absolute cmd.exe for ${taskName}: $createLine"
             }
             if ($createLine -match "C:\\\\") {
                 throw "care install emitted doubled backslashes for ${taskName}: $createLine"
@@ -814,11 +820,17 @@ def call_greet():
             throw "care install missing BrigadeCare-daily-care /Create line"
         }
         $createCmd = Join-Path $acceptRoot "create-brigade-care.cmd"
+        $createOut = Join-Path $acceptRoot "schtasks-create.out"
+        $createErr = Join-Path $acceptRoot "schtasks-create.err"
         Set-Content -LiteralPath $createCmd -Value $createDaily -Encoding ascii
         try {
-            & cmd.exe /c $createCmd
+            cmd.exe /c "`"$createCmd`" > `"$createOut`" 2> `"$createErr`""
             if ($LASTEXITCODE -ne 0) {
-                throw "printed schtasks command was rejected by Windows: $createDaily"
+                $createStdout = ""
+                $createStderr = ""
+                if (Test-Path -LiteralPath $createOut) { $createStdout = Get-Content -LiteralPath $createOut -Raw }
+                if (Test-Path -LiteralPath $createErr) { $createStderr = Get-Content -LiteralPath $createErr -Raw }
+                throw "printed schtasks command was rejected by Windows: $createDaily`nstdout: $createStdout`nstderr: $createStderr"
             }
             & schtasks /Query /TN "BrigadeCare-daily-care" | Out-Null
             if ($LASTEXITCODE -ne 0) {

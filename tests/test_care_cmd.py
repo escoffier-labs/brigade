@@ -498,12 +498,28 @@ def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkey
         # The old bug would put 06:15 on ingest-sweep, weekly, observability, nightly.
         if flags != "/SC DAILY /ST 06:15":
             assert "/ST 06:15" not in line
-        assert '/RU "%USERNAME%"' in line
-        assert "/RL LIMITED" in line
-        assert "/NP" in line
+        assert '/RU "%USERNAME%" /NP /F' in line
+        assert "/RL" not in line
+        assert "/F:String" not in line
         assert line.endswith(" /F")
         assert line.startswith("schtasks /Create ")
-        assert '/TR "cmd /c cd /d ' in line
+        assert r'/TR "C:\Windows\System32\cmd.exe /c cd /d ' in line
+
+
+def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path):
+    """Reject /RL-between-/RU-and-/NP and bare cmd; those fail on windows-latest."""
+    workspace = Path(r"C:\Users\operator\project")
+    for entry in (*care_cmd.CARE_ENTRIES, *care_cmd.MEMORY_JOB_ENTRIES):
+        command = care_cmd._schtasks_create_command(entry, workspace=workspace)
+        flags = EXPECTED_SCHTASKS_FLAGS[entry.schedule]
+        assert f'/TN "BrigadeCare-{entry.entry_id}"' in command
+        assert flags in command
+        assert r'/TR "C:\Windows\System32\cmd.exe /c ' in command
+        assert '/RU "%USERNAME%" /NP /F' in command
+        assert "/RL" not in command
+        assert "/F:String" not in command
+        assert command.startswith("schtasks /Create ")
+        assert command.endswith(" /F")
 
 
 def test_care_windows_printed_path_uses_single_backslashes(tmp_path):
@@ -513,8 +529,12 @@ def test_care_windows_printed_path_uses_single_backslashes(tmp_path):
     assert r"C:\Users\operator\project" in command
     assert r"C:\\Users" not in command
     spaced = care_cmd._schtasks_create_command(entry, workspace=Path(r"C:\Users\operator\my project"))
-    assert r'cd /d "C:\Users\operator\my project"' in spaced
+    assert r"cd /d \"C:\Users\operator\my project\"" in spaced
     assert r"C:\\Users" not in spaced
+    assert "/F:String" not in command
+    assert "/RL" not in command
+    assert command.endswith('/RU "%USERNAME%" /NP /F')
+    assert r"C:\Windows\System32\cmd.exe /c " in command
 
 
 def test_care_windows_install_json_returns_structured_plan(tmp_path, monkeypatch, capsys):

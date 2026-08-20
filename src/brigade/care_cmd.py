@@ -31,7 +31,12 @@ DEFAULT_BACKEND = "auto"
 SUPPORTED_BACKENDS = ("auto", "crontab", "systemd", "launchd", "schtasks")
 SCHTASKS_BACKEND = "schtasks"
 SCHTASKS_WEEKDAYS = ("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")
-SCHTASKS_S4U_FLAGS = '/RU "%USERNAME%" /RL LIMITED /NP'
+# schtasks /Create /? groups [/RU username [/RP password]] separately from
+# [/IT | /NP]. Putting /RL between /RU and /NP makes Windows ignore /NP and
+# prompt for a password (GitHub windows-latest: "Please enter the run as
+# password for runneradmin"). LIMITED is the default run level, so omit /RL.
+SCHTASKS_S4U_FLAGS = '/RU "%USERNAME%" /NP'
+SCHTASKS_CMD_EXE = r"C:\Windows\System32\cmd.exe"
 
 MEMORY_CARE_RUNBOOK_REL = {
     "daily-care": ".brigade/memory-care/runbooks/daily-care-pass.json",
@@ -323,14 +328,20 @@ def _schtasks_schedule_flags(schedule: str) -> str:
 
 def _schtasks_task_run(entry: CareEntry, *, workspace: Path) -> str:
     workspace_text = _windows_path(workspace)
-    cd_target = f'"{workspace_text}"' if (" " in workspace_text or "\t" in workspace_text) else workspace_text
+    if " " in workspace_text or "\t" in workspace_text:
+        # Escape inner quotes so the outer /TR "..." stays one argv for schtasks.
+        cd_target = f'\\"{workspace_text}\\"'
+    else:
+        cd_target = workspace_text
     if entry.kind == "runbook":
         assert entry.runbook_rel is not None
         body = f"brigade runbook run --approved {entry.runbook_rel} --target ."
     else:
         assert entry.shell is not None
         body = entry.shell
-    return f"cmd /c cd /d {cd_target} && {body}"
+    # Bare "cmd" is not on Task Scheduler's search path ("The system cannot
+    # find the file specified" on windows-latest). Use the absolute console host.
+    return f"{SCHTASKS_CMD_EXE} /c cd /d {cd_target} && {body}"
 
 
 def _schtasks_task_name(entry: CareEntry) -> str:
@@ -341,7 +352,9 @@ def _schtasks_create_command(entry: CareEntry, *, workspace: Path) -> str:
     task_name = _schtasks_task_name(entry)
     schedule_flags = _schtasks_schedule_flags(entry.schedule)
     task_run = _schtasks_task_run(entry, workspace=workspace)
-    return f'schtasks /Create /TN "{task_name}" {schedule_flags} /TR "{task_run}" {SCHTASKS_S4U_FLAGS} /F'
+    # Official create flags: /TN /TR /SC [/MO|/D] [/ST] /RU /NP /F.
+    # Do not emit /RL or /F:String — those are not a valid trailing pair.
+    return f'schtasks /Create /TN "{task_name}" /TR "{task_run}" {schedule_flags} {SCHTASKS_S4U_FLAGS} /F'
 
 
 def _schtasks_delete_command(entry: CareEntry) -> str:
