@@ -530,6 +530,242 @@ func boundClosedField(s string, max int) string {
 	return s[:max]
 }
 
+const (
+	cacheRefFreeFormMax      = 256
+	cacheRefFilePathMax      = 256
+	cacheRefQualifiedNameMax = 256
+	cacheRefRepositoryMax    = 128
+)
+
+// cacheRefProjectedSearchOptStrings is the closed set of SearchOpts string
+// fields that a cache-ref may contribute to a model-facing show payload.
+// Origin/Modality/TrustLabel are search-only and must not be copied from the
+// cache file. A newly added SearchOpts string field fails
+// TestCacheRefProjectionStringInventory until it is classified here or in
+// cacheRefNonProjectedSearchOptStrings.
+var cacheRefProjectedSearchOptStrings = map[string]struct{}{
+	"Query":      {},
+	"Source":     {},
+	"Collection": {},
+	"Kind":       {},
+	"ActorType":  {},
+	"From":       {},
+	"To":         {},
+	"Project":    {},
+	"Tags":       {},
+}
+
+var cacheRefNonProjectedSearchOptStrings = map[string]struct{}{
+	"Origin":     {},
+	"Modality":   {},
+	"TrustLabel": {},
+}
+
+// cacheRefSearchOptJSONPaths maps each projected SearchOpts string field to
+// the cache-ref / model-facing JSON path that must be sanitized.
+var cacheRefSearchOptJSONPaths = map[string]string{
+	"Query":      "query",
+	"Source":     "filters.source",
+	"Collection": "filters.collection",
+	"Kind":       "filters.kind",
+	"ActorType":  "filters.actor_type",
+	"From":       "filters.from",
+	"To":         "filters.to",
+	"Project":    "filters.project",
+	"Tags":       "filters.tags",
+}
+
+// projectUntrustedCacheRefFilters rebuilds model-facing filters from a
+// same-UID-writable cache-ref. Unknown keys are dropped. Free-form strings
+// are allowlisted or accepted only when they pass a hard bound; over-long
+// values are dropped rather than truncated. code_reference is re-derived
+// from eligible ledger records when present, otherwise re-validated.
+func projectUntrustedCacheRefFilters(raw any, authority []*CodeReference) map[string]any {
+	src := anyToMap(raw)
+	out := map[string]any{}
+	if projected := projectCacheRefCodeReference(src["code_reference"], authority); projected != nil {
+		out["code_reference"] = projected
+	}
+	for key, value := range src {
+		switch key {
+		case "code_reference":
+			// Applied from authority or sanitized cache-ref above.
+		case "limit":
+			out[key] = intFromAny(value)
+		case "include_related", "include_artifact_text":
+			out[key] = boolFromAny(value)
+		case "collection":
+			if isObject(value) {
+				out[key] = projectUntrustedCacheRefCollection(value)
+			} else {
+				out[key] = projectCacheRefFilterString(key, stringFromAny(value))
+			}
+		case "source", "project", "from", "to", "kind", "actor_type", "tags":
+			out[key] = projectCacheRefFilterString(key, stringFromAny(value))
+		default:
+			// Attacker-planted sibling keys stay off the model-facing payload.
+		}
+	}
+	return out
+}
+
+func isObject(value any) bool {
+	switch value.(type) {
+	case map[string]any, *CodeReference, CodeReference:
+		return true
+	default:
+		return false
+	}
+}
+
+func projectUntrustedCacheRefCollection(raw any) map[string]any {
+	src := anyToMap(raw)
+	out := map[string]any{}
+	out["kind"] = allowlistedProjectionField(stringFromAny(src["kind"]), projectionCollectionKinds)
+	if name := stringFromAny(src["name"]); cacheRefFreeFormAccepted(name, cacheRefFreeFormMax) {
+		out["name"] = name
+	} else {
+		out["name"] = ""
+	}
+	if ext := stringFromAny(src["external_id"]); cacheRefFreeFormAccepted(ext, cacheRefFreeFormMax) {
+		out["external_id"] = ext
+	}
+	return out
+}
+
+func projectCacheRefFilterString(key, value string) string {
+	switch key {
+	case "source":
+		return allowlistedProjectionField(value, projectionSourceKinds)
+	case "kind":
+		return allowlistedProjectionField(value, projectionItemKinds)
+	default:
+		if !cacheRefFreeFormAccepted(value, cacheRefFreeFormMax) {
+			return ""
+		}
+		return value
+	}
+}
+
+func projectCacheRefCodeReference(raw any, authority []*CodeReference) *CodeReference {
+	if len(authority) > 0 {
+		if wanted := parseMaybeCodeReference(raw); wanted != nil {
+			for _, ref := range authority {
+				if codeReferenceClosedIdentityEqual(ref, wanted) {
+					return ref
+				}
+			}
+		}
+		return authority[0]
+	}
+	return sanitizeCacheRefCodeReference(parseMaybeCodeReference(raw))
+}
+
+func codeReferenceClosedIdentityEqual(a, b *CodeReference) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Schema == b.Schema && a.Repository == b.Repository &&
+		a.Revision.Commit == b.Revision.Commit &&
+		a.SymbolKind == b.SymbolKind && a.ChangeKind == b.ChangeKind
+}
+
+func parseMaybeCodeReference(raw any) *CodeReference {
+	if raw == nil {
+		return nil
+	}
+	if ref, ok := raw.(*CodeReference); ok {
+		return sanitizeCacheRefCodeReference(ref)
+	}
+	if ref, ok := raw.(CodeReference); ok {
+		return sanitizeCacheRefCodeReference(&ref)
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	parsed, err := parseCodeReferenceJSON(encoded)
+	if err != nil {
+		return nil
+	}
+	return sanitizeCacheRefCodeReference(parsed)
+}
+
+func sanitizeCacheRefCodeReference(ref *CodeReference) *CodeReference {
+	if ref == nil {
+		return nil
+	}
+	if err := validateCodeReference(*ref); err != nil {
+		return nil
+	}
+	if !cacheRefFreeFormAccepted(ref.FilePath, cacheRefFilePathMax) {
+		return nil
+	}
+	if !cacheRefFreeFormAccepted(ref.QualifiedName, cacheRefQualifiedNameMax) {
+		return nil
+	}
+	if !cacheRefFreeFormAccepted(ref.Repository, cacheRefRepositoryMax) {
+		return nil
+	}
+	out := *ref
+	return &out
+}
+
+func cacheRefFreeFormAccepted(s string, max int) bool {
+	if s == "" || max <= 0 || len(s) > max {
+		return false
+	}
+	for _, r := range s {
+		if r < 32 || r == 127 {
+			return false
+		}
+	}
+	return true
+}
+
+func authorityCodeReferences(db *sql.DB, bundle map[string]any) []*CodeReference {
+	var out []*CodeReference
+	for _, item := range bundleResultMaps(bundle) {
+		id, _ := item["id"].(string)
+		if id == "" || !storedItemContentEligible(db, id) {
+			continue
+		}
+		var metadataJSON string
+		if err := db.QueryRow(`select metadata_json from items where id = ?`, id).Scan(&metadataJSON); err != nil {
+			continue
+		}
+		out = append(out, storedCodeReferences(metadataJSON)...)
+	}
+	return out
+}
+
+func storedCodeReferences(metadataJSON string) []*CodeReference {
+	meta := decodeMetadata(metadataJSON)
+	raw, ok := meta["code_references"]
+	if !ok || raw == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var list []json.RawMessage
+	if err := json.Unmarshal(encoded, &list); err != nil {
+		return nil
+	}
+	var out []*CodeReference
+	for _, item := range list {
+		ref, err := parseCodeReferenceJSON(item)
+		if err != nil {
+			continue
+		}
+		if projected := sanitizeCacheRefCodeReference(ref); projected != nil {
+			out = append(out, projected)
+		}
+	}
+	return out
+}
+
 func decodeMetadata(raw string) map[string]any {
 	if strings.TrimSpace(raw) == "" {
 		return map[string]any{}

@@ -2514,6 +2514,76 @@ func evidenceBundle(db *sql.DB, opts SearchOpts) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	return evidenceBundleFromResults(db, opts, results)
+}
+
+func evidenceBundleFromItemIDs(db *sql.DB, ids []string, opts SearchOpts) (map[string]any, error) {
+	results, err := searchResultsByIDs(db, ids)
+	if err != nil {
+		return nil, err
+	}
+	opts.CodeReference = nil
+	opts.Source = ""
+	opts.Project = ""
+	opts.From = ""
+	opts.To = ""
+	opts.Collection = ""
+	opts.Kind = ""
+	opts.ActorType = ""
+	opts.Tags = ""
+	opts.Query = ""
+	if opts.Limit <= 0 || opts.Limit > 200 {
+		opts.Limit = normalizedSearchLimit(len(ids))
+	}
+	return evidenceBundleFromResults(db, opts, results)
+}
+
+func searchResultsByIDs(db *sql.DB, ids []string) ([]SearchResult, error) {
+	if len(ids) > 200 {
+		ids = ids[:200]
+	}
+	results := make([]SearchResult, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
+			continue
+		}
+		var r SearchResult
+		err := db.QueryRow(`select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), coalesce(substr(i.text,1,240),''), i.content_hash
+from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+left join actors a on a.id = i.actor_id
+where i.id = ? and (`+liveDefaultItemPredicate+`)`, id).Scan(
+			&r.ID, &r.SourceKind, &r.CollectionName, &r.CollectionKind, &r.Kind,
+			&r.ActorType, &r.ActorName, &r.CreatedAt, &r.Snippet, &r.ContentHash)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+func cacheRefItemIDs(ref map[string]any) []string {
+	switch ids := ref["item_ids"].(type) {
+	case []string:
+		return append([]string{}, ids...)
+	case []any:
+		out := make([]string, 0, len(ids))
+		for _, raw := range ids {
+			if id := stringFromAny(raw); id != "" {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	return evidenceBundleItemIDs(ref)
+}
+
+func evidenceBundleFromResults(db *sql.DB, opts SearchOpts, results []SearchResult) (map[string]any, error) {
 	items := make([]map[string]any, 0, len(results))
 	groups := map[string]int{}
 	seenHashes := map[string]bool{}
@@ -2710,52 +2780,64 @@ func materializeEvidenceBundle(id string) (map[string]any, error) {
 		return nil, err
 	}
 	defer db.Close()
-	bundle, err := evidenceBundle(db, opts)
+	var bundle map[string]any
+	if ids := cacheRefItemIDs(ref); len(ids) > 0 {
+		bundle, err = evidenceBundleFromItemIDs(db, ids, opts)
+	} else {
+		opts.CodeReference = nil
+		bundle, err = evidenceBundle(db, opts)
+	}
 	if err != nil {
 		return nil, err
 	}
-	projectMaterializedBundle(bundle, id)
+	projectMaterializedBundle(bundle, id, authorityCodeReferences(db, bundle))
 	return bundle, nil
 }
 
-// projectMaterializedBundle keeps cache-ref fields off the model-facing
-// payload. The cache file is same-UID writable, so query and resource_uri
-// are never copied verbatim: resource_uri is reconstructed from the
-// path-validated id, and query is cleared after the live eligibility regen.
-func projectMaterializedBundle(bundle map[string]any, id string) {
+// projectMaterializedBundle treats the entire cache-ref as untrusted. The
+// cache file is same-UID writable, so no free-form string is copied
+// verbatim onto the model-facing payload: resource_uri is reconstructed
+// from the path-validated id, query is cleared, and filters (including
+// code_reference and collection) are re-derived from eligible ledger
+// records or hard-bounded and allowlist-validated.
+func projectMaterializedBundle(bundle map[string]any, id string, authority []*CodeReference) {
 	bundle["id"] = id
 	bundle["resource_uri"] = evidenceBundleResourceURI(id)
 	bundle["query"] = ""
+	if _, ok := bundle["filters"]; ok {
+		bundle["filters"] = projectUntrustedCacheRefFilters(bundle["filters"], authority)
+	}
 }
 
 func searchOptsFromBundleRef(ref map[string]any) (SearchOpts, error) {
 	filters := anyToMap(ref["filters"])
 	opts := SearchOpts{
-		Query:               boundClosedField(stringFromAny(ref["query"]), cacheRefQueryMax),
-		Source:              boundClosedField(stringFromAny(filters["source"]), ineligibleClosedFieldMax),
-		Collection:          boundClosedField(stringFromAny(filters["collection"]), ineligibleClosedFieldMax),
-		Kind:                boundClosedField(stringFromAny(filters["kind"]), ineligibleClosedFieldMax),
-		ActorType:           boundClosedField(stringFromAny(filters["actor_type"]), ineligibleClosedFieldMax),
-		Project:             boundClosedField(stringFromAny(filters["project"]), ineligibleClosedFieldMax),
-		Tags:                boundClosedField(stringFromAny(filters["tags"]), ineligibleClosedFieldMax),
-		From:                boundClosedField(stringFromAny(filters["from"]), ineligibleClosedFieldMax),
-		To:                  boundClosedField(stringFromAny(filters["to"]), ineligibleClosedFieldMax),
+		Query:               cacheRefSearchString(stringFromAny(ref["query"]), cacheRefQueryMax),
+		Source:              projectCacheRefFilterString("source", stringFromAny(filters["source"])),
+		Collection:          cacheRefSearchString(stringFromAny(filters["collection"]), cacheRefFreeFormMax),
+		Kind:                projectCacheRefFilterString("kind", stringFromAny(filters["kind"])),
+		ActorType:           cacheRefSearchString(stringFromAny(filters["actor_type"]), cacheRefFreeFormMax),
+		Project:             cacheRefSearchString(stringFromAny(filters["project"]), cacheRefFreeFormMax),
+		Tags:                cacheRefSearchString(stringFromAny(filters["tags"]), cacheRefFreeFormMax),
+		From:                cacheRefSearchString(stringFromAny(filters["from"]), cacheRefFreeFormMax),
+		To:                  cacheRefSearchString(stringFromAny(filters["to"]), cacheRefFreeFormMax),
 		Limit:               intFromAny(filters["limit"]),
 		IncludeRelated:      boolFromAny(filters["include_related"]),
 		IncludeArtifactText: boolFromAny(filters["include_artifact_text"]),
 	}
 	if raw, ok := filters["code_reference"]; ok && raw != nil {
-		encoded, err := json.Marshal(raw)
-		if err != nil {
-			return opts, err
+		if reference := parseMaybeCodeReference(raw); reference != nil {
+			opts.CodeReference = reference
 		}
-		reference, err := parseCodeReferenceJSON(encoded)
-		if err != nil {
-			return opts, err
-		}
-		opts.CodeReference = reference
 	}
 	return opts, nil
+}
+
+func cacheRefSearchString(s string, max int) string {
+	if !cacheRefFreeFormAccepted(s, max) {
+		return ""
+	}
+	return s
 }
 
 func evidenceBundleItemIDs(bundle map[string]any) []string {
@@ -2851,10 +2933,10 @@ func listEvidenceBundles() ([]map[string]any, error) {
 			continue
 		}
 		out = append(out, map[string]any{
-			"id":           ref["id"],
-			"resource_uri": ref["resource_uri"],
-			"query":        ref["query"],
-			"generated_at": ref["generated_at"],
+			"id":           id,
+			"resource_uri": evidenceBundleResourceURI(id),
+			"query":        cacheRefSearchString(stringFromAny(ref["query"]), cacheRefQueryMax),
+			"generated_at": cacheRefSearchString(stringFromAny(ref["generated_at"]), ineligibleClosedFieldMax),
 			"result_count": bundleRefResultCount(ref),
 		})
 	}
