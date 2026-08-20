@@ -16,14 +16,14 @@ The README continues to load one local SVG asset. That asset will carry outlined
 **Files:**
 - Create: `tests/test_readme_brand_header.py`
 
-- [ ] Add a focused test that parses `docs/assets/brigade-wordmark.svg` and asserts:
+- [x] Add a focused test that parses `docs/assets/brigade-wordmark.svg` and asserts:
   - the panel uses `#0f1318`, `#2a323d`, and an `8` radius;
   - the wordmark uses `#dde3ea`, the maker line uses `#9aa4b2`, and exactly one element uses amber `#e0a45c`;
   - the amber element is the circle identified as `i-dot`;
   - the SVG contains outlined paths and no `<text>` elements, `Arial`, or the retired blue `#5d8dff`;
   - the title remains `Brigade (by Escoffier Labs)`;
   - `README.md` contains the seven expected `shieldcn.dev` URLs exactly once.
-- [ ] Run RED through Brigade:
+- [x] Run RED through Brigade:
   `brigade work verify run --target . --command "pytest -q tests/test_readme_brand_header.py" --capture brigade-work`
   Expect one failure against the current Arial/blue SVG.
 - [ ] Commit the failing test with `test: lock README brand header`.
