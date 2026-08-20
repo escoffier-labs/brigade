@@ -1,5 +1,6 @@
 //! File indexing: language detection and per-file extraction dispatch.
 
+pub mod astro;
 pub mod common;
 pub mod go;
 pub mod python;
@@ -20,6 +21,7 @@ pub fn language_for(path: &Path) -> Option<Lang> {
     match path.extension().and_then(|e| e.to_str())? {
         "py" => Some(Lang::Python),
         "js" | "jsx" | "ts" | "tsx" => Some(Lang::TypeScript),
+        "astro" => Some(Lang::Astro),
         "rs" => Some(Lang::Rust),
         "go" => Some(Lang::Go),
         _ => None,
@@ -31,6 +33,7 @@ pub fn extractor_fingerprint_for(lang: Lang) -> &'static str {
     match lang {
         Lang::Python => python::EXTRACTOR_FINGERPRINT,
         Lang::TypeScript => typescript::EXTRACTOR_FINGERPRINT,
+        Lang::Astro => astro::EXTRACTOR_FINGERPRINT,
         Lang::Rust => rust::EXTRACTOR_FINGERPRINT,
         Lang::Go => go::EXTRACTOR_FINGERPRINT,
     }
@@ -56,6 +59,7 @@ pub fn index_file(root: &Path, path: &Path, lang: Lang) -> Result<FileGraph> {
     let mut graph = match lang {
         Lang::Python => python::extract_python(&rel, &content, &hash)?,
         Lang::TypeScript => typescript::extract_typescript(&rel, &content, &hash)?,
+        Lang::Astro => astro::extract_astro(&rel, &content, &hash)?,
         Lang::Rust => rust::extract_rust(&rel, &content, &hash)?,
         Lang::Go => go::extract_go(&rel, &content, &hash)?,
     };
@@ -63,4 +67,23 @@ pub fn index_file(root: &Path, path: &Path, lang: Lang) -> Result<FileGraph> {
     graph.size = metadata.len();
     graph.modified_at = modified_at;
     Ok(graph)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn language_for_maps_astro_and_skips_css() {
+        assert!(matches!(
+            language_for(Path::new("src/layouts/Page.astro")),
+            Some(Lang::Astro)
+        ));
+        assert!(language_for(Path::new("src/styles/global.css")).is_none());
+        assert!(matches!(
+            language_for(Path::new("src/app.ts")),
+            Some(Lang::TypeScript)
+        ));
+    }
 }

@@ -29,6 +29,9 @@ MESSAGE_WRAP_MAX_BYTES = 20_000
 SOURCE_SYSTEM = "run"
 ASSIGNED_BY = "ingest:message_envelope.emit"
 BRIGADE_SEAT = "brigade"
+IN_MEMORY_RUN_ID = "in-memory"
+MESSAGE_BINDING_KEY = "message"
+MESSAGE_BINDING_FIELDS = ("run_id", "message_id", "assignment_id", "from_seat", "to_seat")
 
 MESSAGE_KINDS = frozenset(
     {
@@ -114,6 +117,39 @@ def _safe_harness(value: str | None) -> str | None:
 
 def phase_for(kind: str) -> str:
     return KIND_PHASE.get(kind, "work")
+
+
+def assignment_id_for(worker: str, task: str) -> str:
+    """Stable assignment identity derived from the assigned seat and task text."""
+
+    worker_label = _safe_label(worker, "worker")
+    digest = provenance.content_sha256(f"{worker_label}\n{task}")[:12]
+    return _safe_label(f"{worker_label}-{digest}", "assignment")
+
+
+def default_assignment_id(kind: str) -> str:
+    if kind.startswith("plan"):
+        return "plan"
+    if kind.startswith("synthesis"):
+        return "synthesis"
+    return "worker"
+
+
+def message_binding(env: Mapping[str, Any] | None) -> dict[str, str] | None:
+    """Return the authenticated run/seat/message binding, or None if unbound."""
+
+    if not isinstance(env, Mapping):
+        return None
+    raw = env.get(MESSAGE_BINDING_KEY)
+    if not isinstance(raw, Mapping):
+        return None
+    binding: dict[str, str] = {}
+    for key in MESSAGE_BINDING_FIELDS:
+        value = raw.get(key)
+        if not isinstance(value, str) or not value:
+            return None
+        binding[key] = value
+    return binding
 
 
 def message_envelopes_path(run_dir: Path) -> Path:
@@ -259,20 +295,27 @@ def admit_message(
     *,
     kind: str | None = None,
     producer: str | None = None,
+    run_id: str | None = None,
+    message_id: str | None = None,
+    assignment_id: str | None = None,
+    from_seat: str | None = None,
+    to_seat: str | None = None,
 ) -> MessageDelivery:
-    """Verify hash, channel, trust, scan state, and schema before delivery."""
+    """Verify hash, channel, identity, trust, scan state, and schema before delivery."""
 
     display = ""
     if not isinstance(env, Mapping):
         env, display = synthesize_legacy_message_provenance()
     envelope = dict(env)
-    message_id = _safe_label(str(envelope.get("item_id") or ""), f"legacy-{uuid4().hex[:8]}")
+    claimed_message_id = _safe_label(str(envelope.get("item_id") or ""), f"legacy-{uuid4().hex[:8]}")
+    from_label = _safe_label(from_seat, "") if isinstance(from_seat, str) and from_seat else ""
+    to_label = _safe_label(to_seat, "") if isinstance(to_seat, str) and to_seat else ""
     if not isinstance(kind, str) or not kind:
         return MessageDelivery(
-            message_id=message_id,
+            message_id=claimed_message_id,
             phase="work",
-            from_seat="",
-            to_seat="",
+            from_seat=from_label,
+            to_seat=to_label,
             kind="",
             envelope=envelope,
             delivered=False,
@@ -281,22 +324,52 @@ def admit_message(
         )
     if producer is None:
         return MessageDelivery(
-            message_id=message_id,
+            message_id=claimed_message_id,
             phase=phase_for(kind),
-            from_seat="",
-            to_seat="",
+            from_seat=from_label,
+            to_seat=to_label,
             kind=kind,
             envelope=envelope,
             delivered=False,
             reason="receive gate requires an explicit producer",
             display=display,
         )
-    reason = _rejection_reason(text, envelope, kind=kind, producer=producer)
-    return MessageDelivery(
+    if not _has_expected_identity(
+        run_id=run_id,
         message_id=message_id,
+        assignment_id=assignment_id,
+        from_seat=from_seat,
+        to_seat=to_seat,
+    ):
+        return MessageDelivery(
+            message_id=claimed_message_id,
+            phase=phase_for(kind),
+            from_seat=from_label,
+            to_seat=to_label,
+            kind=kind,
+            envelope=envelope,
+            delivered=False,
+            reason="receive gate requires expected run, message, assignment, and seat identity",
+            display=display,
+        )
+    assert run_id is not None and message_id is not None
+    assert assignment_id is not None and from_seat is not None and to_seat is not None
+    reason = _rejection_reason(
+        text,
+        envelope,
+        kind=kind,
+        producer=producer,
+        run_id=run_id,
+        message_id=message_id,
+        assignment_id=assignment_id,
+        from_seat=from_seat,
+        to_seat=to_seat,
+    )
+    return MessageDelivery(
+        message_id=claimed_message_id,
         phase=phase_for(kind),
-        from_seat="",
-        to_seat="",
+        from_seat=from_label,
+        to_seat=to_label,
         kind=kind,
         envelope=envelope,
         delivered=reason is None,
@@ -305,12 +378,60 @@ def admit_message(
     )
 
 
+def _has_expected_identity(
+    *,
+    run_id: str | None,
+    message_id: str | None,
+    assignment_id: str | None,
+    from_seat: str | None,
+    to_seat: str | None,
+) -> bool:
+    return all(isinstance(value, str) and value for value in (run_id, message_id, assignment_id, from_seat, to_seat))
+
+
+def _identity_reason(
+    env: Mapping[str, Any],
+    *,
+    run_id: str,
+    message_id: str,
+    assignment_id: str,
+    from_seat: str,
+    to_seat: str,
+) -> str | None:
+    binding = message_binding(env)
+    if binding is None:
+        return "envelope is not bound to run, message, assignment, and seat identity"
+    expected = {
+        "run_id": run_id,
+        "message_id": message_id,
+        "assignment_id": assignment_id,
+        "from_seat": from_seat,
+        "to_seat": to_seat,
+    }
+    for key, want in expected.items():
+        got = binding.get(key)
+        if got != want:
+            return f"envelope {key} {got!r} does not match expected {want!r}"
+    raw_session = env.get("session")
+    session: Mapping[str, Any] = raw_session if isinstance(raw_session, Mapping) else {}
+    if session.get("id") != run_id:
+        return f"envelope session.id {session.get('id')!r} does not match expected run_id {run_id!r}"
+    if env.get("item_id") != message_id:
+        return f"envelope item_id {env.get('item_id')!r} does not match expected message_id {message_id!r}"
+    return None
+
+
 def _rejection_reason(
     text: str,
     env: Mapping[str, Any],
     *,
     kind: str,
     producer: str,
+    run_id: str,
+    message_id: str,
+    assignment_id: str,
+    from_seat: str,
+    to_seat: str,
 ) -> str | None:
     errors = provenance.validate_envelope(env, inbound_adapter=True)
     if errors:
@@ -347,7 +468,14 @@ def _rejection_reason(
         return f"unknown message kind {kind!r}"
     if producer not in ALLOWLISTED_PRODUCERS:
         return f"producer {producer!r} is not an allowlisted inter-seat producer"
-    return None
+    return _identity_reason(
+        env,
+        run_id=run_id,
+        message_id=message_id,
+        assignment_id=assignment_id,
+        from_seat=from_seat,
+        to_seat=to_seat,
+    )
 
 
 def emit(
@@ -359,6 +487,7 @@ def emit(
     to_seat: str,
     run_dir: Path | None = None,
     run_id: str | None = None,
+    assignment_id: str | None = None,
     session_harness: str | None = None,
     repository_id: str = "workspace",
     repository_revision: str | None = None,
@@ -368,10 +497,11 @@ def emit(
     if kind not in MESSAGE_KINDS:
         raise ValueError(f"unknown message kind {kind!r}; expected one of {sorted(MESSAGE_KINDS)}")
     now = localio.utc_now_iso()
-    resolved_run_id = _safe_label(run_id or (run_dir.name if run_dir is not None else None), "in-memory")
+    resolved_run_id = _safe_label(run_id or (run_dir.name if run_dir is not None else None), IN_MEMORY_RUN_ID)
     message_id = _safe_label(f"{kind}-{uuid4().hex[:12]}", f"message-{uuid4().hex[:12]}")
     from_label = _safe_label(from_seat, BRIGADE_SEAT)
     to_label = _safe_label(to_seat, BRIGADE_SEAT)
+    resolved_assignment_id = _safe_label(assignment_id or default_assignment_id(kind), "assignment")
     if kind in RESULT_KINDS:
         origin = "agent-session"
         modality = "model-generated"
@@ -414,6 +544,13 @@ def emit(
             captured_at=now,
             ingested_at=now,
         )
+        envelope[MESSAGE_BINDING_KEY] = {
+            "run_id": resolved_run_id,
+            "message_id": message_id,
+            "assignment_id": resolved_assignment_id,
+            "from_seat": from_label,
+            "to_seat": to_label,
+        }
     except ValueError as exc:
         env, display = synthesize_legacy_message_provenance()
         delivery = MessageDelivery(
@@ -431,7 +568,17 @@ def emit(
             append_message_receipt(run_dir, delivery)
         return delivery
 
-    reason = _rejection_reason(text, envelope, kind=kind, producer=producer)
+    reason = _rejection_reason(
+        text,
+        envelope,
+        kind=kind,
+        producer=producer,
+        run_id=resolved_run_id,
+        message_id=message_id,
+        assignment_id=resolved_assignment_id,
+        from_seat=from_label,
+        to_seat=to_label,
+    )
     display = LEGACY_MESSAGE_DISPLAY if reason and provenance.is_legacy_unknown(envelope) else ""
     delivery = MessageDelivery(
         message_id=message_id,

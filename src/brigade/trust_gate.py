@@ -213,6 +213,36 @@ def resolve_pending_injection(text: str, env: Mapping[str, Any]) -> tuple[dict[s
     return updated, new_status
 
 
+def admission_integrity_blocker(
+    record: Mapping[str, Any] | None,
+    *,
+    require_complete_envelope: bool = True,
+    env: Mapping[str, Any] | None = None,
+    text: str | None = None,
+) -> str | None:
+    """Return a reason when envelope, digest, or redaction integrity fails.
+
+    Promotion requires a complete envelope, a present exact content-digest
+    match against current body bytes, and a redaction record that still
+    describes those bytes. Other admissions still require the digest match
+    so a same-UID rewrite of stored text cannot emit the replacement body.
+    """
+
+    resolved_env = dict(env) if isinstance(env, Mapping) else envelope_from_record(record)
+    body = text if isinstance(text, str) else item_body_text(record)
+    if require_complete_envelope:
+        if provenance.validate_envelope(resolved_env):
+            return "envelope is missing or malformed"
+        redaction_errors = provenance.verify_redaction_against_bytes(body, resolved_env)
+        if redaction_errors:
+            if any("does not match current item text" in error for error in redaction_errors):
+                return "redaction record does not match current item text"
+            return "redaction record is missing or malformed"
+    if not provenance.verify_content_digest(body, resolved_env, require_present=True):
+        return "envelope content hash does not match current item text"
+    return None
+
+
 def admit_consumer(record: Mapping[str, Any] | None, *, entitlement: str) -> ConsumerAdmission:
     """Decide whether a record may enter a content-emitting consumer."""
 
@@ -241,6 +271,22 @@ def admit_consumer(record: Mapping[str, Any] | None, *, entitlement: str) -> Con
             envelope=env,
             reason=f"trust label {label} is excluded from {entitlement}",
         )
+    integrity = admission_integrity_blocker(
+        record,
+        require_complete_envelope=(entitlement == "promote"),
+        env=env,
+        text=text,
+    )
+    if integrity:
+        metadata_only = entitlement in {"brief", "brief_wrapped", "show", "search"}
+        return ConsumerAdmission(
+            label=label,
+            allowed=metadata_only,
+            body_mode="metadata" if metadata_only else "omit",
+            injection_status=status,
+            envelope=env,
+            reason=integrity,
+        )
     if entitlement == "brief" and allows(label, "brief") and status == "clean":
         return ConsumerAdmission(label=label, allowed=True, body_mode="full", injection_status=status, envelope=env)
     if entitlement in {"brief", "brief_wrapped"} and allows(label, "brief_wrapped") and status == "clean":
@@ -267,6 +313,9 @@ def admit_consumer(record: Mapping[str, Any] | None, *, entitlement: str) -> Con
 
 
 def promotion_blocker(record: Mapping[str, Any] | None) -> str | None:
+    integrity = admission_integrity_blocker(record, require_complete_envelope=True)
+    if integrity:
+        return integrity
     admission = admit_consumer(record, entitlement="promote")
     if admission.label in {"unknown", "quarantined"}:
         return f"trust label {admission.label} cannot be promoted"
@@ -560,6 +609,8 @@ def review_item_ref(
     expected_hash: str,
     *,
     operator_command: str = OPERATOR_REVIEW,
+    to_label: str = "reviewed",
+    mark_injection_clean: bool = False,
 ) -> dict[str, Any]:
     parsed = parse_item_ref(item_ref)
     if parsed is None:
@@ -576,7 +627,14 @@ def review_item_ref(
         return review_research_finding(
             target, run_id, int(index_text), expected_hash, operator_command=operator_command
         )
-    return review_miseledger_item(target, ident, expected_hash, operator_command=operator_command)
+    return review_miseledger_item(
+        target,
+        ident,
+        expected_hash,
+        operator_command=operator_command,
+        to_label=to_label,
+        mark_injection_clean=mark_injection_clean,
+    )
 
 
 def notify_miseledger_trust(
@@ -586,12 +644,22 @@ def notify_miseledger_trust(
     *,
     to_label: str,
     operator_command: str,
+    mark_injection_clean: bool = False,
 ) -> None:
-    from . import component_bins
+    from . import authority_broker, component_bins
 
     binary = component_bins.resolve("miseledger")
     if binary is None:
         raise TrustReviewError("miseledger binary is not available")
+    secret = authority_broker.new_capability_secret()
+    capability = authority_broker.mint_trust_capability(
+        secret,
+        item_id=item_id,
+        from_digest=expected_hash,
+        to_label=to_label,
+        mark_injection_clean=mark_injection_clean,
+    )
+    handoff = authority_broker.encode_handoff(secret, capability)
     command = [
         binary,
         "trust",
@@ -606,6 +674,12 @@ def notify_miseledger_trust(
         operator_command,
         "--json",
     ]
+    if mark_injection_clean:
+        command.append("--mark-injection-clean")
+    child_env = os.environ.copy()
+    child_env["BRIGADE_REQUIRE_TRUST_CAPABILITY"] = "1"
+    for leaked in ("BRIGADE_CAPABILITY_SECRET", "BRIGADE_TRUST_CAPABILITY"):
+        child_env.pop(leaked, None)
     try:
         completed = subprocess.run(
             command,
@@ -614,7 +688,8 @@ def notify_miseledger_trust(
             timeout=30,
             cwd=target,
             check=False,
-            stdin=subprocess.DEVNULL,
+            input=handoff.decode("ascii"),
+            env=child_env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise TrustReviewError(f"miseledger trust review failed: {exc}") from exc
@@ -631,6 +706,7 @@ def review_miseledger_item(
     to_label: str = "reviewed",
     operator_command: str = OPERATOR_REVIEW,
     evidence: Mapping[str, Any] | None = None,
+    mark_injection_clean: bool = False,
 ) -> dict[str, Any]:
     expected = _require_digest(expected_hash)
     item_ref = f"{ITEM_REF_MISELEDGER}{item_id}"
@@ -642,6 +718,7 @@ def review_miseledger_item(
         expected,
         to_label=to_label,
         operator_command=operator_command,
+        mark_injection_clean=mark_injection_clean,
     )
     event = build_provenance_event(
         item_ref=item_ref,

@@ -106,6 +106,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_sweep.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_sweep.add_argument(
+        "--isolated-scanners",
+        action="store_true",
+        help="Run scanner children in a user/mount namespace so they cannot read the parent authority key. POSIX only.",
+    )
+    p_work_sweep.add_argument(
         "sweep_args", nargs="*", help="Use `closeout <sweep-id|latest>` to mark a sweep reviewed."
     )
     p_work_sweeps = work_sub.add_parser("sweeps", help="List scanner sweep reports.")
@@ -347,6 +352,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Validate and ingest configured JSONL output after successful runs.",
     )
     p_work_scanners_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_scanners_run.add_argument(
+        "--isolated-scanners",
+        action="store_true",
+        help="Run scanner children in a user/mount namespace so they cannot read the parent authority key. POSIX only; unavailable platforms stay on the crypto tier and fail this flag.",
+    )
     p_work_scanners_runs = scanners_sub.add_parser("runs", help="List local scanner run receipts.")
     p_work_scanners_runs.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
