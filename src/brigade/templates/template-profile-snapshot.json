@@ -709,10 +709,10 @@
         "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
       },
       {
-        "byte_size": 11823,
+        "byte_size": 10922,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "87dd1344f69c9c78075fcac94c62b9f032b98ecef3c79c44d28fb2985c106253"
+        "sha256": "2fb3c607a95a24be46aece389e0ba561997b29c7a0828052095aa0dd2cf514cf"
       },
       {
         "byte_size": 3226,
@@ -739,10 +739,10 @@
         "sha256": "3a7e9a3aa2677f0c2d5bcff46a3e7b65414deaa3fffb397b41dd5cb015bc6d0d"
       },
       {
-        "byte_size": 4873,
+        "byte_size": 5029,
         "dst": "MEMORY.md",
         "rendered": true,
-        "sha256": "d08485c9c00bb4e6d3811e71d49871a76372a8c4b960d89492cab2e2b814c2db"
+        "sha256": "ca7f05484bfe59a596bd73e622722ed3fc10ff4e6096c2dca018d560528798b9"
       },
       {
         "byte_size": 6331,
@@ -839,6 +839,12 @@
         "dst": "memory/cards/token-glace-output-compaction.md",
         "rendered": true,
         "sha256": "5f8898d45696a8186ab2cf756553e9d3d655ce1da46d633c5fd5c6844883a43c"
+      },
+      {
+        "byte_size": 1292,
+        "dst": "memory/cards/workspace-file-maintenance.md",
+        "rendered": true,
+        "sha256": "e210150b51aa01baad0ec3fb79a6d3b0758019ccdf60cc5eadef7e50a1fe858f"
       },
       {
         "byte_size": 1121,

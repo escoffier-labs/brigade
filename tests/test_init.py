@@ -201,6 +201,7 @@ def test_workspace_install_includes_memory_cards(tmp_target: Path):
         "pipeline-standups.md",
         "obsidian-notes.md",
         "backup-restic.md",
+        "workspace-file-maintenance.md",
     ):
         assert (tmp_target / "memory" / "cards" / card).is_file(), f"missing card {card}"
     assert (tmp_target / "memory" / "handoff-inbox").is_dir()
