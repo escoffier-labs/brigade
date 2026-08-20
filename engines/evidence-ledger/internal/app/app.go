@@ -2564,6 +2564,9 @@ where i.id = ? and (`+liveDefaultItemPredicate+`)`, id).Scan(
 		}
 		results = append(results, r)
 	}
+	if err := applySearchIntegrity(db, results); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -2648,7 +2651,12 @@ where i.id = ?`, r.ID)
 			}
 		}
 		items = append(items, item)
-		groups[r.SourceKind]++
+		// Facet keys are a second copy of source_kind. Count the same
+		// allowlist-redacted value the item projection emits, never the
+		// raw sources.kind column.
+		if kind := stringFromAny(item["source_kind"]); kind != "" {
+			groups[kind]++
+		}
 	}
 	integrityOmitted := 0
 	for _, item := range items {

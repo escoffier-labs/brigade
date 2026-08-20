@@ -505,15 +505,25 @@ func redactIneligibleBundleItem(item map[string]any) {
 	item["snippet"] = ""
 	item["source_kind"] = allowlistedProjectionField(stringFromAny(item["source_kind"]), projectionSourceKinds)
 	item["kind"] = allowlistedProjectionField(stringFromAny(item["kind"]), projectionItemKinds)
+	// items.external_id, collections.external_id, actors.external_id, and
+	// raw_ref.path are source-controlled strings, not opaque ledger ids.
+	// The item id stays; these locators are dropped for ineligible hits.
+	delete(item, "external_id")
 	if col := anyToMap(item["collection"]); len(col) > 0 || item["collection"] != nil {
 		col["name"] = ""
 		col["kind"] = allowlistedProjectionField(stringFromAny(col["kind"]), projectionCollectionKinds)
+		delete(col, "external_id")
 		item["collection"] = col
 	}
 	if actor := anyToMap(item["actor"]); len(actor) > 0 || item["actor"] != nil {
 		actor["name"] = ""
 		actor["type"] = ""
+		delete(actor, "external_id")
 		item["actor"] = actor
+	}
+	if rawRef := anyToMap(item["raw_ref"]); len(rawRef) > 0 || item["raw_ref"] != nil {
+		delete(rawRef, "path")
+		item["raw_ref"] = rawRef
 	}
 }
 
