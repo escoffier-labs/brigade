@@ -598,46 +598,112 @@ var cacheRefSearchOptJSONPaths = map[string]string{
 	"Tags":       "filters.tags",
 }
 
-// sanitizeModelFacingEvidence is the exclusive writer of every
-// cache-ref-derived field on a model-facing evidence payload. Every
-// projection — materializeEvidenceBundle (item_ids and no-item_ids),
-// evidence show / MCP show_evidence_bundle, and listEvidenceBundles —
-// must call this and must not copy query/filters/generated_at/
-// resource_uri from a cache-ref onto the payload itself.
+// sanitizeModelFacingEvidence is the exclusive, last writer of every
+// model-facing evidence payload. Every projection —
+// materializeEvidenceBundle (item_ids and no-item_ids), evidence show /
+// MCP show_evidence_bundle, and listEvidenceBundles — must call this
+// immediately before return or serialize and must not copy any
+// cache-ref-derived field (including id / resource_uri from a cache
+// filename) onto the payload afterward.
 //
-// For ineligible/quarantined items the entire cache-ref-derived
-// envelope is dropped: query is empty, filters are emptied, and
-// generated_at is cleared. Bounding is not an injection control; a
-// 200-byte attacker string must not survive. Eligible items keep an
-// allowlist-validated reconstruction of filters (query stays empty so
-// a planted cache-ref query cannot echo). Unknown keys at any depth
-// are deleted, so a newly added attacker-writable field cannot bypass
-// this function.
+// The function wipes the incoming map, then writes fields only AFTER
+// the eligibility decision. A pre-gate assignment cannot survive: even
+// payload id and resource_uri sourced from entry.Name() are dropped
+// unless they pass the bundle-id allowlist. Bounding is not an
+// injection control; a 200-byte attacker string must not survive.
+// Eligible items keep an allowlist-validated reconstruction of filters
+// (query stays empty so a planted cache-ref query cannot echo).
 func sanitizeModelFacingEvidence(payload map[string]any, id string, authority []*CodeReference, eligible bool) {
 	if payload == nil {
 		return
 	}
+	live := snapshotLiveEvidenceFields(payload)
+	liveID := allowlistedEvidenceBundleID(stringFromAny(payload["id"]))
+	_, hasFilters := payload["filters"]
+	dirtyFilters := payload["filters"]
+	_, hasGenerated := payload["generated_at"]
+	dirtyGenerated := payload["generated_at"]
+
+	for key := range payload {
+		delete(payload, key)
+	}
+
+	src := map[string]any{"query": ""}
+	if hasFilters {
+		src["filters"] = sanitizeCacheRefFilters(dirtyFilters, authority, eligible)
+	}
+	if hasGenerated {
+		src["generated_at"] = ""
+		if eligible {
+			src["generated_at"] = projectCacheRefTimestamp(stringFromAny(dirtyGenerated))
+		}
+	}
+	projectCacheRefModelFacing(payload, src, eligible)
+	projectEvidenceBundleIdentity(payload, id, liveID)
+	restoreLiveEvidenceFields(payload, live)
 	for key := range payload {
 		if _, ok := modelFacingEvidenceLiveKeys[key]; !ok {
 			delete(payload, key)
 		}
 	}
-	payload["id"] = id
-	payload["resource_uri"] = evidenceBundleResourceURI(id)
-	if raw, ok := payload["result_count"]; ok {
-		payload["result_count"] = intFromAny(raw)
-	}
-	src := map[string]any{"query": ""}
-	if _, ok := payload["filters"]; ok {
-		src["filters"] = sanitizeCacheRefFilters(payload["filters"], authority, eligible)
-	}
-	if _, ok := payload["generated_at"]; ok {
-		src["generated_at"] = ""
-		if eligible {
-			src["generated_at"] = projectCacheRefTimestamp(stringFromAny(payload["generated_at"]))
+}
+
+const evidenceBundleIDHexLen = 24
+
+func snapshotLiveEvidenceFields(payload map[string]any) map[string]any {
+	live := map[string]any{}
+	for _, key := range []string{
+		"untrusted_context", "results", "grouped_by_source",
+		"integrity_omitted", "integrity_mismatches", "warnings", "result_count",
+	} {
+		if value, ok := payload[key]; ok {
+			live[key] = value
 		}
 	}
-	projectCacheRefModelFacing(payload, src, eligible)
+	return live
+}
+
+func restoreLiveEvidenceFields(payload, live map[string]any) {
+	for key, value := range live {
+		if key == "result_count" {
+			payload[key] = intFromAny(value)
+			continue
+		}
+		payload[key] = value
+	}
+}
+
+// allowlistedEvidenceBundleID accepts only the 24-hex ids minted by
+// evidenceBundleID. Cache filenames and planted cache-ref id strings
+// are not identities.
+func allowlistedEvidenceBundleID(id string) string {
+	if len(id) != evidenceBundleIDHexLen {
+		return ""
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
+			continue
+		}
+		return ""
+	}
+	return id
+}
+
+// projectEvidenceBundleIdentity writes id and resource_uri only after
+// the eligibility gate has already run. A cache filename or planted
+// cache-ref id that is not a 24-hex bundle id is dropped, so a
+// pre-gate assignment of entry.Name() cannot reach the model.
+func projectEvidenceBundleIdentity(payload map[string]any, requestedID, liveID string) {
+	clean := allowlistedEvidenceBundleID(requestedID)
+	if clean == "" {
+		clean = allowlistedEvidenceBundleID(liveID)
+	}
+	if clean == "" {
+		return
+	}
+	payload["id"] = clean
+	payload["resource_uri"] = evidenceBundleResourceURI(clean)
 }
 
 // sanitizeCacheRefFilters recursively drops or allowlist-validates every

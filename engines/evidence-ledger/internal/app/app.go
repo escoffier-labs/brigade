@@ -2798,6 +2798,9 @@ func materializeEvidenceBundle(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Last transform on both item_ids and no-item_ids branches.
+	// evidence show / MCP show_evidence_bundle serialize this map
+	// with no further field copies.
 	applyModelFacingEvidenceSanitizer(bundle, id, db)
 	return bundle, nil
 }
@@ -2806,7 +2809,7 @@ func materializeEvidenceBundle(id string) (map[string]any, error) {
 // both materializeEvidenceBundle branches. Live regen may have copied
 // SearchOpts (including cache-ref-derived filters.project/from/to on
 // the no-item_ids path) onto the bundle; the sanitizer is the exclusive
-// writer of that envelope.
+// last writer of that envelope, including id / resource_uri.
 func applyModelFacingEvidenceSanitizer(bundle map[string]any, id string, db *sql.DB) {
 	eligible := cacheRefItemsEligible(db, evidenceBundleItemIDs(bundle))
 	sanitizeModelFacingEvidence(bundle, id, authorityCodeReferences(db, bundle), eligible)
@@ -2950,30 +2953,44 @@ func listEvidenceBundles() ([]map[string]any, error) {
 		db = opened
 		return db
 	}
-	out := []map[string]any{}
+	type listedRef struct {
+		filename    string
+		generatedAt any
+		resultCount int
+		eligible    bool
+	}
+	raw := []listedRef{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		id := strings.TrimSuffix(entry.Name(), ".json")
-		ref, err := loadEvidenceBundleRef(id)
+		filename := strings.TrimSuffix(entry.Name(), ".json")
+		ref, err := loadEvidenceBundleRef(filename)
 		if err != nil {
 			continue
 		}
-		eligible := cacheRefItemsEligible(ensureDB(), cacheRefItemIDs(ref))
-		// Do not copy query (or any other attacker-writable cache-ref
-		// string) onto the row. The sanitizer is the exclusive writer
-		// of that envelope.
-		row := map[string]any{
-			"generated_at": ref["generated_at"],
-			"result_count": bundleRefResultCount(ref),
-		}
-		sanitizeModelFacingEvidence(row, id, nil, eligible)
-		out = append(out, row)
+		raw = append(raw, listedRef{
+			filename:    filename,
+			generatedAt: ref["generated_at"],
+			resultCount: bundleRefResultCount(ref),
+			eligible:    cacheRefItemsEligible(ensureDB(), cacheRefItemIDs(ref)),
+		})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return fmt.Sprint(out[i]["generated_at"]) > fmt.Sprint(out[j]["generated_at"])
+	sort.Slice(raw, func(i, j int) bool {
+		return fmt.Sprint(raw[i].generatedAt) > fmt.Sprint(raw[j].generatedAt)
 	})
+	out := make([]map[string]any, 0, len(raw))
+	for _, row := range raw {
+		// Do not copy filename, query, or any other attacker-writable
+		// cache-ref string onto the payload. The sanitizer is the
+		// last transform and the exclusive writer of that envelope.
+		payload := map[string]any{
+			"generated_at": row.generatedAt,
+			"result_count": row.resultCount,
+		}
+		sanitizeModelFacingEvidence(payload, row.filename, nil, row.eligible)
+		out = append(out, payload)
+	}
 	return out, nil
 }
 

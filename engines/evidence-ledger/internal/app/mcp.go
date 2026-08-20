@@ -303,6 +303,9 @@ func mcpEvidenceShow(args map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// materializeEvidenceBundle already ran the eligibility sanitizer
+	// as its last transform. Serialize immediately; do not copy any
+	// further cache-ref fields onto the payload.
 	return mcpTextResult(bundle), nil
 }
 
