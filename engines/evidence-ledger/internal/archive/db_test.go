@@ -211,8 +211,8 @@ values('item-v3','src1','col1','legacy:item','message',?,?,?,'sha256:aaaaaaaaaaa
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 {
-		t.Fatalf("user_version=%d want 4", version)
+	if version != SchemaVersion {
+		t.Fatalf("user_version=%d want %d", version, SchemaVersion)
 	}
 	var name string
 	if err := reopened.QueryRow(`select name from sqlite_master where type='table' and name='provenance_events'`).Scan(&name); err != nil {

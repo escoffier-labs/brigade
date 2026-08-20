@@ -267,14 +267,18 @@ def test_skills_sync_restores_all_outputs_after_projection_write_failure(tmp_pat
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
     capsys.readouterr()
 
-    real_write = projection.localio.write_bytes_atomic
+    real_write = projection._publish_bytes_via_parent
+    cursor_parent = tmp_path / ".cursor" / "skills" / "partial"
 
-    def fail_cursor_bundle(path, data):
-        if ".cursor" in path.parts and path.name == "SKILL.md":
-            raise OSError("simulated cursor write failure")
-        return real_write(path, data)
+    def fail_cursor_bundle(parent_fd: int, name: str, data: bytes) -> None:
+        if name == "SKILL.md" and cursor_parent.exists():
+            parent_info = os.fstat(parent_fd)
+            expected = os.stat(cursor_parent)
+            if (parent_info.st_dev, parent_info.st_ino) == (expected.st_dev, expected.st_ino):
+                raise OSError("simulated cursor write failure")
+        return real_write(parent_fd, name, data)
 
-    monkeypatch.setattr(projection.localio, "write_bytes_atomic", fail_cursor_bundle)
+    monkeypatch.setattr(projection, "_publish_bytes_via_parent", fail_cursor_bundle)
     assert skills_cmd.sync(workspace=tmp_path, harness="all", trust="workspace", write=True, json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
     rows = {(row["skill_id"], row["harness"]): row for row in payload["items"]}

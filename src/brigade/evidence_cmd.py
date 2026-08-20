@@ -1147,12 +1147,20 @@ def trust_review(
     item_ref: str,
     content_hash: str,
     json_output: bool = False,
+    to_label: str = "reviewed",
+    mark_injection_clean: bool = False,
 ) -> int:
     from . import trust_gate
 
     target = target.expanduser().resolve()
     try:
-        payload = trust_gate.review_item_ref(target, item_ref, content_hash)
+        payload = trust_gate.review_item_ref(
+            target,
+            item_ref,
+            content_hash,
+            to_label=to_label,
+            mark_injection_clean=mark_injection_clean,
+        )
     except trust_gate.TrustReviewError as exc:
         if json_output:
             print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))

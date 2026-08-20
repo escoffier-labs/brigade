@@ -389,3 +389,30 @@ def test_explicit_style_rejects_mixed_stamped_markers():
     )
     assert plan.status == managed_block.STATUS_MALFORMED
     assert plan.action == managed_block.ACTION_PRESERVE
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="parent-swap probe requires POSIX O_NOFOLLOW",
+)
+def test_write_text_nofollow_atomic_parent_swap_does_not_escape(tmp_path: Path) -> None:
+    """Mutation probe for #1013: a swapped parent must not receive the write.
+
+    Stays red if write_text_nofollow_atomic is restored to path.parent.mkdir
+    plus tempfile.mkstemp(dir=path.parent).
+    """
+    parent = tmp_path / "home" / ".claude"
+    parent.mkdir(parents=True)
+    dest = parent / "CLAUDE.md"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original = tmp_path / "claude.original"
+    parent.rename(original)
+    parent.symlink_to(outside, target_is_directory=True)
+
+    outcome = managed_block.write_text_nofollow_atomic(dest, "escaped-via-parent-swap\n")
+
+    assert outcome.status != managed_block.WRITE_WRITTEN
+    assert not (outside / "CLAUDE.md").exists()
+    assert list(outside.iterdir()) == []
+    assert not (original / "CLAUDE.md").exists()

@@ -268,6 +268,7 @@ pub enum Direction {
 pub enum Lang {
     Python,
     TypeScript,
+    Astro,
     Rust,
     Go,
 }
@@ -278,6 +279,7 @@ impl Lang {
         match self {
             Lang::Python => "python",
             Lang::TypeScript => "typescript",
+            Lang::Astro => "astro",
             Lang::Rust => "rust",
             Lang::Go => "go",
         }
