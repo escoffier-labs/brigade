@@ -196,6 +196,7 @@ def test_task_plan_write_creates_both_artifacts_with_full_schema(tmp_path, capsy
 
     receipt = json.loads(json_path.read_text())
     expected_keys = {
+        "schema",
         "task_id",
         "kind",
         "title",
@@ -211,6 +212,8 @@ def test_task_plan_write_creates_both_artifacts_with_full_schema(tmp_path, capsy
         "next_command",
         "receipt_paths",
         "research_runs",
+        "generation",
+        "digest",
     }
     assert set(receipt.keys()) == expected_keys
     assert receipt["task_id"] == task_id

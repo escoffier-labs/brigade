@@ -113,6 +113,16 @@ def _edge_identity(source: str, target: str, edge_type: str) -> tuple[str, str, 
     return source, target, edge_type
 
 
+def _is_exact_edge_type(value: object) -> bool:
+    """True only for an exact known type token (no strip, no casefold)."""
+    return isinstance(value, str) and value in EDGE_TYPES
+
+
+def _is_unknown_edge_type(value: object) -> bool:
+    """True when a stored type is missing or not an exact ``EDGE_TYPES`` token."""
+    return not _is_exact_edge_type(value)
+
+
 def _normalize_edge_record(raw: object, *, require_id: bool = False) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -123,15 +133,16 @@ def _normalize_edge_record(raw: object, *, require_id: bool = False) -> dict[str
         return None
     if not isinstance(target, str) or not target.strip():
         return None
-    # Preserve hand-edited unknown types across rewrite; mutation APIs still
-    # validate via ``_normalize_edge_type``. Unknown types never participate in
-    # readiness or cycle detection (see ``READINESS_EDGE_TYPES``).
-    if not isinstance(edge_type, str) or not edge_type.strip():
-        return None
+    # Preserve the exact stored type. Do not strip or casefold during
+    # normalize: that would be an implicit compatibility migration and
+    # would hide BLOCKS / whitespace-wrapped values from readiness.
+    # Missing types become "" so the edge still fail-closes on read.
+    if not isinstance(edge_type, str):
+        edge_type = ""
     edge: dict[str, Any] = {
         "source": source.strip(),
         "target": target.strip(),
-        "type": edge_type.strip(),
+        "type": edge_type,
     }
     edge_id = raw.get("id")
     if isinstance(edge_id, str) and edge_id.strip():
@@ -199,6 +210,23 @@ def _is_open_blocker_status(status: str) -> bool:
 
 def _parent_ids(edges: list[dict[str, Any]]) -> set[str]:
     return {edge["source"] for edge in edges if edge["type"] == "parent-child"}
+
+
+def _unknown_type_blocked_ids(edges: list[dict[str, Any]]) -> set[str]:
+    """Endpoints of unknown/malformed edge types are not startable (#1033).
+
+    Fail closed: a case, whitespace, or other non-exact type must not drop
+    out of readiness the way an ignored ``discovered-from`` edge does.
+    Both endpoints stay out of the ready set so a mangled ``parent-child``
+    cannot make a parent startable and a mangled ``blocks`` cannot make
+    the dependent claimable. Compatibility rewrite is not performed here.
+    """
+    blocked: set[str] = set()
+    for edge in edges:
+        if _is_unknown_edge_type(edge.get("type")):
+            blocked.add(edge["source"])
+            blocked.add(edge["target"])
+    return blocked
 
 
 def _children_by_parent(edges: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -385,6 +413,7 @@ def resolve_readiness(ledger: dict[str, Any]) -> ReadinessResult:
     cycles = find_readiness_cycles(edges)
 
     cycle_nodes = {node for cycle in cycles for node in cycle.get("nodes") or []}
+    unknown_blocked_ids = _unknown_type_blocked_ids(edges)
     ready: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
     orphans: list[dict[str, Any]] = []
@@ -401,6 +430,17 @@ def resolve_readiness(ledger: dict[str, Any]) -> ReadinessResult:
 
     for task in candidates:
         task_id = str(task["id"])
+        if task_id in unknown_blocked_ids:
+            blocked.append(
+                {
+                    "id": task_id,
+                    "title": str(task.get("text") or ""),
+                    "status": _status_of(task),
+                    "reason": REASON_UNKNOWN_EDGE_TYPE,
+                    "blockers": [],
+                }
+            )
+            continue
         if task_id in parent_set:
             blocked.append(
                 {
