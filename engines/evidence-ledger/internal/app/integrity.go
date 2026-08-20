@@ -540,7 +540,7 @@ const (
 
 // cacheRefProjectedSearchOptStrings is the closed set of SearchOpts string
 // fields that a cache-ref may contribute to a model-facing payload. Each
-// field is drop-or-allowlist sanitized by sanitizeModelFacingEvidence.
+// field is gated by sanitizeModelFacingEvidence / projectCacheRefModelFacing.
 // Origin/Modality/TrustLabel are search-only and must not be copied from the
 // cache file. A newly added SearchOpts string field fails
 // TestCacheRefProjectionStringInventory until it is classified here or in
@@ -574,7 +574,8 @@ var cacheRefNonProjectedSearchOptStrings = map[string]struct{}{
 }
 
 // cacheRefSearchOptJSONPaths maps each projected SearchOpts string field to
-// the cache-ref / model-facing JSON path that must be sanitized.
+// the cache-ref / model-facing JSON path that must be sanitized on the
+// eligible-item path. Ineligible items never receive this struct.
 var cacheRefSearchOptJSONPaths = map[string]string{
 	"Query":      "query",
 	"Source":     "filters.source",
@@ -590,12 +591,12 @@ var cacheRefSearchOptJSONPaths = map[string]string{
 // sanitizeModelFacingEvidence is the single choke point for every
 // model-facing evidence projection: materializeEvidenceBundle (item_ids
 // and no-item_ids), evidence show / MCP show_evidence_bundle, and
-// listEvidenceBundles. The cache file is same-UID writable, so every
-// attacker-writable cache-ref-derived field is dropped or
-// allowlist-validated recursively. A newly added free-form field cannot
-// bypass this function: unknown keys are deleted and unclassified filter
-// strings default to empty.
-func sanitizeModelFacingEvidence(payload map[string]any, id string, authority []*CodeReference) {
+// listEvidenceBundles. The cache-ref-derived envelope is gated as a
+// whole on live eligibility. Ineligible/quarantined items expose none of
+// those fields, at any length — bounding is not an injection control.
+// Eligible items keep the live reconstruction (query stays empty so a
+// planted cache-ref query cannot echo).
+func sanitizeModelFacingEvidence(payload map[string]any, id string, authority []*CodeReference, eligible bool) {
 	if payload == nil {
 		return
 	}
@@ -606,23 +607,77 @@ func sanitizeModelFacingEvidence(payload map[string]any, id string, authority []
 	}
 	payload["id"] = id
 	payload["resource_uri"] = evidenceBundleResourceURI(id)
-	payload["query"] = ""
-	if _, ok := payload["filters"]; ok {
-		payload["filters"] = projectUntrustedCacheRefFilters(payload["filters"], authority)
-	}
-	if raw, ok := payload["generated_at"]; ok {
-		payload["generated_at"] = projectCacheRefTimestamp(stringFromAny(raw))
-	}
 	if raw, ok := payload["result_count"]; ok {
 		payload["result_count"] = intFromAny(raw)
 	}
+	src := map[string]any{"query": ""}
+	if _, ok := payload["filters"]; ok {
+		src["filters"] = map[string]any{}
+		if eligible {
+			src["filters"] = projectUntrustedCacheRefFilters(payload["filters"], authority)
+		}
+	}
+	if _, ok := payload["generated_at"]; ok {
+		src["generated_at"] = ""
+		if eligible {
+			src["generated_at"] = projectCacheRefTimestamp(stringFromAny(payload["generated_at"]))
+		}
+	}
+	projectCacheRefModelFacing(payload, src, eligible)
 }
 
-// projectUntrustedCacheRefFilters rebuilds model-facing filters from a
-// same-UID-writable cache-ref. Unknown keys are dropped. Free-form strings
-// are dropped or allowlist-validated; a length bound is not sufficient.
-// code_reference is re-derived from eligible ledger records when present,
-// otherwise re-validated.
+// projectCacheRefModelFacing is the eligibility gate that turns a
+// cache-ref-derived envelope into model-facing output. An ineligible or
+// quarantined result set exposes none of those fields, at any length.
+// An eligible result set keeps the provided reconstruction.
+func projectCacheRefModelFacing(dst map[string]any, src map[string]any, eligible bool) {
+	if dst == nil {
+		return
+	}
+	if !eligible {
+		dst["query"] = ""
+		if _, ok := src["filters"]; ok {
+			dst["filters"] = map[string]any{}
+		} else {
+			delete(dst, "filters")
+		}
+		if _, ok := src["generated_at"]; ok {
+			dst["generated_at"] = ""
+		}
+		return
+	}
+	if query, ok := src["query"]; ok {
+		dst["query"] = query
+	}
+	if filters, ok := src["filters"]; ok {
+		dst["filters"] = filters
+	}
+	if generated, ok := src["generated_at"]; ok {
+		dst["generated_at"] = generated
+	}
+}
+
+// cacheRefItemsEligible is true only when every referenced item currently
+// passes contentEligible. Missing IDs, an empty set (including omitted
+// cache-ref item_ids), or a closed DB fail closed.
+func cacheRefItemsEligible(db *sql.DB, ids []string) bool {
+	if db == nil || len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		if id == "" || !storedItemContentEligible(db, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// projectUntrustedCacheRefFilters rebuilds model-facing filters for an
+// eligible result set. It is not the ineligible injection control; that
+// is projectCacheRefModelFacing, which omits this entire struct. Unknown
+// keys are dropped. Free-form strings are dropped or allowlist-validated;
+// a length bound is not sufficient. code_reference is re-derived from
+// eligible ledger records when present, otherwise re-validated.
 func projectUntrustedCacheRefFilters(raw any, authority []*CodeReference) map[string]any {
 	src := anyToMap(raw)
 	out := map[string]any{}

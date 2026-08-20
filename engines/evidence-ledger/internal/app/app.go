@@ -2790,16 +2790,17 @@ func materializeEvidenceBundle(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	sanitizeModelFacingEvidence(bundle, id, authorityCodeReferences(db, bundle))
+	eligible := cacheRefItemsEligible(db, evidenceBundleItemIDs(bundle))
+	sanitizeModelFacingEvidence(bundle, id, authorityCodeReferences(db, bundle), eligible)
 	return bundle, nil
 }
 
 // projectMaterializedBundle is the show/materialize entry into the shared
-// model-facing sanitizer. Both the item_ids and no-item_ids branches of
+// eligibility gate. Both the item_ids and no-item_ids branches of
 // materializeEvidenceBundle, plus evidence show / MCP show_evidence_bundle,
 // reach the model only through this function.
-func projectMaterializedBundle(bundle map[string]any, id string, authority []*CodeReference) {
-	sanitizeModelFacingEvidence(bundle, id, authority)
+func projectMaterializedBundle(bundle map[string]any, id string, authority []*CodeReference, eligible bool) {
+	sanitizeModelFacingEvidence(bundle, id, authority, eligible)
 }
 
 func searchOptsFromBundleRef(ref map[string]any) (SearchOpts, error) {
@@ -2915,6 +2916,23 @@ func listEvidenceBundles() ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	var db *sql.DB
+	defer func() {
+		if db != nil {
+			_ = db.Close()
+		}
+	}()
+	ensureDB := func() *sql.DB {
+		if db != nil {
+			return db
+		}
+		opened, _, openErr := openMigrated()
+		if openErr != nil {
+			return nil
+		}
+		db = opened
+		return db
+	}
 	out := []map[string]any{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -2925,14 +2943,15 @@ func listEvidenceBundles() ([]map[string]any, error) {
 		if err != nil {
 			continue
 		}
+		eligible := cacheRefItemsEligible(ensureDB(), cacheRefItemIDs(ref))
 		row := map[string]any{
 			"id":           id,
-			"resource_uri": stringFromAny(ref["resource_uri"]),
+			"resource_uri": evidenceBundleResourceURI(id),
 			"query":        stringFromAny(ref["query"]),
 			"generated_at": stringFromAny(ref["generated_at"]),
 			"result_count": bundleRefResultCount(ref),
 		}
-		sanitizeModelFacingEvidence(row, id, nil)
+		sanitizeModelFacingEvidence(row, id, nil, eligible)
 		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool {
