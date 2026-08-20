@@ -128,7 +128,8 @@ _BENIGN_LINE_MARKERS = (
 # Task/policy prose that mentions injection phrases without issuing them.
 # The documenting verb must precede ignore/disregard on the same line, and a
 # third-person subject+modal must be present so "Document: ignore previous
-# instructions" stays a warning.
+# instructions" stays a warning. A later clause that still matches an
+# imperative, role-override, or secret-exfil rule is not discussion.
 _DOCUMENTING_VERB = re.compile(
     r"(?i)\b(?:"
     r"document|describe|explain|summarize|capture|draft|"
@@ -141,21 +142,76 @@ _POLICY_SUBJECT_MODAL = re.compile(
     r".{0,80}\b(?:must|should|needs? to|is (?:required|expected) to|has to)\b"
 )
 _INJECTION_VERB = re.compile(r"(?i)\b(?:ignore|disregard)\b")
+_CLAUSE_BOUNDARY = re.compile(r"[.!?:;]+")
+_ROLE_OVERRIDE_RE = next(pattern for rule_id, pattern in _LINE_RULES if rule_id == "role-override")
+_IGNORE_INSTRUCTIONS_RE = next(pattern for rule_id, pattern in _LINE_RULES if rule_id == "ignore-instructions")
+_DISREGARD_SYSTEM_RE = next(pattern for rule_id, pattern in _LINE_RULES if rule_id == "disregard-system-prompt")
+_SECRET_EXFIL_RE = re.compile(r"(?i)(?:" + "send (all )?(sec" + "rets|tok" + "ens)|" + "exfil" + "trat)")
 
 
 def _excerpt(line: str) -> str:
     return line.strip()[:_MARKER_MAX]
 
 
-def _benign_task_description(line: str) -> bool:
-    """True when the line documents injection policy rather than issuing one."""
-    documenting = _DOCUMENTING_VERB.search(line)
-    if documenting is None or _POLICY_SUBJECT_MODAL.search(line) is None:
+def _iter_clauses(line: str) -> list[tuple[int, str]]:
+    """Split a line on sentence/clause punctuation, preserving start offsets."""
+    clauses: list[tuple[int, str]] = []
+    start = 0
+    for match in _CLAUSE_BOUNDARY.finditer(line):
+        if match.start() > start:
+            clauses.append((start, line[start : match.start()]))
+        start = match.end()
+    if start < len(line):
+        clauses.append((start, line[start:]))
+    return [(index, text) for index, text in clauses if text.strip()]
+
+
+def _is_documenting_ignore_discussion(text: str) -> bool:
+    documenting = _DOCUMENTING_VERB.search(text)
+    if documenting is None or _POLICY_SUBJECT_MODAL.search(text) is None:
         return False
-    injected = _INJECTION_VERB.search(line)
+    injected = _INJECTION_VERB.search(text)
     if injected is None:
         return False
     return documenting.start() < injected.start()
+
+
+def _clause_is_imperative_injection(clause: str) -> bool:
+    """True when ignore/disregard is issued as a command, not third-person policy."""
+    if not (
+        _IGNORE_INSTRUCTIONS_RE.search(clause)
+        or _DISREGARD_SYSTEM_RE.search(clause)
+        or PROMPT_INJECTION_RE.search(clause)
+    ):
+        return False
+    injected = _INJECTION_VERB.search(clause)
+    if injected is None:
+        return True
+    modal = _POLICY_SUBJECT_MODAL.search(clause)
+    return modal is None or modal.start() >= injected.start()
+
+
+def _remaining_actual_injection(line: str) -> bool:
+    """True when a real-injection match remains after the documenting clause."""
+    if _ROLE_OVERRIDE_RE.search(line) or _SECRET_EXFIL_RE.search(line):
+        return True
+    documenting = _DOCUMENTING_VERB.search(line)
+    if documenting is None:
+        return False
+    for start, clause in _iter_clauses(line):
+        end = start + len(clause)
+        if start <= documenting.start() < end:
+            continue
+        if _clause_is_imperative_injection(clause):
+            return True
+    return False
+
+
+def _benign_task_description(line: str) -> bool:
+    """True when the line documents injection policy rather than issuing one."""
+    if not _is_documenting_ignore_discussion(line):
+        return False
+    return not _remaining_actual_injection(line)
 
 
 def _benign_injection_discussion(line: str, *, text: str) -> bool:
