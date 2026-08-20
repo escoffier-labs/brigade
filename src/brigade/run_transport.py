@@ -111,6 +111,53 @@ def _cloudflare_preflight_failure(agent: Agent, assignment: Assignment) -> Worke
     )
 
 
+def _selected_agent_preflight(
+    selected_agent: Agent,
+    *,
+    roster: Roster,
+    quarantine_state: SeatQuarantineState,
+) -> agents.AgentResult | None:
+    """Refuse a candidate before any external call.
+
+    Quarantine, allowlist, and provider checks apply to every invocation,
+    including invalid-final fallbacks. The original assignment worker is
+    still gated at the start of ``run_one`` so a blocked primary seat does
+    not emit a request envelope; this helper is the invoke-time net that
+    fallback and retry candidates must also pass.
+    """
+
+    if quarantine_state.is_quarantined(selected_agent.name):
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail=f"seat {selected_agent.name} is quarantined for this run",
+            failure_phase="dispatch",
+            failure_kind="unclassified",
+        )
+    if selected_agent.cli is None or not is_cli_allowed(selected_agent.cli, roster):
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail=(
+                "worker has no CLI adapter"
+                if selected_agent.cli is None
+                else f"{selected_agent.cli} is not allowed by limits.allow_models"
+            ),
+            failure_phase="dispatch",
+            failure_kind="unclassified",
+        )
+    cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(selected_agent.model)
+    if cloudflare_detail is not None:
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail=cloudflare_detail,
+            failure_phase="preflight",
+            failure_kind="provider-config",
+        )
+    return None
+
+
 def _worker_attempt(
     *,
     kind: str,
@@ -739,6 +786,13 @@ def dispatch(
             resume_session_id: str | None = None,
         ) -> agents.AgentResult:
             """Record transport facts around exactly one real external call."""
+            blocked = _selected_agent_preflight(
+                selected_agent,
+                roster=roster,
+                quarantine_state=quarantine_state,
+            )
+            if blocked is not None:
+                return blocked
             attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
             try:
                 result = _invoke_external(selected_agent, selected_prompt, resume_session_id=resume_session_id)
