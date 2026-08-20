@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- `brigade evidence crawl plan` now prints only miseledger commands that run on the brigade setup v0.6.0 release (`init`, `crawl sessions`, `status --json`, `doctor`). `crawl memory` is omitted: it is not a kind on that release and needs an operator-declared `memory/NAMESPACE`. Sourceharvest-backed `crawl files` / `crawl gitlog` stay omitted. (#1024)
+- `brigade evidence crawl plan` omits `crawl memory` when `memory/NAMESPACE` is missing (or prints it once that operator-declared `memory-<uuid4>` exists), and omits sourceharvest-backed `crawl files` / `crawl gitlog`. Printed commands use positional paths (no `--root`/`--repo`). (#1024)
 - Evidence-ledger read surfaces hide item bodies unless provenance parses and injection status is the validated typed value `clean`. Session preview, session search snippets, and session transcripts are gated the same way. Imports stay `quarantined`/`pending` until `miseledger trust review --mark-injection-clean`; a label-only review does not make content eligible. MCP and HTTP no longer accept a caller-settable `include_untrusted_body` reveal. Routine `trust review` refuses a parse-error-grade stored envelope instead of silently rewriting it to `clean`. (#1007, #1009)
 - Origin-scoped ingest redaction now maps `work import context` (and `--source external-web` / `external-service`) to the external detector tier, normalizes free-form `--source` with `strip().lower()`, and fails closed to `unknown` on unmapped values. An equal-but-unredacted scanner result is treated as failure, and research findings redact title/summary/evidence per field so a multi-line summary cannot migrate into evidence. (#498)
 
