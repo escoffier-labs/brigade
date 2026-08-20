@@ -325,8 +325,11 @@ bytes. Closed `source.kind` values are `plan-request`, `plan-result`,
 `worker-request`, `worker-result`, `synthesis-request`, and
 `synthesis-result`. The run directory stores metadata-only
 `message-envelopes.jsonl` (`message_id`, `phase`, `from_seat`, `to_seat`,
-envelope). Quarantined, unknown, pending/error scan, and hash-mismatched
-messages are not delivered. Legacy run messages synthesize
+envelope). The authenticated envelope also binds
+`{run_id, message_id, assignment_id, from_seat, to_seat}`; receivers require
+those expected values and reject a transplanted pair. Quarantined, unknown,
+pending/error scan, hash-mismatched, and identity-mismatched messages are
+not delivered. Legacy run messages synthesize
 `UNKNOWN PROVENANCE - legacy message` and are never replayed.
 
 ### Legacy banner
