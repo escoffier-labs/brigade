@@ -425,6 +425,7 @@ def test_care_systemd_install_refuses_malformed_unit_without_write(tmp_path, mon
 
 
 def test_care_windows_install_prints_schtasks_and_does_not_claim_success(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: True)
     calls = []
 
@@ -612,6 +613,35 @@ def test_care_status_payload_on_win32_uses_schtasks(tmp_path, monkeypatch):
     assert payload["backends"]["schtasks"]["status"] == "missing"
     assert payload["backends"]["crontab"]["status"] == "unsupported-backend"
     assert {task["id"] for task in payload["tasks"]} >= {"daily-care", "ingest-sweep"}
+
+
+def test_care_explicit_backends_generate_plans_on_win32(tmp_path, monkeypatch, capsys):
+    """Explicit launchd/systemd/crontab must not be swallowed by the Windows printer."""
+    monkeypatch.setattr(care_cmd.sys, "platform", "win32")
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    assert care_cmd.install(target=target, backend="launchd", home=home, json_output=True) == 0
+    launchd_out = capsys.readouterr()
+    assert "does not mutate the Windows scheduler" not in launchd_out.err
+    agents = care_cmd._launchd_dir(home)
+    assert any(agents.glob("dev.brigade.care.*.plist"))
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
+    systemd_out = capsys.readouterr()
+    assert "does not mutate the Windows scheduler" not in systemd_out.err
+    unit_dir = home / ".config" / "systemd" / "user"
+    assert any(unit_dir.glob("brigade-care-*.service"))
+
+    store = {"text": ""}
+    monkeypatch.setattr(care_cmd, "_read_crontab", lambda: (store["text"], None))
+    monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: store.__setitem__("text", text) or None)
+    assert care_cmd.install(target=target, backend="crontab", home=home, json_output=True) == 0
+    crontab_out = capsys.readouterr()
+    assert "does not mutate the Windows scheduler" not in crontab_out.err
+    assert "# BEGIN BRIGADE CARE" in store["text"]
 
 
 def test_care_cli_accepts_schtasks_backend(monkeypatch, tmp_path):

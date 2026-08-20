@@ -276,7 +276,13 @@ def _resolve_backend(backend: str) -> str | None:
 
 
 def _uses_schtasks(backend: str) -> bool:
-    return backend == SCHTASKS_BACKEND or _is_windows()
+    """True only after auto resolved to schtasks, or an explicit schtasks request.
+
+    Explicit systemd/launchd/crontab plans are host-agnostic file generation.
+    Do not intercept them on win32 — that hid plan-generation tests behind the
+    Windows printer (#1045).
+    """
+    return backend == SCHTASKS_BACKEND
 
 
 def _windows_path(value: Path | str) -> str:

@@ -177,37 +177,44 @@ function Test-AcceptanceProcessIsElevated {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Invoke-PrintedSchtasksBatchUnelevated {
+function Read-AcceptanceFileText {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        return ""
+    }
+    $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $raw) {
+        return ""
+    }
+    return $raw.Trim()
+}
+
+function Invoke-PrintedSchtasksBatch {
     param(
         [string]$BatchPath,
         [string]$StdoutPath,
-        [string]$StderrPath,
-        [string]$WorkRoot
+        [string]$StderrPath
     )
-    # Execute the printed schtasks line from a .cmd file. Passing the line
-    # through `cmd /c <schtasks …>` mangles /TR quotes. Always drop to medium
-    # integrity so /IT is proven without an elevated token.
-    $exitFile = Join-Path $WorkRoot "printed-schtasks-exit.txt"
-    $wrapper = Join-Path $WorkRoot "run-printed-schtasks.cmd"
-    if (Test-Path -LiteralPath $exitFile) {
-        Remove-Item -LiteralPath $exitFile -Force
+    # Execute the printed schtasks line from a .cmd file. Do not pass the
+    # schtasks line through `cmd /c <line>` (nested /TR quotes break).
+    # Do not use `runas /trustlevel:0x20000` — on real Windows 11 that
+    # errors `The system cannot find the file specified` whether or not
+    # the session is elevated. /IT is valid in both tokens, so run the
+    # batch in the current process.
+    if (-not $BatchPath -or -not (Test-Path -LiteralPath $BatchPath)) {
+        throw "printed schtasks batch is missing: $BatchPath"
+    }
+    foreach ($redirect in @($StdoutPath, $StderrPath)) {
+        if ($redirect -and (Test-Path -LiteralPath $redirect)) {
+            Remove-Item -LiteralPath $redirect -Force
+        }
     }
     $batchAbs = (Resolve-Path -LiteralPath $BatchPath).Path
-    @(
-        "@echo off"
-        "call `"$batchAbs`" > `"$StdoutPath`" 2> `"$StderrPath`""
-        "echo %ERRORLEVEL%> `"$exitFile`""
-    ) | Set-Content -LiteralPath $wrapper -Encoding ascii
-    $wrapperAbs = (Resolve-Path -LiteralPath $wrapper).Path
-    $null = & runas.exe /trustlevel:0x20000 "C:\Windows\System32\cmd.exe /c `"$wrapperAbs`""
-    $deadline = (Get-Date).AddSeconds(45)
-    while (-not (Test-Path -LiteralPath $exitFile) -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 200
+    $process = Start-Process -FilePath "C:\Windows\System32\cmd.exe" -ArgumentList @("/c", "`"$batchAbs`"") -Wait -PassThru -NoNewWindow -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+    if ($null -eq $process) {
+        throw "failed to start printed schtasks batch: $batchAbs"
     }
-    if (-not (Test-Path -LiteralPath $exitFile)) {
-        throw "printed schtasks batch did not report an exit code (unelevated runas /trustlevel:0x20000)"
-    }
-    return [int]((Get-Content -LiteralPath $exitFile -Raw).Trim())
+    return [int]$process.ExitCode
 }
 
 function Invoke-ExternalCommand {
@@ -837,7 +844,11 @@ def call_greet():
         if ($LASTEXITCODE -ne 3) {
             throw "care install --dry-run --json must exit 3 on Windows, got $LASTEXITCODE"
         }
-        $carePlan = (Get-Content -LiteralPath $careJsonOut -Raw).Trim() | ConvertFrom-Json
+        $careJsonText = Read-AcceptanceFileText -Path $careJsonOut
+        if (-not $careJsonText) {
+            throw "care install --json produced no stdout"
+        }
+        $carePlan = $careJsonText | ConvertFrom-Json
         if ($carePlan.backend -ne "schtasks") {
             throw "care install --json backend=$($carePlan.backend), expected schtasks"
         }
@@ -852,7 +863,11 @@ def call_greet():
         if ($LASTEXITCODE -ne 0) {
             throw "care status --json must report the printed-plan state on Windows, got $LASTEXITCODE"
         }
-        $careStatus = (Get-Content -LiteralPath $careStatusOut -Raw).Trim() | ConvertFrom-Json
+        $careStatusText = Read-AcceptanceFileText -Path $careStatusOut
+        if (-not $careStatusText) {
+            throw "care status --json produced no stdout"
+        }
+        $careStatus = $careStatusText | ConvertFrom-Json
         if ($careStatus.backend -ne "schtasks") {
             throw "care status --json backend=$($careStatus.backend), expected schtasks"
         }
@@ -866,15 +881,13 @@ def call_greet():
         $createErr = Join-Path $acceptRoot "schtasks-create.err"
         Set-Content -LiteralPath $createCmd -Value $createDaily -Encoding ascii
         $elevated = Test-AcceptanceProcessIsElevated
-        Write-Host ("care create context: elevated={0}; running printed line unelevated" -f $elevated)
+        Write-Host ("care create context: elevated={0}; running printed .cmd in current token (/IT is valid elevated and not)" -f $elevated)
         try {
-            $createExit = Invoke-PrintedSchtasksBatchUnelevated -BatchPath $createCmd -StdoutPath $createOut -StderrPath $createErr -WorkRoot $acceptRoot
+            $createExit = Invoke-PrintedSchtasksBatch -BatchPath $createCmd -StdoutPath $createOut -StderrPath $createErr
             if ($createExit -ne 0) {
-                $createStdout = ""
-                $createStderr = ""
-                if (Test-Path -LiteralPath $createOut) { $createStdout = Get-Content -LiteralPath $createOut -Raw }
-                if (Test-Path -LiteralPath $createErr) { $createStderr = Get-Content -LiteralPath $createErr -Raw }
-                throw "printed schtasks command was rejected unelevated (exit $createExit): $createDaily`nstdout: $createStdout`nstderr: $createStderr"
+                $createStdout = Read-AcceptanceFileText -Path $createOut
+                $createStderr = Read-AcceptanceFileText -Path $createErr
+                throw "printed schtasks command was rejected (exit $createExit, elevated=$elevated): $createDaily`nstdout: $createStdout`nstderr: $createStderr"
             }
             & schtasks /Query /TN "BrigadeCare-daily-care" | Out-Null
             if ($LASTEXITCODE -ne 0) {
@@ -886,7 +899,11 @@ def call_greet():
             if ($LASTEXITCODE -ne 0) {
                 throw "care status --json after /Create failed with $LASTEXITCODE"
             }
-            $careStatusAfter = (Get-Content -LiteralPath $careStatusAfterOut -Raw).Trim() | ConvertFrom-Json
+            $careStatusAfterText = Read-AcceptanceFileText -Path $careStatusAfterOut
+            if (-not $careStatusAfterText) {
+                throw "care status --json after /Create produced no stdout"
+            }
+            $careStatusAfter = $careStatusAfterText | ConvertFrom-Json
             $dailyTask = $careStatusAfter.tasks | Where-Object { $_.id -eq "daily-care" } | Select-Object -First 1
             if (-not $dailyTask -or -not $dailyTask.exists) {
                 throw "care status did not report BrigadeCare-daily-care as present after /Create"
