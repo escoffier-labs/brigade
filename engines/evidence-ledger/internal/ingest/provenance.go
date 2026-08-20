@@ -236,12 +236,13 @@ func TransitionTrustLabel(db *sql.DB, itemID, toLabel, operatorCommand string, e
 // MarkInjectionClean is a deliberate injection-status transition to clean;
 // moving the trust label alone never changes injection status.
 // Capability and CapabilitySecret authorize the transition. OperatorCommand
-// is audit metadata only and never grants authority.
+// is audit metadata only and never grants authority. There is no missing-
+// capability exception: stdin kind, TTY, and environment variables do not
+// authorize a review.
 type TrustReviewOpts struct {
-	MarkInjectionClean     bool
-	Capability             *TrustCapability
-	CapabilitySecret       []byte
-	AllowMissingCapability bool
+	MarkInjectionClean bool
+	Capability         *TrustCapability
+	CapabilitySecret   []byte
 }
 
 // ReviewTrustLabel upgrades an item's trust label only when expectedHash
@@ -258,7 +259,7 @@ func ReviewTrustLabel(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand
 // records a separate injection-status transition to clean with an audit
 // event; a label-only review leaves injection pending.
 func ReviewTrust(db *sql.DB, itemID, expectedHash, toLabel, operatorCommand string, evidence map[string]any, opts TrustReviewOpts) error {
-	if opts.Capability == nil && !opts.AllowMissingCapability {
+	if opts.Capability == nil {
 		return fmt.Errorf("trust capability is required")
 	}
 	resolvedID, err := resolveItemID(db, itemID)

@@ -96,13 +96,19 @@ func currentStdin() io.Reader {
 	return os.Stdin
 }
 
-func stdinIsInteractive(r io.Reader) bool {
+// stdinCarriesHandoffPipe reports whether r can hold a parent-minted
+// capability hand-off. A character device (/dev/null, a PTY, a TTY) cannot.
+// This is not an authorization check: missing capability is always refused.
+func stdinCarriesHandoffPipe(r io.Reader) bool {
 	file, ok := r.(*os.File)
 	if !ok {
-		return false
+		return true
 	}
 	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice == 0
 }
 
 func Run(args []string, out, errw io.Writer) int {
@@ -393,9 +399,8 @@ func cmdTrustReview(args []string, out, errw io.Writer) int {
 		operatorCommand = "operator:brigade evidence trust review"
 	}
 	stdin := currentStdin()
-	interactive := stdinIsInteractive(stdin)
 	var handoff *ingest.CapabilityHandoff
-	if !interactive {
+	if stdinCarriesHandoffPipe(stdin) {
 		var handoffErr error
 		handoff, handoffErr = ingest.ReadCapabilityHandoff(stdin)
 		if handoffErr != nil {
@@ -419,13 +424,8 @@ func cmdTrustReview(args []string, out, errw io.Writer) int {
 		}
 		capability = parsed
 	}
-	allowMissing := false
 	if capability == nil {
-		if ingest.RequireCapabilityAlways() || !interactive {
-			return fatalf(errw, "trust review: operator capability is required; use `brigade evidence trust review`")
-		}
-		fmt.Fprintln(errw, "trust review: WARNING missing operator capability; honoring interactive TTY caller for this release only. Direct miseledger trust review is unsupported.")
-		allowMissing = true
+		return fatalf(errw, "trust review: operator capability is required; use `brigade evidence trust review`")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -434,10 +434,9 @@ func cmdTrustReview(args []string, out, errw io.Writer) int {
 	defer db.Close()
 	evidence := map[string]any{"kind": "operator-review", "operator_command": operatorCommand}
 	if err := ingest.ReviewTrust(db, values["item"], values["content-hash"], toLabel, operatorCommand, evidence, ingest.TrustReviewOpts{
-		MarkInjectionClean:     bools["mark-injection-clean"],
-		Capability:             capability,
-		CapabilitySecret:       secret,
-		AllowMissingCapability: allowMissing,
+		MarkInjectionClean: bools["mark-injection-clean"],
+		Capability:         capability,
+		CapabilitySecret:   secret,
 	}); err != nil {
 		return fatalf(errw, "trust review: %s", err)
 	}

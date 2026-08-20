@@ -1616,11 +1616,11 @@ def _unwrap_authority_envelope(
         )
         if expected is None:
             raise OSError(
-                "authority sequence is missing; run `brigade work authority repair --target .` after confirming the bindings"
+                "authority sequence is missing; restore the operator store-hmac.key and sequence.json, or re-bind the workspace after confirming the directories are intact"
             )
         if expected != sequence:
             raise OSError(
-                "authority sequence mismatch; run `brigade work authority repair --target .` after confirming the bindings"
+                "authority sequence mismatch; restore the operator store-hmac.key and sequence.json, or re-bind the workspace after confirming the directories are intact"
             )
         expected_name = f"{_authority_target_digest(record)}.json"
         if path.name != expected_name:

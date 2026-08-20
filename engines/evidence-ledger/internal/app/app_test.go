@@ -1815,8 +1815,6 @@ func runJSONArray(t *testing.T, args ...string) []any {
 
 func run(args ...string) (int, string, string) {
 	var out, errb bytes.Buffer
-	// Tests are non-interactive: empty stdin is not a TTY, so a missing
-	// trust-review capability is refused the same way a scanner child is.
 	code := RunWithStdin(args, bytes.NewReader(nil), &out, &errb)
 	return code, out.String(), errb.String()
 }

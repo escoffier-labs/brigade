@@ -17,7 +17,6 @@ const (
 	capabilityDomain      = "brigade.authority.capability.v1\x00"
 	capabilityHandoffKind = "brigade.authority.capability-handoff.v1"
 	capabilityVersion     = 1
-	requireCapabilityEnv  = "BRIGADE_REQUIRE_TRUST_CAPABILITY"
 )
 
 // TrustCapability is the operator-minted token that authorizes one review.
@@ -126,15 +125,6 @@ func readHandoff(r io.Reader) (*CapabilityHandoff, error) {
 		return nil, nil
 	}
 	return parseHandoff(raw)
-}
-
-// RequireCapabilityAlways reports whether BRIGADE_REQUIRE_TRUST_CAPABILITY=1 is set.
-func RequireCapabilityAlways() bool {
-	return requireCapabilityAlways()
-}
-
-func requireCapabilityAlways() bool {
-	return os.Getenv(requireCapabilityEnv) == "1"
 }
 
 func verifyTrustCapability(secret []byte, cap *TrustCapability, itemID, fromDigest, toLabel string, markInjectionClean bool, now time.Time) error {

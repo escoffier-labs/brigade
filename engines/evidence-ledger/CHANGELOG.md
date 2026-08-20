@@ -9,7 +9,7 @@ Releases before this changelog was started are on the [releases page](https://gi
 ## [Unreleased]
 
 ### Security
-- `miseledger trust review` requires an operator-minted capability handed over stdin (`brigade.authority.capability-handoff.v1`). The MAC is bound to item id, current digest, requested transition, nonce, and expiry. Spent nonces are recorded in `used_capabilities`. `--operator-command` is audit metadata only. A scanner that execs the binary with the correct item and digest and no capability is refused. Missing capability on an interactive TTY logs a loud warning and is still honored for this release unless `BRIGADE_REQUIRE_TRUST_CAPABILITY=1`. Fixes #1029.
+- `miseledger trust review` requires an operator-minted capability handed over stdin (`brigade.authority.capability-handoff.v1`). The MAC is bound to item id, current digest, requested transition, nonce, and expiry. Spent nonces are recorded in `used_capabilities`. `--operator-command` is audit metadata only. A missing capability is refused for every stdin kind, including piped empty input, `/dev/null`, and a PTY. stdin is not an authorization signal. Fixes #1029.
 
 ### Fixed
 
