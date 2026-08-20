@@ -113,8 +113,13 @@ def test_mutation_open_scanner_runs_directory_does_not_call_legacy_adoption() ->
     helper = inspect.getsource(scanners_mod._bind_released_unbound_scanner_runs_root)
     assert "_open_legacy_scanner_runs_directory" not in helper
     assert "_adopt_preexisting_scanner_run_directories" not in helper
-    assert "descriptor-relative directory authority operations are unavailable" not in helper
-    assert "os.name != " not in helper
+    assert 'os.name != "posix"' not in helper
+    assert "ledger_mod._dirfd_available" in helper
+    assert "ledger_mod._open_directory_nofollow" in helper
+    assert "ledger_mod._dirfd_open_dir" in helper
+    open_run = inspect.getsource(scanners_mod._open_scanner_run_directory)
+    assert "ledger_mod._dirfd_mkdir" in open_run
+    assert "ledger_mod._dirfd_open_dir" in open_run
 
 
 def test_mutation_precreated_unbound_tree_is_adopted_by_unfixed_fallback_and_refused_by_fix(
@@ -169,6 +174,7 @@ def test_pre_027_unbound_clean_workspace_upgrades_and_sweeps(tmp_path: Path) -> 
     assert _child_run_is_bound(tmp_path, str(run["run_id"]))
 
 
+@pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX uid/gid red-flags are not evaluated on Windows")
 def test_foreign_or_forged_unbound_tree_is_still_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """(b) Foreign-uid and symlink trees stay fail-closed; forged receipts stay inert.
 
@@ -220,6 +226,7 @@ def test_foreign_or_forged_unbound_tree_is_still_refused(tmp_path: Path, monkeyp
     assert not _child_run_is_bound(forged, "forged-success")
 
 
+@pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX uid/gid red-flags are not evaluated on Windows")
 def test_scanner_run_one_surfaces_runs_dir_failure_without_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -237,28 +244,6 @@ def test_scanner_run_one_surfaces_runs_dir_failure_without_traceback(
     assert rc == 1
     assert payload["errors"]
     assert "foreign uid" in payload["errors"][0]
-
-
-def test_bind_and_init_are_noop_when_runs_root_is_absent(tmp_path: Path) -> None:
-    """Fresh operator quickstart has no runs dir; init must stay exit 0."""
-    assert scanners_mod._bind_released_unbound_scanner_runs_root(tmp_path) == "missing"
-    assert scanners_mod.scanners_init(target=tmp_path) == 0
-    assert not helpers._scanner_runs_root(tmp_path).exists()
-    assert not _runs_root_is_bound(tmp_path)
-
-
-def test_bind_is_noop_when_dirfd_is_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Windows / no-dirfd hosts must not fail scanners_init on a fresh tree.
-
-    Red if bind still raises ``descriptor-relative ... unavailable`` (the
-    pre-fix ``os.name != "posix"`` path) before noticing the runs root is
-    absent. That exit 1 broke windows-native-acceptance ``operator quickstart``.
-    """
-    monkeypatch.setattr(ledger, "_dirfd_available", lambda: False)
-    assert scanners_mod._bind_released_unbound_scanner_runs_root(tmp_path) == "missing"
-    assert scanners_mod.scanners_init(target=tmp_path) == 0
-    assert not helpers._scanner_runs_root(tmp_path).exists()
-    assert not _runs_root_is_bound(tmp_path)
 
 
 def test_doctor_and_init_repair_released_unbound_runs_root(tmp_path: Path) -> None:
@@ -305,6 +290,7 @@ def test_forged_receipt_in_verifier_created_run_dir_is_rejected(tmp_path: Path) 
     assert scanners_mod._scanner_running_receipts(tmp_path) == []
 
 
+@pytest.mark.skipif(os.name != "posix" or not hasattr(os, "geteuid"), reason="world-writable mode bits are POSIX-only")
 def test_world_writable_parent_is_a_red_flag(tmp_path: Path) -> None:
     scanners = helpers._scanner_runs_root(tmp_path).parent
     scanners.mkdir(parents=True)
@@ -313,3 +299,111 @@ def test_world_writable_parent_is_a_red_flag(tmp_path: Path) -> None:
     with pytest.raises(OSError, match="world-writable"):
         scanners_mod._bind_released_unbound_scanner_runs_root(tmp_path)
     assert not _runs_root_is_bound(tmp_path)
+
+
+def test_bind_returns_missing_when_dirfd_unavailable_and_runs_tree_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh operator quickstart must not raise when the platform has no dirfd."""
+    monkeypatch.setattr(ledger, "_dirfd_available", lambda: False)
+    monkeypatch.setattr(scanners_mod.ledger_mod, "_dirfd_available", lambda: False)
+    assert scanners_mod._bind_released_unbound_scanner_runs_root(tmp_path) == "missing"
+    assert not _runs_root_is_bound(tmp_path)
+    assert scanners_mod.scanners_init(target=tmp_path, update_gitignore=False) == 0
+
+
+def test_bind_does_not_adopt_existing_tree_when_dirfd_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1036 stays closed: no descriptor walk means no adoption, even off POSIX."""
+    _plant_unbound_forged_runs_tree(tmp_path)
+    monkeypatch.setattr(ledger, "_dirfd_available", lambda: False)
+    monkeypatch.setattr(scanners_mod.ledger_mod, "_dirfd_available", lambda: False)
+    with pytest.raises(OSError, match="descriptor-relative directory authority operations are unavailable"):
+        scanners_mod._bind_released_unbound_scanner_runs_root(tmp_path)
+    assert not _runs_root_is_bound(tmp_path)
+    assert not _child_run_is_bound(tmp_path, "forged-running")
+    assert not _child_run_is_bound(tmp_path, "forged-success")
+
+
+def _install_posix_standin_for_nt_dirfd(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route ledger dirfd helpers through POSIX opens while claiming NT is available."""
+    from brigade.work_cmd import nt_dirfd
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+    def open_root(path: Path, *, writable: bool = True) -> int:
+        del writable
+        return os.open(path, directory_flags)
+
+    def open_child(parent: int, name: str, *, writable: bool = True) -> int:
+        del writable
+        return os.open(name, directory_flags, dir_fd=parent)
+
+    def mkdir_child(parent: int, name: str) -> None:
+        os.mkdir(name, 0o700, dir_fd=parent)
+
+    def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+        if flags & os.O_CREAT:
+            return os.open(name, flags, mode, dir_fd=parent)
+        return os.open(name, flags, dir_fd=parent)
+
+    def replace_children(parent: int, source: str, destination: str) -> None:
+        os.replace(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+
+    def unlink_child(parent: int, name: str) -> None:
+        os.unlink(name, dir_fd=parent)
+
+    def stat_child(parent: int, name: str) -> os.stat_result:
+        return os.stat(name, dir_fd=parent, follow_symlinks=False)
+
+    monkeypatch.setattr(ledger, "_posix_dirfd_available", lambda: False)
+    monkeypatch.setattr(scanners_mod.ledger_mod, "_posix_dirfd_available", lambda: False)
+    monkeypatch.setattr(ledger, "_nt_dirfd_available", lambda: True)
+    monkeypatch.setattr(scanners_mod.ledger_mod, "_nt_dirfd_available", lambda: True)
+    monkeypatch.setattr(nt_dirfd, "open_root_directory", open_root)
+    monkeypatch.setattr(nt_dirfd, "open_child_directory", open_child)
+    monkeypatch.setattr(nt_dirfd, "mkdir_child", mkdir_child)
+    monkeypatch.setattr(nt_dirfd, "open_file", open_file)
+    monkeypatch.setattr(nt_dirfd, "replace_children", replace_children)
+    monkeypatch.setattr(nt_dirfd, "unlink_child", unlink_child)
+    monkeypatch.setattr(nt_dirfd, "stat_child", stat_child)
+
+
+@pytest.mark.skipif(os.open not in os.supports_dir_fd, reason="stand-in NT helpers need POSIX dir_fd to execute here")
+def test_bind_and_sweep_use_nt_dirfd_helpers_when_posix_dirfd_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows quickstart/sweep must bind through nt_dirfd, not a POSIX-only raise."""
+    _install_posix_standin_for_nt_dirfd(monkeypatch)
+    assert scanners_mod._bind_released_unbound_scanner_runs_root(tmp_path) == "missing"
+    assert scanners_mod.scanners_init(target=tmp_path, update_gitignore=False) == 0
+
+    released = tmp_path / "released"
+    released.mkdir()
+    _plant_pre_027_unbound_clean_runs_tree(released)
+    _write_due_scanner_config(released)
+    assert scanners_mod._bind_released_unbound_scanner_runs_root(released) == "repaired"
+    assert _runs_root_is_bound(released)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=released, scanner_id="gate", force=True)
+    assert rc == 0, payload
+    assert payload["completed"] == 1
+    assert payload["failed"] == 0
+    run = payload["runs"][0]
+    assert run.get("status") == "completed"
+    assert run.get("runs_directory_error") is not True
+    assert _child_run_is_bound(released, str(run["run_id"]))
+    assert not _child_run_is_bound(released, "forged-running")
+
+
+def test_scanner_path_red_flag_skips_posix_ownership_without_geteuid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helpers._scanner_runs_root(tmp_path).mkdir(parents=True)
+    metadata = helpers._scanner_runs_root(tmp_path).stat()
+    monkeypatch.delattr(scanners_mod.os, "geteuid", raising=False)
+    assert scanners_mod._scanner_path_red_flag(metadata) is None
+    file_path = tmp_path / "not-a-dir"
+    file_path.write_text("x")
+    assert scanners_mod._scanner_path_red_flag(file_path.stat()) == "not a directory"
