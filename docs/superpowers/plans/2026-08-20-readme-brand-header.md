@@ -26,22 +26,22 @@ The README continues to load one local SVG asset. That asset will carry outlined
 - [x] Run RED through Brigade:
   `brigade work verify run --target . --command "pytest -q tests/test_readme_brand_header.py" --capture brigade-work`
   Expect one failure against the current Arial/blue SVG.
-- [ ] Commit the failing test with `test: lock README brand header`.
+- [x] Commit the failing test with `test: lock README brand header`.
 
 ### Task 2: Replace the wordmark with outlined Inter glyphs
 
 **Files:**
 - Modify: `docs/assets/brigade-wordmark.svg`
 
-- [ ] Generate the word `brıgade` from Inter ExtraBold 800 and `(by Escoffier Labs)` from Inter Medium 500 as Cairo SVG outlines. Use Inter 4.1 only as a temporary generation input, matching the deployed site's Inter family; do not add the font or a package dependency to the repository.
-- [ ] Compose a `920 x 280` SVG with:
+- [x] Generate the word `brıgade` from Inter ExtraBold 800 and `(by Escoffier Labs)` from Inter Medium 500 as Cairo SVG outlines. Use Inter 4.1 only as a temporary generation input, matching the deployed site's Inter family; do not add the font or a package dependency to the repository.
+- [x] Compose a `920 x 280` SVG with:
   - panel fill `#0f1318`, stroke `#2a323d`, radius `8`;
   - centered off-white outlined wordmark;
   - one amber circle over the dotless `ı`, with no amber terminal period;
   - centered muted maker line below the wordmark;
   - `<title>` and `<desc>` for accessibility.
-- [ ] Render the SVG to PNG with ImageMagick and inspect the result for clipping, centering, and the single-dot treatment.
-- [ ] Run GREEN through Brigade with the same focused pytest command. Expect `1 passed`.
+- [x] Render the SVG to PNG and inspect the Chromium result for clipping, centering, and the single-dot treatment.
+- [x] Run GREEN through Brigade with the same focused pytest command. Expect `1 passed`.
 - [ ] Commit the asset with `docs: match README wordmark to brigade.tools`.
 
 ### Task 3: Verify the complete README header
