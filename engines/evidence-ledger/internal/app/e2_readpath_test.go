@@ -641,7 +641,7 @@ values('item-e2-peer','source-e2','collection-e2-dup','actor-e2','msg:e2-peer','
 func reviewItemInjectionClean(t *testing.T, itemID string) {
 	t.Helper()
 	digest := itemContentHashFromShow(t, itemID)
-	runOK(t, "trust", "review", "--item", itemID, "--content-hash", digest, "--mark-injection-clean", "--json")
+	runTrustReviewOK(t, itemID, digest, "--mark-injection-clean", "--json")
 }
 
 func reviewAllLiveItemsInjectionClean(t *testing.T) {

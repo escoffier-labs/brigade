@@ -150,7 +150,7 @@ fn classify_dead_code_candidate(
             "callback-style name may be registered or invoked indirectly",
         );
     }
-    if matches!(language, "typescript" | "javascript") {
+    if matches!(language, "typescript" | "javascript" | "astro") {
         return (
             "low",
             "top-level JavaScript/TypeScript module visibility is not persisted; export-list use cannot be ruled out",
@@ -171,7 +171,7 @@ fn classify_dead_code_candidate(
     if has_import {
         return ("low", "import evidence references this symbol name");
     }
-    if !matches!(language, "python" | "typescript" | "rust" | "go") {
+    if !matches!(language, "python" | "typescript" | "rust" | "go" | "astro") {
         return (
             "low",
             "source language has no private/local visibility rule",
@@ -194,7 +194,7 @@ fn is_public_or_exported(language: &str, name: &str, signature: &str) -> bool {
     let signature = signature.trim_start();
     match language {
         "python" => !name.starts_with('_'),
-        "typescript" => signature.starts_with("export "),
+        "typescript" | "astro" => signature.starts_with("export "),
         "rust" => signature.starts_with("pub ") || signature.starts_with("pub("),
         "go" => name.chars().next().is_some_and(char::is_uppercase),
         _ => true,
