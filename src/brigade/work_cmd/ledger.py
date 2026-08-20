@@ -203,12 +203,20 @@ def _claim_task(
                 if task is None:
                     continue
                 try:
-                    unresolved = _unresolved_plan_decisions(target, str(task.get("id")))
-                except PlanDecisionError:
-                    # Corrupt checkpoints are not claimable; keep scanning ready set.
-                    continue
-                if unresolved:
-                    continue
+                    _evaluate_task_start_gates(target, ledger, task)
+                except ClaimError as exc:
+                    if exc.reason in {
+                        REASON_ALREADY_CLAIMED,
+                        REASON_NOT_READY,
+                        REASON_GUARD_MISMATCH,
+                        "unresolved_plan_decisions",
+                        REASON_MISSING_PLAN_RECEIPT,
+                        REASON_CORRUPT_PLAN_RECEIPT,
+                        REASON_PLAN_RECEIPT_MISMATCH,
+                        REASON_MALFORMED_PLAN_DECISIONS,
+                    }:
+                        continue
+                    raise
                 try:
                     result = apply_claim_to_task(
                         ledger,
@@ -260,25 +268,7 @@ def _claim_task(
                 details={"task_id": task_id},
                 exit_code=1,
             )
-        try:
-            unresolved = _unresolved_plan_decisions(target, str(task.get("id")))
-        except PlanDecisionError as exc:
-            raise ClaimError(
-                str(exc),
-                reason=exc.reason,
-                details={"task_id": task.get("id"), **exc.details},
-                exit_code=exc.exit_code,
-            ) from exc
-        if unresolved:
-            raise ClaimError(
-                _decision_gate_message(unresolved),
-                reason="unresolved_plan_decisions",
-                details={
-                    "task_id": task.get("id"),
-                    "unresolved_decision_ids": [item.get("id") for item in unresolved],
-                },
-                exit_code=2,
-            )
+        _evaluate_task_start_gates(target, ledger, task)
         result = apply_claim_to_task(
             ledger,
             task,
@@ -438,10 +428,10 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
     try:
         parent, name = _open_import_inbox_parent(target, create=False)
         try:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             )
         except FileNotFoundError:
             return []
@@ -1537,12 +1527,145 @@ def _directory_identity(descriptor: int) -> dict[str, int]:
     return {"device": metadata.st_dev, "inode": metadata.st_ino}
 
 
+def _posix_dirfd_available() -> bool:
+    """Return whether POSIX openat/O_NOFOLLOW primitives can hold a parent."""
+    return (
+        os.name == "posix"
+        and bool(getattr(os, "O_NOFOLLOW", 0))
+        and bool(getattr(os, "O_DIRECTORY", 0))
+        and os.open in os.supports_dir_fd
+        and os.mkdir in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+        and os.rename in os.supports_dir_fd
+    )
+
+
+def _nt_dirfd_available() -> bool:
+    """Return whether Windows handle-relative no-follow operations can be used."""
+    if sys.platform != "win32":
+        return False
+    from . import nt_dirfd
+
+    return nt_dirfd.available()
+
+
+def _dirfd_available() -> bool:
+    return _posix_dirfd_available() or _nt_dirfd_available()
+
+
+def _dirfd_unavailable(kind: str) -> OSError:
+    return OSError(f"descriptor-relative {kind} are unavailable")
+
+
+def _open_directory_nofollow(path: Path) -> int:
+    """Open a directory without following a final symlink or reparse point."""
+    if _posix_dirfd_available():
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        return os.open(path, flags)
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.open_root_directory(path)
+    raise _dirfd_unavailable("directory operations")
+
+
+def _open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
+    """Open a file path without following a final symlink or reparse point."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        if flags & os.O_CREAT:
+            return os.open(path, flags | nofollow | getattr(os, "O_CLOEXEC", 0), mode)
+        return os.open(path, flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.open_path_file(path, flags, mode)
+    raise OSError("no-follow file open is unavailable")
+
+
+def _dirfd_open_dir(parent: int, name: str) -> int:
+    if _posix_dirfd_available():
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        return os.open(name, flags, dir_fd=parent)
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.open_child_directory(parent, name)
+    raise _dirfd_unavailable("directory operations")
+
+
+def _dirfd_mkdir(parent: int, name: str) -> None:
+    if _posix_dirfd_available():
+        os.mkdir(name, 0o700, dir_fd=parent)
+        return
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        nt_dirfd.mkdir_child(parent, name)
+        return
+    raise _dirfd_unavailable("directory operations")
+
+
+def _dirfd_open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    if _posix_dirfd_available():
+        if flags & os.O_CREAT:
+            return os.open(name, flags, mode, dir_fd=parent)
+        return os.open(name, flags, dir_fd=parent)
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.open_file(parent, name, flags, mode)
+    raise _dirfd_unavailable("import inbox operations")
+
+
+def _dirfd_replace(parent: int, source: str, destination: str) -> None:
+    if _posix_dirfd_available():
+        os.replace(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+        return
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        nt_dirfd.replace_children(parent, source, destination)
+        return
+    raise _dirfd_unavailable("import inbox operations")
+
+
+def _dirfd_unlink(parent: int, name: str) -> None:
+    if _posix_dirfd_available():
+        os.unlink(name, dir_fd=parent)
+        return
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        nt_dirfd.unlink_child(parent, name)
+        return
+    raise _dirfd_unavailable("import inbox operations")
+
+
+def _dirfd_stat(parent: int, name: str) -> os.stat_result:
+    if _posix_dirfd_available():
+        return os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if _nt_dirfd_available():
+        from . import nt_dirfd
+
+        return nt_dirfd.stat_child(parent, name)
+    raise _dirfd_unavailable("import inbox validation")
+
+
+def _dirfd_fsync(descriptor: int) -> None:
+    """Flush a held descriptor; directory fsync is best-effort on Windows."""
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        if sys.platform == "win32" and getattr(exc, "winerror", None) in {1, 5}:
+            return
+        raise
+
+
 def _workspace_directory_identity(target: Path) -> dict[str, int]:
     """Return the identity of the workspace root through a no-follow descriptor."""
-    descriptor = os.open(
-        target.expanduser().resolve(),
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-    )
+    descriptor = _open_directory_nofollow(target.expanduser().resolve())
     try:
         return _directory_identity(descriptor)
     finally:
@@ -1560,9 +1683,9 @@ def _read_external_directory_authority_path(
 ) -> dict[str, Any] | None:
     """Read one external authority record without deriving authority from its path."""
     try:
-        descriptor = os.open(
+        descriptor = _open_file_nofollow(
             path,
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
         )
     except FileNotFoundError:
         return None
@@ -1666,19 +1789,22 @@ def _write_external_directory_authority(
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     descriptor = -1
     try:
-        descriptor = os.open(
+        descriptor = _open_file_nofollow(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:
             handle.write(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
+        # Windows refuses os.replace while the source handle is still open (WinError 32).
+        os.close(descriptor)
+        descriptor = -1
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory = _open_directory_nofollow(path.parent)
         try:
-            os.fsync(directory)
+            _dirfd_fsync(directory)
         finally:
             os.close(directory)
     finally:
@@ -1972,11 +2098,11 @@ def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *,
         {"schema_version": _DIRECTORY_AUTHORITY_SCHEMA_VERSION, **identity}, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     try:
-        descriptor = os.open(
+        descriptor = _dirfd_open_file(
+            anchor_parent,
             anchor_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             0o600,
-            dir_fd=anchor_parent,
         )
     except FileExistsError:
         return
@@ -1985,14 +2111,14 @@ def _write_compatibility_directory_anchor(anchor_parent: int, directory: int, *,
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.fsync(anchor_parent)
+        _dirfd_fsync(anchor_parent)
     finally:
         os.close(descriptor)
 
 
 def _adopt_preexisting_scanner_run_directories(target: Path, root: int, *, workspace: dict[str, int]) -> None:
     """Capture released scanner run directories by identity, never by receipt bytes."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     for run_id in os.listdir(root):
         if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", run_id):
             continue
@@ -2014,7 +2140,7 @@ def _adopt_preexisting_scanner_run_directories(target: Path, root: int, *, works
 
 def _open_legacy_scanner_runs_directory(target: Path) -> int:
     """Adopt a released scanner-runs root without deriving trust from receipts."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(target.expanduser().resolve(), flags)
     workspace = _directory_identity(descriptor)
     anchor_parent = -1
@@ -2066,49 +2192,42 @@ def _open_legacy_scanner_runs_directory(target: Path) -> int:
 
 def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...], anchor_name: str, create: bool) -> int:
     """Open an externally bound directory through no-follow descriptors."""
-    if (
-        os.name != "posix"
-        or not getattr(os, "O_NOFOLLOW", 0)
-        or not getattr(os, "O_DIRECTORY", 0)
-        or os.open not in os.supports_dir_fd
-        or os.mkdir not in os.supports_dir_fd
-    ):
+    if not _dirfd_available():
         raise OSError("descriptor-relative directory authority operations are unavailable")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(target.expanduser().resolve(), flags)
+    descriptor = _open_directory_nofollow(target.expanduser().resolve())
     workspace = _directory_identity(descriptor)
     anchor_parent = -1
     parent = -1
     try:
         for component in components[:-2]:
             try:
-                child = os.open(component, flags, dir_fd=descriptor)
+                child = _dirfd_open_dir(descriptor, component)
             except FileNotFoundError:
                 if not create:
                     raise
-                os.mkdir(component, 0o700, dir_fd=descriptor)
-                child = os.open(component, flags, dir_fd=descriptor)
+                _dirfd_mkdir(descriptor, component)
+                child = _dirfd_open_dir(descriptor, component)
             os.close(descriptor)
             descriptor = child
         anchor_parent = descriptor
         descriptor = -1
         parent_name = components[-2]
         try:
-            parent = os.open(parent_name, flags, dir_fd=anchor_parent)
+            parent = _dirfd_open_dir(anchor_parent, parent_name)
         except FileNotFoundError:
             if not create:
                 raise
-            os.mkdir(parent_name, 0o700, dir_fd=anchor_parent)
-            parent = os.open(parent_name, flags, dir_fd=anchor_parent)
+            _dirfd_mkdir(anchor_parent, parent_name)
+            parent = _dirfd_open_dir(anchor_parent, parent_name)
         name = components[-1]
         created = False
         try:
-            child = os.open(name, flags, dir_fd=parent)
+            child = _dirfd_open_dir(parent, name)
         except FileNotFoundError:
             if not create:
                 raise
-            os.mkdir(name, 0o700, dir_fd=parent)
-            child = os.open(name, flags, dir_fd=parent)
+            _dirfd_mkdir(parent, name)
+            child = _dirfd_open_dir(parent, name)
             created = True
         try:
             _validate_external_directory_authority(target, components, child, workspace=workspace)
@@ -2157,7 +2276,7 @@ def _validate_import_proof_descriptor(descriptor: int) -> None:
 def _validate_import_proof_name_matches_descriptor(parent: int, name: str, descriptor: int) -> None:
     """Require the published sidecar name to still identify its held descriptor."""
     _validate_import_proof_descriptor(descriptor)
-    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    named = _dirfd_stat(parent, name)
     opened = os.fstat(descriptor)
     if (
         not stat.S_ISREG(named.st_mode)
@@ -2206,11 +2325,11 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
             if payload is None or name is None:
                 raise OSError("cannot persist import proof for malformed local item")
             data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
                 0o600,
-                dir_fd=parent,
             )
             created.append(name)
             try:
@@ -2223,12 +2342,12 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
             finally:
                 os.close(descriptor)
             published.append((name, data))
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         for name, data in published:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             )
             try:
                 _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
@@ -2243,10 +2362,10 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
     except BaseException:
         for name in created:
             try:
-                os.unlink(name, dir_fd=parent)
+                _dirfd_unlink(parent, name)
             except FileNotFoundError:
                 pass
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         try:
             _restore_external_file_authorities(
                 target,
@@ -2272,10 +2391,10 @@ def _remove_persisted_import_proofs(target: Path, items: list[dict[str, Any]]) -
             if name is None:
                 continue
             try:
-                os.unlink(name, dir_fd=parent)
+                _dirfd_unlink(parent, name)
             except FileNotFoundError:
                 pass
-        os.fsync(parent)
+        _dirfd_fsync(parent)
     finally:
         os.close(parent)
 
@@ -2293,10 +2412,10 @@ def _has_persisted_import_proof(item: dict[str, Any], *, target: Path | None = N
         return False
     try:
         try:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             )
         except OSError:
             return False
@@ -2384,7 +2503,9 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", scanner_run_id)
     ):
         return None
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
     root = -1
     current = -1
     receipt_descriptor = -1
@@ -2411,7 +2532,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
         )
         receipt_descriptor = os.open(
             "receipt.json",
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             dir_fd=current,
         )
         before = os.fstat(receipt_descriptor)
@@ -2526,21 +2647,22 @@ def _legacy_import_source_content_identity(
 
 def _open_import_inbox_parent(target: Path, *, create: bool) -> tuple[int, str]:
     """Hold the inbox parent for an import/proof publication transaction."""
-    if (
-        os.name != "posix"
-        or not getattr(os, "O_NOFOLLOW", 0)
-        or not getattr(os, "O_DIRECTORY", 0)
-        or os.open not in os.supports_dir_fd
-        or os.mkdir not in os.supports_dir_fd
-    ):
-        raise OSError("descriptor-relative import inbox operations are unavailable")
+    if _posix_dirfd_available():
+        return _open_import_inbox_parent_posix(target, create=create)
+    if _nt_dirfd_available():
+        return _open_import_inbox_parent_nt(target, create=create)
+    raise OSError("descriptor-relative import inbox operations are unavailable")
+
+
+def _open_import_inbox_parent_posix(target: Path, *, create: bool) -> tuple[int, str]:
+    """POSIX openat walk that rejects every symlinked inbox parent component."""
     target_root = target.expanduser().resolve()
     inbox_path = helpers._imports_path(target_root)
     try:
         relative = inbox_path.relative_to(target_root)
     except ValueError as exc:
         raise OSError("import inbox escapes target") from exc
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     parent = os.open(target_root, flags)
     try:
         for component in relative.parts[:-1]:
@@ -2559,6 +2681,35 @@ def _open_import_inbox_parent(target: Path, *, create: bool) -> tuple[int, str]:
         raise
 
 
+def _open_import_inbox_parent_nt(target: Path, *, create: bool) -> tuple[int, str]:
+    """Windows handle walk that rejects every reparse-point inbox parent component."""
+    from . import nt_dirfd
+
+    target_root = target.expanduser().resolve()
+    inbox_path = helpers._imports_path(target_root)
+    try:
+        relative = inbox_path.relative_to(target_root)
+    except ValueError as exc:
+        raise OSError("import inbox escapes target") from exc
+    parent = nt_dirfd.open_root_directory(target_root)
+    try:
+        for component in relative.parts[:-1]:
+            nt_dirfd.validate_component(component)
+            try:
+                child = nt_dirfd.open_child_directory(parent, component)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                nt_dirfd.mkdir_child(parent, component)
+                child = nt_dirfd.open_child_directory(parent, component)
+            os.close(parent)
+            parent = child
+        return parent, nt_dirfd.validate_component(relative.parts[-1])
+    except BaseException:
+        os.close(parent)
+        raise
+
+
 def _validate_import_inbox_descriptor(descriptor: int) -> None:
     metadata = os.fstat(descriptor)
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
@@ -2567,10 +2718,10 @@ def _validate_import_inbox_descriptor(descriptor: int) -> None:
 
 def _validate_import_inbox_name_matches_descriptor(parent: int, name: str, descriptor: int) -> None:
     """Ensure a directory entry still names the retained regular inbox object."""
-    if os.stat not in os.supports_dir_fd:
+    if not _dirfd_available():
         raise OSError("descriptor-relative import inbox validation is unavailable")
     opened = os.fstat(descriptor)
-    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    named = _dirfd_stat(parent, name)
     if (
         not stat.S_ISREG(named.st_mode)
         or named.st_nlink != 1
@@ -2594,10 +2745,10 @@ def _write_import_inbox_bytes_at(
     temporary_name = f".{name}.{uuid4().hex}.tmp"
     try:
         try:
-            existing = os.open(
+            existing = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
             )
         except FileNotFoundError:
             pass
@@ -2615,11 +2766,11 @@ def _write_import_inbox_bytes_at(
             previous_exists = False
         if previous_raw is None:
             previous_raw = b""
-        descriptor = os.open(
+        descriptor = _dirfd_open_file(
+            parent,
             temporary_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             0o600,
-            dir_fd=parent,
         )
         _validate_import_inbox_descriptor(descriptor)
         with os.fdopen(os.dup(descriptor), "wb") as handle:
@@ -2627,12 +2778,12 @@ def _write_import_inbox_bytes_at(
             handle.flush()
             os.fsync(handle.fileno())
         _validate_import_inbox_descriptor(descriptor)
-        os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+        _dirfd_replace(parent, temporary_name, name)
         _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
-        os.fsync(parent)
+        _dirfd_fsync(parent)
     except BaseException:
         try:
-            os.unlink(temporary_name, dir_fd=parent)
+            _dirfd_unlink(parent, temporary_name)
         except FileNotFoundError:
             pass
         _restore_import_inbox_snapshot(parent, name, previous_raw, previous_exists)
@@ -2650,10 +2801,10 @@ def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
     descriptor = -1
     try:
         try:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
-                dir_fd=parent,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
             )
         except FileNotFoundError:
             return parent, name, b"", False
@@ -2683,20 +2834,20 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
     """Restore an ordinary import transaction through its original parent."""
     if not exists:
         try:
-            os.unlink(name, dir_fd=parent)
+            _dirfd_unlink(parent, name)
         except FileNotFoundError:
             pass
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         return
     for _attempt in range(3):
         temporary_name = f".{name}.{uuid4().hex}.tmp"
         descriptor = -1
         try:
-            descriptor = os.open(
+            descriptor = _dirfd_open_file(
+                parent,
                 temporary_name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
                 0o600,
-                dir_fd=parent,
             )
             with os.fdopen(os.dup(descriptor), "wb") as handle:
                 handle.write(data)
@@ -2704,10 +2855,10 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
                 os.fsync(handle.fileno())
             _validate_import_inbox_descriptor(descriptor)
             _validate_import_inbox_name_matches_descriptor(parent, temporary_name, descriptor)
-            os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+            _dirfd_replace(parent, temporary_name, name)
             temporary_name = ""
             _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
-            os.fsync(parent)
+            _dirfd_fsync(parent)
             return
         except OSError:
             pass
@@ -2716,15 +2867,15 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
                 os.close(descriptor)
             if temporary_name:
                 try:
-                    os.unlink(temporary_name, dir_fd=parent)
+                    _dirfd_unlink(parent, temporary_name)
                 except FileNotFoundError:
                     pass
     descriptor = -1
     try:
-        descriptor = os.open(
+        descriptor = _dirfd_open_file(
+            parent,
             name,
-            os.O_WRONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=parent,
+            os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
         )
         _validate_import_inbox_descriptor(descriptor)
         os.ftruncate(descriptor, 0)
@@ -2736,14 +2887,14 @@ def _restore_import_inbox_snapshot(parent: int, name: str, data: bytes, exists: 
             remaining = remaining[written:]
         os.fsync(descriptor)
         _validate_import_inbox_name_matches_descriptor(parent, name, descriptor)
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         return
     except OSError:
         try:
-            os.unlink(name, dir_fd=parent)
+            _dirfd_unlink(parent, name)
         except FileNotFoundError:
             pass
-        os.fsync(parent)
+        _dirfd_fsync(parent)
         raise OSError("import inbox rollback could not restore its retained snapshot") from None
     finally:
         if descriptor != -1:
@@ -3497,6 +3648,95 @@ def _ready_tasks(target: Path) -> list[dict[str, Any]]:
     tasks = [task for task in _pending_tasks(target) if task.get("id") in ready_ids]
     tasks.sort(key=_task_sort_key)
     return tasks
+
+
+def _startable_tasks(target: Path) -> list[dict[str, Any]]:
+    """Ready tasks that also pass decision and plan-receipt start gates (#1034)."""
+    from .claiming import ClaimError
+
+    ledger = _read_task_ledger(target)
+    resolution = edges_mod.resolve_readiness(ledger)
+    ready_ids = {item["id"] for item in resolution.ready}
+    startable: list[dict[str, Any]] = []
+    for task in _pending_tasks(target):
+        if task.get("id") not in ready_ids:
+            continue
+        try:
+            _evaluate_task_start_gates(target, ledger, task, require_pending=True)
+        except ClaimError:
+            continue
+        startable.append(task)
+    startable.sort(key=_task_sort_key)
+    return startable
+
+
+def _evaluate_task_start_gates(
+    target: Path,
+    ledger: dict[str, Any],
+    task: dict[str, Any],
+    *,
+    require_pending: bool = False,
+) -> None:
+    """Raise ``ClaimError`` if the task cannot start. Caller holds or accepts a snapshot.
+
+    Shared by claim, default run, and explicit ``work run --task-id`` (#1034, #1035).
+    Claim retries leave ``require_pending`` false so ``apply_claim_to_task``
+    can still honor idempotent claim ids and already-claimed conflicts.
+    """
+    from .claiming import ClaimError, REASON_NOT_READY, readiness_block_for_task
+
+    status = str(task.get("status") or "pending")
+    if status != "pending":
+        if require_pending:
+            raise ClaimError(
+                f"task {task.get('id')} is not ready to start (status={status})",
+                reason=REASON_NOT_READY,
+                details={"task_id": task.get("id"), "status": status, "block": {"reason": "wrong_status"}},
+            )
+        return
+    try:
+        unresolved = _unresolved_plan_decisions(target, str(task.get("id")), task=task)
+    except PlanDecisionError as exc:
+        raise ClaimError(
+            str(exc),
+            reason=exc.reason,
+            details={"task_id": task.get("id"), **exc.details},
+            exit_code=exc.exit_code,
+        ) from exc
+    if unresolved:
+        raise ClaimError(
+            _decision_gate_message(unresolved),
+            reason="unresolved_plan_decisions",
+            details={
+                "task_id": task.get("id"),
+                "unresolved_decision_ids": [item.get("id") for item in unresolved],
+            },
+            exit_code=2,
+        )
+    block = readiness_block_for_task(ledger, str(task.get("id")))
+    if block is not None:
+        raise ClaimError(
+            f"task {task.get('id')} is not ready to start (reason={block.get('reason')})",
+            reason=REASON_NOT_READY,
+            details={"task_id": task.get("id"), "status": status, "block": block},
+        )
+
+
+def _authorize_task_start(target: Path, task_id: str) -> dict[str, Any]:
+    """Locked authorize-and-start CAS used by ``work run`` (#1034)."""
+    from .claiming import ClaimError
+
+    with _task_ledger_lock(target):
+        task, ledger = _find_task(target, task_id)
+        if task is None:
+            raise ClaimError(
+                f"pending task not found: {task_id}",
+                reason="unknown_task",
+                details={"task_id": task_id},
+                exit_code=1,
+            )
+        _evaluate_task_start_gates(target, ledger, task, require_pending=True)
+        return task
 
 
 def _readiness_payload(
@@ -4342,6 +4582,10 @@ _DECISION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 DECISION_STATUS_PENDING = "pending"
 DECISION_STATUS_RESOLVED = "resolved"
 REASON_MALFORMED_PLAN_DECISIONS = "malformed_plan_decisions"
+PLAN_RECEIPT_SCHEMA = "brigade.plan-receipt.v1"
+REASON_MISSING_PLAN_RECEIPT = "missing_plan_receipt"
+REASON_CORRUPT_PLAN_RECEIPT = "corrupt_plan_receipt"
+REASON_PLAN_RECEIPT_MISMATCH = "plan_receipt_mismatch"
 DECISION_RECEIPT_KEYS = (
     "id",
     "prompt",
@@ -4531,17 +4775,196 @@ def _unresolved_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any
     return [item for item in decisions if item.get("status") != DECISION_STATUS_RESOLVED]
 
 
-def _plan_decisions(target: Path, task_id: str, *, kind: str = "plan") -> list[dict[str, Any]]:
-    receipt = _read_plan_receipt(target, task_id, kind)
+def _plan_receipt_digest(
+    *,
+    task_id: object,
+    kind: object,
+    generation: object,
+    decisions: object,
+) -> str:
+    payload = {
+        "schema": PLAN_RECEIPT_SCHEMA,
+        "task_id": task_id,
+        "kind": kind,
+        "generation": generation,
+        "decisions": decisions,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _task_plan_binding(task: dict[str, Any] | None, *, kind: str = "plan") -> dict[str, Any] | None:
+    """Return the expected plan-receipt binding, or None when none was stamped."""
+    if not isinstance(task, dict) or "plan_receipt" not in task:
+        return None
+    raw = task.get("plan_receipt")
+    if not isinstance(raw, dict):
+        raise PlanDecisionError(
+            "task plan_receipt binding is malformed",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "plan_receipt"},
+        )
+    schema = raw.get("schema")
+    bound_task_id = raw.get("task_id")
+    bound_kind = raw.get("kind")
+    digest = raw.get("digest")
+    generation = raw.get("generation")
+    if schema != PLAN_RECEIPT_SCHEMA:
+        raise PlanDecisionError(
+            "task plan_receipt binding has an unknown schema",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"schema": schema, "expected": PLAN_RECEIPT_SCHEMA},
+        )
+    if not isinstance(bound_task_id, str) or not bound_task_id.strip():
+        raise PlanDecisionError(
+            "task plan_receipt binding is missing task_id",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "task_id"},
+        )
+    if not isinstance(bound_kind, str) or not bound_kind.strip():
+        raise PlanDecisionError(
+            "task plan_receipt binding is missing kind",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "kind"},
+        )
+    if bound_kind != kind:
+        return None
+    if not isinstance(digest, str) or not digest.strip():
+        raise PlanDecisionError(
+            "task plan_receipt binding is missing digest",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "digest"},
+        )
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise PlanDecisionError(
+            "task plan_receipt binding has an invalid generation",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "generation", "generation": generation},
+        )
+    return {
+        "schema": schema,
+        "task_id": bound_task_id,
+        "kind": bound_kind,
+        "digest": digest,
+        "generation": generation,
+    }
+
+
+def _verify_plan_receipt_identity(
+    receipt: dict[str, Any],
+    binding: dict[str, Any],
+    *,
+    expected_task_id: str,
+    expected_kind: str,
+) -> None:
+    if receipt.get("schema") != binding["schema"] or receipt.get("schema") != PLAN_RECEIPT_SCHEMA:
+        raise PlanDecisionError(
+            "plan receipt schema does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"receipt_schema": receipt.get("schema"), "binding_schema": binding["schema"]},
+        )
+    if receipt.get("task_id") != binding["task_id"] or receipt.get("task_id") != expected_task_id:
+        raise PlanDecisionError(
+            "plan receipt task_id does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"receipt_task_id": receipt.get("task_id"), "binding_task_id": binding["task_id"]},
+        )
+    if receipt.get("kind") != binding["kind"] or receipt.get("kind") != expected_kind:
+        raise PlanDecisionError(
+            "plan receipt kind does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"receipt_kind": receipt.get("kind"), "binding_kind": binding["kind"]},
+        )
+    if receipt.get("generation") != binding["generation"]:
+        raise PlanDecisionError(
+            "plan receipt generation does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"receipt_generation": receipt.get("generation"), "binding_generation": binding["generation"]},
+        )
+
+
+def _verify_plan_receipt_digest(receipt: dict[str, Any], binding: dict[str, Any]) -> None:
+    digest = _plan_receipt_digest(
+        task_id=receipt.get("task_id"),
+        kind=receipt.get("kind"),
+        generation=receipt.get("generation"),
+        decisions=receipt.get("decisions"),
+    )
+    stored = receipt.get("digest")
+    if digest != binding["digest"] or (isinstance(stored, str) and stored != digest):
+        raise PlanDecisionError(
+            "plan receipt digest does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"expected_digest": binding["digest"]},
+        )
+
+
+def _load_plan_receipt(target: Path, task_id: str, kind: str = "plan") -> dict[str, Any] | None:
+    """Load a plan receipt. Missing file is None; corrupt content fails closed."""
+    json_path, _ = helpers._plan_paths(target, task_id, kind)
+    if not json_path.is_file():
+        return None
+    try:
+        data = json.loads(json_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise PlanDecisionError(
+            f"plan receipt is corrupt or unreadable: {json_path}",
+            reason=REASON_CORRUPT_PLAN_RECEIPT,
+            details={"path": str(json_path), "error": str(exc)},
+        ) from exc
+    if not isinstance(data, dict):
+        raise PlanDecisionError(
+            f"plan receipt is corrupt (root must be an object): {json_path}",
+            reason=REASON_CORRUPT_PLAN_RECEIPT,
+            details={"path": str(json_path)},
+        )
+    return data
+
+
+def _plan_decisions(
+    target: Path,
+    task_id: str,
+    *,
+    kind: str = "plan",
+    task: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if task is None:
+        task, _ = _find_task(target, task_id)
+    resolved_id = str(task.get("id") or task_id) if isinstance(task, dict) else task_id
+    binding = _task_plan_binding(task, kind=kind)
+    receipt = _load_plan_receipt(target, resolved_id, kind)
+    if binding is not None:
+        if receipt is None:
+            raise PlanDecisionError(
+                f"expected plan receipt is missing for task {resolved_id}",
+                reason=REASON_MISSING_PLAN_RECEIPT,
+                details={"task_id": resolved_id, "kind": kind},
+            )
+        _verify_plan_receipt_identity(
+            receipt,
+            binding,
+            expected_task_id=resolved_id,
+            expected_kind=kind,
+        )
     if receipt is None:
         return []
     if "decisions" not in receipt:
-        return []
-    return _normalize_decisions(receipt.get("decisions"))
+        decisions = _normalize_decisions(None) if binding is not None else []
+    else:
+        decisions = _normalize_decisions(receipt.get("decisions"))
+    if binding is not None:
+        _verify_plan_receipt_digest(receipt, binding)
+    return decisions
 
 
-def _unresolved_plan_decisions(target: Path, task_id: str, *, kind: str = "plan") -> list[dict[str, Any]]:
-    return _unresolved_decisions(_plan_decisions(target, task_id, kind=kind))
+def _unresolved_plan_decisions(
+    target: Path,
+    task_id: str,
+    *,
+    kind: str = "plan",
+    task: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    return _unresolved_decisions(_plan_decisions(target, task_id, kind=kind, task=task))
 
 
 def _decision_gate_message(unresolved: list[dict[str, Any]]) -> str:
@@ -4641,6 +5064,7 @@ def _resolve_plan_decision(
 
 
 def _read_plan_receipt(target: Path, task_id: str, kind: str = "plan") -> dict[str, Any] | None:
+    """Display-oriented receipt read. Gates use ``_load_plan_receipt`` instead."""
     json_path, _ = helpers._plan_paths(target, task_id, kind)
     if not json_path.is_file():
         return None
@@ -4687,6 +5111,7 @@ def _build_plan_receipt(
     if existing is None:
         resolved_title = title if title is not None else str(task.get("text") or "")
         return {
+            "schema": PLAN_RECEIPT_SCHEMA,
             "task_id": task_id,
             "kind": kind,
             "title": resolved_title,
@@ -4717,6 +5142,7 @@ def _build_plan_receipt(
         if not any(r.get("run_id") == research.get("run_id") for r in research_runs):
             research_runs = research_runs + [research]
     return {
+        "schema": PLAN_RECEIPT_SCHEMA,
         "task_id": task_id,
         "kind": kind,
         "title": title if title is not None else prior_title,
@@ -4987,64 +5413,101 @@ def _write_plan_artifact(
                 "legacy": False,
             }
             research_sources.append(f"research:{from_research} (mixed-provenance) -> {report_path}")
-    existing = _read_plan_receipt(target, resolved_id, kind)
-    now = helpers._now().isoformat()
-    try:
-        if existing is None or "decisions" not in existing:
-            decisions = _normalize_decisions(None, now=now)
-        else:
-            decisions = _normalize_decisions(existing.get("decisions"), now=now)
-    except PlanDecisionError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return int(exc.exit_code)
-    if decision is not None:
-        decisions, error = _declare_plan_decision(
-            decisions,
-            decision_id=decision,
-            prompt=decision_prompt,
-            options=decision_options,
-            now=now,
+    with _task_ledger_lock(target):
+        task, ledger = _find_task(target, resolved_id)
+        if task is None:
+            print(f"error: task not found: {task_id}", file=sys.stderr)
+            return 1
+        resolved_id = str(task.get("id") or resolved_id)
+        existing = _read_plan_receipt(target, resolved_id, kind)
+        now = helpers._now().isoformat()
+        try:
+            if existing is None or "decisions" not in existing:
+                decisions = _normalize_decisions(None, now=now)
+            else:
+                decisions = _normalize_decisions(existing.get("decisions"), now=now)
+        except PlanDecisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
+        if decision is not None:
+            decisions, error = _declare_plan_decision(
+                decisions,
+                decision_id=decision,
+                prompt=decision_prompt,
+                options=decision_options,
+                now=now,
+            )
+            if error is not None:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+        if resolve_decision is not None:
+            decisions, error = _resolve_plan_decision(
+                decisions,
+                decision_id=resolve_decision,
+                selected=selected,
+                rationale=rationale,
+                evidence_ref=evidence_ref,
+                now=now,
+            )
+            if error is not None:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+        if accept:
+            unresolved = _unresolved_decisions(decisions)
+            if unresolved:
+                print(f"error: {_decision_gate_message(unresolved)}", file=sys.stderr)
+                return 2
+        receipt = _build_plan_receipt(
+            target=target,
+            task=task,
+            task_id=resolved_id,
+            existing=existing,
+            title=title,
+            assumptions=assumptions,
+            risks=risks,
+            sources=research_sources,
+            next_command=next_command,
+            accept=accept,
+            kind=kind,
+            steps=steps,
+            research=research_entry,
+            decisions=decisions,
         )
-        if error is not None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-    if resolve_decision is not None:
-        decisions, error = _resolve_plan_decision(
-            decisions,
-            decision_id=resolve_decision,
-            selected=selected,
-            rationale=rationale,
-            evidence_ref=evidence_ref,
-            now=now,
+        generation = 1
+        try:
+            existing_binding = _task_plan_binding(task, kind=kind)
+        except PlanDecisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
+        if existing_binding is not None:
+            generation = existing_binding["generation"] + 1
+        elif isinstance(existing, dict):
+            prior_generation = existing.get("generation")
+            if isinstance(prior_generation, int) and not isinstance(prior_generation, bool) and prior_generation >= 1:
+                generation = prior_generation + 1
+        receipt["schema"] = PLAN_RECEIPT_SCHEMA
+        receipt["generation"] = generation
+        digest = _plan_receipt_digest(
+            task_id=resolved_id,
+            kind=kind,
+            generation=generation,
+            decisions=receipt.get("decisions"),
         )
-        if error is not None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-    if accept:
-        unresolved = _unresolved_decisions(decisions)
-        if unresolved:
-            print(f"error: {_decision_gate_message(unresolved)}", file=sys.stderr)
-            return 2
-    receipt = _build_plan_receipt(
-        target=target,
-        task=task,
-        task_id=resolved_id,
-        existing=existing,
-        title=title,
-        assumptions=assumptions,
-        risks=risks,
-        sources=research_sources,
-        next_command=next_command,
-        accept=accept,
-        kind=kind,
-        steps=steps,
-        research=research_entry,
-        decisions=decisions,
-    )
-    json_path, md_path = helpers._plan_paths(target, resolved_id, kind)
-    helpers._plans_dir(target).mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-    md_path.write_text(_render_plan_md(receipt))
+        receipt["digest"] = digest
+        json_path, md_path = helpers._plan_paths(target, resolved_id, kind)
+        helpers._plans_dir(target).mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+        md_path.write_text(_render_plan_md(receipt))
+        if kind == "plan":
+            task["plan_receipt"] = {
+                "schema": PLAN_RECEIPT_SCHEMA,
+                "task_id": resolved_id,
+                "kind": kind,
+                "digest": digest,
+                "generation": generation,
+            }
+            task["updated_at"] = now
+            _write_task_ledger(target, ledger)
     if json_output:
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return 0
