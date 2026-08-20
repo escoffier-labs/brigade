@@ -204,17 +204,18 @@ def _prebind_child_visible_directories(target: Path) -> None:
 
 
 def _open_scanner_runs_directory(target: Path, *, create: bool) -> int:
-    try:
-        return ledger_mod._open_verifier_owned_directory(
-            target,
-            components=(".brigade", "scanners", "runs"),
-            anchor_name=".runs.authority.json",
-            create=create,
-        )
-    except OSError:
-        if not create:
-            raise
-        return ledger_mod._open_legacy_scanner_runs_directory(target)
+    """Open the verifier-owned scanner-runs root.
+
+    A pre-existing unbound tree is never adopted (#1036). The hardened
+    opener already refuses that inode; there is no OSError fallback into
+    legacy adoption. Operator migration of a released tree is explicit.
+    """
+    return ledger_mod._open_verifier_owned_directory(
+        target,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=create,
+    )
 
 
 def _validate_scanner_run_directory(authority: _ScannerRunDirectoryAuthority) -> None:

@@ -219,14 +219,18 @@ def test_scanner_receipt_collection_rejects_renamed_receipt(tmp_path: Path) -> N
     assert scanners_mod._scanner_receipts(tmp_path) == []
 
 
-def test_pre_anchor_scanner_runs_directory_is_adopted(tmp_path: Path) -> None:
-    from brigade.work_cmd import helpers, scanners as scanners_mod
+def test_pre_created_unbound_scanner_runs_directory_is_not_adopted(tmp_path: Path) -> None:
+    """#1036: create=True must not adopt a tree the verifier did not create."""
+    from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
 
     helpers._scanner_runs_root(tmp_path).mkdir(parents=True)
-    descriptor = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
-    os.close(descriptor)
+    with pytest.raises(OSError):
+        scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
 
-    assert (tmp_path / ".brigade" / ".runs.authority.json").is_file()
+    assert not (tmp_path / ".brigade" / ".runs.authority.json").is_file()
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    directories = payload.get("directories") if isinstance(payload, dict) else None
+    assert not directories or ".brigade/scanners/runs" not in directories
 
 
 def test_plaintext_runs_anchor_does_not_let_replacement_directory_forge_receipt(tmp_path: Path):
