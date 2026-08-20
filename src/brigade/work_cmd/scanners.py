@@ -229,13 +229,29 @@ def _scanner_path_red_flag(metadata: os.stat_result) -> str | None:
     """Return an adoption red-flag reason, or None when the inode is operator-owned."""
     if not stat.S_ISDIR(metadata.st_mode):
         return "not a directory"
-    if metadata.st_uid != os.geteuid():
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and metadata.st_uid != geteuid():
         return "owned by a foreign uid"
     if metadata.st_mode & 0o002:
         return "world-writable"
-    if metadata.st_mode & 0o020 and metadata.st_gid not in {os.getegid(), os.getgid()}:
+    getegid = getattr(os, "getegid", None)
+    getgid = getattr(os, "getgid", None)
+    if (
+        getegid is not None
+        and getgid is not None
+        and metadata.st_mode & 0o020
+        and metadata.st_gid not in {getegid(), getgid()}
+    ):
         return "group-writable by a foreign gid"
     return None
+
+
+def _scanner_runs_path_is_unsafe_link(exc: OSError) -> bool:
+    """Return whether a walk error means a symlink, reparse point, or non-directory."""
+    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+        return True
+    detail = str(exc).lower()
+    return "reparse point" in detail or "symlink" in detail or "not a directory" in detail
 
 
 def _bind_released_unbound_scanner_runs_root(target: Path) -> str:
@@ -246,27 +262,26 @@ def _bind_released_unbound_scanner_runs_root(target: Path) -> str:
     Child run directories and receipts stay untrusted. An existing tree that
     is foreign-owned, world-writable, or reached through a symlink fails
     closed. This is not the #1036 legacy adoption fallback.
+
+    Descriptor-relative inspection uses the ledger helpers so Windows no-follow
+    dirfd can walk the same path. When those primitives are unavailable and
+    there is nothing to migrate, return ``missing`` instead of failing
+    ``scanners init`` / ``operator quickstart``.
     """
     if _scanner_runs_directory_is_bound(target):
         return "bound"
-    if (
-        os.name != "posix"
-        or not getattr(os, "O_NOFOLLOW", 0)
-        or not getattr(os, "O_DIRECTORY", 0)
-        or os.open not in os.supports_dir_fd
-    ):
-        raise OSError("descriptor-relative directory authority operations are unavailable")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(target.expanduser().resolve(), flags)
+    if not ledger_mod._dirfd_available():
+        return "missing"
+    descriptor = ledger_mod._open_directory_nofollow(target.expanduser().resolve())
     opened = [descriptor]
     try:
         for component in _SCANNER_RUNS_COMPONENTS:
             try:
-                child = os.open(component, flags, dir_fd=opened[-1])
+                child = ledger_mod._dirfd_open_dir(opened[-1], component)
             except FileNotFoundError:
                 return "missing"
             except OSError as exc:
-                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                if _scanner_runs_path_is_unsafe_link(exc):
                     raise OSError(
                         _scanner_runs_root_operator_message(target, "path contains a symlink or is not a directory")
                     ) from exc

@@ -113,6 +113,8 @@ def test_mutation_open_scanner_runs_directory_does_not_call_legacy_adoption() ->
     helper = inspect.getsource(scanners_mod._bind_released_unbound_scanner_runs_root)
     assert "_open_legacy_scanner_runs_directory" not in helper
     assert "_adopt_preexisting_scanner_run_directories" not in helper
+    assert "descriptor-relative directory authority operations are unavailable" not in helper
+    assert "os.name != " not in helper
 
 
 def test_mutation_precreated_unbound_tree_is_adopted_by_unfixed_fallback_and_refused_by_fix(
@@ -235,6 +237,28 @@ def test_scanner_run_one_surfaces_runs_dir_failure_without_traceback(
     assert rc == 1
     assert payload["errors"]
     assert "foreign uid" in payload["errors"][0]
+
+
+def test_bind_and_init_are_noop_when_runs_root_is_absent(tmp_path: Path) -> None:
+    """Fresh operator quickstart has no runs dir; init must stay exit 0."""
+    assert scanners_mod._bind_released_unbound_scanner_runs_root(tmp_path) == "missing"
+    assert scanners_mod.scanners_init(target=tmp_path) == 0
+    assert not helpers._scanner_runs_root(tmp_path).exists()
+    assert not _runs_root_is_bound(tmp_path)
+
+
+def test_bind_is_noop_when_dirfd_is_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows / no-dirfd hosts must not fail scanners_init on a fresh tree.
+
+    Red if bind still raises ``descriptor-relative ... unavailable`` (the
+    pre-fix ``os.name != "posix"`` path) before noticing the runs root is
+    absent. That exit 1 broke windows-native-acceptance ``operator quickstart``.
+    """
+    monkeypatch.setattr(ledger, "_dirfd_available", lambda: False)
+    assert scanners_mod._bind_released_unbound_scanner_runs_root(tmp_path) == "missing"
+    assert scanners_mod.scanners_init(target=tmp_path) == 0
+    assert not helpers._scanner_runs_root(tmp_path).exists()
+    assert not _runs_root_is_bound(tmp_path)
 
 
 def test_doctor_and_init_repair_released_unbound_runs_root(tmp_path: Path) -> None:
