@@ -2591,7 +2591,7 @@ where i.id = ?`, r.ID)
 	addCodeReferenceFilter(filters, opts.CodeReference)
 	return map[string]any{
 		"id":                   id,
-		"resource_uri":         "miseledger://evidence/" + id,
+		"resource_uri":         evidenceBundleResourceURI(id),
 		"query":                opts.Query,
 		"filters":              filters,
 		"generated_at":         time.Now().UTC().Format(time.RFC3339Nano),
@@ -2687,6 +2687,15 @@ func loadEvidenceBundleRef(id string) (map[string]any, error) {
 	return ref, nil
 }
 
+const (
+	cacheRefQueryMax        = 256
+	evidenceBundleURIPrefix = "miseledger://evidence/"
+)
+
+func evidenceBundleResourceURI(id string) string {
+	return evidenceBundleURIPrefix + id
+}
+
 func materializeEvidenceBundle(id string) (map[string]any, error) {
 	ref, err := loadEvidenceBundleRef(id)
 	if err != nil {
@@ -2705,29 +2714,32 @@ func materializeEvidenceBundle(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if storedID, _ := ref["id"].(string); storedID != "" {
-		bundle["id"] = storedID
-		if uri, _ := ref["resource_uri"].(string); uri != "" {
-			bundle["resource_uri"] = uri
-		} else {
-			bundle["resource_uri"] = "miseledger://evidence/" + storedID
-		}
-	}
+	projectMaterializedBundle(bundle, id)
 	return bundle, nil
+}
+
+// projectMaterializedBundle keeps cache-ref fields off the model-facing
+// payload. The cache file is same-UID writable, so query and resource_uri
+// are never copied verbatim: resource_uri is reconstructed from the
+// path-validated id, and query is cleared after the live eligibility regen.
+func projectMaterializedBundle(bundle map[string]any, id string) {
+	bundle["id"] = id
+	bundle["resource_uri"] = evidenceBundleResourceURI(id)
+	bundle["query"] = ""
 }
 
 func searchOptsFromBundleRef(ref map[string]any) (SearchOpts, error) {
 	filters := anyToMap(ref["filters"])
 	opts := SearchOpts{
-		Query:               stringFromAny(ref["query"]),
-		Source:              stringFromAny(filters["source"]),
-		Collection:          stringFromAny(filters["collection"]),
-		Kind:                stringFromAny(filters["kind"]),
-		ActorType:           stringFromAny(filters["actor_type"]),
-		Project:             stringFromAny(filters["project"]),
-		Tags:                stringFromAny(filters["tags"]),
-		From:                stringFromAny(filters["from"]),
-		To:                  stringFromAny(filters["to"]),
+		Query:               boundClosedField(stringFromAny(ref["query"]), cacheRefQueryMax),
+		Source:              boundClosedField(stringFromAny(filters["source"]), ineligibleClosedFieldMax),
+		Collection:          boundClosedField(stringFromAny(filters["collection"]), ineligibleClosedFieldMax),
+		Kind:                boundClosedField(stringFromAny(filters["kind"]), ineligibleClosedFieldMax),
+		ActorType:           boundClosedField(stringFromAny(filters["actor_type"]), ineligibleClosedFieldMax),
+		Project:             boundClosedField(stringFromAny(filters["project"]), ineligibleClosedFieldMax),
+		Tags:                boundClosedField(stringFromAny(filters["tags"]), ineligibleClosedFieldMax),
+		From:                boundClosedField(stringFromAny(filters["from"]), ineligibleClosedFieldMax),
+		To:                  boundClosedField(stringFromAny(filters["to"]), ineligibleClosedFieldMax),
 		Limit:               intFromAny(filters["limit"]),
 		IncludeRelated:      boolFromAny(filters["include_related"]),
 		IncludeArtifactText: boolFromAny(filters["include_artifact_text"]),

@@ -453,25 +453,60 @@ func applySearchIntegrity(db *sql.DB, results []SearchResult) error {
 
 const ineligibleClosedFieldMax = 64
 
+// Adapter Record.Validate only requires source/collection/item kind to be
+// non-empty, so those columns are free-form attacker text. Ineligible
+// projections may emit a value only when it matches these allowlists.
+var (
+	projectionSourceKinds = map[string]struct{}{
+		"brigade": {}, "brigade-memory": {}, "chatgpt": {}, "claude": {},
+		"claude-export": {}, "codex": {}, "cursor": {}, "discrawl": {},
+		"discord": {}, "gmail": {}, "github": {}, "granola": {}, "grok": {},
+		"hermes": {}, "notion": {}, "opencode": {}, "openclaw": {}, "pi": {},
+		"slack": {}, "synthetic": {}, "telegram": {},
+	}
+	projectionCollectionKinds = map[string]struct{}{
+		"agent_session": {}, "conversation": {}, "memory_cards": {},
+		"messages": {}, "prompt_history": {}, "repository": {},
+	}
+	projectionItemKinds = map[string]struct{}{
+		"memory_card": {}, "message": {}, "session_summary": {},
+	}
+	projectionOrigins = map[string]struct{}{
+		"agent-session": {}, "external-service": {}, "external-web": {},
+		"operator-input": {}, "unknown": {}, "workspace": {},
+	}
+	projectionModalities = map[string]struct{}{
+		"external-web": {}, "human-written": {}, "mixed": {},
+		"model-generated": {}, "tool-output": {}, "unknown": {},
+	}
+	projectionTrustLabels = map[string]struct{}{
+		"quarantined": {}, "reviewed": {}, "unknown": {}, "untrusted": {},
+		"verified": {},
+	}
+)
+
 func redactIneligibleSearchResult(r *SearchResult) {
 	r.Snippet = ""
 	r.CollectionName = ""
 	r.ActorName = ""
 	r.ActorType = ""
-	r.SourceKind = boundClosedField(r.SourceKind, ineligibleClosedFieldMax)
-	r.CollectionKind = boundClosedField(r.CollectionKind, ineligibleClosedFieldMax)
-	r.Kind = boundClosedField(r.Kind, ineligibleClosedFieldMax)
+	r.SourceKind = allowlistedProjectionField(r.SourceKind, projectionSourceKinds)
+	r.CollectionKind = allowlistedProjectionField(r.CollectionKind, projectionCollectionKinds)
+	r.Kind = allowlistedProjectionField(r.Kind, projectionItemKinds)
 	r.CreatedAt = boundClosedField(r.CreatedAt, ineligibleClosedFieldMax)
-	r.Origin = boundClosedField(r.Origin, ineligibleClosedFieldMax)
-	r.Modality = boundClosedField(r.Modality, ineligibleClosedFieldMax)
-	r.TrustLabel = boundClosedField(r.TrustLabel, 32)
+	r.Origin = allowlistedProjectionField(r.Origin, projectionOrigins)
+	r.Modality = allowlistedProjectionField(r.Modality, projectionModalities)
+	r.TrustLabel = allowlistedProjectionField(r.TrustLabel, projectionTrustLabels)
 	r.Score = boundClosedField(r.Score, 32)
 }
 
 func redactIneligibleBundleItem(item map[string]any) {
 	item["snippet"] = ""
+	item["source_kind"] = allowlistedProjectionField(stringFromAny(item["source_kind"]), projectionSourceKinds)
+	item["kind"] = allowlistedProjectionField(stringFromAny(item["kind"]), projectionItemKinds)
 	if col := anyToMap(item["collection"]); len(col) > 0 || item["collection"] != nil {
 		col["name"] = ""
+		col["kind"] = allowlistedProjectionField(stringFromAny(col["kind"]), projectionCollectionKinds)
 		item["collection"] = col
 	}
 	if actor := anyToMap(item["actor"]); len(actor) > 0 || item["actor"] != nil {
@@ -479,6 +514,13 @@ func redactIneligibleBundleItem(item map[string]any) {
 		actor["type"] = ""
 		item["actor"] = actor
 	}
+}
+
+func allowlistedProjectionField(value string, allowed map[string]struct{}) string {
+	if _, ok := allowed[value]; ok {
+		return value
+	}
+	return ""
 }
 
 func boundClosedField(s string, max int) string {
