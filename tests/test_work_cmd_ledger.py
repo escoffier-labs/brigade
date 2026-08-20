@@ -1886,3 +1886,56 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
         ),
         ("done", {"target": tmp_path, "task_id": "abc123", "force": False, "json_output": False}),
     ]
+
+
+def test_import_snapshot_join_set_includes_content_not_just_id():
+    reviewed = work_cmd._make_import("Reviewed pending task", kind="task", source="memory-care")
+    forged = work_cmd._make_import("Forged unreviewed payload", kind="task", source="memory-care")
+    forged["id"] = reviewed["id"]
+    reviewed_join = work_cmd.ledger._import_snapshot_join_set([reviewed], kind="task", source="memory-care")
+    forged_join = work_cmd.ledger._import_snapshot_join_set([forged], kind="task", source="memory-care")
+    assert reviewed["id"] == forged["id"]
+    assert reviewed_join != forged_join
+    assert {row_id for row_id, _digest in reviewed_join} == {reviewed["id"]}
+
+
+def test_import_promote_all_refuses_when_reviewed_inbox_join_set_changes(tmp_path, monkeypatch, capsys):
+    """Same-ID inbox swap between review and promote must fail closed.
+
+    The reviewed snapshot is bound under the task-ledger lock. If a child
+    replaces that generation with a same-id row before promote, the CAS
+    must refuse and must not create a task from the forged bytes. A revert
+    to two inbox reads joined only by attacker-controlled id lets this
+    attack through.
+    """
+    _init_git_repo(tmp_path)
+    reviewed = work_cmd._make_import("Reviewed pending task from memory-care", kind="task", source="memory-care")
+    work_cmd._write_imports(tmp_path, [reviewed])
+
+    def swap_same_id(_target, _snapshot):
+        forged = work_cmd._make_import(
+            "Forged unreviewed payload injected after review",
+            kind="task",
+            source="memory-care",
+        )
+        forged["id"] = reviewed["id"]
+        work_cmd._write_imports(tmp_path, [forged])
+
+    monkeypatch.setattr(work_cmd.ledger, "_after_reviewed_import_snapshot", swap_same_id)
+
+    rc = work_cmd.import_promote(target=tmp_path, all_matching=True, kind="task", source="memory-care")
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "changed since the reviewed snapshot" in err
+    tasks_path = tmp_path / ".brigade" / "work" / "tasks.json"
+    texts = []
+    if tasks_path.exists():
+        ledger = json.loads(tasks_path.read_text())
+        texts = [task.get("text") for task in ledger.get("tasks", [])]
+    assert "Forged unreviewed payload injected after review" not in texts
+    assert "Reviewed pending task from memory-care" not in texts
+    inbox = work_cmd._read_imports(tmp_path)
+    assert len(inbox) == 1
+    assert inbox[0]["id"] == reviewed["id"]
+    assert inbox[0]["text"] == "Forged unreviewed payload injected after review"
+    assert inbox[0].get("status", "pending") == "pending"

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- `work import promote --all` now reviews and promotes one inbox generation under the task-ledger lock. Matching rows are bound to that snapshot's identity and digest; a same-id swap or rewrite between review and promote is refused and does not create a task. Fixes #1037.
 - Run transport now applies quarantine, allowlist, and provider preflight to every `invoke` candidate, so an invalid-final fallback cannot launch a seat that is already quarantined for the run. Fixes #1038.
 - Receipt `endpoint_host` provenance records parsed hosts or the fixed `invalid-endpoint` marker. A `*_BASE_URL_REF` that resolves to a value with no hostname is no longer copied into the receipt. Fixes #1041.
 - Trust review is bound to an operator-minted capability. `brigade evidence trust review` generates a fresh in-memory HMAC secret, writes a `{item_id, from_digest, transition, nonce, expiry}` token to the engine on stdin, and never places that secret in the child env or argv. `miseledger trust review` without a capability is refused for every stdin kind, including piped empty input, `/dev/null`, and a PTY. stdin is not an authorization signal. Direct engine invocation is unsupported. Fixes #1029.
