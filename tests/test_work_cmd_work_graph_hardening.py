@@ -755,6 +755,8 @@ def test_unknown_edge_type_surfaces_in_ready_and_doctor(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["unknown_type_count"] == 1
     assert payload["unknown_types"] == ["dependson"]
+    ready_ids = {item["id"] for item in payload["ready"]}
+    assert b["id"] not in ready_ids
 
     assert work_cmd.ready(target=tmp_path) == 0
     text = capsys.readouterr().out

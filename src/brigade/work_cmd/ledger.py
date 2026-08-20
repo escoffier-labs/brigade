@@ -203,12 +203,20 @@ def _claim_task(
                 if task is None:
                     continue
                 try:
-                    unresolved = _unresolved_plan_decisions(target, str(task.get("id")))
-                except PlanDecisionError:
-                    # Corrupt checkpoints are not claimable; keep scanning ready set.
-                    continue
-                if unresolved:
-                    continue
+                    _evaluate_task_start_gates(target, ledger, task)
+                except ClaimError as exc:
+                    if exc.reason in {
+                        REASON_ALREADY_CLAIMED,
+                        REASON_NOT_READY,
+                        REASON_GUARD_MISMATCH,
+                        "unresolved_plan_decisions",
+                        REASON_MISSING_PLAN_RECEIPT,
+                        REASON_CORRUPT_PLAN_RECEIPT,
+                        REASON_PLAN_RECEIPT_MISMATCH,
+                        REASON_MALFORMED_PLAN_DECISIONS,
+                    }:
+                        continue
+                    raise
                 try:
                     result = apply_claim_to_task(
                         ledger,
@@ -260,25 +268,7 @@ def _claim_task(
                 details={"task_id": task_id},
                 exit_code=1,
             )
-        try:
-            unresolved = _unresolved_plan_decisions(target, str(task.get("id")))
-        except PlanDecisionError as exc:
-            raise ClaimError(
-                str(exc),
-                reason=exc.reason,
-                details={"task_id": task.get("id"), **exc.details},
-                exit_code=exc.exit_code,
-            ) from exc
-        if unresolved:
-            raise ClaimError(
-                _decision_gate_message(unresolved),
-                reason="unresolved_plan_decisions",
-                details={
-                    "task_id": task.get("id"),
-                    "unresolved_decision_ids": [item.get("id") for item in unresolved],
-                },
-                exit_code=2,
-            )
+        _evaluate_task_start_gates(target, ledger, task)
         result = apply_claim_to_task(
             ledger,
             task,
@@ -3499,6 +3489,95 @@ def _ready_tasks(target: Path) -> list[dict[str, Any]]:
     return tasks
 
 
+def _startable_tasks(target: Path) -> list[dict[str, Any]]:
+    """Ready tasks that also pass decision and plan-receipt start gates (#1034)."""
+    from .claiming import ClaimError
+
+    ledger = _read_task_ledger(target)
+    resolution = edges_mod.resolve_readiness(ledger)
+    ready_ids = {item["id"] for item in resolution.ready}
+    startable: list[dict[str, Any]] = []
+    for task in _pending_tasks(target):
+        if task.get("id") not in ready_ids:
+            continue
+        try:
+            _evaluate_task_start_gates(target, ledger, task, require_pending=True)
+        except ClaimError:
+            continue
+        startable.append(task)
+    startable.sort(key=_task_sort_key)
+    return startable
+
+
+def _evaluate_task_start_gates(
+    target: Path,
+    ledger: dict[str, Any],
+    task: dict[str, Any],
+    *,
+    require_pending: bool = False,
+) -> None:
+    """Raise ``ClaimError`` if the task cannot start. Caller holds or accepts a snapshot.
+
+    Shared by claim, default run, and explicit ``work run --task-id`` (#1034, #1035).
+    Claim retries leave ``require_pending`` false so ``apply_claim_to_task``
+    can still honor idempotent claim ids and already-claimed conflicts.
+    """
+    from .claiming import ClaimError, REASON_NOT_READY, readiness_block_for_task
+
+    status = str(task.get("status") or "pending")
+    if status != "pending":
+        if require_pending:
+            raise ClaimError(
+                f"task {task.get('id')} is not ready to start (status={status})",
+                reason=REASON_NOT_READY,
+                details={"task_id": task.get("id"), "status": status, "block": {"reason": "wrong_status"}},
+            )
+        return
+    try:
+        unresolved = _unresolved_plan_decisions(target, str(task.get("id")), task=task)
+    except PlanDecisionError as exc:
+        raise ClaimError(
+            str(exc),
+            reason=exc.reason,
+            details={"task_id": task.get("id"), **exc.details},
+            exit_code=exc.exit_code,
+        ) from exc
+    if unresolved:
+        raise ClaimError(
+            _decision_gate_message(unresolved),
+            reason="unresolved_plan_decisions",
+            details={
+                "task_id": task.get("id"),
+                "unresolved_decision_ids": [item.get("id") for item in unresolved],
+            },
+            exit_code=2,
+        )
+    block = readiness_block_for_task(ledger, str(task.get("id")))
+    if block is not None:
+        raise ClaimError(
+            f"task {task.get('id')} is not ready to start (reason={block.get('reason')})",
+            reason=REASON_NOT_READY,
+            details={"task_id": task.get("id"), "status": status, "block": block},
+        )
+
+
+def _authorize_task_start(target: Path, task_id: str) -> dict[str, Any]:
+    """Locked authorize-and-start CAS used by ``work run`` (#1034)."""
+    from .claiming import ClaimError
+
+    with _task_ledger_lock(target):
+        task, ledger = _find_task(target, task_id)
+        if task is None:
+            raise ClaimError(
+                f"pending task not found: {task_id}",
+                reason="unknown_task",
+                details={"task_id": task_id},
+                exit_code=1,
+            )
+        _evaluate_task_start_gates(target, ledger, task, require_pending=True)
+        return task
+
+
 def _readiness_payload(
     target: Path,
     *,
@@ -4342,6 +4421,10 @@ _DECISION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 DECISION_STATUS_PENDING = "pending"
 DECISION_STATUS_RESOLVED = "resolved"
 REASON_MALFORMED_PLAN_DECISIONS = "malformed_plan_decisions"
+PLAN_RECEIPT_SCHEMA = "brigade.plan-receipt.v1"
+REASON_MISSING_PLAN_RECEIPT = "missing_plan_receipt"
+REASON_CORRUPT_PLAN_RECEIPT = "corrupt_plan_receipt"
+REASON_PLAN_RECEIPT_MISMATCH = "plan_receipt_mismatch"
 DECISION_RECEIPT_KEYS = (
     "id",
     "prompt",
@@ -4531,17 +4614,196 @@ def _unresolved_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any
     return [item for item in decisions if item.get("status") != DECISION_STATUS_RESOLVED]
 
 
-def _plan_decisions(target: Path, task_id: str, *, kind: str = "plan") -> list[dict[str, Any]]:
-    receipt = _read_plan_receipt(target, task_id, kind)
+def _plan_receipt_digest(
+    *,
+    task_id: object,
+    kind: object,
+    generation: object,
+    decisions: object,
+) -> str:
+    payload = {
+        "schema": PLAN_RECEIPT_SCHEMA,
+        "task_id": task_id,
+        "kind": kind,
+        "generation": generation,
+        "decisions": decisions,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _task_plan_binding(task: dict[str, Any] | None, *, kind: str = "plan") -> dict[str, Any] | None:
+    """Return the expected plan-receipt binding, or None when none was stamped."""
+    if not isinstance(task, dict) or "plan_receipt" not in task:
+        return None
+    raw = task.get("plan_receipt")
+    if not isinstance(raw, dict):
+        raise PlanDecisionError(
+            "task plan_receipt binding is malformed",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "plan_receipt"},
+        )
+    schema = raw.get("schema")
+    bound_task_id = raw.get("task_id")
+    bound_kind = raw.get("kind")
+    digest = raw.get("digest")
+    generation = raw.get("generation")
+    if schema != PLAN_RECEIPT_SCHEMA:
+        raise PlanDecisionError(
+            "task plan_receipt binding has an unknown schema",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"schema": schema, "expected": PLAN_RECEIPT_SCHEMA},
+        )
+    if not isinstance(bound_task_id, str) or not bound_task_id.strip():
+        raise PlanDecisionError(
+            "task plan_receipt binding is missing task_id",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "task_id"},
+        )
+    if not isinstance(bound_kind, str) or not bound_kind.strip():
+        raise PlanDecisionError(
+            "task plan_receipt binding is missing kind",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "kind"},
+        )
+    if bound_kind != kind:
+        return None
+    if not isinstance(digest, str) or not digest.strip():
+        raise PlanDecisionError(
+            "task plan_receipt binding is missing digest",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "digest"},
+        )
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise PlanDecisionError(
+            "task plan_receipt binding has an invalid generation",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"field": "generation", "generation": generation},
+        )
+    return {
+        "schema": schema,
+        "task_id": bound_task_id,
+        "kind": bound_kind,
+        "digest": digest,
+        "generation": generation,
+    }
+
+
+def _verify_plan_receipt_identity(
+    receipt: dict[str, Any],
+    binding: dict[str, Any],
+    *,
+    expected_task_id: str,
+    expected_kind: str,
+) -> None:
+    if receipt.get("schema") != binding["schema"] or receipt.get("schema") != PLAN_RECEIPT_SCHEMA:
+        raise PlanDecisionError(
+            "plan receipt schema does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"receipt_schema": receipt.get("schema"), "binding_schema": binding["schema"]},
+        )
+    if receipt.get("task_id") != binding["task_id"] or receipt.get("task_id") != expected_task_id:
+        raise PlanDecisionError(
+            "plan receipt task_id does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"receipt_task_id": receipt.get("task_id"), "binding_task_id": binding["task_id"]},
+        )
+    if receipt.get("kind") != binding["kind"] or receipt.get("kind") != expected_kind:
+        raise PlanDecisionError(
+            "plan receipt kind does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"receipt_kind": receipt.get("kind"), "binding_kind": binding["kind"]},
+        )
+    if receipt.get("generation") != binding["generation"]:
+        raise PlanDecisionError(
+            "plan receipt generation does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"receipt_generation": receipt.get("generation"), "binding_generation": binding["generation"]},
+        )
+
+
+def _verify_plan_receipt_digest(receipt: dict[str, Any], binding: dict[str, Any]) -> None:
+    digest = _plan_receipt_digest(
+        task_id=receipt.get("task_id"),
+        kind=receipt.get("kind"),
+        generation=receipt.get("generation"),
+        decisions=receipt.get("decisions"),
+    )
+    stored = receipt.get("digest")
+    if digest != binding["digest"] or (isinstance(stored, str) and stored != digest):
+        raise PlanDecisionError(
+            "plan receipt digest does not match the task binding",
+            reason=REASON_PLAN_RECEIPT_MISMATCH,
+            details={"expected_digest": binding["digest"]},
+        )
+
+
+def _load_plan_receipt(target: Path, task_id: str, kind: str = "plan") -> dict[str, Any] | None:
+    """Load a plan receipt. Missing file is None; corrupt content fails closed."""
+    json_path, _ = helpers._plan_paths(target, task_id, kind)
+    if not json_path.is_file():
+        return None
+    try:
+        data = json.loads(json_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise PlanDecisionError(
+            f"plan receipt is corrupt or unreadable: {json_path}",
+            reason=REASON_CORRUPT_PLAN_RECEIPT,
+            details={"path": str(json_path), "error": str(exc)},
+        ) from exc
+    if not isinstance(data, dict):
+        raise PlanDecisionError(
+            f"plan receipt is corrupt (root must be an object): {json_path}",
+            reason=REASON_CORRUPT_PLAN_RECEIPT,
+            details={"path": str(json_path)},
+        )
+    return data
+
+
+def _plan_decisions(
+    target: Path,
+    task_id: str,
+    *,
+    kind: str = "plan",
+    task: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if task is None:
+        task, _ = _find_task(target, task_id)
+    resolved_id = str(task.get("id") or task_id) if isinstance(task, dict) else task_id
+    binding = _task_plan_binding(task, kind=kind)
+    receipt = _load_plan_receipt(target, resolved_id, kind)
+    if binding is not None:
+        if receipt is None:
+            raise PlanDecisionError(
+                f"expected plan receipt is missing for task {resolved_id}",
+                reason=REASON_MISSING_PLAN_RECEIPT,
+                details={"task_id": resolved_id, "kind": kind},
+            )
+        _verify_plan_receipt_identity(
+            receipt,
+            binding,
+            expected_task_id=resolved_id,
+            expected_kind=kind,
+        )
     if receipt is None:
         return []
     if "decisions" not in receipt:
-        return []
-    return _normalize_decisions(receipt.get("decisions"))
+        decisions = _normalize_decisions(None) if binding is not None else []
+    else:
+        decisions = _normalize_decisions(receipt.get("decisions"))
+    if binding is not None:
+        _verify_plan_receipt_digest(receipt, binding)
+    return decisions
 
 
-def _unresolved_plan_decisions(target: Path, task_id: str, *, kind: str = "plan") -> list[dict[str, Any]]:
-    return _unresolved_decisions(_plan_decisions(target, task_id, kind=kind))
+def _unresolved_plan_decisions(
+    target: Path,
+    task_id: str,
+    *,
+    kind: str = "plan",
+    task: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    return _unresolved_decisions(_plan_decisions(target, task_id, kind=kind, task=task))
 
 
 def _decision_gate_message(unresolved: list[dict[str, Any]]) -> str:
@@ -4641,6 +4903,7 @@ def _resolve_plan_decision(
 
 
 def _read_plan_receipt(target: Path, task_id: str, kind: str = "plan") -> dict[str, Any] | None:
+    """Display-oriented receipt read. Gates use ``_load_plan_receipt`` instead."""
     json_path, _ = helpers._plan_paths(target, task_id, kind)
     if not json_path.is_file():
         return None
@@ -4687,6 +4950,7 @@ def _build_plan_receipt(
     if existing is None:
         resolved_title = title if title is not None else str(task.get("text") or "")
         return {
+            "schema": PLAN_RECEIPT_SCHEMA,
             "task_id": task_id,
             "kind": kind,
             "title": resolved_title,
@@ -4717,6 +4981,7 @@ def _build_plan_receipt(
         if not any(r.get("run_id") == research.get("run_id") for r in research_runs):
             research_runs = research_runs + [research]
     return {
+        "schema": PLAN_RECEIPT_SCHEMA,
         "task_id": task_id,
         "kind": kind,
         "title": title if title is not None else prior_title,
@@ -4987,64 +5252,101 @@ def _write_plan_artifact(
                 "legacy": False,
             }
             research_sources.append(f"research:{from_research} (mixed-provenance) -> {report_path}")
-    existing = _read_plan_receipt(target, resolved_id, kind)
-    now = helpers._now().isoformat()
-    try:
-        if existing is None or "decisions" not in existing:
-            decisions = _normalize_decisions(None, now=now)
-        else:
-            decisions = _normalize_decisions(existing.get("decisions"), now=now)
-    except PlanDecisionError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return int(exc.exit_code)
-    if decision is not None:
-        decisions, error = _declare_plan_decision(
-            decisions,
-            decision_id=decision,
-            prompt=decision_prompt,
-            options=decision_options,
-            now=now,
+    with _task_ledger_lock(target):
+        task, ledger = _find_task(target, resolved_id)
+        if task is None:
+            print(f"error: task not found: {task_id}", file=sys.stderr)
+            return 1
+        resolved_id = str(task.get("id") or resolved_id)
+        existing = _read_plan_receipt(target, resolved_id, kind)
+        now = helpers._now().isoformat()
+        try:
+            if existing is None or "decisions" not in existing:
+                decisions = _normalize_decisions(None, now=now)
+            else:
+                decisions = _normalize_decisions(existing.get("decisions"), now=now)
+        except PlanDecisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
+        if decision is not None:
+            decisions, error = _declare_plan_decision(
+                decisions,
+                decision_id=decision,
+                prompt=decision_prompt,
+                options=decision_options,
+                now=now,
+            )
+            if error is not None:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+        if resolve_decision is not None:
+            decisions, error = _resolve_plan_decision(
+                decisions,
+                decision_id=resolve_decision,
+                selected=selected,
+                rationale=rationale,
+                evidence_ref=evidence_ref,
+                now=now,
+            )
+            if error is not None:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+        if accept:
+            unresolved = _unresolved_decisions(decisions)
+            if unresolved:
+                print(f"error: {_decision_gate_message(unresolved)}", file=sys.stderr)
+                return 2
+        receipt = _build_plan_receipt(
+            target=target,
+            task=task,
+            task_id=resolved_id,
+            existing=existing,
+            title=title,
+            assumptions=assumptions,
+            risks=risks,
+            sources=research_sources,
+            next_command=next_command,
+            accept=accept,
+            kind=kind,
+            steps=steps,
+            research=research_entry,
+            decisions=decisions,
         )
-        if error is not None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-    if resolve_decision is not None:
-        decisions, error = _resolve_plan_decision(
-            decisions,
-            decision_id=resolve_decision,
-            selected=selected,
-            rationale=rationale,
-            evidence_ref=evidence_ref,
-            now=now,
+        generation = 1
+        try:
+            existing_binding = _task_plan_binding(task, kind=kind)
+        except PlanDecisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
+        if existing_binding is not None:
+            generation = existing_binding["generation"] + 1
+        elif isinstance(existing, dict):
+            prior_generation = existing.get("generation")
+            if isinstance(prior_generation, int) and not isinstance(prior_generation, bool) and prior_generation >= 1:
+                generation = prior_generation + 1
+        receipt["schema"] = PLAN_RECEIPT_SCHEMA
+        receipt["generation"] = generation
+        digest = _plan_receipt_digest(
+            task_id=resolved_id,
+            kind=kind,
+            generation=generation,
+            decisions=receipt.get("decisions"),
         )
-        if error is not None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-    if accept:
-        unresolved = _unresolved_decisions(decisions)
-        if unresolved:
-            print(f"error: {_decision_gate_message(unresolved)}", file=sys.stderr)
-            return 2
-    receipt = _build_plan_receipt(
-        target=target,
-        task=task,
-        task_id=resolved_id,
-        existing=existing,
-        title=title,
-        assumptions=assumptions,
-        risks=risks,
-        sources=research_sources,
-        next_command=next_command,
-        accept=accept,
-        kind=kind,
-        steps=steps,
-        research=research_entry,
-        decisions=decisions,
-    )
-    json_path, md_path = helpers._plan_paths(target, resolved_id, kind)
-    helpers._plans_dir(target).mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-    md_path.write_text(_render_plan_md(receipt))
+        receipt["digest"] = digest
+        json_path, md_path = helpers._plan_paths(target, resolved_id, kind)
+        helpers._plans_dir(target).mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+        md_path.write_text(_render_plan_md(receipt))
+        if kind == "plan":
+            task["plan_receipt"] = {
+                "schema": PLAN_RECEIPT_SCHEMA,
+                "task_id": resolved_id,
+                "kind": kind,
+                "digest": digest,
+                "generation": generation,
+            }
+            task["updated_at"] = now
+            _write_task_ledger(target, ledger)
     if json_output:
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return 0
