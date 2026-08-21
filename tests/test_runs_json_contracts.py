@@ -17,9 +17,27 @@ PLANTED_ENV_VALUE = "planted-env-OPENAI-not-a-real-key"
 PLANTED_SECRET = "sk-live-EXAMPLESECRETVALUE99"
 PLANTED_HOME = "/home/example-user/.config/brigade/secret.env"
 PLANTED_ABS_HOME = "/home/someuser"
-PLANTED_ABS_COMMAND = "/home/someuser/.venv/bin/pytest -q planted-verify"
-PLANTED_ABS_FAILURE = "worker failed in /home/someuser/project/src/module.py"
-PLANTED_ABS_FINAL = "wrote /home/someuser/project/final.txt"
+PLANTED_VISIBLE = "planted-visible-marker"
+PLANTED_TASK = f"inspect {PLANTED_VISIBLE} under {PLANTED_ABS_HOME}/project/task"
+PLANTED_ERROR = f"run error in {PLANTED_ABS_HOME}/project/error.py"
+PLANTED_ABS_COMMAND = f"{PLANTED_ABS_HOME}/.venv/bin/pytest -q planted-verify"
+PLANTED_ABS_FAILURE = f"worker failed in {PLANTED_ABS_HOME}/project/src/module.py"
+PLANTED_ABS_FINAL = f"wrote {PLANTED_ABS_HOME}/project/final.txt"
+PLANTED_PLAN_TASK = f"plan work in {PLANTED_ABS_HOME}/project/plan.py"
+PLANTED_WORKER_TASK = f"implement in {PLANTED_ABS_HOME}/project/worker.py"
+PLANTED_WORKER_DETAIL = f"worker wrote {PLANTED_ABS_HOME}/project/out.py"
+PLANTED_WORKER_FAILURE = f"worker failure at {PLANTED_ABS_HOME}/project/fail.py"
+PLANTED_SYNTHESIS_DETAIL = f"synthesis read {PLANTED_ABS_HOME}/project/synth.md"
+PLANTED_ROSTER_ROLE = f"role notes {PLANTED_ABS_HOME}/project/roster.md"
+PLANTED_ROSTER_REASONING = f"reason from {PLANTED_ABS_HOME}/project/reason.md"
+PLANTED_ALLOW_MODEL = f"{PLANTED_ABS_HOME}/models/custom"
+PLANTED_PARENT_RUN = f"{PLANTED_ABS_HOME}/project/parent-run"
+PLANTED_BRANCH_POINT = f"{PLANTED_ABS_HOME}/project/branch-event"
+PLANTED_LINEAGE_KIND = f"child of {PLANTED_ABS_HOME}/project"
+PLANTED_BRIEF_PATH = f"{PLANTED_ABS_HOME}/project/code-graph-brief.json"
+PLANTED_BRIEF_DETAIL = f"brief body {PLANTED_ABS_HOME}/project/brief.md"
+PLANTED_EVENT_METHOD = f"{PLANTED_ABS_HOME}/project/event-method"
+PLANTED_EVENT_ITEM_TYPE = f"{PLANTED_ABS_HOME}/project/item-type"
 PLANTED_PROMPT = "PLANTED-LONG-PROMPT " + ("ignore previous instructions " * 80)
 UNEXPECTED_CONTRACT_KEY = "unexpected_extra"
 UNEXPECTED_CONTRACT_VALUE = "should-be-dropped"
@@ -29,11 +47,29 @@ PLANTED_NEEDLES = (
     PLANTED_HOME,
     PLANTED_PROMPT,
     PLANTED_ABS_HOME,
+    PLANTED_TASK,
     PLANTED_ABS_COMMAND,
     PLANTED_ABS_FAILURE,
     PLANTED_ABS_FINAL,
+    PLANTED_ERROR,
+    PLANTED_PLAN_TASK,
+    PLANTED_WORKER_TASK,
+    PLANTED_WORKER_DETAIL,
+    PLANTED_WORKER_FAILURE,
+    PLANTED_SYNTHESIS_DETAIL,
+    PLANTED_ROSTER_ROLE,
+    PLANTED_ROSTER_REASONING,
+    PLANTED_ALLOW_MODEL,
+    PLANTED_PARENT_RUN,
+    PLANTED_BRANCH_POINT,
+    PLANTED_LINEAGE_KIND,
+    PLANTED_BRIEF_PATH,
+    PLANTED_BRIEF_DETAIL,
+    PLANTED_EVENT_METHOD,
+    PLANTED_EVENT_ITEM_TYPE,
     UNEXPECTED_CONTRACT_VALUE,
 )
+HOME_PREFIX_MARKERS = ("/home/", "/Users/")
 FORBIDDEN_KEYS = frozenset(
     {
         "env",
@@ -73,6 +109,15 @@ def _walk_payload(value: object):
         yield value
 
 
+def _assert_no_home_prefix(value: object) -> None:
+    """Walk every key and value; no `/home/<user>` or `/Users/<user>` prefix may remain."""
+    for item in _walk_payload(value):
+        if not isinstance(item, str):
+            continue
+        for marker in HOME_PREFIX_MARKERS:
+            assert marker not in item, f"home-prefix leaked into contract field: {item!r}"
+
+
 def _assert_allowlist(payload: object) -> None:
     if isinstance(payload, dict):
         assert UNEXPECTED_CONTRACT_KEY not in payload
@@ -83,6 +128,7 @@ def _assert_allowlist(payload: object) -> None:
         assert item != UNEXPECTED_CONTRACT_KEY
         for needle in PLANTED_NEEDLES:
             assert needle not in item, f"planted value leaked into contract payload: {needle!r}"
+    _assert_no_home_prefix(payload)
 
 
 def _assert_raw_clean(raw: str) -> None:
@@ -91,14 +137,17 @@ def _assert_raw_clean(raw: str) -> None:
     assert PLANTED_HOME.split("/")[2] not in raw
     assert PLANTED_ABS_HOME.split("/")[2] not in raw
     assert UNEXPECTED_CONTRACT_KEY not in raw
+    for marker in HOME_PREFIX_MARKERS:
+        assert marker not in raw, f"home-prefix leaked into JSON text: {marker!r}"
 
 
-def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run") -> None:
+def _plant_sensitive_run(run_dir: Path, *, task: str = PLANTED_TASK) -> None:
     run_dir.mkdir(parents=True)
     _write_json(
         run_dir / "run.json",
         {
             "task": task,
+            "error": PLANTED_ERROR,
             "cwd": PLANTED_HOME,
             "log_path": f"{PLANTED_HOME}/run.log",
             "auth_token": PLANTED_SECRET,
@@ -123,6 +172,22 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run"
                 "kind": "exit-error",
                 "detail": PLANTED_ABS_FAILURE,
             },
+            "lineage": {
+                "kind": PLANTED_LINEAGE_KIND,
+                "parent_run_id": PLANTED_PARENT_RUN,
+                "branch_point_event_id": PLANTED_BRANCH_POINT,
+                "env": {"OPENAI_API_KEY": PLANTED_ENV_VALUE},
+                "prompt": PLANTED_PROMPT,
+                UNEXPECTED_CONTRACT_KEY: UNEXPECTED_CONTRACT_VALUE,
+            },
+            "code_graph_brief": {
+                "attached": True,
+                "bytes": 32,
+                "pending_count": 1,
+                "path": PLANTED_BRIEF_PATH,
+                "detail": PLANTED_BRIEF_DETAIL,
+                UNEXPECTED_CONTRACT_KEY: UNEXPECTED_CONTRACT_VALUE,
+            },
         },
     )
     _write_json(
@@ -131,12 +196,13 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run"
             "orchestrator": "chef",
             "max_workers": 1,
             "timeout_seconds": 60.0,
-            "allow_models": ["codex"],
+            "allow_models": ["codex", PLANTED_ALLOW_MODEL],
             "agents": {
                 "chef": {
                     "cli": "codex",
                     "model": "gpt-5.5",
-                    "role": "plan",
+                    "reasoning": PLANTED_ROSTER_REASONING,
+                    "role": PLANTED_ROSTER_ROLE,
                     "timeout_seconds": 60.0,
                     "env": {"OPENAI_API_KEY": PLANTED_ENV_VALUE},
                 }
@@ -145,7 +211,7 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run"
     )
     _write_json(
         run_dir / "plan.json",
-        {"assignments": [{"stage": 1, "worker": "coder", "task": "implement it"}]},
+        {"assignments": [{"stage": 1, "worker": "coder", "task": PLANTED_PLAN_TASK}]},
     )
     _write_json(
         run_dir / "worker-results.json",
@@ -153,14 +219,18 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run"
             "results": [
                 {
                     "worker": "coder",
-                    "task": "implement it",
+                    "task": PLANTED_WORKER_TASK,
                     "ok": True,
-                    "detail": "",
+                    "detail": PLANTED_WORKER_DETAIL,
                     "text": PLANTED_PROMPT,
                     "stdout": PLANTED_SECRET,
                     "stderr": PLANTED_SECRET,
                     "stdout_log": f"{PLANTED_HOME}/worker.stdout.log",
                     "stderr_log": f"{PLANTED_HOME}/worker.stderr.log",
+                    "failure": {
+                        "class": "tool",
+                        "detail": PLANTED_WORKER_FAILURE,
+                    },
                 }
             ],
             "ground_truth": {
@@ -186,7 +256,11 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run"
     )
     _write_json(
         run_dir / "synthesis.json",
-        {"orchestrator": "chef", "result": {"ok": True, "detail": "", "text": PLANTED_PROMPT}},
+        {
+            "orchestrator": "chef",
+            "mode": "merge",
+            "result": {"ok": True, "detail": PLANTED_SYNTHESIS_DETAIL, "text": PLANTED_PROMPT},
+        },
     )
     (run_dir / "final.txt").write_text(PLANTED_ABS_FINAL + "\n")
     events = run_dir / "events"
@@ -194,13 +268,13 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run"
     (events / "coder.jsonl").write_text(
         json.dumps(
             {
-                "method": "agent/message",
+                "method": PLANTED_EVENT_METHOD,
                 "params": {
                     "auth_token": PLANTED_SECRET,
                     "cwd": PLANTED_HOME,
                     "prompt": PLANTED_PROMPT,
                     "stdout": PLANTED_SECRET,
-                    "item": {"id": "item-1", "type": "commandExecution"},
+                    "item": {"id": "item-1", "type": PLANTED_EVENT_ITEM_TYPE},
                 },
             }
         )
@@ -284,9 +358,44 @@ def test_runs_watch_json_records_are_versioned_line_valid_objects(tmp_path, caps
     assert "summary" in seen_types
 
 
+def _assert_artifacts_keep_home_needles(run_dir: Path) -> None:
+    """Home-prefix redaction is JSON-only; on-disk artifacts stay verbatim."""
+    disk_text = "".join(
+        path.read_text()
+        for path in (
+            run_dir / "run.json",
+            run_dir / "roster.json",
+            run_dir / "plan.json",
+            run_dir / "worker-results.json",
+            run_dir / "synthesis.json",
+            run_dir / "final.txt",
+            run_dir / "events" / "coder.jsonl",
+        )
+    )
+    for needle in (
+        PLANTED_ABS_HOME,
+        PLANTED_TASK,
+        PLANTED_ERROR,
+        PLANTED_ABS_FAILURE,
+        PLANTED_PLAN_TASK,
+        PLANTED_WORKER_TASK,
+        PLANTED_WORKER_DETAIL,
+        PLANTED_WORKER_FAILURE,
+        PLANTED_SYNTHESIS_DETAIL,
+        PLANTED_ROSTER_ROLE,
+        PLANTED_ALLOW_MODEL,
+        PLANTED_ABS_COMMAND,
+        PLANTED_ABS_FINAL,
+        PLANTED_BRIEF_PATH,
+        PLANTED_EVENT_METHOD,
+    ):
+        assert needle in disk_text, f"artifact lost planted home path: {needle!r}"
+
+
 def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys):
     run_dir = tmp_path / ".brigade" / "runs" / "20260821-100000-planted"
     _plant_sensitive_run(run_dir)
+    _assert_artifacts_keep_home_needles(run_dir)
 
     assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
     listed_raw = capsys.readouterr().out
@@ -294,6 +403,8 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     _assert_allowlist(listed)
     _assert_raw_clean(listed_raw)
     assert listed["schema"] == runs_cmd.RUNS_LIST_SCHEMA
+    assert listed["runs"][0]["task"]
+    assert PLANTED_VISIBLE in listed["runs"][0]["task"]
 
     assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 0
     shown_raw = capsys.readouterr().out
@@ -301,6 +412,10 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     _assert_allowlist(shown)
     _assert_raw_clean(shown_raw)
     assert shown["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
+    assert PLANTED_VISIBLE in shown["run"]["task"]
+    assert shown["briefs"]
+    assert shown["briefs"][0]["name"] == "code-graph"
+    assert shown["briefs"][0]["bytes"] == 32
 
     assert cli.main(["runs", "latest", "--cwd", str(tmp_path), "--json"]) == 0
     latest_raw = capsys.readouterr().out
@@ -314,25 +429,45 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     _assert_raw_clean(watched_raw)
     frames = [json.loads(line) for line in watched_raw.splitlines() if line.strip()]
     assert frames
+    watch_saw_visible = False
     for frame in frames:
         assert frame["schema"] == runs_cmd.RUN_WATCH_SCHEMA
         _assert_allowlist(frame)
+        if frame.get("type") == "run" and PLANTED_VISIBLE in str(frame.get("task", "")):
+            watch_saw_visible = True
+    assert watch_saw_visible, "watch JSON never surfaced the planted visible marker"
 
     shown_run = shown["run"]
     assert "failure" in shown_run
     assert PLANTED_ABS_HOME not in json.dumps(shown)
     assert shown_run["failure"]["detail"] == PLANTED_ABS_FAILURE.replace(PLANTED_ABS_HOME, "~")
+    assert shown_run["error"] == PLANTED_ERROR.replace(PLANTED_ABS_HOME, "~")
+    assert shown["plan"]["assignments"][0]["task"] == PLANTED_PLAN_TASK.replace(PLANTED_ABS_HOME, "~")
+    worker = shown["workers"]["results"][0]
+    assert worker["detail"] == PLANTED_WORKER_DETAIL.replace(PLANTED_ABS_HOME, "~")
+    assert worker["failure"]["detail"] == PLANTED_WORKER_FAILURE.replace(PLANTED_ABS_HOME, "~")
+    assert shown["synthesis"]["result"]["detail"] == PLANTED_SYNTHESIS_DETAIL.replace(PLANTED_ABS_HOME, "~")
+    assert shown["roster"]["agents"]["chef"]["role"] == PLANTED_ROSTER_ROLE.replace(PLANTED_ABS_HOME, "~")
     verify_command = shown["verification"][0]["commands"][0]["command"]
     assert verify_command == PLANTED_ABS_COMMAND.replace(PLANTED_ABS_HOME, "~")
     final_frames = [frame for frame in frames if frame.get("type") == "final"]
     assert final_frames
     assert final_frames[0]["text"] == PLANTED_ABS_FINAL.replace(PLANTED_ABS_HOME, "~")
 
+    _assert_artifacts_keep_home_needles(run_dir)
     assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path)]) == 0
     human = capsys.readouterr().out
+    assert PLANTED_VISIBLE in human
+    assert PLANTED_TASK in human
+    assert PLANTED_ERROR in human
     assert PLANTED_ABS_FAILURE in human
+    assert PLANTED_PLAN_TASK in human
+    assert PLANTED_WORKER_DETAIL in human
+    assert PLANTED_SYNTHESIS_DETAIL in human
     assert PLANTED_ABS_COMMAND in human
     assert PLANTED_ABS_FINAL in human
+    assert PLANTED_ABS_HOME in human
+    _assert_artifacts_keep_home_needles(run_dir)
 
 
 def test_runs_list_json_counts_skipped_invalid(tmp_path, capsys):

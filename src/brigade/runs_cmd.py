@@ -1289,11 +1289,11 @@ def _emit_watch_json(payload: dict[str, object]) -> None:
 
 def _watch_run_id(run_dir: Path) -> str:
     """Directory name only — never an absolute operator path."""
-    return run_dir.name
+    return _clean_str(run_dir.name) or "unknown"
 
 
 def _watch_inspect_command(run_dir: Path) -> str:
-    return f"brigade runs show {_watch_run_id(run_dir)}"
+    return _clean_str(f"brigade runs show {_watch_run_id(run_dir)}") or "brigade runs show unknown"
 
 
 def _watch_event_payload(event: dict[str, Any]) -> dict[str, object]:
@@ -1320,7 +1320,7 @@ def _emit_run(meta: dict[str, Any], *, json_output: bool) -> None:
                     "duration_seconds": _clean_number(meta.get("duration_seconds")),
                     "failure_phase": _clean_str(phase),
                     "failure_kind": _clean_str(kind),
-                    "failure_detail": _clean_contract_home_str(detail, _DETAIL_TEXT_LIMIT),
+                    "failure_detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
                 }
             )
         )
@@ -1396,7 +1396,7 @@ def _emit_synthesis(synthesis: dict[str, Any], *, json_output: bool) -> None:
 def _emit_final(final_text: str, *, json_output: bool) -> None:
     if json_output:
         # final.txt is raw operator output; emit a bounded one-line or omit.
-        _emit_watch_json(_compact({"type": "final", "text": _clean_contract_home_str(final_text, _DETAIL_TEXT_LIMIT)}))
+        _emit_watch_json(_compact({"type": "final", "text": _clean_str(final_text, _DETAIL_TEXT_LIMIT)}))
         return
     _print_final(final_text)
 
@@ -1611,10 +1611,27 @@ def _stale_timeout(run_dir: Path, meta: dict[str, Any]) -> float | None:
     return timeout if time.time() - started.timestamp() > timeout else None
 
 
+_HOME_PREFIX_RE = re.compile(r"/(?:home|Users)/[^/\s\"']+")
+
+
+def _redact_home_prefixes(text: str) -> str:
+    """Rewrite `/home/<user>` and `/Users/<user>` prefixes to `~` for JSON contracts."""
+    return _HOME_PREFIX_RE.sub("~", text)
+
+
 def _clean_str(value: object, limit: int | None = None) -> str | None:
+    """Bound, then home-prefix-redact, every string that enters a JSON contract."""
     if not isinstance(value, str) or not value:
         return None
-    return _short(value, limit) if limit is not None else value
+    cleaned = _short(value, limit) if limit is not None else value
+    return _redact_home_prefixes(cleaned)
+
+
+def _clean_str_list(value: object) -> list[str] | None:
+    """Clean every string in a JSON-contract list; drop non-strings and empties."""
+    if not isinstance(value, list):
+        return None
+    return [item for raw in value if (item := _clean_str(raw)) is not None]
 
 
 def _clean_number(value: object) -> int | float | None:
@@ -1637,21 +1654,6 @@ def _merge_source(source: Mapping[str, Any] | None, cleaned: Mapping[str, object
 def _allowlisted(payload: Mapping[str, object], allowed: frozenset[str]) -> dict[str, object]:
     """Keep only explicitly allowlisted keys; drop None the same way as `_compact`."""
     return {key: value for key, value in payload.items() if key in allowed and value is not None}
-
-
-_HOME_PREFIX_RE = re.compile(r"/(?:home|Users)/[^/\s\"']+")
-
-
-def _redact_home_prefixes(text: str) -> str:
-    """Rewrite `/home/<user>` and `/Users/<user>` prefixes to `~` for JSON contracts."""
-    return _HOME_PREFIX_RE.sub("~", text)
-
-
-def _clean_contract_home_str(value: object, limit: int | None = None) -> str | None:
-    """Bound and redact home-directory prefixes on selected JSON contract strings."""
-    if not isinstance(value, str) or not value:
-        return None
-    return _clean_str(_redact_home_prefixes(value), limit)
 
 
 def _mode_text(meta: Mapping[str, Any]) -> str:
@@ -1740,14 +1742,14 @@ def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, objec
         _merge_source(
             meta,
             {
-                "run_id": run_dir.name,
+                "run_id": _clean_str(run_dir.name),
                 "status": _clean_str(meta.get("status")) or "unknown",
                 "task": _clean_str(meta.get("task"), _LIST_TASK_LIMIT),
                 "started_at": _clean_str(meta.get("started_at")),
                 "finished_at": _clean_str(meta.get("finished_at")),
                 "duration_seconds": _clean_number(meta.get("duration_seconds")),
                 "failure_phase": _clean_str(phase),
-                "mode": _mode_text(meta),
+                "mode": _clean_str(_mode_text(meta)),
                 "resume_available": _resume_available(run_dir),
                 "parent_run_id": _parent_run_id_from_meta(meta),
             },
@@ -1762,17 +1764,17 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
         {
             "phase": _clean_str(phase),
             "kind": _clean_str(kind),
-            "detail": _clean_contract_home_str(detail, _DETAIL_TEXT_LIMIT),
+            "detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
         }
     )
     return _allowlisted(
         _merge_source(
             meta,
             {
-                "run_id": run_dir.name,
+                "run_id": _clean_str(run_dir.name),
                 "status": _clean_str(meta.get("status")) or "unknown",
                 "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
-                "mode": _mode_text(meta),
+                "mode": _clean_str(_mode_text(meta)),
                 "started_at": _clean_str(meta.get("started_at")),
                 "finished_at": _clean_str(meta.get("finished_at")),
                 "duration_seconds": _clean_number(meta.get("duration_seconds")),
@@ -1796,7 +1798,10 @@ def _detail_roster_section(roster: dict[str, Any] | None) -> dict[str, object]:
         for name, agent in agents.items():
             if not isinstance(agent, dict):
                 continue
-            agents_payload[str(name)] = _compact(
+            cleaned_name = _clean_str(name)
+            if cleaned_name is None:
+                continue
+            agents_payload[cleaned_name] = _compact(
                 {
                     "cli": _clean_str(agent.get("cli")),
                     "model": _clean_str(agent.get("model")),
@@ -1805,15 +1810,12 @@ def _detail_roster_section(roster: dict[str, Any] | None) -> dict[str, object]:
                     "timeout_seconds": _clean_number(agent.get("timeout_seconds")),
                 }
             )
-    allow_models = roster.get("allow_models")
     return _compact(
         {
             "orchestrator": _clean_str(roster.get("orchestrator")),
             "max_workers": _clean_number(roster.get("max_workers")),
             "timeout_seconds": _clean_number(roster.get("timeout_seconds")),
-            "allow_models": (
-                [item for item in allow_models if isinstance(item, str)] if isinstance(allow_models, list) else None
-            ),
+            "allow_models": _clean_str_list(roster.get("allow_models")),
             "agents": agents_payload or None,
         }
     )
@@ -1913,7 +1915,7 @@ def _detail_verification_section(
         command_payload = [
             _compact(
                 {
-                    "command": _clean_contract_home_str(command.get("command"), _DETAIL_COMMAND_LIMIT),
+                    "command": _clean_str(command.get("command"), _DETAIL_COMMAND_LIMIT),
                     "exit_code": _clean_number(command.get("exit_code")),
                     "duration_seconds": _clean_number(command.get("duration_seconds")),
                 }
@@ -1951,7 +1953,7 @@ def _detail_briefs_section(meta: dict[str, Any]) -> list[dict[str, object]]:
         payload.append(
             _compact(
                 {
-                    "name": name,
+                    "name": _clean_str(name),
                     "attached": bool(marker.get("attached")),
                     "bytes": _clean_number(marker.get("bytes")),
                     "pending_count": _clean_number(marker.get("pending_count")),
