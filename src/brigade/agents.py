@@ -1187,6 +1187,10 @@ def run_agent(
                 break
             else:
                 detail = raw_detail
+        if operational_failure_kind == "model-unavailable":
+            safe_text = ""
+            safe_stdout = ""
+            safe_stderr = ""
         return AgentResult(
             text=safe_text,
             ok=False,

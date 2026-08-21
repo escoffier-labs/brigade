@@ -1110,9 +1110,13 @@ def test_run_agent_classifies_nonzero_unsupported_model_without_leaking_provider
     assert result.ok is False
     assert result.failure_kind == "model-unavailable"
     assert result.detail == "The requested model is not available on this lane."
-    assert "400" not in result.detail
-    assert "invalid_request_error" not in result.detail
-    assert "gpt-daybreak-blue-latest" not in result.detail
+    assert result.text == ""
+    assert result.stdout == ""
+    assert result.stderr == ""
+    for exposed in (result.text, result.detail, result.stdout, result.stderr):
+        assert "400" not in exposed
+        assert "invalid_request_error" not in exposed
+        assert "gpt-daybreak-blue-latest" not in exposed
 
 
 @pytest.mark.parametrize(
