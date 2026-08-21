@@ -917,6 +917,10 @@ prompts, transcript bodies, raw stdout/stderr, log paths, or absolute
 workspace paths. Task and detail strings are bounded before emission; the
 authoritative artifacts are never modified.
 
+`brigade runs serve` exposes the same three contracts on loopback as
+`GET /api/runs`, `GET /api/runs/<run-id>`, and `GET /api/runs/<run-id>/events`
+(SSE of watch records). It does not add a second artifact reader.
+
 ### `brigade.runs-list.v1` — `brigade runs list --json`
 
 ```json
