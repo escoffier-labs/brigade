@@ -13,6 +13,7 @@ import pytest
 
 from brigade import cli
 from brigade import runs_cmd
+from brigade import runs_diff
 
 
 PLANTED_ENV_VALUE = "planted-env-OPENAI-not-a-real-key"
@@ -50,6 +51,7 @@ PLANTED_BRIEF_PATH = f"{PLANTED_ABS_HOME}/project/code-graph-brief.json"
 PLANTED_BRIEF_DETAIL = f"brief body {PLANTED_ABS_HOME}/project/brief.md"
 PLANTED_EVENT_METHOD = f"{PLANTED_ABS_HOME}/project/event-method"
 PLANTED_EVENT_ITEM_TYPE = f"{PLANTED_ABS_HOME}/project/item-type"
+PLANTED_DIFF_UNDERBOUND = f"diff-underbound {PLANTED_ABS_HOME}/diff.txt"
 PLANTED_PROMPT = "PLANTED-LONG-PROMPT " + ("ignore previous instructions " * 80)
 UNEXPECTED_CONTRACT_KEY = "unexpected_extra"
 UNEXPECTED_CONTRACT_VALUE = "should-be-dropped"
@@ -79,6 +81,7 @@ PLANTED_NEEDLES = (
     PLANTED_BRIEF_DETAIL,
     PLANTED_EVENT_METHOD,
     PLANTED_EVENT_ITEM_TYPE,
+    PLANTED_DIFF_UNDERBOUND,
     UNEXPECTED_CONTRACT_VALUE,
     PLANTED_WIN_HOME,
     PLANTED_WIN_HOME_FWD,
@@ -531,6 +534,47 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     assert PLANTED_SPACED_HOME in human
     assert PLANTED_APOSTROPHE_HOME in human
     _assert_artifacts_keep_home_needles(run_dir)
+
+    parent_dir = tmp_path / ".brigade" / "runs" / "20260821-090000-parent"
+    _plant_sensitive_run(parent_dir)
+    child_meta = json.loads((run_dir / "run.json").read_text())
+    child_meta["lineage"]["parent_run_id"] = parent_dir.name
+    child_meta["task"] = f"{child_meta['task']} {PLANTED_DIFF_UNDERBOUND}"
+    _write_json(run_dir / "run.json", child_meta)
+    graphtrail = {
+        "ok": True,
+        "status": "ok",
+        "summary": PLANTED_DIFF_UNDERBOUND,
+        "changed_symbol_count": 1,
+        "edge_churn": 0,
+        "before_snapshot_path": f"{PLANTED_ABS_HOME}/graphtrail-before.db",
+        "db_path": f"{PLANTED_WIN_HOME}\\graphtrail.db",
+        "attestations": {
+            "before_snapshot_sha256": "a" * 64,
+            "after_snapshot_sha256": "b" * 64,
+        },
+        UNEXPECTED_CONTRACT_KEY: UNEXPECTED_CONTRACT_VALUE,
+    }
+    _write_json(run_dir / "graph-delta.json", graphtrail)
+    _write_json(parent_dir / "graph-delta.json", graphtrail)
+    assert PLANTED_DIFF_UNDERBOUND in (run_dir / "run.json").read_text()
+    assert PLANTED_ABS_HOME in (run_dir / "graph-delta.json").read_text()
+
+    assert cli.main(["runs", "diff", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 0
+    diff_raw = capsys.readouterr().out
+    diffed = json.loads(diff_raw)
+    _assert_allowlist(diffed)
+    _assert_raw_clean(diff_raw)
+    assert diffed["schema"] == runs_diff.RUN_DIFF_SCHEMA
+    assert set(diffed) == runs_diff.RUN_DIFF_KEYS
+    assert PLANTED_VISIBLE in json.dumps(diffed), "diff JSON never surfaced the planted visible marker"
+    assert PLANTED_DIFF_UNDERBOUND not in diff_raw
+    assert diffed["left"]["run_id"] == run_dir.name
+    assert diffed["right"]["run_id"] == parent_dir.name
+    assert diffed["graphtrail"]["status"] == "compared"
+    _assert_artifacts_keep_home_needles(run_dir)
+    assert PLANTED_DIFF_UNDERBOUND in (run_dir / "run.json").read_text()
+    assert PLANTED_ABS_HOME in (run_dir / "graph-delta.json").read_text()
 
 
 def test_runs_list_json_counts_skipped_invalid(tmp_path, capsys):
