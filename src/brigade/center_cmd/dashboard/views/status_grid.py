@@ -41,14 +41,13 @@ def fetch(target: Path) -> dict:
 
 
 def render(payload: dict, nonce: str) -> str:
-    del nonce
     if payload.get("error"):
         return html.error_panel(TITLE, str(payload["error"]))
     if not payload:
         return html.panel(html.esc(TITLE), f"<p>{html.esc('Nothing here.')}</p>")
 
     parts = [
-        _stylesheet(),
+        _stylesheet(nonce),
         _summary_strip(payload),
         html.panel(html.esc(TITLE), _health_tiles(payload)),
     ]
@@ -248,7 +247,7 @@ def _summary_strip(payload: dict) -> str:
     if inbox_issues is None:
         sentences.append("Inbox hygiene status is unavailable.")
     elif inbox_issues > 0:
-        noun = "issue is" if inbox_issues == 1 else "issues are"
+        noun = "issue" if inbox_issues == 1 else "issues"
         sentences.append(f"The work inbox has {inbox_issues} hygiene {noun} open.")
     else:
         sentences.append("The work inbox is clean.")
@@ -261,8 +260,8 @@ def _summary_strip(payload: dict) -> str:
     )
 
 
-def _stylesheet() -> str:
-    return f"""<style>
+def _stylesheet(nonce: str) -> str:
+    return f"""<style nonce="{html.esc(nonce)}">
 .sg-summary {{
   margin: 0 0 1rem;
   padding: 0.85rem 1rem;

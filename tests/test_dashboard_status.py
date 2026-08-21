@@ -38,8 +38,11 @@ def test_render_shows_summary_strip_and_plain_word_tiles():
         "inbox_hygiene": {"issue_count": 1},
     }
 
-    fragment = status_grid.render(payload, "unused")
+    fragment = status_grid.render(payload, "status-nonce")
 
+    # The stylesheet must carry the CSP nonce or the browser refuses it.
+    assert '<style nonce="status-nonce">' in fragment
+    assert "<style>" not in fragment
     assert 'data-sg-summary="1"' in fragment
     assert "new handoff issues are waiting" in fragment
     assert "No cards are waiting on care review" in fragment
