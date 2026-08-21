@@ -1,4 +1,8 @@
-"""Read-only Agent Activity dashboard view - machine cards first, table secondary."""
+"""Read-only Agent Activity dashboard view - machine cards first, table secondary.
+
+Operator question this view answers: what are the agents doing right now
+across the fleet?
+"""
 
 from __future__ import annotations
 
@@ -65,9 +69,58 @@ def render(payload: dict, nonce: str) -> str:
     if not isinstance(window, int) or window < _RECENCY_WINDOW_SECONDS:
         window = _RECENCY_WINDOW_SECONDS
     now = datetime.now(timezone.utc)
+    summary = _summary_strip(records)
+    legend = _state_legend()
     cards = _machine_cards_html(records, window, now)
     table_panel = html.panel(html.esc("Table"), _table(records, now))
-    return _stylesheet(nonce) + cards + table_panel
+    return _stylesheet(nonce) + summary + legend + cards + table_panel
+
+
+def _bucket_state(record: dict) -> str:
+    state = str(record.get("state") or "").strip().lower()
+    return state if state in _STATE_ICON else "unknown"
+
+
+def _summary_strip(records: list[dict]) -> str:
+    counts: dict[str, int] = {}
+    blocked_hosts: set[str] = set()
+    for record in records:
+        state = _bucket_state(record)
+        counts[state] = counts.get(state, 0) + 1
+        if state == "blocked":
+            host = str(record.get("host") or "local").lower()
+            if host == "local":
+                host = "rocinante"
+            blocked_hosts.add(host)
+    total = len(records)
+    if not total:
+        text = "No agent activity recorded right now."
+    else:
+        parts = [f"{total} agents tracked"]
+        running = counts.get("running", 0)
+        parts.append(f"{running} running")
+        blocked = counts.get("blocked", 0)
+        if blocked:
+            hosts = ", ".join(sorted(blocked_hosts)) or "unknown host"
+            parts.append(f"{blocked} blocked on {hosts}")
+        failed = counts.get("failed", 0)
+        if failed:
+            parts.append(f"{failed} failed")
+        awaiting = counts.get("awaiting approval", 0)
+        if awaiting:
+            parts.append(f"{awaiting} awaiting approval")
+        unknown = counts.get("unknown", 0)
+        if unknown:
+            parts.append(f"{unknown} unknown")
+        text = ", ".join(parts) + "."
+    return f'<div class="page-summary" role="status">{html.esc(text)}</div>'
+
+
+def _state_legend() -> str:
+    entries = [
+        f'<span class="legend-entry">{html.esc(icon)} {html.esc(state)}</span>' for state, icon in _STATE_ICON.items()
+    ]
+    return f'<div class="state-legend" aria-label="State legend">{"".join(entries)}</div>'
 
 
 def _machine_cards_html(records: list[dict], window: int, now: datetime) -> str:
@@ -323,9 +376,10 @@ def _count_strip(records: list[dict]) -> str:
     chips = []
     for state, count in sorted(counts.items(), key=lambda item: _LIVE_RANK.get(item[0], 8)):
         icon = _STATE_ICON.get(state, "?")
+        label = state if state in _STATE_ICON else "unknown"
         chips.append(
-            f'<span class="state-chip agent-state-{html.esc(state.replace(" ", "-"))}" '
-            f'title="{html.esc(state)}">{html.esc(f"{icon} {count}")}</span>'
+            f'<span class="state-chip agent-state-{html.esc(label.replace(" ", "-"))}" '
+            f'title="{html.esc(label)}">{html.esc(f"{icon} {label} {count}")}</span>'
         )
     return f'<div class="state-strip">{"".join(chips)}</div>'
 
@@ -406,6 +460,20 @@ def _machine_glyph(kind: str) -> str:
 
 def _stylesheet(nonce: str) -> str:
     return f'''<style nonce="{html.esc(nonce)}">
+.page-summary {{
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+  color: #111;
+}}
+.state-legend {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.8rem;
+  color: #333;
+}}
+.legend-entry {{ white-space: nowrap; }}
 .machine-board {{
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
