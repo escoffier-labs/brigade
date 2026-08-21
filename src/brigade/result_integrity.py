@@ -37,7 +37,7 @@ _OPERATIONAL_ERRORS = (
     (
         "provider-setting-error",
         re.compile(
-            r"^\s*error:.*\b(?:unknown model|invalid model|model [^\n]+ (?:is )?not (?:available|found))\b",
+            r"^\s*error:.*\b(?:unknown model|invalid model|model [^\n]+ (?:is )?not (?:available|found|supported))\b",
             re.IGNORECASE | re.MULTILINE,
         ),
     ),

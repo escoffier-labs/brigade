@@ -53,6 +53,18 @@ fallback = []
 stats = { speed = "medium", source = "author-receipts-2026-07" }
 caveats = []
 
+[agents.daybreak]
+cli = "codex"
+model = "gpt-daybreak-blue-latest"
+reasoning = "high"
+read_only_capable = true
+role = "Scan-and-report defensive security review."
+purpose = "Scan-and-report security review for vulnerability discovery and trust audits."
+requires = { cli = "codex" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-08" }
+caveats = ["ChatGPT-account entitlement varies.", "The security bench is pending."]
+
 [limits]
 max_workers = 3
 timeout_seconds = 900
