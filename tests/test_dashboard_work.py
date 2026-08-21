@@ -119,12 +119,16 @@ def test_independent_single_task_waves_collapse_to_plain_parallel_list():
     assert 'id="ready"' in fragment
     assert "5 tasks are ready and independent" in fragment
     assert "could all run in parallel" in fragment
+    assert ">Together<" in fragment
+    assert "Ready tasks can start at the same time." in fragment
     for title in titles:
         assert title in fragment
     assert "Wave 0" not in fragment
+    assert "Step 1 of 5" not in fragment
     assert "(exclusive)" not in fragment
     assert "file_overlap+symbol_impact" not in fragment.split("<details", 1)[0]
     assert "Parallel-safe partition" not in fragment
+    assert 'class="wk-diagram"' not in fragment
     for task_id in (f"task-{index}" for index in range(5)):
         assert task_id in fragment
         assert "<details" in fragment
@@ -168,8 +172,13 @@ def test_multi_task_wave_keeps_visual_structure():
     assert "Alpha work" in fragment
     assert "Beta work" in fragment
     assert "Gamma work" in fragment
-    assert "Wave 0" in fragment or "wave 0" in fragment.lower()
+    assert "Step 1 of 2 - these can run together" in fragment
+    assert "Step 2 of 2 - one task at a time" in fragment
+    assert "Wave 0" not in fragment
+    assert ">Together<" in fragment
+    assert "Ready tasks cannot all start at the same time." in fragment
     assert "could all run in parallel" not in fragment
+    assert 'class="wk-diagram"' not in fragment
 
 
 def test_conflict_edge_keeps_visual_structure_even_for_single_task_waves():
@@ -202,8 +211,78 @@ def test_conflict_edge_keeps_visual_structure_even_for_single_task_waves():
     fragment = work_view.render(payload, "unused")
     assert "Ready alpha" in fragment
     assert "Blocked beta" in fragment
+    assert "Step 1 of 1 - one task at a time" in fragment
     assert "could all run in parallel" not in fragment
     assert "waiting" in fragment.lower() or "blocked" in fragment.lower()
+    assert 'class="wk-diagram"' in fragment
+    assert "<svg" in fragment
+    assert 'data-wk-from="task-a"' in fragment
+    assert 'data-wk-to="task-b"' in fragment
+    assert "What is blocking what" in fragment
+    assert "style=" not in fragment.split("<style", 1)[-1].split("</style>", 1)[-1]
+
+
+def test_exclusive_single_task_waves_use_plain_step_headings_when_edges_force_lanes():
+    titles = [
+        "Mint stable card ids",
+        "Repair outcome ledger",
+        "Paginate runs view",
+        "Fold claims into work",
+        "Rewrite activity strip",
+    ]
+    ready = _exclusive_singles(titles)
+    ready["edges"] = [{"source": "task-0", "target": "task-1", "type": "blocks"}]
+    ready["blocked_count"] = 0
+    fragment = work_view.render(_payload(ready=ready), "step-nonce")
+
+    assert '<style nonce="step-nonce">' in fragment
+    assert "Step 2 of 5 - one task at a time (blocks step 3)" in fragment
+    assert "Step 1 of 5 - one task at a time (blocks step 2)" in fragment
+    assert "Step 5 of 5 - one task at a time" in fragment
+    assert "Wave 0" not in fragment
+    assert "Wave 1" not in fragment
+    assert ">Together<" in fragment
+    assert "Ready tasks cannot all start at the same time." in fragment
+    assert 'class="wk-diagram"' in fragment
+    assert 'data-wk-from="task-0"' in fragment
+    assert 'data-wk-to="task-1"' in fragment
+    for title in titles:
+        assert title in fragment
+
+
+def test_drawn_edges_render_when_waves_are_absent():
+    payload = _payload(
+        ready={
+            "ready_count": 1,
+            "blocked_count": 1,
+            "ready": [_ready_task("task-a", "Ready alpha")],
+            "blocked": [
+                {
+                    "id": "task-b",
+                    "title": "Blocked beta",
+                    "status": "pending",
+                    "blockers": [{"id": "task-a", "status": "pending", "via": ["blocks"]}],
+                }
+            ],
+            "edges": [{"source": "task-a", "target": "task-b", "type": "blocks"}],
+            "parallel_safe": True,
+        }
+    )
+    fragment = work_view.render(payload, "edge-nonce")
+    assert '<style nonce="edge-nonce">' in fragment
+    assert "Ready alpha" in fragment
+    assert "Blocked beta" in fragment
+    assert 'class="wk-lane"' not in fragment
+    assert "Wave " not in fragment
+    assert "Step 1 of" not in fragment
+    assert 'class="wk-diagram"' in fragment
+    assert "<svg" in fragment
+    assert 'data-wk-from="task-a"' in fragment
+    assert 'data-wk-to="task-b"' in fragment
+    assert 'data-wk-type="blocks"' in fragment
+    assert "What is blocking what" in fragment
+    assert ">Together<" in fragment
+    assert "Ready tasks cannot all start at the same time." in fragment
 
 
 def test_claims_use_plain_words_not_footprint_jargon(monkeypatch):
