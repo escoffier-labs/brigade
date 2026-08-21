@@ -96,7 +96,17 @@ evidence = load("evidence-hermes.json")
 assert evidence["untrusted_context"] is True, evidence
 assert evidence["resource_uri"].startswith("miseledger://evidence/"), evidence
 assert len(evidence["results"]) >= 1, evidence
-assert isinstance(evidence["results"][0]["artifacts"], list), evidence
+assert isinstance(evidence.get("results"), list), evidence
+assert isinstance(evidence.get("warnings"), list), evidence
+assert isinstance(evidence.get("grouped_by_source"), dict), evidence
+assert "integrity_mismatches" in evidence, evidence
+result = evidence["results"][0]
+if result.get("eligibility_status") == "ineligible":
+    assert set(result) <= {"id", "eligibility_status", "reason_code"}, result
+    assert result.get("reason_code"), result
+    assert "artifacts" not in result, result
+else:
+    assert isinstance(result.get("artifacts"), list), result
 
 evidence_show = load("evidence-show.json")
 assert evidence_show["id"] == evidence["id"], evidence_show

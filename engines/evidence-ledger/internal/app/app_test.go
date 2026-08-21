@@ -1252,12 +1252,21 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 		t.Fatalf("evidence returned no results")
 	}
 	first := results[0].(map[string]any)
-	rawRef := first["raw_ref"].(map[string]any)
-	if rawRef["path"] == "" || rawRef["hash"] == "" {
-		t.Fatalf("evidence missing raw refs: %v", first)
+	if first["id"] == "" {
+		t.Fatalf("evidence result missing id: %v", first)
 	}
-	if _, ok := first["artifacts"].([]any); !ok {
-		t.Fatalf("evidence artifacts was not an array: %T %v", first["artifacts"], first["artifacts"])
+	if first["eligibility_status"] == eligibilityIneligible {
+		if len(first) != 3 {
+			t.Fatalf("ineligible evidence item must be a three-key stub: %v", first)
+		}
+	} else {
+		rawRef := first["raw_ref"].(map[string]any)
+		if rawRef["path"] == "" || rawRef["hash"] == "" {
+			t.Fatalf("evidence missing raw refs: %v", first)
+		}
+		if _, ok := first["artifacts"].([]any); !ok {
+			t.Fatalf("evidence artifacts was not an array: %T %v", first["artifacts"], first["artifacts"])
+		}
 	}
 	projectEvidence := runJSON(t, "evidence", "Claude native import", "--project", "miseledger", "--json")
 	if len(projectEvidence["results"].([]any)) == 0 {
@@ -1752,14 +1761,20 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &evidence); err != nil {
 		t.Fatalf("bad evidence body: %v", err)
 	}
-	if evidence["untrusted_context"] != true || len(evidence["grouped_by_source"].(map[string]any)) == 0 {
+	if evidence["untrusted_context"] != true {
 		t.Fatalf("bad evidence body: %v", evidence)
+	}
+	if _, ok := evidence["grouped_by_source"].(map[string]any); !ok {
+		t.Fatalf("evidence missing grouped_by_source: %v", evidence)
 	}
 	if evidence["id"] == "" || evidence["resource_uri"] == "" {
 		t.Fatalf("http evidence missing stable reference: %v", evidence)
 	}
-	if _, ok := evidence["filters"].(map[string]any)["code_reference"]; ok {
-		t.Fatalf("unfiltered HTTP evidence response added code_reference: %v", evidence["filters"])
+	if _, ok := evidence["filters"]; ok {
+		t.Fatalf("evidence response must drop filters: %v", evidence["filters"])
+	}
+	if _, ok := evidence["query"]; ok {
+		t.Fatalf("evidence response must drop query: %v", evidence["query"])
 	}
 	firstEvidence := evidence["results"].([]any)[0].(map[string]any)
 	if firstEvidence["score"] == "" {
@@ -2287,12 +2302,19 @@ func TestSearchPlanBoundsFTSCandidatesBeforeJoins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("evidenceBundle: %v", err)
 	}
-	items := bundle["results"].([]map[string]any)
-	if len(items) != opts.Limit {
-		t.Fatalf("evidence results = %d, want %d", len(items), opts.Limit)
+	rawItems, ok := bundle["results"].([]any)
+	if !ok {
+		t.Fatalf("evidence results type %T", bundle["results"])
 	}
-	if related, ok := items[0]["related"].([]map[string]any); !ok || len(related) == 0 {
-		t.Fatalf("first evidence item missing related rows: %#v", items[0])
+	if len(rawItems) != opts.Limit {
+		t.Fatalf("evidence results = %d, want %d", len(rawItems), opts.Limit)
+	}
+	item, _ := rawItems[0].(map[string]any)
+	if item["eligibility_status"] != eligibilityIneligible {
+		t.Fatalf("legacy synthetic evidence items must be ineligible stubs: %#v", item)
+	}
+	if _, ok := item["related"]; ok {
+		t.Fatalf("ineligible stub leaked related rows: %#v", item)
 	}
 }
 
@@ -2511,9 +2533,7 @@ func TestCodeReferenceFiltersReachCLIHTTPAndMCPAndIgnoreMalformedStoredReference
 		t.Fatalf("CLI code-reference search = %#v", cli)
 	}
 	evidenceCLI := runJSON(t, "evidence", "needle", "--code-reference", string(encoded), "--json")
-	if results := evidenceCLI["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
-		t.Fatalf("CLI code-reference evidence = %#v", evidenceCLI)
-	}
+	assertSingleIneligibleEvidenceStub(t, evidenceCLI, "item-001", reasonLegacyUnknown)
 
 	handler := newHTTPHandler()
 	req := httptest.NewRequest(http.MethodGet, "/search?q=needle&code_reference="+url.QueryEscape(string(encoded)), nil)
@@ -2543,9 +2563,7 @@ func TestCodeReferenceFiltersReachCLIHTTPAndMCPAndIgnoreMalformedStoredReference
 	if err := json.Unmarshal(rec.Body.Bytes(), &httpEvidence); err != nil {
 		t.Fatal(err)
 	}
-	if results := httpEvidence["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
-		t.Fatalf("HTTP code-reference evidence = %#v", httpEvidence)
-	}
+	assertSingleIneligibleEvidenceStub(t, httpEvidence, "item-001", reasonLegacyUnknown)
 
 	mcpSearchResult, err := mcpSearch(map[string]any{"query": "needle", "code_reference": argument})
 	if err != nil {
@@ -2566,9 +2584,7 @@ func TestCodeReferenceFiltersReachCLIHTTPAndMCPAndIgnoreMalformedStoredReference
 	if err := json.Unmarshal([]byte(mcpEvidenceResult["content"].([]map[string]any)[0]["text"].(string)), &mcpEvidenceBody); err != nil {
 		t.Fatal(err)
 	}
-	if results := mcpEvidenceBody["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
-		t.Fatalf("MCP code-reference evidence = %#v", mcpEvidenceBody)
-	}
+	assertSingleIneligibleEvidenceStub(t, mcpEvidenceBody, "item-001", reasonLegacyUnknown)
 
 	missing := reference
 	missing.ChangeKind = "removed"

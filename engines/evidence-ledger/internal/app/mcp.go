@@ -274,7 +274,7 @@ func mcpEvidence(args map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	bundle, err := evidenceBundle(db, SearchOpts{
+	outbound, err := buildEvidenceOutbound(db, SearchOpts{
 		Query:               query,
 		Source:              argString(args, "source"),
 		Project:             argString(args, "project"),
@@ -284,14 +284,18 @@ func mcpEvidence(args map[string]any) (map[string]any, error) {
 		IncludeRelated:      argBool(args, "include_related"),
 		IncludeArtifactText: argBool(args, "include_artifact_text"),
 		CodeReference:       codeReference,
-	})
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := saveEvidenceBundle(bundle); err != nil {
+	if err := saveEvidenceOutbound(outbound); err != nil {
 		return nil, err
 	}
-	return mcpTextResult(bundle), nil
+	body, err := finalizeEvidenceResponse(outbound)
+	if err != nil {
+		return nil, err
+	}
+	return mcpTextResultBytes(body), nil
 }
 
 func mcpEvidenceShow(args map[string]any) (map[string]any, error) {
@@ -299,11 +303,11 @@ func mcpEvidenceShow(args map[string]any) (map[string]any, error) {
 	if id == "" {
 		return nil, errors.New("missing id")
 	}
-	bundle, err := loadEvidenceBundle(id)
+	body, err := regenerateEvidenceBundle(id)
 	if err != nil {
 		return nil, err
 	}
-	return mcpTextResult(bundle), nil
+	return mcpTextResultBytes(body), nil
 }
 
 func argBool(args map[string]any, key string) bool {
@@ -319,6 +323,10 @@ func argBool(args map[string]any, key string) bool {
 
 func mcpTextResult(v any) map[string]any {
 	b, _ := json.Marshal(v)
+	return mcpTextResultBytes(b)
+}
+
+func mcpTextResultBytes(b []byte) map[string]any {
 	return map[string]any{"content": []map[string]any{{"type": "text", "text": string(b)}}}
 }
 
