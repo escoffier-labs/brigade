@@ -375,8 +375,8 @@ func TestMutationBundleArtifactTextAndEvidenceMarkdownMarker(t *testing.T) {
 	if strings.Contains(markdown, quarantineNeedle) || strings.Contains(markdown, artifactBody) {
 		t.Fatalf("bundle markdown leaked body: %s", markdown)
 	}
-	if !strings.Contains(markdown, "Content omitted: metadata only") {
-		t.Fatalf("bundle markdown missing omission marker: %s", markdown)
+	if !strings.Contains(markdown, "Eligibility: ineligible") {
+		t.Fatalf("bundle markdown missing ineligible marker: %s", markdown)
 	}
 }
 
@@ -666,22 +666,23 @@ func firstBundleResult(t *testing.T, bundle map[string]any) map[string]any {
 
 func assertIneligibleArtifactHidden(t *testing.T, item map[string]any, surface string) {
 	t.Helper()
+	if item["eligibility_status"] != eligibilityIneligible {
+		t.Fatalf("%s ineligible item was not collapsed to a stub: %#v", surface, item)
+	}
+	if len(item) != 3 {
+		t.Fatalf("%s stub keys = %#v, want exactly three", surface, item)
+	}
+	if _, ok := item["id"]; !ok {
+		t.Fatalf("%s stub missing id: %#v", surface, item)
+	}
+	if item["reason_code"] == "" {
+		t.Fatalf("%s stub missing reason_code: %#v", surface, item)
+	}
 	if snippet, _ := item["snippet"].(string); snippet != "" {
 		t.Fatalf("%s leaked snippet: %q", surface, snippet)
 	}
-	if item["integrity_mismatch"] == true {
-		t.Fatalf("%s fixture must not be integrity-mismatched or MU4 stays green: %#v", surface, item)
-	}
-	arts := artifactMaps(item["artifacts"])
-	if len(arts) == 0 {
-		t.Fatalf("%s dropped artifact metadata: %#v", surface, item)
-	}
-	art := arts[0]
-	if _, ok := art["text"]; ok {
-		t.Fatalf("%s leaked artifact text: %#v", surface, art)
-	}
-	if art["id"] == "" && art["kind"] == nil {
-		t.Fatalf("%s dropped artifact metadata fields: %#v", surface, art)
+	if _, ok := item["artifacts"]; ok {
+		t.Fatalf("%s leaked artifacts: %#v", surface, item)
 	}
 }
 
