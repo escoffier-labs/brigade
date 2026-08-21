@@ -36,6 +36,75 @@ RUNS_LIST_SCHEMA = "brigade.runs-list.v1"
 RUN_DETAIL_SCHEMA = "brigade.run-detail.v1"
 RUN_WATCH_SCHEMA = "brigade.run-watch.v1"
 
+# Explicit field allowlists. Serializers copy only these keys; environment
+# values, auth/control tokens, secret references, full prompts, transcript
+# bodies, raw stdout/stderr, and absolute home paths are excluded.
+RUN_SUMMARY_FIELDS = frozenset(
+    {
+        "run_id",
+        "status",
+        "task",
+        "started_at",
+        "finished_at",
+        "duration_seconds",
+        "failure_phase",
+        "mode",
+        "resume_available",
+        "parent_run_id",
+    }
+)
+RUN_DETAIL_KEYS = frozenset(
+    {
+        "schema",
+        "run",
+        "roster",
+        "plan",
+        "workers",
+        "synthesis",
+        "verification",
+        "briefs",
+    }
+)
+_RUN_DETAIL_RUN_FIELDS = frozenset(
+    {
+        "run_id",
+        "status",
+        "task",
+        "mode",
+        "started_at",
+        "finished_at",
+        "duration_seconds",
+        "failure",
+        "error",
+        "suspected_noop",
+        "resume_available",
+        "lineage",
+    }
+)
+_LINEAGE_FIELDS = frozenset(
+    {
+        "kind",
+        "parent_run_id",
+        "branch_point_event_id",
+        "shared_prefix",
+        "children",
+    }
+)
+_CHILD_SUMMARY_FIELDS = frozenset(
+    {
+        "run_id",
+        "status",
+        "branch_point_event_id",
+    }
+)
+_SHARED_PREFIX_FIELDS = frozenset(
+    {
+        "event_sequence",
+        "event_digest",
+        "previous_digest",
+    }
+)
+
 _LIST_TASK_LIMIT = 160
 _DETAIL_TASK_LIMIT = 400
 _DETAIL_TEXT_LIMIT = 400
@@ -1220,11 +1289,11 @@ def _emit_watch_json(payload: dict[str, object]) -> None:
 
 def _watch_run_id(run_dir: Path) -> str:
     """Directory name only — never an absolute operator path."""
-    return run_dir.name
+    return _clean_str(run_dir.name) or "unknown"
 
 
 def _watch_inspect_command(run_dir: Path) -> str:
-    return f"brigade runs show {_watch_run_id(run_dir)}"
+    return _clean_str(f"brigade runs show {_watch_run_id(run_dir)}") or "brigade runs show unknown"
 
 
 def _watch_event_payload(event: dict[str, Any]) -> dict[str, object]:
@@ -1542,10 +1611,27 @@ def _stale_timeout(run_dir: Path, meta: dict[str, Any]) -> float | None:
     return timeout if time.time() - started.timestamp() > timeout else None
 
 
+_HOME_PREFIX_RE = re.compile(r"/(?:home|Users)/[^/\s\"']+")
+
+
+def _redact_home_prefixes(text: str) -> str:
+    """Rewrite `/home/<user>` and `/Users/<user>` prefixes to `~` for JSON contracts."""
+    return _HOME_PREFIX_RE.sub("~", text)
+
+
 def _clean_str(value: object, limit: int | None = None) -> str | None:
+    """Bound, then home-prefix-redact, every string that enters a JSON contract."""
     if not isinstance(value, str) or not value:
         return None
-    return _short(value, limit) if limit is not None else value
+    cleaned = _short(value, limit) if limit is not None else value
+    return _redact_home_prefixes(cleaned)
+
+
+def _clean_str_list(value: object) -> list[str] | None:
+    """Clean every string in a JSON-contract list; drop non-strings and empties."""
+    if not isinstance(value, list):
+        return None
+    return [item for raw in value if (item := _clean_str(raw)) is not None]
 
 
 def _clean_number(value: object) -> int | float | None:
@@ -1558,6 +1644,18 @@ def _compact(payload: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in payload.items() if value is not None}
 
 
+def _merge_source(source: Mapping[str, Any] | None, cleaned: Mapping[str, object]) -> dict[str, object]:
+    """Overlay cleaned fields on the source mapping so `_allowlisted` must drop extras."""
+    payload: dict[str, object] = dict(source) if source is not None else {}
+    payload.update(cleaned)
+    return payload
+
+
+def _allowlisted(payload: Mapping[str, object], allowed: frozenset[str]) -> dict[str, object]:
+    """Keep only explicitly allowlisted keys; drop None the same way as `_compact`."""
+    return {key: value for key, value in payload.items() if key in allowed and value is not None}
+
+
 def _mode_text(meta: Mapping[str, Any]) -> str:
     mode = "read-only" if meta.get("read_only") else "normal"
     if meta.get("dry_run"):
@@ -1565,56 +1663,98 @@ def _mode_text(meta: Mapping[str, Any]) -> str:
     return mode
 
 
-def _detail_lineage_section(meta: Mapping[str, Any]) -> dict[str, object] | None:
-    """Allowlisted child-run lineage for the versioned read contracts."""
+def _detail_children(run_dir: Path) -> list[dict[str, object]]:
+    """Allowlisted recorded children; same discovery as human `runs show`."""
+    return [
+        _allowlisted(
+            _merge_source(
+                child,
+                {
+                    "run_id": _clean_str(child.get("run_id")),
+                    "status": _clean_str(child.get("status"), _DETAIL_TEXT_LIMIT),
+                    "branch_point_event_id": _clean_str(child.get("branch_point_event_id"), _DETAIL_TEXT_LIMIT),
+                },
+            ),
+            _CHILD_SUMMARY_FIELDS,
+        )
+        for child in _recorded_children(run_dir)
+    ]
+
+
+def _detail_lineage_section(run_dir: Path, meta: Mapping[str, Any]) -> dict[str, object] | None:
+    """Allowlisted parent/child lineage for the versioned read contracts."""
     lineage = _lineage(meta)
-    if lineage is None:
+    children = _detail_children(run_dir)
+    if lineage is None and not children:
         return None
-    shared_prefix = lineage.get("shared_prefix")
+    shared_prefix = lineage.get("shared_prefix") if lineage is not None else None
     prefix_payload = None
     if isinstance(shared_prefix, Mapping):
         prefix_payload = (
-            _compact(
-                {
-                    "event_sequence": _clean_number(shared_prefix.get("event_sequence")),
-                    "event_digest": _clean_str(shared_prefix.get("event_digest")),
-                    "previous_digest": _clean_str(shared_prefix.get("previous_digest")),
-                }
+            _allowlisted(
+                _merge_source(
+                    shared_prefix,
+                    {
+                        "event_sequence": _clean_number(shared_prefix.get("event_sequence")),
+                        "event_digest": _clean_str(shared_prefix.get("event_digest")),
+                        "previous_digest": _clean_str(shared_prefix.get("previous_digest")),
+                    },
+                ),
+                _SHARED_PREFIX_FIELDS,
             )
             or None
         )
-    payload = _compact(
-        {
-            "kind": _clean_str(lineage.get("kind")),
-            "parent_run_id": _clean_str(lineage.get("parent_run_id")),
-            "branch_point_event_id": _clean_str(lineage.get("branch_point_event_id")),
-            "shared_prefix": prefix_payload,
-        }
+    payload = _allowlisted(
+        _merge_source(
+            lineage,
+            {
+                "kind": _clean_str(lineage.get("kind")) if lineage is not None else None,
+                "parent_run_id": _clean_str(lineage.get("parent_run_id")) if lineage is not None else None,
+                "branch_point_event_id": (
+                    _clean_str(lineage.get("branch_point_event_id")) if lineage is not None else None
+                ),
+                "shared_prefix": prefix_payload,
+                "children": children or None,
+            },
+        ),
+        _LINEAGE_FIELDS,
     )
     return payload or None
+
+
+def _parent_run_id_from_meta(meta: Mapping[str, Any]) -> str | None:
+    """Return this run's recorded parent id from its own lineage.
+
+    List summaries must not call `_detail_lineage_section` / `_recorded_children`:
+    those scan every sibling `run.json` to discover children, which is O(n) extra
+    reads per listed run.
+    """
+    lineage = _lineage(meta)
+    if lineage is None:
+        return None
+    return _clean_str(lineage.get("parent_run_id"))
 
 
 def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
     """Browser-safe run summary for brigade.runs-list.v1 (no absolute paths)."""
     phase, _, _ = _failure_fields(meta)
-    lineage = _detail_lineage_section(meta)
-    parent_run_id = None
-    if lineage is not None:
-        parent_run_id = lineage.get("parent_run_id")
-        parent_run_id = parent_run_id if isinstance(parent_run_id, str) else None
-    return _compact(
-        {
-            "run_id": run_dir.name,
-            "status": _clean_str(meta.get("status")) or "unknown",
-            "task": _clean_str(meta.get("task"), _LIST_TASK_LIMIT),
-            "started_at": _clean_str(meta.get("started_at")),
-            "finished_at": _clean_str(meta.get("finished_at")),
-            "duration_seconds": _clean_number(meta.get("duration_seconds")),
-            "failure_phase": _clean_str(phase),
-            "mode": _mode_text(meta),
-            "resume_available": _resume_available(run_dir),
-            "parent_run_id": parent_run_id,
-        }
+    return _allowlisted(
+        _merge_source(
+            meta,
+            {
+                "run_id": _clean_str(run_dir.name),
+                "status": _clean_str(meta.get("status")) or "unknown",
+                "task": _clean_str(meta.get("task"), _LIST_TASK_LIMIT),
+                "started_at": _clean_str(meta.get("started_at")),
+                "finished_at": _clean_str(meta.get("finished_at")),
+                "duration_seconds": _clean_number(meta.get("duration_seconds")),
+                "failure_phase": _clean_str(phase),
+                "mode": _clean_str(_mode_text(meta)),
+                "resume_available": _resume_available(run_dir),
+                "parent_run_id": _parent_run_id_from_meta(meta),
+            },
+        ),
+        RUN_SUMMARY_FIELDS,
     )
 
 
@@ -1627,21 +1767,25 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
             "detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
         }
     )
-    return _compact(
-        {
-            "run_id": run_dir.name,
-            "status": _clean_str(meta.get("status")) or "unknown",
-            "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
-            "mode": _mode_text(meta),
-            "started_at": _clean_str(meta.get("started_at")),
-            "finished_at": _clean_str(meta.get("finished_at")),
-            "duration_seconds": _clean_number(meta.get("duration_seconds")),
-            "failure": failure or None,
-            "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
-            "suspected_noop": True if meta.get("suspected_noop") is True else None,
-            "resume_available": _resume_available(run_dir),
-            "lineage": _detail_lineage_section(meta),
-        }
+    return _allowlisted(
+        _merge_source(
+            meta,
+            {
+                "run_id": _clean_str(run_dir.name),
+                "status": _clean_str(meta.get("status")) or "unknown",
+                "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
+                "mode": _clean_str(_mode_text(meta)),
+                "started_at": _clean_str(meta.get("started_at")),
+                "finished_at": _clean_str(meta.get("finished_at")),
+                "duration_seconds": _clean_number(meta.get("duration_seconds")),
+                "failure": failure or None,
+                "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
+                "suspected_noop": True if meta.get("suspected_noop") is True else None,
+                "resume_available": _resume_available(run_dir),
+                "lineage": _detail_lineage_section(run_dir, meta),
+            },
+        ),
+        _RUN_DETAIL_RUN_FIELDS,
     )
 
 
@@ -1654,7 +1798,10 @@ def _detail_roster_section(roster: dict[str, Any] | None) -> dict[str, object]:
         for name, agent in agents.items():
             if not isinstance(agent, dict):
                 continue
-            agents_payload[str(name)] = _compact(
+            cleaned_name = _clean_str(name)
+            if cleaned_name is None:
+                continue
+            agents_payload[cleaned_name] = _compact(
                 {
                     "cli": _clean_str(agent.get("cli")),
                     "model": _clean_str(agent.get("model")),
@@ -1663,15 +1810,12 @@ def _detail_roster_section(roster: dict[str, Any] | None) -> dict[str, object]:
                     "timeout_seconds": _clean_number(agent.get("timeout_seconds")),
                 }
             )
-    allow_models = roster.get("allow_models")
     return _compact(
         {
             "orchestrator": _clean_str(roster.get("orchestrator")),
             "max_workers": _clean_number(roster.get("max_workers")),
             "timeout_seconds": _clean_number(roster.get("timeout_seconds")),
-            "allow_models": (
-                [item for item in allow_models if isinstance(item, str)] if isinstance(allow_models, list) else None
-            ),
+            "allow_models": _clean_str_list(roster.get("allow_models")),
             "agents": agents_payload or None,
         }
     )
@@ -1809,7 +1953,7 @@ def _detail_briefs_section(meta: dict[str, Any]) -> list[dict[str, object]]:
         payload.append(
             _compact(
                 {
-                    "name": name,
+                    "name": _clean_str(name),
                     "attached": bool(marker.get("attached")),
                     "bytes": _clean_number(marker.get("bytes")),
                     "pending_count": _clean_number(marker.get("pending_count")),
@@ -1832,7 +1976,7 @@ def _run_detail_payload(
     Excludes environment values, tokens, full prompts, transcript bodies,
     log paths, raw stdout/stderr, and absolute workspace paths.
     """
-    return {
+    payload = {
         "schema": RUN_DETAIL_SCHEMA,
         "run": _detail_run_section(run_dir, run_meta),
         "roster": _detail_roster_section(roster),
@@ -1842,6 +1986,7 @@ def _run_detail_payload(
         "verification": _detail_verification_section(worker_results, synthesis),
         "briefs": _detail_briefs_section(run_meta),
     }
+    return {key: payload[key] for key in RUN_DETAIL_KEYS}
 
 
 def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10, json_output: bool = False) -> int:
