@@ -950,15 +950,21 @@ Both commands share one serializer:
 - `run`: identifier, status, bounded task, mode, timestamps, duration,
   `failure` (`phase` / `kind` / bounded `detail`), bounded `error`,
   `suspected_noop`, `resume_available`, and optional `lineage`
-  (`kind`, `parent_run_id`, `branch_point_event_id`, `shared_prefix`)
-  when the run is a durable child.
+  (`kind`, `parent_run_id`, `branch_point_event_id`, `shared_prefix`,
+  and `children` discovered from sibling receipts the same way as
+  human `runs show`) when the run is a durable parent or child.
+  Child `status` and `branch_point_event_id` are bounded. Home-directory
+  prefixes in `failure.detail` are rewritten to `~` in this JSON
+  contract only.
 - `roster`: orchestrator, worker limits, allowed models, and per-seat `cli`,
   `model`, `reasoning`, bounded `role`, and `timeout_seconds`.
 - `plan`: worker `assignments` with stage, worker, and bounded task.
 - `workers`: per-result state (ok/status, bounded detail, duration, exit code,
   timeout flag, requested model, transport, failure class).
 - `verification`: verify receipt summaries (receipt run id, status, duration,
-  command label, and exit code) from recorded ground truth.
+  command label, and exit code) from recorded ground truth. Home-directory
+  prefixes in `commands[].command` are rewritten to `~` in this JSON
+  contract only.
 - `briefs`: attachment markers for the Code Intelligence (`code-graph`),
   drift (`drift-impact`), and Evidence Ledger (`evidence`) briefs.
 
@@ -979,8 +985,9 @@ unknown future record types. `brigade runs events` keeps its own
 - `event` records emit only `method` and `item_type`. Auth tokens,
   prompts, transcript bodies, raw stdout/stderr, log paths, and
   absolute paths in `params` are omitted.
-- `final` text is one-lined and bounded; a value that cannot be
-  rendered safely is omitted.
+- `final` text is one-lined and bounded; home-directory prefixes
+  are rewritten to `~`; a value that cannot be rendered safely is
+  omitted. Artifacts and human CLI output are unchanged.
 
 ---
 
