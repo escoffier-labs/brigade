@@ -381,6 +381,24 @@ def test_agent_activity_view_count_chips_carry_plain_words_not_icon_only():
     assert "● running 2" in fragment
 
 
+def test_agent_activity_view_count_chips_collapse_unknown_states_like_summary():
+    # A bogus state and a real "unknown" on the same host must fold into a
+    # single "unknown" chip (bucketed via _bucket_state), matching the summary
+    # strip, not render two indistinguishable split-count chips.
+    now = datetime.now(timezone.utc).isoformat()
+    records = [
+        _view_record(activity_id="b1", state="totally-bogus", last_updated_at=now, started_at=now),
+        _view_record(activity_id="b2", state="unknown", last_updated_at=now, started_at=now),
+    ]
+    fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
+
+    # The count strip collapses both into one "unknown 2" chip; before the fix
+    # they split into two "unknown 1" chips. (The raw state may still appear in
+    # the per-agent detail row's State column, which is correct.)
+    assert "unknown 2" in fragment
+    assert "unknown 1" not in fragment
+
+
 def _view_record(**overrides):
     now = datetime.now(timezone.utc)
     record = {

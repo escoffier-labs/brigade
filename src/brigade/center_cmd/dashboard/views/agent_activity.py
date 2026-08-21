@@ -369,14 +369,14 @@ def _t3_glyph() -> str:
 def _count_strip(records: list[dict]) -> str:
     counts: dict[str, int] = {}
     for record in records:
-        state = str(record.get("state") or "unknown")
+        state = _bucket_state(record)
         counts[state] = counts.get(state, 0) + 1
     if not counts:
         return f'<div class="state-strip"><span class="state-chip state-chip-empty">{html.esc("0")}</span></div>'
     chips = []
     for state, count in sorted(counts.items(), key=lambda item: _LIVE_RANK.get(item[0], 8)):
         icon = _STATE_ICON.get(state, "?")
-        label = state if state in _STATE_ICON else "unknown"
+        label = state
         chips.append(
             f'<span class="state-chip agent-state-{html.esc(label.replace(" ", "-"))}" '
             f'title="{html.esc(label)}">{html.esc(f"{icon} {label} {count}")}</span>'
