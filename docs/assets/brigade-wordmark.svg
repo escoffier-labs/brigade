@@ -73,16 +73,16 @@
 </g>
 </g>
   </defs>
-  <g id="wordmark" fill="#dde3ea" transform="translate(209 8)">
+  <g id="wordmark" fill="#dde3ea" transform="translate(180.5 8)">
 <use xlink:href="#wordmark-glyph-0" x="0" y="143.375"/>
-<use xlink:href="#wordmark-glyph-1" x="83.639648" y="143.375"/>
-<use xlink:href="#wordmark-glyph-2" x="136.279297" y="143.375"/>
-<use xlink:href="#wordmark-glyph-3" x="167.918945" y="143.375"/>
-<use xlink:href="#wordmark-glyph-4" x="252.558594" y="143.375"/>
-<use xlink:href="#wordmark-glyph-5" x="329.198242" y="143.375"/>
-<use xlink:href="#wordmark-glyph-6" x="412.837891" y="143.375"/>
+<use xlink:href="#wordmark-glyph-1" x="93.139648" y="143.375"/>
+<use xlink:href="#wordmark-glyph-2" x="155.279297" y="143.375"/>
+<use xlink:href="#wordmark-glyph-3" x="196.418945" y="143.375"/>
+<use xlink:href="#wordmark-glyph-4" x="290.558594" y="143.375"/>
+<use xlink:href="#wordmark-glyph-5" x="376.698242" y="143.375"/>
+<use xlink:href="#wordmark-glyph-6" x="469.837891" y="143.375"/>
   </g>
-  <circle id="i-dot" cx="366.2" cy="53" r="11.8" fill="#e0a45c"/>
+  <circle id="i-dot" cx="356.7" cy="53" r="11.8" fill="#e0a45c"/>
   <g id="maker-line" fill="#9aa4b2" transform="translate(334.5 211)">
 <use xlink:href="#maker-glyph-0" x="0" y="27.125"/>
 <use xlink:href="#maker-glyph-1" x="10" y="27.125"/>

@@ -29,7 +29,16 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
     wordmark = root.find(f"{SVG_NS}g[@id='wordmark']")
     assert wordmark is not None
     assert wordmark.attrib["fill"] == "#dde3ea"
-    assert wordmark.findall(f".//{SVG_NS}use")
+    assert wordmark.attrib["transform"] == "translate(180.5 8)"
+    assert [use.attrib["x"] for use in wordmark.findall(f".//{SVG_NS}use")] == [
+        "0",
+        "93.139648",
+        "155.279297",
+        "196.418945",
+        "290.558594",
+        "376.698242",
+        "469.837891",
+    ]
 
     maker = root.find(f"{SVG_NS}g[@id='maker-line']")
     assert maker is not None
@@ -40,7 +49,7 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
     assert [(element.tag, element.attrib.get("id")) for element in accent_elements] == [(f"{SVG_NS}circle", "i-dot")]
     i_dot = root.find(f"{SVG_NS}circle[@id='i-dot']")
     assert i_dot is not None
-    assert i_dot.attrib["cx"] == "366.2"
+    assert i_dot.attrib["cx"] == "356.7"
 
     assert root.findall(f".//{SVG_NS}path")
     assert not root.findall(f".//{SVG_NS}text")
