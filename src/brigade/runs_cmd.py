@@ -172,21 +172,75 @@ def _lineage(meta: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return lineage if isinstance(lineage, Mapping) else None
 
 
-def _print_lineage(meta: Mapping[str, Any]) -> None:
+def _recorded_children(run_dir: Path) -> list[dict[str, str]]:
+    """Return sibling runs that record ``run_dir`` as their parent.
+
+    Discovery is inspection-only: invalid or unreadable sibling receipts are
+    skipped, and the shown run is never rewritten. Legacy roots without child
+    metadata simply produce an empty list.
+    """
+    parent_id = run_dir.name
+    try:
+        entries = list(run_dir.parent.iterdir())
+    except OSError:
+        return []
+    children: list[dict[str, str]] = []
+    for path in entries:
+        try:
+            if path.is_symlink() or not path.is_dir() or path.name == parent_id:
+                continue
+        except OSError:
+            continue
+        try:
+            meta = _read_json(path / "run.json")
+        except (OSError, ValueError):
+            continue
+        if meta is None:
+            continue
+        lineage = _lineage(meta)
+        if lineage is None or lineage.get("parent_run_id") != parent_id:
+            continue
+        entry = {"run_id": path.name}
+        branch = lineage.get("branch_point_event_id")
+        if isinstance(branch, str) and branch:
+            entry["branch_point_event_id"] = branch
+        status = meta.get("status")
+        if isinstance(status, str) and status:
+            entry["status"] = status
+        children.append(entry)
+    children.sort(key=lambda item: item["run_id"])
+    return children
+
+
+def _print_lineage(meta: Mapping[str, Any], *, run_dir: Path | None = None) -> None:
     lineage = _lineage(meta)
-    if lineage is None:
+    children = _recorded_children(run_dir) if run_dir is not None else []
+    if lineage is None and not children:
         return
     print("lineage:")
-    _line("  kind", lineage.get("kind"))
-    _line("  parent run", lineage.get("parent_run_id"))
-    _line("  branch point", lineage.get("branch_point_event_id"))
-    shared_prefix = lineage.get("shared_prefix")
-    if not isinstance(shared_prefix, Mapping):
+    if lineage is not None:
+        _line("  kind", lineage.get("kind"))
+        _line("  parent run", lineage.get("parent_run_id"))
+        _line("  branch point", lineage.get("branch_point_event_id"))
+        shared_prefix = lineage.get("shared_prefix")
+        if isinstance(shared_prefix, Mapping):
+            sequence = shared_prefix.get("event_sequence")
+            digest = shared_prefix.get("event_digest")
+            if isinstance(sequence, int) and isinstance(digest, str) and digest:
+                print(f"  shared prefix: seq={sequence} digest={digest[:12]}")
+    if not children:
         return
-    sequence = shared_prefix.get("event_sequence")
-    digest = shared_prefix.get("event_digest")
-    if isinstance(sequence, int) and isinstance(digest, str) and digest:
-        print(f"  shared prefix: seq={sequence} digest={digest[:12]}")
+    print("  children:")
+    for child in children:
+        extras: list[str] = []
+        status = child.get("status")
+        if status:
+            extras.append(status)
+        branch = child.get("branch_point_event_id")
+        if branch:
+            extras.append(f"branch point: {branch}")
+        suffix = f" ({'; '.join(extras)})" if extras else ""
+        print(f"    - {child['run_id']}{suffix}")
 
 
 def _print_roster(roster: dict[str, Any] | None) -> None:
@@ -2023,6 +2077,11 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
     if workspace is None:
         print("error: parent run has no lock workspace", file=sys.stderr)
         return 2
+    target_status = str(snapshot.get("status") or "started")
+    followup = _child_status_followup(target_status)
+    if target_status != "started" and followup is None:
+        print(f"error: unsupported branch point status: {target_status}", file=sys.stderr)
+        return 2
     runs_root = parent_run_dir.parent
     child_run_dir = aboyeur.make_run_dir(runs_root)
     child_meta = _child_receipt_from_parent_snapshot(
@@ -2044,11 +2103,6 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
         run_journal.RunJournalError,
     )
     try:
-        target_status = str(child_meta.get("status") or "started")
-        followup = _child_status_followup(target_status)
-        if target_status != "started" and followup is None:
-            print(f"error: unsupported branch point status: {target_status}", file=sys.stderr)
-            return 2
         child_bootstrap = dict(child_meta)
         child_bootstrap["status"] = "started"
         with runguard.run_lock(workspace, run_dir=child_run_dir):
@@ -2783,13 +2837,13 @@ def show(run_dir: Path, *, json_output: bool = False) -> int:
     if run_meta.get("suspected_noop") is True:
         print("warning: suspected no-op run; ok workers produced no non-.brigade file changes.")
 
+    _print_lineage(run_meta, run_dir=run_dir)
     _print_roster(roster)
     _print_plan(plan)
     _print_workers(worker_results)
     _print_ground_truth(worker_results)
     _print_synthesis(synthesis)
     _print_final(_read_text(run_dir / "final.txt"))
-    _print_lineage(run_meta)
     _print_terminal_guidance(run_dir, run_meta)
     if _is_terminal(run_meta):
         return _watch_return_code(run_meta.get("status"))
