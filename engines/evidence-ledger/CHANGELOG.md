@@ -19,6 +19,9 @@ Releases before this changelog was started are on the [releases page](https://gi
   SQLite report `SQL logic error: out of memory`). A file that still cannot
   be read is skipped with a counted warning that names the path and the
   statement; prompt history and chat surfaces continue to import. Fixes #1052.
+- `import discovered` lists per-source failures but exits 0 when at least one
+  source imported; exit 1 is reserved for total failure (no source imported).
+  Fixes #1052.
 
 - Content eligibility is centralized for every body-emitting read surface.
   Search snippets, MCP `search_evidence`, evidence bundles, Markdown export,
