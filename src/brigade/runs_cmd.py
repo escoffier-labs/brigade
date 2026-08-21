@@ -87,6 +87,14 @@ _LINEAGE_FIELDS = frozenset(
         "parent_run_id",
         "branch_point_event_id",
         "shared_prefix",
+        "children",
+    }
+)
+_CHILD_SUMMARY_FIELDS = frozenset(
+    {
+        "run_id",
+        "status",
+        "branch_point_event_id",
     }
 )
 _SHARED_PREFIX_FIELDS = frozenset(
@@ -1631,12 +1639,28 @@ def _mode_text(meta: Mapping[str, Any]) -> str:
     return mode
 
 
-def _detail_lineage_section(meta: Mapping[str, Any]) -> dict[str, object] | None:
-    """Allowlisted child-run lineage for the versioned read contracts."""
+def _detail_children(run_dir: Path) -> list[dict[str, object]]:
+    """Allowlisted recorded children; same discovery as human `runs show`."""
+    return [
+        _allowlisted(
+            {
+                "run_id": child.get("run_id"),
+                "status": child.get("status"),
+                "branch_point_event_id": child.get("branch_point_event_id"),
+            },
+            _CHILD_SUMMARY_FIELDS,
+        )
+        for child in _recorded_children(run_dir)
+    ]
+
+
+def _detail_lineage_section(run_dir: Path, meta: Mapping[str, Any]) -> dict[str, object] | None:
+    """Allowlisted parent/child lineage for the versioned read contracts."""
     lineage = _lineage(meta)
-    if lineage is None:
+    children = _detail_children(run_dir)
+    if lineage is None and not children:
         return None
-    shared_prefix = lineage.get("shared_prefix")
+    shared_prefix = lineage.get("shared_prefix") if lineage is not None else None
     prefix_payload = None
     if isinstance(shared_prefix, Mapping):
         prefix_payload = (
@@ -1652,10 +1676,13 @@ def _detail_lineage_section(meta: Mapping[str, Any]) -> dict[str, object] | None
         )
     payload = _allowlisted(
         {
-            "kind": _clean_str(lineage.get("kind")),
-            "parent_run_id": _clean_str(lineage.get("parent_run_id")),
-            "branch_point_event_id": _clean_str(lineage.get("branch_point_event_id")),
+            "kind": _clean_str(lineage.get("kind")) if lineage is not None else None,
+            "parent_run_id": _clean_str(lineage.get("parent_run_id")) if lineage is not None else None,
+            "branch_point_event_id": (
+                _clean_str(lineage.get("branch_point_event_id")) if lineage is not None else None
+            ),
             "shared_prefix": prefix_payload,
+            "children": children or None,
         },
         _LINEAGE_FIELDS,
     )
@@ -1665,7 +1692,7 @@ def _detail_lineage_section(meta: Mapping[str, Any]) -> dict[str, object] | None
 def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
     """Browser-safe run summary for brigade.runs-list.v1 (no absolute paths)."""
     phase, _, _ = _failure_fields(meta)
-    lineage = _detail_lineage_section(meta)
+    lineage = _detail_lineage_section(run_dir, meta)
     parent_run_id = None
     if lineage is not None:
         parent_run_id = lineage.get("parent_run_id")
@@ -1709,7 +1736,7 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
             "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
             "suspected_noop": True if meta.get("suspected_noop") is True else None,
             "resume_available": _resume_available(run_dir),
-            "lineage": _detail_lineage_section(meta),
+            "lineage": _detail_lineage_section(run_dir, meta),
         },
         _RUN_DETAIL_RUN_FIELDS,
     )

@@ -307,6 +307,38 @@ def test_legacy_run_without_lineage_still_serializes(tmp_path, capsys):
     assert "lineage" not in listed["runs"][0]
 
 
+def test_show_json_includes_recorded_children_from_sibling_receipts(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    parent = runs_root / "20260821-120000-parent"
+    child = runs_root / "20260821-130000-child"
+    _write_legacy_run(parent)
+    _write_legacy_run(child)
+    payload = json.loads((child / "run.json").read_text())
+    payload["lineage"] = {
+        "kind": "child",
+        "parent_run_id": parent.name,
+        "branch_point_event_id": "20260821-120000-parent-000003-bbbbbbbbbbbb",
+        "env": {"OPENAI_API_KEY": PLANTED_ENV_VALUE},
+        "prompt": PLANTED_PROMPT,
+    }
+    _write_json(child / "run.json", payload)
+
+    assert cli.main(["runs", "show", parent.name, "--cwd", str(tmp_path), "--json"]) == 0
+    shown_raw = capsys.readouterr().out
+    shown = json.loads(shown_raw)
+    _assert_allowlist(shown)
+    _assert_raw_clean(shown_raw)
+    assert shown["run"]["lineage"] == {
+        "children": [
+            {
+                "run_id": child.name,
+                "status": "ok",
+                "branch_point_event_id": "20260821-120000-parent-000003-bbbbbbbbbbbb",
+            }
+        ]
+    }
+
+
 def test_child_lineage_is_allowlisted_on_show_and_list(tmp_path, capsys):
     runs_root = tmp_path / ".brigade" / "runs"
     child = runs_root / "20260821-130000-child"
