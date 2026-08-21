@@ -13,26 +13,47 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
 
     title = root.find(f"{SVG_NS}title")
     assert title is not None
-    assert title.text == "Brigade (by Escoffier Labs)"
+    assert title.text == "Brigade by Escoffier Labs"
 
     panel = root.find(f"{SVG_NS}rect[@id='panel']")
     assert panel is not None
-    assert panel.attrib["fill"] == "#0f1318"
-    assert panel.attrib["stroke"] == "#2a323d"
-    assert panel.attrib["rx"] == "8"
+    assert panel.attrib["x"] == "0"
+    assert panel.attrib["y"] == "0"
+    assert panel.attrib["width"] == "920"
+    assert panel.attrib["height"] == "280"
+    assert panel.attrib["fill"] == "#0d1014"
+    assert "stroke" not in panel.attrib
+    assert "stroke-width" not in panel.attrib
+    assert "rx" not in panel.attrib
 
     wordmark = root.find(f"{SVG_NS}g[@id='wordmark']")
     assert wordmark is not None
     assert wordmark.attrib["fill"] == "#dde3ea"
-    assert wordmark.findall(f".//{SVG_NS}use")
+    assert wordmark.attrib["transform"] == "translate(180.5 8)"
+    assert [use.attrib["x"] for use in wordmark.findall(f".//{SVG_NS}use")] == [
+        "0",
+        "93.139648",
+        "155.279297",
+        "196.418945",
+        "290.558594",
+        "376.698242",
+        "469.837891",
+    ]
 
     maker = root.find(f"{SVG_NS}g[@id='maker-line']")
     assert maker is not None
     assert maker.attrib["fill"] == "#9aa4b2"
-    assert maker.findall(f".//{SVG_NS}use")
+    maker_glyphs = maker.findall(f".//{SVG_NS}use")
+    assert maker_glyphs
+    href = "{http://www.w3.org/1999/xlink}href"
+    assert maker_glyphs[0].attrib[href] == "#maker-glyph-1"
+    assert maker_glyphs[-1].attrib[href] == "#maker-glyph-5"
 
     accent_elements = [element for element in root.iter() if element.attrib.get("fill") == "#e0a45c"]
     assert [(element.tag, element.attrib.get("id")) for element in accent_elements] == [(f"{SVG_NS}circle", "i-dot")]
+    i_dot = root.find(f"{SVG_NS}circle[@id='i-dot']")
+    assert i_dot is not None
+    assert i_dot.attrib["cx"] == "356.7"
 
     assert root.findall(f".//{SVG_NS}path")
     assert not root.findall(f".//{SVG_NS}text")
