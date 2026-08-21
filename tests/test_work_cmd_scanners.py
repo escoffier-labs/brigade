@@ -370,6 +370,8 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     assert work_cmd.scanners_init(target=tmp_path) == 0
     out = capsys.readouterr().out
     config = tmp_path / ".brigade" / "scanners.toml"
+    assert config.is_file()
+    assert not config.is_symlink()
     assert f"scanner_config: {config}" in out
     assert "scanners: 9" in out
     assert ".brigade/scanners.toml" in (tmp_path / ".gitignore").read_text()
@@ -403,6 +405,39 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     assert payload["valid"] is True
     assert payload["planned"][0]["id"] == "handoff-ingest"
     assert payload["suggestions"]
+
+
+def test_scanners_init_refuses_dangling_and_force_symlink_scanners_toml(tmp_path, capsys):
+    """#1042: init/--force must not follow a planted scanners.toml symlink."""
+    outside = tmp_path / "outside" / "planted.toml"
+    outside.parent.mkdir()
+    brigade = tmp_path / ".brigade"
+    brigade.mkdir()
+    config = brigade / "scanners.toml"
+    config.symlink_to(outside)
+
+    assert work_cmd.scanners_init(target=tmp_path) == 2
+    err = capsys.readouterr().err
+    assert "scanner config refused" in err
+    assert "symlink" in err
+    assert not outside.exists()
+    assert config.is_symlink()
+    assert config.readlink() == outside
+
+    outside.write_text("secret-outside-config\n")
+    assert work_cmd.scanners_init(target=tmp_path, force=True) == 2
+    err = capsys.readouterr().err
+    assert "scanner config refused" in err
+    assert "symlink" in err
+    assert outside.read_text() == "secret-outside-config\n"
+    assert config.is_symlink()
+
+    config.unlink()
+    config.write_text("previous-regular\n")
+    assert work_cmd.scanners_init(target=tmp_path, force=True) == 0
+    assert config.is_file()
+    assert not config.is_symlink()
+    assert "[[scanner]]" in config.read_text()
 
 
 def test_work_scanners_plan_detects_conflicts_and_suggests_staggering(tmp_path, capsys):
@@ -741,6 +776,63 @@ conflict_window = "02:00-02:10"
     assert metadata["scanner_import_path"].endswith(".brigade/scanner-imports.jsonl")
     assert metadata["source_fingerprint"]
     assert metadata["scanner_output_path_snapshot"]["exists"] is True
+
+
+def test_import_path_ingest_rolls_back_when_final_receipt_publication_fails(tmp_path, monkeypatch):
+    """#1040: explicit import_path commit + proofs roll back if the final receipt fails."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _init_git_repo(tmp_path)
+    script = tmp_path / "scanner.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+path = Path.cwd() / ".brigade" / "scanner-imports.jsonl"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps({"kind": "task", "source": "repo-scan", "text": "Review generated finding"}) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    real_write = scanners_mod._write_scanner_run_file
+
+    def fail_final_receipt(authority, name, data, *, after_publish=None):
+        if name == "receipt.json" and b'"ingest_output"' in data:
+            raise OSError("forced final receipt publication failure")
+        return real_write(authority, name, data, after_publish=after_publish)
+
+    monkeypatch.setattr(scanners_mod, "_write_scanner_run_file", fail_final_receipt)
+
+    with pytest.raises(OSError, match="forced final receipt publication failure"):
+        scanners_mod._scanners_run_payload(
+            target=tmp_path,
+            scanner_id="repo-scan",
+            ingest_output=True,
+        )
+
+    assert not inbox.exists() or inbox.read_bytes() in {b"", b"\n"}
+    assert work_cmd.ledger._read_imports(tmp_path) == []
+    proofs = tmp_path / ".brigade" / "work" / "imports" / "proofs"
+    if proofs.is_dir():
+        assert list(proofs.glob("*.json")) == []
 
 
 def test_scanners_run_releases_directory_authority_when_import_publication_raises(tmp_path, monkeypatch):
@@ -2085,10 +2177,11 @@ def test_scanner_reconciliation_keeps_builtin_lifecycle_mutation_and_strips_untr
     mutated.update(status="dismissed", dismissed_at="2026-08-11T00:00:00+00:00", dismiss_reason="stale")
     work_cmd.ledger._write_imports(tmp_path, [mutated])
 
+    scanner = _builtin_scanner("handoff-ingest")
     scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner=_builtin_scanner("handoff-ingest"),
-        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        scanner=scanner,
+        run=_verified_builtin_scanner_run(scanner),
         before_ids={trusted["id"]},
         before_imports=before,
         before_raw=before_raw,
@@ -2117,6 +2210,60 @@ def test_scanner_reconciliation_keeps_builtin_lifecycle_mutation_and_strips_untr
     metadata = work_cmd.ledger._read_imports(tmp_path)[0]["metadata"]
     assert "handoff_issue_id" not in metadata
     assert "handoff_target_document" not in metadata
+
+
+def test_scanner_lifecycle_rewrite_requires_ownership_run_proof_and_legal_transition(tmp_path):
+    """#1039: a lifecycle rewrite needs source ownership, run proof, and a legal transition."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    owned = work_cmd.ledger._make_import(
+        "Owned handoff finding",
+        kind="finding",
+        source="handoff-ingest",
+        metadata={"source_item_key": "handoff-ingest:owned", "source_fingerprint": "aa" * 16},
+    )
+    foreign = work_cmd.ledger._make_import(
+        "Foreign scanner finding",
+        kind="finding",
+        source="friction-scan",
+        metadata={"source_item_key": "friction-scan:foreign", "source_fingerprint": "bb" * 16},
+    )
+    dismissed = dict(owned)
+    dismissed.update(status="dismissed", dismissed_at="2026-08-11T00:00:00+00:00", dismiss_reason="stale")
+    scanner = _builtin_scanner("handoff-ingest")
+
+    def _attempt(before_item: dict, after_item: dict, run: dict) -> str:
+        work_cmd.ledger._write_imports(tmp_path, [before_item])
+        before_raw = (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_bytes()
+        work_cmd.ledger._write_imports(tmp_path, [after_item])
+        scanners_mod._scanner_stamp_new_imports(
+            target=tmp_path,
+            scanner=scanner,
+            run=run,
+            before_ids={before_item["id"]},
+            before_imports=[before_item],
+            before_raw=before_raw,
+        )
+        return str(work_cmd.ledger._read_imports(tmp_path)[0]["status"])
+
+    unverified = {"run_id": "scanner-run", "output_after": {"path": "output"}}
+    assert _attempt(owned, dismissed, unverified) == "pending"
+
+    foreign_dismissed = dict(foreign)
+    foreign_dismissed.update(status="dismissed", dismissed_at="2026-08-11T00:00:00+00:00", dismiss_reason="stale")
+    assert _attempt(foreign, foreign_dismissed, _verified_builtin_scanner_run(scanner)) == "pending"
+
+    resurrected = dict(dismissed)
+    resurrected.update(status="pending")
+    resurrected.pop("dismissed_at", None)
+    resurrected.pop("dismiss_reason", None)
+    assert _attempt(dismissed, resurrected, _verified_builtin_scanner_run(scanner)) == "dismissed"
+
+    promoted = dict(owned)
+    promoted.update(status="promoted", updated_at="2026-08-11T00:00:00+00:00")
+    assert _attempt(owned, promoted, _verified_builtin_scanner_run(scanner)) == "pending"
+
+    assert _attempt(owned, dismissed, _verified_builtin_scanner_run(scanner)) == "dismissed"
 
 
 def test_locally_stamped_import_authority_cannot_be_forged_from_row_fields():
@@ -2154,10 +2301,11 @@ def test_scanner_reconciliation_replaces_only_matching_duplicate_id_raw_row(tmp_
     mutated_second_raw = json.dumps(mutated_second, sort_keys=True).encode("utf-8") + b"\n"
     inbox.write_bytes(first_raw + mutated_second_raw)
 
+    scanner = _builtin_scanner("handoff-ingest")
     scanners_mod._scanner_stamp_new_imports(
         target=tmp_path,
-        scanner=_builtin_scanner("handoff-ingest"),
-        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        scanner=scanner,
+        run=_verified_builtin_scanner_run(scanner),
         before_ids={first["id"]},
         before_imports=[first, second],
         before_raw=first_raw + second_raw,
