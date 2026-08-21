@@ -17,9 +17,14 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
 
     panel = root.find(f"{SVG_NS}rect[@id='panel']")
     assert panel is not None
-    assert panel.attrib["fill"] == "#0f1318"
-    assert panel.attrib["stroke"] == "#2a323d"
-    assert panel.attrib["rx"] == "8"
+    assert panel.attrib["x"] == "0"
+    assert panel.attrib["y"] == "0"
+    assert panel.attrib["width"] == "920"
+    assert panel.attrib["height"] == "280"
+    assert panel.attrib["fill"] == "#0d1014"
+    assert "stroke" not in panel.attrib
+    assert "stroke-width" not in panel.attrib
+    assert "rx" not in panel.attrib
 
     wordmark = root.find(f"{SVG_NS}g[@id='wordmark']")
     assert wordmark is not None
@@ -33,6 +38,9 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
 
     accent_elements = [element for element in root.iter() if element.attrib.get("fill") == "#e0a45c"]
     assert [(element.tag, element.attrib.get("id")) for element in accent_elements] == [(f"{SVG_NS}circle", "i-dot")]
+    i_dot = root.find(f"{SVG_NS}circle[@id='i-dot']")
+    assert i_dot is not None
+    assert i_dot.attrib["cx"] == "366.2"
 
     assert root.findall(f".//{SVG_NS}path")
     assert not root.findall(f".//{SVG_NS}text")
