@@ -36,6 +36,67 @@ RUNS_LIST_SCHEMA = "brigade.runs-list.v1"
 RUN_DETAIL_SCHEMA = "brigade.run-detail.v1"
 RUN_WATCH_SCHEMA = "brigade.run-watch.v1"
 
+# Explicit field allowlists. Serializers copy only these keys; environment
+# values, auth/control tokens, secret references, full prompts, transcript
+# bodies, raw stdout/stderr, and absolute home paths are excluded.
+RUN_SUMMARY_FIELDS = frozenset(
+    {
+        "run_id",
+        "status",
+        "task",
+        "started_at",
+        "finished_at",
+        "duration_seconds",
+        "failure_phase",
+        "mode",
+        "resume_available",
+        "parent_run_id",
+    }
+)
+RUN_DETAIL_KEYS = frozenset(
+    {
+        "schema",
+        "run",
+        "roster",
+        "plan",
+        "workers",
+        "synthesis",
+        "verification",
+        "briefs",
+    }
+)
+_RUN_DETAIL_RUN_FIELDS = frozenset(
+    {
+        "run_id",
+        "status",
+        "task",
+        "mode",
+        "started_at",
+        "finished_at",
+        "duration_seconds",
+        "failure",
+        "error",
+        "suspected_noop",
+        "resume_available",
+        "lineage",
+    }
+)
+_LINEAGE_FIELDS = frozenset(
+    {
+        "kind",
+        "parent_run_id",
+        "branch_point_event_id",
+        "shared_prefix",
+    }
+)
+_SHARED_PREFIX_FIELDS = frozenset(
+    {
+        "event_sequence",
+        "event_digest",
+        "previous_digest",
+    }
+)
+
 _LIST_TASK_LIMIT = 160
 _DETAIL_TASK_LIMIT = 400
 _DETAIL_TEXT_LIMIT = 400
@@ -1504,6 +1565,11 @@ def _compact(payload: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in payload.items() if value is not None}
 
 
+def _allowlisted(payload: Mapping[str, object], allowed: frozenset[str]) -> dict[str, object]:
+    """Keep only explicitly allowlisted keys; drop None the same way as `_compact`."""
+    return {key: value for key, value in payload.items() if key in allowed and value is not None}
+
+
 def _mode_text(meta: Mapping[str, Any]) -> str:
     mode = "read-only" if meta.get("read_only") else "normal"
     if meta.get("dry_run"):
@@ -1520,22 +1586,24 @@ def _detail_lineage_section(meta: Mapping[str, Any]) -> dict[str, object] | None
     prefix_payload = None
     if isinstance(shared_prefix, Mapping):
         prefix_payload = (
-            _compact(
+            _allowlisted(
                 {
                     "event_sequence": _clean_number(shared_prefix.get("event_sequence")),
                     "event_digest": _clean_str(shared_prefix.get("event_digest")),
                     "previous_digest": _clean_str(shared_prefix.get("previous_digest")),
-                }
+                },
+                _SHARED_PREFIX_FIELDS,
             )
             or None
         )
-    payload = _compact(
+    payload = _allowlisted(
         {
             "kind": _clean_str(lineage.get("kind")),
             "parent_run_id": _clean_str(lineage.get("parent_run_id")),
             "branch_point_event_id": _clean_str(lineage.get("branch_point_event_id")),
             "shared_prefix": prefix_payload,
-        }
+        },
+        _LINEAGE_FIELDS,
     )
     return payload or None
 
@@ -1548,7 +1616,7 @@ def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, objec
     if lineage is not None:
         parent_run_id = lineage.get("parent_run_id")
         parent_run_id = parent_run_id if isinstance(parent_run_id, str) else None
-    return _compact(
+    return _allowlisted(
         {
             "run_id": run_dir.name,
             "status": _clean_str(meta.get("status")) or "unknown",
@@ -1560,7 +1628,8 @@ def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, objec
             "mode": _mode_text(meta),
             "resume_available": _resume_available(run_dir),
             "parent_run_id": parent_run_id,
-        }
+        },
+        RUN_SUMMARY_FIELDS,
     )
 
 
@@ -1573,7 +1642,7 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
             "detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
         }
     )
-    return _compact(
+    return _allowlisted(
         {
             "run_id": run_dir.name,
             "status": _clean_str(meta.get("status")) or "unknown",
@@ -1587,7 +1656,8 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
             "suspected_noop": True if meta.get("suspected_noop") is True else None,
             "resume_available": _resume_available(run_dir),
             "lineage": _detail_lineage_section(meta),
-        }
+        },
+        _RUN_DETAIL_RUN_FIELDS,
     )
 
 
@@ -1778,7 +1848,7 @@ def _run_detail_payload(
     Excludes environment values, tokens, full prompts, transcript bodies,
     log paths, raw stdout/stderr, and absolute workspace paths.
     """
-    return {
+    payload = {
         "schema": RUN_DETAIL_SCHEMA,
         "run": _detail_run_section(run_dir, run_meta),
         "roster": _detail_roster_section(roster),
@@ -1788,6 +1858,7 @@ def _run_detail_payload(
         "verification": _detail_verification_section(worker_results, synthesis),
         "briefs": _detail_briefs_section(run_meta),
     }
+    return {key: payload[key] for key in RUN_DETAIL_KEYS}
 
 
 def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10, json_output: bool = False) -> int:
