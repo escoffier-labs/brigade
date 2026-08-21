@@ -13,7 +13,7 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
 
     title = root.find(f"{SVG_NS}title")
     assert title is not None
-    assert title.text == "Brigade (by Escoffier Labs)"
+    assert title.text == "Brigade by Escoffier Labs"
 
     panel = root.find(f"{SVG_NS}rect[@id='panel']")
     assert panel is not None
@@ -43,7 +43,11 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
     maker = root.find(f"{SVG_NS}g[@id='maker-line']")
     assert maker is not None
     assert maker.attrib["fill"] == "#9aa4b2"
-    assert maker.findall(f".//{SVG_NS}use")
+    maker_glyphs = maker.findall(f".//{SVG_NS}use")
+    assert maker_glyphs
+    href = "{http://www.w3.org/1999/xlink}href"
+    assert maker_glyphs[0].attrib[href] == "#maker-glyph-1"
+    assert maker_glyphs[-1].attrib[href] == "#maker-glyph-5"
 
     accent_elements = [element for element in root.iter() if element.attrib.get("fill") == "#e0a45c"]
     assert [(element.tag, element.attrib.get("id")) for element in accent_elements] == [(f"{SVG_NS}circle", "i-dot")]
