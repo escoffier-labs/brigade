@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The center dashboard Status view now answers "What needs my attention across handoffs, memory care, verify loop, and inbox hygiene right now?" with a plain-sentence summary strip and health tiles (icon + plain word: OK / ATTENTION / MISSING / TIMED OUT, never color alone), following the Memory Operations baseline. Raw ids move into `<details>` expanders, the placeholder rows for latest verify receipt/signal are dropped, and missing brief sections render as readable MISSING tiles instead of `-` table rows. Refs #972.
+
 ### Security
 - `brigade runs list --json` and the Run View `GET /api/runs` list now drop a child directory that is a symlink, or whose `resolve()` leaves the runs root, and count it in `skipped_invalid`. Per-run serve routes already 404 those ids; the shared collector did not, so a symlink alias could leak out-of-root task text in the list while its detail route 404'd. Refs #631.
 - Scanner lifecycle rewrites now require the verifier-held run proof, `before.source == scanner.source`, and a legal `pending → dismissed` transition. A replacement row is applied as that narrow action, so a matching built-in scanner cannot dismiss another source's finding, resurrect a dismissed row, or assign an arbitrary status. Fixes #1039.
