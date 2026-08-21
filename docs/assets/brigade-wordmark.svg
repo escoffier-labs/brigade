@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="920" height="280" viewBox="0 0 920 280" role="img" aria-labelledby="title desc">
   <title id="title">Brigade (by Escoffier Labs)</title>
   <desc id="desc">The lowercase Brigade wordmark in off-white, with one amber dot above the i and the maker line below.</desc>
-  <rect id="panel" x="1" y="1" width="918" height="278" rx="8" fill="#0f1318" stroke="#2a323d" stroke-width="2"/>
+  <rect id="panel" x="0" y="0" width="920" height="280" fill="#0d1014"/>
   <defs>
 <g>
 <g id="wordmark-glyph-0">
