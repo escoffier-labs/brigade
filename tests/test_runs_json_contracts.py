@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade import cli
 from brigade import runs_cmd
 
@@ -17,8 +19,18 @@ PLANTED_ENV_VALUE = "planted-env-OPENAI-not-a-real-key"
 PLANTED_SECRET = "sk-live-EXAMPLESECRETVALUE99"
 PLANTED_HOME = "/home/example-user/.config/brigade/secret.env"
 PLANTED_ABS_HOME = "/home/someuser"
+PLANTED_WIN_HOME = r"C:\Users\win-user"
+PLANTED_WIN_HOME_FWD = "C:/Users/win-user"
+PLANTED_DOUBLE_SLASH_HOME = "/home//alice"
+PLANTED_SPACED_HOME = "/Users/John Smith"
+PLANTED_APOSTROPHE_HOME = "/home/o'brien"
 PLANTED_VISIBLE = "planted-visible-marker"
-PLANTED_TASK = f"inspect {PLANTED_VISIBLE} under {PLANTED_ABS_HOME}/project/task"
+PLANTED_TASK = (
+    f"inspect {PLANTED_VISIBLE} under {PLANTED_ABS_HOME}/project/task "
+    f"{PLANTED_WIN_HOME}\\x {PLANTED_WIN_HOME_FWD}/x "
+    f"{PLANTED_DOUBLE_SLASH_HOME}/x {PLANTED_SPACED_HOME}/x "
+    f"{PLANTED_APOSTROPHE_HOME}/x"
+)
 PLANTED_ERROR = f"run error in {PLANTED_ABS_HOME}/project/error.py"
 PLANTED_ABS_COMMAND = f"{PLANTED_ABS_HOME}/.venv/bin/pytest -q planted-verify"
 PLANTED_ABS_FAILURE = f"worker failed in {PLANTED_ABS_HOME}/project/src/module.py"
@@ -68,8 +80,22 @@ PLANTED_NEEDLES = (
     PLANTED_EVENT_METHOD,
     PLANTED_EVENT_ITEM_TYPE,
     UNEXPECTED_CONTRACT_VALUE,
+    PLANTED_WIN_HOME,
+    PLANTED_WIN_HOME_FWD,
+    PLANTED_DOUBLE_SLASH_HOME,
+    PLANTED_SPACED_HOME,
+    PLANTED_APOSTROPHE_HOME,
 )
-HOME_PREFIX_MARKERS = ("/home/", "/Users/")
+HOME_PREFIX_MARKERS = ("/home/", "/Users/", "C:\\Users\\", "C:/Users/")
+# Leftovers the pre-#1064 regex left behind, plus Windows/double-slash usernames.
+HOME_LEAK_FRAGMENTS = (
+    "C:\\Users\\",
+    "C:/Users/",
+    "/home//",
+    " Smith/",
+    "'brien",
+    "win-user",
+)
 FORBIDDEN_KEYS = frozenset(
     {
         "env",
@@ -110,12 +136,14 @@ def _walk_payload(value: object):
 
 
 def _assert_no_home_prefix(value: object) -> None:
-    """Walk every key and value; no `/home/<user>` or `/Users/<user>` prefix may remain."""
+    """Walk every key and value; no home prefix or regex-edge leftover may remain."""
     for item in _walk_payload(value):
         if not isinstance(item, str):
             continue
         for marker in HOME_PREFIX_MARKERS:
             assert marker not in item, f"home-prefix leaked into contract field: {item!r}"
+        for fragment in HOME_LEAK_FRAGMENTS:
+            assert fragment not in item, f"home-prefix fragment leaked into contract field: {item!r}"
 
 
 def _assert_allowlist(payload: object) -> None:
@@ -139,6 +167,9 @@ def _assert_raw_clean(raw: str) -> None:
     assert UNEXPECTED_CONTRACT_KEY not in raw
     for marker in HOME_PREFIX_MARKERS:
         assert marker not in raw, f"home-prefix leaked into JSON text: {marker!r}"
+    for fragment in HOME_LEAK_FRAGMENTS:
+        assert fragment not in raw, f"home-prefix fragment leaked into JSON text: {fragment!r}"
+    assert json.dumps(PLANTED_WIN_HOME)[1:-1] not in raw
 
 
 def _plant_sensitive_run(run_dir: Path, *, task: str = PLANTED_TASK) -> None:
@@ -196,7 +227,7 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = PLANTED_TASK) -> None:
             "orchestrator": "chef",
             "max_workers": 1,
             "timeout_seconds": 60.0,
-            "allow_models": ["codex", PLANTED_ALLOW_MODEL],
+            "allow_models": ["codex", PLANTED_ALLOW_MODEL, f"{PLANTED_DOUBLE_SLASH_HOME}/models/custom"],
             "agents": {
                 "chef": {
                     "cli": "codex",
@@ -211,7 +242,12 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = PLANTED_TASK) -> None:
     )
     _write_json(
         run_dir / "plan.json",
-        {"assignments": [{"stage": 1, "worker": "coder", "task": PLANTED_PLAN_TASK}]},
+        {
+            "assignments": [
+                {"stage": 1, "worker": "coder", "task": PLANTED_PLAN_TASK},
+                {"stage": 2, "worker": "reviewer", "task": f"plan {PLANTED_SPACED_HOME}/project/plan.py"},
+            ]
+        },
     )
     _write_json(
         run_dir / "worker-results.json",
@@ -231,7 +267,13 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = PLANTED_TASK) -> None:
                         "class": "tool",
                         "detail": PLANTED_WORKER_FAILURE,
                     },
-                }
+                },
+                {
+                    "worker": "reviewer",
+                    "task": f"review {PLANTED_APOSTROPHE_HOME}/project/worker.py",
+                    "ok": True,
+                    "detail": f"reviewed {PLANTED_APOSTROPHE_HOME}/project/out.py",
+                },
             ],
             "ground_truth": {
                 "available": True,
@@ -247,7 +289,17 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = PLANTED_TASK) -> None:
                                 "command": PLANTED_ABS_COMMAND,
                                 "exit_code": 0,
                                 "duration_seconds": 1.4,
-                            }
+                            },
+                            {
+                                "command": rf"{PLANTED_WIN_HOME}\.venv\bin\pytest -q planted-win",
+                                "exit_code": 0,
+                                "duration_seconds": 0.4,
+                            },
+                            {
+                                "command": f"{PLANTED_WIN_HOME_FWD}/.venv/bin/pytest -q planted-win-fwd",
+                                "exit_code": 0,
+                                "duration_seconds": 0.3,
+                            },
                         ],
                     }
                 ],
@@ -388,8 +440,14 @@ def _assert_artifacts_keep_home_needles(run_dir: Path) -> None:
         PLANTED_ABS_FINAL,
         PLANTED_BRIEF_PATH,
         PLANTED_EVENT_METHOD,
+        PLANTED_WIN_HOME,
+        PLANTED_WIN_HOME_FWD,
+        PLANTED_DOUBLE_SLASH_HOME,
+        PLANTED_SPACED_HOME,
+        PLANTED_APOSTROPHE_HOME,
     ):
-        assert needle in disk_text, f"artifact lost planted home path: {needle!r}"
+        escaped = json.dumps(needle)[1:-1]
+        assert needle in disk_text or escaped in disk_text, f"artifact lost planted home path: {needle!r}"
 
 
 def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys):
@@ -467,6 +525,11 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     assert PLANTED_ABS_COMMAND in human
     assert PLANTED_ABS_FINAL in human
     assert PLANTED_ABS_HOME in human
+    assert PLANTED_WIN_HOME in human
+    assert PLANTED_WIN_HOME_FWD in human
+    assert PLANTED_DOUBLE_SLASH_HOME in human
+    assert PLANTED_SPACED_HOME in human
+    assert PLANTED_APOSTROPHE_HOME in human
     _assert_artifacts_keep_home_needles(run_dir)
 
 
@@ -669,3 +732,19 @@ def test_human_list_and_show_remain_text_when_json_omitted(tmp_path, capsys):
     shown = capsys.readouterr().out
     assert shown.startswith(f"run: {run_dir.resolve()}")
     assert "brigade.run-detail.v1" not in shown
+
+
+def test_allowlisted_rejects_allowlist_key_without_cleaned_counterpart():
+    """An allowlist key with no cleaned overlay cannot pass a raw source value."""
+    source = {"task": "raw-task", "secret": "raw-secret"}
+    cleaned = {"task": "clean-task"}
+    with pytest.raises(AssertionError, match="cleaned counterpart"):
+        runs_cmd._allowlisted(
+            runs_cmd._merge_source(source, cleaned),
+            frozenset({"task", "secret"}),
+        )
+    payload = runs_cmd._allowlisted(
+        runs_cmd._merge_source(source, {**cleaned, "secret": None}),
+        frozenset({"task", "secret"}),
+    )
+    assert payload == {"task": "clean-task"}

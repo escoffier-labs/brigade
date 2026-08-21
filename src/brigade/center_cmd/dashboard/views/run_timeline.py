@@ -1,5 +1,7 @@
 """Run timeline dashboard view.
 
+Operator question answered here: what verification ran recently, did it pass, and what command was it?
+
 Renders Brigade orchestration runs from the versioned ``brigade.runs-list.v1``
 CLI contract (issue #631) alongside the existing verify-run receipts. Data
 access stays CLI-owned; this module never reads run artifacts directly.
@@ -8,6 +10,7 @@ access stays CLI-owned; this module never reads run artifacts directly.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from brigade.center_cmd.dashboard import data
@@ -34,7 +37,99 @@ def fetch(target: Path) -> dict:
 def render(payload: dict, nonce: str) -> str:
     brigade_payload = payload.get("brigade") if isinstance(payload.get("brigade"), dict) else {}
     verify_payload = payload.get("verify") if isinstance(payload.get("verify"), dict) else {}
-    return _render_brigade_panel(brigade_payload) + _render_verify_panel(verify_payload, nonce)
+    strip = _summary_strip(brigade_payload, verify_payload)
+    return strip + _render_brigade_panel(brigade_payload) + _render_verify_panel(verify_payload, nonce)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_ts(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _relative_time(value: object) -> str:
+    parsed = _parse_ts(value)
+    if parsed is None:
+        return "unknown age"
+    delta = _now() - parsed
+    if delta.total_seconds() < 0:
+        # Clock skew: a future stamp is treated as effectively current.
+        return "just now"
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    return f"{hours // 24}d ago"
+
+
+def _chip(status: object) -> str:
+    failed = str(status or "").strip().lower() in {"failed", "error", "failing"}
+    label = "fail" if failed else "pass"
+    css = "mo-chip-fail" if failed else "mo-chip-pass"
+    return f'<span class="mo-chip {css}">{html.esc(label)}</span>'
+
+
+def _runs_of(payload: dict, key: str) -> list[dict]:
+    runs = payload.get(key)
+    if not isinstance(runs, list):
+        return []
+    return [run for run in runs if isinstance(run, dict)]
+
+
+def _week_start(now: datetime) -> datetime:
+    # Monday 00:00 local server time of the dashboard host.
+    local = now.astimezone()
+    start = local - timedelta(days=local.weekday())
+    return start.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+
+def _summary_strip(brigade_payload: dict, verify_payload: dict) -> str:
+    all_runs = _runs_of(brigade_payload, "runs") + _runs_of(verify_payload, "runs")
+    week_start = _week_start(_now())
+    this_week = 0
+    failed = 0
+    stamps: list[tuple[datetime, bool]] = []
+    for run in all_runs:
+        status = str(run.get("status") or "").strip().lower() in {"failed", "error", "failing"}
+        if status:
+            failed += 1
+        parsed = _parse_ts(run.get("started_at"))
+        stamps.append((parsed, status))
+        if parsed is not None and parsed >= week_start:
+            this_week += 1
+    last_run = "unknown age"
+    known = [parsed for (parsed, _) in stamps if parsed is not None]
+    if known:
+        last_run = _relative_time(max(known).isoformat())
+    elif all_runs:
+        last_run = "unknown age"
+    else:
+        last_run = "n/a"
+    summary = f"{this_week} runs this week, {failed} failed, last run {last_run}."
+    return f'<div class="mo-summary">{html.esc(summary)}</div>'
+
+
+def _run_id_details(run_id: object) -> str:
+    rendered = html.esc(str(run_id))
+    return f"<details><summary>Run ID</summary><code>{rendered}</code></details>"
 
 
 def _render_brigade_panel(payload: dict) -> str:
@@ -55,14 +150,13 @@ def _render_brigade_panel(payload: dict) -> str:
             continue
         rows.append(
             [
-                html.esc(_value(run, "run_id")),
-                html.esc(_value(run, "status")),
-                html.esc(_value(run, "task")),
-                html.esc(_value(run, "started_at")),
+                f"{_chip(run.get('status'))} {html.esc(_value(run, 'task'))}",
+                html.esc(_relative_time(run.get("started_at"))),
                 html.esc(_value(run, "duration_seconds")),
                 html.esc(_value(run, "failure_phase")),
                 html.esc(_value(run, "mode")),
                 html.esc("yes" if run.get("resume_available") else "no"),
+                _run_id_details(_value(run, "run_id")),
             ]
         )
     if not rows:
@@ -70,14 +164,13 @@ def _render_brigade_panel(payload: dict) -> str:
 
     table = html.table(
         [
-            html.esc("Run ID"),
-            html.esc("Status"),
             html.esc("Task"),
             html.esc("Started"),
             html.esc("Duration"),
             html.esc("Failure phase"),
             html.esc("Mode"),
             html.esc("Resume"),
+            html.esc("Run ID"),
         ],
         rows,
     )
@@ -110,13 +203,12 @@ def _render_verify_panel(payload: dict, nonce: str) -> str:
         command_records = commands if isinstance(commands, list) else []
         rows.append(
             [
-                html.esc(_value(receipt, "run_id")),
-                html.esc(_value(receipt, "status")),
-                html.esc(_command_values(command_records, "command")),
+                f"{_chip(receipt.get('status'))} {html.esc(_command_values(command_records, 'command'))}",
                 html.esc(_command_values(command_records, "exit_code")),
                 html.esc(_value(receipt, "duration_seconds")),
-                html.esc(_value(receipt, "started_at")),
+                html.esc(_relative_time(receipt.get("started_at"))),
                 _receipt_details(receipt),
+                _run_id_details(_value(receipt, "run_id")),
             ]
         )
 
@@ -125,13 +217,12 @@ def _render_verify_panel(payload: dict, nonce: str) -> str:
 
     table = html.table(
         [
-            html.esc("Run ID"),
-            html.esc("Status"),
             html.esc("Command"),
             html.esc("Exit code"),
             html.esc("Duration"),
             html.esc("Timestamp"),
             html.esc("Receipt"),
+            html.esc("Run ID"),
         ],
         rows,
     )
@@ -177,6 +268,25 @@ def _receipt_details(receipt: dict) -> str:
 
 def _stylesheet(nonce: str) -> str:
     return f"""<style nonce="{html.esc(nonce)}">
+.mo-summary {{
+  font: inherit;
+  margin: 0 0 0.75rem;
+}}
+.mo-chip {{
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid #666;
+  font-size: 0.85em;
+}}
+.mo-chip-pass {{
+  color: #0a5c0a;
+  border-color: #0a5c0a;
+}}
+.mo-chip-fail {{
+  color: #8a1010;
+  border-color: #8a1010;
+}}
 .mo-pager {{
   display: flex;
   flex-wrap: wrap;
