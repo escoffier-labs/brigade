@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Runs dashboard view answers "what verification ran recently, did it pass, and what command was it?" with a summary strip ("N runs this week, M failed, last run Xh ago"), a primary column of command (task for Brigade runs) with a pass/fail chip, Run ID demoted into a `<details>` expander, and relative timestamps ("3h ago"; future stamps render as "just now", unparseable ones as "unknown age"). Refs #974.
 - The center dashboard Status view now answers "What needs my attention across handoffs, memory care, verify loop, and inbox hygiene right now?" with a plain-sentence summary strip and health tiles (icon + plain word: OK / ATTENTION / MISSING / TIMED OUT, never color alone), following the Memory Operations baseline. Raw ids move into `<details>` expanders, the placeholder rows for latest verify receipt/signal are dropped, and missing brief sections render as readable MISSING tiles instead of `-` table rows. Refs #972.
 
 ### Security
