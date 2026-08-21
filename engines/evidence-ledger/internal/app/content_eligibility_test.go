@@ -512,14 +512,22 @@ func assertSurfacesIneligible(t *testing.T, id, query, needle string) {
 		t.Fatalf("show leaked body while ineligible: %#v", shown)
 	}
 	bundle := runJSON(t, "evidence", query, "--json")
+	sawStub := false
 	for _, raw := range bundle["results"].([]any) {
 		item := raw.(map[string]any)
-		if item["id"] != id {
+		if item["eligibility_status"] != eligibilityIneligible {
 			continue
 		}
+		sawStub = true
 		if snippet, _ := item["snippet"].(string); snippet != "" {
 			t.Fatalf("bundle leaked snippet while ineligible: %q", snippet)
 		}
+		if item["id"] == id && !evidenceBundleIDPattern.MatchString(id) {
+			t.Fatalf("bundle echoed non-hex server item id on an ineligible stub: %#v", item)
+		}
+	}
+	if !sawStub {
+		t.Fatalf("bundle missing ineligible stub for query %q: %#v", query, bundle)
 	}
 	_, markdown, _ := run("evidence", query, "--markdown")
 	if strings.Contains(markdown, needle) {
@@ -672,8 +680,9 @@ func assertIneligibleArtifactHidden(t *testing.T, item map[string]any, surface s
 	if len(item) != 3 {
 		t.Fatalf("%s stub keys = %#v, want exactly three", surface, item)
 	}
-	if _, ok := item["id"]; !ok {
-		t.Fatalf("%s stub missing id: %#v", surface, item)
+	stubID, _ := item["id"].(string)
+	if !evidenceBundleIDPattern.MatchString(stubID) {
+		t.Fatalf("%s stub id = %#v, want 24 lowercase hex", surface, item["id"])
 	}
 	if item["reason_code"] == "" {
 		t.Fatalf("%s stub missing reason_code: %#v", surface, item)

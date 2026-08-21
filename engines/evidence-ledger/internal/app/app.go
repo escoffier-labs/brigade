@@ -2414,10 +2414,14 @@ func cmdShow(args []string, out, errw io.Writer) int {
 	return 0
 }
 
+func writeEvidenceUsage(w io.Writer) int {
+	fmt.Fprintln(w, "usage: miseledger evidence <query> [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
+	return 0
+}
+
 func cmdEvidence(args []string, out, errw io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(out, "usage: miseledger evidence <query> [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
-		return 0
+		return writeEvidenceUsage(out)
 	}
 	if len(args) > 0 {
 		switch args[0] {
@@ -2545,18 +2549,14 @@ func buildEvidenceOutbound(db *sql.DB, opts SearchOpts, itemIDs []string) (evide
 			item, decision, sourceKind, omitted, err := projectEvidenceItem(db, opts, evidenceItemRequest{ID: id})
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					stub := ineligibleStub(id, reasonSourceMissing)
-					items = append(items, stub)
-					decisions[id] = evidenceEligibility{Status: eligibilityIneligible, Reason: reasonSourceMissing}
+					recordSourceMissingStub(&items, decisions, id)
 					continue
 				}
 				return evidenceOutbound{}, err
 			}
 			items = append(items, item)
 			decisions[decision.ID] = decision.Eligibility
-			if sourceKind != "" {
-				groups[sourceKind]++
-			}
+			recordEligibleSourceGroup(groups, sourceKind, decision.Eligibility)
 			if omitted {
 				integrityOmitted++
 			}
@@ -2584,20 +2584,14 @@ func buildEvidenceOutbound(db *sql.DB, opts SearchOpts, itemIDs []string) (evide
 			})
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					stub := ineligibleStub(r.ID, reasonSourceMissing)
-					items = append(items, stub)
-					decisions[r.ID] = evidenceEligibility{Status: eligibilityIneligible, Reason: reasonSourceMissing}
+					recordSourceMissingStub(&items, decisions, r.ID)
 					continue
 				}
 				return evidenceOutbound{}, err
 			}
 			items = append(items, item)
 			decisions[decision.ID] = decision.Eligibility
-			if sourceKind != "" {
-				groups[sourceKind]++
-			} else if r.SourceKind != "" {
-				groups[r.SourceKind]++
-			}
+			recordEligibleSourceGroup(groups, sourceKind, decision.Eligibility)
 			if omitted {
 				integrityOmitted++
 			}
@@ -2695,9 +2689,9 @@ where i.id = ?`, req.ID)
 			return nil, evidenceItemDecision{}, sourceKind, false, err
 		}
 	}
-	// Identity is minted only after the eligibility decision. The full
-	// projection is left in the tree so finalizeEvidenceResponse is the
-	// load-bearing drop for ineligible items.
+	// Identity is attached after the eligibility decision. The tree keeps
+	// the server item id so cached E4 rematerialization can reopen the row;
+	// finalizeEvidenceResponse mints the 24-hex stub id on the way out.
 	item := provisional
 	item["id"] = itemID
 	attachIntegrityFields(item, view)
@@ -2706,6 +2700,24 @@ where i.id = ?`, req.ID)
 		decision.Eligibility = evidenceEligibility{Status: eligibilityIneligible, Reason: reasonCode(view)}
 	}
 	return item, decision, sourceKind, view.IntegrityMismatch, nil
+}
+
+func recordEligibleSourceGroup(groups map[string]int, sourceKind string, elig evidenceEligibility) {
+	if elig.Status != eligibilityEligible {
+		return
+	}
+	if _, ok := allowedSourceKinds[sourceKind]; !ok {
+		return
+	}
+	groups[sourceKind]++
+}
+
+func recordSourceMissingStub(items *[]map[string]any, decisions map[string]evidenceEligibility, id string) {
+	stub := ineligibleStub(id, reasonSourceMissing)
+	*items = append(*items, stub)
+	if stubID, ok := stub["id"].(string); ok && stubID != "" {
+		decisions[stubID] = evidenceEligibility{Status: eligibilityIneligible, Reason: reasonSourceMissing}
+	}
 }
 
 type provisionalItemInput struct {

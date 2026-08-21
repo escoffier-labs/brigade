@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	sanitizerSearchToken = "EVSANITIZER"
-	needleWindow         = 32
-	vacuityLeafFloor     = 700
+	sanitizerSearchToken   = "EVSANITIZER"
+	needleWindow           = 32
+	vacuityLeafFloor       = 700
+	cachedAttackerResultID = "EVSAN-attacker-cached-result-id-leak-40b"
 )
 
 type sanitizerNeedles struct {
@@ -205,6 +206,23 @@ func TestEvidenceExitASTForbidsUnsanitizedWriters(t *testing.T) {
 		"mcpEvidenceShow":           true,
 		"handleEvidence":            true,
 	}
+	sinks := map[string]bool{
+		"writeEvidenceJSON":      true,
+		"renderEvidenceMarkdown": true,
+		"renderEvidenceListText": true,
+		"mcpTextResultBytes":     true,
+		"writeEvidenceHTTP":      true,
+	}
+	exitAllowed := map[string]bool{
+		"writeEvidenceJSON":      true,
+		"renderEvidenceMarkdown": true,
+		"renderEvidenceListText": true,
+		"mcpTextResultBytes":     true,
+		"writeEvidenceHTTP":      true,
+		"fatalf":                 true,
+		"httpError":              true,
+		"writeEvidenceUsage":     true,
+	}
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(info os.FileInfo) bool {
 		return strings.HasSuffix(info.Name(), ".go") && !strings.HasSuffix(info.Name(), "_test.go")
@@ -216,40 +234,129 @@ func TestEvidenceExitASTForbidsUnsanitizedWriters(t *testing.T) {
 		for filename, file := range pkg.Files {
 			for _, decl := range file.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil || !exits[fn.Name.Name] {
+				if !ok || fn.Body == nil {
 					continue
 				}
-				ast.Inspect(fn.Body, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					switch fun := call.Fun.(type) {
-					case *ast.Ident:
-						switch fun.Name {
-						case "writeJSON", "httpJSON", "mcpTextResult":
-							t.Errorf("%s:%s calls %s outside a sanctioned byte sink", filename, fn.Name.Name, fun.Name)
-						}
-					case *ast.SelectorExpr:
-						if ident, ok := fun.X.(*ast.Ident); ok && ident.Name == "fmt" && fun.Sel.Name == "Fprintf" {
-							t.Errorf("%s:%s calls fmt.Fprintf outside a sanctioned byte sink", filename, fn.Name.Name)
-						}
-					}
-					return true
-				})
+				name := fn.Name.Name
+				switch {
+				case exits[name]:
+					assertExitWritesAreSanctioned(t, filename, name, fn.Body, exitAllowed)
+				case sinks[name]:
+					assertSinkAvoidsBypassHelpers(t, filename, name, fn.Body)
+				}
 			}
 		}
 	}
+}
+
+func assertExitWritesAreSanctioned(t *testing.T, filename, fnName string, body *ast.BlockStmt, allowed map[string]bool) {
+	t.Helper()
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		callee, writeLike := writeLikeCallee(call)
+		if !writeLike {
+			return true
+		}
+		if allowed[calleeBase(callee)] {
+			return true
+		}
+		t.Errorf("%s:%s calls %s; evidence exits may write or construct a response only via sanctioned byte-sink helpers", filename, fnName, callee)
+		return true
+	})
+}
+
+func assertSinkAvoidsBypassHelpers(t *testing.T, filename, fnName string, body *ast.BlockStmt) {
+	t.Helper()
+	banned := map[string]bool{
+		"writeJSON":     true,
+		"httpJSON":      true,
+		"mcpTextResult": true,
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		callee, writeLike := writeLikeCallee(call)
+		if !writeLike {
+			return true
+		}
+		if banned[calleeBase(callee)] {
+			t.Errorf("%s:%s calls %s; sanctioned sinks may not construct unsanitized responses", filename, fnName, callee)
+		}
+		return true
+	})
+}
+
+func writeLikeCallee(call *ast.CallExpr) (string, bool) {
+	name := astCalleeName(call)
+	if name == "" {
+		return "", false
+	}
+	if isWriteLikeName(name) {
+		return name, true
+	}
+	return "", false
+}
+
+func astCalleeName(call *ast.CallExpr) string {
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name
+	case *ast.SelectorExpr:
+		if ident, ok := fun.X.(*ast.Ident); ok {
+			return ident.Name + "." + fun.Sel.Name
+		}
+		return fun.Sel.Name
+	default:
+		return ""
+	}
+}
+
+func calleeBase(name string) string {
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		return name[i+1:]
+	}
+	return name
+}
+
+func isWriteLikeName(name string) bool {
+	base := calleeBase(name)
+	switch base {
+	case "httpJSON", "mcpTextResult", "mcpTextResultBytes",
+		"renderEvidenceMarkdown", "renderEvidenceListText",
+		"fatalf", "httpError", "writeEvidenceUsage", "Encode",
+		"Write", "WriteString", "WriteHeader",
+		"Fprint", "Fprintf", "Fprintln", "Print", "Printf", "Println":
+		return true
+	}
+	if strings.Contains(strings.ToLower(base), "write") {
+		return true
+	}
+	if strings.HasPrefix(name, "io.Copy") {
+		return true
+	}
+	return false
 }
 
 func TestIneligibleStubExactlyThreeKeys(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
 	id := insertCleanIntegrityItem(t, "UNIQUE_STUB_KEYS quarantined body", "quarantined", "pending")
+	needles := newSanitizerNeedles()
+	plantIneligibleFields(t, id, 0, needles)
 	bundle := runJSON(t, "evidence", "UNIQUE_STUB_KEYS", "--json")
 	item := firstBundleResult(t, bundle)
-	if item["id"] != id {
-		t.Fatalf("stub id = %#v, want %s", item["id"], id)
+	stubID, _ := item["id"].(string)
+	want := evidenceItemStubID(id)
+	if stubID != want {
+		t.Fatalf("stub id = %#v, want minted 24-hex %s (server id was %s)", item["id"], want, id)
+	}
+	if !evidenceBundleIDPattern.MatchString(stubID) {
+		t.Fatalf("stub id = %#v, want 24 lowercase hex (server id was %s)", item["id"], id)
 	}
 	if item["eligibility_status"] != eligibilityIneligible {
 		t.Fatalf("eligibility_status = %#v", item["eligibility_status"])
@@ -259,6 +366,92 @@ func TestIneligibleStubExactlyThreeKeys(t *testing.T) {
 	}
 	if len(item) != 3 {
 		t.Fatalf("stub decoded to %d keys: %#v", len(item), item)
+	}
+}
+
+func TestE4SourceMissingStubDropsCachedAttackerID(t *testing.T) {
+	if len(cachedAttackerResultID) != 40 {
+		t.Fatalf("cachedAttackerResultID must be 40 bytes, got %d", len(cachedAttackerResultID))
+	}
+	withTempHome(t)
+	runOK(t, "init")
+	needles := newSanitizerNeedles()
+	writeTamperedEvidenceCache(t, needles, nil)
+
+	cli := runOK(t, "evidence", "show", needles.cacheID, "--json")
+	if strings.Contains(cli, cachedAttackerResultID) {
+		t.Fatalf("E4 CLI echoed cached attacker result id")
+	}
+	var tree map[string]any
+	if err := json.Unmarshal([]byte(cli), &tree); err != nil {
+		t.Fatal(err)
+	}
+	assertSourceMissingStubDroppedID(t, tree, "E4 CLI")
+
+	mcpShow, err := mcpEvidenceShow(map[string]any{"id": needles.cacheID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	showMCP := mcpShow["content"].([]map[string]any)[0]["text"].(string)
+	if strings.Contains(showMCP, cachedAttackerResultID) {
+		t.Fatalf("E4 MCP echoed cached attacker result id")
+	}
+	var mcpTree map[string]any
+	if err := json.Unmarshal([]byte(showMCP), &mcpTree); err != nil {
+		t.Fatal(err)
+	}
+	assertSourceMissingStubDroppedID(t, mcpTree, "E4 MCP")
+}
+
+func assertSingleIneligibleEvidenceStub(t *testing.T, bundle map[string]any, serverID, reason string) {
+	t.Helper()
+	results, _ := bundle["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("evidence results = %#v, want one ineligible stub", bundle)
+	}
+	item, _ := results[0].(map[string]any)
+	if item["eligibility_status"] != eligibilityIneligible || item["reason_code"] != reason {
+		t.Fatalf("evidence stub = %#v, want ineligible %s", item, reason)
+	}
+	want := evidenceItemStubID(serverID)
+	if item["id"] != want {
+		t.Fatalf("evidence stub id = %#v, want minted %s", item["id"], want)
+	}
+	if len(item) != 3 {
+		t.Fatalf("evidence stub keys = %#v, want exactly three", item)
+	}
+}
+
+func assertSourceMissingStubDroppedID(t *testing.T, tree map[string]any, surface string) {
+	t.Helper()
+	found := false
+	for _, raw := range bundleResultMaps(tree) {
+		if raw["reason_code"] != reasonSourceMissing {
+			continue
+		}
+		found = true
+		if _, ok := raw["id"]; ok {
+			t.Fatalf("%s source_missing stub kept a cache-sourced id: %#v", surface, raw)
+		}
+		if len(raw) != 2 {
+			t.Fatalf("%s source_missing stub keys = %#v, want eligibility_status + reason_code", surface, raw)
+		}
+	}
+	if !found {
+		t.Fatalf("%s missing source_missing stub: %#v", surface, tree)
+	}
+}
+
+func TestWalkJSONLeavesInspectsMapKeys(t *testing.T) {
+	const hostileKey = "hostile-source-kind-as-map-key"
+	seen := false
+	walkJSONLeaves(map[string]any{hostileKey: 1}, func(s string) {
+		if s == hostileKey {
+			seen = true
+		}
+	})
+	if !seen {
+		t.Fatal("walkJSONLeaves is key-blind; map keys must be inspected")
 	}
 }
 
@@ -345,7 +538,7 @@ func newSanitizerNeedles() sanitizerNeedles {
 		n.collectionName, n.collectionKind, n.actorName, n.actorType,
 		n.artPath, n.artURL, n.artMIME, n.artText, n.artHash, n.rawHash, n.rawPath,
 		n.relType, n.relTarget, n.relKind, n.relTime, n.timestamp, n.createdAt,
-		n.metaFree, n.provenanceString,
+		n.metaFree, n.provenanceString, cachedAttackerResultID,
 	}
 	return n
 }
@@ -440,12 +633,20 @@ func plantIneligibleFields(t *testing.T, itemID string, idx int, needles sanitiz
 		colID, "integrity-src", "col:"+colID, needles.collectionKind, needles.collectionName, "{}", at, at); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`insert or ignore into actors(id, source_id, external_id, type, name) values(?,?,?,?,?)`,
-		actorID, "integrity-src", "actor:"+actorID, needles.actorType, needles.actorName); err != nil {
+	srcID := fmt.Sprintf("needle-src-%d", idx)
+	if _, err := db.Exec(`insert or ignore into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)`,
+		srcID, needles.source, "NeedleSource", "1", at, at); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`update items set external_id=?, raw_hash=?, raw_path=?, collection_id=?, actor_id=?, created_at=?, summary=? where id=?`,
-		needles.externalID, needles.rawHash, needles.rawPath, colID, actorID, needles.createdAt, needles.summary, itemID); err != nil {
+	if _, err := db.Exec(`insert or ignore into actors(id, source_id, external_id, type, name) values(?,?,?,?,?)`,
+		actorID, srcID, "actor:"+actorID, needles.actorType, needles.actorName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update items set source_id=?, external_id=?, raw_hash=?, raw_path=?, collection_id=?, actor_id=?, created_at=?, summary=? where id=?`,
+		srcID, needles.externalID, needles.rawHash, needles.rawPath, colID, actorID, needles.createdAt, needles.summary, itemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update item_fts set source_kind=? where item_id=?`, needles.source, itemID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`insert into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json)
@@ -495,6 +696,7 @@ func writeTamperedEvidenceCache(t *testing.T, needles sanitizerNeedles, itemIDs 
 		})
 	}
 	results = append(results, map[string]any{"id": "missing-source-item", "snippet": needles.snippet})
+	results = append(results, map[string]any{"id": cachedAttackerResultID, "snippet": needles.snippet})
 	bundle := map[string]any{
 		"id":           needles.cacheURI,
 		"resource_uri": "miseledger://evidence/" + needles.cacheURI,
@@ -608,8 +810,20 @@ func assertListingShape(t *testing.T, root map[string]any) {
 func assertResultStubs(t *testing.T, root map[string]any) {
 	t.Helper()
 	for _, raw := range bundleResultMaps(root) {
-		if raw["eligibility_status"] == eligibilityIneligible && len(raw) != 3 {
-			t.Fatalf("ineligible stub keys = %#v", raw)
+		if raw["eligibility_status"] != eligibilityIneligible {
+			continue
+		}
+		if id, ok := raw["id"].(string); ok {
+			if !evidenceBundleIDPattern.MatchString(id) {
+				t.Fatalf("ineligible stub id = %#v, want 24 lowercase hex", raw["id"])
+			}
+			if len(raw) != 3 {
+				t.Fatalf("ineligible stub with id must have exactly three keys: %#v", raw)
+			}
+			continue
+		}
+		if len(raw) != 2 {
+			t.Fatalf("ineligible stub without id must keep only eligibility_status + reason_code: %#v", raw)
 		}
 	}
 }
@@ -617,7 +831,8 @@ func assertResultStubs(t *testing.T, root map[string]any) {
 func walkJSONLeaves(v any, fn func(string)) {
 	switch n := v.(type) {
 	case map[string]any:
-		for _, val := range n {
+		for key, val := range n {
+			fn(key)
 			walkJSONLeaves(val, fn)
 		}
 	case []any:

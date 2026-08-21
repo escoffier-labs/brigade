@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"strconv"
@@ -187,12 +189,45 @@ func reasonCode(view integrityView) string {
 	return ""
 }
 
+func collapseToStub(id, reason string) map[string]any {
+	if !validReasonCode(reason) {
+		reason = reasonSourceMissing
+	}
+	if reason == reasonSourceMissing {
+		return ineligibleStub(id, reason)
+	}
+	return ineligibleStub(evidenceItemStubID(id), reason)
+}
+
 func ineligibleStub(id, reason string) map[string]any {
-	return map[string]any{
-		"id":                 id,
+	stub := map[string]any{
 		"eligibility_status": eligibilityIneligible,
 		"reason_code":        reason,
 	}
+	if stubID := sanitizeStubID(id); stubID != "" {
+		stub["id"] = stubID
+	}
+	return stub
+}
+
+// sanitizeStubID keeps a stub id only when it is already 24 lowercase hex.
+// Cache-sourced or otherwise attacker-shaped ids are dropped, not hashed or echoed.
+func sanitizeStubID(id string) string {
+	if evidenceBundleIDPattern.MatchString(id) {
+		return id
+	}
+	return ""
+}
+
+// evidenceItemStubID mints the post-gate stub identity from a server-assigned
+// item id. A value that is already 24-hex is kept; any other server id is
+// digested so the stub never carries a non-hex identifier.
+func evidenceItemStubID(serverID string) string {
+	if sid := sanitizeStubID(serverID); sid != "" {
+		return sid
+	}
+	sum := sha256.Sum256([]byte("miseledger.evidence.stub.id.v1\x00" + serverID))
+	return hex.EncodeToString(sum[:])[:24]
 }
 
 func finalizeEvidenceResponse(out evidenceOutbound) ([]byte, error) {
@@ -268,17 +303,10 @@ func walkEvidenceItem(m map[string]any, out evidenceOutbound) any {
 	id, _ := m["id"].(string)
 	if status, _ := m["eligibility_status"].(string); status == eligibilityIneligible {
 		reason, _ := m["reason_code"].(string)
-		if !validReasonCode(reason) {
-			reason = reasonSourceMissing
-		}
-		return ineligibleStub(id, reason)
+		return collapseToStub(id, reason)
 	}
 	if decision, ok := out.Decisions[id]; ok && decision.Status != eligibilityEligible {
-		reason := decision.Reason
-		if !validReasonCode(reason) {
-			reason = reasonSourceMissing
-		}
-		return ineligibleStub(id, reason)
+		return collapseToStub(id, decision.Reason)
 	}
 	if len(out.Decisions) > 0 {
 		if _, ok := out.Decisions[id]; !ok && id != "" {
@@ -596,6 +624,9 @@ func walkGroupedBySource(val any) any {
 	}
 	out := make(map[string]any, len(m))
 	for key, raw := range m {
+		if !allowedEnum(allowedSourceKinds, key) {
+			continue
+		}
 		if n, ok := coerceNumber(raw); ok {
 			out[key] = n
 		}
