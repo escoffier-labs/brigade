@@ -1166,12 +1166,37 @@ def run_agent(
             )
         raw_detail = safe_stderr.strip() or f"exit {result.code}"
         detail = codex_stdin_hang_detail(raw_detail) if cli_ref == "codex" else None
+        operational_failure_kind: str | None = None
+        operational_failure_phase: str | None = None
         if detail is None:
-            detail = raw_detail
+            for candidate in (safe_stderr, safe_stdout):
+                if not candidate.strip():
+                    continue
+                output_failure = validate_final_output(candidate, detail_transform=scrub_detail)
+                if output_failure is None:
+                    continue
+                if output_failure.kind not in _NONRECOVERABLE_GROK_OUTPUT_FAILURES:
+                    continue
+                operational_failure_kind = output_failure.kind
+                operational_failure_phase = "output-validation"
+                if output_failure.kind == "provider-setting-error":
+                    operational_failure_kind = "model-unavailable"
+                    detail = "The requested model is not available on this lane."
+                else:
+                    detail = output_failure.detail
+                break
+            else:
+                detail = raw_detail
+        if operational_failure_kind == "model-unavailable":
+            safe_text = ""
+            safe_stdout = ""
+            safe_stderr = ""
         return AgentResult(
             text=safe_text,
             ok=False,
             detail=detail[:200],
+            failure_phase=operational_failure_phase,
+            failure_kind=operational_failure_kind,
             stdout=safe_stdout,
             stderr=safe_stderr,
             exit_code=result.code,

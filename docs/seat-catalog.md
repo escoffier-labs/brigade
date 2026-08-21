@@ -32,6 +32,18 @@ role = "Cheap fast scout for file inventories and triage."
 
 The mini and nano tiers also answer through harnesses that front the ChatGPT OAuth directly.
 
+### Daybreak Blue
+
+OpenAI's Daybreak Blue lane is a scan-and-report security seat. The Codex/ChatGPT headless slug `gpt-daybreak-blue-latest` was verified on 2026-08-20. The 2026-08-19 probe used the obsolete `gpt-5.6-daybreak-blue` slug. Do not wire that id. The direct API alias `daybreak-blue-latest` is separately provisioned and is not the Codex headless id.
+
+ChatGPT-account entitlement varies. Smoke the seat before trusting it:
+
+```bash
+brigade run --roster <roster> --read-only --sandbox read-only --worker daybreak --output-dir <dir> "Reply with exactly: SEAT-OK"
+```
+
+Confirm `run.json` records `status=ok`. The security bench is still pending, so do not treat a smoke as a scored security lane.
+
 ### Cursor subscription
 
 Flat-sub plans carry far more than the headline models. Verified answering on one Ultra plan: `composer-2.5`, `grok-4.5` tiers, `kimi-k2.7-code`, `glm-5.2-high`, `gemini-3.7-flash` tiers, `claude-sonnet-5` tiers, and the `gpt-5.4-mini`/`nano` ladder. An open-weight worker at zero marginal cost:

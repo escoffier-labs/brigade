@@ -1091,6 +1091,53 @@ def test_run_agent_nonzero_is_not_ok(monkeypatch):
     assert res.stderr == "boom"
 
 
+_CODEX_UNSUPPORTED_MODEL_400 = (
+    "ERROR: 400 invalid_request_error: The 'gpt-daybreak-blue-latest' model is not "
+    "supported when using Codex with a ChatGPT account."
+)
+
+
+@pytest.mark.parametrize("stream", ["stderr", "stdout"])
+@pytest.mark.parametrize("diagnostic", [_CODEX_UNSUPPORTED_MODEL_400, "Error: model not supported"])
+def test_run_agent_classifies_nonzero_unsupported_model_without_leaking_provider_400(monkeypatch, stream, diagnostic):
+    stdout = diagnostic if stream == "stdout" else ""
+    stderr = diagnostic if stream == "stderr" else ""
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(1, stdout, stderr))
+
+    result = agents.run_agent("codex", "scan the tree", model="gpt-daybreak-blue-latest")
+
+    assert result.ok is False
+    assert result.failure_kind == "model-unavailable"
+    assert result.detail == "The requested model is not available on this lane."
+    assert result.text == ""
+    assert result.stdout == ""
+    assert result.stderr == ""
+    for exposed in (result.text, result.detail, result.stdout, result.stderr):
+        assert "400" not in exposed
+        assert "invalid_request_error" not in exposed
+        assert "gpt-daybreak-blue-latest" not in exposed
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "failure_kind"),
+    [
+        ("Error: authentication required. Run provider login.", "authentication-error"),
+        ("Error: failed to connect to the model provider.", "network-error"),
+        ("Error: rate limit exceeded for this provider.", "rate-limit-error"),
+    ],
+)
+def test_run_agent_classifies_nonzero_operational_diagnostics(monkeypatch, diagnostic, failure_kind):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(1, "", diagnostic))
+
+    result = agents.run_agent("codex", "scan the tree")
+
+    assert result.ok is False
+    assert result.failure_kind == failure_kind
+    assert result.detail.startswith("provider returned an operational error instead of a final result:")
+
+
 @pytest.mark.parametrize("cli_ref", ["cursor", "grok"])
 def test_run_agent_classifies_silent_adapter_exit(monkeypatch, cli_ref):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)

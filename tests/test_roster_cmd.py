@@ -52,6 +52,30 @@ def test_preset_roster_paths_returns_four_packaged_presets():
     assert all(path.is_file() for path in paths)
 
 
+def test_review_heavy_ships_daybreak_codex_security_seat():
+    path = next(item for item in roster_cmd.preset_roster_paths() if item.name == "review-heavy.toml")
+    raw = toml_compat.loads(path.read_text())
+    loaded = roster.load_roster(path)
+    daybreak = loaded.agents["daybreak"]
+    raw_seat = raw["agents"]["daybreak"]
+
+    assert daybreak.cli == "codex"
+    assert daybreak.model == "gpt-daybreak-blue-latest"
+    assert daybreak.reasoning == "high"
+    assert daybreak.read_only_capable is True
+    assert raw_seat["read_only_capable"] is True
+    assert "scan" in daybreak.role.lower()
+    assert "scan" in (daybreak.purpose or "").lower()
+    assert "security" in daybreak.role.lower() or "security" in (daybreak.purpose or "").lower()
+    assert daybreak.requires == {"cli": "codex"}
+    assert daybreak.fallback == ()
+    assert daybreak.stats is not None
+    assert daybreak.stats["source"] == "author-receipts-2026-08"
+    assert any("entitlement" in caveat.lower() for caveat in daybreak.caveats)
+    assert any("bench" in caveat.lower() for caveat in daybreak.caveats)
+    assert "codex" in loaded.allow_models
+
+
 @pytest.mark.parametrize("preset_name", EXPECTED_PRESET_NAMES)
 def test_packaged_presets_parse(preset_name):
     path = next(item for item in roster_cmd.preset_roster_paths() if item.name == preset_name)
@@ -697,10 +721,10 @@ def test_roster_suggest_prints_every_seat_resolution_when_roots_satisfiable(tmp_
     assert roster_cmd.suggest(tmp_target, preset=preset, probe=probe) == 0
     out = capsys.readouterr().out
 
-    for seat in ("chef", "reviewer", "reviewer_flash"):
+    for seat in ("chef", "reviewer", "reviewer_flash", "daybreak"):
         _seat_resolution_fields_present(out, seat)
         assert f"resolved={seat}" in out
-    assert out.count("outcome=self") == 3
+    assert out.count("outcome=self") == 4
     assert "orchestrator =" in out
     assert "adoptable roster" in out.lower()
     emitted = out.split("# Adoptable roster\n", maxsplit=1)[1]
