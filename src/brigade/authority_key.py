@@ -52,6 +52,19 @@ def key_path(*, env: Mapping[str, str] | None = None, system: str | None = None)
     return authority_dir(env=env, system=system) / KEY_NAME
 
 
+def _absolute_unresolved(path: Path) -> Path:
+    """Absolute path without following symlinks (``..`` and ``.`` stay as parts)."""
+
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return expanded
+
+
+def _parts_prefix(path: Path, tree: Path) -> bool:
+    return len(path.parts) >= len(tree.parts) and path.parts[: len(tree.parts)] == tree.parts
+
+
 def key_is_inside_tree(path: Path, tree: Path) -> bool:
     """True when ``path`` resolves inside ``tree`` using absolute real paths."""
 
@@ -62,21 +75,52 @@ def key_is_inside_tree(path: Path, tree: Path) -> bool:
     return True
 
 
-def key_path_is_scanner_reachable(path: Path, workspace: Path | None = None) -> bool:
-    """True when the key would sit in the workspace or ``.brigade`` state."""
+def _workspace_symlink_component(path: Path, workspace: Path) -> bool:
+    """True when a workspace-local component of ``path`` is a symlink."""
 
-    resolved = path.expanduser()
-    if ".brigade" in resolved.parts:
+    lexical = _absolute_unresolved(path)
+    work = _absolute_unresolved(workspace)
+    acc = Path(lexical.parts[0])
+    for part in lexical.parts[1:]:
+        acc = acc / part
+        if not _parts_prefix(acc, work):
+            continue
+        try:
+            if acc.is_symlink():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def key_path_is_scanner_reachable(path: Path, workspace: Path | None = None) -> bool:
+    """True when the key would sit in the workspace or ``.brigade`` state.
+
+    Uses the unresolved path first so a directory symlink inside the workspace
+    that points outside cannot pass as an external key. Also refuses a symlink
+    component under the workspace and a resolved path that lands inside it.
+    """
+
+    unresolved = _absolute_unresolved(path)
+    if ".brigade" in unresolved.parts:
         return True
-    return workspace is not None and key_is_inside_tree(resolved, workspace)
+    if workspace is None:
+        return False
+    work = _absolute_unresolved(workspace)
+    if _parts_prefix(unresolved, work):
+        return True
+    if _workspace_symlink_component(unresolved, work):
+        return True
+    return key_is_inside_tree(path, workspace)
 
 
 def reject_scanner_reachable_key_path(path: Path, workspace: Path | None = None) -> None:
     """Refuse a key path inside the workspace or any scanner-reachable tree.
 
-    The candidate and workspace are resolved to absolute real paths before the
-    containment check. This runs before any create/open so an override such as
-    ``<workspace>/operator-authority.key`` cannot mint a reachable HMAC key.
+    Containment is decided on the unresolved absolute path and on any symlink
+    component under the workspace, before any create or open, so an override
+    such as ``<workspace>/operator-authority.key`` or
+    ``<workspace>/escape-link/k.key`` cannot mint a reachable HMAC key.
     """
 
     if key_path_is_scanner_reachable(path, workspace):
@@ -184,6 +228,9 @@ def generate_key(
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
+    # Re-check the unresolved path, symlink components, and final real path
+    # after mkdir and before any key bytes are written.
+    reject_scanner_reachable_key_path(path, workspace)
     key = secrets.token_bytes(KEY_BYTES)
     if force and path.exists():
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)

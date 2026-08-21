@@ -15,6 +15,23 @@ from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import constants, helpers, ledger
 
 
+def _disable_external_key_isolation(tmp_path: Path) -> None:
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                'isolation = "off"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def _enable_external_key_isolation(tmp_path: Path) -> None:
     config = tmp_path / ".brigade" / "security.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
@@ -398,3 +415,92 @@ def test_feature_on_rejects_forgery_that_feature_off_accepts(tmp_path: Path) -> 
     bound = json.loads(_store_path(other).read_text(encoding="utf-8"))
     assert bound.get("envelope_version") == 1
     assert bound["signature"]["alg"] == "HMAC-SHA256"
+
+
+def test_signed_envelope_mac_is_checked_after_flag_flipped_off(tmp_path: Path) -> None:
+    """Existing HMAC envelopes stay fail-closed after security.toml is flipped off."""
+
+    _bind_workspace(tmp_path)
+    path = _store_path(tmp_path)
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    assert envelope["envelope_version"] == 1
+    stale_mac = envelope["signature"]["mac"]
+    record = dict(envelope["record"])
+    files = dict(record.get("files") or {})
+    files[".brigade/scanners/runs/stolen/receipt.json"] = {
+        "device": 1,
+        "inode": 2,
+        "sha256": "d" * 64,
+    }
+    record["files"] = files
+    envelope["record"] = record
+    path.write_text(json.dumps(envelope, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    assert json.loads(path.read_text(encoding="utf-8"))["signature"]["mac"] == stale_mac
+    _disable_external_key_isolation(tmp_path)
+    with pytest.raises(OSError, match="MAC"):
+        ledger._read_external_directory_authority(tmp_path)
+    item = ledger._make_import("flag-flip forge", kind="task", source="handoff-ingest")
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def _symlink_or_skip(target: Path, link: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+
+def test_directory_symlink_prefix_refuses_key_with_zero_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    _enable_external_key_isolation(workspace)
+    link = workspace / "escape-link"
+    _symlink_or_skip(outside, link)
+    candidate = link / "k.key"
+    monkeypatch.setenv("BRIGADE_AUTHORITY_KEY_FILE", str(candidate))
+    authority_key.clear_key_cache()
+    with pytest.raises(OSError, match="workspace or scanner-reachable"):
+        authority_key.generate_key(workspace=workspace)
+    assert not (outside / "k.key").exists()
+    assert not candidate.exists()
+    with pytest.raises(OSError, match="workspace or scanner-reachable"):
+        authority_key.load_key(workspace=workspace)
+
+
+def test_file_symlink_inside_workspace_refuses_key_with_zero_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    _enable_external_key_isolation(workspace)
+    dest = outside / "real.key"
+    link = workspace / "k.key"
+    _symlink_or_skip(dest, link)
+    monkeypatch.setenv("BRIGADE_AUTHORITY_KEY_FILE", str(link))
+    authority_key.clear_key_cache()
+    with pytest.raises(OSError, match="workspace or scanner-reachable"):
+        authority_key.generate_key(workspace=workspace)
+    assert not dest.exists()
+    with pytest.raises(OSError, match="workspace or scanner-reachable"):
+        authority_key.load_key(workspace=workspace)
+
+
+def test_dotdot_reentry_refuses_key_with_zero_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (workspace / "nested").mkdir()
+    _enable_external_key_isolation(workspace)
+    candidate = workspace / "nested" / ".." / ".." / "outside" / "reentry.key"
+    monkeypatch.setenv("BRIGADE_AUTHORITY_KEY_FILE", str(candidate))
+    authority_key.clear_key_cache()
+    with pytest.raises(OSError, match="workspace or scanner-reachable"):
+        authority_key.generate_key(workspace=workspace)
+    assert not (outside / "reentry.key").exists()
+    with pytest.raises(OSError, match="workspace or scanner-reachable"):
+        authority_key.load_key(workspace=workspace)

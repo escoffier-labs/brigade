@@ -1815,10 +1815,8 @@ def _unwrap_authority_envelope(
     hmac_on = _authority_hmac_enabled(workspace)
 
     if payload.get("envelope_version") == 1:
-        if not hmac_on:
-            if not isinstance(inner, dict) or "schema_version" not in inner or "target" not in inner:
-                raise OSError("external directory authority record is malformed")
-            return dict(inner)
+        # An existing envelope is always verified. The isolation flag only
+        # gates whether new writes are signed; it must not skip a MAC check.
         try:
             secret, loaded_id = (
                 key_material if key_material is not None else authority_key.load_key(env=env, workspace=workspace)
