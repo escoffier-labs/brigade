@@ -111,6 +111,13 @@ def bootstrap(
     else:
         _print_bootstrap_line(constants.WARN, "gitignore", "skipped")
 
+    try:
+        scanners_mod._bind_released_unbound_scanner_runs_root(effective_target)
+        _print_bootstrap_line(constants.OK, "scanner_runs_root", "ready")
+    except OSError as exc:
+        failures += 1
+        _print_bootstrap_line(constants.FAIL, "scanner_runs_root", exc)
+
     codex_path = shutil.which("codex")
     if codex_path is None:
         failures += 1

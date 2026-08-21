@@ -203,25 +203,149 @@ def _prebind_child_visible_directories(target: Path) -> None:
     os.close(descriptor)
 
 
-def _open_scanner_runs_directory(target: Path, *, create: bool) -> int:
+_SCANNER_RUNS_COMPONENTS = (".brigade", "scanners", "runs")
+
+
+def _scanner_runs_root_operator_message(target: Path, reason: str) -> str:
+    """Return a fail-closed operator message for an unsafe unbound runs root."""
+    path = helpers._scanner_runs_root(target)
+    return (
+        f"scanner runs directory {path} exists but is unbound and cannot be "
+        f"migrated safely: {reason}. Move or remove that directory, then run "
+        f"`brigade work scanners doctor --target {target}`."
+    )
+
+
+def _scanner_runs_directory_is_bound(target: Path, extra: tuple[str, ...] = ()) -> bool:
+    """Return whether the runs root (or a child) has an external authority record."""
+    _path, payload = ledger_mod._read_external_directory_authority(target)
+    directories = payload.get("directories") if isinstance(payload, dict) else None
+    if not isinstance(directories, dict):
+        return False
+    return ledger_mod._directory_authority_scope(_SCANNER_RUNS_COMPONENTS + extra) in directories
+
+
+def _scanner_path_red_flag(metadata: os.stat_result) -> str | None:
+    """Return an adoption red-flag reason, or None when the inode is operator-owned.
+
+    POSIX ownership and mode bits are not a containment signal on Windows.
+    Reparse points are already refused by the dirfd walk (``nt_dirfd``).
+    """
+    if not stat.S_ISDIR(metadata.st_mode):
+        return "not a directory"
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return None
+    if metadata.st_uid != geteuid():
+        return "owned by a foreign uid"
+    if metadata.st_mode & 0o002:
+        return "world-writable"
+    getegid = getattr(os, "getegid", None)
+    getgid = getattr(os, "getgid", None)
+    if (
+        metadata.st_mode & 0o020
+        and getegid is not None
+        and getgid is not None
+        and metadata.st_gid not in {getegid(), getgid()}
+    ):
+        return "group-writable by a foreign gid"
+    return None
+
+
+def _scanner_runs_dirfd_is_symlink_error(exc: OSError) -> bool:
+    """Return whether a dirfd walk failed because a component is not a real directory."""
+    if getattr(exc, "errno", None) in {errno.ELOOP, errno.ENOTDIR}:
+        return True
+    detail = str(exc).strip().lower()
+    return any(token in detail for token in ("reparse", "symlink", "not a directory", "not a single contained name"))
+
+
+def _bind_released_unbound_scanner_runs_root(target: Path) -> str:
+    """Bind a released pre-authority runs root without adopting child trees.
+
+    Returns ``missing`` when the directory is absent, ``bound`` when a record
+    already exists, or ``repaired`` after writing a fresh root-only binding.
+    Child run directories and receipts stay untrusted. An existing tree that
+    is foreign-owned, world-writable, or reached through a symlink fails
+    closed. This is not the #1036 legacy adoption fallback.
+
+    Descriptor-relative walks use the ledger dirfd abstraction so Windows
+    binds through ``nt_dirfd`` the same way import-inbox does. When no
+    platform dirfd exists and the tree is absent, return ``missing`` so
+    first-create paths such as ``operator quickstart`` can proceed. An
+    existing unbound tree is never adopted without a descriptor walk.
+    """
+    if _scanner_runs_directory_is_bound(target):
+        return "bound"
+    if not ledger_mod._dirfd_available():
+        if not helpers._scanner_runs_root(target).exists():
+            return "missing"
+        raise OSError("descriptor-relative directory authority operations are unavailable")
+    descriptor = ledger_mod._open_directory_nofollow(target.expanduser().resolve())
+    opened = [descriptor]
     try:
-        return ledger_mod._open_verifier_owned_directory(
+        for component in _SCANNER_RUNS_COMPONENTS:
+            try:
+                child = ledger_mod._dirfd_open_dir(opened[-1], component)
+            except FileNotFoundError:
+                return "missing"
+            except OSError as exc:
+                if _scanner_runs_dirfd_is_symlink_error(exc):
+                    raise OSError(
+                        _scanner_runs_root_operator_message(target, "path contains a symlink or is not a directory")
+                    ) from exc
+                raise
+            opened.append(child)
+            flag = _scanner_path_red_flag(os.fstat(child))
+            if flag is not None:
+                raise OSError(_scanner_runs_root_operator_message(target, flag))
+        ledger_mod._record_external_directory_authority(
             target,
-            components=(".brigade", "scanners", "runs"),
-            anchor_name=".runs.authority.json",
-            create=create,
+            _SCANNER_RUNS_COMPONENTS,
+            opened[-1],
+            workspace=ledger_mod._directory_identity(opened[0]),
         )
-    except OSError:
-        if not create:
-            raise
-        return ledger_mod._open_legacy_scanner_runs_directory(target)
+        return "repaired"
+    finally:
+        for handle in reversed(opened):
+            os.close(handle)
+
+
+def _scanner_runs_directory_failure_message(target: Path, exc: OSError) -> str:
+    """Render a traceback-free operator error for a runs-dir open failure."""
+    detail = str(exc).strip() or exc.__class__.__name__
+    if "unbound and cannot be migrated safely" in detail:
+        return detail
+    return f"scanner runs directory is unavailable: {detail}. Run `brigade work scanners doctor --target {target}`."
+
+
+def _open_scanner_runs_directory(target: Path, *, create: bool) -> int:
+    """Open the verifier-owned scanner-runs root.
+
+    A pre-existing unbound tree is never adopted as scheduling authority
+    (#1036). There is no OSError fallback into legacy child adoption.
+    Create binds only a verifier-owned, uncompromised released root so a
+    pre-0.27 workspace can keep sweeping.
+    """
+    if create:
+        _bind_released_unbound_scanner_runs_root(target)
+    return ledger_mod._open_verifier_owned_directory(
+        target,
+        components=_SCANNER_RUNS_COMPONENTS,
+        anchor_name=".runs.authority.json",
+        create=create,
+    )
 
 
 def _validate_scanner_run_directory(authority: _ScannerRunDirectoryAuthority) -> None:
-    if os.stat not in os.supports_dir_fd:
+    if not ledger_mod._dirfd_available():
         raise OSError("descriptor-relative scanner run validation is unavailable")
     opened = os.fstat(authority.directory)
-    named = os.stat(authority.run_id, dir_fd=authority.root, follow_symlinks=False)
+    named_fd = ledger_mod._dirfd_open_dir(authority.root, authority.run_id)
+    try:
+        named = os.fstat(named_fd)
+    finally:
+        os.close(named_fd)
     if (
         not stat.S_ISDIR(opened.st_mode)
         or not stat.S_ISDIR(named.st_mode)
@@ -238,12 +362,8 @@ def _open_scanner_run_directory(target: Path, run_id: str) -> _ScannerRunDirecto
     root = _open_scanner_runs_directory(target, create=True)
     directory = -1
     try:
-        os.mkdir(run_id, 0o700, dir_fd=root)
-        directory = os.open(
-            run_id,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=root,
-        )
+        ledger_mod._dirfd_mkdir(root, run_id)
+        directory = ledger_mod._dirfd_open_dir(root, run_id)
         authority = _ScannerRunDirectoryAuthority(root=root, directory=directory, run_id=run_id)
         _validate_scanner_run_directory(authority)
         ledger_mod._record_verifier_owned_directory(
@@ -260,10 +380,10 @@ def _open_scanner_run_directory(target: Path, run_id: str) -> _ScannerRunDirecto
 
 
 def _validate_scanner_run_file(parent: int, name: str, descriptor: int) -> None:
-    if os.stat not in os.supports_dir_fd:
+    if not ledger_mod._dirfd_available():
         raise OSError("descriptor-relative scanner run file validation is unavailable")
     opened = os.fstat(descriptor)
-    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    named = ledger_mod._dirfd_stat(parent, name)
     if (
         not stat.S_ISREG(opened.st_mode)
         or opened.st_nlink != 1
@@ -273,6 +393,23 @@ def _validate_scanner_run_file(parent: int, name: str, descriptor: int) -> None:
         != (named.st_dev, named.st_ino, named.st_mode, named.st_nlink)
     ):
         raise OSError("scanner run file no longer matches its held descriptor")
+
+
+def _list_scanner_run_ids(root: int, target: Path) -> list[str]:
+    """List run directory names through a held fd when the platform supports it."""
+    if os.listdir in getattr(os, "supports_fd", set()):
+        names = os.listdir(root)
+    else:
+        names = [entry.name for entry in helpers._scanner_runs_root(target).iterdir()]
+    return [name for name in names if isinstance(name, str)]
+
+
+def _scanner_run_file_open_flags(*, write: bool) -> int:
+    """Return no-follow file flags; Windows dirfd helpers ignore unknown POSIX bits."""
+    flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    if write:
+        return os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags
+    return os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | flags
 
 
 def _write_scanner_run_file(
@@ -291,10 +428,10 @@ def _write_scanner_run_file(
     temporary_name = f".{name}.{uuid4().hex}.tmp"
     try:
         try:
-            existing = os.open(
+            existing = ledger_mod._dirfd_open_file(
+                authority.directory,
                 name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=authority.directory,
+                _scanner_run_file_open_flags(write=False),
             )
         except FileNotFoundError:
             pass
@@ -305,11 +442,11 @@ def _write_scanner_run_file(
                 chunks.append(chunk)
             previous_raw = b"".join(chunks)
             previous_exists = True
-        descriptor = os.open(
+        descriptor = ledger_mod._dirfd_open_file(
+            authority.directory,
             temporary_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            _scanner_run_file_open_flags(write=True),
             0o600,
-            dir_fd=authority.directory,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:
             handle.write(data)
@@ -317,14 +454,14 @@ def _write_scanner_run_file(
             os.fsync(handle.fileno())
         _validate_scanner_run_file(authority.directory, temporary_name, descriptor)
         _validate_scanner_run_directory(authority)
-        os.replace(temporary_name, name, src_dir_fd=authority.directory, dst_dir_fd=authority.directory)
+        ledger_mod._dirfd_replace(authority.directory, temporary_name, name)
         _validate_scanner_run_file(authority.directory, name, descriptor)
-        os.fsync(authority.directory)
+        ledger_mod._dirfd_fsync(authority.directory)
         if after_publish is not None:
             after_publish(descriptor)
     except BaseException:
         try:
-            os.unlink(temporary_name, dir_fd=authority.directory)
+            ledger_mod._dirfd_unlink(authority.directory, temporary_name)
         except FileNotFoundError:
             pass
         _restore_scanner_run_file_snapshot(authority, name, previous_raw, previous_exists)
@@ -342,30 +479,30 @@ def _restore_scanner_run_file_snapshot(
     """Restore a producer artifact through the same retained run authority."""
     if not exists:
         try:
-            os.unlink(name, dir_fd=authority.directory)
+            ledger_mod._dirfd_unlink(authority.directory, name)
         except FileNotFoundError:
             pass
-        os.fsync(authority.directory)
+        ledger_mod._dirfd_fsync(authority.directory)
         return
     for _attempt in range(3):
         temporary_name = f".{name}.{uuid4().hex}.tmp"
         descriptor = -1
         try:
-            descriptor = os.open(
+            descriptor = ledger_mod._dirfd_open_file(
+                authority.directory,
                 temporary_name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                _scanner_run_file_open_flags(write=True),
                 0o600,
-                dir_fd=authority.directory,
             )
             with os.fdopen(os.dup(descriptor), "wb") as handle:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
             _validate_scanner_run_file(authority.directory, temporary_name, descriptor)
-            os.replace(temporary_name, name, src_dir_fd=authority.directory, dst_dir_fd=authority.directory)
+            ledger_mod._dirfd_replace(authority.directory, temporary_name, name)
             temporary_name = ""
             _validate_scanner_run_file(authority.directory, name, descriptor)
-            os.fsync(authority.directory)
+            ledger_mod._dirfd_fsync(authority.directory)
             return
         except OSError:
             pass
@@ -374,7 +511,7 @@ def _restore_scanner_run_file_snapshot(
                 os.close(descriptor)
             if temporary_name:
                 try:
-                    os.unlink(temporary_name, dir_fd=authority.directory)
+                    ledger_mod._dirfd_unlink(authority.directory, temporary_name)
                 except FileNotFoundError:
                     pass
     raise OSError("scanner run artifact rollback could not restore its retained snapshot")
@@ -407,8 +544,8 @@ def _write_scanner_run_receipt(run: dict[str, Any]) -> None:
     data = (json.dumps(run, indent=2, sort_keys=True) + "\n").encode("utf-8")
     target_value = run.get("target")
     target = Path(target_value) if isinstance(target_value, str) and target_value else None
-    bind = target is not None and run.get("status") == "completed" and run.get("exit_code") == 0
-    prior_files = ledger_mod._snapshot_external_file_authorities(target) if bind and target is not None else None
+    bind = target is not None
+    prior_files = ledger_mod._snapshot_external_file_authorities(target) if bind else None
 
     def after_publish(descriptor: int) -> None:
         if not bind or target is None:
@@ -488,13 +625,13 @@ def _read_scanner_receipt_at(target: Path, root: int, run_id: str, *, path: Path
     run = -1
     receipt = -1
     try:
-        run = os.open(
-            run_id,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=root,
-        )
+        run = ledger_mod._dirfd_open_dir(root, run_id)
         opened_run = os.fstat(run)
-        named_run = os.stat(run_id, dir_fd=root, follow_symlinks=False)
+        named_run_fd = ledger_mod._dirfd_open_dir(root, run_id)
+        try:
+            named_run = os.fstat(named_run_fd)
+        finally:
+            os.close(named_run_fd)
         if not stat.S_ISDIR(opened_run.st_mode) or (opened_run.st_dev, opened_run.st_ino) != (
             named_run.st_dev,
             named_run.st_ino,
@@ -505,11 +642,7 @@ def _read_scanner_receipt_at(target: Path, root: int, run_id: str, *, path: Path
             components=(".brigade", "scanners", "runs", run_id),
             directory=run,
         )
-        receipt = os.open(
-            "receipt.json",
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=run,
-        )
+        receipt = ledger_mod._dirfd_open_file(run, "receipt.json", _scanner_run_file_open_flags(write=False))
         before = os.fstat(receipt)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             return None
@@ -530,7 +663,23 @@ def _read_scanner_receipt_at(target: Path, root: int, run_id: str, *, path: Path
             components=(".brigade", "scanners", "runs", run_id),
             directory=run,
         )
-        data = json.loads(b"".join(chunks))
+        payload = b"".join(chunks)
+        named_receipt = ledger_mod._dirfd_stat(run, "receipt.json")
+        if (
+            not stat.S_ISREG(named_receipt.st_mode)
+            or named_receipt.st_nlink != 1
+            or (named_receipt.st_dev, named_receipt.st_ino, named_receipt.st_mode, named_receipt.st_nlink)
+            != (after.st_dev, after.st_ino, after.st_mode, after.st_nlink)
+        ):
+            return None
+        _validate_scanner_run_file(run, "receipt.json", receipt)
+        ledger_mod._validate_verifier_owned_file(
+            target,
+            components=(".brigade", "scanners", "runs", run_id, "receipt.json"),
+            descriptor=receipt,
+            data=payload,
+        )
+        data = json.loads(payload)
         if not isinstance(data, dict) or data.get("run_id") != run_id:
             return None
         data.setdefault("path", str(path))
@@ -569,8 +718,10 @@ def _scanner_receipt_collection(target: Path) -> tuple[list[dict[str, Any]], lis
     try:
         valid: list[dict[str, Any]] = []
         malformed: list[str] = []
-        for run_id in os.listdir(root):
+        for run_id in _list_scanner_run_ids(root, target):
             if not isinstance(run_id, str):
+                continue
+            if not _scanner_runs_directory_is_bound(target, (run_id,)):
                 continue
             path = helpers._scanner_runs_root(target) / run_id
             receipt = _read_scanner_receipt_at(target, root, run_id, path=path)
@@ -1587,7 +1738,33 @@ def _scanner_run_one(
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-{helpers._slug(scanner_id)}-{uuid4().hex[:6]}"
     run_dir = helpers._scanner_runs_root(target) / run_id
-    authority = _open_scanner_run_directory(target, run_id)
+    try:
+        authority = _open_scanner_run_directory(target, run_id)
+    except OSError as exc:
+        completed = helpers._now()
+        error = _scanner_runs_directory_failure_message(target, exc)
+        return {
+            "run_id": run_id,
+            "scanner_id": scanner_id,
+            "source": scanner.get("source"),
+            "status": "failed",
+            "path": str(run_dir),
+            "target": str(target),
+            "cwd": str(cwd),
+            "command": command,
+            "argv": argv or [],
+            "started_at": started.isoformat(),
+            "completed_at": completed.isoformat(),
+            "duration_seconds": (completed - started).total_seconds(),
+            "timeout": scanner.get("timeout"),
+            "exit_code": None,
+            "timed_out": False,
+            "error": error,
+            "stdout_summary": "",
+            "stderr_summary": error,
+            "forced": force,
+            "runs_directory_error": True,
+        }
     stdout_path = run_dir / "stdout.log"
     stderr_path = run_dir / "stderr.log"
     receipt: dict[str, Any] = {
@@ -1905,6 +2082,28 @@ def _scanner_health(target: Path) -> dict[str, Any]:
     elif plan.get("valid"):
         checks.append({"status": constants.OK, "name": "scanner_schedule", "detail": "no scanner schedule conflicts"})
 
+    try:
+        runs_root_state = _bind_released_unbound_scanner_runs_root(target)
+    except OSError as exc:
+        checks.append({"status": constants.FAIL, "name": "scanner_runs_root", "detail": str(exc)})
+    else:
+        if runs_root_state == "repaired":
+            checks.append(
+                {
+                    "status": constants.OK,
+                    "name": "scanner_runs_root",
+                    "detail": "bound released pre-authority runs root",
+                }
+            )
+        elif runs_root_state == "bound":
+            checks.append(
+                {
+                    "status": constants.OK,
+                    "name": "scanner_runs_root",
+                    "detail": "bound to this workspace",
+                }
+            )
+
     receipts, malformed_receipts = _scanner_receipt_collection(target)
     receipts.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
     if malformed_receipts:
@@ -2191,6 +2390,11 @@ def scanners_init(*, target: Path, force: bool = False, update_gitignore: bool =
     except OSError as exc:
         print(f"error: scanner config refused: {exc}", file=sys.stderr)
         return 2
+    try:
+        _bind_released_unbound_scanner_runs_root(target)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     print(f"scanner_config: {path}")
     print(f"scanners: {len(constants.SCANNER_DEFAULTS)}")
     if update_gitignore:
@@ -2452,6 +2656,18 @@ def _scanners_run_payload(
             run = _scanner_run_one(target, scanner, force=force, isolated=isolated_scanners)
             # Cover stamp/receipt failures: authority exists from `_scanner_run_one`.
             runs.append(run)
+            if run.get("runs_directory_error"):
+                skipped_rows = [
+                    {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
+                    for item in skipped
+                    if isinstance(item.get("scanner"), dict)
+                ]
+                return {
+                    "target": str(target),
+                    "errors": [str(run.get("error") or "scanner runs directory is unavailable")],
+                    "runs": runs,
+                    "skipped": skipped_rows,
+                }, 1
             _register_scanner_run_proof(scanner, run)
             stamped_ids = _scanner_stamp_new_imports(
                 target=target,
