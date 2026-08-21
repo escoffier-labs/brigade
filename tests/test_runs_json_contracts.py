@@ -1,4 +1,8 @@
-"""Issue #631 CLI-CONTRACT slice: versioned runs list/show/latest/watch JSON."""
+"""Issue #631 CLI-CONTRACT slice: versioned runs list/show/latest/watch JSON.
+
+These tests are the CLI-owned contract gate. The browser slice must consume
+these payloads and must not grow a second run-artifact reader.
+"""
 
 from __future__ import annotations
 
