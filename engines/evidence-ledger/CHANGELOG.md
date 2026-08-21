@@ -13,6 +13,13 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Fixed
 
+- `import cursor` no longer aborts when `User/globalStorage/conversation-search.db`
+  cannot be opened. Relative profile paths and Windows drive paths now use an
+  absolute `file:` URI (the previous `file://<first-segment>/...` form made
+  SQLite report `SQL logic error: out of memory`). A file that still cannot
+  be read is skipped with a counted warning that names the path and the
+  statement; prompt history and chat surfaces continue to import. Fixes #1052.
+
 - Content eligibility is centralized for every body-emitting read surface.
   Search snippets, MCP `search_evidence`, evidence bundles, Markdown export,
   default `show`, session preview, session search snippets, and session
