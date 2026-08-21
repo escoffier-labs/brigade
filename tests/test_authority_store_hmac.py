@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 from brigade import authority_broker, authority_key, scanner_isolation
-from brigade.work_cmd import ledger
+from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
+from brigade.work_cmd import constants, helpers, ledger
 
 
 def _bind_workspace(tmp_path: Path) -> dict[str, int]:
@@ -27,6 +28,102 @@ def _bind_workspace(tmp_path: Path) -> dict[str, int]:
 
 def _store_path(tmp_path: Path) -> Path:
     return ledger._directory_authority_store_path(tmp_path)
+
+
+def _enable_external_key_isolation(tmp_path: Path) -> None:
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                f'isolation = "{AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_g5_receipt(tmp_path: Path, item: dict) -> Path:
+    scanner = dict(next(row for row in constants.SCANNER_DEFAULTS if row["id"] == "handoff-ingest"))
+    metadata = item.setdefault("metadata", {})
+    metadata.update({"scanner_id": scanner["id"], "scanner_run_id": "chosen-run"})
+    receipt = {
+        "run_id": "chosen-run",
+        "scanner_id": scanner["id"],
+        "source": scanner["source"],
+        "command": scanner["command"],
+        "status": "completed",
+        "exit_code": 0,
+        "self_import_proofs": {
+            "scanner_id": scanner["id"],
+            "source": scanner["source"],
+            "scanner": scanner,
+            "imports": [{"id": item["id"], "content_hash": ledger._locally_stamped_import_content_hash(item)}],
+        },
+    }
+    descriptor = ledger._open_verifier_owned_directory(
+        tmp_path,
+        components=(".brigade", "scanners", "runs"),
+        anchor_name=".runs.authority.json",
+        create=True,
+    )
+    os.close(descriptor)
+    path = helpers._scanner_runs_root(tmp_path) / "chosen-run" / "receipt.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        ledger._record_verifier_owned_directory(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", "chosen-run"),
+            directory=parent,
+        )
+    finally:
+        os.close(parent)
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    data = path.read_bytes()
+    handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        ledger._record_verifier_owned_file(
+            tmp_path,
+            components=(".brigade", "scanners", "runs", "chosen-run", "receipt.json"),
+            descriptor=handle,
+            data=data,
+        )
+    finally:
+        os.close(handle)
+    return path
+
+
+def _g5_same_uid_store_rewrite(tmp_path: Path) -> tuple[object, Path]:
+    """Reviewer probe: same-uid write directly to the binding store by path."""
+
+    item = ledger._make_import("g5 forged identity", kind="task", source="handoff-ingest")
+    receipt_path = _write_g5_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload["attacker_marker"] = "same-uid-store-rewrite"
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+    info = receipt_path.stat()
+    binding = {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+    }
+    store = _store_path(tmp_path)
+    current = json.loads(store.read_text(encoding="utf-8"))
+    record = current.get("record") if current.get("envelope_version") == 1 else current
+    forged = dict(record)
+    files = dict(forged.get("files") or {})
+    files[".brigade/scanners/runs/chosen-run/receipt.json"] = binding
+    forged["files"] = files
+    store.write_text(json.dumps(forged), encoding="utf-8")
+    return ledger._legacy_import_source_content_identity(item, target=tmp_path), store
 
 
 def test_positive_parent_write_validates(tmp_path: Path):
@@ -209,3 +306,46 @@ path.write_text(json.dumps(envelope, sort_keys=True, separators=(",", ":")))
     assert payload is not None
     files = payload.get("files") or {}
     assert ".brigade/scanners/runs/stolen/receipt.json" not in files
+
+
+def test_g5_same_uid_store_write_forged_identity_fails_with_external_key_hmac(tmp_path: Path) -> None:
+    """HMAC on + key outside the scanner-reachable tree refuses the G5 rewrite."""
+
+    _enable_external_key_isolation(tmp_path)
+    key = authority_key.key_path()
+    assert not authority_key.key_is_inside_tree(key, tmp_path)
+    assert not authority_key.key_path_is_scanner_reachable(key)
+    identity, _store = _g5_same_uid_store_rewrite(tmp_path)
+    assert identity is None
+    assert not authority_key.key_is_inside_tree(authority_key.key_path(), tmp_path)
+
+
+def test_g5_forged_binding_is_accepted_when_hmac_verification_is_reverted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revert-check: without HMAC unwrap, the same same-uid write verifies."""
+
+    def _passthrough(
+        path: Path,
+        payload: dict,
+        *,
+        env=None,
+        key_material=None,
+    ) -> dict:
+        if payload.get("envelope_version") == 1 and isinstance(payload.get("record"), dict):
+            return dict(payload["record"])
+        return payload
+
+    monkeypatch.setattr(ledger, "_unwrap_authority_envelope", _passthrough)
+    identity, _store = _g5_same_uid_store_rewrite(tmp_path)
+    assert identity is not None
+    assert identity[0] == "handoff-ingest"
+
+
+def test_generate_key_refuses_workspace_brigade_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inside = tmp_path / ".brigade" / "authority" / "store-hmac.key"
+    monkeypatch.setenv("BRIGADE_AUTHORITY_KEY_FILE", str(inside))
+    authority_key.clear_key_cache()
+    with pytest.raises(OSError, match="scanner-reachable"):
+        authority_key.generate_key()
+    assert not inside.exists()

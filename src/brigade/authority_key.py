@@ -1,8 +1,14 @@
 """Persisted 0600 HMAC key for the parent-held directory-authority store.
 
-Location: ``<config_root>/brigade/authority/store-hmac.key``, overridable with
-``BRIGADE_AUTHORITY_KEY_FILE``. The key is read only by the parent verifier.
+Location: ``<config_root>/brigade/authority/store-hmac.key`` (Linux:
+``$XDG_CONFIG_HOME/brigade/authority/store-hmac.key`` or ``~/.config/...``),
+overridable with ``BRIGADE_AUTHORITY_KEY_FILE``. Mode 0600, parent directory
+0700. The key is read only by the parent verifier and must never be written
+inside the workspace or the scanner-reachable ``.brigade`` tree.
+
 Scanner children must never receive this path on their env allowlist.
+``authority_store.isolation = "external-key"`` in ``.brigade/security.toml``
+is the operator opt-in; ``brigade doctor`` WARNs when that flag is off.
 
 This key is same-UID readable. That is the documented residual of the crypto
 tier: a child that finds and reads this file can forge a valid store envelope.
@@ -44,6 +50,29 @@ def key_path(*, env: Mapping[str, str] | None = None, system: str | None = None)
     if configured:
         return Path(configured).expanduser()
     return authority_dir(env=env, system=system) / KEY_NAME
+
+
+def key_is_inside_tree(path: Path, tree: Path) -> bool:
+    """True when ``path`` resolves inside ``tree``."""
+
+    try:
+        path.expanduser().resolve().relative_to(tree.expanduser().resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def key_path_is_scanner_reachable(path: Path) -> bool:
+    """True when the key would sit in workspace-local or ``.brigade`` state."""
+
+    return ".brigade" in path.expanduser().parts
+
+
+def reject_scanner_reachable_key_path(path: Path) -> None:
+    if key_path_is_scanner_reachable(path):
+        raise OSError(
+            "authority store HMAC key must not be written inside the workspace or scanner-reachable .brigade tree"
+        )
 
 
 def sequence_path(*, env: Mapping[str, str] | None = None, system: str | None = None) -> Path:
@@ -126,6 +155,7 @@ def generate_key(
     *, env: Mapping[str, str] | None = None, system: str | None = None, force: bool = False
 ) -> tuple[bytes, str]:
     path = key_path(env=env, system=system)
+    reject_scanner_reachable_key_path(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         os.chmod(path.parent, 0o700)

@@ -46,6 +46,17 @@ The HMAC tier defends against receipt-plus-digest rewrites by someone who does n
 
 Key rotation is explicit: run `brigade receipts keygen --force --target .`. Rotation orphans older signatures on that machine into `UNVERIFIABLE-SIGNATURE` unless the old key is supplied through `BRIGADE_RECEIPT_SIGNING_KEY_FILE`. A future cross-machine trust tier can use `minisign` or `ssh -Y sign` for public-key signatures, but that is separate from the local HMAC design.
 
+## Directory-authority store HMAC (opt-in)
+
+Scanner children share the operator uid, so they can rewrite the directory-authority binding store by path. That residual same-uid write class is inside the default trust boundary. `brigade doctor` WARNs until you opt in.
+
+Set `authority_store.isolation = "external-key"` in `.brigade/security.toml` to HMAC-sign bindings with a key stored **outside** the workspace and scanner-reachable `.brigade` tree:
+
+- `$XDG_CONFIG_HOME/brigade/authority/store-hmac.key` (or `~/.config/brigade/authority/store-hmac.key`)
+- or `BRIGADE_AUTHORITY_KEY_FILE` pointing at another 0600 file outside the workspace
+
+The key file must be mode `0600` (parent directory `0700`). Brigade will not write this key inside the workspace. A same-uid process that can still read the key can forge a valid envelope; `--isolated-scanners` is the stronger POSIX opt-in.
+
 ## Out of scope
 
 - Bugs in `content-guard` itself - please report those upstream at

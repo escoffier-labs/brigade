@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- Opt-in `authority_store.isolation = "external-key"` HMAC-signs directory-authority bindings with a 0600 key stored outside the workspace and scanner-reachable tree (`$XDG_CONFIG_HOME/brigade/authority/store-hmac.key`, or `BRIGADE_AUTHORITY_KEY_FILE`). `brigade doctor` WARNs when the flag is off, naming the residual same-uid write class. A same-uid rewrite of the binding store by path fails verification when the flag is on and the key is outside that tree. Fixes #957.
 - `brigade runs list --json` and the Run View `GET /api/runs` list now drop a child directory that is a symlink, or whose `resolve()` leaves the runs root, and count it in `skipped_invalid`. Per-run serve routes already 404 those ids; the shared collector did not, so a symlink alias could leak out-of-root task text in the list while its detail route 404'd. Refs #631.
 - Scanner lifecycle rewrites now require the verifier-held run proof, `before.source == scanner.source`, and a legal `pending → dismissed` transition. A replacement row is applied as that narrow action, so a matching built-in scanner cannot dismiss another source's finding, resurrect a dismissed row, or assign an arbitrary status. Fixes #1039.
 - Explicit `import_path` ingestion retains the same publication snapshot as self-import (pre-commit inbox, persisted proofs, and file bindings) until the final scanner receipt binds. A failed receipt write rolls the import and proofs back together. Fixes #1040.

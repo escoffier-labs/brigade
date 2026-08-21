@@ -44,6 +44,21 @@ Supported fields:
 
 Keep tokens, private URLs, hostnames, mount paths, repo paths, and credentials out of this config. Use labels or local paths only when they are safe to expose in local command output.
 
+### Authority store isolation
+
+Same-uid scanner children can write the directory-authority binding store by path. File mode is not a boundary against a process that shares the operator uid. That residual class stays inside the default trust boundary.
+
+Set `authority_store.isolation = "external-key"` under `[authority_store]` to HMAC-sign those bindings with an operator-provisioned key that lives **outside** the workspace and the scanner-reachable `.brigade` tree. `brigade doctor` WARNs when the flag is off.
+
+Expected key location and permissions:
+
+- Default path: `$XDG_CONFIG_HOME/brigade/authority/store-hmac.key` (Linux fallback `~/.config/brigade/authority/store-hmac.key`). macOS uses `~/Library/Application Support/brigade/authority/store-hmac.key`. Windows uses `%LOCALAPPDATA%\brigade\authority\store-hmac.key`.
+- Override: `BRIGADE_AUTHORITY_KEY_FILE` pointing at a file outside the workspace.
+- Permissions: key file `0600`, parent directory `0700`. Group- or world-readable keys are refused.
+- Brigade never writes this key inside the workspace or under `.brigade/`.
+
+The key is still readable by any same-uid process that can find it. Privilege separation or an OS-mediated secret is the only class close; both stay opt-in so zero-dependency `quickstart` keeps working.
+
 ## Review Flow
 
 ```bash
