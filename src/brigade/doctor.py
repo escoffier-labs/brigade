@@ -100,6 +100,7 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.append(_check_recovery_checkpoints(ctx.target))
     checks.extend(_check_journal_event_headroom(ctx.target))
     checks.extend(_check_outcome_loop(ctx))
+    checks.extend(_check_directory_authority(ctx.target))
     return checks
 
 
@@ -185,6 +186,27 @@ def _outcome_ledger_stale_finding(
         f"outcome ledger empty for {age_days} days (threshold {stale_days}); "
         'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
     )
+
+
+def _check_directory_authority(target: Path) -> List[CheckResult]:
+    """WARN when a pre-hardening directory-authority record is still on disk."""
+    from .work_cmd import ledger
+
+    try:
+        path, payload = ledger._read_external_directory_authority(target)
+    except OSError as exc:
+        return [(WARN, "directory-authority: record", f"unable to read authority record: {exc}")]
+    if payload is None:
+        return []
+    if ledger._is_legacy_external_directory_authority(payload):
+        return [
+            (
+                WARN,
+                "directory-authority: legacy record",
+                f"{path} is a pre-hardening format; run `{ledger._directory_authority_rebind_command(target)}`",
+            )
+        ]
+    return [(OK, "directory-authority: record", str(path))]
 
 
 _RECOVERY_CHECKPOINTS_NAME = "runs: recovery checkpoints"
