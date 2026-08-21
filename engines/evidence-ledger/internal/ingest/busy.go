@@ -1,53 +1,115 @@
 package ingest
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
+
+	moderncsqlite "modernc.org/sqlite"
+)
+
+// sqliteBusyPrimary is SQLITE_BUSY. Extended codes keep this in the low 8 bits:
+// SQLITE_BUSY_RECOVERY=261, SQLITE_BUSY_SNAPSHOT=517, SQLITE_BUSY_TIMEOUT=773.
+const sqliteBusyPrimary = 5
+
+const (
+	sqliteBusy         = 5
+	sqliteBusyRecovery = 261
+	sqliteBusySnapshot = 517
+	sqliteBusyTimeout  = 773
 )
 
 // DefaultBusyRetries is the number of attempts (initial try plus retries)
-// around a crawl import that hits SQLITE_BUSY.
-const DefaultBusyRetries = 5
+// around an import or backfill that hits a BUSY-family lock.
+const DefaultBusyRetries = 4
 
 // DefaultBusyBackoff is the first backoff after a retryable lock. Later
 // waits double, capped at DefaultBusyBackoffMax.
-const DefaultBusyBackoff = 200 * time.Millisecond
+const DefaultBusyBackoff = 100 * time.Millisecond
 
 // DefaultBusyBackoffMax caps the per-attempt sleep so a stuck lock fails
 // in bounded time instead of stretching the daily crawl indefinitely.
-const DefaultBusyBackoffMax = 2 * time.Second
+const DefaultBusyBackoffMax = 400 * time.Millisecond
+
+// DefaultBusyTotalWait is the wall-clock ceiling for RetryOnBusy, including
+// per-attempt function time. busy_timeout and retries must compose to a
+// few seconds, never busy_timeout * retries into minutes.
+const DefaultBusyTotalWait = 4 * time.Second
 
 // HolderDiagnosisLabel is the token a bounded SQLITE_BUSY failure must
 // name so a runbook receipt points at lock-holder diagnosis instead of
 // the raw driver string.
 const HolderDiagnosisLabel = "holder-diagnosis"
 
+var busyCodeInMessage = regexp.MustCompile(`\((\d+)\)`)
+
 // BusyRetryOptions configure RetryOnBusy. Zero values use the defaults
 // above. Tests inject Sleep and a short Attempts count.
 type BusyRetryOptions struct {
-	Attempts    int
-	InitialWait time.Duration
-	MaxWait     time.Duration
-	Sleep       func(time.Duration)
-	OnRetry     func(attempt, attempts int, wait time.Duration, err error)
-	Diagnose    func() string
+	Attempts     int
+	InitialWait  time.Duration
+	MaxWait      time.Duration
+	MaxTotalWait time.Duration
+	Sleep        func(time.Duration)
+	Now          func() time.Time
+	OnRetry      func(attempt, attempts int, wait time.Duration, err error)
+	Diagnose     func() string
 }
 
-// IsBusy reports whether err is a retryable SQLite lock (SQLITE_BUSY or
-// the "database is locked" driver text). Permanent errors stay false.
+// IsBusy reports whether err is a retryable SQLite BUSY-family lock.
+// The primary result code is SQLITE_BUSY (5); extended codes keep that
+// value in the low 8 bits (261 recovery, 517 snapshot, 773 timeout).
 func IsBusy(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "database is locked") {
-		return true
+	if code, ok := sqliteErrorCode(err); ok {
+		return isBusyFamilyCode(code)
 	}
-	return strings.Contains(msg, "sqlite_locked")
+	if code, ok := busyCodeFromMessage(err.Error()); ok {
+		return isBusyFamilyCode(code)
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "sqlite_busy")
+}
+
+func isBusyFamilyCode(code int) bool {
+	switch code {
+	case sqliteBusy, sqliteBusyRecovery, sqliteBusySnapshot, sqliteBusyTimeout:
+		return true
+	default:
+		return code&0xFF == sqliteBusyPrimary
+	}
+}
+
+func sqliteErrorCode(err error) (int, bool) {
+	var se *moderncsqlite.Error
+	if errors.As(err, &se) {
+		return se.Code(), true
+	}
+	return 0, false
+}
+
+func busyCodeFromMessage(msg string) (int, bool) {
+	matches := busyCodeInMessage.FindAllStringSubmatch(msg, -1)
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		code, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		if isBusyFamilyCode(code) {
+			return code, true
+		}
+	}
+	return 0, false
 }
 
 func busyRetryDefaults(opts BusyRetryOptions) BusyRetryOptions {
@@ -60,30 +122,44 @@ func busyRetryDefaults(opts BusyRetryOptions) BusyRetryOptions {
 	if opts.MaxWait <= 0 {
 		opts.MaxWait = DefaultBusyBackoffMax
 	}
+	if opts.MaxTotalWait <= 0 {
+		opts.MaxTotalWait = DefaultBusyTotalWait
+	}
 	if opts.Sleep == nil {
 		opts.Sleep = time.Sleep
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
 	}
 	return opts
 }
 
-// RetryOnBusy runs fn, retrying when it returns SQLITE_BUSY, with
-// exponential backoff. Exhaustion returns an error that names
-// holder-diagnosis and omits the raw SQLITE_BUSY string.
+// RetryOnBusy runs fn, retrying when it returns a BUSY-family lock, with
+// exponential backoff and a wall-clock ceiling. Exhaustion returns an
+// error that names holder-diagnosis and omits the raw SQLITE_BUSY string.
 //
-// Crawl import writes the SQLite evidence archive, not the outcome JSONL
-// digest chain. #566's records.jsonl.lock therefore does not serialize
-// this path; SQLITE_BUSY retry is the coordination with concurrent
-// miseledger writers (receipt capture, handoff-ingest).
+// Crawl import and provenance backfill write the SQLite evidence archive,
+// not the outcome JSONL digest chain. #566's records.jsonl.lock therefore
+// does not serialize these paths; SQLITE_BUSY retry is the coordination
+// with concurrent miseledger writers (receipt capture, handoff-ingest).
 func RetryOnBusy(fn func() error, opts BusyRetryOptions) error {
 	opts = busyRetryDefaults(opts)
 	wait := opts.InitialWait
+	started := opts.Now()
 	var last error
 	for attempt := 1; attempt <= opts.Attempts; attempt++ {
 		last = fn()
 		if last == nil || !IsBusy(last) {
 			return last
 		}
-		if attempt == opts.Attempts {
+		elapsed := opts.Now().Sub(started)
+		if attempt == opts.Attempts || elapsed >= opts.MaxTotalWait {
+			break
+		}
+		if remain := opts.MaxTotalWait - elapsed; wait > remain {
+			wait = remain
+		}
+		if wait <= 0 {
 			break
 		}
 		if opts.OnRetry != nil {
@@ -109,8 +185,13 @@ func RetryOnBusy(fn func() error, opts BusyRetryOptions) error {
 // gives up so the failure names the holder-diagnosis step.
 func DiagnoseLockHolder(dbPath string) string {
 	abs := dbPath
-	if resolved, err := filepath.Abs(dbPath); err == nil {
-		abs = resolved
+	if dbPath != "" {
+		if resolved, err := filepath.Abs(dbPath); err == nil {
+			abs = resolved
+		}
+	}
+	if abs == "" {
+		return HolderDiagnosisLabel + ": db=unknown holder=unknown"
 	}
 	holders := lockHolders(abs)
 	if len(holders) == 0 {

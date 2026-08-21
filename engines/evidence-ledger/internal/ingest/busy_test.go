@@ -177,6 +177,69 @@ func TestIsBusyRecognizesDriverText(t *testing.T) {
 	}
 }
 
+func TestIsBusyRecognizesBusyFamilyCodes(t *testing.T) {
+	for _, err := range []error{
+		errors.New("database is locked (5) (SQLITE_BUSY)"),
+		errors.New("database is locked (517)"),
+		errors.New("database is locked (261)"),
+		errors.New("database is locked (773)"),
+	} {
+		if !IsBusy(err) {
+			t.Fatalf("IsBusy(%q) = false, want BUSY-family retryable", err)
+		}
+	}
+	if IsBusy(errors.New("database is locked (6)")) {
+		t.Fatal("SQLITE_LOCKED (6) is not the BUSY family")
+	}
+}
+
+func TestRetryOnBusyRetriesSnapshotThenSucceeds(t *testing.T) {
+	n := 0
+	err := RetryOnBusy(func() error {
+		n++
+		if n == 1 {
+			return errors.New("database is locked (517)")
+		}
+		return nil
+	}, BusyRetryOptions{Attempts: 3, InitialWait: time.Millisecond, Sleep: func(time.Duration) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("fn calls = %d, want 2 (retry after SQLITE_BUSY_SNAPSHOT)", n)
+	}
+}
+
+func TestRetryOnBusyHonorsMaxTotalWait(t *testing.T) {
+	started := time.Now()
+	n := 0
+	err := RetryOnBusy(func() error {
+		n++
+		return errors.New("database is locked (517)")
+	}, BusyRetryOptions{
+		Attempts:     50,
+		InitialWait:  20 * time.Millisecond,
+		MaxWait:      20 * time.Millisecond,
+		MaxTotalWait: 80 * time.Millisecond,
+	})
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("expected bounded exhaustion")
+	}
+	if !strings.Contains(err.Error(), HolderDiagnosisLabel) {
+		t.Fatalf("bounded failure %q must name %s", err, HolderDiagnosisLabel)
+	}
+	if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "(517)") {
+		t.Fatalf("bounded failure %q must not emit the raw lock string", err)
+	}
+	if n > 8 {
+		t.Fatalf("attempts = %d, MaxTotalWait should have stopped the 50-attempt loop", n)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("elapsed %s, composed wait must stay in the low seconds", elapsed)
+	}
+}
+
 func openImmediate(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(0)")

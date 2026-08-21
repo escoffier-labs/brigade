@@ -15,8 +15,9 @@ const SchemaVersion = 5
 
 // BusyTimeoutSeconds is the SQLite busy_timeout applied to every pooled
 // connection. The driver default is 0 (fail immediately on SQLITE_BUSY).
-// Concurrent crawl import vs receipt capture needs a real wait, in seconds.
-const BusyTimeoutSeconds = 10
+// Keep this at 1s so RetryOnBusy's attempts compose to a few seconds,
+// never busy_timeout * retries into minutes under sustained contention.
+const BusyTimeoutSeconds = 1
 
 func Open(path string) (*sql.DB, error) {
 	if err := security.EnsurePrivateParent(path); err != nil {

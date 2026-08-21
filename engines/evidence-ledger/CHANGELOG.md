@@ -13,7 +13,7 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Fixed
 
-- `import sourceharvest` (and the crawl wrappers that call it) retries SQLITE_BUSY with backoff after `busy_timeout` seconds, so a concurrent receipt-capture writer no longer fails the crawl. Exhausted contention names the holder-diagnosis (process and database) instead of the raw SQLITE_BUSY string. Fixes #1067.
+- `import sourceharvest` (and the crawl wrappers that call it) and provenance backfill retry the SQLITE_BUSY family (5, 261, 517) with a 1s `busy_timeout` and a few-second total ceiling, so a concurrent writer no longer fails the crawl or hangs the suite. Exhausted contention names the holder-diagnosis instead of the raw SQLite string. Fixes #1067.
 - Content eligibility is centralized for every body-emitting read surface.
   Search snippets, MCP `search_evidence`, evidence bundles, Markdown export,
   default `show`, session preview, session search snippets, and session
