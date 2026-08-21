@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -700,30 +701,58 @@ func TestBackfillConcurrentInferredEventsAreIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := "concurrent backfill body"
-	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
+	for i := 0; i < 8; i++ {
+		itemID := "item-concurrent"
+		externalID := "legacy:item:concurrent"
+		if i > 0 {
+			itemID = "item-concurrent-" + strconv.Itoa(i)
+			externalID = "legacy:item:concurrent-" + strconv.Itoa(i)
+		}
+		if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
 values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		"item-concurrent", "src1", "col1", "legacy:item:concurrent", "message", now, now, text, "", "sha256:"+hashString(text+"\n"), `{}`, "sha256:"+hashString("raw"), "legacy.jsonl", 1, `{}`); err != nil {
-		t.Fatal(err)
+			itemID, "src1", "col1", externalID, "message", now, now, text, "", "sha256:"+hashString(text+"\n"+itemID), `{}`, "sha256:"+hashString("raw"), "legacy.jsonl", 1, `{}`); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	const workers = 8
+	stopWriter := make(chan struct{})
+	var writerWG sync.WaitGroup
+	writerWG.Add(1)
+	go func() {
+		defer writerWG.Done()
+		for {
+			select {
+			case <-stopWriter:
+				return
+			default:
+				_, _ = db.Exec(`update items set updated_at = ? where id like 'item-concurrent%'`, time.Now().UTC().Format(time.RFC3339Nano))
+			}
+		}
+	}()
+
+	const workers = 16
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			var err error
 			for attempt := 0; attempt < 32; attempt++ {
 				_, err = BackfillProvenance(db, 10, "")
-				if err == nil || !strings.Contains(err.Error(), "SQLITE_BUSY") {
+				if err == nil || !IsBusy(err) {
 					break
 				}
 			}
 			errs <- err
 		}()
 	}
+	close(start)
 	wg.Wait()
+	close(stopWriter)
+	writerWG.Wait()
 	close(errs)
 	for err := range errs {
 		if err != nil {

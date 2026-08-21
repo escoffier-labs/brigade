@@ -314,8 +314,8 @@ func TestOpenAppliesPragmasToAllConnections(t *testing.T) {
 		if err := db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
 			t.Fatal(err)
 		}
-		if timeout != 10000 {
-			t.Fatalf("busy_timeout = %d, want 10000", timeout)
+		if timeout != BusyTimeoutSeconds*1000 {
+			t.Fatalf("busy_timeout = %d, want %d", timeout, BusyTimeoutSeconds*1000)
 		}
 		var fk int
 		if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
