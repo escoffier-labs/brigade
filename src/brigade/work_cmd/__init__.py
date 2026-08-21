@@ -192,6 +192,7 @@ from .ledger import (  # noqa: F401
     _plan_decisions,
     _unresolved_plan_decisions,
     _decision_gate_message,
+    rebind_directory_authority,
 )
 from .config import (  # noqa: F401
     _format_backup_toml,
