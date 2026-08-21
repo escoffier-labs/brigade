@@ -683,9 +683,69 @@ def test_symlink_escape_is_rejected(workspace: Path, planted: dict[str, Path], t
         response = _raw_request(httpd, _host(httpd), path=f"/api/runs/{link.name}")
         assert _status_code(response) == "404"
         assert runs_serve.resolve_served_run_id(link.name, _runs_root(workspace)) is None
+        status, body, _headers = _get_json(httpd, "/api/runs?limit=200")
+        assert status == 200
+        listed = json.dumps(body)
+        assert "outside planted run" not in listed
+        assert link.name not in {item["run_id"] for item in body["runs"]}
+        assert body["skipped_invalid"] == 2
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_symlinked_out_of_root_run_is_absent_from_list_and_cli_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = _workspace(tmp_path)
+    root = _runs_root(workspace)
+    _plant_run(
+        root / "20260821-130000-inside1",
+        status="ok",
+        task="inside planted run",
+        started_at="2026-08-21T13:00:00Z",
+        finished_at="2026-08-21T13:00:01Z",
+        duration_seconds=1.0,
+    )
+    marker = "ESCAPED-CROSS-REPO-MARKER-631"
+    outside = tmp_path / "foreign-root" / "20260821-130100-foreign"
+    _plant_run(
+        outside,
+        status="ok",
+        task=marker,
+        started_at="2026-08-21T13:01:00Z",
+        finished_at="2026-08-21T13:01:01Z",
+        duration_seconds=1.0,
+    )
+    link = root / "escapelink"
+    link.symlink_to(outside)
+
+    httpd = runs_serve.make_server(cwd=workspace, port=0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_until_ready(httpd)
+    try:
+        status, body, _headers = _get_json(httpd, "/api/runs?limit=200")
+        assert status == 200
+        assert marker not in json.dumps(body)
+        assert body["skipped_invalid"] == 1
+        assert [item["run_id"] for item in body["runs"]] == ["20260821-130000-inside1"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    payload, diagnostic, rc = runs_cmd.runs_list_contract(cwd=workspace, limit=200)
+    assert rc == 0
+    assert diagnostic is None
+    assert payload is not None
+    assert marker not in json.dumps(payload)
+    assert payload["skipped_invalid"] == 1
+
+    assert cli.main(["runs", "list", "--cwd", str(workspace), "--json", "--limit", "200"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert marker not in json.dumps(listed)
+    assert listed["skipped_invalid"] == 1
+    assert [item["run_id"] for item in listed["runs"]] == ["20260821-130000-inside1"]
 
 
 def test_absolute_and_alternate_root_ids_are_rejected(

@@ -1540,11 +1540,50 @@ def _run_sort_key(item: tuple[Path, dict[str, Any]]) -> str:
     return str(value) if value else path.name
 
 
+def _resolved_runs_root(root: Path) -> Path:
+    try:
+        return root.resolve()
+    except OSError:
+        return root
+
+
+def _run_dir_is_contained(child: Path, resolved_root: Path) -> bool:
+    """Return True when *child* is a real directory strictly under *resolved_root*.
+
+    Symlink entries and paths whose ``resolve()`` leaves the runs root are
+    rejected so ``runs list --json`` and ``GET /api/runs`` cannot enumerate
+    an alternate tree. Per-run serve routes already apply the same rule.
+    """
+    try:
+        if child.is_symlink():
+            return False
+        if not child.is_dir():
+            return False
+        resolved = child.resolve()
+    except OSError:
+        return False
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError:
+        return False
+    return resolved.parent == resolved_root
+
+
 def _collect_runs(root: Path) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     runs: list[tuple[Path, dict[str, Any]]] = []
     skipped = 0
+    resolved_root = _resolved_runs_root(root)
     for child in root.iterdir():
-        if not child.is_dir():
+        try:
+            is_symlink = child.is_symlink()
+            is_dir = child.is_dir()
+        except OSError:
+            skipped += 1
+            continue
+        if is_symlink or (is_dir and not _run_dir_is_contained(child, resolved_root)):
+            skipped += 1
+            continue
+        if not is_dir:
             continue
         try:
             meta = _read_json(child / "run.json")
