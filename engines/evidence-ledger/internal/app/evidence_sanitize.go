@@ -296,6 +296,9 @@ func walkEvidenceObject(m map[string]any, out evidenceOutbound, level walkLevel)
 			clean[key] = walked
 		}
 	}
+	if level == walkBundleRoot {
+		applyBundleRootDefaults(clean)
+	}
 	return clean
 }
 
@@ -322,7 +325,59 @@ func walkEvidenceItem(m map[string]any, out evidenceOutbound) any {
 			clean[key] = walked
 		}
 	}
+	applyEligibleItemDefaults(clean, m)
 	return clean
+}
+
+// applyEligibleItemDefaults restores list keys that the pre-sanitizer evidence
+// contract always emitted on a full item. Empty arrays stay present as []
+// rather than disappearing when the walker drops a nil, a failed child, or an
+// omitted input key. Ineligible stubs never reach this helper.
+func applyEligibleItemDefaults(clean, original map[string]any) {
+	clean["artifacts"] = ensureAnyList(clean["artifacts"])
+	if _, had := original["related"]; had {
+		clean["related"] = ensureAnyList(clean["related"])
+	}
+}
+
+// applyBundleRootDefaults keeps the always-present bundle containers that
+// origin/main emitted, including when they walk down to empty.
+func applyBundleRootDefaults(clean map[string]any) {
+	if _, ok := clean["bundles"]; ok {
+		return
+	}
+	clean["results"] = ensureAnyList(clean["results"])
+	if _, ok := clean["grouped_by_source"].(map[string]any); !ok {
+		clean["grouped_by_source"] = map[string]any{}
+	}
+	clean["warnings"] = ensureAnyList(clean["warnings"])
+	if _, ok := coerceNumber(clean["integrity_mismatches"]); !ok {
+		clean["integrity_mismatches"] = 0
+	}
+}
+
+func ensureAnyList(v any) []any {
+	switch n := v.(type) {
+	case []any:
+		if n == nil {
+			return []any{}
+		}
+		return n
+	case []map[string]any:
+		out := make([]any, 0, len(n))
+		for _, item := range n {
+			out = append(out, item)
+		}
+		return out
+	case []string:
+		out := make([]any, 0, len(n))
+		for _, item := range n {
+			out = append(out, item)
+		}
+		return out
+	default:
+		return []any{}
+	}
 }
 
 func allowlistFor(level walkLevel) map[string]struct{} {
@@ -510,9 +565,9 @@ func walkItemField(key string, val any, out evidenceOutbound) (any, bool) {
 	case "raw_ref":
 		return walkEvidenceTree(val, out, walkRawRef), true
 	case "artifacts":
-		return walkEvidenceTree(val, out, walkArtifact), true
+		return ensureAnyList(walkEvidenceTree(val, out, walkArtifact)), true
 	case "related":
-		return walkEvidenceTree(val, out, walkRelated), true
+		return ensureAnyList(walkEvidenceTree(val, out, walkRelated)), true
 	case "provenance":
 		return walkEvidenceTree(val, out, walkProvenance), true
 	case "integrity_mismatch":

@@ -9,7 +9,7 @@ Releases before this changelog was started are on the [releases page](https://gi
 ## [Unreleased]
 
 ### Security
-- Evidence CLI, MCP, and HTTP exits now sanitize the complete serialized payload through one last allowlist walker. Ineligible items become `{id?, eligibility_status, reason_code}` — stub `id` is 24 lowercase hex or omitted. `grouped_by_source` counts only eligible closed-enum kinds. Request `query`/`filters` are not reflected; cached show regenerates live; a URL content hash cannot authorize swapped artifact text. Fixes #1030, #1031, #1032.
+- Evidence CLI, MCP, and HTTP exits now sanitize the complete serialized payload through one last allowlist walker. Ineligible items become `{id?, eligibility_status, reason_code}` — stub `id` is 24 lowercase hex or omitted. Eligible items always serialize `artifacts` as a list (`[]` when none); empty `related`, `results`, `warnings`, and `grouped_by_source` stay present rather than omitted. `grouped_by_source` counts only eligible closed-enum kinds. Request `query`/`filters` are not reflected; cached show regenerates live; a URL content hash cannot authorize swapped artifact text. Fixes #1030, #1031, #1032.
 - `miseledger trust review` requires an operator-minted capability handed over stdin (`brigade.authority.capability-handoff.v1`). The MAC is bound to item id, current digest, requested transition, nonce, and expiry. Spent nonces are recorded in `used_capabilities`. `--operator-command` is audit metadata only. A missing capability is refused for every stdin kind, including piped empty input, `/dev/null`, and a PTY. stdin is not an authorization signal. Fixes #1029.
 
 ### Fixed
