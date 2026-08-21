@@ -173,15 +173,19 @@ func verifyMaterializedHashes(text, rawJSON string, envMap map[string]any, artif
 		kind, _ := art["kind"].(string)
 		url, _ := art["url"].(string)
 		computedText := provenance.SHA256Bytes([]byte(textnorm.Normalize(text)))
-		if kind == "url" && url != "" {
-			computedURL := provenance.SHA256Bytes([]byte(url))
-			if computedText != want && computedURL != want {
-				out = append(out, hashMismatch{Kind: "artifact", Expected: want, Actual: computedText, Scope: "artifact.content_hash", Artifact: id})
-			}
-			continue
-		}
+		// #1030: a kind=url content_hash that matches the URL string must not
+		// satisfy integrity when artifact text is present. The URL digest is
+		// only an alternative for URL-only (no-text) rows, which this loop
+		// already skips.
 		if computedText != want {
-			out = append(out, hashMismatch{Kind: "artifact", Expected: want, Actual: computedText, Scope: "artifact.content_hash", Artifact: id})
+			actual := computedText
+			if kind == "url" && url != "" {
+				computedURL := provenance.SHA256Bytes([]byte(url))
+				if computedURL == want {
+					actual = computedText
+				}
+			}
+			out = append(out, hashMismatch{Kind: "artifact", Expected: want, Actual: actual, Scope: "artifact.content_hash", Artifact: id})
 		}
 	}
 	return out

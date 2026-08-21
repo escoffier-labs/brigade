@@ -173,11 +173,14 @@ func TestEvidenceBundleMarkdownAndCachePreserveEnvelopeAndOmissions(t *testing.T
 		t.Fatalf("bundle results = %#v", bundle)
 	}
 	item := results[0].(map[string]any)
-	if item["integrity_mismatch"] != true || item["origin"] != "workspace" || item["trust_label"] != "untrusted" {
-		t.Fatalf("bundle item envelope fields = %#v", item)
+	if item["eligibility_status"] != eligibilityIneligible || item["reason_code"] != reasonIntegrityMismatch {
+		t.Fatalf("bundle item must be an integrity-mismatch stub: %#v", item)
 	}
 	if snippet, _ := item["snippet"].(string); snippet != "" {
 		t.Fatalf("bundle leaked mismatched snippet: %q", snippet)
+	}
+	if len(item) != 3 {
+		t.Fatalf("ineligible stub keys = %#v, want exactly three", item)
 	}
 
 	code, markdown, errb := run("evidence", "UNIQUE_BUNDLE_NEEDLE", "--markdown")
@@ -187,8 +190,8 @@ func TestEvidenceBundleMarkdownAndCachePreserveEnvelopeAndOmissions(t *testing.T
 	if !strings.Contains(markdown, "Integrity omitted: 1") {
 		t.Fatalf("markdown missing omission counter: %s", markdown)
 	}
-	if !strings.Contains(markdown, "Integrity mismatch: true") {
-		t.Fatalf("markdown missing mismatch field: %s", markdown)
+	if !strings.Contains(markdown, "Reason: "+reasonIntegrityMismatch) {
+		t.Fatalf("markdown missing mismatch reason: %s", markdown)
 	}
 	if strings.Contains(markdown, "UNIQUE_BUNDLE_NEEDLE bundle body") {
 		t.Fatalf("markdown leaked mismatched body: %s", markdown)
@@ -198,9 +201,12 @@ func TestEvidenceBundleMarkdownAndCachePreserveEnvelopeAndOmissions(t *testing.T
 	if cached["integrity_omitted"].(float64) != 1 {
 		t.Fatalf("cached bundle dropped integrity_omitted: %#v", cached)
 	}
+	if cached["regenerated_at"] == nil || cached["regenerated_at"] == "" {
+		t.Fatalf("cached show must regenerate live: %#v", cached)
+	}
 	cachedItem := cached["results"].([]any)[0].(map[string]any)
-	if cachedItem["integrity_mismatch"] != true || cachedItem["origin"] != "workspace" {
-		t.Fatalf("cached bundle dropped envelope fields: %#v", cachedItem)
+	if cachedItem["eligibility_status"] != eligibilityIneligible || cachedItem["reason_code"] != reasonIntegrityMismatch {
+		t.Fatalf("regenerated bundle dropped mismatch stub: %#v", cachedItem)
 	}
 	assertItemNotDeleted(t, id)
 	assertIntegrityEventCount(t, id, 1)

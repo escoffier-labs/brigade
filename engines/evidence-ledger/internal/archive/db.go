@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/escoffier-labs/miseledger/internal/security"
@@ -11,6 +12,12 @@ import (
 )
 
 const SchemaVersion = 5
+
+// BusyTimeoutSeconds is the SQLite busy_timeout applied to every pooled
+// connection. The driver default is 0 (fail immediately on SQLITE_BUSY).
+// Keep this at 1s so RetryOnBusy's attempts compose to a few seconds,
+// never busy_timeout * retries into minutes under sustained contention.
+const BusyTimeoutSeconds = 1
 
 func Open(path string) (*sql.DB, error) {
 	if err := security.EnsurePrivateParent(path); err != nil {
@@ -27,7 +34,7 @@ func Open(path string) (*sql.DB, error) {
 	// batched bulk imports and is still crash-safe (a power loss can lose the
 	// last unsynced transactions but cannot corrupt the database).
 	dsn := "file:" + path +
-		"?_pragma=busy_timeout(10000)" +
+		"?_pragma=busy_timeout(" + strconv.Itoa(BusyTimeoutSeconds*1000) + ")" +
 		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
 		"&_pragma=foreign_keys(1)"

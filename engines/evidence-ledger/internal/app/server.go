@@ -291,16 +291,29 @@ func handleEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer db.Close()
-	bundle, err := evidenceBundle(db, SearchOpts{Query: req.Query, Source: req.Source, Project: req.Project, From: req.From, To: req.To, Limit: req.Limit, IncludeRelated: req.IncludeRelated, IncludeArtifactText: req.IncludeArtifactText, CodeReference: codeReference})
+	outbound, err := buildEvidenceOutbound(db, SearchOpts{Query: req.Query, Source: req.Source, Project: req.Project, From: req.From, To: req.To, Limit: req.Limit, IncludeRelated: req.IncludeRelated, IncludeArtifactText: req.IncludeArtifactText, CodeReference: codeReference}, nil)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := saveEvidenceBundle(bundle); err != nil {
+	if err := saveEvidenceOutbound(outbound); err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, bundle)
+	body, err := finalizeEvidenceResponse(outbound)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeEvidenceHTTP(w, body)
+}
+
+func writeEvidenceHTTP(w http.ResponseWriter, b []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(b)
+	if len(b) == 0 || b[len(b)-1] != '\n' {
+		_, _ = w.Write([]byte("\n"))
+	}
 }
 
 func searchOptsFromQuery(q map[string][]string, query string) SearchOpts {

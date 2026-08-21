@@ -58,48 +58,67 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 		}
 		return 0
 	}
-	db, _, err := openMigrated()
+	// Crawl import writes the SQLite evidence archive, not the outcome
+	// JSONL digest chain. #566's records.jsonl.lock does not serialize
+	// this path; SQLITE_BUSY retry plus busy_timeout is the coordination
+	// with concurrent miseledger writers (receipt capture, handoff-ingest).
+	var result ingest.AdapterResult
+	err := ingest.RetryOnBusy(func() error {
+		db, _, openErr := openMigrated()
+		if openErr != nil {
+			return openErr
+		}
+		defer db.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sourceharvest", passArgs...)
+		stdout, pipeErr := cmd.StdoutPipe()
+		if pipeErr != nil {
+			return pipeErr
+		}
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if startErr := cmd.Start(); startErr != nil {
+			return toolpath.WrapExecErr("sourceharvest", toolpath.HintSourceHarvest, startErr)
+		}
+		imported, importErr := ingest.ImportAdapterReader(db, stdout, "sourceharvest://"+strings.Join(passArgs, " "), "")
+		waitErr := cmd.Wait()
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("timed out after %s", externalScannerTimeout)
+		}
+		if importErr != nil {
+			return importErr
+		}
+		if waitErr != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = waitErr.Error()
+			}
+			return fmt.Errorf("%s", msg)
+		}
+		result = imported
+		summary := parseSourceHarvestSummary(stderr.Bytes())
+		result.Warnings = append(summary.Warnings, result.Warnings...)
+		if summary.Path != "" {
+			sourceKind := result.SourceKind
+			if sourceKind == "" {
+				sourceKind = summary.Source
+			}
+			if scanErr := recordSourceHarvestScan(db, sourceKind, result.SourceHash, summary); scanErr != nil {
+				return scanErr
+			}
+		}
+		return nil
+	}, ingest.BusyRetryOptions{
+		OnRetry: func(attempt, attempts int, wait time.Duration, _ error) {
+			fmt.Fprintf(errw, "import sourceharvest: retry %d/%d after %s\n", attempt, attempts, wait)
+		},
+		Diagnose: func() string {
+			return ingest.DiagnoseLockHolder(ResolvePaths().DBPath)
+		},
+	})
 	if err != nil {
 		return fatalf(errw, "import sourceharvest: %s", err)
-	}
-	defer db.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sourceharvest", passArgs...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fatalf(errw, "import sourceharvest: %s", err)
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return fatalf(errw, "import sourceharvest: %s", toolpath.WrapExecErr("sourceharvest", toolpath.HintSourceHarvest, err))
-	}
-	result, importErr := ingest.ImportAdapterReader(db, stdout, "sourceharvest://"+strings.Join(passArgs, " "), "")
-	waitErr := cmd.Wait()
-	if ctx.Err() == context.DeadlineExceeded {
-		return fatalf(errw, "import sourceharvest: timed out after %s", externalScannerTimeout)
-	}
-	if importErr != nil {
-		return fatalf(errw, "import sourceharvest: %s", importErr)
-	}
-	if waitErr != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = waitErr.Error()
-		}
-		return fatalf(errw, "import sourceharvest: %s", msg)
-	}
-	summary := parseSourceHarvestSummary(stderr.Bytes())
-	result.Warnings = append(summary.Warnings, result.Warnings...)
-	if summary.Path != "" {
-		sourceKind := result.SourceKind
-		if sourceKind == "" {
-			sourceKind = summary.Source
-		}
-		if err := recordSourceHarvestScan(db, sourceKind, result.SourceHash, summary); err != nil {
-			return fatalf(errw, "import sourceharvest: %s", err)
-		}
 	}
 	if asJSON {
 		writeJSON(out, result)
