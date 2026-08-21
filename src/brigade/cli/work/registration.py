@@ -42,6 +42,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-agent timeout."
     )
     p_work_bootstrap.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
+    p_work_rebind_authority = work_sub.add_parser(
+        "rebind-authority",
+        help="Upgrade a legacy directory-authority record after confirming directory identities.",
+    )
+    p_work_rebind_authority.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace whose store record to upgrade."
+    )
     p_work_resume = work_sub.add_parser("resume", help="Show the current work handoff point and next command.")
     p_work_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_brief = work_sub.add_parser("brief", help="Show the daily work brief and suggested next command.")

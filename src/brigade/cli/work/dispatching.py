@@ -42,6 +42,8 @@ def _dispatch_impl(args) -> int:
             timeout_seconds=args.timeout_seconds,
             update_gitignore=not args.no_gitignore,
         )
+    if args.work_command == "rebind-authority":
+        return work_cmd.rebind_directory_authority(target=args.target)
     if args.work_command == "resume":
         return work_cmd.resume(target=args.target)
     if args.work_command == "brief":
