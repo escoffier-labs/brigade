@@ -1320,7 +1320,7 @@ def _emit_run(meta: dict[str, Any], *, json_output: bool) -> None:
                     "duration_seconds": _clean_number(meta.get("duration_seconds")),
                     "failure_phase": _clean_str(phase),
                     "failure_kind": _clean_str(kind),
-                    "failure_detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
+                    "failure_detail": _clean_contract_home_str(detail, _DETAIL_TEXT_LIMIT),
                 }
             )
         )
@@ -1396,7 +1396,7 @@ def _emit_synthesis(synthesis: dict[str, Any], *, json_output: bool) -> None:
 def _emit_final(final_text: str, *, json_output: bool) -> None:
     if json_output:
         # final.txt is raw operator output; emit a bounded one-line or omit.
-        _emit_watch_json(_compact({"type": "final", "text": _clean_str(final_text, _DETAIL_TEXT_LIMIT)}))
+        _emit_watch_json(_compact({"type": "final", "text": _clean_contract_home_str(final_text, _DETAIL_TEXT_LIMIT)}))
         return
     _print_final(final_text)
 
@@ -1627,9 +1627,31 @@ def _compact(payload: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in payload.items() if value is not None}
 
 
+def _merge_source(source: Mapping[str, Any] | None, cleaned: Mapping[str, object]) -> dict[str, object]:
+    """Overlay cleaned fields on the source mapping so `_allowlisted` must drop extras."""
+    payload: dict[str, object] = dict(source) if source is not None else {}
+    payload.update(cleaned)
+    return payload
+
+
 def _allowlisted(payload: Mapping[str, object], allowed: frozenset[str]) -> dict[str, object]:
     """Keep only explicitly allowlisted keys; drop None the same way as `_compact`."""
     return {key: value for key, value in payload.items() if key in allowed and value is not None}
+
+
+_HOME_PREFIX_RE = re.compile(r"/(?:home|Users)/[^/\s\"']+")
+
+
+def _redact_home_prefixes(text: str) -> str:
+    """Rewrite `/home/<user>` and `/Users/<user>` prefixes to `~` for JSON contracts."""
+    return _HOME_PREFIX_RE.sub("~", text)
+
+
+def _clean_contract_home_str(value: object, limit: int | None = None) -> str | None:
+    """Bound and redact home-directory prefixes on selected JSON contract strings."""
+    if not isinstance(value, str) or not value:
+        return None
+    return _clean_str(_redact_home_prefixes(value), limit)
 
 
 def _mode_text(meta: Mapping[str, Any]) -> str:
@@ -1643,11 +1665,14 @@ def _detail_children(run_dir: Path) -> list[dict[str, object]]:
     """Allowlisted recorded children; same discovery as human `runs show`."""
     return [
         _allowlisted(
-            {
-                "run_id": child.get("run_id"),
-                "status": child.get("status"),
-                "branch_point_event_id": child.get("branch_point_event_id"),
-            },
+            _merge_source(
+                child,
+                {
+                    "run_id": _clean_str(child.get("run_id")),
+                    "status": _clean_str(child.get("status"), _DETAIL_TEXT_LIMIT),
+                    "branch_point_event_id": _clean_str(child.get("branch_point_event_id"), _DETAIL_TEXT_LIMIT),
+                },
+            ),
             _CHILD_SUMMARY_FIELDS,
         )
         for child in _recorded_children(run_dir)
@@ -1665,51 +1690,68 @@ def _detail_lineage_section(run_dir: Path, meta: Mapping[str, Any]) -> dict[str,
     if isinstance(shared_prefix, Mapping):
         prefix_payload = (
             _allowlisted(
-                {
-                    "event_sequence": _clean_number(shared_prefix.get("event_sequence")),
-                    "event_digest": _clean_str(shared_prefix.get("event_digest")),
-                    "previous_digest": _clean_str(shared_prefix.get("previous_digest")),
-                },
+                _merge_source(
+                    shared_prefix,
+                    {
+                        "event_sequence": _clean_number(shared_prefix.get("event_sequence")),
+                        "event_digest": _clean_str(shared_prefix.get("event_digest")),
+                        "previous_digest": _clean_str(shared_prefix.get("previous_digest")),
+                    },
+                ),
                 _SHARED_PREFIX_FIELDS,
             )
             or None
         )
     payload = _allowlisted(
-        {
-            "kind": _clean_str(lineage.get("kind")) if lineage is not None else None,
-            "parent_run_id": _clean_str(lineage.get("parent_run_id")) if lineage is not None else None,
-            "branch_point_event_id": (
-                _clean_str(lineage.get("branch_point_event_id")) if lineage is not None else None
-            ),
-            "shared_prefix": prefix_payload,
-            "children": children or None,
-        },
+        _merge_source(
+            lineage,
+            {
+                "kind": _clean_str(lineage.get("kind")) if lineage is not None else None,
+                "parent_run_id": _clean_str(lineage.get("parent_run_id")) if lineage is not None else None,
+                "branch_point_event_id": (
+                    _clean_str(lineage.get("branch_point_event_id")) if lineage is not None else None
+                ),
+                "shared_prefix": prefix_payload,
+                "children": children or None,
+            },
+        ),
         _LINEAGE_FIELDS,
     )
     return payload or None
 
 
+def _parent_run_id_from_meta(meta: Mapping[str, Any]) -> str | None:
+    """Return this run's recorded parent id from its own lineage.
+
+    List summaries must not call `_detail_lineage_section` / `_recorded_children`:
+    those scan every sibling `run.json` to discover children, which is O(n) extra
+    reads per listed run.
+    """
+    lineage = _lineage(meta)
+    if lineage is None:
+        return None
+    return _clean_str(lineage.get("parent_run_id"))
+
+
 def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
     """Browser-safe run summary for brigade.runs-list.v1 (no absolute paths)."""
     phase, _, _ = _failure_fields(meta)
-    lineage = _detail_lineage_section(run_dir, meta)
-    parent_run_id = None
-    if lineage is not None:
-        parent_run_id = lineage.get("parent_run_id")
-        parent_run_id = parent_run_id if isinstance(parent_run_id, str) else None
     return _allowlisted(
-        {
-            "run_id": run_dir.name,
-            "status": _clean_str(meta.get("status")) or "unknown",
-            "task": _clean_str(meta.get("task"), _LIST_TASK_LIMIT),
-            "started_at": _clean_str(meta.get("started_at")),
-            "finished_at": _clean_str(meta.get("finished_at")),
-            "duration_seconds": _clean_number(meta.get("duration_seconds")),
-            "failure_phase": _clean_str(phase),
-            "mode": _mode_text(meta),
-            "resume_available": _resume_available(run_dir),
-            "parent_run_id": parent_run_id,
-        },
+        _merge_source(
+            meta,
+            {
+                "run_id": run_dir.name,
+                "status": _clean_str(meta.get("status")) or "unknown",
+                "task": _clean_str(meta.get("task"), _LIST_TASK_LIMIT),
+                "started_at": _clean_str(meta.get("started_at")),
+                "finished_at": _clean_str(meta.get("finished_at")),
+                "duration_seconds": _clean_number(meta.get("duration_seconds")),
+                "failure_phase": _clean_str(phase),
+                "mode": _mode_text(meta),
+                "resume_available": _resume_available(run_dir),
+                "parent_run_id": _parent_run_id_from_meta(meta),
+            },
+        ),
         RUN_SUMMARY_FIELDS,
     )
 
@@ -1720,24 +1762,27 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
         {
             "phase": _clean_str(phase),
             "kind": _clean_str(kind),
-            "detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
+            "detail": _clean_contract_home_str(detail, _DETAIL_TEXT_LIMIT),
         }
     )
     return _allowlisted(
-        {
-            "run_id": run_dir.name,
-            "status": _clean_str(meta.get("status")) or "unknown",
-            "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
-            "mode": _mode_text(meta),
-            "started_at": _clean_str(meta.get("started_at")),
-            "finished_at": _clean_str(meta.get("finished_at")),
-            "duration_seconds": _clean_number(meta.get("duration_seconds")),
-            "failure": failure or None,
-            "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
-            "suspected_noop": True if meta.get("suspected_noop") is True else None,
-            "resume_available": _resume_available(run_dir),
-            "lineage": _detail_lineage_section(run_dir, meta),
-        },
+        _merge_source(
+            meta,
+            {
+                "run_id": run_dir.name,
+                "status": _clean_str(meta.get("status")) or "unknown",
+                "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
+                "mode": _mode_text(meta),
+                "started_at": _clean_str(meta.get("started_at")),
+                "finished_at": _clean_str(meta.get("finished_at")),
+                "duration_seconds": _clean_number(meta.get("duration_seconds")),
+                "failure": failure or None,
+                "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
+                "suspected_noop": True if meta.get("suspected_noop") is True else None,
+                "resume_available": _resume_available(run_dir),
+                "lineage": _detail_lineage_section(run_dir, meta),
+            },
+        ),
         _RUN_DETAIL_RUN_FIELDS,
     )
 
@@ -1868,7 +1913,7 @@ def _detail_verification_section(
         command_payload = [
             _compact(
                 {
-                    "command": _clean_str(command.get("command"), _DETAIL_COMMAND_LIMIT),
+                    "command": _clean_contract_home_str(command.get("command"), _DETAIL_COMMAND_LIMIT),
                     "exit_code": _clean_number(command.get("exit_code")),
                     "duration_seconds": _clean_number(command.get("duration_seconds")),
                 }

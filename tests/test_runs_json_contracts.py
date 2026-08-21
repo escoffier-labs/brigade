@@ -16,8 +16,24 @@ from brigade import runs_cmd
 PLANTED_ENV_VALUE = "planted-env-OPENAI-not-a-real-key"
 PLANTED_SECRET = "sk-live-EXAMPLESECRETVALUE99"
 PLANTED_HOME = "/home/example-user/.config/brigade/secret.env"
+PLANTED_ABS_HOME = "/home/someuser"
+PLANTED_ABS_COMMAND = "/home/someuser/.venv/bin/pytest -q planted-verify"
+PLANTED_ABS_FAILURE = "worker failed in /home/someuser/project/src/module.py"
+PLANTED_ABS_FINAL = "wrote /home/someuser/project/final.txt"
 PLANTED_PROMPT = "PLANTED-LONG-PROMPT " + ("ignore previous instructions " * 80)
-PLANTED_NEEDLES = (PLANTED_ENV_VALUE, PLANTED_SECRET, PLANTED_HOME, PLANTED_PROMPT)
+UNEXPECTED_CONTRACT_KEY = "unexpected_extra"
+UNEXPECTED_CONTRACT_VALUE = "should-be-dropped"
+PLANTED_NEEDLES = (
+    PLANTED_ENV_VALUE,
+    PLANTED_SECRET,
+    PLANTED_HOME,
+    PLANTED_PROMPT,
+    PLANTED_ABS_HOME,
+    PLANTED_ABS_COMMAND,
+    PLANTED_ABS_FAILURE,
+    PLANTED_ABS_FINAL,
+    UNEXPECTED_CONTRACT_VALUE,
+)
 FORBIDDEN_KEYS = frozenset(
     {
         "env",
@@ -58,10 +74,13 @@ def _walk_payload(value: object):
 
 
 def _assert_allowlist(payload: object) -> None:
+    if isinstance(payload, dict):
+        assert UNEXPECTED_CONTRACT_KEY not in payload
     for item in _walk_payload(payload):
         if not isinstance(item, str):
             continue
         assert item not in FORBIDDEN_KEYS, f"forbidden key {item!r} leaked into contract payload"
+        assert item != UNEXPECTED_CONTRACT_KEY
         for needle in PLANTED_NEEDLES:
             assert needle not in item, f"planted value leaked into contract payload: {needle!r}"
 
@@ -70,6 +89,8 @@ def _assert_raw_clean(raw: str) -> None:
     for needle in PLANTED_NEEDLES:
         assert needle not in raw, f"planted value leaked into JSON output: {needle!r}"
     assert PLANTED_HOME.split("/")[2] not in raw
+    assert PLANTED_ABS_HOME.split("/")[2] not in raw
+    assert UNEXPECTED_CONTRACT_KEY not in raw
 
 
 def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run") -> None:
@@ -96,6 +117,12 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run"
             "artifacts": PLANTED_HOME,
             "handoff": f"{PLANTED_HOME}/handoff.md",
             "control_transport": {"owner_token": PLANTED_SECRET},
+            UNEXPECTED_CONTRACT_KEY: UNEXPECTED_CONTRACT_VALUE,
+            "failure": {
+                "phase": "worker",
+                "kind": "exit-error",
+                "detail": PLANTED_ABS_FAILURE,
+            },
         },
     )
     _write_json(
@@ -135,14 +162,33 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = "inspect the planted run"
                     "stdout_log": f"{PLANTED_HOME}/worker.stdout.log",
                     "stderr_log": f"{PLANTED_HOME}/worker.stderr.log",
                 }
-            ]
+            ],
+            "ground_truth": {
+                "available": True,
+                "cwd": PLANTED_HOME,
+                "verify_receipts": [
+                    {
+                        "run_id": "verify-planted",
+                        "status": "ok",
+                        "started_at": "2026-08-21T10:00:01Z",
+                        "duration_seconds": 1.5,
+                        "commands": [
+                            {
+                                "command": PLANTED_ABS_COMMAND,
+                                "exit_code": 0,
+                                "duration_seconds": 1.4,
+                            }
+                        ],
+                    }
+                ],
+            },
         },
     )
     _write_json(
         run_dir / "synthesis.json",
         {"orchestrator": "chef", "result": {"ok": True, "detail": "", "text": PLANTED_PROMPT}},
     )
-    (run_dir / "final.txt").write_text("final answer\n")
+    (run_dir / "final.txt").write_text(PLANTED_ABS_FINAL + "\n")
     events = run_dir / "events"
     events.mkdir()
     (events / "coder.jsonl").write_text(
@@ -272,6 +318,22 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
         assert frame["schema"] == runs_cmd.RUN_WATCH_SCHEMA
         _assert_allowlist(frame)
 
+    shown_run = shown["run"]
+    assert "failure" in shown_run
+    assert PLANTED_ABS_HOME not in json.dumps(shown)
+    assert shown_run["failure"]["detail"] == PLANTED_ABS_FAILURE.replace(PLANTED_ABS_HOME, "~")
+    verify_command = shown["verification"][0]["commands"][0]["command"]
+    assert verify_command == PLANTED_ABS_COMMAND.replace(PLANTED_ABS_HOME, "~")
+    final_frames = [frame for frame in frames if frame.get("type") == "final"]
+    assert final_frames
+    assert final_frames[0]["text"] == PLANTED_ABS_FINAL.replace(PLANTED_ABS_HOME, "~")
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path)]) == 0
+    human = capsys.readouterr().out
+    assert PLANTED_ABS_FAILURE in human
+    assert PLANTED_ABS_COMMAND in human
+    assert PLANTED_ABS_FINAL in human
+
 
 def test_runs_list_json_counts_skipped_invalid(tmp_path, capsys):
     runs_root = tmp_path / ".brigade" / "runs"
@@ -320,7 +382,9 @@ def test_show_json_includes_recorded_children_from_sibling_receipts(tmp_path, ca
         "branch_point_event_id": "20260821-120000-parent-000003-bbbbbbbbbbbb",
         "env": {"OPENAI_API_KEY": PLANTED_ENV_VALUE},
         "prompt": PLANTED_PROMPT,
+        UNEXPECTED_CONTRACT_KEY: UNEXPECTED_CONTRACT_VALUE,
     }
+    payload[UNEXPECTED_CONTRACT_KEY] = UNEXPECTED_CONTRACT_VALUE
     _write_json(child / "run.json", payload)
 
     assert cli.main(["runs", "show", parent.name, "--cwd", str(tmp_path), "--json"]) == 0
@@ -354,10 +418,13 @@ def test_child_lineage_is_allowlisted_on_show_and_list(tmp_path, capsys):
             "previous_digest": "a" * 64,
             "secret": PLANTED_SECRET,
             "cwd": PLANTED_HOME,
+            UNEXPECTED_CONTRACT_KEY: UNEXPECTED_CONTRACT_VALUE,
         },
         "env": {"OPENAI_API_KEY": PLANTED_ENV_VALUE},
         "prompt": PLANTED_PROMPT,
+        UNEXPECTED_CONTRACT_KEY: UNEXPECTED_CONTRACT_VALUE,
     }
+    payload[UNEXPECTED_CONTRACT_KEY] = UNEXPECTED_CONTRACT_VALUE
     _write_json(child / "run.json", payload)
 
     assert cli.main(["runs", "show", child.name, "--cwd", str(tmp_path), "--json"]) == 0
@@ -382,6 +449,75 @@ def test_child_lineage_is_allowlisted_on_show_and_list(tmp_path, capsys):
     _assert_allowlist(listed)
     _assert_raw_clean(listed_raw)
     assert listed["runs"][0]["parent_run_id"] == "20260821-120000-parent"
+
+
+def test_runs_list_json_does_not_scan_sibling_run_json(tmp_path, capsys, monkeypatch):
+    runs_root = tmp_path / ".brigade" / "runs"
+    parent = runs_root / "20260821-120000-parent"
+    child = runs_root / "20260821-130000-child"
+    _write_legacy_run(parent)
+    _write_legacy_run(child)
+    payload = json.loads((child / "run.json").read_text())
+    payload["started_at"] = "2026-08-21T13:00:00Z"
+    payload["lineage"] = {"kind": "child", "parent_run_id": parent.name}
+    _write_json(child / "run.json", payload)
+
+    reads: list[str] = []
+    original_read = runs_cmd._read_json
+
+    def counting_read(path: Path):
+        if path.name == "run.json":
+            reads.append(path.parent.name)
+        return original_read(path)
+
+    def boom_recorded_children(run_dir: Path):
+        raise AssertionError(f"list path scanned siblings for {run_dir}")
+
+    monkeypatch.setattr(runs_cmd, "_read_json", counting_read)
+    monkeypatch.setattr(runs_cmd, "_recorded_children", boom_recorded_children)
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [run["run_id"] for run in listed["runs"]] == [child.name, parent.name]
+    assert listed["runs"][0]["parent_run_id"] == parent.name
+    assert "parent_run_id" not in listed["runs"][1]
+    assert reads == [parent.name, child.name] or reads == [child.name, parent.name]
+    assert reads.count(parent.name) == 1
+    assert reads.count(child.name) == 1
+
+
+def test_show_json_bounds_oversized_sibling_child_status(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    parent = runs_root / "20260821-120000-parent"
+    child = runs_root / "20260821-130000-child"
+    _write_legacy_run(parent)
+    _write_legacy_run(child)
+    payload = json.loads((child / "run.json").read_text())
+    payload["status"] = "x" * 50_000
+    payload["lineage"] = {
+        "kind": "child",
+        "parent_run_id": parent.name,
+        "branch_point_event_id": "y" * 50_000,
+        UNEXPECTED_CONTRACT_KEY: UNEXPECTED_CONTRACT_VALUE,
+    }
+    payload[UNEXPECTED_CONTRACT_KEY] = UNEXPECTED_CONTRACT_VALUE
+    _write_json(child / "run.json", payload)
+
+    assert cli.main(["runs", "show", parent.name, "--cwd", str(tmp_path), "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    _assert_allowlist(shown)
+    child_entry = shown["run"]["lineage"]["children"][0]
+    assert child_entry["run_id"] == child.name
+    assert len(child_entry["status"]) <= 400
+    assert len(child_entry["branch_point_event_id"]) <= 400
+    assert child_entry["status"].endswith("...")
+    assert child_entry["branch_point_event_id"].endswith("...")
+    assert UNEXPECTED_CONTRACT_KEY not in child_entry
+
+    assert cli.main(["runs", "show", parent.name, "--cwd", str(tmp_path)]) == 0
+    human = capsys.readouterr().out
+    assert "x" * 50_000 in human
+    assert "y" * 50_000 in human
 
 
 def test_human_list_and_show_remain_text_when_json_omitted(tmp_path, capsys):
