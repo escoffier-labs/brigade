@@ -1272,6 +1272,7 @@ def test_runs_show_prints_summary(tmp_path, capsys):
     assert "  [ok] chef" in out
     assert "final:" in out
     assert "  final answer" in out
+    assert "lineage:" not in out
     assert not (run_dir / "revisions").exists()
 
 
@@ -2664,6 +2665,94 @@ def test_runs_child_fails_closed_for_corrupt_parent_journal_without_partial_run(
     assert "parent lifecycle journal has a partial trailing record" in capsys.readouterr().err
     children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
     assert children == []
+
+
+def test_runs_child_fails_closed_for_digest_mismatch_without_partial_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    journal = _journal_path(parent_dir)
+    raw = journal.read_bytes()
+    ended_nl = raw.endswith(b"\n")
+    lines = raw.split(b"\n")
+    complete = [index for index, line in enumerate(lines) if line]
+    idx = complete[-1]
+    payload = json.loads(lines[idx])
+    digest = payload["event_digest"]
+    assert isinstance(digest, str) and len(digest) == 64
+    payload["event_digest"] = ("0" if digest[0] != "0" else "1") + digest[1:]
+    lines[idx] = run_journal.canonical_bytes(payload)
+    rebuilt = b"\n".join(lines)
+    if ended_nl and not rebuilt.endswith(b"\n"):
+        rebuilt += b"\n"
+    journal.write_bytes(rebuilt)
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 2
+    assert "parent lifecycle journal is corrupt" in capsys.readouterr().err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
+def test_runs_child_fails_closed_for_legacy_parent_without_journal(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-legacy-aaaaaa"
+    _write_minimal_run(
+        parent_dir,
+        task="legacy root",
+        status="ok",
+        started_at="2026-08-17T12:00:00Z",
+    )
+
+    assert runs_cmd.child(parent_dir.name, "missing-event-id", cwd=workspace) == 2
+    assert "parent run has no lifecycle journal" in capsys.readouterr().err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
+def test_runs_child_refuses_workspace_lock_without_partial_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+
+    with runguard.run_lock(workspace, run_dir=parent_dir):
+        assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 2
+    err = capsys.readouterr().err
+    assert "could not create child run" in err
+    assert "another brigade run appears active" in err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
+def test_runs_show_lists_recorded_children_and_parent_lineage(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    branch_event = events[-1]
+
+    assert runs_cmd.child(parent_dir.name, branch_event.event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+
+    assert runs_cmd.show(child_dir) == 0
+    child_out = capsys.readouterr().out
+    assert "lineage:" in child_out
+    assert "kind: child" in child_out
+    assert f"parent run: {parent_dir.name}" in child_out
+    assert f"branch point: {branch_event.event_id}" in child_out
+
+    assert runs_cmd.show(parent_dir) == 0
+    parent_out = capsys.readouterr().out
+    assert "lineage:" in parent_out
+    assert f"    - {child_dir.name}" in parent_out
+    assert f"branch point: {branch_event.event_id}" in parent_out
 
 
 def test_runs_child_cleans_up_partial_dir_when_checkpoint_fails_after_mkdir(tmp_path, capsys, monkeypatch):
