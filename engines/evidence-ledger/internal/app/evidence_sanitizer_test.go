@@ -195,34 +195,6 @@ func TestEvidenceExitBytesEqualFinalize(t *testing.T) {
 }
 
 func TestEvidenceExitASTForbidsUnsanitizedWriters(t *testing.T) {
-	exits := map[string]bool{
-		"cmdEvidence":               true,
-		"cmdEvidenceShow":           true,
-		"cmdEvidenceList":           true,
-		"materializeEvidenceBundle": true,
-		"listEvidenceBundles":       true,
-		"regenerateEvidenceBundle":  true,
-		"mcpEvidence":               true,
-		"mcpEvidenceShow":           true,
-		"handleEvidence":            true,
-	}
-	sinks := map[string]bool{
-		"writeEvidenceJSON":      true,
-		"renderEvidenceMarkdown": true,
-		"renderEvidenceListText": true,
-		"mcpTextResultBytes":     true,
-		"writeEvidenceHTTP":      true,
-	}
-	exitAllowed := map[string]bool{
-		"writeEvidenceJSON":      true,
-		"renderEvidenceMarkdown": true,
-		"renderEvidenceListText": true,
-		"mcpTextResultBytes":     true,
-		"writeEvidenceHTTP":      true,
-		"fatalf":                 true,
-		"httpError":              true,
-		"writeEvidenceUsage":     true,
-	}
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(info os.FileInfo) bool {
 		return strings.HasSuffix(info.Name(), ".go") && !strings.HasSuffix(info.Name(), "_test.go")
@@ -232,63 +204,215 @@ func TestEvidenceExitASTForbidsUnsanitizedWriters(t *testing.T) {
 	}
 	for _, pkg := range pkgs {
 		for filename, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					continue
-				}
-				name := fn.Name.Name
-				switch {
-				case exits[name]:
-					assertExitWritesAreSanctioned(t, filename, name, fn.Body, exitAllowed)
-				case sinks[name]:
-					assertSinkAvoidsBypassHelpers(t, filename, name, fn.Body)
-				}
-			}
+			reportEvidenceASTViolations(t, filename, file)
 		}
 	}
 }
 
-func assertExitWritesAreSanctioned(t *testing.T, filename, fnName string, body *ast.BlockStmt, allowed map[string]bool) {
+func TestEvidenceExitASTRejectsWriterPassedToUnlistedHelper(t *testing.T) {
+	src := `package app
+
+import "io"
+
+func cmdEvidence(args []string, out, errw io.Writer) int {
+	emitReviewLeak(out)
+	return 0
+}
+
+func emitReviewLeak(w io.Writer) {
+	io.WriteString(w, "leak")
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "review_leak.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := collectEvidenceASTViolations("review_leak.go", file)
+	if len(findings) == 0 {
+		t.Fatal("guard is still name-blind: passing out to an unlisted helper that writes must fail")
+	}
+	joined := strings.Join(findings, "\n")
+	if !strings.Contains(joined, "emitReviewLeak") {
+		t.Fatalf("expected a writer-passing finding for emitReviewLeak, got:\n%s", joined)
+	}
+}
+
+func reportEvidenceASTViolations(t *testing.T, filename string, file *ast.File) {
 	t.Helper()
-	ast.Inspect(body, func(n ast.Node) bool {
+	for _, finding := range collectEvidenceASTViolations(filename, file) {
+		t.Error(finding)
+	}
+}
+
+func collectEvidenceASTViolations(filename string, file *ast.File) []string {
+	var findings []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		name := fn.Name.Name
+		switch {
+		case evidenceExitFuncs[name]:
+			findings = append(findings, exitASTViolations(filename, fn)...)
+		case sanctionedEvidenceSinks[name]:
+			findings = append(findings, sinkASTViolations(filename, fn)...)
+		}
+	}
+	return findings
+}
+
+var evidenceExitFuncs = map[string]bool{
+	"cmdEvidence":               true,
+	"cmdEvidenceShow":           true,
+	"cmdEvidenceList":           true,
+	"materializeEvidenceBundle": true,
+	"listEvidenceBundles":       true,
+	"regenerateEvidenceBundle":  true,
+	"mcpEvidence":               true,
+	"mcpEvidenceShow":           true,
+	"handleEvidence":            true,
+}
+
+var sanctionedEvidenceSinks = map[string]bool{
+	"writeEvidenceJSON":      true,
+	"renderEvidenceMarkdown": true,
+	"renderEvidenceListText": true,
+	"mcpTextResultBytes":     true,
+	"writeEvidenceHTTP":      true,
+}
+
+var exitAllowedWriteLike = map[string]bool{
+	"writeEvidenceJSON":      true,
+	"renderEvidenceMarkdown": true,
+	"renderEvidenceListText": true,
+	"mcpTextResultBytes":     true,
+	"writeEvidenceHTTP":      true,
+	"fatalf":                 true,
+	"httpError":              true,
+	"writeEvidenceUsage":     true,
+}
+
+var exitWriterRecipients = map[string]bool{
+	"writeEvidenceJSON":      true,
+	"renderEvidenceMarkdown": true,
+	"renderEvidenceListText": true,
+	"mcpTextResultBytes":     true,
+	"writeEvidenceHTTP":      true,
+	"writeEvidenceUsage":     true,
+	"httpError":              true,
+	"cmdEvidenceShow":        true,
+	"cmdEvidenceList":        true,
+	"MaxBytesReader":         true,
+}
+
+var rendererWriterRecipients = map[string]bool{
+	"Fprint":      true,
+	"Fprintf":     true,
+	"Fprintln":    true,
+	"Write":       true,
+	"WriteString": true,
+}
+
+func exitASTViolations(filename string, fn *ast.FuncDecl) []string {
+	var findings []string
+	writers := outputWriterParams(fn)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		callee, writeLike := writeLikeCallee(call)
-		if !writeLike {
-			return true
+		callee := astCalleeName(call)
+		base := calleeBase(callee)
+		if name, writeLike := writeLikeCallee(call); writeLike && !exitAllowedWriteLike[base] {
+			findings = append(findings, fmt.Sprintf("%s:%s calls %s; evidence exits may write or construct a response only via sanctioned byte-sink helpers", filename, fn.Name.Name, name))
 		}
-		if allowed[calleeBase(callee)] {
-			return true
+		if callPassesWriter(call, writers) && !exitWriterRecipients[base] {
+			findings = append(findings, fmt.Sprintf("%s:%s passes the output writer to %s; evidence exits may hand the writer only to sanctioned byte-sink helpers", filename, fn.Name.Name, callee))
 		}
-		t.Errorf("%s:%s calls %s; evidence exits may write or construct a response only via sanctioned byte-sink helpers", filename, fnName, callee)
 		return true
 	})
+	return findings
 }
 
-func assertSinkAvoidsBypassHelpers(t *testing.T, filename, fnName string, body *ast.BlockStmt) {
-	t.Helper()
+func sinkASTViolations(filename string, fn *ast.FuncDecl) []string {
+	var findings []string
 	banned := map[string]bool{
 		"writeJSON":     true,
 		"httpJSON":      true,
 		"mcpTextResult": true,
 	}
-	ast.Inspect(body, func(n ast.Node) bool {
+	writers := outputWriterParams(fn)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		callee, writeLike := writeLikeCallee(call)
-		if !writeLike {
-			return true
+		callee := astCalleeName(call)
+		base := calleeBase(callee)
+		if banned[base] {
+			findings = append(findings, fmt.Sprintf("%s:%s calls %s; sanctioned sinks may not construct unsanitized responses", filename, fn.Name.Name, callee))
 		}
-		if banned[calleeBase(callee)] {
-			t.Errorf("%s:%s calls %s; sanctioned sinks may not construct unsanitized responses", filename, fnName, callee)
+		if callPassesWriter(call, writers) && !rendererWriterRecipients[base] && !banned[base] {
+			findings = append(findings, fmt.Sprintf("%s:%s passes the output writer to %s; Markdown/text renderers may not hand the writer to an unlisted helper", filename, fn.Name.Name, callee))
 		}
 		return true
 	})
+	return findings
+}
+
+func outputWriterParams(fn *ast.FuncDecl) map[string]bool {
+	writers := map[string]bool{}
+	if fn.Type.Params == nil {
+		return writers
+	}
+	for _, field := range fn.Type.Params.List {
+		if !isOutputWriterType(field.Type) {
+			continue
+		}
+		for _, name := range field.Names {
+			if name.Name == "errw" {
+				continue
+			}
+			writers[name.Name] = true
+		}
+	}
+	return writers
+}
+
+func isOutputWriterType(expr ast.Expr) bool {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		return isOutputWriterType(t.X)
+	case *ast.SelectorExpr:
+		pkg, ok := t.X.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		switch {
+		case pkg.Name == "io" && t.Sel.Name == "Writer":
+			return true
+		case pkg.Name == "http" && t.Sel.Name == "ResponseWriter":
+			return true
+		case pkg.Name == "os" && t.Sel.Name == "File":
+			return true
+		}
+	}
+	return false
+}
+
+func callPassesWriter(call *ast.CallExpr, writers map[string]bool) bool {
+	if len(writers) == 0 {
+		return false
+	}
+	for _, arg := range call.Args {
+		ident, ok := arg.(*ast.Ident)
+		if ok && writers[ident.Name] {
+			return true
+		}
+	}
+	return false
 }
 
 func writeLikeCallee(call *ast.CallExpr) (string, bool) {
