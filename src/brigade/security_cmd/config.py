@@ -280,7 +280,9 @@ def authority_store_doctor_check(target: Path) -> tuple[str, str, str]:
     from .. import authority_key
 
     path = authority_key.key_path()
-    if authority_key.key_is_inside_tree(path, target) or authority_key.key_path_is_scanner_reachable(path):
+    try:
+        authority_key.reject_scanner_reachable_key_path(path, target)
+    except OSError:
         return (
             "FAIL",
             name,
@@ -295,7 +297,7 @@ def authority_store_doctor_check(target: Path) -> tuple[str, str, str]:
             "outside the workspace",
         )
     try:
-        authority_key.load_key()
+        authority_key.load_key(workspace=target)
     except OSError as exc:
         return ("FAIL", name, str(exc))
     return (

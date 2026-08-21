@@ -53,7 +53,7 @@ def key_path(*, env: Mapping[str, str] | None = None, system: str | None = None)
 
 
 def key_is_inside_tree(path: Path, tree: Path) -> bool:
-    """True when ``path`` resolves inside ``tree``."""
+    """True when ``path`` resolves inside ``tree`` using absolute real paths."""
 
     try:
         path.expanduser().resolve().relative_to(tree.expanduser().resolve())
@@ -62,17 +62,25 @@ def key_is_inside_tree(path: Path, tree: Path) -> bool:
     return True
 
 
-def key_path_is_scanner_reachable(path: Path) -> bool:
-    """True when the key would sit in workspace-local or ``.brigade`` state."""
+def key_path_is_scanner_reachable(path: Path, workspace: Path | None = None) -> bool:
+    """True when the key would sit in the workspace or ``.brigade`` state."""
 
-    return ".brigade" in path.expanduser().parts
+    resolved = path.expanduser()
+    if ".brigade" in resolved.parts:
+        return True
+    return workspace is not None and key_is_inside_tree(resolved, workspace)
 
 
-def reject_scanner_reachable_key_path(path: Path) -> None:
-    if key_path_is_scanner_reachable(path):
-        raise OSError(
-            "authority store HMAC key must not be written inside the workspace or scanner-reachable .brigade tree"
-        )
+def reject_scanner_reachable_key_path(path: Path, workspace: Path | None = None) -> None:
+    """Refuse a key path inside the workspace or any scanner-reachable tree.
+
+    The candidate and workspace are resolved to absolute real paths before the
+    containment check. This runs before any create/open so an override such as
+    ``<workspace>/operator-authority.key`` cannot mint a reachable HMAC key.
+    """
+
+    if key_path_is_scanner_reachable(path, workspace):
+        raise OSError("authority store HMAC key must not be written inside the workspace or scanner-reachable tree")
 
 
 def sequence_path(*, env: Mapping[str, str] | None = None, system: str | None = None) -> Path:
@@ -86,6 +94,17 @@ def key_id(key: bytes) -> str:
 def require_signed(*, env: Mapping[str, str] | None = None) -> bool:
     environment = env if env is not None else os.environ
     return environment.get(REQUIRE_SIGNED_ENV) == "1"
+
+
+def hmac_enabled(target: Path | None) -> bool:
+    """True when ``authority_store.isolation = "external-key"`` for ``target``."""
+
+    if target is None:
+        return False
+    from .security_cmd.config import authority_store_isolation_mode
+    from .security_cmd.models import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
+
+    return authority_store_isolation_mode(target) == AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 
 
 def _cache_key(path: Path) -> str:
@@ -152,10 +171,14 @@ def _fsync_directory(path: Path) -> None:
 
 
 def generate_key(
-    *, env: Mapping[str, str] | None = None, system: str | None = None, force: bool = False
+    *,
+    env: Mapping[str, str] | None = None,
+    system: str | None = None,
+    force: bool = False,
+    workspace: Path | None = None,
 ) -> tuple[bytes, str]:
     path = key_path(env=env, system=system)
-    reject_scanner_reachable_key_path(path)
+    reject_scanner_reachable_key_path(path, workspace)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         os.chmod(path.parent, 0o700)
@@ -184,11 +207,16 @@ def generate_key(
 
 
 def load_key(
-    *, env: Mapping[str, str] | None = None, system: str | None = None, create: bool = False
+    *,
+    env: Mapping[str, str] | None = None,
+    system: str | None = None,
+    create: bool = False,
+    workspace: Path | None = None,
 ) -> tuple[bytes, str]:
     """Load the persisted store key. Missing key fails closed unless ``create``."""
 
     path = key_path(env=env, system=system)
+    reject_scanner_reachable_key_path(path, workspace)
     cached = _CACHE.get(_cache_key(path))
     if cached is not None:
         return cached
@@ -197,7 +225,7 @@ def load_key(
         descriptor = _open_file_nofollow(path, flags)
     except FileNotFoundError:
         if create:
-            return generate_key(env=env, system=system)
+            return generate_key(env=env, system=system, workspace=workspace)
         raise OSError("external directory authority key is unavailable") from None
     except OSError as exc:
         raise OSError("external directory authority key is unavailable") from exc

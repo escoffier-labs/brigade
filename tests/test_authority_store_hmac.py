@@ -15,21 +15,6 @@ from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import constants, helpers, ledger
 
 
-def _bind_workspace(tmp_path: Path) -> dict[str, int]:
-    (tmp_path / ".brigade").mkdir(exist_ok=True)
-    workspace = ledger._workspace_directory_identity(tmp_path)
-    root = os.open(tmp_path / ".brigade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        ledger._record_external_directory_authority(tmp_path, (".brigade",), root, workspace=workspace)
-    finally:
-        os.close(root)
-    return workspace
-
-
-def _store_path(tmp_path: Path) -> Path:
-    return ledger._directory_authority_store_path(tmp_path)
-
-
 def _enable_external_key_isolation(tmp_path: Path) -> None:
     config = tmp_path / ".brigade" / "security.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
@@ -45,6 +30,23 @@ def _enable_external_key_isolation(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _bind_workspace(tmp_path: Path, *, external_key: bool = True) -> dict[str, int]:
+    if external_key:
+        _enable_external_key_isolation(tmp_path)
+    (tmp_path / ".brigade").mkdir(exist_ok=True)
+    workspace = ledger._workspace_directory_identity(tmp_path)
+    root = os.open(tmp_path / ".brigade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        ledger._record_external_directory_authority(tmp_path, (".brigade",), root, workspace=workspace)
+    finally:
+        os.close(root)
+    return workspace
+
+
+def _store_path(tmp_path: Path) -> Path:
+    return ledger._directory_authority_store_path(tmp_path)
 
 
 def _write_g5_receipt(tmp_path: Path, item: dict) -> Path:
@@ -331,11 +333,13 @@ def test_g5_forged_binding_is_accepted_when_hmac_verification_is_reverted(
         *,
         env=None,
         key_material=None,
+        workspace=None,
     ) -> dict:
         if payload.get("envelope_version") == 1 and isinstance(payload.get("record"), dict):
             return dict(payload["record"])
         return payload
 
+    _enable_external_key_isolation(tmp_path)
     monkeypatch.setattr(ledger, "_unwrap_authority_envelope", _passthrough)
     identity, _store = _g5_same_uid_store_rewrite(tmp_path)
     assert identity is not None
@@ -347,5 +351,50 @@ def test_generate_key_refuses_workspace_brigade_tree(tmp_path: Path, monkeypatch
     monkeypatch.setenv("BRIGADE_AUTHORITY_KEY_FILE", str(inside))
     authority_key.clear_key_cache()
     with pytest.raises(OSError, match="scanner-reachable"):
-        authority_key.generate_key()
+        authority_key.generate_key(workspace=tmp_path)
     assert not inside.exists()
+
+
+def test_workspace_root_key_override_is_refused_and_cannot_verify_forgery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer probe: BRIGADE_AUTHORITY_KEY_FILE inside the workspace must fail closed."""
+
+    _enable_external_key_isolation(tmp_path)
+    planted = tmp_path / "operator-authority.key"
+    monkeypatch.setenv("BRIGADE_AUTHORITY_KEY_FILE", str(planted))
+    authority_key.clear_key_cache()
+    with pytest.raises(OSError, match="workspace or scanner-reachable"):
+        authority_key.generate_key(workspace=tmp_path)
+    assert not planted.exists()
+    with pytest.raises(OSError, match="workspace or scanner-reachable"):
+        _bind_workspace(tmp_path)
+    assert not planted.exists()
+    item = ledger._make_import("in-workspace key forge", kind="task", source="handoff-ingest")
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def test_feature_on_rejects_forgery_that_feature_off_accepts(tmp_path: Path) -> None:
+    """The security.toml flag controls HMAC verify, not just doctor output."""
+
+    off = tmp_path / "off"
+    on = tmp_path / "on"
+    off.mkdir()
+    on.mkdir()
+
+    identity_off, store_off = _g5_same_uid_store_rewrite(off)
+    assert identity_off is not None
+    off_raw = json.loads(store_off.read_text(encoding="utf-8"))
+    assert off_raw.get("envelope_version") != 1
+
+    _enable_external_key_isolation(on)
+    identity_on, store_on = _g5_same_uid_store_rewrite(on)
+    assert identity_on is None
+    # After the unsigned rewrite the on-store is also unsigned; bind itself was enveloped.
+    # Recreate a clean on-bind to show the flag changes the written bytes.
+    other = tmp_path / "on-bind"
+    other.mkdir()
+    _bind_workspace(other)
+    bound = json.loads(_store_path(other).read_text(encoding="utf-8"))
+    assert bound.get("envelope_version") == 1
+    assert bound["signature"]["alg"] == "HMAC-SHA256"

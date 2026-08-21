@@ -1740,8 +1740,27 @@ def _require_workspace_directory_identity(target: Path, expected: dict[str, int]
         raise OSError("workspace directory identity does not match expected identity")
 
 
+def _authority_workspace_from_record(record: Mapping[str, Any] | None) -> Path | None:
+    if record is None:
+        return None
+    raw = record.get("target")
+    if isinstance(raw, str) and raw:
+        return Path(raw)
+    return None
+
+
+def _authority_hmac_enabled(workspace: Path | None) -> bool:
+    from .. import authority_key
+
+    return authority_key.hmac_enabled(workspace)
+
+
 def _read_external_directory_authority_path(
-    path: Path, *, env: Mapping[str, str] | None = None, key_material: tuple[bytes, str] | None = None
+    path: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    key_material: tuple[bytes, str] | None = None,
+    workspace: Path | None = None,
 ) -> dict[str, Any] | None:
     """Read one external authority record without deriving authority from its path."""
     try:
@@ -1762,12 +1781,12 @@ def _read_external_directory_authority_path(
         os.close(descriptor)
     if not isinstance(payload, dict):
         raise OSError("external directory authority record is malformed")
-    return _unwrap_authority_envelope(path, payload, env=env, key_material=key_material)
+    return _unwrap_authority_envelope(path, payload, env=env, key_material=key_material, workspace=workspace)
 
 
 def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, Any] | None]:
     path = _directory_authority_store_path(target)
-    return path, _read_external_directory_authority_path(path)
+    return path, _read_external_directory_authority_path(path, workspace=target)
 
 
 def _authority_target_digest(record: Mapping[str, Any]) -> str:
@@ -1783,12 +1802,27 @@ def _unwrap_authority_envelope(
     *,
     env: Mapping[str, str] | None = None,
     key_material: tuple[bytes, str] | None = None,
+    workspace: Path | None = None,
 ) -> dict[str, Any]:
     from .. import authority_broker, authority_key
 
+    inner = (
+        payload["record"]
+        if payload.get("envelope_version") == 1 and isinstance(payload.get("record"), dict)
+        else payload
+    )
+    workspace = workspace or _authority_workspace_from_record(inner if isinstance(inner, dict) else None)
+    hmac_on = _authority_hmac_enabled(workspace)
+
     if payload.get("envelope_version") == 1:
+        if not hmac_on:
+            if not isinstance(inner, dict) or "schema_version" not in inner or "target" not in inner:
+                raise OSError("external directory authority record is malformed")
+            return dict(inner)
         try:
-            secret, loaded_id = key_material if key_material is not None else authority_key.load_key(env=env)
+            secret, loaded_id = (
+                key_material if key_material is not None else authority_key.load_key(env=env, workspace=workspace)
+            )
         except OSError as exc:
             raise OSError("external directory authority key is unavailable") from exc
         try:
@@ -1811,12 +1845,20 @@ def _unwrap_authority_envelope(
         if path.name != expected_name:
             raise OSError("authority store filename does not match the bound target")
         return record
+    if not hmac_on:
+        if "schema_version" not in payload or "target" not in payload:
+            raise OSError("external directory authority record is malformed")
+        return payload
     if authority_key.require_signed(env=env):
         raise OSError("unsigned authority store record is refused")
     if "schema_version" not in payload or "target" not in payload:
         raise OSError("external directory authority record is malformed")
     try:
-        secret, loaded_id = key_material if key_material is not None else authority_key.load_key(env=env, create=True)
+        secret, loaded_id = (
+            key_material
+            if key_material is not None
+            else authority_key.load_key(env=env, create=True, workspace=workspace)
+        )
     except OSError as exc:
         raise OSError("external directory authority key is unavailable") from exc
     if (
@@ -1824,7 +1866,7 @@ def _unwrap_authority_envelope(
         is not None
     ):
         raise OSError("unsigned authority store downgrade is refused")
-    _write_external_directory_authority(path, payload, env=env, key_material=(secret, loaded_id))
+    _write_external_directory_authority(path, payload, env=env, key_material=(secret, loaded_id), workspace=workspace)
     return payload
 
 
@@ -1834,6 +1876,7 @@ def _write_external_directory_authority(
     *,
     env: Mapping[str, str] | None = None,
     key_material: tuple[bytes, str] | None = None,
+    workspace: Path | None = None,
 ) -> None:
     from .. import authority_broker, authority_key
 
@@ -1844,9 +1887,20 @@ def _write_external_directory_authority(
     )
     if record.get("envelope_version") == 1:
         record = dict(record.get("record") or {})
-    secret, loaded_id = key_material if key_material is not None else authority_key.load_key(env=env, create=True)
-    sequence = authority_key.next_sequence(_authority_target_digest(record), env=env, secret=secret, key_id=loaded_id)
-    envelope = authority_broker.sign_store_record(secret, record, sequence, loaded_id)
+    workspace = workspace or _authority_workspace_from_record(record)
+    hmac_on = _authority_hmac_enabled(workspace)
+    if hmac_on:
+        secret, loaded_id = (
+            key_material
+            if key_material is not None
+            else authority_key.load_key(env=env, create=True, workspace=workspace)
+        )
+        sequence = authority_key.next_sequence(
+            _authority_target_digest(record), env=env, secret=secret, key_id=loaded_id
+        )
+        to_write: dict[str, Any] = authority_broker.sign_store_record(secret, record, sequence, loaded_id)
+    else:
+        to_write = dict(record)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     descriptor = -1
@@ -1857,7 +1911,7 @@ def _write_external_directory_authority(
             0o600,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:
-            handle.write(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            handle.write(json.dumps(to_write, sort_keys=True, separators=(",", ":")).encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
         # Windows refuses os.replace while the source handle is still open (WinError 32).
@@ -1912,7 +1966,7 @@ def _record_external_directory_authority(
             raise OSError("external directory authority record does not match directory")
         return
     directories[scope] = identity
-    _write_external_directory_authority(path, payload)
+    _write_external_directory_authority(path, payload, workspace=target)
 
 
 def _reanchor_external_directory_authority(
@@ -1964,7 +2018,7 @@ def _reanchor_external_directory_authority(
             merged = dict(old_files)
             merged.update(_external_file_authorities(new_payload))
             new_payload["files"] = merged
-        _write_external_directory_authority(new_path, new_payload)
+        _write_external_directory_authority(new_path, new_payload, workspace=target)
         return True
     return False
 
@@ -2099,7 +2153,7 @@ def _restore_external_file_authorities(
         payload["files"] = merged
     else:
         payload.pop("files", None)
-    _write_external_directory_authority(path, payload)
+    _write_external_directory_authority(path, payload, workspace=target)
 
 
 def _record_verifier_owned_file(
@@ -2128,7 +2182,7 @@ def _record_verifier_owned_file(
     if files.get(scope) == identity:
         return
     files[scope] = identity
-    _write_external_directory_authority(path, existing)
+    _write_external_directory_authority(path, existing, workspace=target)
     if _file_identity(descriptor, data) != identity:
         raise OSError("file identity changed while recording authority")
 
