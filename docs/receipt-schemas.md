@@ -917,6 +917,10 @@ prompts, transcript bodies, raw stdout/stderr, log paths, or absolute
 workspace paths. Task and detail strings are bounded before emission; the
 authoritative artifacts are never modified.
 
+`brigade runs serve` exposes the same three contracts on loopback as
+`GET /api/runs`, `GET /api/runs/<run-id>`, and `GET /api/runs/<run-id>/events`
+(SSE of watch records). It does not add a second artifact reader.
+
 ### `brigade.runs-list.v1` — `brigade runs list --json`
 
 ```json
@@ -929,6 +933,8 @@ run directory name, never an absolute path), `status`, bounded `task`,
 (`normal` / `read-only`, with `, dry-run` appended), `resume_available`, and
 optional `parent_run_id` when the run is a durable child of another run.
 Invalid run directories are counted in `skipped_invalid` and skipped.
+That includes a child that is a symlink and a directory whose resolved
+path leaves the runs root, so list JSON cannot enumerate an alternate tree.
 
 ### `brigade.run-detail.v1` — `brigade runs show <run> --json`, `brigade runs latest --json`
 

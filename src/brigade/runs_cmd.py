@@ -9,11 +9,13 @@ import re
 import secrets
 import shutil
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 _NONTERMINAL_STATUSES = frozenset(
     {
@@ -1283,8 +1285,27 @@ def _emit_json(payload: dict[str, object]) -> None:
     print(json.dumps(payload, sort_keys=True))
 
 
+_watch_emit = threading.local()
+
+
+@contextmanager
+def _watch_record_sink(callback: Callable[[dict[str, object]], None]) -> Iterator[None]:
+    """Redirect watch JSON records to *callback* on this thread only."""
+    previous = getattr(_watch_emit, "sink", None)
+    _watch_emit.sink = callback
+    try:
+        yield
+    finally:
+        _watch_emit.sink = previous
+
+
 def _emit_watch_json(payload: dict[str, object]) -> None:
-    _emit_json({"schema": RUN_WATCH_SCHEMA, **payload})
+    record: dict[str, object] = {"schema": RUN_WATCH_SCHEMA, **payload}
+    sink = getattr(_watch_emit, "sink", None)
+    if sink is not None:
+        sink(record)
+        return
+    _emit_json(record)
 
 
 def _watch_run_id(run_dir: Path) -> str:
@@ -1519,11 +1540,50 @@ def _run_sort_key(item: tuple[Path, dict[str, Any]]) -> str:
     return str(value) if value else path.name
 
 
+def _resolved_runs_root(root: Path) -> Path:
+    try:
+        return root.resolve()
+    except OSError:
+        return root
+
+
+def _run_dir_is_contained(child: Path, resolved_root: Path) -> bool:
+    """Return True when *child* is a real directory strictly under *resolved_root*.
+
+    Symlink entries and paths whose ``resolve()`` leaves the runs root are
+    rejected so ``runs list --json`` and ``GET /api/runs`` cannot enumerate
+    an alternate tree. Per-run serve routes already apply the same rule.
+    """
+    try:
+        if child.is_symlink():
+            return False
+        if not child.is_dir():
+            return False
+        resolved = child.resolve()
+    except OSError:
+        return False
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError:
+        return False
+    return resolved.parent == resolved_root
+
+
 def _collect_runs(root: Path) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     runs: list[tuple[Path, dict[str, Any]]] = []
     skipped = 0
+    resolved_root = _resolved_runs_root(root)
     for child in root.iterdir():
-        if not child.is_dir():
+        try:
+            is_symlink = child.is_symlink()
+            is_dir = child.is_dir()
+        except OSError:
+            skipped += 1
+            continue
+        if is_symlink or (is_dir and not _run_dir_is_contained(child, resolved_root)):
+            skipped += 1
+            continue
+        if not is_dir:
             continue
         try:
             meta = _read_json(child / "run.json")
@@ -1989,7 +2049,121 @@ def _run_detail_payload(
     return {key: payload[key] for key in RUN_DETAIL_KEYS}
 
 
+def runs_list_contract(
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    limit: int = 10,
+) -> tuple[dict[str, object] | None, str | None, int]:
+    """Return the brigade.runs-list.v1 payload used by ``runs list --json``.
+
+    A missing runs directory is an empty list plus the CLI diagnostic (rc 2),
+    so a higher-level surface can render the empty state without a second
+    artifact reader.
+    """
+    if limit < 1:
+        return None, "error: --limit must be a positive integer", 2
+    cwd = cwd.expanduser().resolve()
+    if not cwd.is_dir():
+        return None, f"error: --cwd is not a directory: {cwd}", 2
+    root = runs_dir.expanduser() if runs_dir is not None else cwd / ".brigade" / "runs"
+    if not root.is_dir():
+        payload: dict[str, object] = {
+            "schema": RUNS_LIST_SCHEMA,
+            "runs": [],
+            "skipped_invalid": 0,
+        }
+        return payload, f"error: runs directory not found: {root}", 2
+    runs, skipped = _collect_runs(root)
+    return (
+        {
+            "schema": RUNS_LIST_SCHEMA,
+            "runs": [_run_summary_payload(path, meta) for path, meta in runs[:limit]],
+            "skipped_invalid": skipped,
+        },
+        None,
+        0,
+    )
+
+
+def run_detail_contract(run_dir: Path) -> tuple[dict[str, object] | None, str | None, int]:
+    """Return the brigade.run-detail.v1 payload used by ``runs show --json``."""
+    run_dir = run_dir.expanduser()
+    if not run_dir.is_dir():
+        return None, f"error: run directory not found: {run_dir}", 2
+    try:
+        run_meta = _read_json(run_dir / "run.json")
+        if run_meta is None:
+            return None, f"error: run.json not found in {run_dir}", 2
+        roster = _read_json(run_dir / "roster.json")
+        plan = _read_json(run_dir / "plan.json")
+        worker_results = _read_json(run_dir / "worker-results.json")
+        synthesis = _read_json(run_dir / "synthesis.json")
+    except ValueError as exc:
+        return None, f"error: {exc}", 2
+    payload = _run_detail_payload(run_dir, run_meta, roster, plan, worker_results, synthesis)
+    rc = _watch_return_code(run_meta.get("status")) if _is_terminal(run_meta) else 0
+    return payload, None, rc
+
+
+def iter_watch_records(
+    run_dir: Path,
+    *,
+    interval: float = 1.0,
+    should_stop: Callable[[], bool] | None = None,
+) -> Iterator[dict[str, object]]:
+    """Yield brigade.run-watch.v1 records using the same emitters as ``watch --json``."""
+    if interval < 0:
+        return
+    records: list[dict[str, object]] = []
+
+    def _sink(record: dict[str, object]) -> None:
+        records.append(record)
+
+    with _watch_record_sink(_sink):
+        _emit_watch_json({"type": "watch", "run_id": _watch_run_id(run_dir)})
+        yield from records
+        records.clear()
+        signatures: dict[str, str] = {}
+        event_offsets: dict[Path, int] = {}
+        summary_emitted = False
+        while True:
+            if should_stop is not None and should_stop():
+                return
+            run_meta, rc = _poll_watch_artifacts(
+                run_dir,
+                signatures,
+                event_offsets,
+                json_output=True,
+            )
+            yield from records
+            records.clear()
+            if rc is not None:
+                return
+            assert run_meta is not None
+            if _is_terminal(run_meta):
+                if not summary_emitted:
+                    _emit_summary(run_dir, run_meta, json_output=True)
+                    summary_emitted = True
+                    yield from records
+                    records.clear()
+                return
+            if interval == 0:
+                time.sleep(0)
+            else:
+                time.sleep(interval)
+
+
 def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10, json_output: bool = False) -> int:
+    if json_output:
+        payload, diagnostic, rc = runs_list_contract(cwd=cwd, runs_dir=runs_dir, limit=limit)
+        if payload is None or rc != 0:
+            if diagnostic:
+                print(diagnostic, file=sys.stderr)
+            return rc
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
         return 2
@@ -2004,14 +2178,6 @@ def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10, json_
         return 2
 
     runs, skipped = _collect_runs(root)
-    if json_output:
-        payload = {
-            "schema": RUNS_LIST_SCHEMA,
-            "runs": [_run_summary_payload(path, meta) for path, meta in runs[:limit]],
-            "skipped_invalid": skipped,
-        }
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
     for path, meta in runs[:limit]:
         status = meta.get("status", "unknown")
         stale_timeout = _stale_timeout(path, meta)
@@ -2938,6 +3104,15 @@ def audit(
 
 def show(run_dir: Path, *, json_output: bool = False) -> int:
     run_dir = run_dir.expanduser()
+    if json_output:
+        payload, diagnostic, rc = run_detail_contract(run_dir)
+        if payload is None:
+            if diagnostic:
+                print(diagnostic, file=sys.stderr)
+            return 2
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return rc
+
     if not run_dir.is_dir():
         print(f"error: run directory not found: {run_dir}", file=sys.stderr)
         return 2
@@ -2954,13 +3129,6 @@ def show(run_dir: Path, *, json_output: bool = False) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-
-    if json_output:
-        payload = _run_detail_payload(run_dir, run_meta, roster, plan, worker_results, synthesis)
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        if _is_terminal(run_meta):
-            return _watch_return_code(run_meta.get("status"))
-        return 0
 
     print(f"run: {run_dir}")
     _line("status", run_meta.get("status"))
@@ -2993,3 +3161,16 @@ def show(run_dir: Path, *, json_output: bool = False) -> int:
     if _is_terminal(run_meta):
         return _watch_return_code(run_meta.get("status"))
     return 0
+
+
+def serve(
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    port: int = 0,
+    open_browser: bool = True,
+) -> int:
+    """Foreground loopback Run View. Delegates to the HTTP layer."""
+    from . import runs_serve
+
+    return runs_serve.serve(cwd=cwd, runs_dir=runs_dir, port=port, open_browser=open_browser)

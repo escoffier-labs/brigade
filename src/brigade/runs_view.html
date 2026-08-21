@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brigade Run View</title>
+  <style nonce="__BRIGADE_CSP_NONCE__">
+    :root {
+      --bg: #f6f4ef;
+      --fg: #1c1916;
+      --muted: #5c564e;
+      --panel: #fffdf8;
+      --line: #d8d1c4;
+      --accent: #2558a8;
+      --ok: #1f6b3a;
+      --fail: #9b1d2a;
+      --warn: #8a5a12;
+      --focus: #1c4f9c;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #161412;
+        --fg: #efe8dc;
+        --muted: #b3aa9c;
+        --panel: #211e1a;
+        --line: #3a342c;
+        --accent: #8bb4f0;
+        --ok: #7dcea0;
+        --fail: #f0a0a8;
+        --warn: #e6c07b;
+        --focus: #9ec2ff;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font: 16px/1.45 system-ui, "Segoe UI", sans-serif;
+    }
+    a:focus, button:focus, input:focus, select:focus, summary:focus {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+    .skip {
+      position: absolute;
+      left: -999px;
+      top: 0;
+    }
+    .skip:focus { left: 8px; top: 8px; background: var(--panel); padding: 4px 8px; }
+    header, main { padding: 12px 16px; }
+    header {
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    h1, h2, h3 { margin: 0 0 8px; font-size: 1.15rem; }
+    h1 { font-size: 1.25rem; }
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: end;
+      margin-top: 8px;
+    }
+    label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9rem; color: var(--muted); }
+    input, select, button {
+      font: inherit;
+      color: var(--fg);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 6px 8px;
+    }
+    button { cursor: pointer; }
+    main {
+      display: grid;
+      grid-template-columns: minmax(16rem, 22rem) 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 720px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px;
+      min-width: 0;
+    }
+    #run-list { list-style: none; margin: 0; padding: 0; }
+    #run-list li { margin: 0 0 8px; }
+    #run-list button {
+      width: 100%;
+      text-align: left;
+      display: grid;
+      gap: 2px;
+    }
+    #run-list button[aria-current="true"] { border-color: var(--accent); }
+    .status-ok { color: var(--ok); }
+    .status-fail { color: var(--fail); }
+    .status-active { color: var(--accent); }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+    .warning { color: var(--warn); }
+    dl { display: grid; grid-template-columns: 10rem 1fr; gap: 4px 12px; margin: 0 0 12px; }
+    dt { color: var(--muted); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    table { width: 100%; border-collapse: collapse; margin: 0 0 12px; }
+    th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 6px 4px; vertical-align: top; overflow-wrap: anywhere; }
+    details { margin: 8px 0; }
+    #empty-state, #stale-warning { margin: 0 0 8px; }
+    [hidden] { display: none !important; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#run-detail">Skip to run detail</a>
+  <header>
+    <h1>Brigade Run View</h1>
+    <p class="muted">Local read-only inspection. No start, steer, interrupt, or resume actions.</p>
+    <form class="filters" role="search" id="filters">
+      <label for="filter-status">Status
+        <select id="filter-status">
+          <option value="">All statuses</option>
+        </select>
+      </label>
+      <label for="filter-text">Text
+        <input id="filter-text" type="search" autocomplete="off">
+      </label>
+    </form>
+  </header>
+  <main>
+    <nav class="panel" aria-labelledby="list-heading">
+      <h2 id="list-heading">Recent runs</h2>
+      <p id="empty-state" hidden></p>
+      <details id="empty-diagnostic" hidden>
+        <summary>CLI diagnostic</summary>
+        <pre id="empty-diagnostic-text"></pre>
+      </details>
+      <p id="skipped-invalid" class="muted" hidden></p>
+      <ul id="run-list"></ul>
+    </nav>
+    <article class="panel" id="run-detail" aria-live="polite">
+      <p id="stale-warning" class="warning" hidden>Showing last readable state. The selected run is stale or unreadable.</p>
+      <h2 id="detail-title">Select a run</h2>
+      <p id="detail-task"></p>
+      <dl id="detail-identity"></dl>
+      <section aria-labelledby="roster-heading">
+        <h3 id="roster-heading">Roster</h3>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Seat</th>
+              <th scope="col">Model</th>
+              <th scope="col">Reasoning</th>
+              <th scope="col">Assignment</th>
+              <th scope="col">Timeout</th>
+              <th scope="col">Result</th>
+            </tr>
+          </thead>
+          <tbody id="roster-body"></tbody>
+        </table>
+      </section>
+      <section aria-labelledby="plan-heading">
+        <h3 id="plan-heading">Plan stages</h3>
+        <ol id="plan-list"></ol>
+      </section>
+      <section aria-labelledby="timeline-heading">
+        <h3 id="timeline-heading">Phase timeline</h3>
+        <ol id="timeline-list"></ol>
+      </section>
+      <section aria-labelledby="failure-heading">
+        <h3 id="failure-heading">Failure</h3>
+        <p id="failure-text"></p>
+      </section>
+      <section aria-labelledby="verify-heading">
+        <h3 id="verify-heading">Verification</h3>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Receipt</th>
+              <th scope="col">Status</th>
+              <th scope="col">Duration</th>
+              <th scope="col">Command</th>
+              <th scope="col">Exit</th>
+            </tr>
+          </thead>
+          <tbody id="verify-body"></tbody>
+        </table>
+      </section>
+      <section aria-labelledby="briefs-heading">
+        <h3 id="briefs-heading">Attached briefs</h3>
+        <div id="briefs-list"></div>
+      </section>
+      <section aria-labelledby="lineage-heading">
+        <h3 id="lineage-heading">Lineage</h3>
+        <p id="lineage-text"></p>
+      </section>
+      <details id="event-disclosure">
+        <summary>Diagnostic event payloads</summary>
+        <pre id="event-payloads"></pre>
+      </details>
+    </article>
+  </main>
+  <script nonce="__BRIGADE_CSP_NONCE__">
+(function () {
+  var DISPLAY_LIMIT = 400;
+  var LIST_LIMIT = 50;
+  var KNOWN_WATCH = ["watch", "run", "plan", "event", "workers", "synthesis", "final", "summary"];
+  var MAX_BACKOFF = 8000;
+  var lastDetail = null;
+  var lastList = null;
+  var selectedId = null;
+  var stale = false;
+  var eventSource = null;
+  var backoff = 500;
+  var eventLog = [];
+
+  function bounded(value) {
+    if (value == null) return "";
+    var text = String(value);
+    if (text.length <= DISPLAY_LIMIT) return text;
+    return text.slice(0, DISPLAY_LIMIT - 3) + "...";
+  }
+
+  function setText(id, value) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = value == null ? "" : String(value);
+  }
+
+  function clearNode(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function el(name, text) {
+    var node = document.createElement(name);
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function relativeTime(iso) {
+    if (!iso) return "";
+    var then = Date.parse(iso);
+    if (isNaN(then)) return bounded(iso);
+    var delta = Math.round((Date.now() - then) / 1000);
+    if (delta < 60) return delta + "s ago";
+    if (delta < 3600) return Math.round(delta / 60) + "m ago";
+    if (delta < 86400) return Math.round(delta / 3600) + "h ago";
+    return Math.round(delta / 86400) + "d ago";
+  }
+
+  function durationText(seconds) {
+    if (typeof seconds !== "number") return "";
+    if (seconds < 60) return seconds + "s";
+    return Math.round(seconds / 60) + "m";
+  }
+
+  function statusClass(status) {
+    if (status === "ok" || status === "dry-run") return "status-ok";
+    if (status === "failed" || status === "error") return "status-fail";
+    return "status-active";
+  }
+
+  function fillDl(target, rows) {
+    clearNode(target);
+    rows.forEach(function (row) {
+      target.appendChild(el("dt", row[0]));
+      target.appendChild(el("dd", row[1]));
+    });
+  }
+
+  function applyFilters(runs) {
+    var status = document.getElementById("filter-status").value;
+    var needle = document.getElementById("filter-text").value.toLowerCase();
+    return runs.filter(function (run) {
+      if (status && run.status !== status) return false;
+      if (!needle) return true;
+      var hay = [run.run_id, run.status, run.task, run.failure_phase].join(" ").toLowerCase();
+      return hay.indexOf(needle) !== -1;
+    });
+  }
+
+  function renderStatusOptions(runs) {
+    var select = document.getElementById("filter-status");
+    var current = select.value;
+    var seen = {};
+    runs.forEach(function (run) {
+      if (run.status) seen[run.status] = true;
+    });
+    clearNode(select);
+    select.appendChild(el("option", "All statuses")).value = "";
+    Object.keys(seen).sort().forEach(function (status) {
+      var option = el("option", status);
+      option.value = status;
+      if (status === current) option.selected = true;
+      select.appendChild(option);
+    });
+    if (current && !seen[current]) select.value = "";
+  }
+
+  function renderList(payload) {
+    lastList = payload;
+    var list = document.getElementById("run-list");
+    var empty = document.getElementById("empty-state");
+    var diag = document.getElementById("empty-diagnostic");
+    var diagText = document.getElementById("empty-diagnostic-text");
+    var skipped = document.getElementById("skipped-invalid");
+    var runs = payload && payload.runs ? payload.runs : [];
+    renderStatusOptions(runs);
+    var filtered = applyFilters(runs);
+    clearNode(list);
+    if (!runs.length) {
+      empty.hidden = false;
+      empty.textContent = "No Brigade runs yet.";
+    } else {
+      empty.hidden = true;
+    }
+    if (payload && payload.diagnostic) {
+      diag.hidden = false;
+      diagText.textContent = bounded(payload.diagnostic);
+    } else {
+      diag.hidden = true;
+      diagText.textContent = "";
+    }
+    if (payload && payload.skipped_invalid) {
+      skipped.hidden = false;
+      skipped.textContent = "Skipped " + payload.skipped_invalid + " invalid run directories.";
+    } else {
+      skipped.hidden = true;
+    }
+    filtered.forEach(function (run) {
+      var item = document.createElement("li");
+      var button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("data-run-id", run.run_id || "");
+      if (run.run_id === selectedId) button.setAttribute("aria-current", "true");
+      var title = el("strong", bounded(run.run_id));
+      var status = el("span", bounded(run.status || "unknown"));
+      status.className = statusClass(run.status);
+      var task = el("span", bounded(run.task));
+      var meta = el("span", [relativeTime(run.started_at), durationText(run.duration_seconds), run.failure_phase ? "failed in " + bounded(run.failure_phase) : ""].filter(Boolean).join(" · "));
+      meta.className = "muted";
+      button.appendChild(title);
+      button.appendChild(status);
+      button.appendChild(task);
+      button.appendChild(meta);
+      item.appendChild(button);
+      list.appendChild(item);
+    });
+  }
+
+  function assignmentFor(worker, plan) {
+    var assignments = plan && plan.assignments ? plan.assignments : [];
+    for (var i = 0; i < assignments.length; i++) {
+      if (assignments[i].worker === worker) return assignments[i].task || "";
+    }
+    return "";
+  }
+
+  function resultFor(worker, workers) {
+    var results = workers && workers.results ? workers.results : [];
+    for (var i = 0; i < results.length; i++) {
+      if (results[i].worker === worker) return results[i].status || (results[i].ok ? "ok" : "");
+    }
+    return "";
+  }
+
+  function renderRoster(detail) {
+    var body = document.getElementById("roster-body");
+    clearNode(body);
+    var agents = detail.roster && detail.roster.agents ? detail.roster.agents : {};
+    Object.keys(agents).forEach(function (seat) {
+      var agent = agents[seat] || {};
+      var row = document.createElement("tr");
+      [seat, agent.model, agent.reasoning, assignmentFor(seat, detail.plan), agent.timeout_seconds, resultFor(seat, detail.workers)].forEach(function (value) {
+        row.appendChild(el("td", bounded(value)));
+      });
+      body.appendChild(row);
+    });
+  }
+
+  function renderPlan(detail) {
+    var list = document.getElementById("plan-list");
+    clearNode(list);
+    var assignments = detail.plan && detail.plan.assignments ? detail.plan.assignments : [];
+    assignments.forEach(function (item) {
+      var li = el("li", "stage " + (item.stage == null ? "?" : item.stage) + " → " + bounded(item.worker) + ": " + bounded(item.task));
+      list.appendChild(li);
+    });
+  }
+
+  function renderTimeline(detail) {
+    var list = document.getElementById("timeline-list");
+    clearNode(list);
+    var run = detail.run || {};
+    var steps = [];
+    if (run.started_at) steps.push("started " + bounded(run.started_at));
+    if (run.status) steps.push("status " + bounded(run.status));
+    var assignments = detail.plan && detail.plan.assignments ? detail.plan.assignments : [];
+    assignments.forEach(function (item) {
+      steps.push("plan stage " + (item.stage == null ? "?" : item.stage) + " " + bounded(item.worker));
+    });
+    var results = detail.workers && detail.workers.results ? detail.workers.results : [];
+    results.forEach(function (item) {
+      steps.push("worker " + bounded(item.worker) + " " + bounded(item.status || (item.ok ? "ok" : "")));
+    });
+    if (detail.synthesis && detail.synthesis.mode) steps.push("synthesis " + bounded(detail.synthesis.mode));
+    if (run.failure && run.failure.phase) steps.push("failure " + bounded(run.failure.phase));
+    if (run.finished_at) steps.push("finished " + bounded(run.finished_at));
+    steps.forEach(function (step) { list.appendChild(el("li", step)); });
+  }
+
+  function renderFailure(detail) {
+    var run = detail.run || {};
+    var failure = run.failure || {};
+    var parts = [failure.phase, failure.kind, failure.detail, run.error].filter(Boolean);
+    setText("failure-text", parts.length ? bounded(parts.join(" — ")) : "No failure recorded.");
+  }
+
+  function renderVerification(detail) {
+    var body = document.getElementById("verify-body");
+    clearNode(body);
+    var receipts = detail.verification || [];
+    receipts.forEach(function (receipt) {
+      var commands = receipt.commands || [];
+      if (!commands.length) {
+        var emptyRow = document.createElement("tr");
+        [receipt.run_id, receipt.status, durationText(receipt.duration_seconds), "", ""].forEach(function (value) {
+          emptyRow.appendChild(el("td", bounded(value)));
+        });
+        body.appendChild(emptyRow);
+        return;
+      }
+      commands.forEach(function (command) {
+        var row = document.createElement("tr");
+        [receipt.run_id, receipt.status, durationText(receipt.duration_seconds || command.duration_seconds), command.command, command.exit_code].forEach(function (value) {
+          row.appendChild(el("td", bounded(value)));
+        });
+        body.appendChild(row);
+      });
+    });
+  }
+
+  function renderBriefs(detail) {
+    var root = document.getElementById("briefs-list");
+    clearNode(root);
+    var briefs = detail.briefs || [];
+    if (!briefs.length) {
+      root.appendChild(el("p", "No attached briefs."));
+      return;
+    }
+    briefs.forEach(function (brief) {
+      var box = document.createElement("details");
+      var label = bounded(brief.name) + (brief.attached ? " attached" : "");
+      if (brief.name === "evidence") label += " (untrusted)";
+      box.appendChild(el("summary", label));
+      box.appendChild(el("p", "bytes " + bounded(brief.bytes) + ", pending " + bounded(brief.pending_count)));
+      root.appendChild(box);
+    });
+  }
+
+  function renderLineage(detail) {
+    var lineage = detail.run && detail.run.lineage ? detail.run.lineage : {};
+    var parts = [];
+    if (lineage.parent_run_id) parts.push("parent " + bounded(lineage.parent_run_id));
+    if (lineage.kind) parts.push(bounded(lineage.kind));
+    var children = lineage.children || [];
+    children.forEach(function (child) {
+      parts.push("child " + bounded(child.run_id) + (child.status ? " (" + bounded(child.status) + ")" : ""));
+    });
+    setText("lineage-text", parts.length ? parts.join(" · ") : "No recorded lineage.");
+  }
+
+  function renderDetail(detail) {
+    lastDetail = detail;
+    var run = detail.run || {};
+    setText("detail-title", bounded(run.run_id || selectedId || "Run"));
+    setText("detail-task", bounded(run.task));
+    fillDl(document.getElementById("detail-identity"), [
+      ["Run", bounded(run.run_id)],
+      ["Status", bounded(run.status)],
+      ["Mode", bounded(run.mode)],
+      ["Started", bounded(run.started_at)],
+      ["Finished", bounded(run.finished_at)],
+      ["Duration", durationText(run.duration_seconds)],
+      ["Resume", run.resume_available ? "available" : "unavailable"]
+    ]);
+    renderRoster(detail);
+    renderPlan(detail);
+    renderTimeline(detail);
+    renderFailure(detail);
+    renderVerification(detail);
+    renderBriefs(detail);
+    renderLineage(detail);
+    document.getElementById("stale-warning").hidden = !stale;
+  }
+
+  function renderEventLog() {
+    var boundedEvents = eventLog.slice(-20).map(function (item) {
+      var raw = JSON.stringify(item);
+      return bounded(raw);
+    });
+    setText("event-payloads", boundedEvents.join("\n"));
+  }
+
+  function diagnosticFrom(response) {
+    return response.headers.get("X-Brigade-Diagnostic");
+  }
+
+  function fetchList() {
+    return fetch("/api/runs?limit=" + LIST_LIMIT, { credentials: "same-origin" }).then(function (response) {
+      if (!response.ok) throw new Error("list failed");
+      return response.json().then(function (payload) {
+        var diagnostic = diagnosticFrom(response);
+        if (diagnostic) payload.diagnostic = diagnostic;
+        renderList(payload);
+        return payload;
+      });
+    }).catch(function () {
+      if (lastList) renderList(lastList);
+    });
+  }
+
+  function fetchDetail(runId) {
+    return fetch("/api/runs/" + encodeURIComponent(runId), { credentials: "same-origin" }).then(function (response) {
+      if (response.status === 502) {
+        stale = true;
+        if (lastDetail) renderDetail(lastDetail);
+        else document.getElementById("stale-warning").hidden = false;
+        return null;
+      }
+      if (!response.ok) throw new Error("detail failed");
+      return response.json().then(function (payload) {
+        stale = false;
+        renderDetail(payload);
+        return payload;
+      });
+    }).catch(function () {
+      stale = true;
+      if (lastDetail) renderDetail(lastDetail);
+      else document.getElementById("stale-warning").hidden = false;
+    });
+  }
+
+  function applyWatchRecord(record) {
+    if (!record || !record.type) return;
+    if (KNOWN_WATCH.indexOf(record.type) === -1) return;
+    eventLog.push(record);
+    renderEventLog();
+    if (!lastDetail) return;
+    if (record.type === "run") {
+      lastDetail.run = lastDetail.run || {};
+      ["status", "task", "started_at", "finished_at", "duration_seconds"].forEach(function (key) {
+        if (record[key] != null) lastDetail.run[key] = record[key];
+      });
+      if (record.failure_phase || record.failure_kind || record.failure_detail) {
+        lastDetail.run.failure = {
+          phase: record.failure_phase,
+          kind: record.failure_kind,
+          detail: record.failure_detail
+        };
+      }
+    } else if (record.type === "plan") {
+      lastDetail.plan = { assignments: record.assignments || [] };
+    } else if (record.type === "workers") {
+      lastDetail.workers = { results: record.results || [] };
+    } else if (record.type === "synthesis") {
+      lastDetail.synthesis = record;
+    } else if (record.type === "summary" && record.status) {
+      lastDetail.run = lastDetail.run || {};
+      lastDetail.run.status = record.status;
+    }
+    renderDetail(lastDetail);
+  }
+
+  function connectEvents(runId) {
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    if (!window.EventSource) return;
+    eventSource = new EventSource("/api/runs/" + encodeURIComponent(runId) + "/events");
+    eventSource.onmessage = function (evt) {
+      backoff = 500;
+      try {
+        applyWatchRecord(JSON.parse(evt.data));
+      } catch (err) {
+        return;
+      }
+    };
+    eventSource.onerror = function () {
+      if (eventSource) eventSource.close();
+      eventSource = null;
+      window.setTimeout(function () {
+        fetchDetail(runId).then(function () {
+          connectEvents(runId);
+        });
+      }, backoff);
+      backoff = Math.min(MAX_BACKOFF, backoff * 2);
+    };
+  }
+
+  function selectRun(runId) {
+    selectedId = runId;
+    if (lastList) renderList(lastList);
+    fetchDetail(runId).then(function () {
+      connectEvents(runId);
+    });
+  }
+
+  document.getElementById("run-list").addEventListener("click", function (evt) {
+    var target = evt.target;
+    while (target && target !== evt.currentTarget) {
+      if (target.getAttribute && target.getAttribute("data-run-id")) {
+        selectRun(target.getAttribute("data-run-id"));
+        return;
+      }
+      target = target.parentNode;
+    }
+  });
+  document.getElementById("filter-status").addEventListener("change", function () {
+    if (lastList) renderList(lastList);
+  });
+  document.getElementById("filter-text").addEventListener("input", function () {
+    if (lastList) renderList(lastList);
+  });
+  document.getElementById("filters").addEventListener("submit", function (evt) {
+    evt.preventDefault();
+  });
+
+  fetchList();
+})();
+  </script>
+</body>
+</html>

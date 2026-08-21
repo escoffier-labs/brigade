@@ -1248,6 +1248,7 @@ Inspect a completed run without opening each JSON file:
 brigade runs list --cwd /path/to/repo
 brigade runs latest --cwd /path/to/repo
 brigade runs show .brigade/runs/<run-id>
+brigade runs serve --cwd /path/to/repo --no-open
 brigade security init
 brigade security fix
 brigade security scan --target .
@@ -1264,6 +1265,10 @@ brigade security suppress <finding-id-or-fingerprint> --reason "reviewed false p
 brigade security unsuppress <finding-id-or-fingerprint>
 brigade security scan --target . --import-findings
 ```
+
+`brigade runs serve` is a foreground loopback Run View over the versioned
+runs JSON contracts. It is read-only, never installed as a service, and is
+not started by `run`, `doctor`, or `brief`.
 
 When `.graphtrail/graphtrail.db` is present, `brigade run` can attach bounded GraphTrail context. If pending upstream drift state is available, it can also attach a drift impact brief. `run.json` records the shared brief budget, attached brief names, byte counts, and truncation flags.
 

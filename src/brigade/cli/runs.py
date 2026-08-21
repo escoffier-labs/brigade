@@ -108,6 +108,34 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=1.0,
         help="Polling interval in seconds.",
     )
+    p_runs_serve = runs_sub.add_parser(
+        "serve",
+        help="Open a local read-only Run View in the browser.",
+        description="Foreground read-only Run View on loopback. Stops on Ctrl+C; never a service.",
+    )
+    p_runs_serve.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be inspected.",
+    )
+    p_runs_serve.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_serve.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="Loopback port. Default 0 selects an available port.",
+    )
+    p_runs_serve.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Print the bound URL without opening a browser.",
+    )
     p_runs_events = runs_sub.add_parser(
         "events",
         help="Read verified lifecycle journal events with durable cursors.",
@@ -356,6 +384,13 @@ def dispatch(args) -> int:
             runs_dir=args.runs_dir,
             json_output=args.json,
             interval=args.interval,
+        )
+    if args.runs_command == "serve":
+        return runs_cmd.serve(
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            port=args.port,
+            open_browser=not args.no_open,
         )
     if args.runs_command == "events":
         return runs_cmd.events(
