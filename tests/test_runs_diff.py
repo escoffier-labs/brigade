@@ -28,6 +28,8 @@ def _write_run(
     worker_status: str = "ok",
     verify_status: str = "ok",
     verify_exit: int = 0,
+    verify_command: str = "pytest -q",
+    verify_run_id: str | None = None,
     synthesis_ok: bool = True,
     synthesis_detail: str = "merged",
     final_text: str | None = "done\n",
@@ -68,9 +70,9 @@ def _write_run(
                 "available": True,
                 "verify_receipts": [
                     {
-                        "run_id": "verify-1",
+                        "run_id": verify_run_id or f"verify-{run_dir.name}",
                         "status": verify_status,
-                        "commands": [{"command": "pytest -q", "exit_code": verify_exit}],
+                        "commands": [{"command": verify_command, "exit_code": verify_exit}],
                     }
                 ],
             },
@@ -178,6 +180,79 @@ def test_diff_compares_child_against_recorded_parent(tmp_path, capsys):
     assert payload["outcome"]["changed"] is True
     assert payload["graphtrail"]["status"] == "skipped"
     assert payload["graphtrail"]["reason"] == "absent snapshots"
+    assert payload["verification"]["left"]["run_id"] != payload["verification"]["right"]["run_id"]
+    assert any(change["field"] == "status" for change in payload["verification"]["changes"])
+    assert any(change["field"] == "exit_code" for change in payload["verification"]["changes"])
+
+
+def test_verification_matching_content_different_run_ids_is_unchanged(tmp_path, capsys):
+    """Equal verify results stay unchanged even when production-unique run_ids differ."""
+    runs_root = tmp_path / ".brigade" / "runs"
+    parent = runs_root / "20260821-120000-parent"
+    child = runs_root / "20260821-130000-child"
+    _write_run(
+        parent,
+        verify_run_id="20260821-120000-work-verify-aaaaaa",
+        verify_status="ok",
+        verify_exit=0,
+        verify_command="pytest -q",
+        final_text="same-final\n",
+    )
+    _write_run(
+        child,
+        lineage=_child_lineage(parent.name),
+        verify_run_id="20260821-130000-work-verify-bbbbbb",
+        verify_status="ok",
+        verify_exit=0,
+        verify_command="pytest -q",
+        final_text="same-final\n",
+    )
+
+    assert cli.main(["runs", "diff", child.name, "--cwd", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verification"]["left"]["run_id"] == "20260821-130000-work-verify-bbbbbb"
+    assert payload["verification"]["right"]["run_id"] == "20260821-120000-work-verify-aaaaaa"
+    assert payload["verification"]["left"]["run_id"] != payload["verification"]["right"]["run_id"]
+    assert payload["verification"]["changed"] is False
+    assert payload["verification"].get("changes") is None
+    assert payload["verification"]["left"]["status"] == payload["verification"]["right"]["status"] == "ok"
+    assert payload["verification"]["left"]["exit_code"] == payload["verification"]["right"]["exit_code"] == 0
+    assert payload["verification"]["left"]["command"] == payload["verification"]["right"]["command"]
+    assert payload["verification"]["left"]["digest"] == payload["verification"]["right"]["digest"]
+    assert payload["verification"]["left"]["digest"]
+
+
+def test_verification_content_differences_are_changed(tmp_path, capsys):
+    """A status, exit_code, command, or result-digest mismatch must mark verification changed."""
+    cases = (
+        ({"verify_status": "failed"}, "status"),
+        ({"verify_exit": 1}, "exit_code"),
+        ({"verify_command": "ruff check ."}, "command"),
+        ({"final_text": "child-verify-final\n"}, "digest"),
+    )
+    for child_kwargs, field in cases:
+        runs_root = tmp_path / ".brigade" / "runs"
+        parent = runs_root / f"20260821-120000-parent-{field}"
+        child = runs_root / f"20260821-130000-child-{field}"
+        shared = {
+            "verify_status": "ok",
+            "verify_exit": 0,
+            "verify_command": "pytest -q",
+            "final_text": "same-final\n",
+        }
+        _write_run(parent, verify_run_id=f"verify-{parent.name}", **shared)
+        _write_run(
+            child,
+            lineage=_child_lineage(parent.name),
+            verify_run_id=f"verify-{child.name}",
+            **{**shared, **child_kwargs},
+        )
+        assert cli.main(["runs", "diff", child.name, "--cwd", str(tmp_path), "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["verification"]["left"]["run_id"] != payload["verification"]["right"]["run_id"]
+        assert payload["verification"]["changed"] is True, field
+        assert any(change["field"] == field for change in payload["verification"]["changes"]), field
+        assert payload["verification"]["left"][field] != payload["verification"]["right"][field], field
 
 
 def test_diff_two_run_form_compares_siblings(tmp_path, capsys):

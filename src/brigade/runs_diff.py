@@ -36,8 +36,8 @@ _SECTION_FIELDS = frozenset({"changed", "changes", "left", "right"})
 _CHANGE_FIELDS = frozenset({"field", "left", "right"})
 _LIFECYCLE_FIELDS = frozenset({"status", "mode", "failure", "resume_available"})
 _WORKER_FIELDS = frozenset({"worker", "ok", "status", "exit_code", "timed_out", "failure"})
-_VERIFY_FIELDS = frozenset({"run_id", "status", "commands"})
-_VERIFY_COMMAND_FIELDS = frozenset({"command", "exit_code"})
+_VERIFY_VIEW_FIELDS = frozenset({"run_id", "status", "command", "exit_code", "digest"})
+_VERIFY_CONTENT_FIELDS = frozenset({"status", "command", "exit_code", "digest"})
 _OUTCOME_FIELDS = frozenset(
     {
         "suspected_noop",
@@ -106,11 +106,7 @@ def run_diff_contract(
                 _worker_views(right_detail),
                 key_field="worker",
             ),
-            "verification": _collection_section(
-                _verification_views(left_detail),
-                _verification_views(right_detail),
-                key_field="run_id",
-            ),
+            "verification": _verification_section(left_dir, left_detail, right_dir, right_detail),
             "outcome": _scalar_section(
                 _outcome_view(left_dir, left_detail),
                 _outcome_view(right_dir, right_detail),
@@ -310,35 +306,57 @@ def _worker_views(detail: Mapping[str, Any]) -> list[dict[str, object]]:
     return views
 
 
-def _verification_views(detail: Mapping[str, Any]) -> list[dict[str, object]]:
+def _verification_section(
+    left_dir: Path,
+    left_detail: Mapping[str, Any],
+    right_dir: Path,
+    right_detail: Mapping[str, Any],
+) -> dict[str, object]:
+    """Compare verify results on content. ``run_id`` is display-only."""
+    left_view = _verification_view(left_dir, left_detail)
+    right_view = _verification_view(right_dir, right_detail)
+    changes = [
+        _change(field, left_view.get(field), right_view.get(field))
+        for field in sorted(_VERIFY_CONTENT_FIELDS)
+        if left_view.get(field) != right_view.get(field)
+    ]
+    return _section_payload(bool(changes), changes, left_view, right_view)
+
+
+def _verification_view(run_dir: Path, detail: Mapping[str, Any]) -> dict[str, object]:
+    receipt = _first_verify_receipt(detail)
+    command = _first_verify_command(receipt)
+    digest, _size = _final_digest(run_dir)
+    return _allow(
+        {
+            "run_id": _clean(receipt.get("run_id")),
+            "status": _clean(receipt.get("status"), runs_cmd._DETAIL_TEXT_LIMIT),
+            "command": _clean(command.get("command"), runs_cmd._DETAIL_COMMAND_LIMIT),
+            "exit_code": runs_cmd._clean_number(command.get("exit_code")),
+            "digest": _clean(digest),
+        },
+        _VERIFY_VIEW_FIELDS,
+    )
+
+
+def _first_verify_receipt(detail: Mapping[str, Any]) -> Mapping[str, Any]:
     receipts = detail.get("verification")
     if not isinstance(receipts, list):
-        return []
-    views: list[dict[str, object]] = []
+        return {}
     for receipt in receipts:
-        if not isinstance(receipt, Mapping):
-            continue
-        commands = receipt.get("commands")
-        command_payload = [
-            runs_cmd._compact(
-                {
-                    "command": _clean(command.get("command"), runs_cmd._DETAIL_COMMAND_LIMIT),
-                    "exit_code": runs_cmd._clean_number(command.get("exit_code")),
-                }
-            )
-            for command in (commands if isinstance(commands, list) else [])
-            if isinstance(command, Mapping)
-        ]
-        views.append(
-            runs_cmd._compact(
-                {
-                    "run_id": _clean(receipt.get("run_id")),
-                    "status": _clean(receipt.get("status"), runs_cmd._DETAIL_TEXT_LIMIT),
-                    "commands": command_payload,
-                }
-            )
-        )
-    return views
+        if isinstance(receipt, Mapping):
+            return receipt
+    return {}
+
+
+def _first_verify_command(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+    commands = receipt.get("commands")
+    if not isinstance(commands, list):
+        return {}
+    for command in commands:
+        if isinstance(command, Mapping):
+            return command
+    return {}
 
 
 def _outcome_view(run_dir: Path, detail: Mapping[str, Any]) -> dict[str, object]:
