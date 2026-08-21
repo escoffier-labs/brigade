@@ -1180,6 +1180,7 @@ def run_agent(
                 operational_failure_kind = output_failure.kind
                 operational_failure_phase = "output-validation"
                 if output_failure.kind == "provider-setting-error":
+                    operational_failure_kind = "model-unavailable"
                     detail = "The requested model is not available on this lane."
                 else:
                     detail = output_failure.detail

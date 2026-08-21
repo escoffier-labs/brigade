@@ -1098,16 +1098,17 @@ _CODEX_UNSUPPORTED_MODEL_400 = (
 
 
 @pytest.mark.parametrize("stream", ["stderr", "stdout"])
-def test_run_agent_classifies_nonzero_unsupported_model_without_leaking_provider_400(monkeypatch, stream):
-    stdout = _CODEX_UNSUPPORTED_MODEL_400 if stream == "stdout" else ""
-    stderr = _CODEX_UNSUPPORTED_MODEL_400 if stream == "stderr" else ""
+@pytest.mark.parametrize("diagnostic", [_CODEX_UNSUPPORTED_MODEL_400, "Error: model not supported"])
+def test_run_agent_classifies_nonzero_unsupported_model_without_leaking_provider_400(monkeypatch, stream, diagnostic):
+    stdout = diagnostic if stream == "stdout" else ""
+    stderr = diagnostic if stream == "stderr" else ""
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(1, stdout, stderr))
 
     result = agents.run_agent("codex", "scan the tree", model="gpt-daybreak-blue-latest")
 
     assert result.ok is False
-    assert result.failure_kind == "provider-setting-error"
+    assert result.failure_kind == "model-unavailable"
     assert result.detail == "The requested model is not available on this lane."
     assert "400" not in result.detail
     assert "invalid_request_error" not in result.detail
