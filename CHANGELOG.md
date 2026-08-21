@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- The center Work view now labels dispatch waves as plain-language steps (for example `Step 2 of 5 - one task at a time (blocks step 3)`) instead of bare `Wave N`, rewords the Parallel tile to Together / yes-or-no with a sentence about whether ready tasks can start at the same time, and draws a small SVG of `blocks` / `parent-child` edges so "what is blocking what" is visible even when waves are absent. The task list stays. Fixes #977.
 - The center dashboard Status view now answers "What needs my attention across handoffs, memory care, verify loop, and inbox hygiene right now?" with a plain-sentence summary strip and health tiles (icon + plain word: OK / ATTENTION / MISSING / TIMED OUT, never color alone), following the Memory Operations baseline. Raw ids move into `<details>` expanders, the placeholder rows for latest verify receipt/signal are dropped, and missing brief sections render as readable MISSING tiles instead of `-` table rows. Refs #972.
 
 ### Security
