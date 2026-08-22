@@ -22,10 +22,20 @@ SCHEMA_VERSION = 1
 
 MODULE_CAP = 15
 EDGE_CAP = 24
+MAX_BLAST_HOPS = 5
 _TOP_FILES = 5
 _TEST_CAP = 8
 _SEARCH_LIMIT = 12
 _GRAPH_TIMEOUT = 30.0
+
+
+def parse_blast_hops(raw: object, default: int = 1) -> int:
+    """Clamp a hop-depth query to ``1..MAX_BLAST_HOPS``."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(MAX_BLAST_HOPS, value))
 
 
 def export_payload(
@@ -33,6 +43,9 @@ def export_payload(
     *,
     symbol: str | None = None,
     overlay: bool = False,
+    focus: str | None = None,
+    up_hops: int = 1,
+    down_hops: int = 1,
 ) -> dict[str, Any]:
     """Build the versioned export JSON contract for *target*."""
     target = target.expanduser().resolve()
@@ -67,11 +80,25 @@ def export_payload(
     if symbol and symbol.strip():
         payload["impact"] = _impact_section(binary, db_path, target, symbol.strip())
 
+    changed_modules: list[str] = []
     if overlay:
+        changed_modules = sorted({_module_key(path) for path in changed_files if _module_key(path)})
         payload["change_overlay"] = {
             "changed_files": changed_files,
-            "changed_modules": sorted({_module_key(path) for path in changed_files if _module_key(path)}),
+            "changed_modules": changed_modules,
         }
+
+    seed = (focus or "").strip()
+    if not seed and len(changed_modules) == 1:
+        seed = changed_modules[0]
+    if seed:
+        payload["blast_radius"] = focus_neighborhood(
+            file_graph,
+            seed,
+            up_hops=parse_blast_hops(up_hops),
+            down_hops=parse_blast_hops(down_hops),
+            changed_modules=set(changed_modules),
+        )
 
     return payload
 
@@ -86,6 +113,9 @@ def run_cli(target: Path, forwarded: list[str]) -> int:
     json_output = False
     symbol: str | None = None
     overlay = False
+    focus: str | None = None
+    up_hops = 1
+    down_hops = 1
     index = 0
     while index < len(forwarded):
         token = forwarded[index]
@@ -108,6 +138,39 @@ def run_cli(target: Path, forwarded: list[str]) -> int:
             overlay = True
             index += 1
             continue
+        if token == "--focus":
+            if index + 1 >= len(forwarded):
+                print("error: --focus requires a value", file=sys.stderr)
+                return 2
+            focus = forwarded[index + 1]
+            index += 2
+            continue
+        if token.startswith("--focus="):
+            focus = token.split("=", 1)[1]
+            index += 1
+            continue
+        if token == "--up":
+            if index + 1 >= len(forwarded):
+                print("error: --up requires a value", file=sys.stderr)
+                return 2
+            up_hops = parse_blast_hops(forwarded[index + 1])
+            index += 2
+            continue
+        if token.startswith("--up="):
+            up_hops = parse_blast_hops(token.split("=", 1)[1])
+            index += 1
+            continue
+        if token == "--down":
+            if index + 1 >= len(forwarded):
+                print("error: --down requires a value", file=sys.stderr)
+                return 2
+            down_hops = parse_blast_hops(forwarded[index + 1])
+            index += 2
+            continue
+        if token.startswith("--down="):
+            down_hops = parse_blast_hops(token.split("=", 1)[1])
+            index += 1
+            continue
         if token in {"--format", "--scope", "--out"}:
             if token in {"--format", "--scope", "--out"} and index + 1 < len(forwarded):
                 index += 2
@@ -122,7 +185,14 @@ def run_cli(target: Path, forwarded: list[str]) -> int:
         )
         return 2
 
-    payload = export_payload(target, symbol=symbol, overlay=overlay)
+    payload = export_payload(
+        target,
+        symbol=symbol,
+        overlay=overlay,
+        focus=focus,
+        up_hops=up_hops,
+        down_hops=down_hops,
+    )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if "error" not in payload else 1
 
@@ -263,6 +333,214 @@ def _package_group(module_id: str) -> str:
 
 def _is_test_path(file_path: str) -> bool:
     return "tests" in PurePosixPath(file_path).parts
+
+
+def _uncapped_module_graph(file_graph: dict[str, Any]) -> dict[str, Any]:
+    """Build the full module adjacency (no MODULE_CAP / EDGE_CAP)."""
+    raw_nodes = file_graph.get("nodes")
+    nodes: dict[str, int] = raw_nodes if isinstance(raw_nodes, dict) else {}
+    raw_edge_list = file_graph.get("edges")
+    raw_edges: list[tuple[str, str, int]] = raw_edge_list if isinstance(raw_edge_list, list) else []
+
+    labels: dict[str, str] = {}
+    seen_files: set[str] = set()
+    for file_path in nodes:
+        canonical = _canonical_file_path(str(file_path))
+        if canonical is None or canonical in seen_files:
+            continue
+        seen_files.add(canonical)
+        module_id = _module_key(canonical)
+        if module_id:
+            labels[module_id] = _module_label(module_id)
+
+    edge_weight: dict[tuple[str, str], int] = defaultdict(int)
+    seen_edge_files: set[tuple[str, str]] = set()
+    inbound: dict[str, set[str]] = defaultdict(set)
+    outbound: dict[str, set[str]] = defaultdict(set)
+    for source, target_file, weight in raw_edges:
+        source_path = _canonical_file_path(str(source))
+        target_path = _canonical_file_path(str(target_file))
+        if source_path is None or target_path is None:
+            continue
+        edge_key = (source_path, target_path)
+        if edge_key in seen_edge_files:
+            continue
+        seen_edge_files.add(edge_key)
+        source_mod = _module_key(source_path)
+        target_mod = _module_key(target_path)
+        if not source_mod or not target_mod or source_mod == target_mod:
+            continue
+        amount = int(weight) if isinstance(weight, int) and weight >= 0 else 1
+        edge_weight[(source_mod, target_mod)] += amount
+        inbound[target_mod].add(source_mod)
+        outbound[source_mod].add(target_mod)
+        labels.setdefault(source_mod, _module_label(source_mod))
+        labels.setdefault(target_mod, _module_label(target_mod))
+
+    return {
+        "labels": labels,
+        "edge_weight": dict(edge_weight),
+        "inbound": {key: set(value) for key, value in inbound.items()},
+        "outbound": {key: set(value) for key, value in outbound.items()},
+    }
+
+
+def _resolve_focus_id(labels: dict[str, str], focus: str) -> tuple[str | None, list[str]]:
+    """Resolve *focus* to a unique module id, or list every matching id.
+
+    An exact unique module id (or the unique ``_module_key`` of a path) still
+    resolves directly. A typed short name that matches more than one module
+    returns ``(None, sorted_candidates)`` so the caller can ask the operator
+    to pick a full id — never a silent first-match.
+    """
+    requested = focus.strip()
+    if not requested:
+        return None, []
+    if requested in labels:
+        return requested, [requested]
+    lowered = requested.lower()
+    id_ci = sorted(module_id for module_id in labels if module_id.lower() == lowered)
+    if len(id_ci) == 1:
+        return id_ci[0], id_ci
+    if len(id_ci) > 1:
+        return None, id_ci
+    exact_labels = sorted(module_id for module_id, label in labels.items() if label == requested)
+    if len(exact_labels) == 1:
+        return exact_labels[0], exact_labels
+    if len(exact_labels) > 1:
+        return None, exact_labels
+    ci_labels = sorted(module_id for module_id, label in labels.items() if label.lower() == lowered)
+    if len(ci_labels) == 1:
+        return ci_labels[0], ci_labels
+    if len(ci_labels) > 1:
+        return None, ci_labels
+    keyed = _module_key(requested)
+    if keyed in labels:
+        return keyed, [keyed]
+    return None, []
+
+
+def _walk_hops(
+    start: str,
+    adjacency: dict[str, set[str]],
+    hops: int,
+    *,
+    edge_weight: dict[tuple[str, str], int],
+    labels: dict[str, str],
+    inbound: bool,
+) -> list[dict[str, Any]]:
+    """Walk *hops* from *start* and rank each hop independently.
+
+    When several parents at the same hop reach one module, *weight* is the
+    **sum** of those parent-edge weights (not the first set-iteration winner).
+    Rows sort by aggregated weight descending, then module id ascending, so
+    the order is stable before any display cap.
+    """
+    seen: set[str] = {start}
+    frontier: set[str] = {start}
+    rows: list[dict[str, Any]] = []
+    depth = parse_blast_hops(hops)
+    for hop in range(1, depth + 1):
+        hop_weight: dict[str, int] = defaultdict(int)
+        for node in sorted(frontier):
+            for neighbor in sorted(adjacency.get(node, ())):
+                if neighbor in seen:
+                    continue
+                pair = (neighbor, node) if inbound else (node, neighbor)
+                hop_weight[neighbor] += int(edge_weight.get(pair, 0))
+        ordered = sorted(hop_weight.items(), key=lambda kv: (-kv[1], kv[0]))
+        hop_rows = [
+            {
+                "id": neighbor,
+                "label": labels.get(neighbor, _module_label(neighbor)),
+                "hops": hop,
+                "weight": weight,
+            }
+            for neighbor, weight in ordered
+        ]
+        rows.extend(hop_rows)
+        nxt = set(hop_weight)
+        seen.update(nxt)
+        frontier = nxt
+        if not frontier:
+            break
+    return rows
+
+
+def focus_neighborhood(
+    file_graph: dict[str, Any],
+    focus: str,
+    *,
+    up_hops: int = 1,
+    down_hops: int = 1,
+    changed_modules: set[str] | None = None,
+) -> dict[str, Any]:
+    """Return uncapped upstream/downstream rows for *focus* from the full graph.
+
+    This is the blast-radius query helper: neighbors are walked on the complete
+    module adjacency, never on a MODULE_CAP / EDGE_CAP truncated export.
+    """
+    graph = _uncapped_module_graph(file_graph)
+    labels: dict[str, str] = graph["labels"]
+    edge_weight: dict[tuple[str, str], int] = graph["edge_weight"]
+    inbound: dict[str, set[str]] = graph["inbound"]
+    outbound: dict[str, set[str]] = graph["outbound"]
+    resolved, candidates = _resolve_focus_id(labels, focus)
+    changed = changed_modules or set()
+    up_depth = parse_blast_hops(up_hops)
+    down_depth = parse_blast_hops(down_hops)
+    if resolved is None:
+        requested = focus.strip() or focus
+        ambiguous = bool(candidates)
+        return {
+            "focus": {
+                "id": requested,
+                "label": requested,
+                "changed": requested in changed,
+            },
+            "resolved": False,
+            "ambiguous": ambiguous,
+            "candidates": [
+                {"id": module_id, "label": labels.get(module_id, _module_label(module_id))} for module_id in candidates
+            ],
+            "upstream": [],
+            "downstream": [],
+            "upstream_depth": up_depth,
+            "downstream_depth": down_depth,
+        }
+
+    upstream = _walk_hops(
+        resolved,
+        inbound,
+        up_depth,
+        edge_weight=edge_weight,
+        labels=labels,
+        inbound=True,
+    )
+    downstream = _walk_hops(
+        resolved,
+        outbound,
+        down_depth,
+        edge_weight=edge_weight,
+        labels=labels,
+        inbound=False,
+    )
+    for row in (*upstream, *downstream):
+        row["changed"] = str(row["id"]) in changed
+    return {
+        "focus": {
+            "id": resolved,
+            "label": labels.get(resolved, _module_label(resolved)),
+            "changed": resolved in changed,
+        },
+        "resolved": True,
+        "ambiguous": False,
+        "candidates": [],
+        "upstream": upstream,
+        "downstream": downstream,
+        "upstream_depth": up_depth,
+        "downstream_depth": down_depth,
+    }
 
 
 def _insight_ref(
