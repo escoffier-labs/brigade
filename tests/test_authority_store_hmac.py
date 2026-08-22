@@ -715,9 +715,7 @@ def test_default_home_brigade_marker_is_created_and_blocks_strip(
         ledger._read_external_directory_authority(workspace)
 
 
-def test_marker_rejects_workspace_symlink_and_dotdot_escape(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_marker_rejects_workspace_symlink_and_dotdot_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "ws"
     outside = tmp_path / "outside"
     workspace.mkdir()
