@@ -2171,9 +2171,7 @@ def downgrade_external_directory_authority(
         try:
             inner_digest = _authority_target_digest(verified)
         except OSError as exc:
-            raise OSError(
-                "authority downgrade refuses a store envelope bound to a different target"
-            ) from exc
+            raise OSError("authority downgrade refuses a store envelope bound to a different target") from exc
         if inner_digest != fingerprint:
             raise OSError("authority downgrade refuses a store envelope bound to a different target")
         unsigned_record = verified

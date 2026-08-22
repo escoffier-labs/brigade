@@ -306,9 +306,7 @@ def clear_key_cache() -> None:
     _CACHE.clear()
 
 
-def _write_private_json(
-    path: Path, payload: dict, *, on_replaced: Callable[[], None] | None = None
-) -> None:
+def _write_private_json(path: Path, payload: dict, *, on_replaced: Callable[[], None] | None = None) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     descriptor = -1

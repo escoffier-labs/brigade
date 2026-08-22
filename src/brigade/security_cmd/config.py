@@ -270,9 +270,7 @@ _ISOLATION_EXTERNAL_KEY_LINE = re.compile(
 )
 
 
-def turn_off_authority_store_isolation(
-    target: Path, *, on_replaced: Callable[[], None] | None = None
-) -> bytes | None:
+def turn_off_authority_store_isolation(target: Path, *, on_replaced: Callable[[], None] | None = None) -> bytes | None:
     """Set ``authority_store.isolation`` to ``off`` in place.
 
     Returns the previous file bytes when a line was changed, otherwise ``None``.

@@ -666,9 +666,7 @@ def test_authority_downgrade_fails_closed_when_external_key_removed(
     assert not authority_marker.audit_path().exists()
 
 
-def test_downgrade_rejects_cross_target_envelope(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_downgrade_rejects_cross_target_envelope(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A valid envelope copied from target B must not downgrade as target A."""
 
     dest = tmp_path / "alpha-workspace"
