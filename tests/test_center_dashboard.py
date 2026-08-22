@@ -623,6 +623,15 @@ def test_memory_operations_renders_topology_health_ownership_and_inventory_field
     assert 'class="mo-summary"' in html or "data-mo-summary" in html
     assert "<svg" in html and ('class="mo-pipeline"' in html or "data-mo-pipeline" in html)
     assert "mo-health-tile" in html or "mo-health-tiles" in html
+    # Chip-icon fills are nonce stylesheet classes; inline style= is CSP-blocked.
+    assert "style=" not in re.sub(r"<style\b[^>]*>.*?</style>", "", html, flags=re.DOTALL)
+    assert 'class="mo-chip-icon mo-chip-good"' in html
+    assert 'class="mo-chip-icon mo-chip-warning"' in html
+    assert 'class="mo-chip-icon mo-chip-serious"' in html
+    assert ".mo-chip-good { background: #0ca30c; }" in html
+    assert ".mo-chip-warning { background: #fab219; }" in html
+    assert ".mo-chip-serious { background: #ec835a; }" in html
+    assert ".mo-chip-critical { background: #d03b3b; }" in html
 
     for label in (
         "Care scan",
