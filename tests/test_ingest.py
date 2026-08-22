@@ -465,6 +465,20 @@ def test_missing_inbox_returns_error(tmp_target: Path):
     assert rc == 2
 
 
+def test_ingest_fails_closed_on_invalid_handoff_sources(tmp_path, capsys):
+    workspace = tmp_path / "wsA"
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".claude" / "memory-handoffs").mkdir(parents=True)
+    (workspace / ".brigade" / "handoff-sources.json").write_text("{broken")
+
+    rc = ingest_mod.run(target=workspace)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "invalid handoff source config" in err
+    assert "invalid JSON" in err
+    assert "no handoff inbox" not in err
+
+
 def test_ingest_processes_configured_non_target_root(tmp_path):
     workspace = tmp_path / "wsA"
     other = tmp_path / "rootB"

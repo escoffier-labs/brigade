@@ -117,7 +117,11 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
 
 
 def _handoff_source_inbox_paths(target: Path) -> list[Path]:
-    """Existing inbox directories from `.brigade/handoff-sources.json`."""
+    """Inbox directories declared in `.brigade/handoff-sources.json`.
+
+    Raises ValueError when the file exists but cannot be parsed, so ingest
+    does not go green while omitting configured roots.
+    """
     from .handoff_cmd.models import default_sources_path
     from .handoff_cmd.sources import _load_sources
 
@@ -126,8 +130,8 @@ def _handoff_source_inbox_paths(target: Path) -> list[Path]:
         return []
     try:
         config = _load_sources(target, sources_path)
-    except ValueError:
-        return []
+    except ValueError as exc:
+        raise ValueError(f"invalid handoff source config {sources_path}: {exc}") from exc
     return [watched.root / watched.inbox for watched in config.watched]
 
 
@@ -182,7 +186,11 @@ def ingest_into(
     the fleet driver so it can sweep many sources into one owner and report once.
     """
     inbox_dir = owner / "memory" / "handoff-inbox"
-    handoff_dirs = _resolve_inbox_paths(source)
+    try:
+        handoff_dirs = _resolve_inbox_paths(source)
+    except ValueError as exc:
+        print(f"brigade ingest: {exc}", file=sys.stderr)
+        return 2
     if not handoff_dirs:
         legacy = source / ".claude" / "memory-handoffs"
         print(f"brigade ingest: no handoff inbox at {legacy}", file=sys.stderr)
