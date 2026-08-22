@@ -44,6 +44,21 @@ Supported fields:
 
 Keep tokens, private URLs, hostnames, mount paths, repo paths, and credentials out of this config. Use labels or local paths only when they are safe to expose in local command output.
 
+### Authority store isolation
+
+Same-uid scanner children can write the directory-authority binding store by path. File mode is not a boundary against a process that shares the operator uid. That residual class stays inside the default trust boundary.
+
+Set `authority_store.isolation = "external-key"` under `[authority_store]` to HMAC-sign **new** bindings with an operator-provisioned key that lives **outside** the workspace and the scanner-reachable `.brigade` tree. An existing HMAC envelope is always verified; the flag never skips a MAC check. The first signed write also records a user-level sticky marker at `~/.brigade/authority-signed/<target-fingerprint>` (override: `BRIGADE_USER_DIR`). A raw unsigned record for a marked target fails closed even if the repo flag is off. Downgrade is `brigade security authority downgrade --target <workspace> --confirm` only: it writes the inner unsigned record, removes the sticky marker, and sets isolation off so the next read cannot recreate the marker. `brigade doctor` WARNs when the flag is off.
+
+Expected key location and permissions:
+
+- Default path: `$XDG_CONFIG_HOME/brigade/authority/store-hmac.key` (Linux fallback `~/.config/brigade/authority/store-hmac.key`). macOS uses `~/Library/Application Support/brigade/authority/store-hmac.key`. Windows uses `%LOCALAPPDATA%\brigade\authority\store-hmac.key`.
+- Override: `BRIGADE_AUTHORITY_KEY_FILE` pointing at a file outside the workspace.
+- Permissions: key file `0600`, parent directory `0700`. Group- or world-readable keys are refused.
+- Brigade never writes this key inside the workspace or under `.brigade/`. A candidate whose unresolved path sits under the workspace, including a directory-symlink prefix, a file symlink, or a `..` re-entry, is refused before any key bytes are written.
+
+The key is still readable by any same-uid process that can find it. The sticky marker raises the bar (the attacker must also write `~/.brigade`) but is defense in depth, not a hard boundary. Privilege separation or an OS-mediated secret is the only class close; both stay opt-in so zero-dependency `quickstart` keeps working.
+
 ## Review Flow
 
 ```bash

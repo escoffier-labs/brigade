@@ -765,9 +765,11 @@ def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     from . import scanner_isolation
 
     isolation_status, isolation_name, isolation_detail = scanner_isolation.doctor_check()
+    authority_status, authority_name, authority_detail = security_cmd.authority_store_doctor_check(ctx.target)
     results: List[CheckResult] = [
         (OK, "security: built-in scanner", "available"),
         (isolation_status, isolation_name, isolation_detail),
+        (authority_status, authority_name, authority_detail),
     ]
     config = security_cmd.config_path(ctx.target)
     config_valid = True

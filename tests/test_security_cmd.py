@@ -1360,6 +1360,47 @@ def test_security_config_rejects_unknown_suppressions_key(tmp_path):
         security_cmd.load_config(tmp_path)
 
 
+def test_security_config_rejects_unknown_authority_store_key(tmp_path):
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                'isolation = "external-key"',
+                "extra_flag = true",
+                "",
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="unsupported authority_store key: extra_flag"):
+        security_cmd.load_config(tmp_path)
+
+
+def test_security_config_loads_authority_store_isolation(tmp_path):
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                'isolation = "external-key"',
+                "",
+            ]
+        )
+    )
+
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.authority_store_isolation == "external-key"
+    assert security_cmd.authority_store_isolation_mode(tmp_path) == "external-key"
+
+
 def test_security_config_rejects_unknown_enrichment_key(tmp_path):
     config = tmp_path / ".brigade" / "security.toml"
     config.parent.mkdir(parents=True)
@@ -2867,6 +2908,8 @@ def test_security_init_writes_gitignored_local_config(tmp_path, capsys):
     assert config.is_file()
     assert 'policy = "personal"' in config.read_text()
     assert "[enrichment]" in config.read_text()
+    assert "[authority_store]" in config.read_text()
+    assert 'isolation = "off"' in config.read_text()
     assert 'provider = "local"' in config.read_text()
     loaded = security_cmd.load_config(tmp_path)
     assert loaded is not None

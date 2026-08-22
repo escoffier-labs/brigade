@@ -77,6 +77,21 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
+    """Redirect user-level ``~/.brigade`` sticky state away from the real home.
+
+    Authority signed-markers default to ``$HOME/.brigade``. The redirected
+    path must end in ``.brigade`` so tests exercise the real default location
+    instead of a ``user_brigade`` temp that accidentally omits that component.
+    """
+    home = tmp_path_factory.mktemp("operator_home")
+    user_dir = home / ".brigade"
+    user_dir.mkdir(mode=0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("BRIGADE_USER_DIR", str(user_dir))
+
+
+@pytest.fixture(autouse=True)
 def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
     """Default to the bare-host baseline: no managed tool resolves.
 

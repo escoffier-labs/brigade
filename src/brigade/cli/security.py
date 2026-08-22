@@ -157,6 +157,25 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Append findings to the local Brigade work import inbox.",
     )
+    p_security_authority = security_sub.add_parser(
+        "authority", help="Manage directory-authority store isolation and downgrade."
+    )
+    authority_sub = p_security_authority.add_subparsers(
+        dest="security_authority_command", metavar="<authority-command>"
+    )
+    authority_sub.required = True
+    p_security_authority_downgrade = authority_sub.add_parser(
+        "downgrade",
+        help="Convert the signed authority store to unsigned and remove the sticky marker.",
+    )
+    p_security_authority_downgrade.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to downgrade."
+    )
+    p_security_authority_downgrade.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required. Confirm the downgrade. A TTY also prompts y/N.",
+    )
     p_security.set_defaults(func=dispatch)
 
 
@@ -227,5 +246,9 @@ def dispatch(args) -> int:
             import_findings=args.import_findings,
             output_dir=args.output_dir,
         )
+    if args.security_command == "authority":
+        if getattr(args, "security_authority_command", None) == "downgrade":
+            return security_cmd.authority_downgrade(target=args.target, confirm=args.confirm)
+        args._brigade_parser.error(f"unknown security authority command: {args.security_authority_command}")
     args._brigade_parser.error(f"unknown security command: {args.security_command}")
     return 2

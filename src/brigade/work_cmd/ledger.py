@@ -1569,8 +1569,9 @@ def _directory_authority_store_path(target: Path, *, env: Mapping[str, str] | No
     ``env`` resolves the record under a different data root, which the scanner
     child sandbox uses to seed a copy without exposing the operator's store.
     """
-    resolved = str(target.expanduser().resolve())
-    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+    from .. import authority_marker
+
+    digest = authority_marker.target_fingerprint(target)
     try:
         data_root = Path(component_paths.data_root() if env is None else component_paths.data_root(env=env))
     except ValueError as exc:
@@ -1740,8 +1741,28 @@ def _require_workspace_directory_identity(target: Path, expected: dict[str, int]
         raise OSError("workspace directory identity does not match expected identity")
 
 
+def _authority_workspace_from_record(record: Mapping[str, Any] | None) -> Path | None:
+    if record is None:
+        return None
+    raw = record.get("target")
+    if isinstance(raw, str) and raw:
+        return Path(raw)
+    return None
+
+
+def _authority_hmac_enabled(workspace: Path | None) -> bool:
+    from .. import authority_key
+
+    return authority_key.hmac_enabled(workspace)
+
+
 def _read_external_directory_authority_path(
-    path: Path, *, env: Mapping[str, str] | None = None, key_material: tuple[bytes, str] | None = None
+    path: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    key_material: tuple[bytes, str] | None = None,
+    workspace: Path | None = None,
+    allow_unsigned_upgrade: bool = True,
 ) -> dict[str, Any] | None:
     """Read one external authority record without deriving authority from its path."""
     try:
@@ -1762,12 +1783,19 @@ def _read_external_directory_authority_path(
         os.close(descriptor)
     if not isinstance(payload, dict):
         raise OSError("external directory authority record is malformed")
-    return _unwrap_authority_envelope(path, payload, env=env, key_material=key_material)
+    return _unwrap_authority_envelope(
+        path,
+        payload,
+        env=env,
+        key_material=key_material,
+        workspace=workspace,
+        allow_unsigned_upgrade=allow_unsigned_upgrade,
+    )
 
 
 def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, Any] | None]:
     path = _directory_authority_store_path(target)
-    return path, _read_external_directory_authority_path(path)
+    return path, _read_external_directory_authority_path(path, workspace=target)
 
 
 def _authority_target_digest(record: Mapping[str, Any]) -> str:
@@ -1783,12 +1811,26 @@ def _unwrap_authority_envelope(
     *,
     env: Mapping[str, str] | None = None,
     key_material: tuple[bytes, str] | None = None,
+    workspace: Path | None = None,
+    allow_unsigned_upgrade: bool = True,
 ) -> dict[str, Any]:
-    from .. import authority_broker, authority_key
+    from .. import authority_broker, authority_key, authority_marker
+
+    inner = (
+        payload["record"]
+        if payload.get("envelope_version") == 1 and isinstance(payload.get("record"), dict)
+        else payload
+    )
+    workspace = workspace or _authority_workspace_from_record(inner if isinstance(inner, dict) else None)
+    hmac_on = _authority_hmac_enabled(workspace)
 
     if payload.get("envelope_version") == 1:
+        # An existing envelope is always verified. The isolation flag only
+        # gates whether new writes are signed; it must not skip a MAC check.
         try:
-            secret, loaded_id = key_material if key_material is not None else authority_key.load_key(env=env)
+            secret, loaded_id = (
+                key_material if key_material is not None else authority_key.load_key(env=env, workspace=workspace)
+            )
         except OSError as exc:
             raise OSError("external directory authority key is unavailable") from exc
         try:
@@ -1810,13 +1852,33 @@ def _unwrap_authority_envelope(
         expected_name = f"{_authority_target_digest(record)}.json"
         if path.name != expected_name:
             raise OSError("authority store filename does not match the bound target")
+        if workspace is not None:
+            authority_marker.record_signed_marker(workspace)
         return record
+    if authority_marker.marker_exists(workspace, record=payload):
+        raise OSError(
+            "signed authority store refuses a raw unsigned record; "
+            "run brigade security authority downgrade to intentionally downgrade"
+        )
+    if hmac_on and not allow_unsigned_upgrade:
+        raise OSError(
+            "signed authority store refuses a raw unsigned reanchor candidate; "
+            "the destination isolation policy does not accept an unsigned store"
+        )
+    if not hmac_on:
+        if "schema_version" not in payload or "target" not in payload:
+            raise OSError("external directory authority record is malformed")
+        return payload
     if authority_key.require_signed(env=env):
         raise OSError("unsigned authority store record is refused")
     if "schema_version" not in payload or "target" not in payload:
         raise OSError("external directory authority record is malformed")
     try:
-        secret, loaded_id = key_material if key_material is not None else authority_key.load_key(env=env, create=True)
+        secret, loaded_id = (
+            key_material
+            if key_material is not None
+            else authority_key.load_key(env=env, create=True, workspace=workspace)
+        )
     except OSError as exc:
         raise OSError("external directory authority key is unavailable") from exc
     if (
@@ -1824,7 +1886,7 @@ def _unwrap_authority_envelope(
         is not None
     ):
         raise OSError("unsigned authority store downgrade is refused")
-    _write_external_directory_authority(path, payload, env=env, key_material=(secret, loaded_id))
+    _write_external_directory_authority(path, payload, env=env, key_material=(secret, loaded_id), workspace=workspace)
     return payload
 
 
@@ -1953,8 +2015,9 @@ def _write_external_directory_authority(
     *,
     env: Mapping[str, str] | None = None,
     key_material: tuple[bytes, str] | None = None,
+    workspace: Path | None = None,
 ) -> None:
-    from .. import authority_broker, authority_key
+    from .. import authority_broker, authority_key, authority_marker
 
     record = (
         payload["record"]
@@ -1963,9 +2026,42 @@ def _write_external_directory_authority(
     )
     if record.get("envelope_version") == 1:
         record = dict(record.get("record") or {})
-    secret, loaded_id = key_material if key_material is not None else authority_key.load_key(env=env, create=True)
-    sequence = authority_key.next_sequence(_authority_target_digest(record), env=env, secret=secret, key_id=loaded_id)
-    envelope = authority_broker.sign_store_record(secret, record, sequence, loaded_id)
+    workspace = workspace or _authority_workspace_from_record(record)
+    hmac_on = _authority_hmac_enabled(workspace)
+    if hmac_on:
+        secret, loaded_id = (
+            key_material
+            if key_material is not None
+            else authority_key.load_key(env=env, create=True, workspace=workspace)
+        )
+        sequence = authority_key.next_sequence(
+            _authority_target_digest(record), env=env, secret=secret, key_id=loaded_id
+        )
+        to_write: dict[str, Any] = authority_broker.sign_store_record(secret, record, sequence, loaded_id)
+    else:
+        if authority_marker.marker_exists(workspace, record=record):
+            raise OSError(
+                "signed authority store refuses a raw unsigned record; "
+                "run brigade security authority downgrade to intentionally downgrade"
+            )
+        to_write = dict(record)
+    _publish_authority_store_payload(path, to_write)
+    if hmac_on and workspace is not None:
+        authority_marker.record_signed_marker(workspace)
+
+
+def _downgrade_durability_checkpoint(path: Path) -> None:
+    """Test seam: dest bytes have changed; parent-dir durability has not run yet."""
+
+
+def _publish_authority_store_payload(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    on_replaced: Callable[[], None] | None = None,
+) -> None:
+    """Atomically replace the authority store file. No HMAC or marker side effects."""
+
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     descriptor = -1
@@ -1976,13 +2072,15 @@ def _write_external_directory_authority(
             0o600,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:
-            handle.write(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            handle.write(json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
         # Windows refuses os.replace while the source handle is still open (WinError 32).
         os.close(descriptor)
         descriptor = -1
         os.replace(temporary, path)
+        if on_replaced is not None:
+            on_replaced()
         directory = _open_directory_nofollow(path.parent)
         try:
             _dirfd_fsync(directory)
@@ -1995,6 +2093,208 @@ def _write_external_directory_authority(
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _read_raw_authority_store(path: Path) -> tuple[bytes | None, dict[str, Any] | None]:
+    """Read store bytes and JSON without unwrapping or recording a marker."""
+
+    try:
+        descriptor = _open_file_nofollow(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return None, None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError("external directory authority record is not a single-link regular file")
+        raw = os.read(descriptor, 1024 * 1024)
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError("external directory authority record is malformed") from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(payload, dict):
+        raise OSError("external directory authority record is malformed")
+    return raw, payload
+
+
+def _restore_authority_file(path: Path, data: bytes) -> None:
+    from .. import authority_marker
+
+    authority_marker._restore_marker_bytes(path, data)
+
+
+def downgrade_external_directory_authority(
+    target: Path,
+    *,
+    actor: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Convert a signed store to unsigned, remove the sticky marker, and audit.
+
+    The envelope must be bound to this destination target. A valid MAC for a
+    different inner target is refused before any mutation. Intent is logged
+    first. Each artifact is recorded the moment dest bytes change so a
+    durability-step failure still restores store, sequence, isolation, and
+    marker to their pre-downgrade state.
+    """
+
+    from .. import authority_broker, authority_key, authority_marker
+    from ..localio import utc_now_iso_z
+    from ..security_cmd.config import turn_off_authority_store_isolation
+    from ..security_cmd.models import config_path as security_config_path
+
+    workspace = target.expanduser().resolve()
+    store_path = _directory_authority_store_path(workspace, env=env)
+    fingerprint = authority_marker.target_fingerprint(workspace)
+    marker_path = authority_marker.signed_marker_path(fingerprint, env=env)
+    authority_marker.reject_unsafe_marker_path(marker_path, workspace, env=env)
+    isolation_path = security_config_path(workspace)
+
+    store_backup, raw_payload = _read_raw_authority_store(store_path)
+    unsigned_record: dict[str, Any] | None = None
+    key_material: tuple[bytes, str] | None = None
+    if raw_payload is not None and raw_payload.get("envelope_version") == 1:
+        try:
+            secret, loaded_id = authority_key.load_key(env=env, workspace=workspace)
+            verified = authority_broker.verify_store_envelope(secret, raw_payload, loaded_id)
+            key_material = (secret, loaded_id)
+        except (OSError, ValueError) as exc:
+            raise OSError(
+                "authority downgrade cannot unwrap the signed store because the "
+                "external HMAC key is unavailable; restore the operator "
+                "store-hmac.key (or BRIGADE_AUTHORITY_KEY_FILE) and retry. "
+                "the store and marker were not changed"
+            ) from exc
+        try:
+            inner_digest = _authority_target_digest(verified)
+        except OSError as exc:
+            raise OSError("authority downgrade refuses a store envelope bound to a different target") from exc
+        if inner_digest != fingerprint:
+            raise OSError("authority downgrade refuses a store envelope bound to a different target")
+        unsigned_record = verified
+
+    try:
+        marker_bytes = marker_path.read_bytes()
+    except FileNotFoundError:
+        marker_bytes = None
+    except OSError as exc:
+        raise OSError("authority signed marker is unreadable") from exc
+
+    actor_value = actor if actor is not None else authority_marker.operator_identity(env=env)
+    resolved = str(workspace)
+    if unsigned_record is None and marker_bytes is None:
+        return {
+            "action": "authority-downgrade",
+            "actor": actor_value,
+            "created_at": utc_now_iso_z(),
+            "phase": "complete",
+            "removed": False,
+            "store_unwrapped": False,
+            "target": resolved,
+            "target_fingerprint": fingerprint,
+        }
+
+    intent = {
+        "action": "authority-downgrade",
+        "actor": actor_value,
+        "created_at": utc_now_iso_z(),
+        "phase": "intent",
+        "removed": False,
+        "store_unwrapped": unsigned_record is not None,
+        "target": resolved,
+        "target_fingerprint": fingerprint,
+    }
+    try:
+        authority_marker.append_audit(intent, env=env)
+    except OSError as exc:
+        raise OSError("authority downgrade audit is unavailable; marker not removed") from exc
+
+    sequence_path = authority_key.sequence_path(env=env)
+    try:
+        sequence_backup = sequence_path.read_bytes()
+    except FileNotFoundError:
+        sequence_backup = None
+    except OSError:
+        sequence_backup = None
+    try:
+        if isolation_path.is_file() and not isolation_path.is_symlink():
+            isolation_backup = isolation_path.read_bytes()
+        else:
+            isolation_backup = None
+    except OSError:
+        isolation_backup = None
+
+    changed: dict[Path, bytes] = {}
+    marker_removed = False
+
+    def _record_change(path: Path, backup: bytes | None) -> None:
+        if backup is not None:
+            changed[path] = backup
+        _downgrade_durability_checkpoint(path)
+
+    def _restore_all() -> None:
+        for path, backup in changed.items():
+            _restore_authority_file(path, backup)
+        if marker_removed and marker_bytes is not None:
+            _restore_authority_file(marker_path, marker_bytes)
+
+    try:
+        if unsigned_record is not None:
+            _publish_authority_store_payload(
+                store_path,
+                unsigned_record,
+                on_replaced=lambda: _record_change(store_path, store_backup),
+            )
+            if key_material is not None:
+                digest = _authority_target_digest(unsigned_record)
+                authority_key.drop_sequence(
+                    digest,
+                    env=env,
+                    secret=key_material[0],
+                    key_id=key_material[1],
+                    on_replaced=lambda: _record_change(sequence_path, sequence_backup),
+                )
+        turn_off_authority_store_isolation(
+            workspace,
+            on_replaced=lambda: _record_change(isolation_path, isolation_backup),
+        )
+        if marker_bytes is not None:
+            try:
+                marker_path.unlink()
+            except FileNotFoundError:
+                pass
+            else:
+                marker_removed = True
+                _downgrade_durability_checkpoint(marker_path)
+    except OSError:
+        try:
+            _restore_all()
+        except OSError:
+            pass
+        raise
+
+    completion = {
+        "action": "authority-downgrade",
+        "actor": actor_value,
+        "created_at": utc_now_iso_z(),
+        "phase": "complete",
+        "removed": marker_removed,
+        "store_unwrapped": unsigned_record is not None,
+        "target": resolved,
+        "target_fingerprint": fingerprint,
+    }
+    try:
+        completion["audit_path"] = str(authority_marker.append_audit(completion, env=env))
+    except OSError as exc:
+        try:
+            _restore_all()
+        except OSError as restore_exc:
+            raise OSError("authority downgrade audit failed and marker restore failed") from restore_exc
+        raise OSError("authority downgrade audit failed; marker restored") from exc
+    return completion
 
 
 def _record_external_directory_authority(
@@ -2044,7 +2344,7 @@ def _record_external_directory_authority(
             )
         return
     directories[scope] = identity
-    _write_external_directory_authority(path, payload)
+    _write_external_directory_authority(path, payload, workspace=target)
 
 
 def _reanchor_external_directory_authority(
@@ -2064,7 +2364,13 @@ def _reanchor_external_directory_authority(
         if candidate == current_path:
             continue
         try:
-            payload = _read_external_directory_authority_path(candidate)
+            # Bind verification to the destination target, not the candidate's
+            # self-declared target name. Never auto-upgrade a raw candidate.
+            payload = _read_external_directory_authority_path(
+                candidate,
+                workspace=target,
+                allow_unsigned_upgrade=False,
+            )
         except OSError:
             continue
         if payload is None:
@@ -2096,7 +2402,7 @@ def _reanchor_external_directory_authority(
             merged = dict(old_files)
             merged.update(_external_file_authorities(new_payload))
             new_payload["files"] = merged
-        _write_external_directory_authority(new_path, new_payload)
+        _write_external_directory_authority(new_path, new_payload, workspace=target)
         return True
     return False
 
@@ -2360,7 +2666,7 @@ def _restore_external_file_authorities(
         payload["files"] = merged
     else:
         payload.pop("files", None)
-    _write_external_directory_authority(path, payload)
+    _write_external_directory_authority(path, payload, workspace=target)
 
 
 def _record_verifier_owned_file(
@@ -2389,7 +2695,7 @@ def _record_verifier_owned_file(
     if files.get(scope) == identity:
         return
     files[scope] = identity
-    _write_external_directory_authority(path, existing)
+    _write_external_directory_authority(path, existing, workspace=target)
     if _file_identity(descriptor, data) != identity:
         raise OSError("file identity changed while recording authority")
 

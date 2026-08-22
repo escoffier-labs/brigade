@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 import json
+import os
 
 import pytest
 
@@ -493,6 +494,119 @@ def test_doctor_warns_on_stale_security_suppressions(tmp_target: Path, capsys):
     assert rc == 0
     assert "security: stale suppressions" in out
     assert "security: suppression reasons" in out
+
+
+def test_doctor_warns_when_authority_store_isolation_is_off(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    security_config = tmp_target / ".brigade" / "security.toml"
+    security_config.parent.mkdir(exist_ok=True)
+    security_config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                'isolation = "off"',
+                "",
+            ]
+        )
+    )
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "security: authority store" in out
+    assert "[warn]" in out
+    assert "same-uid" in out
+    assert "external-key" in out
+
+
+def test_doctor_warns_when_sticky_marker_exists_and_isolation_is_off(tmp_target: Path, capsys):
+    from brigade import authority_key, authority_marker
+    from brigade.work_cmd import ledger
+
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    security_config = tmp_target / ".brigade" / "security.toml"
+    security_config.parent.mkdir(exist_ok=True)
+    security_config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                'isolation = "external-key"',
+                "",
+            ]
+        )
+    )
+    (tmp_target / ".brigade").mkdir(exist_ok=True)
+    workspace = ledger._workspace_directory_identity(tmp_target)
+    root = os.open(tmp_target / ".brigade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        ledger._record_external_directory_authority(tmp_target, (".brigade",), root, workspace=workspace)
+    finally:
+        os.close(root)
+    assert authority_marker.marker_exists(tmp_target)
+    security_config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                'isolation = "off"',
+                "",
+            ]
+        )
+    )
+    authority_key.clear_key_cache()
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "security: authority store" in out
+    assert "[warn]" in out
+    assert "same-uid" in out
+    assert "signed store with isolation off" in out
+    assert "brigade security authority downgrade" in out
+
+
+def test_doctor_ok_when_authority_store_external_key_is_provisioned(tmp_target: Path, capsys):
+    from brigade import authority_key
+
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    security_config = tmp_target / ".brigade" / "security.toml"
+    security_config.parent.mkdir(exist_ok=True)
+    security_config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                'isolation = "external-key"',
+                "",
+            ]
+        )
+    )
+    authority_key.clear_key_cache()
+    authority_key.generate_key()
+    key = authority_key.key_path()
+    assert not authority_key.key_is_inside_tree(key, tmp_target)
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "security: authority store" in out
+    assert "external-key HMAC enabled" in out
+    assert "[fail]" not in out
 
 
 def test_doctor_warns_on_misconfigured_security_enrichment(tmp_target: Path, capsys):

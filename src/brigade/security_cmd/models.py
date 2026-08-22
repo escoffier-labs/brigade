@@ -176,6 +176,17 @@ CONFIG_ENRICHMENT_KEYS = frozenset(
 )
 
 
+AUTHORITY_STORE_ISOLATION_OFF = "off"
+AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY = "external-key"
+AUTHORITY_STORE_ISOLATION_VALUES = frozenset(
+    {
+        AUTHORITY_STORE_ISOLATION_OFF,
+        AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY,
+    }
+)
+CONFIG_AUTHORITY_STORE_KEYS = frozenset({"isolation"})
+
+
 SKIP_DIRS = {
     ".git",
     ".hg",
@@ -631,6 +642,7 @@ class SecurityConfig:
     suppressions: tuple[str, ...] = ()
     suppression_reasons: dict[str, str] = field(default_factory=dict)
     enrichment: SecurityEnrichmentConfig = field(default_factory=SecurityEnrichmentConfig)
+    authority_store_isolation: str = AUTHORITY_STORE_ISOLATION_OFF
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ class _SecurityToml:
     top_level_keys: frozenset[str]
     suppressions_keys: frozenset[str]
     enrichment_keys: frozenset[str]
+    authority_store_keys: frozenset[str]
 
 
 def _validate_config_keys(parsed: _SecurityToml) -> None:
@@ -57,6 +59,9 @@ def _validate_config_keys(parsed: _SecurityToml) -> None:
     unknown_enrichment = parsed.enrichment_keys - CONFIG_ENRICHMENT_KEYS
     if unknown_enrichment:
         raise ValueError(f"unsupported enrichment key: {', '.join(sorted(unknown_enrichment))}")
+    unknown_authority = parsed.authority_store_keys - CONFIG_AUTHORITY_STORE_KEYS
+    if unknown_authority:
+        raise ValueError(f"unsupported authority_store key: {', '.join(sorted(unknown_authority))}")
 
 
 def _read_toml_object(path: Path) -> _SecurityToml:
@@ -66,13 +71,14 @@ def _read_toml_object(path: Path) -> _SecurityToml:
     top_level_keys: set[str] = set()
     suppressions_keys: set[str] = set()
     enrichment_keys: set[str] = set()
+    authority_store_keys: set[str] = set()
     for line_number, raw_line in enumerate(path.read_text().splitlines(), start=1):
         line = raw_line.split("#", 1)[0].strip()
         if not line:
             continue
         if line.startswith("[") and line.endswith("]"):
             table = line[1:-1].strip()
-            if table not in {"suppressions", "suppression_reasons", "enrichment"}:
+            if table not in {"suppressions", "suppression_reasons", "enrichment", "authority_store"}:
                 raise ValueError(f"invalid security config line {line_number}: unsupported table [{table}]")
             current_section = table
             current = data.setdefault(table, {})
@@ -94,6 +100,9 @@ def _read_toml_object(path: Path) -> _SecurityToml:
             current[key] = value
         elif current_section == "suppression_reasons":
             current[key] = value
+        elif current_section == "authority_store":
+            authority_store_keys.add(key)
+            current[key] = value
         else:
             enrichment_keys.add(key)
             current[key] = value
@@ -102,6 +111,7 @@ def _read_toml_object(path: Path) -> _SecurityToml:
         top_level_keys=frozenset(top_level_keys),
         suppressions_keys=frozenset(suppressions_keys),
         enrichment_keys=frozenset(enrichment_keys),
+        authority_store_keys=frozenset(authority_store_keys),
     )
     _validate_config_keys(parsed)
     return parsed
@@ -164,6 +174,7 @@ def load_config(target: Path) -> SecurityConfig | None:
             if fingerprint.strip() and reason.strip():
                 suppression_reasons[fingerprint.strip()] = reason.strip()
     enrichment = _parse_enrichment_config(data.get("enrichment", {}))
+    authority_store_isolation = _parse_authority_store_isolation(data.get("authority_store", {}))
     return SecurityConfig(
         policy=policy,
         scan_profile=scan_profile,
@@ -177,6 +188,7 @@ def load_config(target: Path) -> SecurityConfig | None:
         suppressions=suppressions,
         suppression_reasons=suppression_reasons,
         enrichment=enrichment,
+        authority_store_isolation=authority_store_isolation,
     )
 
 
@@ -226,6 +238,120 @@ def _parse_enrichment_config(raw: object) -> SecurityEnrichmentConfig:
         misp_api_key_env=misp_api_key_env.strip(),
         timeout_seconds=timeout_seconds,
         cache_path=cache_path.strip(),
+    )
+
+
+def _parse_authority_store_isolation(raw: object) -> str:
+    if raw in ({}, None):
+        return AUTHORITY_STORE_ISOLATION_OFF
+    if not isinstance(raw, dict):
+        raise ValueError("authority_store must be a table")
+    isolation = raw.get("isolation", AUTHORITY_STORE_ISOLATION_OFF)
+    if not isinstance(isolation, str) or isolation not in AUTHORITY_STORE_ISOLATION_VALUES:
+        raise ValueError("authority_store.isolation must be one of: off, external-key")
+    return isolation
+
+
+def authority_store_isolation_mode(target: Path) -> str:
+    """Return the configured isolation mode. Missing or invalid config is off."""
+
+    try:
+        loaded = load_config(target)
+    except ValueError:
+        return AUTHORITY_STORE_ISOLATION_OFF
+    if loaded is None:
+        return AUTHORITY_STORE_ISOLATION_OFF
+    return loaded.authority_store_isolation
+
+
+_ISOLATION_EXTERNAL_KEY_LINE = re.compile(
+    r'^([ \t]*isolation[ \t]*=[ \t]*)(["\'])external-key\2([ \t]*(?:#.*)?)?\s*$',
+    re.MULTILINE,
+)
+
+
+def turn_off_authority_store_isolation(target: Path, *, on_replaced: Callable[[], None] | None = None) -> bytes | None:
+    """Set ``authority_store.isolation`` to ``off`` in place.
+
+    Returns the previous file bytes when a line was changed, otherwise ``None``.
+    Dest bytes are replaced before ``on_replaced`` so a durability failure can
+    still restore the original file.
+    """
+
+    path = config_path(target.expanduser().resolve())
+    if not path.is_file() or path.is_symlink():
+        return None
+    original = path.read_bytes()
+    try:
+        text = original.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    updated, count = _ISOLATION_EXTERNAL_KEY_LINE.subn(r"\1\2off\2\3", text, count=1)
+    if count == 0:
+        return None
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(updated, encoding="utf-8")
+        os.replace(temporary, path)
+        if on_replaced is not None:
+            on_replaced()
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return original
+
+
+def authority_store_doctor_check(target: Path) -> tuple[str, str, str]:
+    """Doctor status for opt-in external-key HMAC. WARN when the flag is off."""
+
+    name = "security: authority store"
+    mode = authority_store_isolation_mode(target)
+    residual = (
+        "residual same-uid write class: scanner children share the operator uid "
+        "and can rewrite the binding store by path; set "
+        'authority_store.isolation = "external-key" in .brigade/security.toml '
+        "to HMAC-sign bindings with a 0600 key outside the scanner-reachable tree"
+    )
+    if mode != AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY:
+        from .. import authority_marker
+
+        if authority_marker.marker_exists(target):
+            return (
+                "WARN",
+                name,
+                residual + "; signed store with isolation off: verification stays enforced; "
+                "run brigade security authority downgrade to intentionally downgrade",
+            )
+        return ("WARN", name, residual)
+    from .. import authority_key
+
+    path = authority_key.key_path()
+    try:
+        authority_key.reject_scanner_reachable_key_path(path, target)
+    except OSError:
+        return (
+            "FAIL",
+            name,
+            f"external-key HMAC key must live outside the workspace and scanner-reachable tree, not at {path}",
+        )
+    if not path.is_file():
+        return (
+            "FAIL",
+            name,
+            "external-key isolation is on but the HMAC key is missing; provision a 0600 file at "
+            "$XDG_CONFIG_HOME/brigade/authority/store-hmac.key or BRIGADE_AUTHORITY_KEY_FILE "
+            "outside the workspace",
+        )
+    try:
+        authority_key.load_key(workspace=target)
+    except OSError as exc:
+        return ("FAIL", name, str(exc))
+    return (
+        "OK",
+        name,
+        "external-key HMAC enabled; key is 0600 and outside the scanner-reachable tree",
     )
 
 
@@ -299,6 +425,11 @@ def write_default_config(target: Path, *, force: bool = False) -> Path:
                 "timeout_seconds = 10",
                 'cache_path = ".brigade/security/enrichment-cache.json"',
                 "",
+                "[authority_store]",
+                "# off (default): same-uid scanner children stay inside the trust boundary.",
+                "# external-key: HMAC-sign bindings with a 0600 key outside the scanner-reachable tree.",
+                'isolation = "off"',
+                "",
             ]
         )
     )
@@ -344,6 +475,9 @@ def write_config(target: Path, config: SecurityConfig) -> Path:
             f"misp_api_key_env = {_toml_string(enrichment.misp_api_key_env)}",
             f"timeout_seconds = {enrichment.timeout_seconds}",
             f"cache_path = {_toml_string(enrichment.cache_path)}",
+            "",
+            "[authority_store]",
+            f"isolation = {_toml_string(config.authority_store_isolation)}",
         ]
     )
     lines.append("")

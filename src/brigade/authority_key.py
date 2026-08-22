@@ -1,8 +1,14 @@
 """Persisted 0600 HMAC key for the parent-held directory-authority store.
 
-Location: ``<config_root>/brigade/authority/store-hmac.key``, overridable with
-``BRIGADE_AUTHORITY_KEY_FILE``. The key is read only by the parent verifier.
+Location: ``<config_root>/brigade/authority/store-hmac.key`` (Linux:
+``$XDG_CONFIG_HOME/brigade/authority/store-hmac.key`` or ``~/.config/...``),
+overridable with ``BRIGADE_AUTHORITY_KEY_FILE``. Mode 0600, parent directory
+0700. The key is read only by the parent verifier and must never be written
+inside the workspace or the scanner-reachable ``.brigade`` tree.
+
 Scanner children must never receive this path on their env allowlist.
+``authority_store.isolation = "external-key"`` in ``.brigade/security.toml``
+is the operator opt-in; ``brigade doctor`` WARNs when that flag is off.
 
 This key is same-UID readable. That is the documented residual of the crypto
 tier: a child that finds and reads this file can forge a valid store envelope.
@@ -17,7 +23,7 @@ import os
 import secrets
 import stat
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from . import component_paths
@@ -46,6 +52,86 @@ def key_path(*, env: Mapping[str, str] | None = None, system: str | None = None)
     return authority_dir(env=env, system=system) / KEY_NAME
 
 
+def _absolute_unresolved(path: Path) -> Path:
+    """Absolute path without following symlinks (``..`` and ``.`` stay as parts)."""
+
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return expanded
+
+
+def _parts_prefix(path: Path, tree: Path) -> bool:
+    return len(path.parts) >= len(tree.parts) and path.parts[: len(tree.parts)] == tree.parts
+
+
+def key_is_inside_tree(path: Path, tree: Path) -> bool:
+    """True when ``path`` resolves inside ``tree`` using absolute real paths."""
+
+    try:
+        path.expanduser().resolve().relative_to(tree.expanduser().resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _workspace_symlink_component(path: Path, workspace: Path) -> bool:
+    """True when a workspace-local component of ``path`` is a symlink."""
+
+    lexical = _absolute_unresolved(path)
+    work = _absolute_unresolved(workspace)
+    acc = Path(lexical.parts[0])
+    for part in lexical.parts[1:]:
+        acc = acc / part
+        if not _parts_prefix(acc, work):
+            continue
+        try:
+            if acc.is_symlink():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def key_path_is_scanner_reachable(path: Path, workspace: Path | None = None) -> bool:
+    """True when the *HMAC key* would sit in the workspace or ``.brigade`` state.
+
+    Uses the unresolved path first so a directory symlink inside the workspace
+    that points outside cannot pass as an external key. Also refuses a symlink
+    component under the workspace and a resolved path that lands inside it.
+
+    Do not reuse this helper for the signed marker. Markers are required to
+    live under ``~/.brigade`` (or ``$BRIGADE_USER_DIR``), which contains a
+    ``.brigade`` path component by design. See
+    ``authority_marker.reject_unsafe_marker_path``.
+    """
+
+    unresolved = _absolute_unresolved(path)
+    if ".brigade" in unresolved.parts:
+        return True
+    if workspace is None:
+        return False
+    work = _absolute_unresolved(workspace)
+    if _parts_prefix(unresolved, work):
+        return True
+    if _workspace_symlink_component(unresolved, work):
+        return True
+    return key_is_inside_tree(path, workspace)
+
+
+def reject_scanner_reachable_key_path(path: Path, workspace: Path | None = None) -> None:
+    """Refuse a key path inside the workspace or any scanner-reachable tree.
+
+    Containment is decided on the unresolved absolute path and on any symlink
+    component under the workspace, before any create or open, so an override
+    such as ``<workspace>/operator-authority.key`` or
+    ``<workspace>/escape-link/k.key`` cannot mint a reachable HMAC key.
+    """
+
+    if key_path_is_scanner_reachable(path, workspace):
+        raise OSError("authority store HMAC key must not be written inside the workspace or scanner-reachable tree")
+
+
 def sequence_path(*, env: Mapping[str, str] | None = None, system: str | None = None) -> Path:
     return authority_dir(env=env, system=system) / "sequence.json"
 
@@ -57,6 +143,17 @@ def key_id(key: bytes) -> str:
 def require_signed(*, env: Mapping[str, str] | None = None) -> bool:
     environment = env if env is not None else os.environ
     return environment.get(REQUIRE_SIGNED_ENV) == "1"
+
+
+def hmac_enabled(target: Path | None) -> bool:
+    """True when ``authority_store.isolation = "external-key"`` for ``target``."""
+
+    if target is None:
+        return False
+    from .security_cmd.config import authority_store_isolation_mode
+    from .security_cmd.models import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
+
+    return authority_store_isolation_mode(target) == AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 
 
 def _cache_key(path: Path) -> str:
@@ -123,14 +220,22 @@ def _fsync_directory(path: Path) -> None:
 
 
 def generate_key(
-    *, env: Mapping[str, str] | None = None, system: str | None = None, force: bool = False
+    *,
+    env: Mapping[str, str] | None = None,
+    system: str | None = None,
+    force: bool = False,
+    workspace: Path | None = None,
 ) -> tuple[bytes, str]:
     path = key_path(env=env, system=system)
+    reject_scanner_reachable_key_path(path, workspace)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
+    # Re-check the unresolved path, symlink components, and final real path
+    # after mkdir and before any key bytes are written.
+    reject_scanner_reachable_key_path(path, workspace)
     key = secrets.token_bytes(KEY_BYTES)
     if force and path.exists():
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -154,11 +259,16 @@ def generate_key(
 
 
 def load_key(
-    *, env: Mapping[str, str] | None = None, system: str | None = None, create: bool = False
+    *,
+    env: Mapping[str, str] | None = None,
+    system: str | None = None,
+    create: bool = False,
+    workspace: Path | None = None,
 ) -> tuple[bytes, str]:
     """Load the persisted store key. Missing key fails closed unless ``create``."""
 
     path = key_path(env=env, system=system)
+    reject_scanner_reachable_key_path(path, workspace)
     cached = _CACHE.get(_cache_key(path))
     if cached is not None:
         return cached
@@ -167,7 +277,7 @@ def load_key(
         descriptor = _open_file_nofollow(path, flags)
     except FileNotFoundError:
         if create:
-            return generate_key(env=env, system=system)
+            return generate_key(env=env, system=system, workspace=workspace)
         raise OSError("external directory authority key is unavailable") from None
     except OSError as exc:
         raise OSError("external directory authority key is unavailable") from exc
@@ -196,7 +306,7 @@ def clear_key_cache() -> None:
     _CACHE.clear()
 
 
-def _write_private_json(path: Path, payload: dict) -> None:
+def _write_private_json(path: Path, payload: dict, *, on_replaced: Callable[[], None] | None = None) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     descriptor = -1
@@ -214,6 +324,8 @@ def _write_private_json(path: Path, payload: dict) -> None:
         os.close(descriptor)
         descriptor = -1
         os.replace(temporary, path)
+        if on_replaced is not None:
+            on_replaced()
         _fsync_directory(path.parent)
     finally:
         if descriptor != -1:
@@ -256,7 +368,12 @@ def load_sequence(*, env: Mapping[str, str] | None = None, secret: bytes, key_id
 
 
 def write_sequence(
-    records: Mapping[str, int], *, env: Mapping[str, str] | None = None, secret: bytes, key_id: str
+    records: Mapping[str, int],
+    *,
+    env: Mapping[str, str] | None = None,
+    secret: bytes,
+    key_id: str,
+    on_replaced: Callable[[], None] | None = None,
 ) -> None:
     from . import authority_broker
 
@@ -271,7 +388,7 @@ def write_sequence(
         },
         "records": dict(records),
     }
-    _write_private_json(sequence_path(env=env), payload)
+    _write_private_json(sequence_path(env=env), payload, on_replaced=on_replaced)
 
 
 def next_sequence(target_digest: str, *, env: Mapping[str, str] | None = None, secret: bytes, key_id: str) -> int:
@@ -285,3 +402,21 @@ def next_sequence(target_digest: str, *, env: Mapping[str, str] | None = None, s
 def sequence_for(target_digest: str, *, env: Mapping[str, str] | None = None, secret: bytes, key_id: str) -> int | None:
     records = load_sequence(env=env, secret=secret, key_id=key_id)
     return records.get(target_digest)
+
+
+def drop_sequence(
+    target_digest: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    secret: bytes,
+    key_id: str,
+    on_replaced: Callable[[], None] | None = None,
+) -> bool:
+    """Remove one target from the sequence file so a later re-sign can start clean."""
+
+    records = load_sequence(env=env, secret=secret, key_id=key_id)
+    if target_digest not in records:
+        return False
+    del records[target_digest]
+    write_sequence(records, env=env, secret=secret, key_id=key_id, on_replaced=on_replaced)
+    return True

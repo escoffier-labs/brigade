@@ -168,9 +168,11 @@ def _seed_child_authority_store(target: Path, env: dict[str, str]) -> None:
     try:
         from .. import authority_key
 
-        ephemeral = authority_key.generate_key(env=env)
+        ephemeral = authority_key.generate_key(env=env, workspace=target)
         child_path = ledger_mod._directory_authority_store_path(target, env=env)
-        ledger_mod._write_external_directory_authority(child_path, payload, env=env, key_material=ephemeral)
+        ledger_mod._write_external_directory_authority(
+            child_path, payload, env=env, key_material=ephemeral, workspace=target
+        )
     except OSError:
         return
 
