@@ -914,8 +914,15 @@ Versioned, read-only CLI JSON contracts for higher-level surfaces (the Center
 Runs view). Each payload is an explicit allowlist over run artifacts: it never
 includes environment values, auth or control tokens, secret references, full
 prompts, transcript bodies, raw stdout/stderr, log paths, or absolute
-workspace paths. Task and detail strings are bounded before emission; the
-authoritative artifacts are never modified.
+workspace paths. Every string that enters a list, detail, or watch JSON
+contract passes through one `_clean_str` chokepoint: the value is bounded,
+then home-directory prefixes are rewritten to `~` as the last transform.
+That rewrite is universal — not limited to `failure.detail` or
+`commands[].command`. Matched prefixes are POSIX `/home/<user>` and
+`/Users/<user>` (including a doubled slash such as `/home//<user>`, and
+usernames that contain a space or an apostrophe) and Windows
+`C:\Users\<name>\` plus `C:/Users/<name>/`. The authoritative artifacts
+and human CLI output are never modified.
 
 `brigade runs serve` exposes the same three contracts on loopback as
 `GET /api/runs`, `GET /api/runs/<run-id>`, and `GET /api/runs/<run-id>/events`
@@ -959,18 +966,14 @@ Both commands share one serializer:
   (`kind`, `parent_run_id`, `branch_point_event_id`, `shared_prefix`,
   and `children` discovered from sibling receipts the same way as
   human `runs show`) when the run is a durable parent or child.
-  Child `status` and `branch_point_event_id` are bounded. Home-directory
-  prefixes in `failure.detail` are rewritten to `~` in this JSON
-  contract only.
+  Child `status` and `branch_point_event_id` are bounded.
 - `roster`: orchestrator, worker limits, allowed models, and per-seat `cli`,
   `model`, `reasoning`, bounded `role`, and `timeout_seconds`.
 - `plan`: worker `assignments` with stage, worker, and bounded task.
 - `workers`: per-result state (ok/status, bounded detail, duration, exit code,
   timeout flag, requested model, transport, failure class).
 - `verification`: verify receipt summaries (receipt run id, status, duration,
-  command label, and exit code) from recorded ground truth. Home-directory
-  prefixes in `commands[].command` are rewritten to `~` in this JSON
-  contract only.
+  command label, and exit code) from recorded ground truth.
 - `briefs`: attachment markers for the Code Intelligence (`code-graph`),
   drift (`drift-impact`), and Evidence Ledger (`evidence`) briefs.
 
@@ -991,9 +994,8 @@ unknown future record types. `brigade runs events` keeps its own
 - `event` records emit only `method` and `item_type`. Auth tokens,
   prompts, transcript bodies, raw stdout/stderr, log paths, and
   absolute paths in `params` are omitted.
-- `final` text is one-lined and bounded; home-directory prefixes
-  are rewritten to `~`; a value that cannot be rendered safely is
-  omitted. Artifacts and human CLI output are unchanged.
+- `final` text is one-lined and bounded through the same `_clean_str`
+  chokepoint; a value that cannot be rendered safely is omitted.
 
 ---
 

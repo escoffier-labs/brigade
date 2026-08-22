@@ -199,6 +199,7 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 	totalGenerated := 0
 	totalFilesParsed := 0
 	totalFilesSkipped := 0
+	succeeded := 0
 	warnings := []string{}
 	failures := []string{}
 	for _, row := range rows {
@@ -216,6 +217,8 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 		}
 		if row.Failed {
 			failures = append(failures, row.SourceKind+": "+row.Error)
+		} else if !row.Skipped {
+			succeeded++
 		}
 	}
 	result := map[string]any{
@@ -236,8 +239,15 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 			fmt.Fprintf(errw, "import failed: %s\n", f)
 		}
 	}
-	// A hard failure in any source is an error, not a silent generated=0.
-	if len(failures) > 0 {
+	// Partial success: at least one source imported. Per-source failures
+	// stay in `failures` and on stderr so callers can see them, but the
+	// process exits 0 so a scheduler does not treat a usable import as a
+	// hard failure. Exit 1 is reserved for total failure (nothing imported).
+	return discoveredImportExitCode(len(failures), succeeded)
+}
+
+func discoveredImportExitCode(failed, succeeded int) int {
+	if failed > 0 && succeeded == 0 {
 		return 1
 	}
 	return 0

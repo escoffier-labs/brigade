@@ -421,6 +421,16 @@ func resolveItemID(db *sql.DB, itemID string) (string, error) {
 // per row with bounded evidence so the batch stays resumable. Inferred rows
 // always use trust.label=unknown.
 func BackfillProvenance(db *sql.DB, batchSize int, afterID string) (BackfillProvenanceResult, error) {
+	var result BackfillProvenanceResult
+	err := RetryOnBusy(func() error {
+		var err error
+		result, err = backfillProvenanceOnce(db, batchSize, afterID)
+		return err
+	}, BusyRetryOptions{})
+	return result, err
+}
+
+func backfillProvenanceOnce(db *sql.DB, batchSize int, afterID string) (BackfillProvenanceResult, error) {
 	if batchSize <= 0 {
 		batchSize = 100
 	}

@@ -375,8 +375,8 @@ func TestMutationBundleArtifactTextAndEvidenceMarkdownMarker(t *testing.T) {
 	if strings.Contains(markdown, quarantineNeedle) || strings.Contains(markdown, artifactBody) {
 		t.Fatalf("bundle markdown leaked body: %s", markdown)
 	}
-	if !strings.Contains(markdown, "Content omitted: metadata only") {
-		t.Fatalf("bundle markdown missing omission marker: %s", markdown)
+	if !strings.Contains(markdown, "Eligibility: ineligible") {
+		t.Fatalf("bundle markdown missing ineligible marker: %s", markdown)
 	}
 }
 
@@ -512,14 +512,22 @@ func assertSurfacesIneligible(t *testing.T, id, query, needle string) {
 		t.Fatalf("show leaked body while ineligible: %#v", shown)
 	}
 	bundle := runJSON(t, "evidence", query, "--json")
+	sawStub := false
 	for _, raw := range bundle["results"].([]any) {
 		item := raw.(map[string]any)
-		if item["id"] != id {
+		if item["eligibility_status"] != eligibilityIneligible {
 			continue
 		}
+		sawStub = true
 		if snippet, _ := item["snippet"].(string); snippet != "" {
 			t.Fatalf("bundle leaked snippet while ineligible: %q", snippet)
 		}
+		if item["id"] == id && !evidenceBundleIDPattern.MatchString(id) {
+			t.Fatalf("bundle echoed non-hex server item id on an ineligible stub: %#v", item)
+		}
+	}
+	if !sawStub {
+		t.Fatalf("bundle missing ineligible stub for query %q: %#v", query, bundle)
 	}
 	_, markdown, _ := run("evidence", query, "--markdown")
 	if strings.Contains(markdown, needle) {
@@ -666,22 +674,24 @@ func firstBundleResult(t *testing.T, bundle map[string]any) map[string]any {
 
 func assertIneligibleArtifactHidden(t *testing.T, item map[string]any, surface string) {
 	t.Helper()
+	if item["eligibility_status"] != eligibilityIneligible {
+		t.Fatalf("%s ineligible item was not collapsed to a stub: %#v", surface, item)
+	}
+	if len(item) != 3 {
+		t.Fatalf("%s stub keys = %#v, want exactly three", surface, item)
+	}
+	stubID, _ := item["id"].(string)
+	if !evidenceBundleIDPattern.MatchString(stubID) {
+		t.Fatalf("%s stub id = %#v, want 24 lowercase hex", surface, item["id"])
+	}
+	if item["reason_code"] == "" {
+		t.Fatalf("%s stub missing reason_code: %#v", surface, item)
+	}
 	if snippet, _ := item["snippet"].(string); snippet != "" {
 		t.Fatalf("%s leaked snippet: %q", surface, snippet)
 	}
-	if item["integrity_mismatch"] == true {
-		t.Fatalf("%s fixture must not be integrity-mismatched or MU4 stays green: %#v", surface, item)
-	}
-	arts := artifactMaps(item["artifacts"])
-	if len(arts) == 0 {
-		t.Fatalf("%s dropped artifact metadata: %#v", surface, item)
-	}
-	art := arts[0]
-	if _, ok := art["text"]; ok {
-		t.Fatalf("%s leaked artifact text: %#v", surface, art)
-	}
-	if art["id"] == "" && art["kind"] == nil {
-		t.Fatalf("%s dropped artifact metadata fields: %#v", surface, art)
+	if _, ok := item["artifacts"]; ok {
+		t.Fatalf("%s leaked artifacts: %#v", surface, item)
 	}
 }
 

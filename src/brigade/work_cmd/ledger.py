@@ -1890,6 +1890,125 @@ def _unwrap_authority_envelope(
     return payload
 
 
+def _directory_authority_rebind_command(target: Path) -> str:
+    """Return the supported operator command that upgrades or re-binds a record."""
+    return f"brigade work rebind-authority --target {target.expanduser().resolve()}"
+
+
+def _format_authority_field_value(value: object) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return str(value)
+
+
+def _is_legacy_external_directory_authority(payload: Mapping[str, Any]) -> bool:
+    """Return whether ``payload`` is the pre-workspace store format.
+
+    History from ``ledger.py``: the first external record was
+    ``{schema_version, target, directories}`` (unsigned). Relocation binding
+    later required ``workspace: {device, inode}``. HMAC wrapping is handled
+    by ``_unwrap_authority_envelope`` and is not a body-format change.
+    A record that already has ``workspace`` is current, even if that field
+    mismatches — that is forgery, not a superseded format.
+    """
+    if payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION:
+        return False
+    if not isinstance(payload.get("target"), str) or not payload.get("target"):
+        return False
+    if not isinstance(payload.get("directories"), dict):
+        return False
+    return payload.get("workspace") is None
+
+
+def _authority_record_mismatch_error(
+    path: Path,
+    *,
+    field: str,
+    expected: object,
+    observed: object,
+    target: Path,
+    prefix: str = "external directory authority record does not match directory",
+) -> OSError:
+    return OSError(
+        f"{prefix}: {path} field {field} expected {_format_authority_field_value(expected)} "
+        f"observed {_format_authority_field_value(observed)}. "
+        f"Run `{_directory_authority_rebind_command(target)}` after confirming the directories are intact."
+    )
+
+
+def _present_directory_authority_mismatches(
+    payload: Mapping[str, Any],
+    *,
+    target: Path,
+    workspace: dict[str, int],
+    components: tuple[str, ...] | None = None,
+    directory: int | None = None,
+) -> list[tuple[str, object, object]]:
+    """Return mismatches for identity fields that already exist on ``payload``.
+
+    Missing ``workspace`` is a legacy-format signal, not a mismatch. A
+    missing ``directories[scope]`` is an unbound scope, not a present-field
+    mismatch — callers must not treat that as a safe auto-migrate.
+    """
+    mismatches: list[tuple[str, object, object]] = []
+    resolved = str(target.expanduser().resolve())
+    if "schema_version" in payload and payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION:
+        mismatches.append(
+            ("schema_version", _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION, payload.get("schema_version"))
+        )
+    if "target" in payload and payload.get("target") != resolved:
+        mismatches.append(("target", resolved, payload.get("target")))
+    if payload.get("workspace") is not None and payload.get("workspace") != workspace:
+        mismatches.append(("workspace", workspace, payload.get("workspace")))
+    directories = payload.get("directories")
+    if "directories" in payload and not isinstance(directories, dict):
+        mismatches.append(("directories", "object", type(directories).__name__))
+        return mismatches
+    if components is not None and directory is not None and isinstance(directories, dict):
+        scope = _directory_authority_scope(components)
+        if scope in directories:
+            observed = _directory_identity(directory)
+            recorded = directories.get(scope)
+            if recorded != observed:
+                mismatches.append((f"directories[{scope}]", recorded, observed))
+    return mismatches
+
+
+def _upgrade_legacy_directory_authority(
+    path: Path, payload: Mapping[str, Any], *, workspace: dict[str, int]
+) -> dict[str, Any]:
+    """Write the current body format for a record whose extant fields already matched."""
+    upgraded = dict(payload)
+    upgraded["workspace"] = workspace
+    _write_external_directory_authority(path, upgraded)
+    return upgraded
+
+
+def _adopt_legacy_directory_authority_if_safe(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    target: Path,
+    workspace: dict[str, int],
+    components: tuple[str, ...] | None = None,
+    directory: int | None = None,
+) -> dict[str, Any]:
+    """Upgrade a verifiably legacy record, or raise on any present-field mismatch.
+
+    Never rewrites a record whose extant identity fields disagree with the
+    live directory. That path is the #1036/#1037/#1054 forgery refuse.
+    """
+    mismatches = _present_directory_authority_mismatches(
+        payload, target=target, workspace=workspace, components=components, directory=directory
+    )
+    if mismatches:
+        field, expected, observed = mismatches[0]
+        raise _authority_record_mismatch_error(path, field=field, expected=expected, observed=observed, target=target)
+    if not _is_legacy_external_directory_authority(payload):
+        return payload
+    return _upgrade_legacy_directory_authority(path, payload, workspace=workspace)
+
+
 def _write_external_directory_authority(
     path: Path,
     payload: dict[str, Any],
@@ -2158,14 +2277,21 @@ def _record_external_directory_authority(
             "directories": {},
         }
     else:
-        payload = existing
+        payload = _adopt_legacy_directory_authority_if_safe(path, existing, target=target, workspace=workspace)
         if (
             payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
             or payload.get("target") != resolved
             or payload.get("workspace") != workspace
             or not isinstance(payload.get("directories"), dict)
         ):
-            raise OSError("external directory authority record is malformed")
+            raise _authority_record_mismatch_error(
+                path,
+                field="record",
+                expected="current directory-authority body",
+                observed="malformed",
+                target=target,
+                prefix="external directory authority record is malformed",
+            )
     directories = payload["directories"]
     assert isinstance(directories, dict)
     scope = _directory_authority_scope(components)
@@ -2173,7 +2299,13 @@ def _record_external_directory_authority(
     existing_identity = directories.get(scope)
     if existing_identity is not None:
         if existing_identity != identity:
-            raise OSError("external directory authority record does not match directory")
+            raise _authority_record_mismatch_error(
+                path,
+                field=f"directories[{scope}]",
+                expected=existing_identity,
+                observed=identity,
+                target=target,
+            )
         return
     directories[scope] = identity
     _write_external_directory_authority(path, payload, workspace=target)
@@ -2243,37 +2375,166 @@ def _validate_external_directory_authority(
     target: Path, components: tuple[str, ...], directory: int, *, workspace: dict[str, int]
 ) -> None:
     _require_workspace_directory_identity(target, workspace)
-    _path, payload = _read_external_directory_authority(target)
+    path, payload = _read_external_directory_authority(target)
     if payload is None:
-        raise OSError("external directory authority record is missing")
+        raise OSError(
+            f"external directory authority record is missing: {path}. "
+            f"Run `{_directory_authority_rebind_command(target)}` after confirming the directories are intact."
+        )
+    payload = _adopt_legacy_directory_authority_if_safe(
+        path,
+        payload,
+        target=target,
+        workspace=workspace,
+        components=components,
+        directory=directory,
+    )
     directories = payload.get("directories")
-    if (
-        payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
-        or payload.get("target") != str(target.expanduser().resolve())
-        or payload.get("workspace") != workspace
-        or not isinstance(directories, dict)
-        or directories.get(_directory_authority_scope(components)) != _directory_identity(directory)
-    ):
-        raise OSError("external directory authority record does not match directory")
+    scope = _directory_authority_scope(components)
+    identity = _directory_identity(directory)
+    resolved = str(target.expanduser().resolve())
+    if payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION:
+        raise _authority_record_mismatch_error(
+            path,
+            field="schema_version",
+            expected=_EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION,
+            observed=payload.get("schema_version"),
+            target=target,
+        )
+    if payload.get("target") != resolved:
+        raise _authority_record_mismatch_error(
+            path, field="target", expected=resolved, observed=payload.get("target"), target=target
+        )
+    if payload.get("workspace") != workspace:
+        raise _authority_record_mismatch_error(
+            path, field="workspace", expected=workspace, observed=payload.get("workspace"), target=target
+        )
+    if not isinstance(directories, dict):
+        raise _authority_record_mismatch_error(
+            path,
+            field="directories",
+            expected="object",
+            observed=type(directories).__name__,
+            target=target,
+        )
+    recorded = directories.get(scope)
+    if recorded != identity:
+        raise _authority_record_mismatch_error(
+            path,
+            field=f"directories[{scope}]",
+            expected=identity,
+            observed="missing" if recorded is None else recorded,
+            target=target,
+        )
 
 
 def _external_workspace_directory_identity(target: Path) -> dict[str, int]:
     """Read and recheck the root identity already bound by an external authority record."""
-    _path, payload = _read_external_directory_authority(target)
+    path, payload = _read_external_directory_authority(target)
     if payload is None:
-        raise OSError("external directory authority record is missing")
-    workspace = payload.get("workspace")
+        raise OSError(
+            f"external directory authority record is missing: {path}. "
+            f"Run `{_directory_authority_rebind_command(target)}` after confirming the directories are intact."
+        )
+    resolved = str(target.expanduser().resolve())
+    if _is_legacy_external_directory_authority(payload) and payload.get("target") == resolved:
+        live = _workspace_directory_identity(target)
+        payload = _adopt_legacy_directory_authority_if_safe(path, payload, target=target, workspace=live)
+        workspace = payload.get("workspace")
+    else:
+        workspace = payload.get("workspace")
     if (
         payload.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
-        or payload.get("target") != str(target.expanduser().resolve())
+        or payload.get("target") != resolved
         or not isinstance(workspace, dict)
         or set(workspace) != {"device", "inode"}
         or not all(isinstance(value, int) and not isinstance(value, bool) for value in workspace.values())
         or not isinstance(payload.get("directories"), dict)
     ):
-        raise OSError("external directory authority record is malformed")
+        raise _authority_record_mismatch_error(
+            path,
+            field="record",
+            expected="current directory-authority body",
+            observed="malformed",
+            target=target,
+            prefix="external directory authority record is malformed",
+        )
     _require_workspace_directory_identity(target, workspace)
     return workspace
+
+
+def _live_directory_scope_mismatches(target: Path, payload: Mapping[str, Any]) -> list[tuple[str, object, object]]:
+    """Compare each recorded directory scope that still exists on disk."""
+    mismatches: list[tuple[str, object, object]] = []
+    directories = payload.get("directories")
+    if not isinstance(directories, dict):
+        return mismatches
+    for scope, recorded in directories.items():
+        if not isinstance(scope, str) or not isinstance(recorded, dict):
+            continue
+        parts = tuple(part for part in scope.split("/") if part)
+        if not parts:
+            continue
+        dir_path = target.joinpath(*parts)
+        try:
+            descriptor = _open_directory_nofollow(dir_path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            mismatches.append((f"directories[{scope}]", recorded, f"unreadable: {exc}"))
+            continue
+        try:
+            live = _directory_identity(descriptor)
+        finally:
+            os.close(descriptor)
+        if recorded != live:
+            mismatches.append((f"directories[{scope}]", recorded, live))
+    return mismatches
+
+
+def rebind_directory_authority(*, target: Path) -> int:
+    """Upgrade a legacy directory-authority record after present fields match.
+
+    Refuses to rewrite a record whose extant identity fields disagree with
+    the live workspace. That is the supported remediation named by doctor
+    and by the fail-closed validator.
+    """
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    path = _directory_authority_store_path(target)
+    try:
+        path, payload = _read_external_directory_authority(target)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if payload is None:
+        print(
+            f"error: external directory authority record is missing: {path}. "
+            f"Run `{_directory_authority_rebind_command(target)}` after confirming the directories are intact.",
+            file=sys.stderr,
+        )
+        return 1
+    workspace = _workspace_directory_identity(target)
+    try:
+        mismatches = _present_directory_authority_mismatches(payload, target=target, workspace=workspace)
+        mismatches.extend(_live_directory_scope_mismatches(target, payload))
+        if mismatches:
+            field, expected, observed = mismatches[0]
+            raise _authority_record_mismatch_error(
+                path, field=field, expected=expected, observed=observed, target=target
+            )
+        was_legacy = _is_legacy_external_directory_authority(payload)
+        if was_legacy:
+            _upgrade_legacy_directory_authority(path, payload, workspace=workspace)
+            print(f"directory-authority: upgraded legacy record {path}")
+        else:
+            print(f"directory-authority: {path} already current")
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _record_verifier_owned_directory(

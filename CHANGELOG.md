@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The center Code Graph view now defaults to a branch-scoped overlay (changed modules plus their direct neighbors) so the summary strip matches the diagram, collapses `.worktrees/` and similar non-canonical copies unless toggled, adds an Impact-tab "Start from changed modules" shortcut, and notes when the impact layer diagram is capped. Zero local changes fall back to the full map with a banner. Fixes #976.
+- Runs dashboard view answers "what verification ran recently, did it pass, and what command was it?" with a summary strip ("N runs this week, M failed, last run Xh ago"), a primary column of command (task for Brigade runs) with a pass/fail chip, Run ID demoted into a `<details>` expander, and relative timestamps ("3h ago"; future stamps render as "just now", unparseable ones as "unknown age"). Refs #974.
+- The center Work view now labels dispatch waves as plain-language steps (for example `Step 2 of 5 - one task at a time (blocks step 3)`) instead of bare `Wave N`, rewords the Parallel tile to Together / yes-or-no with a sentence about whether ready tasks can start at the same time, and draws a small SVG of `blocks` / `parent-child` edges so "what is blocking what" is visible even when waves are absent. The task list stays. Fixes #977.
+- The center dashboard Status view now answers "What needs my attention across handoffs, memory care, verify loop, and inbox hygiene right now?" with a plain-sentence summary strip and health tiles (icon + plain word: OK / ATTENTION / MISSING / TIMED OUT, never color alone), following the Memory Operations baseline. Raw ids move into `<details>` expanders, the placeholder rows for latest verify receipt/signal are dropped, and missing brief sections render as readable MISSING tiles instead of `-` table rows. Refs #972.
+- Center dashboard Outcomes view states its operator question ("Which skills and cards are actually helping vs hurting the loop?") in the module docstring and renders a one-sentence top-N summary strip (biggest net help vs biggest net drag, derived purely from `ranking[]` entries) above the existing table. The 9-column outcomes ledger itself is untouched. (#973)
+
 ### Security
 - Opt-in `authority_store.isolation = "external-key"` HMAC-signs new directory-authority bindings with a 0600 key stored outside the workspace and scanner-reachable tree (`$XDG_CONFIG_HOME/brigade/authority/store-hmac.key`, or `BRIGADE_AUTHORITY_KEY_FILE`). An existing HMAC envelope is always verified; flipping the flag off cannot skip a MAC check. Once a target is signed, a user-level sticky marker under `~/.brigade/authority-signed/<target-fingerprint>` (override: `BRIGADE_USER_DIR`) keeps raw unsigned records fail-closed even after the repo-writable flag is flipped off or the envelope is stripped. Marker containment is distinct from the HMAC key rule: the marker must live under that user-level brigade directory and outside the workspace, and is not rejected merely because its path contains `.brigade`. Downgrade is `brigade security authority downgrade --target <t> --confirm` only: it converts the signed store to an unsigned record, removes the sticky marker, and turns isolation off so a later read cannot recreate the marker. A key override whose unresolved path sits under the workspace, including a directory-symlink prefix, a file symlink, or a `..` re-entry, is refused before any key bytes are written. `brigade doctor` WARNs when the flag is off, and names the sticky enforcement when a marker exists. Fixes #957.
+- JSON run contracts redact Windows `C:\Users\<name>\` and `C:/Users/<name>/` home prefixes to `~` at the same `_clean_str` chokepoint as POSIX `/home/<user>` and `/Users/<user>`, including doubled slashes and usernames that contain a space or apostrophe. An allowlist key without a cleaned counterpart can no longer pass a raw source value. Fixes #1064. Refs #631.
+- Evidence-ledger JSON/Markdown/MCP/HTTP exits now pass the complete serialized bundle through one last allowlist walker (`finalizeEvidenceResponse`). Ineligible or quarantined items collapse to `{id?, eligibility_status, reason_code}` — stub `id` is 24 lowercase hex or omitted, so a cached attacker id is never echoed. `grouped_by_source` counts only eligible closed-enum kinds (unknown keys are dropped). `query`/`filters` and other unlisted keys are dropped, not trimmed. Cached `evidence show` / `show_evidence_bundle` regenerate live from item ids. A `kind=url` content hash can no longer authorize swapped artifact text. Fixes #1030, #1031, #1032.
 - `brigade runs list --json` and the Run View `GET /api/runs` list now drop a child directory that is a symlink, or whose `resolve()` leaves the runs root, and count it in `skipped_invalid`. Per-run serve routes already 404 those ids; the shared collector did not, so a symlink alias could leak out-of-root task text in the list while its detail route 404'd. Refs #631.
 - Scanner lifecycle rewrites now require the verifier-held run proof, `before.source == scanner.source`, and a legal `pending → dismissed` transition. A replacement row is applied as that narrow action, so a matching built-in scanner cannot dismiss another source's finding, resurrect a dismissed row, or assign an arbitrary status. Fixes #1039.
 - Explicit `import_path` ingestion retains the same publication snapshot as self-import (pre-commit inbox, persisted proofs, and file bindings) until the final scanner receipt binds. A failed receipt write rolls the import and proofs back together. Fixes #1040.
@@ -23,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON run contracts rewrite home-directory prefixes (`/home/<user>`, `/Users/<user>`) to `~` on every string that enters the list, show, latest, and watch payloads. Artifacts and human CLI output are unchanged. Refs #631. Refs #958.
 
 ### Fixed
+- Changelog footer link definitions cover every release section again (24 were missing, 0.8.2 through 0.26.1), and `[Unreleased]` compares against v0.26.1 instead of v0.26.0.
+- Center dashboard chip-icon backgrounds now render under the nonce-only Content-Security-Policy: Memory Operations and Status views use one stylesheet class per status role instead of per-element `style=` attributes (which `style-src` with a nonce refuses). Work, Runs, Agent Activity, and Outcomes already used classes or had no chip-icon inline styles. Fixes #1077.
+- Evidence crawl import (`miseledger import sourceharvest` / `crawl files|gitlog|docs`) and provenance backfill retry the SQLITE_BUSY family (primary code 5, including snapshot 517 and recovery 261) from a concurrent writer instead of failing the runbook. A lock that outlives the bound names the holder-diagnosis step rather than the raw SQLite string. Fixes #1067.
+- Evidence-ledger `archive.Open` restores the pre-#1073 10s global SQLite `busy_timeout` so unwrapped command paths do not give up after 1s under contention. Crawl import and provenance backfill still bound their own wait via retry count, backoff, and a 4s `MaxTotalWait` ceiling (no `busy_timeout * retries` hang). `IsBusy` classifies by the SQLite result code (primary / low 8 bits == 5) and ignores parenthesized 5/261/517 in free text such as subprocess stderr. Fixes #1085.
+- Directory-authority validation distinguishes a pre-hardening record (missing `workspace`) from a genuine identity mismatch. A legacy record whose extant `target` and directory identities still match is upgraded in place, so `memory care import-issues` and other bound opens no longer die with a bare `OSError` on long-lived workspaces. A swapped or forged directory still fail-closes; the error names the record path, the mismatched field, and `brigade work rebind-authority --target <workspace>`. `brigade doctor` WARNs when a legacy record is still on disk. Fixes #1066.
 - `work import promote --all` now persists a task only after that item succeeds through the late-window inbox CAS. A failed batch item is not flushed by a later success, and a refused promote writes no task files. Fixes #1059.
 - Scanner runs-dir authority bind and run-directory publication now use the same POSIX/Windows dirfd abstraction as import-inbox (`nt_dirfd` on Windows). `operator quickstart` and `brigade work` scanner sweep no longer fail with `descriptor-relative directory authority operations are unavailable` on Windows. A host with no dirfd and no existing runs tree returns `missing` so first-create can proceed; an existing unbound tree is still not adopted. The #1036 adoption refusal stays closed on POSIX. (#1036)
 - A fresh `init` / `operator quickstart` workspace no longer fails its own `doctor` or `security scan`. The workspace `AGENTS.md` template keeps the file-maintenance table in `memory/cards/` so the rendered file stays under the 12000-byte bootstrap budget on Windows CRLF, `*_FILE` / `*_PATH` / `*_FILEPATH` names such as `RESTIC_PASSWORD_FILE` are not plaintext-password findings (values that merely start with `$` or `~` still report), and the half-fed outcome-loop warning names `brigade work verify run --manifest` plus `verify/manifests/`. (#1025)
@@ -41,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recorded-child `status` and `branch_point_event_id` in `brigade.run-detail.v1` are bounded through the same `_clean_str` limit as other contract strings. Refs #631. Refs #958.
 
 ### Added
+- Center Code Graph adds a Blast radius primary mode beside the Module map (which stays the landing view): a fixed upstream / focus / downstream layout for one module, seeded from the branch's changed modules, with a focus picker, one-hop default depth, per-side "expand one more hop", and stated truncation (`showing 10 of 34`). Neighbors come from the full code graph for the focus node, not the capped module-map export. Same-hop ranking sums every parent edge and sorts by weight then module id (stable top-10); a typed name that matches more than one module lists both full ids instead of silently picking one. Fixes #1091.
+- `brigade work ready --campaign <name> --parallel-safe` now composes campaign-aware dispatch waves at query time from each member's existing per-repo footprint partition. Global wave N is that member's local wave N in campaign order: overlapping files inside one member still serialize, disjoint work from different members (including matching relative paths) can share a wave, and an empty footprint stays exclusive only inside its own member. Cross-repo `blocks` still gate readiness before composition; missing or unreadable members still fail closed before any waves are returned; per-member GraphTrail degradation is reported without discarding safe file-overlap waves. Per-repo `--parallel-safe` output is unchanged. Waves are not persisted. Fixes #999.
+- The Agent Activity dashboard view answers "what are the agents doing right now across the fleet?" with a page-level summary strip above the machine board (total agents, running, blocked-on-host, failed, awaiting approval, unknown) and a visible plain-word state legend; per-host count chips now show icon + word + count instead of a tooltip-only icon+number. Missing or unrecognized states aggregate under `unknown`. Fixes #975.
 - The `review-heavy` preset now ships a read-only Daybreak Blue defensive-security seat using the verified Codex headless model id. Accounts without entitlement report `model-unavailable` without echoing provider diagnostics. Fixes #1002.
 - `brigade runs serve --cwd <workspace>` opens a foreground, loopback-only, read-only Run View over the existing `brigade.runs-list.v1`, `brigade.run-detail.v1`, and `brigade.run-watch.v1` serializers. It binds an available port by default, prints the URL, opens the browser unless `--no-open`, and stops on Ctrl+C. The HTTP layer does not read run artifacts itself, rejects traversal and symlink escape, and never starts from another command. Fixes #631.
 - `brigade.run-detail.v1` includes recorded children under `run.lineage` (same sibling-receipt discovery as human `runs show`). Serializers merge source artifacts through a load-bearing field allowlist so unexpected keys cannot pass into the JSON contracts. Refs #631. Refs #958.
@@ -357,8 +374,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.brigade/campaigns/<name>.json` (member targets + optional cross-repo
   `blocks` edges). Task ids are repo-qualified (`member:local-id`); member
   ledgers stay authoritative and unchanged when the campaign file is removed.
-  `--parallel-safe` with `--campaign` leaves a deferred wave-aggregation seam
-  (`partition_mode=campaign_deferred`) for a later cross-repo compositor.
+  `--parallel-safe` with `--campaign` composes those per-repo waves at query
+  time (see #999); member ledgers stay authoritative and waves are not stored.
 - Work brief as wiring source of truth (#733): static harness instruction
   blocks shrink to depth profiles rendered from the same ordered brief
   sections as `brigade work brief`. Hook-capable Claude installs default to
@@ -1662,14 +1679,38 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.26.1...HEAD
+[0.26.1]: https://github.com/escoffier-labs/brigade/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/escoffier-labs/brigade/compare/v0.25.0...v0.26.0
+[0.25.1]: https://github.com/escoffier-labs/brigade/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/escoffier-labs/brigade/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/escoffier-labs/brigade/compare/v0.23.3...v0.24.0
 [0.23.3]: https://github.com/escoffier-labs/brigade/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/escoffier-labs/brigade/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/escoffier-labs/brigade/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/escoffier-labs/brigade/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/escoffier-labs/brigade/compare/v0.21.1...v0.22.0
+[0.21.1]: https://github.com/escoffier-labs/brigade/compare/v0.21.0...v0.21.1
+[0.21.0]: https://github.com/escoffier-labs/brigade/compare/v0.19.0...v0.21.0
+[0.19.0]: https://github.com/escoffier-labs/brigade/compare/v0.18.0...v0.19.0
+[0.18.0]: https://github.com/escoffier-labs/brigade/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/escoffier-labs/brigade/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/escoffier-labs/brigade/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/escoffier-labs/brigade/compare/v0.14.1...v0.15.0
+[0.14.1]: https://github.com/escoffier-labs/brigade/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/escoffier-labs/brigade/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/escoffier-labs/brigade/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/escoffier-labs/brigade/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/escoffier-labs/brigade/compare/v0.10.3...v0.11.0
+[0.10.3]: https://github.com/escoffier-labs/brigade/compare/v0.10.2...v0.10.3
+[0.10.2]: https://github.com/escoffier-labs/brigade/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/escoffier-labs/brigade/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/escoffier-labs/brigade/compare/v0.9.3...v0.10.0
+[0.9.3]: https://github.com/escoffier-labs/brigade/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/escoffier-labs/brigade/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/escoffier-labs/brigade/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/escoffier-labs/brigade/compare/v0.8.2...v0.9.0
+[0.8.2]: https://github.com/escoffier-labs/brigade/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/escoffier-labs/brigade/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/escoffier-labs/brigade/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/escoffier-labs/brigade/compare/v0.6.0...v0.7.0

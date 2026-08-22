@@ -78,7 +78,9 @@ func CountSessions(path string) (int, error) {
 	if dbPath := filepath.Join(path, "globalStorage", "conversation-search.db"); fileExists(dbPath) {
 		n, err := countConversationRows(dbPath)
 		if err != nil {
-			return 0, err
+			// An unreadable auxiliary database must not hide prompt history
+			// or chat directories that are still countable.
+			n = 0
 		}
 		count += n
 	}
@@ -99,25 +101,73 @@ func CountSessions(path string) (int, error) {
 	return count, nil
 }
 
+const conversationCountSQL = `select count(*) from conversations`
+
+const conversationSearchSQL = `select c.id, c.title, c.updated_at, c.is_archived, c.scope, coalesce(c.root_fingerprint, ''), coalesce(f.body, '') from conversations c join conversation_fts f on f.rowid = c.fts_rowid order by c.updated_at, c.id`
+
 func countConversationRows(dbPath string) (int, error) {
-	u := &url.URL{Scheme: "file", Path: dbPath}
-	query := u.Query()
-	query.Set("mode", "ro")
-	u.RawQuery = query.Encode()
-	db, err := sql.Open("sqlite", u.String())
+	db, err := openConversationSearch(dbPath)
 	if err != nil {
 		return 0, err
 	}
 	defer db.Close()
-	db.SetMaxOpenConns(1)
 	var count int
-	if err := db.QueryRow(`select count(*) from conversations`).Scan(&count); err != nil {
+	if err := db.QueryRow(conversationCountSQL).Scan(&count); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
 			return 0, nil
 		}
-		return 0, err
+		return 0, sqliteOpError(dbPath, conversationCountSQL, err)
 	}
 	return count, nil
+}
+
+// sqliteFileURIPath turns a filesystem path into the Path component of a
+// file: URI. Relative paths and Windows drive paths must become absolute
+// URL paths; otherwise url.URL emits file://<first-segment>/... which
+// SQLite treats as a host and fails with "SQL logic error: out of memory".
+func sqliteFileURIPath(abs string) string {
+	p := filepath.ToSlash(abs)
+	p = strings.ReplaceAll(p, "\\", "/")
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
+}
+
+func sqliteReadOnlyDSN(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	u := &url.URL{Scheme: "file", Path: sqliteFileURIPath(abs)}
+	query := u.Query()
+	query.Set("mode", "ro")
+	u.RawQuery = query.Encode()
+	return u.String(), nil
+}
+
+func sqliteOpError(path, op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %s: %w", path, op, err)
+}
+
+func openConversationSearch(dbPath string) (*sql.DB, error) {
+	dsn, err := sqliteReadOnlyDSN(dbPath)
+	if err != nil {
+		return nil, sqliteOpError(dbPath, "open", err)
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, sqliteOpError(dbPath, "open", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, sqliteOpError(dbPath, "open", err)
+	}
+	return db, nil
 }
 
 // Generate walks a Cursor config root (or a direct prompt_history.json file)
@@ -177,29 +227,19 @@ func (g *generator) emitConversationSearch(dbPath string) error {
 		return g.afterFile(*scan)
 	}
 
-	u := &url.URL{Scheme: "file", Path: dbPath}
-	query := u.Query()
-	query.Set("mode", "ro")
-	u.RawQuery = query.Encode()
-	db, err := sql.Open("sqlite", u.String())
+	db, err := openConversationSearch(dbPath)
 	if err != nil {
-		return err
+		return g.skipUnreadableConversationSearch(scan, err)
 	}
 	defer db.Close()
-	db.SetMaxOpenConns(1)
-	rows, err := db.Query(`
-		select c.id, c.title, c.updated_at, c.is_archived, c.scope,
-		       coalesce(c.root_fingerprint, ''), coalesce(f.body, '')
-		from conversations c
-		join conversation_fts f on f.rowid = c.fts_rowid
-		order by c.updated_at, c.id`)
+	rows, err := db.Query(conversationSearchSQL)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
 			g.warn(scan, fmt.Sprintf("%s: required conversation tables are missing: %s", dbPath, err))
 			g.scans = append(g.scans, *scan)
 			return g.afterFile(*scan)
 		}
-		return err
+		return g.skipUnreadableConversationSearch(scan, sqliteOpError(dbPath, conversationSearchSQL, err))
 	}
 	defer rows.Close()
 	var ordinal int64
@@ -208,7 +248,8 @@ func (g *generator) emitConversationSearch(dbPath string) error {
 		var updatedAt int64
 		var archived int
 		if err := rows.Scan(&id, &title, &updatedAt, &archived, &scope, &rootFingerprint, &body); err != nil {
-			return err
+			g.warn(scan, fmt.Sprintf("skipping unreadable conversation-search database: %s", sqliteOpError(dbPath, conversationSearchSQL, err)))
+			break
 		}
 		if g.limited() {
 			continue
@@ -260,8 +301,14 @@ func (g *generator) emitConversationSearch(dbPath string) error {
 		scan.Records++
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		g.warn(scan, fmt.Sprintf("skipping unreadable conversation-search database: %s", sqliteOpError(dbPath, conversationSearchSQL, err)))
 	}
+	g.scans = append(g.scans, *scan)
+	return g.afterFile(*scan)
+}
+
+func (g *generator) skipUnreadableConversationSearch(scan *sources.FileScan, err error) error {
+	g.warn(scan, fmt.Sprintf("skipping unreadable conversation-search database: %s", err))
 	g.scans = append(g.scans, *scan)
 	return g.afterFile(*scan)
 }

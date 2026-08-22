@@ -1671,11 +1671,15 @@ def _stale_timeout(run_dir: Path, meta: dict[str, Any]) -> float | None:
     return timeout if time.time() - started.timestamp() > timeout else None
 
 
-_HOME_PREFIX_RE = re.compile(r"/(?:home|Users)/[^/\s\"']+")
+# Windows alternative is first so `C:/Users/<name>` is not left as `C:~`.
+# `/+` and `[/\\]+` accept doubled separators; `[^/\\]+` keeps spaces and apostrophes.
+_HOME_PREFIX_RE = re.compile(
+    r"(?:[A-Za-z]:[/\\]+(?i:Users)[/\\]+|/(?:home|Users)/+)[^/\\]+",
+)
 
 
 def _redact_home_prefixes(text: str) -> str:
-    """Rewrite `/home/<user>` and `/Users/<user>` prefixes to `~` for JSON contracts."""
+    """Rewrite POSIX and Windows home prefixes to `~` for JSON contracts."""
     return _HOME_PREFIX_RE.sub("~", text)
 
 
@@ -1704,15 +1708,31 @@ def _compact(payload: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in payload.items() if value is not None}
 
 
+class _MergedSource(dict[str, object]):
+    """Source overlay that records which keys passed through the cleaner."""
+
+    cleaned_keys: frozenset[str]
+
+    def __init__(self, data: Mapping[str, Any] | None = None) -> None:
+        super().__init__(data or {})
+        self.cleaned_keys = frozenset()
+
+
 def _merge_source(source: Mapping[str, Any] | None, cleaned: Mapping[str, object]) -> dict[str, object]:
     """Overlay cleaned fields on the source mapping so `_allowlisted` must drop extras."""
-    payload: dict[str, object] = dict(source) if source is not None else {}
+    payload = _MergedSource(source)
     payload.update(cleaned)
+    payload.cleaned_keys = frozenset(cleaned)
     return payload
 
 
 def _allowlisted(payload: Mapping[str, object], allowed: frozenset[str]) -> dict[str, object]:
     """Keep only explicitly allowlisted keys; drop None the same way as `_compact`."""
+    if not isinstance(payload, _MergedSource):
+        raise AssertionError("JSON contract allowlist requires _merge_source overlay")
+    missing = allowed - payload.cleaned_keys
+    if missing:
+        raise AssertionError("allowlist keys have no cleaned counterpart: " + ", ".join(sorted(missing)))
     return {key: value for key, value in payload.items() if key in allowed and value is not None}
 
 

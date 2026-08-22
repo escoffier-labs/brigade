@@ -1,10 +1,13 @@
-"""Code Graph dashboard view: module map, impact drill-down, change overlay.
+"""Code Graph dashboard view: module map, blast radius, impact drill-down.
 
-Operator question: What parts of the codebase matter, which module is the hub,
-and what breaks if I touch a changed file?
+Operator question: What parts of the codebase matter for my current change,
+and what breaks if I touch X?
 
-Contract-only: ``brigade code export --json`` (and ``--symbol`` for impact).
-No direct graph database reads.
+Contract-only: ``brigade code export --json`` (``--symbol`` for impact,
+``--focus`` / ``--up`` / ``--down`` for blast-radius neighbors).
+No direct graph database reads. Default landing view is the Module map
+(branch overlay). Blast radius is a primary mode beside it: one focus
+node, fixed upstream / focus / downstream zones from the full graph.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 from brigade import code_export
 from brigade.center_cmd.dashboard import data
@@ -20,6 +24,12 @@ from brigade.center_cmd.dashboard import render as html
 NAME = "code"
 TITLE = "Code Graph"
 ORDER = 6.25
+
+_NONCANONICAL_ROOTS = frozenset({".worktrees", ".git", ".hg", ".svn", ".venv", "node_modules"})
+_IMPACT_CALLER_CAP = 8
+_IMPACT_EDGE_CAP = 10
+_BLAST_ZONE_CAP = 10
+_BLAST_MODES = frozenset({"map", "blast", "impact"})
 
 _STATUS_WARNING = "#fab219"
 _TEXT_PRIMARY = "#0b0b0b"
@@ -47,60 +57,247 @@ _MAX_ROW_X = _PAD + _LABEL_W + _COLS * (132 + _GAP_X)
 
 
 def fetch(target: Path, query: dict[str, str] | None = None) -> dict[str, Any]:
-    symbol = (query or {}).get("symbol", "").strip() or None
+    query = query or {}
+    symbol = query.get("symbol", "").strip() or None
+    focus = query.get("focus", "").strip() or None
+    mode = query.get("mode", "").strip().lower()
+    up_hops = code_export.parse_blast_hops(query.get("up"), 1)
+    down_hops = code_export.parse_blast_hops(query.get("down"), 1)
     args = ["code", "export"]
     if symbol:
         args.extend(["--symbol", symbol])
     args.append("--overlay")
+    if focus:
+        args.extend(["--focus", focus])
+    if up_hops != 1:
+        args.extend(["--up", str(up_hops)])
+    if down_hops != 1:
+        args.extend(["--down", str(down_hops)])
     export = data.run_json(target, args, timeout=60.0)
-    return {"export": export, "symbol": symbol}
+    return {
+        "export": export,
+        "symbol": symbol,
+        "focus": focus,
+        "mode": mode if mode in _BLAST_MODES else "",
+        "up_hops": up_hops,
+        "down_hops": down_hops,
+        "show_full_map": _query_flag(query, "map", "full"),
+        "show_worktrees": _query_flag(query, "worktrees", "1"),
+    }
+
+
+def _query_flag(query: dict[str, str], key: str, truthy: str) -> bool:
+    raw = (query.get(key) or "").strip().lower()
+    return raw == truthy or raw == "1" or raw == "true"
 
 
 def render(payload: dict, nonce: str) -> str:
     export = payload.get("export") if isinstance(payload.get("export"), dict) else {}
     symbol = payload.get("symbol")
+    show_full_map = payload.get("show_full_map") is True
+    show_worktrees = payload.get("show_worktrees") is True
+    active = _active_mode(payload)
 
     if export.get("error"):
         return html.error_panel(TITLE, str(export["error"]))
 
     parts = [
         _stylesheet(nonce),
-        _mode_tabs(bool(symbol)),
-        '<div id="cg-map" class="cg-panel" data-cg-panel="map" role="tabpanel">',
-        _render_module_map(export),
+        _mode_tabs(active),
+        _panel_open("map", active),
+        _render_module_map(export, show_full_map=show_full_map, show_worktrees=show_worktrees),
         "</div>",
-        '<div id="cg-impact" class="cg-panel" data-cg-panel="impact" role="tabpanel">',
-        _render_impact(export, symbol),
+        _panel_open("blast", active),
+        _render_blast_radius(payload, export, show_full_map=show_full_map, show_worktrees=show_worktrees),
+        "</div>",
+        _panel_open("impact", active),
+        _render_impact(export, symbol, show_worktrees=show_worktrees, show_full_map=show_full_map),
         "</div>",
         _script(nonce),
     ]
     return "".join(parts)
 
 
-def _mode_tabs(impact_active: bool) -> str:
-    map_sel = "false" if impact_active else "true"
-    impact_sel = "true" if impact_active else "false"
-    return (
-        '<div class="cg-modes" role="tablist" aria-label="' + html.esc("Code graph modes") + '">'
-        f'<a href="#cg-map" class="cg-mode" data-cg-mode="map" aria-selected="{map_sel}" '
-        f'tabindex="{"0" if not impact_active else "-1"}">' + html.esc("Module map") + "</a>"
-        f'<a href="#cg-impact" class="cg-mode" data-cg-mode="impact" aria-selected="{impact_sel}" '
-        f'tabindex="{"0" if impact_active else "-1"}">' + html.esc("Impact") + "</a>"
-        "</div>"
-    )
+def _active_mode(payload: dict) -> str:
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode in _BLAST_MODES:
+        return mode
+    if str(payload.get("focus") or "").strip():
+        return "blast"
+    if payload.get("symbol"):
+        return "impact"
+    return "map"
 
 
-def _summary_strip(export: dict) -> str:
+def _panel_open(name: str, active: str) -> str:
+    hidden = " hidden" if name != active else ""
+    return f'<div id="cg-{name}" class="cg-panel" data-cg-panel="{name}" role="tabpanel"{hidden}>'
+
+
+def _mode_tabs(active: str) -> str:
+    tabs = (("map", "Module map"), ("blast", "Blast radius"), ("impact", "Impact"))
+    parts = ['<div class="cg-modes" role="tablist" aria-label="' + html.esc("Code graph modes") + '">']
+    for name, label in tabs:
+        selected = name == active
+        parts.append(
+            f'<a href="#cg-{name}" class="cg-mode" data-cg-mode="{name}" aria-selected="'
+            f'{"true" if selected else "false"}" tabindex="{"0" if selected else "-1"}">' + html.esc(label) + "</a>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _changed_module_ids(export: dict) -> list[str]:
+    overlay = export.get("change_overlay")
+    if not isinstance(overlay, dict):
+        return []
+    raw = overlay.get("changed_modules") if isinstance(overlay.get("changed_modules"), list) else []
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        module_id = str(item).strip()
+        if module_id and module_id not in seen:
+            seen.add(module_id)
+            ids.append(module_id)
+    return ids
+
+
+def _path_parts(value: str) -> list[str]:
+    return [part for part in value.replace("\\", "/").split("/") if part]
+
+
+def _is_noncanonical_module(module: dict) -> bool:
+    for key in ("id", "package", "label"):
+        raw = str(module.get(key) or "")
+        if any(part in _NONCANONICAL_ROOTS for part in _path_parts(raw)):
+            return True
+    return False
+
+
+def _neighbor_ids(changed: set[str], edges: list[dict]) -> set[str]:
+    neighbors: set[str] = set()
+    for edge in edges:
+        source = str(edge.get("from") or "")
+        target = str(edge.get("to") or "")
+        if source in changed and target:
+            neighbors.add(target)
+        if target in changed and source:
+            neighbors.add(source)
+    return neighbors
+
+
+def _filter_modules(
+    modules: list[dict],
+    edges: list[dict],
+    *,
+    keep_ids: set[str] | None,
+    show_worktrees: bool,
+) -> tuple[list[dict], list[dict], int]:
+    hidden_noncanonical = 0
+    visible: list[dict] = []
+    for module in modules:
+        module_id = str(module.get("id") or "")
+        if keep_ids is not None and module_id not in keep_ids:
+            continue
+        if not show_worktrees and _is_noncanonical_module(module):
+            hidden_noncanonical += 1
+            continue
+        visible.append(module)
+    visible_ids = {str(row.get("id") or "") for row in visible}
+    visible_edges = [
+        edge
+        for edge in edges
+        if str(edge.get("from") or "") in visible_ids and str(edge.get("to") or "") in visible_ids
+    ]
+    return visible, visible_edges, hidden_noncanonical
+
+
+def _code_href(
+    *,
+    symbol: str | None = None,
+    show_full_map: bool = False,
+    show_worktrees: bool = False,
+    mode: str | None = None,
+    focus: str | None = None,
+    up_hops: int | None = None,
+    down_hops: int | None = None,
+) -> str:
+    params: list[str] = []
+    if mode and mode in _BLAST_MODES:
+        params.append(f"mode={quote_plus(mode)}")
+    if focus:
+        params.append(f"focus={quote_plus(focus)}")
+    if up_hops is not None and up_hops > 1:
+        params.append(f"up={up_hops}")
+    if down_hops is not None and down_hops > 1:
+        params.append(f"down={down_hops}")
+    if symbol:
+        params.append(f"symbol={quote_plus(symbol)}")
+    if show_full_map:
+        params.append("map=full")
+    if show_worktrees:
+        params.append("worktrees=1")
+    query = ("?" + "&".join(params)) if params else ""
+    return "/view/code" + query
+
+
+def _summary_strip(
+    export: dict,
+    *,
+    shown: list[dict],
+    overlay_active: bool,
+    changed_ids: list[str],
+) -> str:
     stats = export.get("stats") if isinstance(export.get("stats"), dict) else {}
     module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
     insights = module_map.get("insights") if isinstance(module_map.get("insights"), dict) else {}
-    modules = [row for row in module_map.get("modules", []) if isinstance(row, dict)]
+    modules = shown if shown else [row for row in module_map.get("modules", []) if isinstance(row, dict)]
 
     core = insights.get("core") if isinstance(insights.get("core"), dict) else {}
     hub = insights.get("most_connected") if isinstance(insights.get("most_connected"), dict) else {}
     change = insights.get("biggest_change") if isinstance(insights.get("biggest_change"), dict) else {}
     largest = insights.get("largest") if isinstance(insights.get("largest"), dict) else {}
     isolated = insights.get("isolated_count")
+
+    if overlay_active:
+        changed_n = len(changed_ids)
+        neighbor_n = max(0, len(modules) - changed_n)
+        changed_word = "module" if changed_n == 1 else "modules"
+        neighbor_word = "neighbor" if neighbor_n == 1 else "neighbors"
+        shown_hub = hub if str(hub.get("id") or "") in {str(row.get("id") or "") for row in modules} else {}
+        if not shown_hub and modules:
+            top = max(modules, key=lambda row: int(row.get("inbound_count") or 0))
+            shown_hub = {
+                "id": str(top.get("id") or ""),
+                "label": str(top.get("label") or top.get("id") or ""),
+                "inbound": int(top.get("inbound_count") or 0),
+            }
+        hub_label = str(shown_hub.get("label") or "this overlay")
+        hub_id = str(shown_hub.get("id") or "")
+        hub_in = shown_hub.get("inbound") if isinstance(shown_hub.get("inbound"), int) else 0
+        change_label = str(change.get("label") or (changed_ids[0] if changed_ids else "none on this branch"))
+        change_id = str(change.get("id") or (changed_ids[0] if changed_ids else ""))
+        s1 = (
+            f'<a href="#cg-map" data-cg-jump="map">'
+            f"{changed_n} {html.esc(changed_word)} changed on this branch; "
+            f"showing {html.esc('changed modules and their direct neighbors')} "
+            f"({changed_n} {html.esc(changed_word)}"
+            f"{f', {neighbor_n} {html.esc(neighbor_word)}' if neighbor_n else ''}).</a>"
+        )
+        s2 = (
+            f'<a href="#cg-hub" data-cg-jump="{html.esc(hub_id)}">'
+            f"Most connected: {html.esc(hub_label)} (imported by {hub_in} others).</a>"
+        )
+        s4 = (
+            f'<a href="#cg-changed" data-cg-jump="{html.esc(change_id)}">'
+            f"Biggest recent change impact: {html.esc(change_label)}.</a>"
+        )
+        return (
+            f'<section class="cg-summary" data-cg-summary="1" data-cg-summary-scope="overlay" '
+            f'aria-label="{html.esc("Code graph summary")}">'
+            f"<p>{s1} {s2} {s4}</p></section>"
+        )
+
     total = insights.get("total_modules")
     if not isinstance(total, int):
         total = len(modules)
@@ -140,36 +337,133 @@ def _summary_strip(export: dict) -> str:
         f"Biggest recent change impact: {html.esc(change_label)}.</a>"
     )
     return (
-        f'<section class="cg-summary" data-cg-summary="1" aria-label="{html.esc("Code graph summary")}">'
+        f'<section class="cg-summary" data-cg-summary="1" data-cg-summary-scope="full" '
+        f'aria-label="{html.esc("Code graph summary")}">'
         f"<p>{s1} {s2} {s3} {s4}</p></section>"
     )
 
 
-def _render_module_map(export: dict) -> str:
+def _map_toggles(
+    *,
+    overlay_active: bool,
+    hidden_noncanonical: int,
+    show_full_map: bool,
+    show_worktrees: bool,
+    has_noncanonical: bool,
+) -> str:
+    links: list[str] = []
+    if overlay_active:
+        links.append(
+            f'<a class="cg-toggle" data-cg-map-toggle="full" href="{html.esc(_code_href(show_full_map=True, show_worktrees=show_worktrees))}">'
+            + html.esc("Show full module map")
+            + "</a>"
+        )
+    elif show_full_map:
+        links.append(
+            f'<a class="cg-toggle" data-cg-map-toggle="overlay" href="{html.esc(_code_href(show_worktrees=show_worktrees))}">'
+            + html.esc("Show branch overlay")
+            + "</a>"
+        )
+    if has_noncanonical or hidden_noncanonical:
+        if show_worktrees:
+            links.append(
+                f'<a class="cg-toggle" data-cg-worktrees-toggle="hide" href="{html.esc(_code_href(show_full_map=show_full_map))}">'
+                + html.esc("Hide .worktrees copies")
+                + "</a>"
+            )
+        else:
+            label = (
+                f"Show .worktrees copies ({hidden_noncanonical} hidden)"
+                if hidden_noncanonical
+                else "Show .worktrees copies"
+            )
+            links.append(
+                f'<a class="cg-toggle" data-cg-worktrees-toggle="show" href="{html.esc(_code_href(show_full_map=show_full_map, show_worktrees=True))}">'
+                + html.esc(label)
+                + "</a>"
+            )
+    if not links:
+        return ""
+    return f'<p class="cg-toggles">{"".join(links)}</p>'
+
+
+def _render_module_map(export: dict, *, show_full_map: bool, show_worktrees: bool) -> str:
     module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
     modules = [row for row in module_map.get("modules", []) if isinstance(row, dict)]
     edges = [row for row in module_map.get("edges", []) if isinstance(row, dict)]
     trunc = module_map.get("truncation") if isinstance(module_map.get("truncation"), dict) else {}
+    changed_ids = _changed_module_ids(export)
+    has_overlay_data = isinstance(export.get("change_overlay"), dict)
+    has_noncanonical = any(_is_noncanonical_module(row) for row in modules)
 
-    if not modules:
+    keep_ids: set[str] | None = None
+    overlay_active = False
+    empty_change_banner = ""
+    if changed_ids and not show_full_map:
+        keep_ids = set(changed_ids) | _neighbor_ids(set(changed_ids), edges)
+        overlay_active = True
+    elif has_overlay_data and not changed_ids:
+        empty_change_banner = (
+            f'<p class="cg-banner" data-cg-empty-change="1">'
+            f"{html.esc('Nothing changed locally. Showing the full module map.')}</p>"
+        )
+
+    shown, shown_edges, hidden_noncanonical = _filter_modules(
+        modules, edges, keep_ids=keep_ids, show_worktrees=show_worktrees
+    )
+
+    if overlay_active and not shown:
+        overlay_active = False
+        keep_ids = None
+        if has_overlay_data:
+            empty_change_banner = (
+                f'<p class="cg-banner" data-cg-empty-change="1">'
+                f"{html.esc('Nothing changed locally. Showing the full module map.')}</p>"
+            )
+        shown, shown_edges, hidden_noncanonical = _filter_modules(
+            modules, edges, keep_ids=None, show_worktrees=show_worktrees
+        )
+
+    if not shown:
         return html.panel(html.esc("Module map"), f"<p>{html.esc('Nothing here.')}</p>")
 
     trunc_note = ""
-    note = trunc.get("note")
-    if isinstance(note, str) and note.strip():
-        trunc_note = f'<p class="cg-muted" data-cg-truncation="1" id="cg-isolated">{html.esc(note.strip())}</p>'
+    if not overlay_active:
+        note = trunc.get("note")
+        if isinstance(note, str) and note.strip():
+            trunc_note = f'<p class="cg-muted" data-cg-truncation="1" id="cg-isolated">{html.esc(note.strip())}</p>'
+    elif overlay_active:
+        neighbor_n = max(0, len(shown) - len(changed_ids))
+        overlay_note = (
+            f"Showing {len(changed_ids)} changed "
+            f"{'module' if len(changed_ids) == 1 else 'modules'} and "
+            f"{neighbor_n} direct {'neighbor' if neighbor_n == 1 else 'neighbors'} on this branch."
+        )
+        trunc_note = f'<p class="cg-muted" data-cg-overlay="1" id="cg-isolated">{html.esc(overlay_note)}</p>'
 
     hub_id = ""
     insights = module_map.get("insights") if isinstance(module_map.get("insights"), dict) else {}
     hub = insights.get("most_connected") if isinstance(insights.get("most_connected"), dict) else {}
-    if isinstance(hub.get("id"), str):
+    if isinstance(hub.get("id"), str) and any(str(row.get("id") or "") == hub["id"] for row in shown):
         hub_id = hub["id"]
 
+    toggles = _map_toggles(
+        overlay_active=overlay_active,
+        hidden_noncanonical=hidden_noncanonical,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+        has_noncanonical=has_noncanonical,
+    )
+
     return (
-        _summary_strip(export)
+        _summary_strip(export, shown=shown, overlay_active=overlay_active, changed_ids=changed_ids)
         + html.panel(
             html.esc("Module map"),
-            trunc_note + _module_map_svg(modules, edges, hub_id=hub_id) + _module_card_shell(),
+            empty_change_banner
+            + toggles
+            + trunc_note
+            + _module_map_svg(shown, shown_edges, hub_id=hub_id)
+            + _module_card_shell(),
         )
         + _debug_details(export)
     )
@@ -359,7 +653,448 @@ def _status_chip(box_x: int, box_y: int, box_h: int, box_w: int, word: str) -> s
     )
 
 
-def _render_impact(export: dict, symbol: str | None) -> str:
+def _blast_payload(export: dict) -> dict[str, Any]:
+    raw = export.get("blast_radius")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _picker_module_choices(export: dict) -> list[tuple[str, str]]:
+    module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
+    choices: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for module_id in _changed_module_ids(export):
+        seen.add(module_id)
+        choices.append((module_id, module_id.split("/")[-1] or module_id))
+    for row in module_map.get("modules", []):
+        if not isinstance(row, dict):
+            continue
+        module_id = str(row.get("id") or "").strip()
+        if not module_id or module_id in seen:
+            continue
+        seen.add(module_id)
+        choices.append((module_id, str(row.get("label") or module_id)))
+    blast = _blast_payload(export)
+    focus = blast.get("focus") if isinstance(blast.get("focus"), dict) else {}
+    focus_id = str(focus.get("id") or "").strip()
+    if focus_id and focus_id not in seen:
+        choices.insert(0, (focus_id, str(focus.get("label") or focus_id)))
+    return choices
+
+
+def _seed_focus_id(export: dict, requested: str | None) -> str:
+    if requested and requested.strip():
+        return requested.strip()
+    blast = _blast_payload(export)
+    focus = blast.get("focus") if isinstance(blast.get("focus"), dict) else {}
+    focus_id = str(focus.get("id") or "").strip()
+    if focus_id and blast.get("resolved") is not False:
+        return focus_id
+    changed = _changed_module_ids(export)
+    if len(changed) == 1:
+        return changed[0]
+    return ""
+
+
+def _blast_rows(raw: object) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        module_id = str(item.get("id") or "").strip()
+        if not module_id:
+            continue
+        rows.append(item)
+    return rows
+
+
+def _blast_count_phrase(total: int, *, upstream: bool) -> str:
+    if upstream:
+        if total == 1:
+            return "1 module depends on this"
+        return f"{total} modules depend on this"
+    if total == 1:
+        return "this depends on 1 module"
+    return f"this depends on {total} modules"
+
+
+def _blast_picker(
+    export: dict,
+    *,
+    focus: str,
+    up_hops: int,
+    down_hops: int,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    options: list[str] = []
+    for module_id, label in _picker_module_choices(export):
+        options.append(f'<option value="{html.esc(module_id)}">{html.esc(label)}</option>')
+    hidden: list[str] = ['<input type="hidden" name="mode" value="blast">']
+    if up_hops > 1:
+        hidden.append(f'<input type="hidden" name="up" value="{up_hops}">')
+    if down_hops > 1:
+        hidden.append(f'<input type="hidden" name="down" value="{down_hops}">')
+    if show_full_map:
+        hidden.append('<input type="hidden" name="map" value="full">')
+    if show_worktrees:
+        hidden.append('<input type="hidden" name="worktrees" value="1">')
+    return (
+        '<form class="cg-search cg-blast-picker" method="get" action="/view/code" data-cg-blast-picker="1">'
+        + "".join(hidden)
+        + f"<label>{html.esc('Focus a module')} "
+        f'<input type="search" name="focus" value="{html.esc(focus)}" '
+        f'list="cg-blast-nodes" placeholder="{html.esc("module id or name")}" '
+        f'aria-label="{html.esc("Focus a module")}"></label>'
+        f'<datalist id="cg-blast-nodes">{"".join(options)}</datalist>'
+        f'<button type="submit">{html.esc("Show blast radius")}</button>'
+        "</form>"
+    )
+
+
+def _blast_seed_stack(
+    export: dict,
+    *,
+    focus: str,
+    up_hops: int,
+    down_hops: int,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    changed = _changed_module_ids(export)
+    if not changed:
+        return ""
+    labels = {module_id: label for module_id, label in _picker_module_choices(export)}
+    items: list[str] = []
+    for module_id in changed:
+        label = labels.get(module_id) or module_id.split("/")[-1] or module_id
+        href = _code_href(
+            mode="blast",
+            focus=module_id,
+            up_hops=up_hops,
+            down_hops=down_hops,
+            show_full_map=show_full_map,
+            show_worktrees=show_worktrees,
+        )
+        current = ' aria-current="true"' if module_id == focus else ""
+        items.append(f'<li{current}><a href="{html.esc(href)}">{html.esc(label)}</a></li>')
+    heading = "Changed on this branch" if len(changed) > 1 else "Changed module on this branch"
+    return (
+        f'<div class="cg-blast-seeds" data-cg-blast-seeds="1"><p>{html.esc(heading)}</p><ul>{"".join(items)}</ul></div>'
+    )
+
+
+def _blast_candidate_rows(blast: dict) -> list[dict[str, Any]]:
+    raw = blast.get("candidates")
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, dict):
+            module_id = str(item.get("id") or "").strip()
+        else:
+            module_id = str(item).strip()
+        if not module_id or module_id in seen:
+            continue
+        seen.add(module_id)
+        label = str(item.get("label") or module_id) if isinstance(item, dict) else module_id
+        rows.append({"id": module_id, "label": label})
+    rows.sort(key=lambda row: str(row["id"]))
+    return rows
+
+
+def _blast_ambiguous_choices(
+    candidates: list[dict[str, Any]],
+    *,
+    up_hops: int,
+    down_hops: int,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    items: list[str] = []
+    for row in candidates:
+        module_id = str(row.get("id") or "")
+        href = _code_href(
+            mode="blast",
+            focus=module_id,
+            up_hops=up_hops,
+            down_hops=down_hops,
+            show_full_map=show_full_map,
+            show_worktrees=show_worktrees,
+        )
+        items.append(f'<li><a href="{html.esc(href)}">{html.esc(module_id)}</a></li>')
+    return (
+        '<div class="cg-blast-candidates" data-cg-blast-ambiguous="1">'
+        f"<p>{html.esc('That name matches more than one module. Pick the full module id.')}</p>"
+        f"<ul>{''.join(items)}</ul>"
+        "</div>"
+    )
+
+
+def _blast_node_item(
+    row: dict[str, Any],
+    *,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    module_id = str(row.get("id") or "")
+    label = str(row.get("label") or module_id)
+    hops = row.get("hops")
+    hop_note = f" ({hops} hops)" if isinstance(hops, int) and hops > 1 else ""
+    changed = " cg-blast-node-changed" if row.get("changed") is True else ""
+    href = _code_href(
+        mode="blast",
+        focus=module_id,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    return (
+        f'<li class="cg-blast-node{changed}"><a href="{html.esc(href)}">{html.esc(label)}{html.esc(hop_note)}</a></li>'
+    )
+
+
+def _blast_zone(
+    *,
+    side: str,
+    title: str,
+    empty_text: str,
+    rows: list[dict[str, Any]],
+    depth: int,
+    expand_href: str,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    total = len(rows)
+    shown = rows[:_BLAST_ZONE_CAP]
+    count = _blast_count_phrase(total, upstream=side == "upstream")
+    empty = ""
+    trunc = ""
+    expand = ""
+    body: list[str] = []
+    if total == 0:
+        empty = f'<p class="cg-blast-empty" data-cg-blast-empty="{html.esc(side)}">{html.esc(empty_text)}</p>'
+    else:
+        body.append(f'<p class="cg-blast-count" data-cg-blast-count="{html.esc(side)}">{html.esc(count)}</p>')
+        if len(shown) < total:
+            trunc = (
+                f'<p class="cg-muted" data-cg-blast-truncation="{html.esc(side)}">'
+                f"{html.esc(f'showing {len(shown)} of {total}')}</p>"
+            )
+        if depth > 1:
+            grouped: dict[int, list[dict[str, Any]]] = {}
+            for row in shown:
+                hop = int(row.get("hops") or 1)
+                grouped.setdefault(hop, []).append(row)
+            for hop in sorted(grouped):
+                items = "".join(
+                    _blast_node_item(
+                        row,
+                        show_full_map=show_full_map,
+                        show_worktrees=show_worktrees,
+                    )
+                    for row in grouped[hop]
+                )
+                hop_label = "1 hop away" if hop == 1 else f"{hop} hops away"
+                body.append(
+                    f'<div class="cg-blast-hop" data-cg-hop="{hop}"><p>{html.esc(hop_label)}</p><ul>{items}</ul></div>'
+                )
+        else:
+            items = "".join(
+                _blast_node_item(
+                    row,
+                    show_full_map=show_full_map,
+                    show_worktrees=show_worktrees,
+                )
+                for row in shown
+            )
+            body.append(f'<ul class="cg-blast-list">{items}</ul>')
+        if depth < code_export.MAX_BLAST_HOPS:
+            expand = (
+                f'<a class="cg-toggle" data-cg-blast-expand="{html.esc(side)}" href="{html.esc(expand_href)}">'
+                + html.esc("Expand one more hop")
+                + "</a>"
+            )
+    return (
+        f'<section class="cg-blast-zone" data-cg-blast-zone="{html.esc(side)}">'
+        f"<h3>{html.esc(title)}</h3>" + empty + "".join(body) + trunc + expand + "</section>"
+    )
+
+
+def _render_blast_radius(
+    payload: dict,
+    export: dict,
+    *,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    blast = _blast_payload(export)
+    requested = str(payload.get("focus") or "").strip()
+    up_hops = code_export.parse_blast_hops(payload.get("up_hops") or blast.get("upstream_depth"), 1)
+    down_hops = code_export.parse_blast_hops(payload.get("down_hops") or blast.get("downstream_depth"), 1)
+    if isinstance(blast.get("upstream_depth"), int):
+        up_hops = code_export.parse_blast_hops(blast["upstream_depth"], up_hops)
+    if isinstance(blast.get("downstream_depth"), int):
+        down_hops = code_export.parse_blast_hops(blast["downstream_depth"], down_hops)
+    focus_id = _seed_focus_id(export, requested)
+    focus_meta = blast.get("focus") if isinstance(blast.get("focus"), dict) else {}
+    focus_label = str(focus_meta.get("label") or focus_id or "this module")
+    picker = _blast_picker(
+        export,
+        focus=focus_id,
+        up_hops=up_hops,
+        down_hops=down_hops,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    seeds = _blast_seed_stack(
+        export,
+        focus=focus_id,
+        up_hops=up_hops,
+        down_hops=down_hops,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    legend = (
+        f'<p class="cg-blast-legend">{html.esc("Arrows mean depends on: left depends on the module to its right.")}</p>'
+    )
+
+    if not focus_id:
+        prompt = (
+            "<p>"
+            + html.esc("Pick a changed module, or search for any module, to see what breaks and what it leans on.")
+            + "</p>"
+        )
+        return html.panel(html.esc("Blast radius"), picker + seeds + prompt)
+
+    candidates = _blast_candidate_rows(blast)
+    if blast.get("ambiguous") is True or (blast.get("resolved") is False and candidates):
+        return html.panel(
+            html.esc("Blast radius"),
+            picker
+            + seeds
+            + _blast_ambiguous_choices(
+                candidates,
+                up_hops=up_hops,
+                down_hops=down_hops,
+                show_full_map=show_full_map,
+                show_worktrees=show_worktrees,
+            ),
+        )
+
+    if blast.get("resolved") is False:
+        missing = "<p>" + html.esc("No module matches that focus.") + "</p>"
+        return html.panel(html.esc("Blast radius"), picker + seeds + missing)
+
+    if not blast:
+        hint = (
+            "<p>"
+            + html.esc(
+                "Neighborhood is loaded from the full code graph for this focus. Select Show blast radius to fetch it."
+            )
+            + "</p>"
+        )
+        return html.panel(html.esc("Blast radius"), picker + seeds + hint)
+
+    upstream = _blast_rows(blast.get("upstream"))
+    downstream = _blast_rows(blast.get("downstream"))
+    changed_chip = (
+        f'<p class="cg-blast-changed">{html.esc("CHANGED on this branch")}</p>'
+        if focus_meta.get("changed") is True
+        else ""
+    )
+    focus_zone = (
+        '<section class="cg-blast-zone" data-cg-blast-zone="focus">'
+        f"<h3>{html.esc('Focus — the thing you are changing')}</h3>"
+        f'<p class="cg-blast-focus-name" data-cg-blast-focus="{html.esc(focus_id)}">{html.esc(focus_label)}</p>'
+        f"{changed_chip}"
+        f'<p class="cg-blast-dir">{html.esc("depends on →")}</p>'
+        "</section>"
+    )
+    up_expand = _code_href(
+        mode="blast",
+        focus=focus_id,
+        up_hops=min(code_export.MAX_BLAST_HOPS, up_hops + 1),
+        down_hops=down_hops,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    down_expand = _code_href(
+        mode="blast",
+        focus=focus_id,
+        up_hops=up_hops,
+        down_hops=min(code_export.MAX_BLAST_HOPS, down_hops + 1),
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    zones = (
+        '<div class="cg-blast-zones" data-cg-blast="1">'
+        + _blast_zone(
+            side="upstream",
+            title="What breaks if you change this",
+            empty_text="nothing depends on this yet",
+            rows=upstream,
+            depth=up_hops,
+            expand_href=up_expand,
+            show_full_map=show_full_map,
+            show_worktrees=show_worktrees,
+        )
+        + focus_zone
+        + _blast_zone(
+            side="downstream",
+            title="What this leans on",
+            empty_text="this does not lean on other modules yet",
+            rows=downstream,
+            depth=down_hops,
+            expand_href=down_expand,
+            show_full_map=show_full_map,
+            show_worktrees=show_worktrees,
+        )
+        + "</div>"
+    )
+    return html.panel(html.esc("Blast radius"), picker + seeds + legend + zones)
+
+
+def _changed_module_shortcut(
+    export: dict,
+    *,
+    show_worktrees: bool,
+    show_full_map: bool,
+) -> str:
+    changed_ids = _changed_module_ids(export)
+    if not changed_ids:
+        return ""
+    module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
+    labels = {
+        str(row.get("id") or ""): str(row.get("label") or row.get("id") or "")
+        for row in module_map.get("modules", [])
+        if isinstance(row, dict)
+    }
+    items: list[str] = []
+    for module_id in changed_ids:
+        if not show_worktrees and any(part in _NONCANONICAL_ROOTS for part in _path_parts(module_id)):
+            continue
+        label = labels.get(module_id) or module_id
+        href = _code_href(symbol=module_id, show_full_map=show_full_map, show_worktrees=show_worktrees)
+        items.append(f'<li><a href="{html.esc(href)}">{html.esc(label)}</a></li>')
+    if not items:
+        return ""
+    return (
+        '<div class="cg-impact-shortcut" data-cg-changed-shortcut="1">'
+        f"<p>{html.esc('Start from changed modules')}</p>"
+        f"<ul>{''.join(items)}</ul>"
+        "</div>"
+    )
+
+
+def _render_impact(
+    export: dict,
+    symbol: str | None,
+    *,
+    show_worktrees: bool,
+    show_full_map: bool,
+) -> str:
     search_form = (
         '<form class="cg-search" method="get" action="/view/code">'
         f"<label>{html.esc('Symbol or file')} "
@@ -369,18 +1104,20 @@ def _render_impact(export: dict, symbol: str | None) -> str:
         f'<button type="submit">{html.esc("Show impact")}</button>'
         "</form>"
     )
+    shortcut = _changed_module_shortcut(export, show_worktrees=show_worktrees, show_full_map=show_full_map)
 
     impact = export.get("impact") if isinstance(export.get("impact"), dict) else None
     if not symbol:
         return html.panel(
             html.esc("Impact"),
             search_form
+            + shortcut
             + f"<p>{html.esc('Search for a symbol to see callers, blast radius, and attributed tests.')}</p>",
         )
     if not impact:
         return html.panel(
             html.esc("Impact"),
-            search_form + f"<p>{html.esc('No impact data for that symbol.')}</p>",
+            search_form + shortcut + f"<p>{html.esc('No impact data for that symbol.')}</p>",
         )
 
     resolved = impact.get("resolved_symbol") if isinstance(impact.get("resolved_symbol"), dict) else {}
@@ -396,6 +1133,7 @@ def _render_impact(export: dict, symbol: str | None) -> str:
 
     sections = [
         search_form,
+        shortcut,
         f'<p class="cg-impact-intro">{html.esc(intro)}</p>',
         _impact_diagram(plain_name, callers, edges),
         _impact_table("Direct callers", callers, limit=20),
@@ -407,16 +1145,31 @@ def _render_impact(export: dict, symbol: str | None) -> str:
 
 
 def _impact_diagram(focus: str, callers: list, edges: list) -> str:
+    caller_rows = [row for row in callers if isinstance(row, dict)]
+    edge_rows = [row for row in edges if isinstance(row, dict)]
+    shown_callers = caller_rows[:_IMPACT_CALLER_CAP]
+    shown_edges = edge_rows[:_IMPACT_EDGE_CAP]
+    trunc_note = ""
+    hidden_callers = max(0, len(caller_rows) - len(shown_callers))
+    hidden_edges = max(0, len(edge_rows) - len(shown_edges))
+    if hidden_callers or hidden_edges:
+        bits: list[str] = []
+        if hidden_callers:
+            bits.append(f"showing top {len(shown_callers)} callers, {hidden_callers} hidden")
+        if hidden_edges:
+            bits.append(f"showing top {len(shown_edges)} impact edges, {hidden_edges} hidden")
+        trunc_note = f'<p class="cg-muted" data-cg-impact-truncation="1">{html.esc("; ".join(bits))}</p>'
     layers = [
-        ("Callers", callers[:8]),
-        ("Focus", [{"source": row.get("source"), "target": focus} for row in callers[:1]] or [{"target": focus}]),
-        ("Impact", edges[:10]),
+        ("Callers", shown_callers),
+        ("Focus", [{"source": row.get("source"), "target": focus} for row in shown_callers[:1]] or [{"target": focus}]),
+        ("Impact", shown_edges),
     ]
     width = 720
     height = 200
     parts = [
+        trunc_note,
         f'<svg class="cg-impact-diagram" viewBox="0 0 {width} {height}" width="100%" role="img" '
-        f'aria-label="{html.esc("Impact layers")}">'
+        f'aria-label="{html.esc("Impact layers")}">',
     ]
     x_positions = [80, width // 2, width - 120]
     for (title, rows), x in zip(layers, x_positions, strict=False):
@@ -536,6 +1289,21 @@ def _stylesheet(nonce: str) -> str:
 .cg-summary p {{ margin:0; }}
 .cg-summary a {{ color:{_TEXT_PRIMARY}; text-decoration:underline; text-underline-offset:2px; }}
 .cg-muted {{ color:{_TEXT_SECONDARY}; font-size:0.9rem; }}
+.cg-banner {{
+  margin:0 0 0.75rem; padding:0.65rem 0.85rem; border:1px solid {_CHANGED_STROKE};
+  border-radius:0.35rem; background:{_CHANGED_FILL}; color:{_TEXT_PRIMARY};
+}}
+.cg-toggles {{ display:flex; flex-wrap:wrap; gap:0.5rem; margin:0 0 0.75rem; }}
+.cg-toggle {{
+  font:inherit; padding:0.3rem 0.65rem; border:1px solid {_BOX_STROKE}; border-radius:0.25rem;
+  background:{_SURFACE}; color:{_TEXT_PRIMARY}; text-decoration:none;
+}}
+.cg-impact-shortcut {{
+  margin:0 0 1rem; padding:0.65rem 0.85rem; border:1px solid {_BORDER};
+  border-radius:0.35rem; background:{_SURFACE};
+}}
+.cg-impact-shortcut p {{ margin:0 0 0.35rem; font-weight:600; }}
+.cg-impact-shortcut ul {{ margin:0; padding-left:1.2rem; }}
 .cg-map-wrap {{ overflow-x:auto; max-width:100%; }}
 .cg-module {{ cursor:pointer; }}
 .cg-card {{
@@ -561,6 +1329,38 @@ def _stylesheet(nonce: str) -> str:
 .cg-debug, .cg-debug-panel {{ margin-top:0.35rem; color:{_TEXT_SECONDARY}; font-size:0.85rem; }}
 .cg-debug summary, .cg-debug-panel summary {{ cursor:pointer; }}
 .cg-panel[hidden] {{ display:none; }}
+.cg-blast-legend {{ color:{_TEXT_SECONDARY}; margin:0 0 0.75rem; }}
+.cg-blast-seeds {{
+  margin:0 0 1rem; padding:0.65rem 0.85rem; border:1px solid {_BORDER};
+  border-radius:0.35rem; background:{_SURFACE};
+}}
+.cg-blast-seeds p {{ margin:0 0 0.35rem; font-weight:600; }}
+.cg-blast-seeds ul {{ margin:0; padding-left:1.2rem; }}
+.cg-blast-zones {{
+  display:grid; grid-template-columns:1fr minmax(10rem, 16rem) 1fr; gap:1rem; align-items:start;
+}}
+.cg-blast-zone {{
+  margin:0; padding:0.85rem 1rem; border:1px solid {_BORDER}; border-radius:0.35rem;
+  background:{_SURFACE}; color:{_TEXT_PRIMARY};
+}}
+.cg-blast-zone[data-cg-blast-zone="focus"] {{
+  background:{_CHANGED_FILL}; border-color:{_CHANGED_STROKE};
+}}
+.cg-blast-zone h3 {{ margin:0 0 0.5rem; font-size:1rem; }}
+.cg-blast-count, .cg-blast-focus-name {{ margin:0 0 0.5rem; font-weight:600; }}
+.cg-blast-empty {{ margin:0; color:{_TEXT_SECONDARY}; }}
+.cg-blast-dir {{ margin:0.5rem 0 0; color:{_TEXT_SECONDARY}; font-size:0.9rem; }}
+.cg-blast-changed {{ margin:0 0 0.5rem; font-size:0.85rem; font-weight:700; }}
+.cg-blast-list, .cg-blast-hop ul {{ margin:0; padding-left:1.2rem; }}
+.cg-blast-hop p {{ margin:0.5rem 0 0.25rem; color:{_TEXT_SECONDARY}; font-size:0.85rem; }}
+.cg-blast-node-changed a {{ font-weight:700; }}
+.cg-blast-zone .cg-toggle {{ display:inline-block; margin-top:0.75rem; }}
+.cg-blast-candidates {{
+  margin:0 0 1rem; padding:0.65rem 0.85rem; border:1px solid {_BORDER};
+  border-radius:0.35rem; background:{_SURFACE};
+}}
+.cg-blast-candidates p {{ margin:0 0 0.35rem; font-weight:600; }}
+.cg-blast-candidates ul {{ margin:0; padding-left:1.2rem; }}
 </style>
 <noscript><style nonce="{html.esc(nonce)}">.cg-panel[hidden] {{ display:block !important; }}</style></noscript>"""
 
@@ -647,6 +1447,10 @@ def _script(nonce: str) -> str:
     showCard(hit.value);
   }});
   var params = new URLSearchParams(window.location.search || "");
-  selectMode(params.get("symbol") ? "impact" : "map");
+  var mode = params.get("mode") || "";
+  if (mode !== "map" && mode !== "blast" && mode !== "impact") {{
+    mode = params.get("focus") ? "blast" : (params.get("symbol") ? "impact" : "map");
+  }}
+  selectMode(mode);
 }})();
 </script>"""

@@ -17,37 +17,69 @@ def test_fetch_uses_work_brief_json(monkeypatch, tmp_path):
     assert calls == [(tmp_path, ["work", "brief"], 60.0)]
 
 
-def test_render_displays_status_signals():
+def test_docstring_states_operator_question():
+    doc = status_grid.__doc__ or ""
+    assert "attention" in doc.lower()
+    for topic in ("handoffs", "memory", "verify loop", "inbox hygiene"):
+        assert topic in doc.lower()
+
+
+def test_render_shows_summary_strip_and_plain_word_tiles():
     payload = {
-        "handoff_issues": {"count": 2, "total_count": 5},
-        "memory_care": {"issue_count": 3},
+        "handoff_issues": {"count": 2, "known_count": 3, "total_count": 5},
+        "memory_care": {"issue_count": 0},
         "outcome_loop": {
             "verify_run_count": 12,
             "record_count": 9,
             "eligible_receipt_count": 7,
+            "ineligible_receipt_count": 1,
         },
         "pending_tasks": [{"id": "task-a"}, {"id": "task-b"}],
         "inbox_hygiene": {"issue_count": 1},
     }
 
-    fragment = status_grid.render(payload, "unused")
+    fragment = status_grid.render(payload, "status-nonce")
 
-    assert "Pending handoff issues" in fragment
-    assert "Total handoff issues" in fragment
-    assert "Memory cards at refresh risk" in fragment
-    assert "Latest verify receipt" in fragment
-    assert "Latest verify signal" in fragment
-    assert "Verify runs" in fragment
-    assert "Outcome records" in fragment
-    assert "Open work-inbox items" in fragment
-    assert "Inbox hygiene issues" in fragment
-    for value in ("2", "5", "3", "12", "9", "7", "1"):
-        assert f">{value}<" in fragment
-    assert ">-<" in fragment
+    # The stylesheet must carry the CSP nonce or the browser refuses it.
+    assert '<style nonce="status-nonce">' in fragment
+    assert "<style>" not in fragment
+    # Chip colors live in the nonce'd stylesheet, not style= attributes (CSP blocks those).
+    assert "style=" not in fragment.split("<style", 1)[-1].split("</style>", 1)[-1]
+    assert 'class="sg-chip-icon sg-chip-warning"' in fragment
+    assert 'class="sg-chip-icon sg-chip-good"' in fragment
+    assert ".sg-chip-good { background: #0ca30c; }" in fragment
+    assert ".sg-chip-warning { background: #fab219; }" in fragment
+    assert ".sg-chip-serious { background: #ec835a; }" in fragment
+    assert 'data-sg-summary="1"' in fragment
+    assert "new handoff issues are waiting" in fragment
+    assert "No cards are waiting on care review" in fragment
+    assert "The work inbox has" in fragment
+
+    for label in ("Handoffs", "Memory care", "Verify loop", "Inbox hygiene", "Pending tasks"):
+        assert label in fragment
+    # Plain words, never color alone.
+    for word in ("ATTENTION", "OK"):
+        assert word in fragment
+    assert "MISSING" not in fragment
+
+    assert "Raw ids" in fragment
+    assert "task-a" in fragment
+    assert "Latest verify receipt" not in fragment
+    assert "Latest verify signal" not in fragment
+
+
+def test_render_missing_sections_show_missing_tiles():
+    fragment = status_grid.render({"handoff_issues": {"count": 0}}, "unused")
+    assert "MISSING" in fragment
+    assert "not available" in fragment or "unavailable" in fragment
+    assert 'class="sg-chip-icon sg-chip-serious"' in fragment
+    assert "style=" not in fragment.split("<style", 1)[-1].split("</style>", 1)[-1]
 
 
 def test_render_error_and_empty_payloads_degrade_safely():
-    assert "boom" in status_grid.render({"error": "boom"}, "unused")
+    error_fragment = status_grid.render({"error": "boom"}, "unused")
+    assert "boom" in error_fragment
+    assert "Status" in error_fragment
 
-    fragment = status_grid.render({}, "unused")
-    assert "Nothing here." in fragment
+    empty_fragment = status_grid.render({}, "unused")
+    assert "Nothing here." in empty_fragment

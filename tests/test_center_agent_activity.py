@@ -328,6 +328,77 @@ def test_external_sources_redact_journal_text_and_missing_local_sources_are_stal
     assert all(record.get("task_label") != "Task unavailable" for record in records)
 
 
+def test_agent_activity_view_docstring_answers_operator_question():
+    assert "right now" in agent_activity.__doc__.lower()
+    assert "fleet" in agent_activity.__doc__.lower()
+
+
+def test_agent_activity_view_summary_strip_counts_states_and_blocked_hosts():
+    now = datetime.now(timezone.utc).isoformat()
+    records = [
+        _view_record(activity_id="a1", state="running", host="rocinante", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a2", state="running", host="shadowfax", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a3", state="blocked", host="shadowfax", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a4", state="totally-bogus", host="gandalf", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a5", state=None, host="gandalf", last_updated_at=now, started_at=now),
+    ]
+    fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
+
+    strip = fragment.split('class="page-summary"', 1)[1].split("</div>", 1)[0]
+    assert "5 agents tracked" in strip
+    assert "2 running" in strip
+    assert "1 blocked on shadowfax" in strip
+    assert "2 unknown" in strip
+    board_index = fragment.index('class="machine-board"')
+    summary_index = fragment.index('class="page-summary"')
+    assert summary_index < board_index
+
+
+def test_agent_activity_view_summary_strip_handles_empty_records():
+    fragment = agent_activity.render({"agent_activity": []}, "test-nonce")
+    strip = fragment.split('class="page-summary"', 1)[1].split("</div>", 1)[0]
+    assert "No agent activity recorded right now." in strip
+
+
+def test_agent_activity_view_state_legend_lists_plain_words_in_sync_with_icons():
+    fragment = agent_activity.render({"agent_activity": []}, "test-nonce")
+
+    assert 'class="state-legend"' in fragment
+    for state, icon in agent_activity._STATE_ICON.items():
+        assert f"{icon} {state}" in fragment
+        entry = f'<span class="legend-entry">{icon} {state}</span>'
+        assert entry in fragment
+
+
+def test_agent_activity_view_count_chips_carry_plain_words_not_icon_only():
+    now = datetime.now(timezone.utc).isoformat()
+    records = [
+        _view_record(activity_id="a1", state="running", last_updated_at=now, started_at=now),
+        _view_record(activity_id="a2", state="running", last_updated_at=now, started_at=now),
+    ]
+    fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
+
+    assert "● running 2" in fragment
+
+
+def test_agent_activity_view_count_chips_collapse_unknown_states_like_summary():
+    # A bogus state and a real "unknown" on the same host must fold into a
+    # single "unknown" chip (bucketed via _bucket_state), matching the summary
+    # strip, not render two indistinguishable split-count chips.
+    now = datetime.now(timezone.utc).isoformat()
+    records = [
+        _view_record(activity_id="b1", state="totally-bogus", last_updated_at=now, started_at=now),
+        _view_record(activity_id="b2", state="unknown", last_updated_at=now, started_at=now),
+    ]
+    fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
+
+    # The count strip collapses both into one "unknown 2" chip; before the fix
+    # they split into two "unknown 1" chips. (The raw state may still appear in
+    # the per-agent detail row's State column, which is correct.)
+    assert "unknown 2" in fragment
+    assert "unknown 1" not in fragment
+
+
 def _view_record(**overrides):
     now = datetime.now(timezone.utc)
     record = {
@@ -448,9 +519,9 @@ def test_zombie_running_run_without_lock_renders_stale_last_seen(tmp_path, monke
     assert worker["state"] == "stale"
 
     fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
-    assert "● running" not in fragment
-    assert "⌛" in fragment
-    assert "stale (last seen 45h ago)" in fragment
+    board = fragment.split('class="machine-board"', 1)[1]
+    assert "● running" not in board
+    assert "⌛ stale (last seen 45h ago)" in board
 
 
 def test_blocked_45h_run_is_older_history_not_live(tmp_path, monkeypatch):
@@ -477,11 +548,11 @@ def test_blocked_45h_run_is_older_history_not_live(tmp_path, monkeypatch):
     assert run_record["state"] == "stale"
 
     fragment = agent_activity.render({"agent_activity": records}, "test-nonce")
-    live, collapsed = fragment.split("show ", 1) if "show " in fragment.lower() else (fragment, "")
+    board = fragment.split('class="machine-board"', 1)[1]
     live_section = fragment.split('class="completed-expander"', 1)[0]
     assert "Ancient blocked run" not in live_section or "older" in fragment.lower()
     assert "show " in fragment.lower() and "older" in fragment.lower()
-    assert "! blocked" not in live_section
+    assert "! blocked" not in board
     collapsed_html = (
         fragment.split('class="completed-expander"', 1)[1] if 'class="completed-expander"' in fragment else ""
     )

@@ -447,6 +447,7 @@ def campaign_readiness_payload(
     *,
     explain: bool = False,
     parallel_safe: bool = False,
+    impact_runner: Any | None = None,
 ) -> dict[str, Any]:
     """Aggregated ready-view JSON for a campaign (shaped like per-repo ready)."""
     workspace = workspace.expanduser().resolve()
@@ -494,9 +495,17 @@ def campaign_readiness_payload(
         }
     )
     if parallel_safe:
-        # Seam for future cross-repo wave aggregation over the campaign ready set.
-        # Per-repo footprint waves (#778) do not yet compose across members.
-        partition_payload = partition_mod.partition_campaign_ready(payload["ready"], members=members_info)
+        tasks_by_id = {
+            str(task["id"]): task
+            for task in synthetic.get("tasks") or []
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+        }
+        partition_payload = partition_mod.partition_campaign_ready(
+            payload["ready"],
+            members=members_info,
+            tasks_by_id=tasks_by_id,
+            impact_runner=impact_runner,
+        )
         payload["parallel_safe"] = True
         payload.update(partition_payload)
     return payload
