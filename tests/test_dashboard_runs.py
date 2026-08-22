@@ -1,7 +1,12 @@
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from brigade.center_cmd.dashboard.views import run_timeline
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_fetch_uses_runs_list_and_verify_runs_contracts(monkeypatch, tmp_path):
@@ -35,6 +40,12 @@ def test_fetch_uses_runs_list_and_verify_runs_contracts(monkeypatch, tmp_path):
     assert limit >= 50
 
 
+def test_docstring_answers_operator_question():
+    assert "what verification ran recently" in run_timeline.__doc__.lower()
+    assert "did it pass" in run_timeline.__doc__.lower()
+    assert "command" in run_timeline.__doc__.lower()
+
+
 def test_render_brigade_runs_from_versioned_list_contract():
     payload = {
         "brigade": {
@@ -59,12 +70,17 @@ def test_render_brigade_runs_from_versioned_list_contract():
     fragment = run_timeline.render(payload, "unused")
 
     assert "Brigade runs" in fragment
-    assert "20260101-090000-aaaa" in fragment
     assert "dispatch" in fragment
     assert "read-only" in fragment
     assert "Skipped 2 invalid run directories." in fragment
     assert "build the &lt;thing&gt;" in fragment
     assert "<thing>" not in fragment
+    # Primary column is task + chip; Run ID demoted into a details expander.
+    assert 'class="mo-chip mo-chip-fail">fail</span> build the &lt;thing&gt;' in fragment
+    assert "<details><summary>Run ID</summary><code>20260101-090000-aaaa</code></details>" in fragment
+    first_row = re.search(r"<tr data-mo-row=\"1\">.*?</tr>", fragment, re.DOTALL)
+    assert first_row is None  # brigade panel rows carry no pager hook
+    assert fragment.index("build the &lt;thing&gt;") < fragment.index("<summary>Run ID</summary>")
 
 
 def test_render_brigade_runs_error_is_empty_state_with_diagnostic():
@@ -108,10 +124,13 @@ def test_render_lists_verify_runs_newest_first_with_bounded_receipts():
     fragment = run_timeline.render(payload, "unused")
 
     assert fragment.index("run-late") < fragment.index("run-early")
-    for heading in ("Run ID", "Status", "Command", "Exit code", "Duration", "Timestamp"):
+    for heading in ("Command", "Exit code", "Duration", "Timestamp", "Receipt"):
         assert f"<th>{heading}</th>" in fragment
     assert "<details>" in fragment
     assert "<summary>Receipt JSON</summary>" in fragment
+    # Primary column is command + chip; Run ID demoted into its own expander.
+    assert 'class="mo-chip mo-chip-pass">pass</span> fake check &amp;lt;safe&amp;gt;' in fragment
+    assert "<details><summary>Run ID</summary><code>run-late</code></details>" in fragment
     assert "&amp;lt;safe&amp;gt;" in fragment
     assert "Receipt truncated at 4000 characters." in fragment
     assert "x" * 4_001 not in fragment
@@ -125,7 +144,7 @@ def test_render_error_and_empty_payloads_degrade_safely():
     assert "Nothing here." in run_timeline.render({"verify": {"runs": []}, "brigade": {"runs": []}}, "unused")
 
 
-def test_render_paginates_with_prior_next_like_memory_inventory():
+def test_render_paginates_with_prior_next_like_memory_inventory(monkeypatch):
     runs = []
     for index in range(55):
         runs.append(
@@ -152,3 +171,96 @@ def test_render_paginates_with_prior_next_like_memory_inventory():
     assert 'data-mo-row="1"' in fragment
     assert "check-0000" in fragment
     assert "check-0054" in fragment
+
+
+def test_summary_strip_counts_week_runs_failures_and_last_run(monkeypatch):
+    now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(run_timeline, "_now", lambda: now)
+    week_run = now - timedelta(hours=3)
+    old_run = now - timedelta(days=14)
+    payload = {
+        "brigade": {
+            "schema": "brigade.runs-list.v1",
+            "runs": [
+                {
+                    "run_id": "b-week",
+                    "status": "failed",
+                    "task": "week task",
+                    "started_at": _iso(week_run),
+                },
+                {
+                    "run_id": "b-old",
+                    "status": "completed",
+                    "task": "old task",
+                    "started_at": _iso(old_run),
+                },
+            ],
+        },
+        "verify": {
+            "runs": [
+                {
+                    "run_id": "v-week",
+                    "status": "completed",
+                    "started_at": _iso(now - timedelta(minutes=10)),
+                    "commands": [{"command": "fake check", "exit_code": 0}],
+                }
+            ]
+        },
+    }
+
+    fragment = run_timeline.render(payload, "unused")
+
+    assert "2 runs this week, 1 failed, last run 10m ago." in fragment
+
+
+def test_summary_strip_counts_unparseable_stamps_as_unknown_age(monkeypatch):
+    now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(run_timeline, "_now", lambda: now)
+    payload = {
+        "brigade": {"schema": "brigade.runs-list.v1", "runs": []},
+        "verify": {"runs": [{"run_id": "v-bad", "status": "completed", "started_at": "not-a-timestamp"}]},
+    }
+
+    fragment = run_timeline.render(payload, "unused")
+
+    assert "0 runs this week, 0 failed, last run unknown age." in fragment
+    assert "<td>unknown age</td>" in fragment
+
+
+def test_relative_time_renders_hours_ago_and_future_skew_as_just_now(monkeypatch):
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(run_timeline, "_now", lambda: now)
+    assert run_timeline._relative_time(None) == "unknown age"
+    assert run_timeline._relative_time("garbage") == "unknown age"
+    hours_ago = _iso(now - timedelta(hours=3))
+    minutes_ago = _iso(now - timedelta(minutes=5))
+    days_ago = _iso(now - timedelta(days=3))
+    future = _iso(now + timedelta(minutes=30))
+    assert run_timeline._relative_time(hours_ago) == "3h ago"
+    assert run_timeline._relative_time(minutes_ago) == "5m ago"
+    assert run_timeline._relative_time(days_ago) == "3d ago"
+    # Future stamps (clock skew) render as just now.
+    assert run_timeline._relative_time(future) == "just now"
+
+
+def test_render_timestamps_use_relative_time_in_rows(monkeypatch):
+    now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(run_timeline, "_now", lambda: now)
+    payload = {
+        "brigade": {"schema": "brigade.runs-list.v1", "runs": []},
+        "verify": {
+            "runs": [
+                {
+                    "run_id": "v-rel",
+                    "status": "completed",
+                    "started_at": _iso(now - timedelta(hours=2)),
+                    "commands": [{"command": "fake check", "exit_code": 0}],
+                }
+            ]
+        },
+    }
+
+    fragment = run_timeline.render(payload, "unused")
+
+    assert "<td>2h ago</td>" in fragment
+    assert "<td>2026" not in fragment

@@ -9,10 +9,22 @@ Releases before this changelog was started are on the [releases page](https://gi
 ## [Unreleased]
 
 ### Security
+- Evidence CLI, MCP, and HTTP exits now sanitize the complete serialized payload through one last allowlist walker. Ineligible items become `{id?, eligibility_status, reason_code}` — stub `id` is 24 lowercase hex or omitted. Eligible items always serialize `artifacts` as a list (`[]` when none); empty `related`, `results`, `warnings`, and `grouped_by_source` stay present rather than omitted. `grouped_by_source` counts only eligible closed-enum kinds. Request `query`/`filters` are not reflected; cached show regenerates live; a URL content hash cannot authorize swapped artifact text. Fixes #1030, #1031, #1032.
 - `miseledger trust review` requires an operator-minted capability handed over stdin (`brigade.authority.capability-handoff.v1`). The MAC is bound to item id, current digest, requested transition, nonce, and expiry. Spent nonces are recorded in `used_capabilities`. `--operator-command` is audit metadata only. A missing capability is refused for every stdin kind, including piped empty input, `/dev/null`, and a PTY. stdin is not an authorization signal. Fixes #1029.
 
 ### Fixed
 
+- `import cursor` no longer aborts when `User/globalStorage/conversation-search.db`
+  cannot be opened. Relative profile paths and Windows drive paths now use an
+  absolute `file:` URI (the previous `file://<first-segment>/...` form made
+  SQLite report `SQL logic error: out of memory`). A file that still cannot
+  be read is skipped with a counted warning that names the path and the
+  statement; prompt history and chat surfaces continue to import. Fixes #1052.
+- `import discovered` lists per-source failures but exits 0 when at least one
+  source imported; exit 1 is reserved for total failure (no source imported).
+  Fixes #1052.
+- `import sourceharvest` (and the crawl wrappers that call it) and provenance backfill retry the SQLITE_BUSY family (5, 261, 517) with a bounded total wait, so a concurrent writer no longer fails the crawl or hangs the suite. Exhausted contention names the holder-diagnosis instead of the raw SQLite string. Fixes #1067.
+- `archive.Open` restores the pre-#1073 10s global `busy_timeout` so unwrapped command paths keep their contention tolerance. The two retry-wrapped paths bound their own wait via retry count, backoff, and `MaxTotalWait` rather than by shrinking the DSN timeout. `IsBusy` classifies by the SQLite result code (low 8 bits == 5) and cannot be tripped by parenthesized 5/261/517 in subprocess stderr. Fixes #1085.
 - Content eligibility is centralized for every body-emitting read surface.
   Search snippets, MCP `search_evidence`, evidence bundles, Markdown export,
   default `show`, session preview, session search snippets, and session

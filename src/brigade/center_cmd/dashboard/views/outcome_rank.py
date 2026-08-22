@@ -1,4 +1,4 @@
-"""Outcome rank dashboard view."""
+"""Which skills and cards are actually helping vs hurting the loop?"""
 
 from __future__ import annotations
 
@@ -60,7 +60,27 @@ def render(payload: dict, nonce: str) -> str:
             ]
         )
     escaped_headers = [html.esc(header) for header in headers]
-    return html.panel(html.esc(TITLE), html.table(escaped_headers, rows))
+    strip = _summary_strip(entries)
+    return html.panel(html.esc(TITLE), f"<p>{strip}</p>" + html.table(escaped_headers, rows))
+
+
+def _summary_strip(entries: list[dict]) -> str:
+    def net(entry: dict) -> int:
+        try:
+            return int(entry.get("helped", 0)) - int(entry.get("hurt", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    best = max(entries, key=net)
+    worst = min(entries, key=net)
+    best_id = html.esc(best.get("artifact_id", "-"))
+    worst_id = html.esc(worst.get("artifact_id", "-"))
+    if best is worst:
+        return f"Top entry: {best_id} (net {net(best):+d})."
+    return (
+        f"{best_id} is the biggest net help (net {net(best):+d}); "
+        f"{worst_id} is the biggest net drag (net {net(worst):+d})."
+    )
 
 
 def _fmt(value: object) -> object:
