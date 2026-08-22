@@ -15,9 +15,13 @@ const SchemaVersion = 5
 
 // BusyTimeoutSeconds is the SQLite busy_timeout applied to every pooled
 // connection. The driver default is 0 (fail immediately on SQLITE_BUSY).
-// Keep this at 1s so RetryOnBusy's attempts compose to a few seconds,
-// never busy_timeout * retries into minutes under sustained contention.
-const BusyTimeoutSeconds = 1
+// Keep this at 10s so unwrapped command paths (openMigrated / Open) retain
+// the pre-#1073 contention tolerance. Retry-wrapped paths (crawl import,
+// provenance backfill) must bound their own total wait via retry count and
+// backoff (ingest.DefaultBusyTotalWait), never by shrinking this global
+// timeout — otherwise a reduced DSN wait would cut the other ~41 call sites
+// 10x and busy_timeout * retries would still be able to blow up.
+const BusyTimeoutSeconds = 10
 
 func Open(path string) (*sql.DB, error) {
 	if err := security.EnsurePrivateParent(path); err != nil {

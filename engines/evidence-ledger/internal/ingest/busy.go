@@ -5,25 +5,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
-
-	moderncsqlite "modernc.org/sqlite"
 )
 
 // sqliteBusyPrimary is SQLITE_BUSY. Extended codes keep this in the low 8 bits:
 // SQLITE_BUSY_RECOVERY=261, SQLITE_BUSY_SNAPSHOT=517, SQLITE_BUSY_TIMEOUT=773.
 const sqliteBusyPrimary = 5
 
-const (
-	sqliteBusy         = 5
-	sqliteBusyRecovery = 261
-	sqliteBusySnapshot = 517
-	sqliteBusyTimeout  = 773
-)
+// sqliteResultCoder is the structural SQLite error surface. modernc.org/sqlite
+// Error.Code() returns the result code; tests may implement the same method.
+// Free-text errors (including subprocess stderr) do not implement this.
+type sqliteResultCoder interface {
+	Code() int
+}
 
 // DefaultBusyRetries is the number of attempts (initial try plus retries)
 // around an import or backfill that hits a BUSY-family lock.
@@ -38,16 +34,17 @@ const DefaultBusyBackoff = 100 * time.Millisecond
 const DefaultBusyBackoffMax = 400 * time.Millisecond
 
 // DefaultBusyTotalWait is the wall-clock ceiling for RetryOnBusy, including
-// per-attempt function time. busy_timeout and retries must compose to a
-// few seconds, never busy_timeout * retries into minutes.
+// per-attempt function time. The global archive busy_timeout stays at 10s
+// for unwrapped command paths; retry-wrapped paths bound additional
+// attempts here so composed wait cannot become busy_timeout * retries.
+// A first attempt that already waited the full DSN timeout will exhaust
+// this ceiling, fail with holder-diagnosis, and never loop into minutes.
 const DefaultBusyTotalWait = 4 * time.Second
 
 // HolderDiagnosisLabel is the token a bounded SQLITE_BUSY failure must
 // name so a runbook receipt points at lock-holder diagnosis instead of
 // the raw driver string.
 const HolderDiagnosisLabel = "holder-diagnosis"
-
-var busyCodeInMessage = regexp.MustCompile(`\((\d+)\)`)
 
 // BusyRetryOptions configure RetryOnBusy. Zero values use the defaults
 // above. Tests inject Sleep and a short Attempts count.
@@ -63,51 +60,26 @@ type BusyRetryOptions struct {
 }
 
 // IsBusy reports whether err is a retryable SQLite BUSY-family lock.
-// The primary result code is SQLITE_BUSY (5); extended codes keep that
-// value in the low 8 bits (261 recovery, 517 snapshot, 773 timeout).
+// Classification is structural: a result Code() whose primary / low 8
+// bits equal SQLITE_BUSY (5). That covers 5, 261 recovery, 517 snapshot,
+// and 773 timeout. Parenthesized numbers or "SQLITE_BUSY" in free text
+// (including subprocess stderr that reaches RetryOnBusy) are not busy.
 func IsBusy(err error) bool {
 	if err == nil {
 		return false
 	}
-	if code, ok := sqliteErrorCode(err); ok {
-		return isBusyFamilyCode(code)
-	}
-	if code, ok := busyCodeFromMessage(err.Error()); ok {
-		return isBusyFamilyCode(code)
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "sqlite_busy")
+	code, ok := sqliteErrorCode(err)
+	return ok && isBusyFamilyCode(code)
 }
 
 func isBusyFamilyCode(code int) bool {
-	switch code {
-	case sqliteBusy, sqliteBusyRecovery, sqliteBusySnapshot, sqliteBusyTimeout:
-		return true
-	default:
-		return code&0xFF == sqliteBusyPrimary
-	}
+	return code&0xFF == sqliteBusyPrimary
 }
 
 func sqliteErrorCode(err error) (int, bool) {
-	var se *moderncsqlite.Error
-	if errors.As(err, &se) {
-		return se.Code(), true
-	}
-	return 0, false
-}
-
-func busyCodeFromMessage(msg string) (int, bool) {
-	matches := busyCodeInMessage.FindAllStringSubmatch(msg, -1)
-	for _, m := range matches {
-		if len(m) < 2 {
-			continue
-		}
-		code, err := strconv.Atoi(m[1])
-		if err != nil {
-			continue
-		}
-		if isBusyFamilyCode(code) {
-			return code, true
-		}
+	var coder sqliteResultCoder
+	if errors.As(err, &coder) {
+		return coder.Code(), true
 	}
 	return 0, false
 }

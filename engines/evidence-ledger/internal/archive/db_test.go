@@ -2,10 +2,13 @@ package archive
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 )
 
 func openMigrated(t *testing.T) *sql.DB {
@@ -527,4 +530,138 @@ values(?,?,?,?,?,?,?,?,?,?,?)`, row.id, "src-memory", "col-memory", ext, "memory
 		}
 	}
 	return nil
+}
+
+// TestOpenWriteDoesNotGiveUpAtOneSecond is the unwrapped-path tolerance
+// check for #1085: archive.Open (the single open behind openMigrated) must
+// keep waiting past the 1s #1073 DSN, matching the pre-#1073 10s busy_timeout.
+func TestOpenWriteDoesNotGiveUpAtOneSecond(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miseledger.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+
+	holder, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	holder.SetMaxOpenConns(1)
+	if err := holder.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+
+	const pastOneSecond = 1500 * time.Millisecond
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, execErr := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('s1','k','n','1','t','t')`)
+		done <- execErr
+	}()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(started)
+		_, _ = holder.Exec("ROLLBACK")
+		t.Fatalf("unwrapped write returned after %s (err=%v); must keep waiting past ~1s (pre-#1073 busy_timeout was 10s)", elapsed, err)
+	case <-time.After(pastOneSecond):
+		// Still blocked past 1s: the restored 10s DSN is in effect.
+	}
+
+	if _, err := holder.Exec("COMMIT"); err != nil {
+		t.Fatalf("release holder: %v", err)
+	}
+	err = <-done
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("write after lock release: %v (elapsed %s)", err, elapsed)
+	}
+	if elapsed < pastOneSecond {
+		t.Fatalf("write returned in %s, want to have blocked past %s", elapsed, pastOneSecond)
+	}
+}
+
+func TestOpenConcurrentWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miseledger.db")
+	setup, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(setup); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-06-03T00:00:00Z"
+	if _, err := setup.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)`,
+		"src-stress", "busy-stress", "Busy Stress", "1", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 8
+	const inserts = 16
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			db, openErr := Open(path)
+			if openErr != nil {
+				errs <- openErr
+				return
+			}
+			defer db.Close()
+			<-start
+			for n := 0; n < inserts; n++ {
+				_, execErr := db.Exec(
+					`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)`,
+					fmt.Sprintf("col-%d-%d", id, n),
+					"src-stress",
+					fmt.Sprintf("busy:col:%d:%d", id, n),
+					"agent_session",
+					"stress",
+					"{}",
+					now,
+					now,
+				)
+				if execErr != nil {
+					errs <- execErr
+					return
+				}
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent unwrapped writer: %v", err)
+		}
+	}
+
+	check, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var got int
+	if err := check.QueryRow(`select count(*) from collections`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if want := workers * inserts; got != want {
+		t.Fatalf("collections = %d, want %d", got, want)
+	}
 }
