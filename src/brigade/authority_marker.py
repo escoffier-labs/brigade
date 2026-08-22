@@ -193,9 +193,19 @@ def actor_name(*, env: Mapping[str, str] | None = None) -> str:
 def append_audit(record: Mapping[str, Any], *, env: Mapping[str, str] | None = None) -> Path:
     path = audit_path(env=env)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        if path.exists() and (path.is_dir() or path.is_symlink() or not path.is_file()):
+            raise OSError("authority downgrade audit is not a regular file")
+    except OSError as exc:
+        if "not a regular file" in str(exc):
+            raise
+        raise OSError("authority downgrade audit is unavailable") from exc
     line = json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n"
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(path, flags, 0o600)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise OSError("authority downgrade audit is unavailable") from exc
     try:
         with os.fdopen(os.dup(descriptor), "a", encoding="utf-8") as handle:
             handle.write(line)
@@ -210,31 +220,98 @@ def append_audit(record: Mapping[str, Any], *, env: Mapping[str, str] | None = N
     return path
 
 
+def _restore_marker_bytes(path: Path, data: bytes) -> None:
+    """Put the exact pre-downgrade marker bytes back after a failed audit."""
+
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.restore.tmp")
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            with os.fdopen(os.dup(descriptor), "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def remove_signed_marker(
     target: Path,
     *,
     actor: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Remove the sticky marker and append a security audit line."""
+    """Remove the sticky marker only after a durable downgrade audit.
+
+    Intent is logged first. If completion logging fails, the exact marker
+    bytes are restored so trust is never dropped without an audit record.
+    """
 
     fingerprint = target_fingerprint(target)
     path = signed_marker_path(fingerprint, env=env)
     if _marker_is_inside_workspace(path, target):
         raise OSError("authority signed marker path is inside the workspace")
     try:
-        path.unlink()
-        removed = True
+        marker_bytes = path.read_bytes()
     except FileNotFoundError:
-        removed = False
-    payload = {
+        return {
+            "action": "authority-downgrade",
+            "actor": actor if actor is not None else operator_identity(env=env),
+            "created_at": utc_now_iso_z(),
+            "phase": "complete",
+            "removed": False,
+            "target": str(target.expanduser().resolve()),
+            "target_fingerprint": fingerprint,
+        }
+    except OSError as exc:
+        raise OSError("authority signed marker is unreadable") from exc
+    actor_value = actor if actor is not None else operator_identity(env=env)
+    resolved = str(target.expanduser().resolve())
+    intent = {
         "action": "authority-downgrade",
-        "actor": actor if actor is not None else operator_identity(env=env),
+        "actor": actor_value,
         "created_at": utc_now_iso_z(),
-        "removed": removed,
-        "target": str(target.expanduser().resolve()),
+        "phase": "intent",
+        "removed": False,
+        "target": resolved,
         "target_fingerprint": fingerprint,
     }
-    if removed:
-        payload["audit_path"] = str(append_audit(payload, env=env))
-    return payload
+    try:
+        append_audit(intent, env=env)
+    except OSError as exc:
+        raise OSError("authority downgrade audit is unavailable; marker not removed") from exc
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return {
+            **intent,
+            "phase": "complete",
+            "removed": False,
+        }
+    completion = {
+        "action": "authority-downgrade",
+        "actor": actor_value,
+        "created_at": utc_now_iso_z(),
+        "phase": "complete",
+        "removed": True,
+        "target": resolved,
+        "target_fingerprint": fingerprint,
+    }
+    try:
+        completion["audit_path"] = str(append_audit(completion, env=env))
+    except OSError as exc:
+        try:
+            _restore_marker_bytes(path, marker_bytes)
+        except OSError as restore_exc:
+            raise OSError("authority downgrade audit failed and marker restore failed") from restore_exc
+        raise OSError("authority downgrade audit failed; marker restored") from exc
+    return completion

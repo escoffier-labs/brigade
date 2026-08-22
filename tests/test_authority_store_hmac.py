@@ -351,6 +351,7 @@ def test_g5_forged_binding_is_accepted_when_hmac_verification_is_reverted(
         env=None,
         key_material=None,
         workspace=None,
+        allow_unsigned_upgrade=True,
     ) -> dict:
         if payload.get("envelope_version") == 1 and isinstance(payload.get("record"), dict):
             return dict(payload["record"])
@@ -683,3 +684,122 @@ def test_record_signed_marker_refuses_workspace_user_dir(tmp_path: Path, monkeyp
     planted = tmp_path / "authority-signed" / authority_marker.target_fingerprint(tmp_path)
     assert not planted.exists()
     assert not authority_marker.marker_exists(tmp_path)
+
+
+def test_reanchor_rejects_forged_raw_candidate_for_marked_destination(tmp_path: Path) -> None:
+    """Round-5 probe: a raw dummy-target candidate cannot re-sign forged bindings."""
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    _bind_workspace(dest)
+    item = ledger._make_import("reanchor forge", kind="task", source="handoff-ingest")
+    receipt_path = _write_g5_receipt(dest, item)
+    ledger._write_persisted_import_proofs(dest, [item], operation_id="0" * 32)
+    assert ledger._legacy_import_source_content_identity(item, target=dest) is not None
+    assert authority_marker.marker_exists(dest)
+
+    store = _store_path(dest)
+    envelope = json.loads(store.read_text(encoding="utf-8"))
+    record = dict(envelope["record"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["attacker_marker"] = "reanchor-raw-candidate"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    info = receipt_path.stat()
+    forged_binding = {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+    }
+    dummy = tmp_path / "dummy-unmarked"
+    dummy.mkdir()
+    dummy_target = str(dummy.resolve())
+    dummy_digest = hashlib.sha256(dummy_target.encode("utf-8")).hexdigest()
+    candidate = store.parent / f"{dummy_digest}.json"
+    planted = {
+        "schema_version": record["schema_version"],
+        "target": dummy_target,
+        "workspace": record["workspace"],
+        "directories": dict(record.get("directories") or {}),
+        "files": {
+            **dict(record.get("files") or {}),
+            ".brigade/scanners/runs/chosen-run/receipt.json": forged_binding,
+        },
+    }
+    store.unlink()
+    candidate.write_text(json.dumps(planted, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+    with pytest.raises(OSError):
+        descriptor = ledger._open_verifier_owned_directory(
+            dest,
+            components=(".brigade", "scanners", "runs"),
+            anchor_name=".runs.authority.json",
+            create=True,
+        )
+        os.close(descriptor)
+
+    assert ledger._legacy_import_source_content_identity(item, target=dest) is None
+    if store.exists():
+        raw = json.loads(store.read_text(encoding="utf-8"))
+        inner = raw["record"] if raw.get("envelope_version") == 1 else raw
+        files = (inner or {}).get("files") or {}
+        bound = files.get(".brigade/scanners/runs/chosen-run/receipt.json") or {}
+        assert bound.get("sha256") != forged_binding["sha256"]
+
+
+def test_reanchor_accepts_enveloped_candidate_signed_with_real_key(tmp_path: Path) -> None:
+    original = tmp_path / "original-workspace"
+    original.mkdir()
+    _bind_workspace(original)
+    item = ledger._make_import("reanchor-legit", kind="task", source="handoff-ingest")
+    _write_g5_receipt(original, item)
+    ledger._write_persisted_import_proofs(original, [item], operation_id="0" * 32)
+    assert ledger._legacy_import_source_content_identity(item, target=original) is not None
+    assert json.loads(_store_path(original).read_text(encoding="utf-8")).get("envelope_version") == 1
+
+    relocated = tmp_path / "relocated-workspace"
+    original.rename(relocated)
+    descriptor = ledger._open_import_proof_directory(relocated, create=True)
+    os.close(descriptor)
+    assert ledger._legacy_import_source_content_identity(item, target=relocated) is not None
+    relocated_store = json.loads(_store_path(relocated).read_text(encoding="utf-8"))
+    assert relocated_store.get("envelope_version") == 1
+
+
+def test_downgrade_does_not_remove_marker_when_audit_unwritable(tmp_path: Path) -> None:
+    """Downgrade must not drop the sticky marker when audit.jsonl cannot be written."""
+
+    _bind_workspace(tmp_path)
+    marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+    before = marker.read_bytes()
+    assert marker.is_file()
+    audit = authority_marker.audit_path()
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    if audit.exists() or audit.is_symlink():
+        if audit.is_dir() and not audit.is_symlink():
+            audit.rmdir()
+        else:
+            audit.unlink()
+    audit.mkdir()
+    with pytest.raises(OSError, match="audit"):
+        authority_marker.remove_signed_marker(tmp_path, actor="test-operator")
+    assert marker.is_file()
+    assert marker.read_bytes() == before
+    _strip_store_to_raw_record(tmp_path)
+    _disable_external_key_isolation(tmp_path)
+    with pytest.raises(OSError, match="raw unsigned record"):
+        ledger._read_external_directory_authority(tmp_path)
+    assert (
+        cli.main(
+            [
+                "security",
+                "authority",
+                "downgrade",
+                "--target",
+                str(tmp_path),
+                "--confirm",
+            ]
+        )
+        == 2
+    )
+    assert marker.is_file()
+    assert marker.read_bytes() == before

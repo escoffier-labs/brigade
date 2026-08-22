@@ -1762,6 +1762,7 @@ def _read_external_directory_authority_path(
     env: Mapping[str, str] | None = None,
     key_material: tuple[bytes, str] | None = None,
     workspace: Path | None = None,
+    allow_unsigned_upgrade: bool = True,
 ) -> dict[str, Any] | None:
     """Read one external authority record without deriving authority from its path."""
     try:
@@ -1782,7 +1783,14 @@ def _read_external_directory_authority_path(
         os.close(descriptor)
     if not isinstance(payload, dict):
         raise OSError("external directory authority record is malformed")
-    return _unwrap_authority_envelope(path, payload, env=env, key_material=key_material, workspace=workspace)
+    return _unwrap_authority_envelope(
+        path,
+        payload,
+        env=env,
+        key_material=key_material,
+        workspace=workspace,
+        allow_unsigned_upgrade=allow_unsigned_upgrade,
+    )
 
 
 def _read_external_directory_authority(target: Path) -> tuple[Path, dict[str, Any] | None]:
@@ -1804,6 +1812,7 @@ def _unwrap_authority_envelope(
     env: Mapping[str, str] | None = None,
     key_material: tuple[bytes, str] | None = None,
     workspace: Path | None = None,
+    allow_unsigned_upgrade: bool = True,
 ) -> dict[str, Any]:
     from .. import authority_broker, authority_key, authority_marker
 
@@ -1850,6 +1859,11 @@ def _unwrap_authority_envelope(
         raise OSError(
             "signed authority store refuses a raw unsigned record; "
             "run brigade security authority downgrade to intentionally downgrade"
+        )
+    if hmac_on and not allow_unsigned_upgrade:
+        raise OSError(
+            "signed authority store refuses a raw unsigned reanchor candidate; "
+            "the destination isolation policy does not accept an unsigned store"
         )
     if not hmac_on:
         if "schema_version" not in payload or "target" not in payload:
@@ -1999,7 +2013,13 @@ def _reanchor_external_directory_authority(
         if candidate == current_path:
             continue
         try:
-            payload = _read_external_directory_authority_path(candidate)
+            # Bind verification to the destination target, not the candidate's
+            # self-declared target name. Never auto-upgrade a raw candidate.
+            payload = _read_external_directory_authority_path(
+                candidate,
+                workspace=target,
+                allow_unsigned_upgrade=False,
+            )
         except OSError:
             continue
         if payload is None:
