@@ -1,10 +1,12 @@
 """Code Graph dashboard view: module map, impact drill-down, change overlay.
 
-Operator question: What parts of the codebase matter, which module is the hub,
-and what breaks if I touch a changed file?
+Operator question: What parts of the codebase matter for my current change,
+and what breaks if I touch X?
 
 Contract-only: ``brigade code export --json`` (and ``--symbol`` for impact).
-No direct graph database reads.
+No direct graph database reads. Default module map is the branch overlay
+(changed modules plus direct neighbors); the full repo grid is a fallback
+when nothing changed locally or when explicitly requested.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 from brigade import code_export
 from brigade.center_cmd.dashboard import data
@@ -20,6 +23,10 @@ from brigade.center_cmd.dashboard import render as html
 NAME = "code"
 TITLE = "Code Graph"
 ORDER = 6.25
+
+_NONCANONICAL_ROOTS = frozenset({".worktrees", ".git", ".hg", ".svn", ".venv", "node_modules"})
+_IMPACT_CALLER_CAP = 8
+_IMPACT_EDGE_CAP = 10
 
 _STATUS_WARNING = "#fab219"
 _TEXT_PRIMARY = "#0b0b0b"
@@ -47,18 +54,31 @@ _MAX_ROW_X = _PAD + _LABEL_W + _COLS * (132 + _GAP_X)
 
 
 def fetch(target: Path, query: dict[str, str] | None = None) -> dict[str, Any]:
-    symbol = (query or {}).get("symbol", "").strip() or None
+    query = query or {}
+    symbol = query.get("symbol", "").strip() or None
     args = ["code", "export"]
     if symbol:
         args.extend(["--symbol", symbol])
     args.append("--overlay")
     export = data.run_json(target, args, timeout=60.0)
-    return {"export": export, "symbol": symbol}
+    return {
+        "export": export,
+        "symbol": symbol,
+        "show_full_map": _query_flag(query, "map", "full"),
+        "show_worktrees": _query_flag(query, "worktrees", "1"),
+    }
+
+
+def _query_flag(query: dict[str, str], key: str, truthy: str) -> bool:
+    raw = (query.get(key) or "").strip().lower()
+    return raw == truthy or raw == "1" or raw == "true"
 
 
 def render(payload: dict, nonce: str) -> str:
     export = payload.get("export") if isinstance(payload.get("export"), dict) else {}
     symbol = payload.get("symbol")
+    show_full_map = payload.get("show_full_map") is True
+    show_worktrees = payload.get("show_worktrees") is True
 
     if export.get("error"):
         return html.error_panel(TITLE, str(export["error"]))
@@ -67,10 +87,10 @@ def render(payload: dict, nonce: str) -> str:
         _stylesheet(nonce),
         _mode_tabs(bool(symbol)),
         '<div id="cg-map" class="cg-panel" data-cg-panel="map" role="tabpanel">',
-        _render_module_map(export),
+        _render_module_map(export, show_full_map=show_full_map, show_worktrees=show_worktrees),
         "</div>",
         '<div id="cg-impact" class="cg-panel" data-cg-panel="impact" role="tabpanel">',
-        _render_impact(export, symbol),
+        _render_impact(export, symbol, show_worktrees=show_worktrees, show_full_map=show_full_map),
         "</div>",
         _script(nonce),
     ]
@@ -90,17 +110,145 @@ def _mode_tabs(impact_active: bool) -> str:
     )
 
 
-def _summary_strip(export: dict) -> str:
+def _changed_module_ids(export: dict) -> list[str]:
+    overlay = export.get("change_overlay")
+    if not isinstance(overlay, dict):
+        return []
+    raw = overlay.get("changed_modules") if isinstance(overlay.get("changed_modules"), list) else []
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        module_id = str(item).strip()
+        if module_id and module_id not in seen:
+            seen.add(module_id)
+            ids.append(module_id)
+    return ids
+
+
+def _path_parts(value: str) -> list[str]:
+    return [part for part in value.replace("\\", "/").split("/") if part]
+
+
+def _is_noncanonical_module(module: dict) -> bool:
+    for key in ("id", "package", "label"):
+        raw = str(module.get(key) or "")
+        if any(part in _NONCANONICAL_ROOTS for part in _path_parts(raw)):
+            return True
+    return False
+
+
+def _neighbor_ids(changed: set[str], edges: list[dict]) -> set[str]:
+    neighbors: set[str] = set()
+    for edge in edges:
+        source = str(edge.get("from") or "")
+        target = str(edge.get("to") or "")
+        if source in changed and target:
+            neighbors.add(target)
+        if target in changed and source:
+            neighbors.add(source)
+    return neighbors
+
+
+def _filter_modules(
+    modules: list[dict],
+    edges: list[dict],
+    *,
+    keep_ids: set[str] | None,
+    show_worktrees: bool,
+) -> tuple[list[dict], list[dict], int]:
+    hidden_noncanonical = 0
+    visible: list[dict] = []
+    for module in modules:
+        module_id = str(module.get("id") or "")
+        if keep_ids is not None and module_id not in keep_ids:
+            continue
+        if not show_worktrees and _is_noncanonical_module(module):
+            hidden_noncanonical += 1
+            continue
+        visible.append(module)
+    visible_ids = {str(row.get("id") or "") for row in visible}
+    visible_edges = [
+        edge
+        for edge in edges
+        if str(edge.get("from") or "") in visible_ids and str(edge.get("to") or "") in visible_ids
+    ]
+    return visible, visible_edges, hidden_noncanonical
+
+
+def _code_href(
+    *,
+    symbol: str | None = None,
+    show_full_map: bool = False,
+    show_worktrees: bool = False,
+) -> str:
+    params: list[str] = []
+    if symbol:
+        params.append(f"symbol={quote_plus(symbol)}")
+    if show_full_map:
+        params.append("map=full")
+    if show_worktrees:
+        params.append("worktrees=1")
+    query = ("?" + "&".join(params)) if params else ""
+    return "/view/code" + query
+
+
+def _summary_strip(
+    export: dict,
+    *,
+    shown: list[dict],
+    overlay_active: bool,
+    changed_ids: list[str],
+) -> str:
     stats = export.get("stats") if isinstance(export.get("stats"), dict) else {}
     module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
     insights = module_map.get("insights") if isinstance(module_map.get("insights"), dict) else {}
-    modules = [row for row in module_map.get("modules", []) if isinstance(row, dict)]
+    modules = shown if shown else [row for row in module_map.get("modules", []) if isinstance(row, dict)]
 
     core = insights.get("core") if isinstance(insights.get("core"), dict) else {}
     hub = insights.get("most_connected") if isinstance(insights.get("most_connected"), dict) else {}
     change = insights.get("biggest_change") if isinstance(insights.get("biggest_change"), dict) else {}
     largest = insights.get("largest") if isinstance(insights.get("largest"), dict) else {}
     isolated = insights.get("isolated_count")
+
+    if overlay_active:
+        changed_n = len(changed_ids)
+        neighbor_n = max(0, len(modules) - changed_n)
+        changed_word = "module" if changed_n == 1 else "modules"
+        neighbor_word = "neighbor" if neighbor_n == 1 else "neighbors"
+        shown_hub = hub if str(hub.get("id") or "") in {str(row.get("id") or "") for row in modules} else {}
+        if not shown_hub and modules:
+            top = max(modules, key=lambda row: int(row.get("inbound_count") or 0))
+            shown_hub = {
+                "id": str(top.get("id") or ""),
+                "label": str(top.get("label") or top.get("id") or ""),
+                "inbound": int(top.get("inbound_count") or 0),
+            }
+        hub_label = str(shown_hub.get("label") or "this overlay")
+        hub_id = str(shown_hub.get("id") or "")
+        hub_in = shown_hub.get("inbound") if isinstance(shown_hub.get("inbound"), int) else 0
+        change_label = str(change.get("label") or (changed_ids[0] if changed_ids else "none on this branch"))
+        change_id = str(change.get("id") or (changed_ids[0] if changed_ids else ""))
+        s1 = (
+            f'<a href="#cg-map" data-cg-jump="map">'
+            f"{changed_n} {html.esc(changed_word)} changed on this branch; "
+            f"showing {html.esc('changed modules and their direct neighbors')} "
+            f"({changed_n} {html.esc(changed_word)}"
+            f"{f', {neighbor_n} {html.esc(neighbor_word)}' if neighbor_n else ''}).</a>"
+        )
+        s2 = (
+            f'<a href="#cg-hub" data-cg-jump="{html.esc(hub_id)}">'
+            f"Most connected: {html.esc(hub_label)} (imported by {hub_in} others).</a>"
+        )
+        s4 = (
+            f'<a href="#cg-changed" data-cg-jump="{html.esc(change_id)}">'
+            f"Biggest recent change impact: {html.esc(change_label)}.</a>"
+        )
+        return (
+            f'<section class="cg-summary" data-cg-summary="1" data-cg-summary-scope="overlay" '
+            f'aria-label="{html.esc("Code graph summary")}">'
+            f"<p>{s1} {s2} {s4}</p></section>"
+        )
+
     total = insights.get("total_modules")
     if not isinstance(total, int):
         total = len(modules)
@@ -140,36 +288,133 @@ def _summary_strip(export: dict) -> str:
         f"Biggest recent change impact: {html.esc(change_label)}.</a>"
     )
     return (
-        f'<section class="cg-summary" data-cg-summary="1" aria-label="{html.esc("Code graph summary")}">'
+        f'<section class="cg-summary" data-cg-summary="1" data-cg-summary-scope="full" '
+        f'aria-label="{html.esc("Code graph summary")}">'
         f"<p>{s1} {s2} {s3} {s4}</p></section>"
     )
 
 
-def _render_module_map(export: dict) -> str:
+def _map_toggles(
+    *,
+    overlay_active: bool,
+    hidden_noncanonical: int,
+    show_full_map: bool,
+    show_worktrees: bool,
+    has_noncanonical: bool,
+) -> str:
+    links: list[str] = []
+    if overlay_active:
+        links.append(
+            f'<a class="cg-toggle" data-cg-map-toggle="full" href="{html.esc(_code_href(show_full_map=True, show_worktrees=show_worktrees))}">'
+            + html.esc("Show full module map")
+            + "</a>"
+        )
+    elif show_full_map:
+        links.append(
+            f'<a class="cg-toggle" data-cg-map-toggle="overlay" href="{html.esc(_code_href(show_worktrees=show_worktrees))}">'
+            + html.esc("Show branch overlay")
+            + "</a>"
+        )
+    if has_noncanonical or hidden_noncanonical:
+        if show_worktrees:
+            links.append(
+                f'<a class="cg-toggle" data-cg-worktrees-toggle="hide" href="{html.esc(_code_href(show_full_map=show_full_map))}">'
+                + html.esc("Hide .worktrees copies")
+                + "</a>"
+            )
+        else:
+            label = (
+                f"Show .worktrees copies ({hidden_noncanonical} hidden)"
+                if hidden_noncanonical
+                else "Show .worktrees copies"
+            )
+            links.append(
+                f'<a class="cg-toggle" data-cg-worktrees-toggle="show" href="{html.esc(_code_href(show_full_map=show_full_map, show_worktrees=True))}">'
+                + html.esc(label)
+                + "</a>"
+            )
+    if not links:
+        return ""
+    return f'<p class="cg-toggles">{"".join(links)}</p>'
+
+
+def _render_module_map(export: dict, *, show_full_map: bool, show_worktrees: bool) -> str:
     module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
     modules = [row for row in module_map.get("modules", []) if isinstance(row, dict)]
     edges = [row for row in module_map.get("edges", []) if isinstance(row, dict)]
     trunc = module_map.get("truncation") if isinstance(module_map.get("truncation"), dict) else {}
+    changed_ids = _changed_module_ids(export)
+    has_overlay_data = isinstance(export.get("change_overlay"), dict)
+    has_noncanonical = any(_is_noncanonical_module(row) for row in modules)
 
-    if not modules:
+    keep_ids: set[str] | None = None
+    overlay_active = False
+    empty_change_banner = ""
+    if changed_ids and not show_full_map:
+        keep_ids = set(changed_ids) | _neighbor_ids(set(changed_ids), edges)
+        overlay_active = True
+    elif has_overlay_data and not changed_ids:
+        empty_change_banner = (
+            f'<p class="cg-banner" data-cg-empty-change="1">'
+            f"{html.esc('Nothing changed locally. Showing the full module map.')}</p>"
+        )
+
+    shown, shown_edges, hidden_noncanonical = _filter_modules(
+        modules, edges, keep_ids=keep_ids, show_worktrees=show_worktrees
+    )
+
+    if overlay_active and not shown:
+        overlay_active = False
+        keep_ids = None
+        if has_overlay_data:
+            empty_change_banner = (
+                f'<p class="cg-banner" data-cg-empty-change="1">'
+                f"{html.esc('Nothing changed locally. Showing the full module map.')}</p>"
+            )
+        shown, shown_edges, hidden_noncanonical = _filter_modules(
+            modules, edges, keep_ids=None, show_worktrees=show_worktrees
+        )
+
+    if not shown:
         return html.panel(html.esc("Module map"), f"<p>{html.esc('Nothing here.')}</p>")
 
     trunc_note = ""
-    note = trunc.get("note")
-    if isinstance(note, str) and note.strip():
-        trunc_note = f'<p class="cg-muted" data-cg-truncation="1" id="cg-isolated">{html.esc(note.strip())}</p>'
+    if not overlay_active:
+        note = trunc.get("note")
+        if isinstance(note, str) and note.strip():
+            trunc_note = f'<p class="cg-muted" data-cg-truncation="1" id="cg-isolated">{html.esc(note.strip())}</p>'
+    elif overlay_active:
+        neighbor_n = max(0, len(shown) - len(changed_ids))
+        overlay_note = (
+            f"Showing {len(changed_ids)} changed "
+            f"{'module' if len(changed_ids) == 1 else 'modules'} and "
+            f"{neighbor_n} direct {'neighbor' if neighbor_n == 1 else 'neighbors'} on this branch."
+        )
+        trunc_note = f'<p class="cg-muted" data-cg-overlay="1" id="cg-isolated">{html.esc(overlay_note)}</p>'
 
     hub_id = ""
     insights = module_map.get("insights") if isinstance(module_map.get("insights"), dict) else {}
     hub = insights.get("most_connected") if isinstance(insights.get("most_connected"), dict) else {}
-    if isinstance(hub.get("id"), str):
+    if isinstance(hub.get("id"), str) and any(str(row.get("id") or "") == hub["id"] for row in shown):
         hub_id = hub["id"]
 
+    toggles = _map_toggles(
+        overlay_active=overlay_active,
+        hidden_noncanonical=hidden_noncanonical,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+        has_noncanonical=has_noncanonical,
+    )
+
     return (
-        _summary_strip(export)
+        _summary_strip(export, shown=shown, overlay_active=overlay_active, changed_ids=changed_ids)
         + html.panel(
             html.esc("Module map"),
-            trunc_note + _module_map_svg(modules, edges, hub_id=hub_id) + _module_card_shell(),
+            empty_change_banner
+            + toggles
+            + trunc_note
+            + _module_map_svg(shown, shown_edges, hub_id=hub_id)
+            + _module_card_shell(),
         )
         + _debug_details(export)
     )
@@ -359,7 +604,45 @@ def _status_chip(box_x: int, box_y: int, box_h: int, box_w: int, word: str) -> s
     )
 
 
-def _render_impact(export: dict, symbol: str | None) -> str:
+def _changed_module_shortcut(
+    export: dict,
+    *,
+    show_worktrees: bool,
+    show_full_map: bool,
+) -> str:
+    changed_ids = _changed_module_ids(export)
+    if not changed_ids:
+        return ""
+    module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
+    labels = {
+        str(row.get("id") or ""): str(row.get("label") or row.get("id") or "")
+        for row in module_map.get("modules", [])
+        if isinstance(row, dict)
+    }
+    items: list[str] = []
+    for module_id in changed_ids:
+        if not show_worktrees and any(part in _NONCANONICAL_ROOTS for part in _path_parts(module_id)):
+            continue
+        label = labels.get(module_id) or module_id
+        href = _code_href(symbol=module_id, show_full_map=show_full_map, show_worktrees=show_worktrees)
+        items.append(f'<li><a href="{html.esc(href)}">{html.esc(label)}</a></li>')
+    if not items:
+        return ""
+    return (
+        '<div class="cg-impact-shortcut" data-cg-changed-shortcut="1">'
+        f"<p>{html.esc('Start from changed modules')}</p>"
+        f"<ul>{''.join(items)}</ul>"
+        "</div>"
+    )
+
+
+def _render_impact(
+    export: dict,
+    symbol: str | None,
+    *,
+    show_worktrees: bool,
+    show_full_map: bool,
+) -> str:
     search_form = (
         '<form class="cg-search" method="get" action="/view/code">'
         f"<label>{html.esc('Symbol or file')} "
@@ -369,18 +652,20 @@ def _render_impact(export: dict, symbol: str | None) -> str:
         f'<button type="submit">{html.esc("Show impact")}</button>'
         "</form>"
     )
+    shortcut = _changed_module_shortcut(export, show_worktrees=show_worktrees, show_full_map=show_full_map)
 
     impact = export.get("impact") if isinstance(export.get("impact"), dict) else None
     if not symbol:
         return html.panel(
             html.esc("Impact"),
             search_form
+            + shortcut
             + f"<p>{html.esc('Search for a symbol to see callers, blast radius, and attributed tests.')}</p>",
         )
     if not impact:
         return html.panel(
             html.esc("Impact"),
-            search_form + f"<p>{html.esc('No impact data for that symbol.')}</p>",
+            search_form + shortcut + f"<p>{html.esc('No impact data for that symbol.')}</p>",
         )
 
     resolved = impact.get("resolved_symbol") if isinstance(impact.get("resolved_symbol"), dict) else {}
@@ -396,6 +681,7 @@ def _render_impact(export: dict, symbol: str | None) -> str:
 
     sections = [
         search_form,
+        shortcut,
         f'<p class="cg-impact-intro">{html.esc(intro)}</p>',
         _impact_diagram(plain_name, callers, edges),
         _impact_table("Direct callers", callers, limit=20),
@@ -407,16 +693,31 @@ def _render_impact(export: dict, symbol: str | None) -> str:
 
 
 def _impact_diagram(focus: str, callers: list, edges: list) -> str:
+    caller_rows = [row for row in callers if isinstance(row, dict)]
+    edge_rows = [row for row in edges if isinstance(row, dict)]
+    shown_callers = caller_rows[:_IMPACT_CALLER_CAP]
+    shown_edges = edge_rows[:_IMPACT_EDGE_CAP]
+    trunc_note = ""
+    hidden_callers = max(0, len(caller_rows) - len(shown_callers))
+    hidden_edges = max(0, len(edge_rows) - len(shown_edges))
+    if hidden_callers or hidden_edges:
+        bits: list[str] = []
+        if hidden_callers:
+            bits.append(f"showing top {len(shown_callers)} callers, {hidden_callers} hidden")
+        if hidden_edges:
+            bits.append(f"showing top {len(shown_edges)} impact edges, {hidden_edges} hidden")
+        trunc_note = f'<p class="cg-muted" data-cg-impact-truncation="1">{html.esc("; ".join(bits))}</p>'
     layers = [
-        ("Callers", callers[:8]),
-        ("Focus", [{"source": row.get("source"), "target": focus} for row in callers[:1]] or [{"target": focus}]),
-        ("Impact", edges[:10]),
+        ("Callers", shown_callers),
+        ("Focus", [{"source": row.get("source"), "target": focus} for row in shown_callers[:1]] or [{"target": focus}]),
+        ("Impact", shown_edges),
     ]
     width = 720
     height = 200
     parts = [
+        trunc_note,
         f'<svg class="cg-impact-diagram" viewBox="0 0 {width} {height}" width="100%" role="img" '
-        f'aria-label="{html.esc("Impact layers")}">'
+        f'aria-label="{html.esc("Impact layers")}">',
     ]
     x_positions = [80, width // 2, width - 120]
     for (title, rows), x in zip(layers, x_positions, strict=False):
@@ -536,6 +837,21 @@ def _stylesheet(nonce: str) -> str:
 .cg-summary p {{ margin:0; }}
 .cg-summary a {{ color:{_TEXT_PRIMARY}; text-decoration:underline; text-underline-offset:2px; }}
 .cg-muted {{ color:{_TEXT_SECONDARY}; font-size:0.9rem; }}
+.cg-banner {{
+  margin:0 0 0.75rem; padding:0.65rem 0.85rem; border:1px solid {_CHANGED_STROKE};
+  border-radius:0.35rem; background:{_CHANGED_FILL}; color:{_TEXT_PRIMARY};
+}}
+.cg-toggles {{ display:flex; flex-wrap:wrap; gap:0.5rem; margin:0 0 0.75rem; }}
+.cg-toggle {{
+  font:inherit; padding:0.3rem 0.65rem; border:1px solid {_BOX_STROKE}; border-radius:0.25rem;
+  background:{_SURFACE}; color:{_TEXT_PRIMARY}; text-decoration:none;
+}}
+.cg-impact-shortcut {{
+  margin:0 0 1rem; padding:0.65rem 0.85rem; border:1px solid {_BORDER};
+  border-radius:0.35rem; background:{_SURFACE};
+}}
+.cg-impact-shortcut p {{ margin:0 0 0.35rem; font-weight:600; }}
+.cg-impact-shortcut ul {{ margin:0; padding-left:1.2rem; }}
 .cg-map-wrap {{ overflow-x:auto; max-width:100%; }}
 .cg-module {{ cursor:pointer; }}
 .cg-card {{

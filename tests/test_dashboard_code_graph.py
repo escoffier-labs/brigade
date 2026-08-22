@@ -31,8 +31,10 @@ def test_fetch_uses_code_export_contract(monkeypatch, tmp_path):
         }
 
     monkeypatch.setattr("brigade.center_cmd.dashboard.data.run_json", fake_run_json)
-    payload = code_graph.fetch(tmp_path, query={"symbol": "dispatch"})
+    payload = code_graph.fetch(tmp_path, query={"symbol": "dispatch", "map": "full", "worktrees": "1"})
     assert payload["symbol"] == "dispatch"
+    assert payload["show_full_map"] is True
+    assert payload["show_worktrees"] is True
     assert calls == [["code", "export", "--symbol", "dispatch", "--overlay"]]
 
 
@@ -133,6 +135,14 @@ def _insight_payload() -> dict:
                         "top_files": [{"path": "src/other/util.py", "symbol_count": 4}],
                         "attributed_tests": [],
                     },
+                    {
+                        "id": "src/unrelated",
+                        "label": "unrelated",
+                        "symbol_count": 2,
+                        "file_count": 1,
+                        "package": "unrelated",
+                        "inbound_count": 0,
+                    },
                 ],
                 "edges": [{"from": "src/other", "to": "src/brigade", "weight": 6}],
                 "truncation": {
@@ -164,18 +174,22 @@ def _insight_payload() -> dict:
 def test_render_leads_with_linked_plain_language_summary():
     fragment = code_graph.render(_insight_payload(), "nonce-summary")
     assert 'data-cg-summary="1"' in fragment
-    assert "2737" in fragment
+    assert 'data-cg-summary-scope="overlay"' in fragment
+    assert "changed on this branch" in fragment
+    assert "direct neighbors" in fragment
     assert "Most connected" in fragment
     assert "imported by" in fragment
-    assert "isolated" in fragment
     assert "Biggest recent change impact" in fragment
     summary = fragment.split("data-cg-summary", 1)[1].split("</section>", 1)[0]
+    assert "across 48 modules" not in summary
     assert summary.count("<a ") >= 3
     assert "#cg-hub" in summary or "cg-module-src/brigade" in summary or "data-cg-jump" in summary
 
 
 def test_render_shows_labeled_truncation_not_hairball_caption():
-    fragment = code_graph.render(_insight_payload(), "nonce-trunc")
+    payload = _insight_payload()
+    payload["show_full_map"] = True
+    fragment = code_graph.render(payload, "nonce-trunc")
     assert 'data-cg-truncation="1"' in fragment
     assert "showing top 15 of 48 modules, 40 edges hidden" in fragment
 
@@ -217,7 +231,8 @@ def test_code_view_warm_path_reuses_snapshot_cache(monkeypatch, tmp_path):
         assert _status_code(second) == "200"
         _, body = _headers_and_body(second)
         assert 'data-cg-summary="1"' in body
-        assert "showing top 15 of 48 modules, 40 edges hidden" in body
+        assert "changed on this branch" in body
+        assert 'data-cg-overlay="1"' in body
         assert calls == [1]
     finally:
         server.shutdown()
@@ -320,3 +335,158 @@ def test_module_labels_fit_in_boxes_without_ok_chips():
             chip_x = int(chip.group(1))
             assert text_end <= chip_x
             assert "CHANGED" in box
+
+
+def _zero_changed_payload() -> dict:
+    payload = _insight_payload()
+    payload["export"]["change_overlay"] = {"changed_modules": [], "changed_files": []}
+    payload["export"]["module_map"]["modules"][1]["changed"] = False
+    payload["export"]["module_map"]["insights"]["biggest_change"] = {}
+    return payload
+
+
+def _worktrees_payload() -> dict:
+    return {
+        "export": {
+            "stats": {"symbols": 100, "files": 4},
+            "module_map": {
+                "modules": [
+                    {
+                        "id": "tests",
+                        "label": "tests",
+                        "symbol_count": 80,
+                        "file_count": 10,
+                        "package": "tests",
+                    },
+                    {
+                        "id": ".worktrees/pr-906/tests",
+                        "label": "tests",
+                        "symbol_count": 80,
+                        "file_count": 10,
+                        "package": "tests",
+                    },
+                    {
+                        "id": ".worktrees/pr-906/src/brigade",
+                        "label": "brigade",
+                        "symbol_count": 12,
+                        "file_count": 2,
+                        "package": "brigade",
+                    },
+                    {
+                        "id": "src/brigade",
+                        "label": "brigade",
+                        "symbol_count": 12,
+                        "file_count": 2,
+                        "package": "brigade",
+                    },
+                ],
+                "edges": [],
+                "insights": {
+                    "total_modules": 4,
+                    "core": {"id": "src/brigade", "label": "brigade", "symbol_count": 100},
+                    "largest": {"id": "tests", "label": "tests", "symbol_count": 80},
+                    "most_connected": {"id": "src/brigade", "label": "brigade", "inbound": 0},
+                    "isolated_count": 4,
+                    "biggest_change": {},
+                },
+            },
+            "change_overlay": {"changed_modules": [], "changed_files": []},
+        },
+        "symbol": None,
+    }
+
+
+def test_default_view_is_branch_overlay_not_whole_repo_grid():
+    fragment = code_graph.render(_insight_payload(), "nonce-overlay")
+    assert 'data-cg-overlay="1"' in fragment
+    assert 'id="cg-module-src/other"' in fragment
+    assert 'id="cg-module-src/brigade"' in fragment
+    assert 'id="cg-module-src/unrelated"' not in fragment
+    assert "unrelated" not in fragment.split('class="cg-map"', 1)[-1].split("</svg>", 1)[0]
+    assert "CHANGED" in fragment
+    assert "across 48 modules" not in fragment.split("data-cg-summary", 1)[1].split("</section>", 1)[0]
+
+
+def test_zero_changed_shows_full_map_and_banner():
+    fragment = code_graph.render(_zero_changed_payload(), "nonce-empty")
+    assert 'data-cg-empty-change="1"' in fragment
+    assert "Nothing changed locally" in fragment
+    assert 'id="cg-module-src/other"' in fragment
+    assert 'id="cg-module-src/brigade"' in fragment
+    assert 'id="cg-module-src/unrelated"' in fragment
+    assert 'data-cg-overlay="1"' not in fragment
+    assert 'data-cg-summary-scope="full"' in fragment
+
+
+def test_worktrees_collapsed_by_default_and_toggle_reveals_them():
+    hidden = code_graph.render(_worktrees_payload(), "nonce-wt-hide")
+    assert 'id="cg-module-tests"' in hidden
+    assert 'id="cg-module-src/brigade"' in hidden
+    assert 'id="cg-module-.worktrees/pr-906/tests"' not in hidden
+    assert 'id="cg-module-.worktrees/pr-906/src/brigade"' not in hidden
+    assert 'data-cg-worktrees-toggle="show"' in hidden
+    assert "Show .worktrees copies" in hidden
+    titles = re.findall(r"<title>([^<]*)</title>", hidden)
+    assert titles.count("tests (80)") == 1
+
+    shown = code_graph.render({**_worktrees_payload(), "show_worktrees": True}, "nonce-wt-show")
+    assert 'id="cg-module-.worktrees/pr-906/tests"' in shown
+    assert 'id="cg-module-.worktrees/pr-906/src/brigade"' in shown
+    assert 'data-cg-worktrees-toggle="hide"' in shown
+    assert "Hide .worktrees copies" in shown
+
+
+def test_impact_start_from_changed_modules_shortcut():
+    fragment = code_graph.render(_insight_payload(), "nonce-shortcut")
+    assert 'data-cg-changed-shortcut="1"' in fragment
+    assert "Start from changed modules" in fragment
+    assert 'href="/view/code?symbol=src%2Fother"' in fragment or 'href="/view/code?symbol=src/other"' in fragment
+
+
+def test_impact_diagram_truncation_note():
+    callers = [
+        {
+            "source": f"caller-{index}",
+            "target": "fn",
+            "kind": "calls",
+            "hops": 1,
+            "source_id": f"src{index:02d}",
+            "target_id": "focus",
+        }
+        for index in range(11)
+    ]
+    edges = [
+        {
+            "source": f"edge-{index}",
+            "target": "fn",
+            "kind": "calls",
+            "hops": 2,
+            "source_id": f"e{index:02d}",
+            "target_id": "focus",
+        }
+        for index in range(14)
+    ]
+    payload = {
+        "export": {
+            "module_map": {"modules": [], "edges": []},
+            "stats": {},
+            "change_overlay": {"changed_modules": []},
+            "impact": {
+                "query": "fn",
+                "resolved_symbol": {"name": "fn", "file_path": "src/a.py"},
+                "callers": callers,
+                "edges": edges,
+                "affected_tests": {"affected_tests": []},
+            },
+        },
+        "symbol": "fn",
+    }
+    fragment = code_graph.render(payload, "nonce-impact-trunc")
+    assert 'data-cg-impact-truncation="1"' in fragment
+    assert "showing top 8 callers, 3 hidden" in fragment
+    assert "showing top 10 impact edges, 4 hidden" in fragment
+    labels = re.findall(r'class="cg-svg-label">([^<]*)</text>', fragment)
+    assert "caller-0" in labels
+    assert "caller-10" not in labels
+    assert "edge-0" in labels
+    assert "edge-13" not in labels
