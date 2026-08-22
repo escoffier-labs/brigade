@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON run contracts rewrite home-directory prefixes (`/home/<user>`, `/Users/<user>`) to `~` on every string that enters the list, show, latest, and watch payloads. Artifacts and human CLI output are unchanged. Refs #631. Refs #958.
 
 ### Fixed
+- The center Runs view now treats a missing runs directory as the existing "No Brigade runs yet." empty state, and renders a distinct error panel for other `brigade runs list` CLI failures (timeout, invalid JSON, unreadable store). `brigade.run-detail.v1` docs name the verification field `command`. Fixes #991.
 - Changelog footer link definitions cover every release section again (24 were missing, 0.8.2 through 0.26.1), and `[Unreleased]` compares against v0.26.1 instead of v0.26.0.
 - Center dashboard chip-icon backgrounds now render under the nonce-only Content-Security-Policy: Memory Operations and Status views use one stylesheet class per status role instead of per-element `style=` attributes (which `style-src` with a nonce refuses). Work, Runs, Agent Activity, and Outcomes already used classes or had no chip-icon inline styles. Fixes #1077.
 - Evidence crawl import (`miseledger import sourceharvest` / `crawl files|gitlog|docs`) and provenance backfill retry the SQLITE_BUSY family (primary code 5, including snapshot 517 and recovery 261) from a concurrent writer instead of failing the runbook. A lock that outlives the bound names the holder-diagnosis step rather than the raw SQLite string. Fixes #1067.
