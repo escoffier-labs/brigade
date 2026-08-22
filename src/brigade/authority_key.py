@@ -395,3 +395,14 @@ def next_sequence(target_digest: str, *, env: Mapping[str, str] | None = None, s
 def sequence_for(target_digest: str, *, env: Mapping[str, str] | None = None, secret: bytes, key_id: str) -> int | None:
     records = load_sequence(env=env, secret=secret, key_id=key_id)
     return records.get(target_digest)
+
+
+def drop_sequence(target_digest: str, *, env: Mapping[str, str] | None = None, secret: bytes, key_id: str) -> bool:
+    """Remove one target from the sequence file so a later re-sign can start clean."""
+
+    records = load_sequence(env=env, secret=secret, key_id=key_id)
+    if target_digest not in records:
+        return False
+    del records[target_digest]
+    write_sequence(records, env=env, secret=secret, key_id=key_id)
+    return True

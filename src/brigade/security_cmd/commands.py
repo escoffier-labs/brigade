@@ -345,7 +345,7 @@ def authority_downgrade(
     confirm: bool = False,
     stdin: Any | None = None,
 ) -> int:
-    """Remove the user-level sticky signed marker after explicit confirmation."""
+    """Convert a signed authority store to unsigned and remove the sticky marker."""
 
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -365,16 +365,21 @@ def authority_downgrade(
             print("error: authority downgrade cancelled", file=sys.stderr)
             return 2
     from .. import authority_marker
+    from ..work_cmd import ledger
 
-    if not authority_marker.marker_exists(target):
-        print("authority downgrade: no sticky marker for this target")
-        return 0
     try:
-        payload = authority_marker.remove_signed_marker(target, actor=authority_marker.operator_identity())
+        payload = ledger.downgrade_external_directory_authority(
+            target, actor=authority_marker.operator_identity()
+        )
     except OSError as exc:
         print(f"error: authority downgrade failed: {exc}", file=sys.stderr)
         return 2
+    if not payload.get("removed") and not payload.get("store_unwrapped"):
+        print("authority downgrade: no sticky marker for this target")
+        return 0
     print(f"authority downgrade: removed sticky marker for {payload['target_fingerprint']}")
+    if payload.get("store_unwrapped"):
+        print("authority downgrade: converted signed store to an unsigned record")
     print(f"actor: {payload['actor']}")
     print(f"target: {payload['target']}")
     print(f"created_at: {payload['created_at']}")

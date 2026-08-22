@@ -263,6 +263,33 @@ def authority_store_isolation_mode(target: Path) -> str:
     return loaded.authority_store_isolation
 
 
+_ISOLATION_EXTERNAL_KEY_LINE = re.compile(
+    r'^([ \t]*isolation[ \t]*=[ \t]*)(["\'])external-key\2([ \t]*(?:#.*)?)?\s*$',
+    re.MULTILINE,
+)
+
+
+def turn_off_authority_store_isolation(target: Path) -> bytes | None:
+    """Set ``authority_store.isolation`` to ``off`` in place.
+
+    Returns the previous file bytes when a line was changed, otherwise ``None``.
+    """
+
+    path = config_path(target.expanduser().resolve())
+    if not path.is_file() or path.is_symlink():
+        return None
+    original = path.read_bytes()
+    try:
+        text = original.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    updated, count = _ISOLATION_EXTERNAL_KEY_LINE.subn(r"\1\2off\2\3", text, count=1)
+    if count == 0:
+        return None
+    path.write_text(updated, encoding="utf-8")
+    return original
+
+
 def authority_store_doctor_check(target: Path) -> tuple[str, str, str]:
     """Doctor status for opt-in external-key HMAC. WARN when the flag is off."""
 

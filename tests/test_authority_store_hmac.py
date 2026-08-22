@@ -584,6 +584,88 @@ def test_authority_downgrade_with_confirm_accepts_raw_records_and_logs(
     assert line["removed"] is True
 
 
+def test_authority_downgrade_persists_unsigned_store_without_recreating_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Confirmed downgrade must unwrap the store; a later read must not recreate the marker."""
+
+    monkeypatch.setenv("USER", "test-operator")
+    _bind_workspace(tmp_path)
+    assert authority_marker.marker_exists(tmp_path)
+    assert json.loads(_store_path(tmp_path).read_text(encoding="utf-8")).get("envelope_version") == 1
+    assert (
+        cli.main(
+            [
+                "security",
+                "authority",
+                "downgrade",
+                "--target",
+                str(tmp_path),
+                "--confirm",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "removed sticky marker" in out
+    assert "unsigned" in out
+    raw = json.loads(_store_path(tmp_path).read_text(encoding="utf-8"))
+    assert raw.get("envelope_version") != 1
+    assert "schema_version" in raw
+    assert not authority_marker.marker_exists(tmp_path)
+    path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert payload is not None
+    assert payload.get("envelope_version") != 1
+    assert json.loads(path.read_text(encoding="utf-8")).get("envelope_version") != 1
+    assert not authority_marker.marker_exists(tmp_path)
+    identity, _store = _g5_same_uid_store_rewrite(tmp_path)
+    assert identity is not None
+    audit = authority_marker.audit_path().read_text(encoding="utf-8")
+    line = json.loads(audit.strip().splitlines()[-1])
+    assert line["action"] == "authority-downgrade"
+    assert line["actor"] == "test-operator"
+    assert line["removed"] is True
+    assert line.get("store_unwrapped") is True
+    _enable_external_key_isolation(tmp_path)
+    _path, signed = ledger._read_external_directory_authority(tmp_path)
+    assert signed is not None
+    assert json.loads(_store_path(tmp_path).read_text(encoding="utf-8")).get("envelope_version") == 1
+    assert authority_marker.marker_exists(tmp_path)
+
+
+def test_authority_downgrade_fails_closed_when_external_key_removed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bind_workspace(tmp_path)
+    marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+    before_marker = marker.read_bytes()
+    before_store = _store_path(tmp_path).read_bytes()
+    authority_key.key_path().unlink()
+    authority_key.clear_key_cache()
+    assert (
+        cli.main(
+            [
+                "security",
+                "authority",
+                "downgrade",
+                "--target",
+                str(tmp_path),
+                "--confirm",
+            ]
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert "HMAC key is unavailable" in err
+    assert "were not changed" in err
+    assert marker.is_file()
+    assert marker.read_bytes() == before_marker
+    assert _store_path(tmp_path).read_bytes() == before_store
+    assert json.loads(before_store).get("envelope_version") == 1
+    assert authority_marker.marker_exists(tmp_path)
+    assert not authority_marker.audit_path().exists()
+
+
 def test_authority_downgrade_tty_no_cancels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

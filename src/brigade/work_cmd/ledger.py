@@ -1926,6 +1926,14 @@ def _write_external_directory_authority(
                 "run brigade security authority downgrade to intentionally downgrade"
             )
         to_write = dict(record)
+    _publish_authority_store_payload(path, to_write)
+    if hmac_on and workspace is not None:
+        authority_marker.record_signed_marker(workspace)
+
+
+def _publish_authority_store_payload(path: Path, payload: Mapping[str, Any]) -> None:
+    """Atomically replace the authority store file. No HMAC or marker side effects."""
+
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     descriptor = -1
@@ -1936,7 +1944,7 @@ def _write_external_directory_authority(
             0o600,
         )
         with os.fdopen(os.dup(descriptor), "wb") as handle:
-            handle.write(json.dumps(to_write, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            handle.write(json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
         # Windows refuses os.replace while the source handle is still open (WinError 32).
@@ -1955,8 +1963,183 @@ def _write_external_directory_authority(
             temporary.unlink()
         except FileNotFoundError:
             pass
-    if hmac_on and workspace is not None:
-        authority_marker.record_signed_marker(workspace)
+
+
+def _read_raw_authority_store(path: Path) -> tuple[bytes | None, dict[str, Any] | None]:
+    """Read store bytes and JSON without unwrapping or recording a marker."""
+
+    try:
+        descriptor = _open_file_nofollow(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return None, None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError("external directory authority record is not a single-link regular file")
+        raw = os.read(descriptor, 1024 * 1024)
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError("external directory authority record is malformed") from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(payload, dict):
+        raise OSError("external directory authority record is malformed")
+    return raw, payload
+
+
+def _restore_authority_file(path: Path, data: bytes) -> None:
+    from .. import authority_marker
+
+    authority_marker._restore_marker_bytes(path, data)
+
+
+def downgrade_external_directory_authority(
+    target: Path,
+    *,
+    actor: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Convert a signed store to unsigned, remove the sticky marker, and audit.
+
+    Intent is logged first. Store, isolation flag, sequence, and marker are
+    restored if completion logging fails. A missing HMAC key fails before any
+    mutation so the store is never left half-downgraded.
+    """
+
+    from .. import authority_broker, authority_key, authority_marker
+    from ..localio import utc_now_iso_z
+    from ..security_cmd.config import turn_off_authority_store_isolation
+    from ..security_cmd.models import config_path as security_config_path
+
+    workspace = target.expanduser().resolve()
+    store_path = _directory_authority_store_path(workspace, env=env)
+    fingerprint = authority_marker.target_fingerprint(workspace)
+    marker_path = authority_marker.signed_marker_path(fingerprint, env=env)
+    authority_marker.reject_unsafe_marker_path(marker_path, workspace, env=env)
+    isolation_path = security_config_path(workspace)
+
+    store_backup, raw_payload = _read_raw_authority_store(store_path)
+    unsigned_record: dict[str, Any] | None = None
+    key_material: tuple[bytes, str] | None = None
+    if raw_payload is not None and raw_payload.get("envelope_version") == 1:
+        try:
+            secret, loaded_id = authority_key.load_key(env=env, workspace=workspace)
+            unsigned_record = authority_broker.verify_store_envelope(secret, raw_payload, loaded_id)
+            key_material = (secret, loaded_id)
+        except (OSError, ValueError) as exc:
+            raise OSError(
+                "authority downgrade cannot unwrap the signed store because the "
+                "external HMAC key is unavailable; restore the operator "
+                "store-hmac.key (or BRIGADE_AUTHORITY_KEY_FILE) and retry. "
+                "the store and marker were not changed"
+            ) from exc
+
+    try:
+        marker_bytes = marker_path.read_bytes()
+    except FileNotFoundError:
+        marker_bytes = None
+    except OSError as exc:
+        raise OSError("authority signed marker is unreadable") from exc
+
+    actor_value = actor if actor is not None else authority_marker.operator_identity(env=env)
+    resolved = str(workspace)
+    if unsigned_record is None and marker_bytes is None:
+        return {
+            "action": "authority-downgrade",
+            "actor": actor_value,
+            "created_at": utc_now_iso_z(),
+            "phase": "complete",
+            "removed": False,
+            "store_unwrapped": False,
+            "target": resolved,
+            "target_fingerprint": fingerprint,
+        }
+
+    intent = {
+        "action": "authority-downgrade",
+        "actor": actor_value,
+        "created_at": utc_now_iso_z(),
+        "phase": "intent",
+        "removed": False,
+        "store_unwrapped": unsigned_record is not None,
+        "target": resolved,
+        "target_fingerprint": fingerprint,
+    }
+    try:
+        authority_marker.append_audit(intent, env=env)
+    except OSError as exc:
+        raise OSError("authority downgrade audit is unavailable; marker not removed") from exc
+
+    isolation_backup: bytes | None = None
+    sequence_path = authority_key.sequence_path(env=env)
+    try:
+        sequence_backup = sequence_path.read_bytes()
+    except FileNotFoundError:
+        sequence_backup = None
+    except OSError:
+        sequence_backup = None
+
+    mutated_store = False
+    mutated_sequence = False
+    mutated_isolation = False
+    mutated_marker = False
+
+    def _restore_all() -> None:
+        if mutated_store and store_backup is not None:
+            _restore_authority_file(store_path, store_backup)
+        if mutated_sequence and sequence_backup is not None:
+            _restore_authority_file(sequence_path, sequence_backup)
+        if mutated_isolation and isolation_backup is not None:
+            _restore_authority_file(isolation_path, isolation_backup)
+        if mutated_marker and marker_bytes is not None:
+            _restore_authority_file(marker_path, marker_bytes)
+
+    try:
+        if unsigned_record is not None:
+            _publish_authority_store_payload(store_path, unsigned_record)
+            mutated_store = True
+            if key_material is not None:
+                digest = _authority_target_digest(unsigned_record)
+                if authority_key.drop_sequence(digest, env=env, secret=key_material[0], key_id=key_material[1]):
+                    mutated_sequence = True
+        isolation_backup = turn_off_authority_store_isolation(workspace)
+        mutated_isolation = isolation_backup is not None
+        if marker_bytes is not None:
+            try:
+                marker_path.unlink()
+            except FileNotFoundError:
+                pass
+            else:
+                mutated_marker = True
+    except OSError:
+        try:
+            _restore_all()
+        except OSError:
+            pass
+        raise
+
+    completion = {
+        "action": "authority-downgrade",
+        "actor": actor_value,
+        "created_at": utc_now_iso_z(),
+        "phase": "complete",
+        "removed": mutated_marker,
+        "store_unwrapped": unsigned_record is not None,
+        "target": resolved,
+        "target_fingerprint": fingerprint,
+    }
+    try:
+        completion["audit_path"] = str(authority_marker.append_audit(completion, env=env))
+    except OSError as exc:
+        try:
+            _restore_all()
+        except OSError as restore_exc:
+            raise OSError("authority downgrade audit failed and marker restore failed") from restore_exc
+        raise OSError("authority downgrade audit failed; marker restored") from exc
+    return completion
 
 
 def _record_external_directory_authority(

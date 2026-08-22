@@ -166,7 +166,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     authority_sub.required = True
     p_security_authority_downgrade = authority_sub.add_parser(
         "downgrade",
-        help="Remove the user-level sticky signed marker after operator confirmation.",
+        help="Convert the signed authority store to unsigned and remove the sticky marker.",
     )
     p_security_authority_downgrade.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to downgrade."
