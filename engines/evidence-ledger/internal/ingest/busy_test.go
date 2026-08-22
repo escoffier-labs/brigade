@@ -15,6 +15,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const (
+	sqliteBusy         = 5
+	sqliteBusyRecovery = 261
+	sqliteBusySnapshot = 517
+	sqliteBusyTimeout  = 773
+)
+
 func TestRetryOnBusyImportSucceedsAfterHeldLock(t *testing.T) {
 	path := t.TempDir() + "/miseledger.db"
 	setup, err := archive.Open(path)
@@ -153,7 +160,7 @@ func TestRetryOnBusyInvokesOnRetryThenSucceeds(t *testing.T) {
 	err := RetryOnBusy(func() error {
 		n++
 		if n == 1 {
-			return errors.New("database is locked (5) (SQLITE_BUSY)")
+			return resultCodeError{code: sqliteBusy, msg: "database is locked (5) (SQLITE_BUSY)"}
 		}
 		return nil
 	}, opts)
@@ -168,28 +175,66 @@ func TestRetryOnBusyInvokesOnRetryThenSucceeds(t *testing.T) {
 	}
 }
 
-func TestIsBusyRecognizesDriverText(t *testing.T) {
-	if !IsBusy(errors.New("import sourceharvest: database is locked (5) (SQLITE_BUSY)")) {
-		t.Fatal("expected the runbook SQLITE_BUSY string to be retryable")
+func TestRetryOnBusyDoesNotRetryFreeTextBusy(t *testing.T) {
+	n := 0
+	err := RetryOnBusy(func() error {
+		n++
+		return errors.New("sourceharvest: unexpected token (5) (SQLITE_BUSY) in stderr")
+	}, BusyRetryOptions{Attempts: 4, InitialWait: time.Millisecond, Sleep: func(time.Duration) {}})
+	if err == nil {
+		t.Fatal("expected the free-text error to be returned as-is")
+	}
+	if n != 1 {
+		t.Fatalf("fn calls = %d, want 1 (subprocess stderr must not retry)", n)
+	}
+}
+
+func TestIsBusyIgnoresBusyFamilyNumbersInFreeText(t *testing.T) {
+	// Subprocess stderr and wrapped plain errors can mention (5)/(261)/(517)
+	// without being a SQLite result code. Those must not classify as busy.
+	for _, err := range []error{
+		errors.New("import sourceharvest: database is locked (5) (SQLITE_BUSY)"),
+		errors.New("scanner stderr: unexpected token (261) near harvest"),
+		errors.New("helper failed: snapshot conflict (517) in log line"),
+		errors.New("timeout (773) from sidecar"),
+		fmt.Errorf("import sourceharvest: %s", "database is locked (5) (SQLITE_BUSY)"),
+	} {
+		if IsBusy(err) {
+			t.Fatalf("IsBusy(%q) = true, free text must not classify as busy", err)
+		}
 	}
 	if IsBusy(errors.New("import sourceharvest: timed out after 2m0s")) {
 		t.Fatal("timeout must not be treated as retryable lock")
 	}
 }
 
+func TestIsBusyRecognizesDriverResultCode(t *testing.T) {
+	err := realBusyResultCode(t)
+	if !IsBusy(err) {
+		t.Fatalf("IsBusy(%T %v) = false, want real SQLITE_BUSY result code", err, err)
+	}
+	if !IsBusy(fmt.Errorf("import sourceharvest: %w", err)) {
+		t.Fatal("wrapped driver busy must still classify via the result code")
+	}
+	if code, ok := sqliteErrorCode(err); !ok || !isBusyFamilyCode(code) {
+		t.Fatalf("driver busy code = (%d, %v), want BUSY-family", code, ok)
+	}
+}
+
 func TestIsBusyRecognizesBusyFamilyCodes(t *testing.T) {
-	for _, err := range []error{
-		errors.New("database is locked (5) (SQLITE_BUSY)"),
-		errors.New("database is locked (517)"),
-		errors.New("database is locked (261)"),
-		errors.New("database is locked (773)"),
-	} {
+	for _, code := range []int{sqliteBusy, sqliteBusyRecovery, sqliteBusySnapshot, sqliteBusyTimeout} {
+		err := resultCodeError{code: code, msg: fmt.Sprintf("database is locked (%d)", code)}
 		if !IsBusy(err) {
-			t.Fatalf("IsBusy(%q) = false, want BUSY-family retryable", err)
+			t.Fatalf("IsBusy(code=%d) = false, want BUSY-family retryable", code)
 		}
 	}
-	if IsBusy(errors.New("database is locked (6)")) {
+	if IsBusy(resultCodeError{code: 6, msg: "database table is locked (6)"}) {
 		t.Fatal("SQLITE_LOCKED (6) is not the BUSY family")
+	}
+	// A non-busy error whose text merely contains a parenthesized busy-family
+	// number must stay false even when a Code() is present for a different rc.
+	if IsBusy(resultCodeError{code: 1, msg: "SQL logic error (5) (SQLITE_BUSY) mentioned in text"}) {
+		t.Fatal("non-busy result code must not classify from parenthesized text")
 	}
 }
 
@@ -198,7 +243,7 @@ func TestRetryOnBusyRetriesSnapshotThenSucceeds(t *testing.T) {
 	err := RetryOnBusy(func() error {
 		n++
 		if n == 1 {
-			return errors.New("database is locked (517)")
+			return resultCodeError{code: sqliteBusySnapshot, msg: "database is locked (517)"}
 		}
 		return nil
 	}, BusyRetryOptions{Attempts: 3, InitialWait: time.Millisecond, Sleep: func(time.Duration) {}})
@@ -215,7 +260,7 @@ func TestRetryOnBusyHonorsMaxTotalWait(t *testing.T) {
 	n := 0
 	err := RetryOnBusy(func() error {
 		n++
-		return errors.New("database is locked (517)")
+		return resultCodeError{code: sqliteBusySnapshot, msg: "database is locked (517)"}
 	}, BusyRetryOptions{
 		Attempts:     50,
 		InitialWait:  20 * time.Millisecond,
@@ -238,6 +283,89 @@ func TestRetryOnBusyHonorsMaxTotalWait(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Fatalf("elapsed %s, composed wait must stay in the low seconds", elapsed)
 	}
+}
+
+func TestRetryOnBusyConcurrentImportsStayBounded(t *testing.T) {
+	path := t.TempDir() + "/miseledger.db"
+	setup, err := archive.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Migrate(setup); err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 4
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	opts := BusyRetryOptions{
+		Attempts:     16,
+		InitialWait:  5 * time.Millisecond,
+		MaxWait:      50 * time.Millisecond,
+		MaxTotalWait: 8 * time.Second,
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			db, openErr := archive.Open(path)
+			if openErr != nil {
+				errs <- openErr
+				return
+			}
+			defer db.Close()
+			<-start
+			jsonl := fmt.Sprintf(`{"schema":"miseledger.adapter.v1","source":{"kind":"busy-stress","name":"Busy Stress"},"collection":{"external_id":"busy:collection:%d","kind":"agent_session","name":"busy"},"item":{"external_id":"busy:item:%d","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"concurrent import %d","tags":["busy"]},"actor":{"external_id":"busy:actor:%d","type":"human","name":"busy"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"busy.jsonl","ordinal":1}}`+"\n", i, i, i, i)
+			errs <- RetryOnBusy(func() error {
+				_, importErr := ImportAdapterReader(db, strings.NewReader(jsonl), fmt.Sprintf("busy://stress/%d", i), "busy-stress")
+				return importErr
+			}, opts)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent import: %v", err)
+		}
+	}
+}
+
+type resultCodeError struct {
+	code int
+	msg  string
+}
+
+func (e resultCodeError) Error() string { return e.msg }
+func (e resultCodeError) Code() int     { return e.code }
+
+func realBusyResultCode(t *testing.T) error {
+	t.Helper()
+	path := t.TempDir() + "/busy-code.db"
+	holder := openImmediate(t, path)
+	t.Cleanup(func() { _ = holder.Close() })
+	if _, err := holder.Exec("CREATE TABLE t(x INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = holder.Exec("ROLLBACK") })
+	other := openImmediate(t, path)
+	t.Cleanup(func() { _ = other.Close() })
+	_, err := other.Exec("INSERT INTO t(x) VALUES (1)")
+	if err == nil {
+		t.Fatal("expected a real SQLITE_BUSY result code from the held write lock")
+	}
+	if _, ok := sqliteErrorCode(err); !ok {
+		t.Fatalf("held-lock error %T %v has no result Code()", err, err)
+	}
+	return err
 }
 
 func openImmediate(t *testing.T, path string) *sql.DB {
