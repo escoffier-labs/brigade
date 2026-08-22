@@ -82,10 +82,50 @@ def _fingerprint_for(
     return target_fingerprint_from_record(record)
 
 
-def _marker_is_inside_workspace(path: Path, workspace: Path) -> bool:
+def _marker_enters_workspace(path: Path, workspace: Path) -> bool:
+    """True when the marker would sit inside ``workspace``.
+
+    Same lexical / symlink / ``..`` rigor as the HMAC key check, but without
+    the key's ``.brigade``-component heuristic. The default marker home is
+    ``~/.brigade``, which must remain legal.
+    """
+
     from . import authority_key
 
-    return authority_key.key_path_is_scanner_reachable(path, workspace)
+    unresolved = authority_key._absolute_unresolved(path)
+    work = authority_key._absolute_unresolved(workspace)
+    if authority_key._parts_prefix(unresolved, work):
+        return True
+    if authority_key._workspace_symlink_component(unresolved, work):
+        return True
+    return authority_key.key_is_inside_tree(path, workspace)
+
+
+def _marker_is_under_user_brigade_dir(path: Path, *, env: Mapping[str, str] | None = None) -> bool:
+    """True when ``path`` is under the configured user-level brigade directory."""
+
+    from . import authority_key
+
+    user = user_brigade_dir(env=env)
+    unresolved = authority_key._absolute_unresolved(path)
+    user_unresolved = authority_key._absolute_unresolved(user)
+    if not authority_key._parts_prefix(unresolved, user_unresolved):
+        return False
+    return authority_key.key_is_inside_tree(path, user)
+
+
+def reject_unsafe_marker_path(
+    path: Path,
+    workspace: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Refuse a marker inside the workspace or outside the user-level brigade dir."""
+
+    if _marker_enters_workspace(path, workspace):
+        raise OSError("authority signed marker must not be written inside the workspace")
+    if not _marker_is_under_user_brigade_dir(path, env=env):
+        raise OSError("authority signed marker must live under the user-level brigade directory")
 
 
 def marker_exists(
@@ -108,7 +148,9 @@ def marker_exists(
         path = signed_marker_path(fingerprint, env=env)
     except OSError:
         return False
-    if target is not None and _marker_is_inside_workspace(path, target):
+    if target is not None and _marker_enters_workspace(path, target):
+        return False
+    if not _marker_is_under_user_brigade_dir(path, env=env):
         return False
     try:
         return path.is_file() and not path.is_symlink()
@@ -125,8 +167,7 @@ def record_signed_marker(
 
     fingerprint = target_fingerprint(target)
     path = signed_marker_path(fingerprint, env=env)
-    if _marker_is_inside_workspace(path, target):
-        raise OSError("authority signed marker must not be written inside the workspace")
+    reject_unsafe_marker_path(path, target, env=env)
     if path.is_file() and not path.is_symlink():
         return path
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -258,8 +299,7 @@ def remove_signed_marker(
 
     fingerprint = target_fingerprint(target)
     path = signed_marker_path(fingerprint, env=env)
-    if _marker_is_inside_workspace(path, target):
-        raise OSError("authority signed marker path is inside the workspace")
+    reject_unsafe_marker_path(path, target, env=env)
     try:
         marker_bytes = path.read_bytes()
     except FileNotFoundError:

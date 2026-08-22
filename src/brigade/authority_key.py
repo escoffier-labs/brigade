@@ -94,11 +94,16 @@ def _workspace_symlink_component(path: Path, workspace: Path) -> bool:
 
 
 def key_path_is_scanner_reachable(path: Path, workspace: Path | None = None) -> bool:
-    """True when the key would sit in the workspace or ``.brigade`` state.
+    """True when the *HMAC key* would sit in the workspace or ``.brigade`` state.
 
     Uses the unresolved path first so a directory symlink inside the workspace
     that points outside cannot pass as an external key. Also refuses a symlink
     component under the workspace and a resolved path that lands inside it.
+
+    Do not reuse this helper for the signed marker. Markers are required to
+    live under ``~/.brigade`` (or ``$BRIGADE_USER_DIR``), which contains a
+    ``.brigade`` path component by design. See
+    ``authority_marker.reject_unsafe_marker_path``.
     """
 
     unresolved = _absolute_unresolved(path)

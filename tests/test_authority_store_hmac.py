@@ -686,6 +686,63 @@ def test_record_signed_marker_refuses_workspace_user_dir(tmp_path: Path, monkeyp
     assert not authority_marker.marker_exists(tmp_path)
 
 
+def test_default_home_brigade_marker_is_created_and_blocks_strip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default ``$HOME/.brigade`` must actually receive a marker; strip then fails closed."""
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("BRIGADE_USER_DIR", raising=False)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _bind_workspace(workspace)
+    fingerprint = authority_marker.target_fingerprint(workspace)
+    marker = home / ".brigade" / "authority-signed" / fingerprint
+    assert marker.is_file()
+    assert marker.resolve().is_relative_to((home / ".brigade").resolve())
+    assert ".brigade" in marker.parts
+    assert not marker.resolve().is_relative_to(workspace.resolve())
+    assert authority_marker.marker_exists(workspace)
+    _strip_store_to_raw_record(workspace)
+    _disable_external_key_isolation(workspace)
+    with pytest.raises(OSError, match="raw unsigned record"):
+        ledger._read_external_directory_authority(workspace)
+    authority_key.key_path().unlink()
+    authority_key.clear_key_cache()
+    with pytest.raises(OSError, match="raw unsigned record"):
+        ledger._read_external_directory_authority(workspace)
+
+
+def test_marker_rejects_workspace_symlink_and_dotdot_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (workspace / "nested").mkdir()
+    link = workspace / "escape-link"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    monkeypatch.setenv("BRIGADE_USER_DIR", str(link / ".brigade"))
+    with pytest.raises(OSError, match="inside the workspace"):
+        authority_marker.record_signed_marker(workspace)
+    assert not (outside / ".brigade" / "authority-signed" / authority_marker.target_fingerprint(workspace)).exists()
+
+    monkeypatch.setenv(
+        "BRIGADE_USER_DIR",
+        str(workspace / "nested" / ".." / ".." / "outside" / ".brigade"),
+    )
+    with pytest.raises(OSError, match="inside the workspace"):
+        authority_marker.record_signed_marker(workspace)
+    assert not (outside / ".brigade" / "authority-signed" / authority_marker.target_fingerprint(workspace)).exists()
+
+
 def test_reanchor_rejects_forged_raw_candidate_for_marked_destination(tmp_path: Path) -> None:
     """Round-5 probe: a raw dummy-target candidate cannot re-sign forged bindings."""
 
