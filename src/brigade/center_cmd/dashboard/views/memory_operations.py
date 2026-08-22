@@ -413,7 +413,7 @@ def _health_tiles(health: dict) -> str:
     for key, label in _HEALTH_KEYS:
         block = health.get(key) if isinstance(health.get(key), dict) else {}
         status = block.get("status", "unknown")
-        role, _word, icon, color = _status_role(status)
+        role, _word, icon, _ = _status_role(status)
         meaning = _health_meaning(key, block)
         debug_bits: list[str] = []
         for detail_key in (
@@ -438,7 +438,7 @@ def _health_tiles(health: dict) -> str:
         tiles.append(
             f'<article class="mo-health-tile mo-health-{html.esc(role)}" data-mo-health="{html.esc(key)}">'
             f'<div class="mo-health-head">'
-            f'<span class="mo-chip-icon" aria-hidden="true" style="background:{html.esc(color)}">'
+            f'<span class="mo-chip-icon mo-chip-{html.esc(role)}" aria-hidden="true">'
             f"{html.esc(icon)}</span>"
             f'<span class="mo-health-label">{html.esc(label)}</span>'
             f'<span class="mo-chip-word">{html.esc(_health_word(status))}</span>'
@@ -1448,6 +1448,10 @@ def _stylesheet(nonce: str) -> str:
   font-size: 0.7rem;
   line-height: 1;
 }}
+.mo-chip-good {{ background: {_STATUS_GOOD}; }}
+.mo-chip-warning {{ background: {_STATUS_WARNING}; }}
+.mo-chip-serious {{ background: {_STATUS_SERIOUS}; }}
+.mo-chip-critical {{ background: {_STATUS_CRITICAL}; }}
 .mo-pipeline-wrap {{
   overflow-x: auto;
   max-width: 100%;

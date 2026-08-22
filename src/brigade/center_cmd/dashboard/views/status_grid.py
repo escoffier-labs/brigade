@@ -198,7 +198,7 @@ def _health_tiles(payload: dict) -> str:
     for key, label in _TILES:
         count, section = _tile_counts(payload, key)
         word = _status_word(section, count)
-        role, icon, color = _status_role(word)
+        role, icon, _ = _status_role(word)
         meaning = _tile_meaning(key, section, count)
         debug = ""
         if key == "pending_tasks":
@@ -210,8 +210,8 @@ def _health_tiles(payload: dict) -> str:
         tiles.append(
             f'<article class="sg-tile sg-tile-{html.esc(role)}" data-sg-tile="{html.esc(key)}">'
             '<div class="sg-tile-head">'
-            '<span class="sg-chip-icon" aria-hidden="true" '
-            f'style="background:{html.esc(color)}">{html.esc(icon)}</span>'
+            f'<span class="sg-chip-icon sg-chip-{html.esc(role)}" aria-hidden="true">'
+            f"{html.esc(icon)}</span>"
             f'<span class="sg-tile-label">{html.esc(label)}</span>'
             f'<span class="sg-chip-word">{html.esc(word)}</span>'
             "</div>"
@@ -316,6 +316,9 @@ def _stylesheet(nonce: str) -> str:
   font-size: 0.7rem;
   line-height: 1;
 }}
+.sg-chip-good {{ background: {_STATUS_GOOD}; }}
+.sg-chip-warning {{ background: {_STATUS_WARNING}; }}
+.sg-chip-serious {{ background: {_STATUS_SERIOUS}; }}
 .sg-debug {{
   margin-top: 0.35rem;
   color: {_TEXT_SECONDARY};
