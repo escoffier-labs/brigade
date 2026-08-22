@@ -368,9 +368,7 @@ def authority_downgrade(
     from ..work_cmd import ledger
 
     try:
-        payload = ledger.downgrade_external_directory_authority(
-            target, actor=authority_marker.operator_identity()
-        )
+        payload = ledger.downgrade_external_directory_authority(target, actor=authority_marker.operator_identity())
     except OSError as exc:
         print(f"error: authority downgrade failed: {exc}", file=sys.stderr)
         return 2
