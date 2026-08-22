@@ -2384,3 +2384,24 @@ def test_fsync_directory_without_o_directory_opens_readonly_and_fsyncs(tmp_path,
 
     assert fsynced
     assert fsynced[0]
+
+
+def test_chmod_fd_or_path_does_not_use_fchmod_off_posix():
+    """Regression: presence of os.fchmod is not proof it works.
+
+    os.fchmod exists on Windows under Python 3.14 but raises PermissionError
+    (WinError 5) when the descriptor was opened O_RDONLY, which
+    _enforce_file_mode always does. Gate on the platform so non-POSIX takes the
+    verified-path os.chmod fallback instead.
+    """
+    assert run_journal._HAS_FCHMOD == (hasattr(os, "fchmod") and os.name == "posix")
+
+
+def test_enforce_file_mode_succeeds_on_a_read_only_descriptor(tmp_path: Path):
+    """ensure_journal must not raise while correcting the journal's mode."""
+    journal = tmp_path / "lifecycle.jsonl"
+    run_journal.ensure_journal(journal)
+
+    assert journal.exists()
+    # Second call re-enters the mode-enforcement path against an existing file.
+    run_journal.ensure_journal(journal)
