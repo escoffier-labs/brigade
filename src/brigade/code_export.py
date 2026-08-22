@@ -448,6 +448,7 @@ def _walk_hops(
                     continue
                 pair = (neighbor, node) if inbound else (node, neighbor)
                 hop_weight[neighbor] += int(edge_weight.get(pair, 0))
+        ordered = sorted(hop_weight.items(), key=lambda kv: (-kv[1], kv[0]))
         hop_rows = [
             {
                 "id": neighbor,
@@ -455,9 +456,8 @@ def _walk_hops(
                 "hops": hop,
                 "weight": weight,
             }
-            for neighbor, weight in hop_weight.items()
+            for neighbor, weight in ordered
         ]
-        hop_rows.sort(key=lambda row: (-int(row["weight"]), str(row["id"])))
         rows.extend(hop_rows)
         nxt = set(hop_weight)
         seen.update(nxt)
