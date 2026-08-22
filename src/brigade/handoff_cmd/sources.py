@@ -478,17 +478,36 @@ def _short(text: str, limit: int = 96) -> str:
     return rendered[: limit - 3].rstrip() + "..."
 
 
-def _inspect_inbox(target: Path, rel: str, watched: tuple[WatchedInbox, ...]) -> InboxHealth:
-    path = target / rel
+def _inspect_inbox(root: Path, rel: str, watched: tuple[WatchedInbox, ...]) -> InboxHealth:
+    path = root / rel
     return InboxHealth(
         inbox=rel,
         path=path,
         exists=path.is_dir(),
         pending=_count_pending(path),
         processed=_count_processed(path),
-        watched=_is_watched(target, rel, watched),
+        watched=_is_watched(root, rel, watched),
         oldest_pending_age_seconds=_oldest_pending_age_seconds(path),
     )
+
+
+def _collect_inbox_health(target: Path, watched: tuple[WatchedInbox, ...]) -> tuple[InboxHealth, ...]:
+    """Inspect local writer inboxes plus every configured (root, inbox) pair.
+
+    Local `WRITER_INBOXES` stay first and in that order so existing doctor JSON
+    indexes remain stable. Extra configured roots are appended, keyed by the
+    resolved inbox path so a second root is not collapsed into the target.
+    """
+    seen: dict[str, InboxHealth] = {}
+    for rel in WRITER_INBOXES:
+        health = _inspect_inbox(target, rel, watched)
+        seen[str((target / rel).resolve())] = health
+    for item in watched:
+        key = str((item.root / item.inbox).resolve())
+        if key in seen:
+            continue
+        seen[key] = _inspect_inbox(item.root, item.inbox, watched)
+    return tuple(seen.values())
 
 
 def _oldest_pending_age_seconds(path: Path) -> int | None:
@@ -529,10 +548,9 @@ def _count_processed(path: Path) -> int:
     return len([candidate for candidate in processed.glob("*.md") if candidate.is_file()])
 
 
-def _is_watched(target: Path, rel: str, watched: tuple[WatchedInbox, ...]) -> bool:
-    resolved_target = target.resolve()
-    normalized = _normalize_inbox(rel)
-    return any(item.root == resolved_target and item.inbox == normalized for item in watched)
+def _is_watched(root: Path, rel: str, watched: tuple[WatchedInbox, ...]) -> bool:
+    resolved_inbox = (root / rel).resolve()
+    return any((item.root / item.inbox).resolve() == resolved_inbox for item in watched)
 
 
 def _format_seconds(value: int | None) -> str:

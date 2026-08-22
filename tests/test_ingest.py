@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import textwrap
@@ -462,6 +463,55 @@ def test_missing_inbox_returns_error(tmp_target: Path):
     tmp_target.mkdir()
     rc = ingest_mod.run(target=tmp_target)
     assert rc == 2
+
+
+def test_ingest_processes_configured_non_target_root(tmp_path):
+    workspace = tmp_path / "wsA"
+    other = tmp_path / "rootB"
+    remote_inbox = other / ".claude" / "memory-handoffs"
+    remote_inbox.mkdir(parents=True)
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".brigade" / "handoff-sources.json").write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {"root": ".", "inboxes": [".claude/memory-handoffs"]},
+                    {"root": str(other), "inboxes": [".claude/memory-handoffs"]},
+                ]
+            }
+        )
+    )
+    _write_handoff(
+        remote_inbox,
+        "2026-08-19-1500-repro.md",
+        """\
+        # Memory Handoff
+
+        ## Type
+        setup
+
+        ## Title
+        non-target root
+
+        ## Summary
+        A handoff sitting in a second configured root must be ingested.
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        TOOLS.md
+
+        ## Suggested document content
+        - second-root entry
+        """,
+    )
+
+    rc = ingest_mod.run(target=workspace, promote_cards=True, route_documents=True)
+    assert rc == 0
+    assert (workspace / "TOOLS.md").read_text().count("second-root entry") == 1
+    assert (remote_inbox / "processed" / "2026-08-19-1500-repro.md").is_file()
+    assert not (remote_inbox / "2026-08-19-1500-repro.md").exists()
 
 
 def test_ingest_scans_multiple_writer_inboxes(tmp_path):

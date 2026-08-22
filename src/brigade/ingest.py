@@ -85,19 +85,50 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
     Reads `.brigade/config.json` when present and returns one inbox per
     writer harness in the selection (alphabetical by harness id). Falls back
     to the legacy `.claude/memory-handoffs/` path for pre-v0.3.0 installs.
+    Also includes every existing inbox declared in `.brigade/handoff-sources.json`,
+    including roots outside `target`, so a second configured root is ingested.
     """
     from .config import load_config
 
+    paths: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        if not path.is_dir():
+            return
+        resolved = path.resolve()
+        key = str(resolved)
+        if key in seen:
+            return
+        seen.add(key)
+        paths.append(resolved)
+
     cfg = load_config(target)
     if cfg is None:
-        legacy = target / ".claude" / "memory-handoffs"
-        return [legacy] if legacy.is_dir() else []
-    paths: list[Path] = []
-    for h in sorted(cfg.selection.harnesses):
-        rel = WRITER_INBOXES.get(h)
-        if rel and (target / rel).is_dir():
-            paths.append(target / rel)
+        add(target / ".claude" / "memory-handoffs")
+    else:
+        for h in sorted(cfg.selection.harnesses):
+            rel = WRITER_INBOXES.get(h)
+            if rel:
+                add(target / rel)
+    for extra in _handoff_source_inbox_paths(target):
+        add(extra)
     return paths
+
+
+def _handoff_source_inbox_paths(target: Path) -> list[Path]:
+    """Existing inbox directories from `.brigade/handoff-sources.json`."""
+    from .handoff_cmd.models import default_sources_path
+    from .handoff_cmd.sources import _load_sources
+
+    sources_path = default_sources_path(target)
+    if not sources_path.is_file():
+        return []
+    try:
+        config = _load_sources(target, sources_path)
+    except ValueError:
+        return []
+    return [watched.root / watched.inbox for watched in config.watched]
 
 
 def run(

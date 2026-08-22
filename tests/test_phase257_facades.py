@@ -621,6 +621,7 @@ EXPECTED_SYMBOLS = {
         "_normalize_inbox",
         "_short",
         "_inspect_inbox",
+        "_collect_inbox_health",
         "_oldest_pending_age_seconds",
         "_count_pending",
         "_count_processed",
