@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import authority_broker, authority_key, scanner_isolation
+from brigade import authority_broker, authority_key, authority_marker, cli, scanner_isolation
 from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import constants, helpers, ledger
 
@@ -504,3 +504,181 @@ def test_dotdot_reentry_refuses_key_with_zero_bytes(tmp_path: Path, monkeypatch:
     assert not (outside / "reentry.key").exists()
     with pytest.raises(OSError, match="workspace or scanner-reachable"):
         authority_key.load_key(workspace=workspace)
+
+
+def _strip_store_to_raw_record(tmp_path: Path) -> dict:
+    path = _store_path(tmp_path)
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    assert envelope.get("envelope_version") == 1
+    record = dict(envelope["record"])
+    path.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    return record
+
+
+def test_stripped_envelope_is_refused_after_flag_flipped_off(tmp_path: Path) -> None:
+    """Round-3 probe: flag-off + envelope strip cannot downgrade a marked target."""
+
+    _bind_workspace(tmp_path)
+    assert authority_marker.marker_exists(tmp_path)
+    marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+    assert marker.is_file()
+    assert not marker.resolve().is_relative_to(tmp_path.resolve())
+    _strip_store_to_raw_record(tmp_path)
+    _disable_external_key_isolation(tmp_path)
+    with pytest.raises(OSError, match="raw unsigned record"):
+        ledger._read_external_directory_authority(tmp_path)
+    item = ledger._make_import("strip forge", kind="task", source="handoff-ingest")
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def test_stripped_envelope_is_refused_after_external_key_deleted(tmp_path: Path) -> None:
+    """Fail closed: sticky marker still rejects a raw record after the HMAC key is gone."""
+
+    _bind_workspace(tmp_path)
+    _strip_store_to_raw_record(tmp_path)
+    _disable_external_key_isolation(tmp_path)
+    key = authority_key.key_path()
+    key.unlink()
+    authority_key.clear_key_cache()
+    with pytest.raises(OSError, match="raw unsigned record"):
+        ledger._read_external_directory_authority(tmp_path)
+
+
+def test_authority_downgrade_with_confirm_accepts_raw_records_and_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER", "test-operator")
+    _bind_workspace(tmp_path)
+    _strip_store_to_raw_record(tmp_path)
+    _disable_external_key_isolation(tmp_path)
+    with pytest.raises(OSError, match="raw unsigned record"):
+        ledger._read_external_directory_authority(tmp_path)
+    assert (
+        cli.main(
+            [
+                "security",
+                "authority",
+                "downgrade",
+                "--target",
+                str(tmp_path),
+                "--confirm",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "removed sticky marker" in out
+    assert "test-operator" in out
+    assert not authority_marker.marker_exists(tmp_path)
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert payload is not None
+    assert payload.get("envelope_version") != 1
+    audit = authority_marker.audit_path().read_text(encoding="utf-8")
+    line = json.loads(audit.strip().splitlines()[-1])
+    assert line["action"] == "authority-downgrade"
+    assert line["actor"] == "test-operator"
+    assert line["target_fingerprint"] == authority_marker.target_fingerprint(tmp_path)
+    assert line["target"] == str(tmp_path.resolve())
+    assert line["removed"] is True
+
+
+def test_authority_downgrade_tty_no_cancels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class _Stdin:
+        def isatty(self) -> bool:
+            return True
+
+        def readline(self) -> str:
+            return "n\n"
+
+    _bind_workspace(tmp_path)
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    assert (
+        cli.main(
+            [
+                "security",
+                "authority",
+                "downgrade",
+                "--target",
+                str(tmp_path),
+                "--confirm",
+            ]
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert "cancelled" in err
+    assert authority_marker.marker_exists(tmp_path)
+    assert not authority_marker.audit_path().exists()
+
+
+def test_authority_downgrade_without_confirm_refuses(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _bind_workspace(tmp_path)
+    marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+    before = marker.read_bytes()
+    assert (
+        cli.main(
+            [
+                "security",
+                "authority",
+                "downgrade",
+                "--target",
+                str(tmp_path),
+            ]
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert "--confirm" in err
+    assert marker.read_bytes() == before
+    assert authority_marker.marker_exists(tmp_path)
+    assert not authority_marker.audit_path().exists()
+
+
+def test_fresh_unsigned_target_has_no_marker(tmp_path: Path) -> None:
+    _bind_workspace(tmp_path, external_key=False)
+    assert not authority_marker.marker_exists(tmp_path)
+    path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert payload is not None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw.get("envelope_version") != 1
+    identity, _store = _g5_same_uid_store_rewrite(tmp_path)
+    assert identity is not None
+
+
+def test_workspace_relative_marker_plant_is_ignored(tmp_path: Path) -> None:
+    """A plant or delete under the workspace cannot create or clear the sticky bit."""
+
+    _bind_workspace(tmp_path, external_key=False)
+    fingerprint = authority_marker.target_fingerprint(tmp_path)
+    planted = tmp_path / "authority-signed" / fingerprint
+    planted.parent.mkdir(parents=True)
+    planted.write_text("planted", encoding="utf-8")
+    brigade_plant = tmp_path / ".brigade" / "authority-signed" / fingerprint
+    brigade_plant.parent.mkdir(parents=True, exist_ok=True)
+    brigade_plant.write_text("planted", encoding="utf-8")
+    assert not authority_marker.marker_exists(tmp_path)
+    _path, payload = ledger._read_external_directory_authority(tmp_path)
+    assert payload is not None
+
+    _enable_external_key_isolation(tmp_path)
+    _bind_workspace(tmp_path)
+    real = authority_marker.signed_marker_path(fingerprint)
+    assert real.is_file()
+    assert not real.resolve().is_relative_to(tmp_path.resolve())
+    planted.unlink()
+    brigade_plant.unlink()
+    _strip_store_to_raw_record(tmp_path)
+    _disable_external_key_isolation(tmp_path)
+    with pytest.raises(OSError, match="raw unsigned record"):
+        ledger._read_external_directory_authority(tmp_path)
+
+
+def test_record_signed_marker_refuses_workspace_user_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIGADE_USER_DIR", str(tmp_path))
+    with pytest.raises(OSError, match="inside the workspace"):
+        authority_marker.record_signed_marker(tmp_path)
+    planted = tmp_path / "authority-signed" / authority_marker.target_fingerprint(tmp_path)
+    assert not planted.exists()
+    assert not authority_marker.marker_exists(tmp_path)

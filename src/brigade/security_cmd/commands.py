@@ -339,6 +339,50 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     return 0 if payload["valid"] else 1
 
 
+def authority_downgrade(
+    *,
+    target: Path,
+    confirm: bool = False,
+    stdin: Any | None = None,
+) -> int:
+    """Remove the user-level sticky signed marker after explicit confirmation."""
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if not confirm:
+        print(
+            "error: authority downgrade requires --confirm (and an interactive y/N when stdin is a TTY)",
+            file=sys.stderr,
+        )
+        return 2
+    stream = stdin if stdin is not None else sys.stdin
+    if hasattr(stream, "isatty") and stream.isatty():
+        print(f"Downgrade signed authority for {target}? [y/N]: ", end="", flush=True)
+        answer = stream.readline() if hasattr(stream, "readline") else ""
+        if str(answer).strip().lower() not in {"y", "yes"}:
+            print("error: authority downgrade cancelled", file=sys.stderr)
+            return 2
+    from .. import authority_marker
+
+    if not authority_marker.marker_exists(target):
+        print("authority downgrade: no sticky marker for this target")
+        return 0
+    try:
+        payload = authority_marker.remove_signed_marker(target)
+    except OSError as exc:
+        print(f"error: authority downgrade failed: {exc}", file=sys.stderr)
+        return 2
+    print(f"authority downgrade: removed sticky marker for {payload['target_fingerprint']}")
+    print(f"actor: {payload['actor']}")
+    print(f"target: {payload['target']}")
+    print(f"created_at: {payload['created_at']}")
+    if payload.get("audit_path"):
+        print(f"audit: {payload['audit_path']}")
+    return 0
+
+
 def closeout(
     *,
     target: Path,

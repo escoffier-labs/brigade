@@ -77,6 +77,18 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
+    """Redirect user-level ``~/.brigade`` sticky state away from the real home.
+
+    Authority signed-markers live under ``BRIGADE_USER_DIR`` (default
+    ``~/.brigade``). Tests must never create or delete that tree on the
+    operator account.
+    """
+    root = tmp_path_factory.mktemp("user_brigade")
+    monkeypatch.setenv("BRIGADE_USER_DIR", str(root))
+
+
+@pytest.fixture(autouse=True)
 def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
     """Default to the bare-host baseline: no managed tool resolves.
 

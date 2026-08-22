@@ -1569,8 +1569,9 @@ def _directory_authority_store_path(target: Path, *, env: Mapping[str, str] | No
     ``env`` resolves the record under a different data root, which the scanner
     child sandbox uses to seed a copy without exposing the operator's store.
     """
-    resolved = str(target.expanduser().resolve())
-    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+    from .. import authority_marker
+
+    digest = authority_marker.target_fingerprint(target)
     try:
         data_root = Path(component_paths.data_root() if env is None else component_paths.data_root(env=env))
     except ValueError as exc:
@@ -1804,7 +1805,7 @@ def _unwrap_authority_envelope(
     key_material: tuple[bytes, str] | None = None,
     workspace: Path | None = None,
 ) -> dict[str, Any]:
-    from .. import authority_broker, authority_key
+    from .. import authority_broker, authority_key, authority_marker
 
     inner = (
         payload["record"]
@@ -1842,7 +1843,14 @@ def _unwrap_authority_envelope(
         expected_name = f"{_authority_target_digest(record)}.json"
         if path.name != expected_name:
             raise OSError("authority store filename does not match the bound target")
+        if workspace is not None:
+            authority_marker.record_signed_marker(workspace)
         return record
+    if authority_marker.marker_exists(workspace, record=payload):
+        raise OSError(
+            "signed authority store refuses a raw unsigned record; "
+            "run brigade security authority downgrade to intentionally downgrade"
+        )
     if not hmac_on:
         if "schema_version" not in payload or "target" not in payload:
             raise OSError("external directory authority record is malformed")
@@ -1876,7 +1884,7 @@ def _write_external_directory_authority(
     key_material: tuple[bytes, str] | None = None,
     workspace: Path | None = None,
 ) -> None:
-    from .. import authority_broker, authority_key
+    from .. import authority_broker, authority_key, authority_marker
 
     record = (
         payload["record"]
@@ -1898,6 +1906,11 @@ def _write_external_directory_authority(
         )
         to_write: dict[str, Any] = authority_broker.sign_store_record(secret, record, sequence, loaded_id)
     else:
+        if authority_marker.marker_exists(workspace, record=record):
+            raise OSError(
+                "signed authority store refuses a raw unsigned record; "
+                "run brigade security authority downgrade to intentionally downgrade"
+            )
         to_write = dict(record)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -1928,6 +1941,8 @@ def _write_external_directory_authority(
             temporary.unlink()
         except FileNotFoundError:
             pass
+    if hmac_on and workspace is not None:
+        authority_marker.record_signed_marker(workspace)
 
 
 def _record_external_directory_authority(

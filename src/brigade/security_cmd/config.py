@@ -268,15 +268,23 @@ def authority_store_doctor_check(target: Path) -> tuple[str, str, str]:
 
     name = "security: authority store"
     mode = authority_store_isolation_mode(target)
+    residual = (
+        "residual same-uid write class: scanner children share the operator uid "
+        "and can rewrite the binding store by path; set "
+        'authority_store.isolation = "external-key" in .brigade/security.toml '
+        "to HMAC-sign bindings with a 0600 key outside the scanner-reachable tree"
+    )
     if mode != AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY:
-        return (
-            "WARN",
-            name,
-            "residual same-uid write class: scanner children share the operator uid "
-            "and can rewrite the binding store by path; set "
-            'authority_store.isolation = "external-key" in .brigade/security.toml '
-            "to HMAC-sign bindings with a 0600 key outside the scanner-reachable tree",
-        )
+        from .. import authority_marker
+
+        if authority_marker.marker_exists(target):
+            return (
+                "WARN",
+                name,
+                residual + "; signed store with isolation off: verification stays enforced; "
+                "run brigade security authority downgrade to intentionally downgrade",
+            )
+        return ("WARN", name, residual)
     from .. import authority_key
 
     path = authority_key.key_path()
