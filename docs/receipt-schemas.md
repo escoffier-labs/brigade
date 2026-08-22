@@ -997,6 +997,43 @@ unknown future record types. `brigade runs events` keeps its own
 - `final` text is one-lined and bounded through the same `_clean_str`
   chokepoint; a value that cannot be rendered safely is omitted.
 
+### `brigade.run-diff.v1` — `brigade runs diff <child> [other] --json`
+
+Read-only comparison of a durable child against its recorded parent
+(one-argument form) or two sibling runs that share a parent (explicit
+two-run form). The command never writes to either run directory.
+Unknown, corrupt, or parentless run IDs fail closed with no JSON.
+
+```json
+{
+  "schema": "brigade.run-diff.v1",
+  "relation": "child-parent",
+  "left": {},
+  "right": {},
+  "parent_run_id": "",
+  "branch_point_event_id": "",
+  "lifecycle": {},
+  "workers": {},
+  "verification": {},
+  "outcome": {},
+  "graphtrail": {}
+}
+```
+
+- `relation`: `child-parent` or `siblings`. Left is the child (or first
+  sibling); right is the parent (or second sibling).
+- `lifecycle`, `workers`, `verification`, and `outcome` each carry
+  `changed`, optional `changes` (`field` / `left` / `right`), and the
+  compared left/right views. Compared strings use the same `_clean_str`
+  chokepoint as list/show/latest/watch. Verification `changed` is the
+  ordered `{status, command, exit_code}` sequence across every receipt
+  and command; `run_id` and the `final.txt` digest are display-only.
+- `graphtrail` compares GraphTrail snapshot attestations only when both
+  sides have compatible snapshots (`ok`/`status=ok` plus a before or
+  after snapshot sha256). Absent or incompatible snapshots set
+  `status: skipped` and a `reason` (`absent snapshots` or
+  `incompatible snapshots`) instead of guessing.
+
 ---
 
 ## Related commands

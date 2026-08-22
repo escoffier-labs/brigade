@@ -87,6 +87,34 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
+    p_runs_diff = runs_sub.add_parser(
+        "diff",
+        help="Compare a durable child run against its recorded parent, or two sibling runs.",
+    )
+    p_runs_diff.add_argument("run", help="Child run directory path, run id under --runs-dir, or 'latest'.")
+    p_runs_diff.add_argument(
+        "other",
+        nargs="?",
+        default=None,
+        help="Optional other run (recorded parent or sibling). Defaults to the run's recorded parent.",
+    )
+    p_runs_diff.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_runs_diff.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_diff.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the versioned brigade.run-diff.v1 JSON contract.",
+    )
     p_runs_watch = runs_sub.add_parser("watch", help="Watch a Brigade run artifact directory until it finishes.")
     p_runs_watch.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
     p_runs_watch.add_argument(
@@ -377,6 +405,16 @@ def dispatch(args) -> int:
         return runs_cmd.show(run_dir, json_output=args.json)
     if args.runs_command == "child":
         return runs_cmd.child(args.run, args.event_id, cwd=args.cwd, runs_dir=args.runs_dir)
+    if args.runs_command == "diff":
+        from .. import runs_diff
+
+        return runs_diff.diff(
+            args.run,
+            args.other,
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            json_output=args.json,
+        )
     if args.runs_command == "watch":
         return runs_cmd.watch(
             args.run,
