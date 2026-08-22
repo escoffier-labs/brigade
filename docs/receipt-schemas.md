@@ -1025,7 +1025,9 @@ Unknown, corrupt, or parentless run IDs fail closed with no JSON.
 - `lifecycle`, `workers`, `verification`, and `outcome` each carry
   `changed`, optional `changes` (`field` / `left` / `right`), and the
   compared left/right views. Compared strings use the same `_clean_str`
-  chokepoint as list/show/latest/watch.
+  chokepoint as list/show/latest/watch. Verification `changed` is the
+  ordered `{status, command, exit_code}` sequence across every receipt
+  and command; `run_id` and the `final.txt` digest are display-only.
 - `graphtrail` compares GraphTrail snapshot attestations only when both
   sides have compatible snapshots (`ok`/`status=ok` plus a before or
   after snapshot sha256). Absent or incompatible snapshots set

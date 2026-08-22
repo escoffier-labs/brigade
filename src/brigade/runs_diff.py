@@ -312,20 +312,24 @@ def _verification_section(
     right_dir: Path,
     right_detail: Mapping[str, Any],
 ) -> dict[str, object]:
-    """Compare verify receipts on content. ``run_id`` and ``digest`` are display-only."""
+    """Compare every verify receipt on content. ``run_id`` and ``digest`` are display-only."""
     left_view = _verification_view(left_dir, left_detail)
     right_view = _verification_view(right_dir, right_detail)
-    changes = [
-        _change(field, left_view.get(field), right_view.get(field))
-        for field in sorted(_VERIFY_CONTENT_FIELDS)
-        if left_view.get(field) != right_view.get(field)
-    ]
-    return _section_payload(bool(changes), changes, left_view, right_view)
+    left_content = _verify_content_sequence(left_detail)
+    right_content = _verify_content_sequence(right_detail)
+    return _section_payload(
+        left_content != right_content,
+        _verify_sequence_changes(left_content, right_content, left_view, right_view),
+        left_view,
+        right_view,
+    )
 
 
 def _verification_view(run_dir: Path, detail: Mapping[str, Any]) -> dict[str, object]:
-    receipt = _first_verify_receipt(detail)
-    command = _first_verify_command(receipt)
+    receipts = _verify_receipts(detail)
+    receipt = receipts[0] if receipts else {}
+    commands = _verify_commands(receipt)
+    command = commands[0] if commands else {}
     digest, _size = _final_digest(run_dir)
     return _allow(
         {
@@ -339,24 +343,56 @@ def _verification_view(run_dir: Path, detail: Mapping[str, Any]) -> dict[str, ob
     )
 
 
-def _first_verify_receipt(detail: Mapping[str, Any]) -> Mapping[str, Any]:
+def _verify_content_sequence(detail: Mapping[str, Any]) -> list[dict[str, object]]:
+    """Ordered ``{status, command, exit_code}`` for every receipt and command."""
+    sequence: list[dict[str, object]] = []
+    for receipt in _verify_receipts(detail):
+        commands = _verify_commands(receipt)
+        if not commands:
+            sequence.append(_verify_content_item(receipt, {}))
+            continue
+        sequence.extend(_verify_content_item(receipt, command) for command in commands)
+    return sequence
+
+
+def _verify_content_item(receipt: Mapping[str, Any], command: Mapping[str, Any]) -> dict[str, object]:
+    return {
+        "status": _clean(receipt.get("status"), runs_cmd._DETAIL_TEXT_LIMIT),
+        "command": _clean(command.get("command"), runs_cmd._DETAIL_COMMAND_LIMIT),
+        "exit_code": runs_cmd._clean_number(command.get("exit_code")),
+    }
+
+
+def _verify_sequence_changes(
+    left_content: list[dict[str, object]],
+    right_content: list[dict[str, object]],
+    left_view: Mapping[str, object],
+    right_view: Mapping[str, object],
+) -> list[dict[str, object]]:
+    if left_content == right_content:
+        return []
+    changes = [
+        _change(field, left_view.get(field), right_view.get(field))
+        for field in sorted(_VERIFY_CONTENT_FIELDS)
+        if left_view.get(field) != right_view.get(field)
+    ]
+    if changes:
+        return changes
+    return [_change("receipts", left_content, right_content)]
+
+
+def _verify_receipts(detail: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     receipts = detail.get("verification")
     if not isinstance(receipts, list):
-        return {}
-    for receipt in receipts:
-        if isinstance(receipt, Mapping):
-            return receipt
-    return {}
+        return []
+    return [receipt for receipt in receipts if isinstance(receipt, Mapping)]
 
 
-def _first_verify_command(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+def _verify_commands(receipt: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     commands = receipt.get("commands")
     if not isinstance(commands, list):
-        return {}
-    for command in commands:
-        if isinstance(command, Mapping):
-            return command
-    return {}
+        return []
+    return [command for command in commands if isinstance(command, Mapping)]
 
 
 def _outcome_view(run_dir: Path, detail: Mapping[str, Any]) -> dict[str, object]:

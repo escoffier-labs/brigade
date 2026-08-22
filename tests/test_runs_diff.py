@@ -30,6 +30,7 @@ def _write_run(
     verify_exit: int = 0,
     verify_command: str = "pytest -q",
     verify_run_id: str | None = None,
+    verify_receipts: list[dict[str, object]] | None = None,
     synthesis_ok: bool = True,
     synthesis_detail: str = "merged",
     final_text: str | None = "done\n",
@@ -68,7 +69,8 @@ def _write_run(
             ],
             "ground_truth": {
                 "available": True,
-                "verify_receipts": [
+                "verify_receipts": verify_receipts
+                or [
                     {
                         "run_id": verify_run_id or f"verify-{run_dir.name}",
                         "status": verify_status,
@@ -264,6 +266,126 @@ def test_verification_content_differences_are_changed(tmp_path, capsys):
         assert payload["verification"]["changed"] is True, field
         assert any(change["field"] == field for change in payload["verification"]["changes"]), field
         assert payload["verification"]["left"][field] != payload["verification"]["right"][field], field
+
+
+def _verify_receipt(
+    run_id: str,
+    *,
+    status: str = "ok",
+    command: str = "pytest -q",
+    exit_code: int = 0,
+) -> dict[str, object]:
+    return {
+        "run_id": run_id,
+        "status": status,
+        "commands": [{"command": command, "exit_code": exit_code}],
+    }
+
+
+def test_verification_later_receipt_difference_is_changed(tmp_path, capsys):
+    """A later receipt mismatch must mark verification changed (first-only misses this)."""
+    runs_root = tmp_path / ".brigade" / "runs"
+    parent = runs_root / "20260821-120000-parent"
+    child = runs_root / "20260821-130000-child"
+    shared_first = {"status": "ok", "command": "pytest -q", "exit_code": 0}
+    _write_run(
+        parent,
+        verify_receipts=[
+            _verify_receipt("20260821-120000-work-verify-aaaaaa", **shared_first),
+            _verify_receipt(
+                "20260821-120000-work-verify-cccccc",
+                status="ok",
+                command="ruff check .",
+                exit_code=0,
+            ),
+        ],
+        final_text="parent-synthesis-output\n",
+    )
+    _write_run(
+        child,
+        lineage=_child_lineage(parent.name),
+        verify_receipts=[
+            _verify_receipt("20260821-130000-work-verify-bbbbbb", **shared_first),
+            _verify_receipt(
+                "20260821-130000-work-verify-dddddd",
+                status="failed",
+                command="ruff check .",
+                exit_code=1,
+            ),
+        ],
+        final_text="child-synthesis-output\n",
+    )
+
+    assert cli.main(["runs", "diff", child.name, "--cwd", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verification"]["left"]["status"] == payload["verification"]["right"]["status"] == "ok"
+    assert payload["verification"]["left"]["command"] == payload["verification"]["right"]["command"]
+    assert payload["verification"]["left"]["exit_code"] == payload["verification"]["right"]["exit_code"] == 0
+    assert payload["verification"]["changed"] is True
+
+
+def test_verification_receipt_count_difference_is_changed(tmp_path, capsys):
+    """Different verify-receipt counts must mark verification changed."""
+    runs_root = tmp_path / ".brigade" / "runs"
+    parent = runs_root / "20260821-120000-parent"
+    child = runs_root / "20260821-130000-child"
+    shared = {"status": "ok", "command": "pytest -q", "exit_code": 0}
+    _write_run(
+        parent,
+        verify_receipts=[
+            _verify_receipt("20260821-120000-work-verify-aaaaaa", **shared),
+            _verify_receipt(
+                "20260821-120000-work-verify-cccccc",
+                status="ok",
+                command="ruff check .",
+                exit_code=0,
+            ),
+        ],
+    )
+    _write_run(
+        child,
+        lineage=_child_lineage(parent.name),
+        verify_receipts=[_verify_receipt("20260821-130000-work-verify-bbbbbb", **shared)],
+    )
+
+    assert cli.main(["runs", "diff", child.name, "--cwd", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verification"]["changed"] is True
+
+
+def test_verification_identical_multi_receipt_sequences_are_unchanged(tmp_path, capsys):
+    """Equal multi-receipt content stays unchanged even when ids and final.txt differ."""
+    runs_root = tmp_path / ".brigade" / "runs"
+    parent = runs_root / "20260821-120000-parent"
+    child = runs_root / "20260821-130000-child"
+    content = (
+        {"status": "ok", "command": "pytest -q", "exit_code": 0},
+        {"status": "ok", "command": "ruff check .", "exit_code": 0},
+    )
+    _write_run(
+        parent,
+        verify_receipts=[
+            _verify_receipt("20260821-120000-work-verify-aaaaaa", **content[0]),
+            _verify_receipt("20260821-120000-work-verify-cccccc", **content[1]),
+        ],
+        final_text="parent-synthesis-output\n",
+    )
+    _write_run(
+        child,
+        lineage=_child_lineage(parent.name),
+        verify_receipts=[
+            _verify_receipt("20260821-130000-work-verify-bbbbbb", **content[0]),
+            _verify_receipt("20260821-130000-work-verify-dddddd", **content[1]),
+        ],
+        final_text="child-synthesis-output\n",
+    )
+
+    assert cli.main(["runs", "diff", child.name, "--cwd", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verification"]["left"]["run_id"] != payload["verification"]["right"]["run_id"]
+    assert payload["verification"]["left"]["digest"] != payload["verification"]["right"]["digest"]
+    assert payload["verification"]["changed"] is False
+    assert payload["verification"].get("changes") is None
 
 
 def test_diff_two_run_form_compares_siblings(tmp_path, capsys):
