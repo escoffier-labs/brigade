@@ -547,6 +547,7 @@ def test_stripped_envelope_is_refused_after_external_key_deleted(tmp_path: Path)
 def test_authority_downgrade_with_confirm_accepts_raw_records_and_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setenv("LOGNAME", "login-name")
     monkeypatch.setenv("USER", "test-operator")
     _bind_workspace(tmp_path)
     _strip_store_to_raw_record(tmp_path)

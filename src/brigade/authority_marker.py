@@ -138,6 +138,7 @@ def record_signed_marker(
         "schema_version": 1,
         "target": str(target.expanduser().resolve()),
         "target_fingerprint": fingerprint,
+        "signed_by": operator_identity(env=env),
         "created_at": utc_now_iso_z(),
     }
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -165,9 +166,15 @@ def audit_path(*, env: Mapping[str, str] | None = None) -> Path:
     return signed_marker_root(env=env) / AUDIT_NAME
 
 
-def actor_name(*, env: Mapping[str, str] | None = None) -> str:
+def operator_identity(*, env: Mapping[str, str] | None = None) -> str:
+    """Return the current operator identity for signing and downgrade audit.
+
+    Prefer ``USER`` so a test or operator shell can stamp the acting account
+    without losing to ``LOGNAME`` (the first key ``getpass.getuser()`` reads).
+    """
+
     environment = env if env is not None else os.environ
-    for key in ("LOGNAME", "USER", "USERNAME"):
+    for key in ("USER", "USERNAME", "LOGNAME"):
         value = environment.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -177,6 +184,10 @@ def actor_name(*, env: Mapping[str, str] | None = None) -> str:
         return getpass.getuser()
     except Exception:
         return "unknown"
+
+
+def actor_name(*, env: Mapping[str, str] | None = None) -> str:
+    return operator_identity(env=env)
 
 
 def append_audit(record: Mapping[str, Any], *, env: Mapping[str, str] | None = None) -> Path:
@@ -218,7 +229,7 @@ def remove_signed_marker(
         removed = False
     payload = {
         "action": "authority-downgrade",
-        "actor": actor if actor is not None else actor_name(env=env),
+        "actor": actor if actor is not None else operator_identity(env=env),
         "created_at": utc_now_iso_z(),
         "removed": removed,
         "target": str(target.expanduser().resolve()),
