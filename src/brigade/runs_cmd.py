@@ -2553,9 +2553,59 @@ def _validate_child_branch_point(
     return branch_event, parent_run_dir, None
 
 
+def _child_can_continue_execution(run_dir: Path) -> bool:
+    """True when the existing app-server resume path can continue this child."""
+    from . import run_resume
+
+    if not (run_dir / "roster.json").is_file():
+        return False
+    if _resume_available(run_dir):
+        return True
+    return run_resume._interrupted_appserver_results(run_dir) is not None
+
+
+def _continue_child_execution(run_dir: Path, meta: Mapping[str, Any]) -> int:
+    """Continue a durable child through the same locked resume path as a normal run."""
+    from . import aboyeur, run_resume
+
+    status = meta.get("status") if isinstance(meta.get("status"), str) else None
+    if status in run_resume._NONTERMINAL_RUN_STATUSES:
+        interrupted = run_resume._interrupted_appserver_results(run_dir)
+        if interrupted is None:
+            print(
+                "error: child run is not terminal; no durable app-server thread coordinates are available",
+                file=sys.stderr,
+            )
+            return 2
+        salvage_error = run_resume._interrupted_salvage_blocked(
+            run_dir,
+            dict(meta),
+            worker_data=run_resume._load_json(run_dir, "worker-results.json"),
+            interrupted_data=interrupted,
+        )
+        if salvage_error is not None:
+            print(f"error: {salvage_error}", file=sys.stderr)
+            return 2
+        aboyeur.record_run_termination(
+            run_dir,
+            status="failed",
+            failure_phase=status,
+            failure_kind="owner-process-exited",
+            detail="run owner exited before recording a terminal state",
+        )
+    return run_resume._resume_locked(run_dir)
+
+
 def _resume_durable_child(run_dir: Path, meta: Mapping[str, Any]) -> int:
-    """Resume a durable child from its recorded branch-point on its own journal."""
-    from . import localio, receipt_schema, run_journal, run_lifecycle, run_projector, runguard
+    """Resume a durable child from its recorded branch-point on its own journal.
+
+    When the child has a roster and resumable app-server coordinates, work
+    continues through ``run_resume._resume_locked`` (the same continuation
+    ``brigade runs resume`` already uses). A fresh ``runs child`` snapshot
+    without those artifacts is not re-executed: Brigade confirms the
+    branch-point and leaves status unchanged instead of stamping ``running``.
+    """
+    from . import run_journal, run_lifecycle, runguard
 
     lineage = _durable_child_lineage(meta)
     if lineage is None:
@@ -2576,7 +2626,6 @@ def _resume_durable_child(run_dir: Path, meta: Mapping[str, Any]) -> int:
         RuntimeError,
         runguard.RunGuardError,
         run_lifecycle.LifecycleJournalError,
-        run_projector.ProjectionError,
         run_journal.RunJournalError,
     )
     try:
@@ -2585,36 +2634,20 @@ def _resume_durable_child(run_dir: Path, meta: Mapping[str, Any]) -> int:
             current_lineage = _durable_child_lineage(current)
             if current is None or current_lineage is None:
                 raise RuntimeError("child lineage changed before resume lock acquisition")
-            locked_event, _locked_parent, locked_error = _validate_child_branch_point(run_dir, current_lineage)
+            _locked_event, _locked_parent, locked_error = _validate_child_branch_point(run_dir, current_lineage)
             if locked_error is not None:
                 raise RuntimeError(locked_error)
-            assert locked_event is not None
-            key_digest = hashlib.sha256(f"{run_dir.name}:{locked_event.event_id}".encode()).hexdigest()
-            run_lifecycle.record_lifecycle_event(
-                run_dir,
-                event_type="run.recovery.started",
-                payload={"detail": "child resume from branch-point"},
-                idempotency_key=f"runs-child-resume:{key_digest[:32]}",
-                workspace=workspace,
+            if _child_can_continue_execution(run_dir):
+                return _continue_child_execution(run_dir, current)
+            print(f"restored: {run_dir}")
+            print(
+                "resume: confirmed durable child branch-point state; "
+                "did not re-execute (no resumable worker continuation on this child)"
             )
-            report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
-            if report.partial_tail is not None:
-                raise run_journal.RunJournalError("child lifecycle journal has a partial trailing record")
-            if report.chain_errors:
-                raise run_journal.RunJournalError(report.chain_errors[0])
-            bootstrap = dict(current)
-            bootstrap["status"] = "started"
-            bootstrap.pop("projector_version", None)
-            bootstrap.pop("journal_present", None)
-            bootstrap.pop("journal_last_sequence", None)
-            bootstrap.pop("journal_last_event_digest", None)
-            projection = run_projector.project_run_snapshot(bootstrap, report.events, journal_present=True)
-            localio.write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(dict(projection.snapshot)))
+            return 0
     except resume_errors as exc:
         print(f"error: could not resume child run: {exc}", file=sys.stderr)
         return 2
-    print(f"resumed: {run_dir}")
-    return 0
 
 
 def show_latest(*, cwd: Path, runs_dir: Path | None = None, json_output: bool = False) -> int:

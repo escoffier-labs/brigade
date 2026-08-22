@@ -2810,13 +2810,17 @@ def test_runs_resume_child_from_branch_point(tmp_path, capsys):
     events = _write_checkpointed_parent_run(workspace, parent_dir)
     branch_event = events[-1]
     child_dir = _create_lineaged_child(workspace, parent_dir, branch_event.event_id, capsys)
+    before = _run_artifact_fingerprint(child_dir)
+    create_event_types = [event.event_type for event in _events(child_dir)]
 
     assert cli.main(["runs", "resume", child_dir.name, "--cwd", str(workspace)]) == 0
-    out = capsys.readouterr().out.strip().splitlines()
-    assert out and out[-1] == f"resumed: {child_dir}"
+    out = capsys.readouterr().out
+    assert f"restored: {child_dir}" in out
+    assert "did not re-execute" in out
+    assert "resumed:" not in out
 
     child_meta = json.loads((child_dir / "run.json").read_text())
-    assert child_meta["status"] == "running"
+    assert child_meta["status"] == "planning"
     assert child_meta["lineage"] == {
         "kind": "child",
         "parent_run_id": parent_dir.name,
@@ -2827,11 +2831,9 @@ def test_runs_resume_child_from_branch_point(tmp_path, capsys):
             "previous_digest": branch_event.previous_digest,
         },
     }
-    child_events = _events(child_dir)
-    assert child_events[-1].event_type == "run.recovery.started"
-    assert child_events[-1].payload == {"detail": "child resume from branch-point"}
-    assert child_events[-1].run_id == child_dir.name
-    assert all(event.run_id == child_dir.name for event in child_events)
+    assert _run_artifact_fingerprint(child_dir) == before
+    assert [event.event_type for event in _events(child_dir)] == create_event_types
+    assert all(event.run_id == child_dir.name for event in _events(child_dir))
 
 
 def test_runs_resume_child_refuses_workspace_lock_without_partial_state(tmp_path, capsys):
@@ -2887,15 +2889,16 @@ def test_runs_resume_child_leaves_parent_and_siblings_unchanged(tmp_path, capsys
     assert f"    - {child_b.name}" in parent_show_after
     assert f"branch point: {branch_event.event_id}" in parent_show_after
     assert "status: ok" in parent_show_after
-    assert f"    - {child_a.name} (running; branch point: {branch_event.event_id})" in parent_show_after
+    assert f"    - {child_a.name} (planning; branch point: {branch_event.event_id})" in parent_show_after
     assert f"    - {child_b.name} (planning; branch point: {branch_event.event_id})" in parent_show_after
+    assert json.loads((child_a / "run.json").read_text())["status"] == "planning"
 
     assert runs_cmd.show(child_a) == 0
     child_out = capsys.readouterr().out
     assert "kind: child" in child_out
     assert f"parent run: {parent_dir.name}" in child_out
     assert f"branch point: {branch_event.event_id}" in child_out
-    assert "status: running" in child_out
+    assert "status: planning" in child_out
 
 
 def test_runs_resume_child_fails_closed_for_corrupt_branch_point_without_partial_state(tmp_path, capsys):
@@ -2933,6 +2936,59 @@ def test_runs_resume_child_fails_closed_for_unsupported_branch_point_without_par
     err = capsys.readouterr().err
     assert "unsupported branch point event" in err
     assert _run_artifact_fingerprint(child_dir) == before
+
+
+def test_runs_resume_child_invokes_existing_continuation(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+    branch_event = events[-1]
+    child_dir = _create_lineaged_child(workspace, parent_dir, branch_event.event_id, capsys)
+    child_meta = json.loads((child_dir / "run.json").read_text())
+    child_meta["status"] = "failed"
+    (child_dir / "run.json").write_text(json.dumps(child_meta, indent=2, sort_keys=True) + "\n")
+    _write_json(
+        child_dir / "roster.json",
+        {
+            "orchestrator": "chef",
+            "max_workers": 4,
+            "timeout_seconds": 600.0,
+            "allow_models": [],
+            "sandbox": None,
+            "agents": {
+                "chef": {"cli": "claude", "model": None, "role": "plan", "timeout_seconds": None},
+                "cook": {"cli": "codex", "model": None, "role": "code", "timeout_seconds": None},
+            },
+        },
+    )
+    _write_json(
+        child_dir / "worker-results.json",
+        {
+            "results": [
+                {
+                    "worker": "cook",
+                    "task": "write code",
+                    "ok": False,
+                    "detail": "timeout",
+                    "thread_id": "t-child-1",
+                    "status": "interrupted",
+                }
+            ],
+            "ground_truth": {},
+        },
+    )
+    parent_before = _run_artifact_fingerprint(parent_dir)
+    continued: list[Path] = []
+    monkeypatch.setattr(run_resume, "_resume_locked", lambda path, **_kwargs: continued.append(path) or 0)
+
+    assert runs_cmd.resume(child_dir) == 0
+    assert continued == [child_dir]
+    assert _run_artifact_fingerprint(parent_dir) == parent_before
+    assert json.loads((child_dir / "run.json").read_text())["lineage"]["parent_run_id"] == parent_dir.name
+    assert json.loads((child_dir / "run.json").read_text())["lineage"]["branch_point_event_id"] == branch_event.event_id
+    assert "did not re-execute" not in capsys.readouterr().out
 
 
 def test_runs_resume_legacy_run_without_child_metadata_is_unaffected(tmp_path, capsys, monkeypatch):
