@@ -1151,7 +1151,7 @@ def _finalize_redeemed_approval(
 
 
 def resume(run_dir: Path) -> int:
-    """Resume a legacy run or consume an approval before a paused continuation."""
+    """Resume a durable child, a legacy run, or an approval-paused continuation."""
     from . import run_lifecycle, run_resume, runguard
 
     run_dir = run_dir.expanduser().resolve()
@@ -1160,6 +1160,8 @@ def resume(run_dir: Path) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if meta is not None and _durable_child_lineage(meta) is not None:
+        return _resume_durable_child(run_dir, meta)
     if meta is None or _approval_resume_state(meta) is None:
         return run_resume.resume(run_dir)
     raw_reference = meta.get("approval_reference")
@@ -2219,6 +2221,23 @@ def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10, json_
     return 0
 
 
+def _read_verified_journal(run_dir: Path, *, role: str) -> tuple[list[Any] | None, str | None]:
+    from . import run_journal, run_lifecycle
+
+    journal_path = run_lifecycle._journal_path(run_dir)
+    if not journal_path.is_file():
+        return None, f"{role} has no lifecycle journal"
+    try:
+        report = run_journal.read_journal_bounded(journal_path)
+    except run_journal.RunJournalError as exc:
+        return None, f"could not read {role} lifecycle journal: {exc.diagnostic}"
+    if report.partial_tail is not None:
+        return None, f"{role} lifecycle journal has a partial trailing record"
+    if report.chain_errors:
+        return None, f"{role} lifecycle journal is corrupt: {report.chain_errors[0]}"
+    return report.events, None
+
+
 def _read_verified_parent_journal(run_dir: Path) -> tuple[list[Any] | None, str | None]:
     from . import run_journal, run_lifecycle
 
@@ -2475,6 +2494,126 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
         print(f"error: could not create child run: {exc}", file=sys.stderr)
         return 2
     print(f"child: {child_run_dir}")
+    return 0
+
+
+def _durable_child_lineage(meta: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """Return recorded child lineage, or None for legacy / non-child runs."""
+    if meta is None:
+        return None
+    lineage = _lineage(meta)
+    if lineage is None or lineage.get("kind") != "child":
+        return None
+    return lineage
+
+
+def _validate_child_branch_point(
+    child_run_dir: Path, lineage: Mapping[str, Any]
+) -> tuple[Any | None, Path | None, str | None]:
+    """Verify a child's recorded branch-point against the parent journal.
+
+    Read-only: never creates a run directory or appends to either journal.
+    """
+    parent_id = lineage.get("parent_run_id")
+    branch_id = lineage.get("branch_point_event_id")
+    if not isinstance(parent_id, str) or not parent_id.strip():
+        return None, None, "corrupt branch point event: child lineage is missing parent_run_id"
+    if not isinstance(branch_id, str) or not branch_id.strip():
+        return None, None, "corrupt branch point event: child lineage is missing branch_point_event_id"
+
+    parent_run_dir = child_run_dir.parent / parent_id
+    try:
+        if parent_run_dir.is_symlink() or not parent_run_dir.is_dir():
+            return None, None, f"parent run directory not found: {parent_id}"
+    except OSError:
+        return None, None, f"parent run directory not found: {parent_id}"
+
+    _child_events, child_journal_error = _read_verified_journal(child_run_dir, role="child")
+    if child_journal_error is not None:
+        return None, None, child_journal_error
+    events, journal_error = _read_verified_parent_journal(parent_run_dir)
+    if journal_error is not None:
+        return None, None, journal_error
+    assert events is not None
+    branch_event = next((event for event in events if event.event_id == branch_id), None)
+    if branch_event is None:
+        return None, None, f"unknown branch point event: {branch_id}"
+    _snapshot, snapshot_error = _supported_branch_snapshot(parent_run_dir, branch_event)
+    if snapshot_error is not None:
+        return None, None, snapshot_error
+    shared = lineage.get("shared_prefix")
+    if not isinstance(shared, Mapping):
+        return None, None, "corrupt branch point event: child lineage is missing shared_prefix"
+    if (
+        shared.get("event_sequence") != branch_event.sequence
+        or shared.get("event_digest") != branch_event.event_digest
+        or shared.get("previous_digest") != branch_event.previous_digest
+    ):
+        return None, None, "corrupt branch point event: shared-prefix digest does not match the parent event"
+    return branch_event, parent_run_dir, None
+
+
+def _resume_durable_child(run_dir: Path, meta: Mapping[str, Any]) -> int:
+    """Resume a durable child from its recorded branch-point on its own journal."""
+    from . import localio, receipt_schema, run_journal, run_lifecycle, run_projector, runguard
+
+    lineage = _durable_child_lineage(meta)
+    if lineage is None:
+        print("error: run is not a durable child", file=sys.stderr)
+        return 2
+    branch_event, _parent_run_dir, error = _validate_child_branch_point(run_dir, lineage)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    assert branch_event is not None
+    workspace = runguard.resolve_run_lock_workspace(dict(meta), run_dir)
+    if workspace is None:
+        print("error: child run has no lock workspace", file=sys.stderr)
+        return 2
+    resume_errors = (
+        OSError,
+        ValueError,
+        RuntimeError,
+        runguard.RunGuardError,
+        run_lifecycle.LifecycleJournalError,
+        run_projector.ProjectionError,
+        run_journal.RunJournalError,
+    )
+    try:
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            current = _read_json(run_dir / "run.json")
+            current_lineage = _durable_child_lineage(current)
+            if current is None or current_lineage is None:
+                raise RuntimeError("child lineage changed before resume lock acquisition")
+            locked_event, _locked_parent, locked_error = _validate_child_branch_point(run_dir, current_lineage)
+            if locked_error is not None:
+                raise RuntimeError(locked_error)
+            assert locked_event is not None
+            key_digest = hashlib.sha256(f"{run_dir.name}:{locked_event.event_id}".encode()).hexdigest()
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                event_type="run.recovery.started",
+                payload={"detail": "child resume from branch-point"},
+                idempotency_key=f"runs-child-resume:{key_digest[:32]}",
+                workspace=workspace,
+            )
+            report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
+            if report.partial_tail is not None:
+                raise run_journal.RunJournalError("child lifecycle journal has a partial trailing record")
+            if report.chain_errors:
+                raise run_journal.RunJournalError(report.chain_errors[0])
+            bootstrap = dict(current)
+            bootstrap["status"] = "started"
+            bootstrap.pop("projector_version", None)
+            bootstrap.pop("journal_present", None)
+            bootstrap.pop("journal_last_sequence", None)
+            bootstrap.pop("journal_last_event_digest", None)
+            projection = run_projector.project_run_snapshot(bootstrap, report.events, journal_present=True)
+            localio.write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(dict(projection.snapshot)))
+    except resume_errors as exc:
+        print(f"error: could not resume child run: {exc}", file=sys.stderr)
+        return 2
+    print(f"resumed: {run_dir}")
     return 0
 
 
