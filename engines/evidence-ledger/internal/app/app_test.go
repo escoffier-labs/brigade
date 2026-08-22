@@ -2113,6 +2113,67 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+func TestImportDiscoveredPartialSuccessExitsZero(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	root := filepath.Join(os.Getenv("HOME"), ".codex", "sessions", "2026", "06", "03")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(root, "codex.jsonl"))
+
+	// A present Cursor profile whose chats path is a file makes that source
+	// fail after Codex has already committed. This is independent of the
+	// conversation-search.db skip path.
+	cursorRoot := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "Cursor", "User")
+	if err := os.MkdirAll(cursorRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cursorRoot, "chats"), []byte("not-a-directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errb := run("import", "discovered", "--json")
+	if code != 0 {
+		t.Fatalf("partial success should exit 0, got %d err=%s out=%s", code, errb, out)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, out)
+	}
+	if got["inserted_items"].(float64) == 0 {
+		t.Fatalf("expected Codex to commit items: %v", got)
+	}
+	failures, _ := got["failures"].([]any)
+	if len(failures) == 0 {
+		t.Fatalf("expected cursor listed in failures: %v", got)
+	}
+	joined := fmt.Sprint(failures)
+	if !strings.Contains(joined, "cursor:") {
+		t.Fatalf("failures should name the cursor source: %v", failures)
+	}
+}
+
+func TestImportDiscoveredTotalFailureExitsOne(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	cursorRoot := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "Cursor", "User")
+	if err := os.MkdirAll(cursorRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cursorRoot, "chats"), []byte("not-a-directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errb := run("import", "discovered", "--json")
+	if code != 1 {
+		t.Fatalf("total failure should exit 1, got %d err=%s out=%s", code, errb, out)
+	}
+	if !strings.Contains(out, `"failures"`) || !strings.Contains(out, "cursor:") {
+		t.Fatalf("total failure JSON should list cursor: out=%s err=%s", out, errb)
+	}
+}
+
 func TestImportDiscoveredAttributesWarningsAndFailures(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")

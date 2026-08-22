@@ -14,6 +14,15 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Fixed
 
+- `import cursor` no longer aborts when `User/globalStorage/conversation-search.db`
+  cannot be opened. Relative profile paths and Windows drive paths now use an
+  absolute `file:` URI (the previous `file://<first-segment>/...` form made
+  SQLite report `SQL logic error: out of memory`). A file that still cannot
+  be read is skipped with a counted warning that names the path and the
+  statement; prompt history and chat surfaces continue to import. Fixes #1052.
+- `import discovered` lists per-source failures but exits 0 when at least one
+  source imported; exit 1 is reserved for total failure (no source imported).
+  Fixes #1052.
 - `import sourceharvest` (and the crawl wrappers that call it) and provenance backfill retry the SQLITE_BUSY family (5, 261, 517) with a 1s `busy_timeout` and a few-second total ceiling, so a concurrent writer no longer fails the crawl or hangs the suite. Exhausted contention names the holder-diagnosis instead of the raw SQLite string. Fixes #1067.
 - Content eligibility is centralized for every body-emitting read surface.
   Search snippets, MCP `search_evidence`, evidence bundles, Markdown export,

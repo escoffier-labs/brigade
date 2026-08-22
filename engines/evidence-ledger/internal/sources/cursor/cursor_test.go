@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,6 +309,127 @@ func TestGenerateConversationSearchReadOnlyAndWALScan(t *testing.T) {
 	}
 	if res.Records != 3 || scanned != dbPath+"-wal" {
 		t.Fatalf("records=%d scanned=%q", res.Records, scanned)
+	}
+}
+
+func TestSQLiteOpErrorNamesPathAndStatement(t *testing.T) {
+	err := sqliteOpError(
+		filepath.Join("User", "globalStorage", "conversation-search.db"),
+		conversationSearchSQL,
+		errors.New("SQL logic error: out of memory (1)"),
+	)
+	msg := err.Error()
+	for _, want := range []string{
+		"conversation-search.db",
+		"from conversations c",
+		"out of memory",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("sqliteOpError=%q missing %q", msg, want)
+		}
+	}
+}
+
+func TestSQLiteFileURIPathWindowsDriveAndRelative(t *testing.T) {
+	if got := sqliteFileURIPath(`C:\Users\demo\conversation-search.db`); got != "/C:/Users/demo/conversation-search.db" {
+		t.Fatalf("windows drive URI path=%q", got)
+	}
+	if got := sqliteFileURIPath("User/globalStorage/conversation-search.db"); got != "/User/globalStorage/conversation-search.db" {
+		t.Fatalf("relative URI path=%q", got)
+	}
+	dsn, err := sqliteReadOnlyDSN("conversation-search.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(dsn, "file:///") {
+		t.Fatalf("dsn=%q is not an absolute file URI", dsn)
+	}
+	if strings.Contains(dsn, "file://conversation-search.db") {
+		t.Fatalf("dsn=%q still has a host component", dsn)
+	}
+}
+
+func chdir(t *testing.T, dir string) {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Errorf("restore cwd: %v", err)
+		}
+	})
+}
+
+func TestGenerateConversationSearchRelativePathImports(t *testing.T) {
+	root := buildConversationFixture(t)
+	chdir(t, filepath.Dir(root))
+	recs, res := parseRecords(t, filepath.Base(root), sources.Options{})
+	if res.Records != 2 || len(recs) != 2 {
+		t.Fatalf("relative conversation-search import records=%d decoded=%d warnings=%v", res.Records, len(recs), res.Warnings)
+	}
+}
+
+func TestGenerateConversationSearchZeroByteRelativePathSkips(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	writeFile(t, filepath.Join("User", "globalStorage", "conversation-search.db"), "")
+	writeFile(t, filepath.Join("User", "prompt_history.json"), `["keep importing other cursor surfaces"]`)
+
+	var buf bytes.Buffer
+	res, err := Generate("User", sources.Options{}, &buf)
+	if err != nil {
+		t.Fatalf("0-byte conversation-search.db must not abort import: %v", err)
+	}
+	if len(res.Warnings) == 0 {
+		t.Fatalf("expected a skip warning, got %#v", res)
+	}
+	joined := strings.Join(res.Warnings, "\n")
+	if !strings.Contains(joined, "conversation-search.db") {
+		t.Fatalf("warning must name the file: %q", joined)
+	}
+	recs := records(t, &buf)
+	if len(recs) != 1 || !strings.Contains(recs[0].Item.Text, "keep importing other cursor surfaces") {
+		t.Fatalf("other cursor surfaces should still import, got %+v", recs)
+	}
+}
+
+func TestGenerateConversationSearchUnreadableFileSkips(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "globalStorage", "conversation-search.db")
+	writeFile(t, dbPath, "this is not a sqlite database")
+	writeFile(t, filepath.Join(root, "prompt_history.json"), `["still index prompt history"]`)
+
+	recs, res := parseRecords(t, root, sources.Options{})
+	if len(res.Warnings) == 0 {
+		t.Fatal("expected a warning for the unreadable conversation-search.db")
+	}
+	joined := strings.Join(res.Warnings, "\n")
+	if !strings.Contains(joined, dbPath) {
+		t.Fatalf("warning must name the file: %q", joined)
+	}
+	if !strings.Contains(joined, "open") && !strings.Contains(joined, "select") {
+		t.Fatalf("warning must name the failed statement: %q", joined)
+	}
+	if len(recs) != 1 || !strings.Contains(recs[0].Item.Text, "still index prompt history") {
+		t.Fatalf("prompt history should still import, got %+v", recs)
+	}
+}
+
+func TestCountSessionsUnreadableDatabaseContinues(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "globalStorage", "conversation-search.db"), "not-a-database")
+	writeFile(t, filepath.Join(root, "prompt_history.json"), `["x"]`)
+	got, err := CountSessions(root)
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("CountSessions=%d want 1 (prompt history only)", got)
 	}
 }
 
