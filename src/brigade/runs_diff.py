@@ -37,7 +37,7 @@ _CHANGE_FIELDS = frozenset({"field", "left", "right"})
 _LIFECYCLE_FIELDS = frozenset({"status", "mode", "failure", "resume_available"})
 _WORKER_FIELDS = frozenset({"worker", "ok", "status", "exit_code", "timed_out", "failure"})
 _VERIFY_VIEW_FIELDS = frozenset({"run_id", "status", "command", "exit_code", "digest"})
-_VERIFY_CONTENT_FIELDS = frozenset({"status", "command", "exit_code", "digest"})
+_VERIFY_CONTENT_FIELDS = frozenset({"status", "command", "exit_code"})
 _OUTCOME_FIELDS = frozenset(
     {
         "suspected_noop",
@@ -312,7 +312,7 @@ def _verification_section(
     right_dir: Path,
     right_detail: Mapping[str, Any],
 ) -> dict[str, object]:
-    """Compare verify results on content. ``run_id`` is display-only."""
+    """Compare verify receipts on content. ``run_id`` and ``digest`` are display-only."""
     left_view = _verification_view(left_dir, left_detail)
     right_view = _verification_view(right_dir, right_detail)
     changes = [

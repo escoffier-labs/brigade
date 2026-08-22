@@ -185,8 +185,8 @@ def test_diff_compares_child_against_recorded_parent(tmp_path, capsys):
     assert any(change["field"] == "exit_code" for change in payload["verification"]["changes"])
 
 
-def test_verification_matching_content_different_run_ids_is_unchanged(tmp_path, capsys):
-    """Equal verify results stay unchanged even when production-unique run_ids differ."""
+def test_verification_matching_content_different_final_txt_is_unchanged(tmp_path, capsys):
+    """Equal verify receipts stay unchanged even when final.txt (and run_ids) differ."""
     runs_root = tmp_path / ".brigade" / "runs"
     parent = runs_root / "20260821-120000-parent"
     child = runs_root / "20260821-130000-child"
@@ -196,7 +196,7 @@ def test_verification_matching_content_different_run_ids_is_unchanged(tmp_path, 
         verify_status="ok",
         verify_exit=0,
         verify_command="pytest -q",
-        final_text="same-final\n",
+        final_text="parent-synthesis-output\n",
     )
     _write_run(
         child,
@@ -205,7 +205,7 @@ def test_verification_matching_content_different_run_ids_is_unchanged(tmp_path, 
         verify_status="ok",
         verify_exit=0,
         verify_command="pytest -q",
-        final_text="same-final\n",
+        final_text="child-synthesis-output\n",
     )
 
     assert cli.main(["runs", "diff", child.name, "--cwd", str(tmp_path), "--json"]) == 0
@@ -213,22 +213,20 @@ def test_verification_matching_content_different_run_ids_is_unchanged(tmp_path, 
     assert payload["verification"]["left"]["run_id"] == "20260821-130000-work-verify-bbbbbb"
     assert payload["verification"]["right"]["run_id"] == "20260821-120000-work-verify-aaaaaa"
     assert payload["verification"]["left"]["run_id"] != payload["verification"]["right"]["run_id"]
+    assert payload["verification"]["left"]["digest"] != payload["verification"]["right"]["digest"]
     assert payload["verification"]["changed"] is False
     assert payload["verification"].get("changes") is None
     assert payload["verification"]["left"]["status"] == payload["verification"]["right"]["status"] == "ok"
     assert payload["verification"]["left"]["exit_code"] == payload["verification"]["right"]["exit_code"] == 0
     assert payload["verification"]["left"]["command"] == payload["verification"]["right"]["command"]
-    assert payload["verification"]["left"]["digest"] == payload["verification"]["right"]["digest"]
-    assert payload["verification"]["left"]["digest"]
 
 
 def test_verification_content_differences_are_changed(tmp_path, capsys):
-    """A status, exit_code, command, or result-digest mismatch must mark verification changed."""
+    """A status, command, or exit_code mismatch must mark verification changed."""
     cases = (
         ({"verify_status": "failed"}, "status"),
         ({"verify_exit": 1}, "exit_code"),
         ({"verify_command": "ruff check ."}, "command"),
-        ({"final_text": "child-verify-final\n"}, "digest"),
     )
     for child_kwargs, field in cases:
         runs_root = tmp_path / ".brigade" / "runs"
