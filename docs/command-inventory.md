@@ -62,7 +62,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs`: 16 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
-- `brigade security`: 15 command path(s)
+- `brigade security`: 16 command path(s)
 - `brigade setup`: 1 command path(s)
 - `brigade skills`: 30 command path(s)
 - `brigade stations`: 3 command path(s)
@@ -492,6 +492,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade search status`
 - `brigade search sync`
 - `brigade search sync plan`
+- `brigade security authority downgrade`
 - `brigade security closeout`
 - `brigade security config`
 - `brigade security diff`
