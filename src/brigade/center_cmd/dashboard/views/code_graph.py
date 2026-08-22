@@ -785,6 +785,54 @@ def _blast_seed_stack(
     )
 
 
+def _blast_candidate_rows(blast: dict) -> list[dict[str, Any]]:
+    raw = blast.get("candidates")
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, dict):
+            module_id = str(item.get("id") or "").strip()
+        else:
+            module_id = str(item).strip()
+        if not module_id or module_id in seen:
+            continue
+        seen.add(module_id)
+        label = str(item.get("label") or module_id) if isinstance(item, dict) else module_id
+        rows.append({"id": module_id, "label": label})
+    rows.sort(key=lambda row: str(row["id"]))
+    return rows
+
+
+def _blast_ambiguous_choices(
+    candidates: list[dict[str, Any]],
+    *,
+    up_hops: int,
+    down_hops: int,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    items: list[str] = []
+    for row in candidates:
+        module_id = str(row.get("id") or "")
+        href = _code_href(
+            mode="blast",
+            focus=module_id,
+            up_hops=up_hops,
+            down_hops=down_hops,
+            show_full_map=show_full_map,
+            show_worktrees=show_worktrees,
+        )
+        items.append(f'<li><a href="{html.esc(href)}">{html.esc(module_id)}</a></li>')
+    return (
+        '<div class="cg-blast-candidates" data-cg-blast-ambiguous="1">'
+        f"<p>{html.esc('That name matches more than one module. Pick the full module id.')}</p>"
+        f"<ul>{''.join(items)}</ul>"
+        "</div>"
+    )
+
+
 def _blast_node_item(
     row: dict[str, Any],
     *,
@@ -919,6 +967,21 @@ def _render_blast_radius(
             + "</p>"
         )
         return html.panel(html.esc("Blast radius"), picker + seeds + prompt)
+
+    candidates = _blast_candidate_rows(blast)
+    if blast.get("ambiguous") is True or (blast.get("resolved") is False and candidates):
+        return html.panel(
+            html.esc("Blast radius"),
+            picker
+            + seeds
+            + _blast_ambiguous_choices(
+                candidates,
+                up_hops=up_hops,
+                down_hops=down_hops,
+                show_full_map=show_full_map,
+                show_worktrees=show_worktrees,
+            ),
+        )
 
     if blast.get("resolved") is False:
         missing = "<p>" + html.esc("No module matches that focus.") + "</p>"
@@ -1292,6 +1355,12 @@ def _stylesheet(nonce: str) -> str:
 .cg-blast-hop p {{ margin:0.5rem 0 0.25rem; color:{_TEXT_SECONDARY}; font-size:0.85rem; }}
 .cg-blast-node-changed a {{ font-weight:700; }}
 .cg-blast-zone .cg-toggle {{ display:inline-block; margin-top:0.75rem; }}
+.cg-blast-candidates {{
+  margin:0 0 1rem; padding:0.65rem 0.85rem; border:1px solid {_BORDER};
+  border-radius:0.35rem; background:{_SURFACE};
+}}
+.cg-blast-candidates p {{ margin:0 0 0.35rem; font-weight:600; }}
+.cg-blast-candidates ul {{ margin:0; padding-left:1.2rem; }}
 </style>
 <noscript><style nonce="{html.esc(nonce)}">.cg-panel[hidden] {{ display:block !important; }}</style></noscript>"""
 

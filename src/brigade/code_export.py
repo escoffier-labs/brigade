@@ -385,26 +385,39 @@ def _uncapped_module_graph(file_graph: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _resolve_focus_id(labels: dict[str, str], focus: str) -> str | None:
+def _resolve_focus_id(labels: dict[str, str], focus: str) -> tuple[str | None, list[str]]:
+    """Resolve *focus* to a unique module id, or list every matching id.
+
+    An exact unique module id (or the unique ``_module_key`` of a path) still
+    resolves directly. A typed short name that matches more than one module
+    returns ``(None, sorted_candidates)`` so the caller can ask the operator
+    to pick a full id — never a silent first-match.
+    """
     requested = focus.strip()
     if not requested:
-        return None
+        return None, []
     if requested in labels:
-        return requested
+        return requested, [requested]
     lowered = requested.lower()
-    for module_id in labels:
-        if module_id.lower() == lowered:
-            return module_id
-    for module_id, label in labels.items():
-        if label == requested:
-            return module_id
-    for module_id, label in labels.items():
-        if label.lower() == lowered:
-            return module_id
+    id_ci = sorted(module_id for module_id in labels if module_id.lower() == lowered)
+    if len(id_ci) == 1:
+        return id_ci[0], id_ci
+    if len(id_ci) > 1:
+        return None, id_ci
+    exact_labels = sorted(module_id for module_id, label in labels.items() if label == requested)
+    if len(exact_labels) == 1:
+        return exact_labels[0], exact_labels
+    if len(exact_labels) > 1:
+        return None, exact_labels
+    ci_labels = sorted(module_id for module_id, label in labels.items() if label.lower() == lowered)
+    if len(ci_labels) == 1:
+        return ci_labels[0], ci_labels
+    if len(ci_labels) > 1:
+        return None, ci_labels
     keyed = _module_key(requested)
     if keyed in labels:
-        return keyed
-    return None
+        return keyed, [keyed]
+    return None, []
 
 
 def _walk_hops(
@@ -416,30 +429,38 @@ def _walk_hops(
     labels: dict[str, str],
     inbound: bool,
 ) -> list[dict[str, Any]]:
+    """Walk *hops* from *start* and rank each hop independently.
+
+    When several parents at the same hop reach one module, *weight* is the
+    **sum** of those parent-edge weights (not the first set-iteration winner).
+    Rows sort by aggregated weight descending, then module id ascending, so
+    the order is stable before any display cap.
+    """
     seen: set[str] = {start}
     frontier: set[str] = {start}
     rows: list[dict[str, Any]] = []
     depth = parse_blast_hops(hops)
     for hop in range(1, depth + 1):
-        nxt: set[str] = set()
-        hop_rows: list[dict[str, Any]] = []
-        for node in frontier:
-            for neighbor in adjacency.get(node, ()):
+        hop_weight: dict[str, int] = defaultdict(int)
+        for node in sorted(frontier):
+            for neighbor in sorted(adjacency.get(node, ())):
                 if neighbor in seen:
                     continue
-                seen.add(neighbor)
-                nxt.add(neighbor)
                 pair = (neighbor, node) if inbound else (node, neighbor)
-                hop_rows.append(
-                    {
-                        "id": neighbor,
-                        "label": labels.get(neighbor, _module_label(neighbor)),
-                        "hops": hop,
-                        "weight": int(edge_weight.get(pair, 0)),
-                    }
-                )
+                hop_weight[neighbor] += int(edge_weight.get(pair, 0))
+        hop_rows = [
+            {
+                "id": neighbor,
+                "label": labels.get(neighbor, _module_label(neighbor)),
+                "hops": hop,
+                "weight": weight,
+            }
+            for neighbor, weight in hop_weight.items()
+        ]
         hop_rows.sort(key=lambda row: (-int(row["weight"]), str(row["id"])))
         rows.extend(hop_rows)
+        nxt = set(hop_weight)
+        seen.update(nxt)
         frontier = nxt
         if not frontier:
             break
@@ -464,12 +485,13 @@ def focus_neighborhood(
     edge_weight: dict[tuple[str, str], int] = graph["edge_weight"]
     inbound: dict[str, set[str]] = graph["inbound"]
     outbound: dict[str, set[str]] = graph["outbound"]
-    resolved = _resolve_focus_id(labels, focus)
+    resolved, candidates = _resolve_focus_id(labels, focus)
     changed = changed_modules or set()
     up_depth = parse_blast_hops(up_hops)
     down_depth = parse_blast_hops(down_hops)
     if resolved is None:
         requested = focus.strip() or focus
+        ambiguous = bool(candidates)
         return {
             "focus": {
                 "id": requested,
@@ -477,6 +499,10 @@ def focus_neighborhood(
                 "changed": requested in changed,
             },
             "resolved": False,
+            "ambiguous": ambiguous,
+            "candidates": [
+                {"id": module_id, "label": labels.get(module_id, _module_label(module_id))} for module_id in candidates
+            ],
             "upstream": [],
             "downstream": [],
             "upstream_depth": up_depth,
@@ -508,6 +534,8 @@ def focus_neighborhood(
             "changed": resolved in changed,
         },
         "resolved": True,
+        "ambiguous": False,
+        "candidates": [],
         "upstream": upstream,
         "downstream": downstream,
         "upstream_depth": up_depth,
