@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recorded-child `status` and `branch_point_event_id` in `brigade.run-detail.v1` are bounded through the same `_clean_str` limit as other contract strings. Refs #631. Refs #958.
 
 ### Added
+- `brigade work ready --campaign <name> --parallel-safe` now composes campaign-aware dispatch waves at query time from each member's existing per-repo footprint partition. Global wave N is that member's local wave N in campaign order: overlapping files inside one member still serialize, disjoint work from different members (including matching relative paths) can share a wave, and an empty footprint stays exclusive only inside its own member. Cross-repo `blocks` still gate readiness before composition; missing or unreadable members still fail closed before any waves are returned; per-member GraphTrail degradation is reported without discarding safe file-overlap waves. Per-repo `--parallel-safe` output is unchanged. Waves are not persisted. Fixes #999.
 - The Agent Activity dashboard view answers "what are the agents doing right now across the fleet?" with a page-level summary strip above the machine board (total agents, running, blocked-on-host, failed, awaiting approval, unknown) and a visible plain-word state legend; per-host count chips now show icon + word + count instead of a tooltip-only icon+number. Missing or unrecognized states aggregate under `unknown`. Fixes #975.
 - The `review-heavy` preset now ships a read-only Daybreak Blue defensive-security seat using the verified Codex headless model id. Accounts without entitlement report `model-unavailable` without echoing provider diagnostics. Fixes #1002.
 - `brigade runs serve --cwd <workspace>` opens a foreground, loopback-only, read-only Run View over the existing `brigade.runs-list.v1`, `brigade.run-detail.v1`, and `brigade.run-watch.v1` serializers. It binds an available port by default, prints the URL, opens the browser unless `--no-open`, and stops on Ctrl+C. The HTTP layer does not read run artifacts itself, rejects traversal and symlink escape, and never starts from another command. Fixes #631.
@@ -369,8 +370,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.brigade/campaigns/<name>.json` (member targets + optional cross-repo
   `blocks` edges). Task ids are repo-qualified (`member:local-id`); member
   ledgers stay authoritative and unchanged when the campaign file is removed.
-  `--parallel-safe` with `--campaign` leaves a deferred wave-aggregation seam
-  (`partition_mode=campaign_deferred`) for a later cross-repo compositor.
+  `--parallel-safe` with `--campaign` composes those per-repo waves at query
+  time (see #999); member ledgers stay authoritative and waves are not stored.
 - Work brief as wiring source of truth (#733): static harness instruction
   blocks shrink to depth profiles rendered from the same ordered brief
   sections as `brigade work brief`. Hook-capable Claude installs default to
