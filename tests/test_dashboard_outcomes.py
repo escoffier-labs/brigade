@@ -70,6 +70,30 @@ def test_render_displays_ranking_rows_with_cohort_and_recency_columns():
     assert fragment.index("example-skill-one") < fragment.index("example-skill-two")
 
 
+def test_docstring_states_operator_question():
+    assert outcome_rank.__doc__ is not None
+    assert "helping" in outcome_rank.__doc__
+    assert "hurting" in outcome_rank.__doc__
+
+
+def test_summary_strip_renders_before_table_from_ranking_data():
+    payload = {
+        "ranking": [
+            {"artifact_id": "example-skill-one", "helped": 12, "hurt": 3},
+            {"artifact_id": "example-skill-two", "helped": 2, "hurt": 5},
+        ]
+    }
+
+    fragment = outcome_rank.render(payload, "unused")
+
+    assert "biggest net help" in fragment
+    assert "biggest net drag" in fragment
+    assert "example-skill-one" in fragment.split("<table")[0]
+    assert "example-skill-two" in fragment.split("<table")[0]
+    assert fragment.index("biggest net help") < fragment.index("<table")
+    assert "<style" not in fragment
+
+
 def test_render_escapes_untrusted_values():
     payload = {
         "ranking": [
@@ -110,3 +134,4 @@ def test_render_empty_payloads_render_not_being_fed_panel():
         assert "ranking is empty" in fragment
         assert "outcome loop is not being fed" in fragment
         assert "<table" not in fragment
+        assert "biggest net help" not in fragment
