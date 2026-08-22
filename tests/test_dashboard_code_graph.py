@@ -490,3 +490,206 @@ def test_impact_diagram_truncation_note():
     assert "caller-10" not in labels
     assert "edge-0" in labels
     assert "edge-13" not in labels
+
+
+def _blast_view_payload(
+    *,
+    focus: str = "src/other",
+    mode: str = "blast",
+    upstream: list[dict] | None = None,
+    downstream: list[dict] | None = None,
+    changed_modules: list[str] | None = None,
+    up_hops: int = 1,
+    down_hops: int = 1,
+    resolved: bool = True,
+) -> dict:
+    if changed_modules is None:
+        changed_modules = ["src/other"]
+    if upstream is None:
+        upstream = [
+            {"id": "src/caller-a", "label": "caller-a", "hops": 1, "weight": 4},
+            {"id": "src/caller-b", "label": "caller-b", "hops": 1, "weight": 2},
+        ]
+    if downstream is None:
+        downstream = [
+            {"id": "src/brigade", "label": "brigade", "hops": 1, "weight": 6},
+        ]
+    payload = _insight_payload()
+    payload["mode"] = mode
+    payload["focus"] = focus
+    payload["up_hops"] = up_hops
+    payload["down_hops"] = down_hops
+    payload["export"]["change_overlay"]["changed_modules"] = changed_modules
+    payload["export"]["blast_radius"] = {
+        "focus": {"id": focus, "label": focus.split("/")[-1], "changed": focus in changed_modules},
+        "resolved": resolved,
+        "upstream": upstream,
+        "downstream": downstream,
+        "upstream_depth": up_hops,
+        "downstream_depth": down_hops,
+    }
+    return payload
+
+
+def test_blast_radius_is_primary_mode_map_stays_default():
+    fragment = code_graph.render(_insight_payload(), "nonce-blast-default")
+    assert 'data-cg-mode="blast"' in fragment
+    assert "Blast radius" in fragment
+    assert re.search(r'data-cg-mode="map"[^>]*aria-selected="true"', fragment)
+    assert re.search(r'data-cg-mode="blast"[^>]*aria-selected="false"', fragment)
+    assert 'id="cg-map"' in fragment
+    assert 'data-cg-panel="blast" role="tabpanel" hidden' in fragment
+    assert 'data-cg-panel="map" role="tabpanel" hidden' not in fragment.split('id="cg-impact"', 1)[0]
+
+
+def test_blast_radius_zones_and_counts_for_focus():
+    fragment = code_graph.render(_blast_view_payload(), "nonce-blast-zones")
+    assert 'data-cg-blast="1"' in fragment
+    assert 'data-cg-blast-zone="upstream"' in fragment
+    assert 'data-cg-blast-zone="focus"' in fragment
+    assert 'data-cg-blast-zone="downstream"' in fragment
+    assert "What breaks if you change this" in fragment
+    assert "What this leans on" in fragment
+    assert "2 modules depend on this" in fragment
+    assert "this depends on 1 module" in fragment
+    assert "caller-a" in fragment
+    assert "caller-b" in fragment
+    assert "brigade" in fragment
+    assert 'data-cg-blast-focus="src/other"' in fragment
+    assert "force-directed" not in fragment.lower()
+
+
+def test_blast_radius_default_one_hop_and_expand():
+    fragment = code_graph.render(_blast_view_payload(), "nonce-blast-expand")
+    assert 'data-cg-blast-expand="upstream"' in fragment
+    assert 'data-cg-blast-expand="downstream"' in fragment
+    assert "Expand one more hop" in fragment
+    assert "up=2" in fragment
+    assert "down=2" in fragment
+    assert "2 hops away" not in fragment
+
+    expanded = code_graph.render(
+        _blast_view_payload(
+            up_hops=2,
+            upstream=[
+                {"id": "src/caller-a", "label": "caller-a", "hops": 1, "weight": 4},
+                {"id": "src/caller-c", "label": "caller-c", "hops": 2, "weight": 1},
+            ],
+        ),
+        "nonce-blast-hop2",
+    )
+    assert "2 hops away" in expanded
+    assert "caller-c" in expanded
+    assert "up=3" in expanded
+
+
+def test_blast_radius_seeds_from_changed_and_picker():
+    one = code_graph.render(_insight_payload(), "nonce-blast-seed")
+    assert 'data-cg-blast-picker="1"' in one
+    assert 'data-cg-blast-seeds="1"' in one
+    assert 'name="focus"' in one
+    assert "Show blast radius" in one
+    assert "other" in one.split('data-cg-blast-seeds="1"', 1)[1].split("</div>", 1)[0]
+
+    several = _insight_payload()
+    several["export"]["change_overlay"]["changed_modules"] = ["src/other", "src/brigade"]
+    several["mode"] = "blast"
+    fragment = code_graph.render(several, "nonce-blast-stack")
+    seeds = fragment.split('data-cg-blast-seeds="1"', 1)[1].split("</div>", 1)[0]
+    assert "Changed on this branch" in seeds
+    assert "focus=src%2Fother" in seeds or "focus=src/other" in seeds
+    assert "focus=src%2Fbrigade" in seeds or "focus=src/brigade" in seeds
+    assert 'data-cg-blast-picker="1"' in fragment
+
+
+def test_blast_radius_empty_zones_use_plain_language():
+    fragment = code_graph.render(
+        _blast_view_payload(upstream=[], downstream=[]),
+        "nonce-blast-empty",
+    )
+    assert "nothing depends on this yet" in fragment
+    assert "this does not lean on other modules yet" in fragment
+    assert 'data-cg-blast-empty="upstream"' in fragment
+    assert 'data-cg-blast-empty="downstream"' in fragment
+    assert 'data-cg-blast-count="upstream"' not in fragment
+    assert 'data-cg-blast-count="downstream"' not in fragment
+
+
+def test_blast_radius_truncation_states_true_total():
+    upstream = [{"id": f"src/dep-{index}", "label": f"dep-{index}", "hops": 1, "weight": 1} for index in range(34)]
+    fragment = code_graph.render(_blast_view_payload(upstream=upstream), "nonce-blast-trunc")
+    assert 'data-cg-blast-truncation="upstream"' in fragment
+    assert "showing 10 of 34" in fragment
+    assert "34 modules depend on this" in fragment
+    assert "dep-0" in fragment
+    assert "dep-9" in fragment
+    assert (
+        "dep-10" not in fragment.split('data-cg-blast-zone="upstream"', 1)[1].split('data-cg-blast-zone="focus"', 1)[0]
+    )
+
+
+def test_blast_radius_uses_full_graph_neighbors_not_capped_export():
+    nodes = {f"src/top{index}/file.py": 50 for index in range(20)}
+    edges: list[tuple[str, str, int]] = []
+    for index in range(20):
+        for other in range(index + 1, min(index + 4, 20)):
+            edges.append((f"src/top{index}/file.py", f"src/top{other}/file.py", 5))
+    nodes["src/focus/mod.py"] = 2
+    nodes["src/hidden/util.py"] = 1
+    nodes["src/need/lib.py"] = 1
+    edges.append(("src/hidden/util.py", "src/focus/mod.py", 2))
+    edges.append(("src/focus/mod.py", "src/need/lib.py", 3))
+    file_graph = {"nodes": nodes, "edges": edges}
+
+    mapped = code_export._build_module_map(file_graph, changed_files=["src/focus/mod.py"])
+    shown_ids = {row["id"] for row in mapped["modules"]}
+    shown_edge_pairs = {(row["from"], row["to"]) for row in mapped["edges"]}
+    assert "src/hidden" not in shown_ids or ("src/hidden", "src/focus") not in shown_edge_pairs
+
+    blast = code_export.focus_neighborhood(file_graph, "src/focus", changed_modules={"src/focus"})
+    up_ids = {row["id"] for row in blast["upstream"]}
+    down_ids = {row["id"] for row in blast["downstream"]}
+    assert "src/hidden" in up_ids
+    assert "src/need" in down_ids
+
+    payload = {
+        "export": {
+            "module_map": mapped,
+            "change_overlay": {"changed_modules": ["src/focus"], "changed_files": ["src/focus/mod.py"]},
+            "blast_radius": blast,
+            "stats": {},
+        },
+        "mode": "blast",
+        "focus": "src/focus",
+    }
+    fragment = code_graph.render(payload, "nonce-blast-fullgraph")
+    upstream_html = fragment.split('data-cg-blast-zone="upstream"', 1)[1].split('data-cg-blast-zone="focus"', 1)[0]
+    downstream_html = fragment.split('data-cg-blast-zone="downstream"', 1)[1]
+    assert "hidden" in upstream_html
+    assert "need" in downstream_html
+    assert "1 module depends on this" in fragment
+    assert "this depends on 1 module" in fragment
+
+
+def test_blast_radius_has_nonce_and_no_inline_style():
+    nonce = "nonce-blast-csp"
+    fragment = code_graph.render(_blast_view_payload(), nonce)
+    assert f'<style nonce="{nonce}">' in fragment
+    assert f'<script nonce="{nonce}">' in fragment
+    assert re.search(r"\sstyle\s*=", fragment) is None
+    assert re.search(r"\bon\w+\s*=", fragment, re.IGNORECASE) is None
+
+
+def test_fetch_passes_focus_and_hop_flags(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+
+    def fake_run_json(target, args, **kwargs):
+        calls.append(list(args))
+        return {"schema": "brigade.code-graph-export.v1", "module_map": {"modules": [], "edges": []}}
+
+    monkeypatch.setattr("brigade.center_cmd.dashboard.data.run_json", fake_run_json)
+    payload = code_graph.fetch(tmp_path, query={"focus": "src/other", "up": "2", "mode": "blast"})
+    assert payload["focus"] == "src/other"
+    assert payload["up_hops"] == 2
+    assert payload["mode"] == "blast"
+    assert calls == [["code", "export", "--overlay", "--focus", "src/other", "--up", "2"]]

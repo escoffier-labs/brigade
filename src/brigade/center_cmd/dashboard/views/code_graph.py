@@ -1,12 +1,13 @@
-"""Code Graph dashboard view: module map, impact drill-down, change overlay.
+"""Code Graph dashboard view: module map, blast radius, impact drill-down.
 
 Operator question: What parts of the codebase matter for my current change,
 and what breaks if I touch X?
 
-Contract-only: ``brigade code export --json`` (and ``--symbol`` for impact).
-No direct graph database reads. Default module map is the branch overlay
-(changed modules plus direct neighbors); the full repo grid is a fallback
-when nothing changed locally or when explicitly requested.
+Contract-only: ``brigade code export --json`` (``--symbol`` for impact,
+``--focus`` / ``--up`` / ``--down`` for blast-radius neighbors).
+No direct graph database reads. Default landing view is the Module map
+(branch overlay). Blast radius is a primary mode beside it: one focus
+node, fixed upstream / focus / downstream zones from the full graph.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ ORDER = 6.25
 _NONCANONICAL_ROOTS = frozenset({".worktrees", ".git", ".hg", ".svn", ".venv", "node_modules"})
 _IMPACT_CALLER_CAP = 8
 _IMPACT_EDGE_CAP = 10
+_BLAST_ZONE_CAP = 10
+_BLAST_MODES = frozenset({"map", "blast", "impact"})
 
 _STATUS_WARNING = "#fab219"
 _TEXT_PRIMARY = "#0b0b0b"
@@ -56,14 +59,28 @@ _MAX_ROW_X = _PAD + _LABEL_W + _COLS * (132 + _GAP_X)
 def fetch(target: Path, query: dict[str, str] | None = None) -> dict[str, Any]:
     query = query or {}
     symbol = query.get("symbol", "").strip() or None
+    focus = query.get("focus", "").strip() or None
+    mode = query.get("mode", "").strip().lower()
+    up_hops = code_export.parse_blast_hops(query.get("up"), 1)
+    down_hops = code_export.parse_blast_hops(query.get("down"), 1)
     args = ["code", "export"]
     if symbol:
         args.extend(["--symbol", symbol])
     args.append("--overlay")
+    if focus:
+        args.extend(["--focus", focus])
+    if up_hops != 1:
+        args.extend(["--up", str(up_hops)])
+    if down_hops != 1:
+        args.extend(["--down", str(down_hops)])
     export = data.run_json(target, args, timeout=60.0)
     return {
         "export": export,
         "symbol": symbol,
+        "focus": focus,
+        "mode": mode if mode in _BLAST_MODES else "",
+        "up_hops": up_hops,
+        "down_hops": down_hops,
         "show_full_map": _query_flag(query, "map", "full"),
         "show_worktrees": _query_flag(query, "worktrees", "1"),
     }
@@ -79,17 +96,21 @@ def render(payload: dict, nonce: str) -> str:
     symbol = payload.get("symbol")
     show_full_map = payload.get("show_full_map") is True
     show_worktrees = payload.get("show_worktrees") is True
+    active = _active_mode(payload)
 
     if export.get("error"):
         return html.error_panel(TITLE, str(export["error"]))
 
     parts = [
         _stylesheet(nonce),
-        _mode_tabs(bool(symbol)),
-        '<div id="cg-map" class="cg-panel" data-cg-panel="map" role="tabpanel">',
+        _mode_tabs(active),
+        _panel_open("map", active),
         _render_module_map(export, show_full_map=show_full_map, show_worktrees=show_worktrees),
         "</div>",
-        '<div id="cg-impact" class="cg-panel" data-cg-panel="impact" role="tabpanel">',
+        _panel_open("blast", active),
+        _render_blast_radius(payload, export, show_full_map=show_full_map, show_worktrees=show_worktrees),
+        "</div>",
+        _panel_open("impact", active),
         _render_impact(export, symbol, show_worktrees=show_worktrees, show_full_map=show_full_map),
         "</div>",
         _script(nonce),
@@ -97,17 +118,33 @@ def render(payload: dict, nonce: str) -> str:
     return "".join(parts)
 
 
-def _mode_tabs(impact_active: bool) -> str:
-    map_sel = "false" if impact_active else "true"
-    impact_sel = "true" if impact_active else "false"
-    return (
-        '<div class="cg-modes" role="tablist" aria-label="' + html.esc("Code graph modes") + '">'
-        f'<a href="#cg-map" class="cg-mode" data-cg-mode="map" aria-selected="{map_sel}" '
-        f'tabindex="{"0" if not impact_active else "-1"}">' + html.esc("Module map") + "</a>"
-        f'<a href="#cg-impact" class="cg-mode" data-cg-mode="impact" aria-selected="{impact_sel}" '
-        f'tabindex="{"0" if impact_active else "-1"}">' + html.esc("Impact") + "</a>"
-        "</div>"
-    )
+def _active_mode(payload: dict) -> str:
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode in _BLAST_MODES:
+        return mode
+    if str(payload.get("focus") or "").strip():
+        return "blast"
+    if payload.get("symbol"):
+        return "impact"
+    return "map"
+
+
+def _panel_open(name: str, active: str) -> str:
+    hidden = " hidden" if name != active else ""
+    return f'<div id="cg-{name}" class="cg-panel" data-cg-panel="{name}" role="tabpanel"{hidden}>'
+
+
+def _mode_tabs(active: str) -> str:
+    tabs = (("map", "Module map"), ("blast", "Blast radius"), ("impact", "Impact"))
+    parts = ['<div class="cg-modes" role="tablist" aria-label="' + html.esc("Code graph modes") + '">']
+    for name, label in tabs:
+        selected = name == active
+        parts.append(
+            f'<a href="#cg-{name}" class="cg-mode" data-cg-mode="{name}" aria-selected="'
+            f'{"true" if selected else "false"}" tabindex="{"0" if selected else "-1"}">' + html.esc(label) + "</a>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def _changed_module_ids(export: dict) -> list[str]:
@@ -180,8 +217,20 @@ def _code_href(
     symbol: str | None = None,
     show_full_map: bool = False,
     show_worktrees: bool = False,
+    mode: str | None = None,
+    focus: str | None = None,
+    up_hops: int | None = None,
+    down_hops: int | None = None,
 ) -> str:
     params: list[str] = []
+    if mode and mode in _BLAST_MODES:
+        params.append(f"mode={quote_plus(mode)}")
+    if focus:
+        params.append(f"focus={quote_plus(focus)}")
+    if up_hops is not None and up_hops > 1:
+        params.append(f"up={up_hops}")
+    if down_hops is not None and down_hops > 1:
+        params.append(f"down={down_hops}")
     if symbol:
         params.append(f"symbol={quote_plus(symbol)}")
     if show_full_map:
@@ -604,6 +653,346 @@ def _status_chip(box_x: int, box_y: int, box_h: int, box_w: int, word: str) -> s
     )
 
 
+def _blast_payload(export: dict) -> dict[str, Any]:
+    raw = export.get("blast_radius")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _picker_module_choices(export: dict) -> list[tuple[str, str]]:
+    module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
+    choices: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for module_id in _changed_module_ids(export):
+        seen.add(module_id)
+        choices.append((module_id, module_id.split("/")[-1] or module_id))
+    for row in module_map.get("modules", []):
+        if not isinstance(row, dict):
+            continue
+        module_id = str(row.get("id") or "").strip()
+        if not module_id or module_id in seen:
+            continue
+        seen.add(module_id)
+        choices.append((module_id, str(row.get("label") or module_id)))
+    blast = _blast_payload(export)
+    focus = blast.get("focus") if isinstance(blast.get("focus"), dict) else {}
+    focus_id = str(focus.get("id") or "").strip()
+    if focus_id and focus_id not in seen:
+        choices.insert(0, (focus_id, str(focus.get("label") or focus_id)))
+    return choices
+
+
+def _seed_focus_id(export: dict, requested: str | None) -> str:
+    if requested and requested.strip():
+        return requested.strip()
+    blast = _blast_payload(export)
+    focus = blast.get("focus") if isinstance(blast.get("focus"), dict) else {}
+    focus_id = str(focus.get("id") or "").strip()
+    if focus_id and blast.get("resolved") is not False:
+        return focus_id
+    changed = _changed_module_ids(export)
+    if len(changed) == 1:
+        return changed[0]
+    return ""
+
+
+def _blast_rows(raw: object) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        module_id = str(item.get("id") or "").strip()
+        if not module_id:
+            continue
+        rows.append(item)
+    return rows
+
+
+def _blast_count_phrase(total: int, *, upstream: bool) -> str:
+    if upstream:
+        if total == 1:
+            return "1 module depends on this"
+        return f"{total} modules depend on this"
+    if total == 1:
+        return "this depends on 1 module"
+    return f"this depends on {total} modules"
+
+
+def _blast_picker(
+    export: dict,
+    *,
+    focus: str,
+    up_hops: int,
+    down_hops: int,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    options: list[str] = []
+    for module_id, label in _picker_module_choices(export):
+        options.append(f'<option value="{html.esc(module_id)}">{html.esc(label)}</option>')
+    hidden: list[str] = ['<input type="hidden" name="mode" value="blast">']
+    if up_hops > 1:
+        hidden.append(f'<input type="hidden" name="up" value="{up_hops}">')
+    if down_hops > 1:
+        hidden.append(f'<input type="hidden" name="down" value="{down_hops}">')
+    if show_full_map:
+        hidden.append('<input type="hidden" name="map" value="full">')
+    if show_worktrees:
+        hidden.append('<input type="hidden" name="worktrees" value="1">')
+    return (
+        '<form class="cg-search cg-blast-picker" method="get" action="/view/code" data-cg-blast-picker="1">'
+        + "".join(hidden)
+        + f"<label>{html.esc('Focus a module')} "
+        f'<input type="search" name="focus" value="{html.esc(focus)}" '
+        f'list="cg-blast-nodes" placeholder="{html.esc("module id or name")}" '
+        f'aria-label="{html.esc("Focus a module")}"></label>'
+        f'<datalist id="cg-blast-nodes">{"".join(options)}</datalist>'
+        f'<button type="submit">{html.esc("Show blast radius")}</button>'
+        "</form>"
+    )
+
+
+def _blast_seed_stack(
+    export: dict,
+    *,
+    focus: str,
+    up_hops: int,
+    down_hops: int,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    changed = _changed_module_ids(export)
+    if not changed:
+        return ""
+    labels = {module_id: label for module_id, label in _picker_module_choices(export)}
+    items: list[str] = []
+    for module_id in changed:
+        label = labels.get(module_id) or module_id.split("/")[-1] or module_id
+        href = _code_href(
+            mode="blast",
+            focus=module_id,
+            up_hops=up_hops,
+            down_hops=down_hops,
+            show_full_map=show_full_map,
+            show_worktrees=show_worktrees,
+        )
+        current = ' aria-current="true"' if module_id == focus else ""
+        items.append(f'<li{current}><a href="{html.esc(href)}">{html.esc(label)}</a></li>')
+    heading = "Changed on this branch" if len(changed) > 1 else "Changed module on this branch"
+    return (
+        f'<div class="cg-blast-seeds" data-cg-blast-seeds="1"><p>{html.esc(heading)}</p><ul>{"".join(items)}</ul></div>'
+    )
+
+
+def _blast_node_item(
+    row: dict[str, Any],
+    *,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    module_id = str(row.get("id") or "")
+    label = str(row.get("label") or module_id)
+    hops = row.get("hops")
+    hop_note = f" ({hops} hops)" if isinstance(hops, int) and hops > 1 else ""
+    changed = " cg-blast-node-changed" if row.get("changed") is True else ""
+    href = _code_href(
+        mode="blast",
+        focus=module_id,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    return (
+        f'<li class="cg-blast-node{changed}"><a href="{html.esc(href)}">{html.esc(label)}{html.esc(hop_note)}</a></li>'
+    )
+
+
+def _blast_zone(
+    *,
+    side: str,
+    title: str,
+    empty_text: str,
+    rows: list[dict[str, Any]],
+    depth: int,
+    expand_href: str,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    total = len(rows)
+    shown = rows[:_BLAST_ZONE_CAP]
+    count = _blast_count_phrase(total, upstream=side == "upstream")
+    empty = ""
+    trunc = ""
+    expand = ""
+    body: list[str] = []
+    if total == 0:
+        empty = f'<p class="cg-blast-empty" data-cg-blast-empty="{html.esc(side)}">{html.esc(empty_text)}</p>'
+    else:
+        body.append(f'<p class="cg-blast-count" data-cg-blast-count="{html.esc(side)}">{html.esc(count)}</p>')
+        if len(shown) < total:
+            trunc = (
+                f'<p class="cg-muted" data-cg-blast-truncation="{html.esc(side)}">'
+                f"{html.esc(f'showing {len(shown)} of {total}')}</p>"
+            )
+        if depth > 1:
+            grouped: dict[int, list[dict[str, Any]]] = {}
+            for row in shown:
+                hop = int(row.get("hops") or 1)
+                grouped.setdefault(hop, []).append(row)
+            for hop in sorted(grouped):
+                items = "".join(
+                    _blast_node_item(
+                        row,
+                        show_full_map=show_full_map,
+                        show_worktrees=show_worktrees,
+                    )
+                    for row in grouped[hop]
+                )
+                hop_label = "1 hop away" if hop == 1 else f"{hop} hops away"
+                body.append(
+                    f'<div class="cg-blast-hop" data-cg-hop="{hop}"><p>{html.esc(hop_label)}</p><ul>{items}</ul></div>'
+                )
+        else:
+            items = "".join(
+                _blast_node_item(
+                    row,
+                    show_full_map=show_full_map,
+                    show_worktrees=show_worktrees,
+                )
+                for row in shown
+            )
+            body.append(f'<ul class="cg-blast-list">{items}</ul>')
+        if depth < code_export.MAX_BLAST_HOPS:
+            expand = (
+                f'<a class="cg-toggle" data-cg-blast-expand="{html.esc(side)}" href="{html.esc(expand_href)}">'
+                + html.esc("Expand one more hop")
+                + "</a>"
+            )
+    return (
+        f'<section class="cg-blast-zone" data-cg-blast-zone="{html.esc(side)}">'
+        f"<h3>{html.esc(title)}</h3>" + empty + "".join(body) + trunc + expand + "</section>"
+    )
+
+
+def _render_blast_radius(
+    payload: dict,
+    export: dict,
+    *,
+    show_full_map: bool,
+    show_worktrees: bool,
+) -> str:
+    blast = _blast_payload(export)
+    requested = str(payload.get("focus") or "").strip()
+    up_hops = code_export.parse_blast_hops(payload.get("up_hops") or blast.get("upstream_depth"), 1)
+    down_hops = code_export.parse_blast_hops(payload.get("down_hops") or blast.get("downstream_depth"), 1)
+    if isinstance(blast.get("upstream_depth"), int):
+        up_hops = code_export.parse_blast_hops(blast["upstream_depth"], up_hops)
+    if isinstance(blast.get("downstream_depth"), int):
+        down_hops = code_export.parse_blast_hops(blast["downstream_depth"], down_hops)
+    focus_id = _seed_focus_id(export, requested)
+    focus_meta = blast.get("focus") if isinstance(blast.get("focus"), dict) else {}
+    focus_label = str(focus_meta.get("label") or focus_id or "this module")
+    picker = _blast_picker(
+        export,
+        focus=focus_id,
+        up_hops=up_hops,
+        down_hops=down_hops,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    seeds = _blast_seed_stack(
+        export,
+        focus=focus_id,
+        up_hops=up_hops,
+        down_hops=down_hops,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    legend = (
+        f'<p class="cg-blast-legend">{html.esc("Arrows mean depends on: left depends on the module to its right.")}</p>'
+    )
+
+    if not focus_id:
+        prompt = (
+            "<p>"
+            + html.esc("Pick a changed module, or search for any module, to see what breaks and what it leans on.")
+            + "</p>"
+        )
+        return html.panel(html.esc("Blast radius"), picker + seeds + prompt)
+
+    if blast.get("resolved") is False:
+        missing = "<p>" + html.esc("No module matches that focus.") + "</p>"
+        return html.panel(html.esc("Blast radius"), picker + seeds + missing)
+
+    if not blast:
+        hint = (
+            "<p>"
+            + html.esc(
+                "Neighborhood is loaded from the full code graph for this focus. Select Show blast radius to fetch it."
+            )
+            + "</p>"
+        )
+        return html.panel(html.esc("Blast radius"), picker + seeds + hint)
+
+    upstream = _blast_rows(blast.get("upstream"))
+    downstream = _blast_rows(blast.get("downstream"))
+    changed_chip = (
+        f'<p class="cg-blast-changed">{html.esc("CHANGED on this branch")}</p>'
+        if focus_meta.get("changed") is True
+        else ""
+    )
+    focus_zone = (
+        '<section class="cg-blast-zone" data-cg-blast-zone="focus">'
+        f"<h3>{html.esc('Focus — the thing you are changing')}</h3>"
+        f'<p class="cg-blast-focus-name" data-cg-blast-focus="{html.esc(focus_id)}">{html.esc(focus_label)}</p>'
+        f"{changed_chip}"
+        f'<p class="cg-blast-dir">{html.esc("depends on →")}</p>'
+        "</section>"
+    )
+    up_expand = _code_href(
+        mode="blast",
+        focus=focus_id,
+        up_hops=min(code_export.MAX_BLAST_HOPS, up_hops + 1),
+        down_hops=down_hops,
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    down_expand = _code_href(
+        mode="blast",
+        focus=focus_id,
+        up_hops=up_hops,
+        down_hops=min(code_export.MAX_BLAST_HOPS, down_hops + 1),
+        show_full_map=show_full_map,
+        show_worktrees=show_worktrees,
+    )
+    zones = (
+        '<div class="cg-blast-zones" data-cg-blast="1">'
+        + _blast_zone(
+            side="upstream",
+            title="What breaks if you change this",
+            empty_text="nothing depends on this yet",
+            rows=upstream,
+            depth=up_hops,
+            expand_href=up_expand,
+            show_full_map=show_full_map,
+            show_worktrees=show_worktrees,
+        )
+        + focus_zone
+        + _blast_zone(
+            side="downstream",
+            title="What this leans on",
+            empty_text="this does not lean on other modules yet",
+            rows=downstream,
+            depth=down_hops,
+            expand_href=down_expand,
+            show_full_map=show_full_map,
+            show_worktrees=show_worktrees,
+        )
+        + "</div>"
+    )
+    return html.panel(html.esc("Blast radius"), picker + seeds + legend + zones)
+
+
 def _changed_module_shortcut(
     export: dict,
     *,
@@ -877,6 +1266,32 @@ def _stylesheet(nonce: str) -> str:
 .cg-debug, .cg-debug-panel {{ margin-top:0.35rem; color:{_TEXT_SECONDARY}; font-size:0.85rem; }}
 .cg-debug summary, .cg-debug-panel summary {{ cursor:pointer; }}
 .cg-panel[hidden] {{ display:none; }}
+.cg-blast-legend {{ color:{_TEXT_SECONDARY}; margin:0 0 0.75rem; }}
+.cg-blast-seeds {{
+  margin:0 0 1rem; padding:0.65rem 0.85rem; border:1px solid {_BORDER};
+  border-radius:0.35rem; background:{_SURFACE};
+}}
+.cg-blast-seeds p {{ margin:0 0 0.35rem; font-weight:600; }}
+.cg-blast-seeds ul {{ margin:0; padding-left:1.2rem; }}
+.cg-blast-zones {{
+  display:grid; grid-template-columns:1fr minmax(10rem, 16rem) 1fr; gap:1rem; align-items:start;
+}}
+.cg-blast-zone {{
+  margin:0; padding:0.85rem 1rem; border:1px solid {_BORDER}; border-radius:0.35rem;
+  background:{_SURFACE}; color:{_TEXT_PRIMARY};
+}}
+.cg-blast-zone[data-cg-blast-zone="focus"] {{
+  background:{_CHANGED_FILL}; border-color:{_CHANGED_STROKE};
+}}
+.cg-blast-zone h3 {{ margin:0 0 0.5rem; font-size:1rem; }}
+.cg-blast-count, .cg-blast-focus-name {{ margin:0 0 0.5rem; font-weight:600; }}
+.cg-blast-empty {{ margin:0; color:{_TEXT_SECONDARY}; }}
+.cg-blast-dir {{ margin:0.5rem 0 0; color:{_TEXT_SECONDARY}; font-size:0.9rem; }}
+.cg-blast-changed {{ margin:0 0 0.5rem; font-size:0.85rem; font-weight:700; }}
+.cg-blast-list, .cg-blast-hop ul {{ margin:0; padding-left:1.2rem; }}
+.cg-blast-hop p {{ margin:0.5rem 0 0.25rem; color:{_TEXT_SECONDARY}; font-size:0.85rem; }}
+.cg-blast-node-changed a {{ font-weight:700; }}
+.cg-blast-zone .cg-toggle {{ display:inline-block; margin-top:0.75rem; }}
 </style>
 <noscript><style nonce="{html.esc(nonce)}">.cg-panel[hidden] {{ display:block !important; }}</style></noscript>"""
 
@@ -963,6 +1378,10 @@ def _script(nonce: str) -> str:
     showCard(hit.value);
   }});
   var params = new URLSearchParams(window.location.search || "");
-  selectMode(params.get("symbol") ? "impact" : "map");
+  var mode = params.get("mode") || "";
+  if (mode !== "map" && mode !== "blast" && mode !== "impact") {{
+    mode = params.get("focus") ? "blast" : (params.get("symbol") ? "impact" : "map");
+  }}
+  selectMode(mode);
 }})();
 </script>"""
