@@ -58,6 +58,13 @@ _OPERATIONAL_ERRORS = (
     ),
 )
 _CLAUSE_SPLIT = re.compile(r"(?:\r?\n)+|(?<=[.!?])\s+")
+# Providers sometimes omit the space after a sentence terminator
+# (`...answering.media-cli is...`). Split there too, but only when the
+# next token looks like a sentence start — not a version digit.
+_GLUED_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])(?=[A-Za-z])")
+# Short lowercase tokens after a period are file extensions (`README.md`),
+# not a new clause. Hyphenated identifiers (`media-cli`) stay split.
+_FILE_EXTENSION_FRAGMENT = re.compile(r"\A[a-z]{1,5}(?![A-Za-z-])")
 _FUTURE_INTENT = re.compile(
     r"\A\s*(?:(?:first|next|now)\s*,?\s*)?"
     r"(?:i\s+(?:will|shall|need to|plan to|am going to)|i['’](?:ll|m going to)|let me)\b",
@@ -169,8 +176,30 @@ def _tool_only(text: str) -> bool:
     )
 
 
+def _expand_glued_sentences(clause: str) -> list[str]:
+    parts = [part.strip() for part in _GLUED_SENTENCE_SPLIT.split(clause) if part.strip()]
+    if len(parts) <= 1:
+        return parts or [clause]
+    merged = [parts[0]]
+    for part in parts[1:]:
+        if _FILE_EXTENSION_FRAGMENT.match(part):
+            merged[-1] += part
+        else:
+            merged.append(part)
+    return merged
+
+
+def _split_clauses(text: str) -> list[str]:
+    clauses: list[str] = []
+    for clause in _CLAUSE_SPLIT.split(text):
+        stripped = clause.strip()
+        if stripped:
+            clauses.extend(_expand_glued_sentences(stripped))
+    return clauses
+
+
 def _progress_only(text: str) -> bool:
-    clauses = [clause.strip() for clause in _CLAUSE_SPLIT.split(text) if clause.strip()]
+    clauses = _split_clauses(text)
     if not clauses:
         return False
     explicit_progress = False
