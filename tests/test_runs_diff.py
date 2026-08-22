@@ -185,6 +185,19 @@ def test_diff_compares_child_against_recorded_parent(tmp_path, capsys):
     assert any(change["field"] == "exit_code" for change in payload["verification"]["changes"])
 
 
+def test_verify_content_fields_are_receipt_only():
+    """Changed/unchanged is status, command, exit_code only.
+
+    ``run_id`` and the ``final.txt`` digest are display-only identity.
+    Putting ``digest`` back into ``_VERIFY_CONTENT_FIELDS`` makes
+    ``test_verification_matching_content_different_final_txt_is_unchanged``
+    RED (same identity-leak as keying on verify ``run_id``).
+    """
+    assert runs_diff._VERIFY_CONTENT_FIELDS == frozenset({"status", "command", "exit_code"})
+    assert runs_diff._VERIFY_CONTENT_FIELDS.isdisjoint({"run_id", "digest"})
+    assert {"run_id", "digest"} <= runs_diff._VERIFY_VIEW_FIELDS
+
+
 def test_verification_matching_content_different_final_txt_is_unchanged(tmp_path, capsys):
     """Equal verify receipts stay unchanged even when final.txt (and run_ids) differ."""
     runs_root = tmp_path / ".brigade" / "runs"
