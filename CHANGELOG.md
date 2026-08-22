@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON run contracts rewrite home-directory prefixes (`/home/<user>`, `/Users/<user>`) to `~` on every string that enters the list, show, latest, and watch payloads. Artifacts and human CLI output are unchanged. Refs #631. Refs #958.
 
 ### Fixed
+- Changelog footer link definitions cover every release section again (24 were missing, 0.8.2 through 0.26.1), and `[Unreleased]` compares against v0.26.1 instead of v0.26.0.
 - Center dashboard chip-icon backgrounds now render under the nonce-only Content-Security-Policy: Memory Operations and Status views use one stylesheet class per status role instead of per-element `style=` attributes (which `style-src` with a nonce refuses). Work, Runs, Agent Activity, and Outcomes already used classes or had no chip-icon inline styles. Fixes #1077.
 - Evidence crawl import (`miseledger import sourceharvest` / `crawl files|gitlog|docs`) and provenance backfill retry the SQLITE_BUSY family (primary code 5, including snapshot 517 and recovery 261) from a concurrent writer instead of failing the runbook. A lock that outlives the bound names the holder-diagnosis step rather than the raw SQLite string. Fixes #1067.
 - Evidence-ledger `archive.Open` restores the pre-#1073 10s global SQLite `busy_timeout` so unwrapped command paths do not give up after 1s under contention. Crawl import and provenance backfill still bound their own wait via retry count, backoff, and a 4s `MaxTotalWait` ceiling (no `busy_timeout * retries` hang). `IsBusy` classifies by the SQLite result code (primary / low 8 bits == 5) and ignores parenthesized 5/261/517 in free text such as subprocess stderr. Fixes #1085.
@@ -1677,14 +1678,38 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.26.1...HEAD
+[0.26.1]: https://github.com/escoffier-labs/brigade/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/escoffier-labs/brigade/compare/v0.25.0...v0.26.0
+[0.25.1]: https://github.com/escoffier-labs/brigade/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/escoffier-labs/brigade/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/escoffier-labs/brigade/compare/v0.23.3...v0.24.0
 [0.23.3]: https://github.com/escoffier-labs/brigade/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/escoffier-labs/brigade/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/escoffier-labs/brigade/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/escoffier-labs/brigade/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/escoffier-labs/brigade/compare/v0.21.1...v0.22.0
+[0.21.1]: https://github.com/escoffier-labs/brigade/compare/v0.21.0...v0.21.1
+[0.21.0]: https://github.com/escoffier-labs/brigade/compare/v0.19.0...v0.21.0
+[0.19.0]: https://github.com/escoffier-labs/brigade/compare/v0.18.0...v0.19.0
+[0.18.0]: https://github.com/escoffier-labs/brigade/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/escoffier-labs/brigade/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/escoffier-labs/brigade/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/escoffier-labs/brigade/compare/v0.14.1...v0.15.0
+[0.14.1]: https://github.com/escoffier-labs/brigade/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/escoffier-labs/brigade/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/escoffier-labs/brigade/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/escoffier-labs/brigade/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/escoffier-labs/brigade/compare/v0.10.3...v0.11.0
+[0.10.3]: https://github.com/escoffier-labs/brigade/compare/v0.10.2...v0.10.3
+[0.10.2]: https://github.com/escoffier-labs/brigade/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/escoffier-labs/brigade/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/escoffier-labs/brigade/compare/v0.9.3...v0.10.0
+[0.9.3]: https://github.com/escoffier-labs/brigade/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/escoffier-labs/brigade/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/escoffier-labs/brigade/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/escoffier-labs/brigade/compare/v0.8.2...v0.9.0
+[0.8.2]: https://github.com/escoffier-labs/brigade/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/escoffier-labs/brigade/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/escoffier-labs/brigade/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/escoffier-labs/brigade/compare/v0.6.0...v0.7.0
