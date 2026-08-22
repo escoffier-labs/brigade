@@ -24,7 +24,7 @@ from .package import (
     managed_groups,
     managed_user_groups,
 )
-from .paths import resolve_claude_home
+from .paths import is_operator_home, resolve_claude_home
 
 HooksScope = Literal["project", "user"]
 
@@ -35,8 +35,70 @@ USER_SIDECAR_REL_PATH = Path("brigade/claude-hooks.json")
 USER_HOOK_SCRIPT_REL_PATH = Path("hooks") / HOOK_SCRIPT_NAME
 
 
-def _packaged_script_digest() -> str:
-    return hashlib.sha256(hook_script_text().encode("utf-8")).hexdigest()
+def _packaged_script_digest(*, pin: Path | None = None) -> str:
+    return hashlib.sha256(hook_script_text(pin=pin).encode("utf-8")).hexdigest()
+
+
+def _user_settings_path() -> Path:
+    return resolve_claude_home() / USER_SETTINGS_REL_PATH
+
+
+def _project_collides_with_user_settings(layout: _InstallLayout) -> bool:
+    if layout.scope != "project":
+        return False
+    try:
+        return layout.settings_path.expanduser().resolve() == _user_settings_path().resolve()
+    except OSError:
+        return False
+
+
+def _project_scope_home_error(layout: _InstallLayout) -> str | None:
+    if layout.scope != "project":
+        return None
+    if is_operator_home(layout.root) or _project_collides_with_user_settings(layout):
+        return (
+            f"refusing project-scope hook install at {layout.root}: "
+            f"{layout.settings_rel} is Claude Code's user settings file. "
+            "Use `brigade work hooks install --scope user`, or pass --target at a project directory."
+        )
+    return None
+
+
+def _resolve_user_scope_pin(target: Path) -> tuple[Path | None, str | None]:
+    """Pin user-scope hook-run only when --target is an explicit wired workspace."""
+    if target == Path("."):
+        return None, None
+    try:
+        resolved = target.expanduser().resolve()
+    except OSError as exc:
+        return None, f"unable to resolve --target: {type(exc).__name__}: {exc}"
+    if is_operator_home(resolved):
+        return None, (
+            f"refusing to pin user-scope hooks to the home directory ({resolved}); "
+            "pass --target at a wired workspace, or omit --target for multi-repo mode"
+        )
+    try:
+        config = load_config(resolved)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, f"unable to load Brigade config: {type(exc).__name__}: {exc}"
+    if config is None or "claude" not in config.selection.harnesses:
+        return None, (
+            f"user-scope --target must be a Claude-wired Brigade workspace: {resolved}; "
+            "omit --target for multi-repo mode"
+        )
+    return resolved, None
+
+
+def _pin_from_sidecar(sidecar: dict[str, Any] | None) -> Path | None:
+    if not isinstance(sidecar, dict):
+        return None
+    raw = sidecar.get("pinned_target")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return Path(raw).expanduser().resolve()
+    except OSError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -189,8 +251,8 @@ def _sidecar(layout: _InstallLayout) -> dict[str, Any] | None:
     return localio.read_json_dict(layout.sidecar_path)
 
 
-def _write_hook_script(path: Path) -> str:
-    text = hook_script_text()
+def _write_hook_script(path: Path, *, pin: Path | None = None) -> str:
+    text = hook_script_text(pin=pin)
     localio.write_text_atomic(path, text)
     mode = path.stat().st_mode
     path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -204,11 +266,22 @@ def _write_package(
     scope: HooksScope,
 ) -> tuple[dict[str, Any] | None, str | None]:
     layout = _layout(scope=scope, target=target)
+    pin: Path | None = None
     if layout.scope == "project":
+        home_error = _project_scope_home_error(layout)
+        if home_error is not None:
+            return None, home_error
         resolved, error = _resolve_hooks_target(target)
         if resolved is None:
             return None, error
         layout = _layout(scope=scope, target=resolved)
+        home_error = _project_scope_home_error(layout)
+        if home_error is not None:
+            return None, home_error
+    else:
+        pin, pin_error = _resolve_user_scope_pin(target)
+        if pin_error is not None:
+            return None, pin_error
     settings, error = _load_settings(layout.settings_path)
     if settings is None:
         return None, error
@@ -216,7 +289,7 @@ def _write_package(
     previous = _sidecar(layout) or {}
     script_digest: str | None = None
     if layout.script_path is not None:
-        script_digest = _write_hook_script(layout.script_path)
+        script_digest = _write_hook_script(layout.script_path, pin=pin)
     localio.write_json(layout.settings_path, _merge_settings(settings, layout=layout))
     sidecar = {
         "version": 1,
@@ -233,6 +306,8 @@ def _write_package(
             sidecar["script_path"] = layout.script_rel
         if script_digest is not None:
             sidecar["script_digest"] = script_digest
+        if pin is not None:
+            sidecar["pinned_target"] = str(pin)
     localio.write_json(layout.sidecar_path, sidecar)
     return {"action": action, "target": str(layout.root), **sidecar}, None
 
@@ -245,7 +320,9 @@ def hooks_install(*, target: Path, scope: HooksScope = "project", quiet: bool = 
         return 2
     if not quiet:
         location = payload["target"] if scope == "project" else f"{payload['target']} ({scope})"
-        print(f"claude hooks: installed {PACKAGE_ID}@{PACKAGE_VERSION} -> {location}")
+        pin = payload.get("pinned_target")
+        suffix = f" pin={pin}" if pin else ""
+        print(f"claude hooks: installed {PACKAGE_ID}@{PACKAGE_VERSION} -> {location}{suffix}")
     return 0
 
 
@@ -276,12 +353,14 @@ def _expected_groups(layout: _InstallLayout) -> dict[str, list[dict[str, Any]]]:
 def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, Any]:
     layout = _layout(scope=scope, target=target)
     settings, error = _load_settings(layout.settings_path)
+    sidecar = _sidecar(layout)
+    pin = _pin_from_sidecar(sidecar)
     script_digest: str | None = None
     script_current = True
     if layout.script_path is not None:
         if layout.script_path.is_file():
             script_digest = localio.file_sha256(layout.script_path)
-            script_current = script_digest == _packaged_script_digest()
+            script_current = script_digest == _packaged_script_digest(pin=pin)
         else:
             script_current = False
     if settings is None:
@@ -294,6 +373,8 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
             "managed_events": [],
             "missing_events": list(MANAGED_EVENTS),
             "error": error,
+            "duplicate_handler_count": 0,
+            "scope_widened": False,
         }
         if layout.scope == "user":
             payload["scope"] = layout.scope
@@ -308,6 +389,7 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
     foreign_count = 0
     legacy_count = 0
     legacy_events: list[str] = []
+    duplicate_count = 0
     expected_groups = _expected_groups(layout)
     for event, groups in hooks.items():
         managed_signatures: list[str] = []
@@ -326,6 +408,7 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
                             legacy_events.append(event)
                     else:
                         foreign_count += 1
+        duplicate_count += len(managed_signatures) - len(set(managed_signatures))
         if event in MANAGED_EVENTS and managed_signatures:
             present.append(event)
             expected_signatures = [
@@ -333,7 +416,6 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
             ]
             if sorted(managed_signatures) == sorted(expected_signatures):
                 current_events.append(event)
-    sidecar = _sidecar(layout)
     current_sidecar = bool(
         sidecar
         and sidecar.get("package_id") == PACKAGE_ID
@@ -347,12 +429,15 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
     ordered_legacy_events = [event for event in MANAGED_EVENTS if event in legacy_events]
     script_installed = layout.script_path is None or layout.script_path.is_file()
     installed = not missing and sidecar is not None and script_installed
+    scope_widened = _project_collides_with_user_settings(layout)
     current = (
         not missing
         and not stale
         and current_sidecar
         and script_current
         and (layout.script_path is None or script_installed)
+        and duplicate_count == 0
+        and not scope_widened
     )
     result = {
         "target": str(layout.root),
@@ -367,11 +452,15 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
         "foreign_handler_count": foreign_count,
         "legacy_handler_count": legacy_count,
         "legacy_events": ordered_legacy_events,
+        "duplicate_handler_count": duplicate_count,
+        "scope_widened": scope_widened,
         "sidecar": sidecar,
         "error": error,
     }
     if layout.scope == "user":
         result["scope"] = layout.scope
+        if pin is not None:
+            result["pinned_target"] = str(pin)
     if layout.script_path is not None:
         result["script_path"] = str(layout.script_path)
         result["script_installed"] = script_installed
@@ -405,6 +494,12 @@ def hooks_status(*, target: Path, scope: HooksScope = "project", json_output: bo
             print(f"script: {script_state} ({payload['script_path']})")
         print(f"foreign_handlers: {payload.get('foreign_handler_count', 0)}")
         print(f"legacy_handlers: {payload.get('legacy_handler_count', 0)}")
+        if payload.get("duplicate_handler_count"):
+            print(f"duplicate_handlers: {payload['duplicate_handler_count']}")
+        if payload.get("scope_widened"):
+            print("warning: project settings path is Claude Code user settings; use --scope user")
+        if payload.get("pinned_target"):
+            print(f"pinned_target: {payload['pinned_target']}")
         if payload.get("error"):
             print(f"error: {payload['error']}")
     return 2 if payload.get("error") else 0

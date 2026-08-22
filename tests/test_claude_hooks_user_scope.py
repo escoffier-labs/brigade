@@ -72,7 +72,7 @@ def test_user_hooks_install_writes_script_and_settings(claude_home: Path):
     settings.parent.mkdir(parents=True, exist_ok=True)
     settings.write_text(json.dumps(FOREIGN_SETTINGS, indent=2) + "\n")
 
-    assert hooks_install(target=Path("/unused/repo"), scope="user") == 0
+    assert hooks_install(target=Path("."), scope="user") == 0
 
     script = claude_home / "hooks" / HOOK_SCRIPT_NAME
     assert script.is_file()

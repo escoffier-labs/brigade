@@ -76,7 +76,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     hooks_sub.required = True
     for action in ("install", "update", "status", "uninstall"):
         parser = hooks_sub.add_parser(action, help=f"{action.capitalize()} the managed Claude work-loop hooks.")
-        parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo to update or inspect.")
+        parser.add_argument(
+            "--target",
+            "-t",
+            type=Path,
+            default=Path("."),
+            help=(
+                "Repo to update or inspect. With --scope user, a wired workspace pins "
+                "hook-run --target; omit (or pass .) for multi-repo mode."
+            ),
+        )
         parser.add_argument(
             "--scope",
             choices=("project", "user"),
@@ -93,6 +102,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Claude hook event to handle.",
     )
     p_work_hook_run.add_argument("--package", required=True, help="Managed hook package id and version.")
+    p_work_hook_run.add_argument(
+        "--target",
+        "-t",
+        type=Path,
+        default=None,
+        help="Pin hook work to this wired workspace. Sessions outside it no-op.",
+    )
     p_work_sweep = work_sub.add_parser("sweep", help="Run an explicit daily scanner sweep.")
     p_work_sweep.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_sweep.add_argument("--scanner", default=None, help="Run one scanner id instead of due scanners.")

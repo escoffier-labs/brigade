@@ -117,7 +117,7 @@ Install the verified-work loop once at user scope instead of wiring every repo b
 brigade work hooks install --scope user
 ```
 
-Session start then injects the work brief. An unwired repo prints the exact `brigade init` command for the agent to run. Uninstall with `brigade work hooks uninstall --scope user`. Only Brigade-owned hook entries are touched.
+Session start then injects the work brief. An unwired repo prints the exact `brigade init` command for the agent to run. The home directory is never a work target. Pin with `--target <wired-workspace>` when the session cwd is not the workspace you want. Uninstall with `brigade work hooks uninstall --scope user`. Only Brigade-owned hook entries are touched.
 
 ## Success Check
 

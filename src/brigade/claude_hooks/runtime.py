@@ -20,8 +20,10 @@ from ..work_cmd.verification import _tree_fingerprint
 from ..wiring import resolve_wired_target
 from . import compaction_marker, envelope
 from .package import PACKAGE_REF
+from .paths import is_operator_home, resolved_path
 
 BRIEF_TIMEOUT_SECONDS = 10
+HOOK_TIMEOUT_LATCH_AFTER = 2
 MAX_RECENT_SESSION_STATES = 512
 MAX_HOOK_STDIN_BYTES = 1_048_576
 MAX_HOOK_STDIN_STRING_CHARS = 262_144
@@ -30,6 +32,7 @@ MAX_HOOK_STDIN_NESTING_DEPTH = 32
 _HOOK_STDIN_READ_CHUNK = 4096
 CLAUDE_SESSION_ENV = "BRIGADE_CLAUDE_SESSION"
 _HOOK_WORKER_EVENT_ENV = "BRIGADE_HOOK_WORKER_EVENT"
+_HOOK_PIN_ENV = "BRIGADE_HOOK_PIN_TARGET"
 _HOOK_TEST_HANG_ENV = "BRIGADE_HOOK_TEST_HANG_SECONDS"
 _HOOK_TIMEOUT_ENV = "BRIGADE_HOOK_TIMEOUT_SECONDS"
 _HOOK_WORKER_COMMAND = (
@@ -519,6 +522,64 @@ def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
             if wired is not None:
                 return wired
     return resolve_wired_target(payload.get("cwd"))
+
+
+def _path_is_within(inner: Path, outer: Path) -> bool:
+    resolved_inner = resolved_path(inner)
+    resolved_outer = resolved_path(outer)
+    if resolved_inner is None or resolved_outer is None:
+        return False
+    try:
+        return resolved_inner.is_relative_to(resolved_outer)
+    except ValueError:
+        return False
+
+
+def _hook_pin_from_env() -> Path | None:
+    raw = os.environ.get(_HOOK_PIN_ENV)
+    if raw is None or not raw.strip():
+        return None
+    return resolved_path(Path(raw))
+
+
+def _resolve_pin(target: Path | None) -> Path | None:
+    if target is None:
+        return _hook_pin_from_env()
+    resolved = resolved_path(target)
+    if resolved is None or is_operator_home(resolved):
+        return None
+    return resolved
+
+
+def _session_id_from_payload(payload: dict[str, Any]) -> str:
+    raw = payload.get("session_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return "unknown"
+
+
+def effective_hook_target(payload: dict[str, Any], *, pin: Path | None = None) -> Path | None:
+    """Return the workspace a hook may operate on, or None to no-op.
+
+    User-scope installs fire for every Claude session. Home is never a work
+    target (even when wired): fingerprinting and brief against that tree is
+    what times out on every tool call. An optional ``--target`` pin restricts
+    work to that wired workspace and no-ops everywhere else.
+    """
+    derived = wired_target_from_payload(payload)
+    resolved_pin = _resolve_pin(pin)
+    if resolved_pin is not None:
+        if derived is not None and _path_is_within(derived, resolved_pin):
+            return None if is_operator_home(derived) else derived
+        raw_cwd = payload.get("cwd")
+        if isinstance(raw_cwd, str) and raw_cwd.strip():
+            cwd = resolved_path(Path(raw_cwd))
+            if cwd is not None and _path_is_within(cwd, resolved_pin) and not is_operator_home(resolved_pin):
+                return resolved_pin if resolve_wired_target(str(resolved_pin)) is not None else None
+        return None
+    if derived is None or is_operator_home(derived):
+        return None
+    return derived
 
 
 def _session_repo_union(session_id: str, *seeds: Path) -> list[str]:
@@ -1913,6 +1974,9 @@ def _new_state(target: Path, session_id: str) -> dict[str, Any]:
         "briefed": False,
         "write_observed": False,
         "verify_denied_count": 0,
+        "hook_timeout_count": 0,
+        "hook_latched": False,
+        "hook_latch_announced": False,
         "repo_fingerprint": repo_worktree_fingerprint(target),
     }
 
@@ -1960,6 +2024,11 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
     denied = payload.get("verify_denied_count")
     if isinstance(denied, int) and not isinstance(denied, bool) and denied >= 0:
         normalized["verify_denied_count"] = denied
+    timeout_count = payload.get("hook_timeout_count")
+    if isinstance(timeout_count, int) and not isinstance(timeout_count, bool) and timeout_count >= 0:
+        normalized["hook_timeout_count"] = timeout_count
+    normalized["hook_latched"] = payload.get("hook_latched") is True
+    normalized["hook_latch_announced"] = payload.get("hook_latch_announced") is True
     last_write = localio.parse_iso_datetime(payload.get("last_write_at"))
     if last_write is not None and last_write <= now:
         normalized["last_write_at"] = last_write.isoformat()
@@ -2120,12 +2189,12 @@ def _strip_claim(result: dict[str, Any] | None) -> tuple[dict[str, Any] | None, 
     return cleaned, Path(raw)
 
 
-def _handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any] | None:
+def _handle_pre_compact(payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
     """Record a pending restore marker; PreCompact cannot inject context."""
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return None
-    target = wired_target_from_payload(payload)
+    target = effective_hook_target(payload, pin=pin)
     if target is None:
         return None
     trigger_detail = payload.get("trigger")
@@ -2142,7 +2211,7 @@ def _handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any] | None:
+def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
     """Restore the brief once after compaction; absent markers stay near-free."""
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -2154,7 +2223,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any] | None
     if not compaction_marker.marker_present(key):
         return None
     # Confirm the workspace is still a Claude-wired Brigade repo before claiming.
-    target = resolve_wired_target(str(workspace))
+    target = effective_hook_target(payload, pin=pin)
     if target is None:
         return None
     try:
@@ -2178,15 +2247,16 @@ def _handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any] | None
         raise
 
 
-def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
+    pin = pin if pin is not None else _hook_pin_from_env()
     if event == "PreCompact":
-        return _handle_pre_compact(payload)
+        return _handle_pre_compact(payload, pin=pin)
     if event == "UserPromptSubmit":
-        return _handle_user_prompt_submit(payload)
+        return _handle_user_prompt_submit(payload, pin=pin)
 
-    target = wired_target_from_payload(payload)
+    target = effective_hook_target(payload, pin=pin)
     if target is None:
-        if event == "SessionStart":
+        if event == "SessionStart" and pin is None:
             return _unwired_init_hint(payload)
         return None
     session_id = payload.get("session_id")
@@ -2601,16 +2671,16 @@ def _maybe_test_hang() -> None:
         time.sleep(seconds)
 
 
-def _isolated_handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+def _isolated_handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
     _maybe_test_hang()
-    return handle_payload(event, payload)
+    return handle_payload(event, payload, pin=pin)
 
 
 def _hook_worker_main() -> None:
     """Run ``handle_payload`` in an isolated child process (issue #735)."""
     event = os.environ.get(_HOOK_WORKER_EVENT_ENV, "")
     payload, _raw = _load_hook_stdin()
-    result = _isolated_handle_payload(event, payload)
+    result = _isolated_handle_payload(event, payload, pin=_hook_pin_from_env())
     sys.stdout.write(json.dumps(result))
 
 
@@ -2645,22 +2715,24 @@ def _recv_timed_handle_payload_result(
     raise RuntimeError(str(value))
 
 
-def _fork_timed_handle_payload_target(event: str, payload: dict[str, Any], queue: mp.Queue) -> None:
+def _fork_timed_handle_payload_target(event: str, payload: dict[str, Any], queue: mp.Queue, pin: Path | None) -> None:
     try:
-        result = _isolated_handle_payload(event, payload)
+        result = _isolated_handle_payload(event, payload, pin=pin)
         queue.put(("ok", result))
     except Exception as exc:  # noqa: BLE001 - marshal failure back to parent
         queue.put(("err", exc))
 
 
-def _fork_timed_handle_payload_worker(event: str, raw: str, *, timeout: float) -> dict[str, Any] | None:
+def _fork_timed_handle_payload_worker(
+    event: str, raw: str, *, timeout: float, pin: Path | None = None
+) -> dict[str, Any] | None:
     payload = _parse_hook_stdin(raw.encode("utf-8"))
 
     ctx = mp.get_context("fork")
     queue: mp.Queue = ctx.Queue()
     proc = ctx.Process(
         target=_fork_timed_handle_payload_target,
-        args=(event, payload, queue),
+        args=(event, payload, queue, pin),
         daemon=True,
     )
     try:
@@ -2673,9 +2745,15 @@ def _fork_timed_handle_payload_worker(event: str, raw: str, *, timeout: float) -
         queue.join_thread()
 
 
-def _subprocess_timed_handle_payload(event: str, raw: str, *, timeout: float) -> dict[str, Any] | None:
+def _subprocess_timed_handle_payload(
+    event: str, raw: str, *, timeout: float, pin: Path | None = None
+) -> dict[str, Any] | None:
     env = os.environ.copy()
     env[_HOOK_WORKER_EVENT_ENV] = event
+    if pin is not None:
+        env[_HOOK_PIN_ENV] = str(pin)
+    else:
+        env.pop(_HOOK_PIN_ENV, None)
     try:
         completed = subprocess.run(
             [sys.executable, "-c", _HOOK_WORKER_COMMAND],
@@ -2698,11 +2776,11 @@ def _subprocess_timed_handle_payload(event: str, raw: str, *, timeout: float) ->
     return parsed if isinstance(parsed, dict) else None
 
 
-def _run_timed_handle_payload(event: str, raw: str) -> dict[str, Any] | None:
+def _run_timed_handle_payload(event: str, raw: str, *, pin: Path | None = None) -> dict[str, Any] | None:
     timeout = _hook_timeout_seconds()
     if sys.platform == "win32":
-        return _subprocess_timed_handle_payload(event, raw, timeout=timeout)
-    return _fork_timed_handle_payload_worker(event, raw, timeout=timeout)
+        return _subprocess_timed_handle_payload(event, raw, timeout=timeout, pin=pin)
+    return _fork_timed_handle_payload_worker(event, raw, timeout=timeout, pin=pin)
 
 
 def _emit_result(event: str, result: dict[str, Any] | None, *, target: Path | None) -> None:
@@ -2712,27 +2790,79 @@ def _emit_result(event: str, result: dict[str, Any] | None, *, target: Path | No
         envelope.append_log(target, f"{event}: empty envelope")
 
 
-def _resolve_log_target(payload: dict[str, Any] | None) -> Path | None:
+def _resolve_log_target(payload: dict[str, Any] | None, *, pin: Path | None = None) -> Path | None:
     if not isinstance(payload, dict):
         return None
-    wired = resolve_wired_target(payload.get("cwd"))
-    if wired is not None:
-        return wired
-    raw = payload.get("cwd")
-    if isinstance(raw, str) and raw:
-        try:
-            return Path(raw).expanduser().resolve(strict=False)
-        except OSError:
-            return None
-    return None
+    return effective_hook_target(payload, pin=pin)
 
 
-def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
+def _is_timeout_degraded(exc: BaseException) -> bool:
+    return "timed out" in str(exc)
+
+
+def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
+    state = read_session_state(target, session_id)
+    if not isinstance(state, dict) or state.get("hook_latched") is not True:
+        return False, False
+    return True, state.get("hook_latch_announced") is not True
+
+
+def _mark_hook_latch_announced(target: Path, session_id: str) -> None:
+    state = read_session_state(target, session_id)
+    if not isinstance(state, dict):
+        return
+    if state.get("hook_latch_announced") is True:
+        return
+    updated = dict(state)
+    updated["hook_latched"] = True
+    updated["hook_latch_announced"] = True
+    write_session_state(target, session_id, updated)
+
+
+def _record_hook_timeout(target: Path, session_id: str) -> dict[str, Any]:
+    state = read_session_state(target, session_id)
+    updated: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
+    count = updated.get("hook_timeout_count")
+    next_count = count + 1 if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 1
+    updated["hook_timeout_count"] = next_count
+    if next_count >= HOOK_TIMEOUT_LATCH_AFTER:
+        updated["hook_latched"] = True
+    write_session_state(target, session_id, updated)
+    return updated
+
+
+def _clear_hook_timeouts(target: Path, session_id: str) -> None:
+    state = read_session_state(target, session_id)
+    if not isinstance(state, dict):
+        return
+    if state.get("hook_latched") is True:
+        return
+    if not state.get("hook_timeout_count"):
+        return
+    updated = dict(state)
+    updated["hook_timeout_count"] = 0
+    write_session_state(target, session_id, updated)
+
+
+def _emit_latched(event: str, target: Path, session_id: str) -> None:
+    envelope.append_log(target, f"{event}: latched after repeated timeouts")
+    envelope.emit_stdout(envelope.latched_envelope(event))
+    _mark_hook_latch_announced(target, session_id)
+
+
+def hook_run(
+    *,
+    event: str,
+    package: str,
+    stdin_text: str | None = None,
+    target: Path | None = None,
+) -> int:
     """Run one managed Claude hook under the #735 output contract.
 
     Always exits 0. Stdout is exactly one schema-valid JSON object (empty
-    envelope, degraded doctor pointer, or a rendered decision/injection).
-    Diagnostics go to the local hook log, never to the session stream.
+    envelope, degraded doctor pointer, latched notice, or a rendered
+    decision/injection). Diagnostics go to the local hook log, never to the
+    session stream.
     """
     if package != PACKAGE_REF:
         return 0
@@ -2740,21 +2870,46 @@ def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
     log_target: Path | None = None
     raw = ""
     claim_path: Path | None = None
+    session_id = "unknown"
+    pin = _resolve_pin(target)
     try:
         payload, raw = _load_hook_stdin(stdin_text=stdin_text)
-        log_target = _resolve_log_target(payload)
-        result = _run_timed_handle_payload(event, raw)
+        session_id = _session_id_from_payload(payload)
+        log_target = _resolve_log_target(payload, pin=pin)
+        if log_target is None:
+            result = handle_payload(event, payload, pin=pin)
+            result, claim_path = _strip_claim(result)
+            _emit_result(event, result, target=None)
+            if claim_path is not None:
+                compaction_marker.complete_claim_path(claim_path)
+            return 0
+        latched, announce = _read_hook_latch(log_target, session_id)
+        if latched:
+            if announce:
+                _emit_latched(event, log_target, session_id)
+            else:
+                envelope.emit_stdout(envelope.empty_envelope(event))
+            return 0
+        result = _run_timed_handle_payload(event, raw, pin=pin)
         result, claim_path = _strip_claim(result)
+        _clear_hook_timeouts(log_target, session_id)
     except HookDegraded as exc:
         if claim_path is not None:
             compaction_marker.release_claim_path(claim_path)
             claim_path = None
         if log_target is not None:
+            if _is_timeout_degraded(exc):
+                state = _record_hook_timeout(log_target, session_id)
+                if state.get("hook_latched") is True:
+                    envelope.append_log(log_target, f"{event}: degraded: {exc}")
+                    _emit_latched(event, log_target, session_id)
+                    return 0
             envelope.append_log(log_target, f"{event}: degraded: {exc}")
         else:
-            # Best-effort log under cwd when the repo is not yet wired.
             try:
-                envelope.append_log(Path.cwd(), f"{event}: degraded: {exc}")
+                cwd = Path.cwd()
+                if not is_operator_home(cwd):
+                    envelope.append_log(cwd, f"{event}: degraded: {exc}")
             except OSError:
                 pass
         envelope.emit_stdout(envelope.degraded_envelope(event))
