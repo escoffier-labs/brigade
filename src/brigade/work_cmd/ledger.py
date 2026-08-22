@@ -2050,7 +2050,16 @@ def _write_external_directory_authority(
         authority_marker.record_signed_marker(workspace)
 
 
-def _publish_authority_store_payload(path: Path, payload: Mapping[str, Any]) -> None:
+def _downgrade_durability_checkpoint(path: Path) -> None:
+    """Test seam: dest bytes have changed; parent-dir durability has not run yet."""
+
+
+def _publish_authority_store_payload(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    on_replaced: Callable[[], None] | None = None,
+) -> None:
     """Atomically replace the authority store file. No HMAC or marker side effects."""
 
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2070,6 +2079,8 @@ def _publish_authority_store_payload(path: Path, payload: Mapping[str, Any]) -> 
         os.close(descriptor)
         descriptor = -1
         os.replace(temporary, path)
+        if on_replaced is not None:
+            on_replaced()
         directory = _open_directory_nofollow(path.parent)
         try:
             _dirfd_fsync(directory)
@@ -2123,9 +2134,11 @@ def downgrade_external_directory_authority(
 ) -> dict[str, Any]:
     """Convert a signed store to unsigned, remove the sticky marker, and audit.
 
-    Intent is logged first. Store, isolation flag, sequence, and marker are
-    restored if completion logging fails. A missing HMAC key fails before any
-    mutation so the store is never left half-downgraded.
+    The envelope must be bound to this destination target. A valid MAC for a
+    different inner target is refused before any mutation. Intent is logged
+    first. Each artifact is recorded the moment dest bytes change so a
+    durability-step failure still restores store, sequence, isolation, and
+    marker to their pre-downgrade state.
     """
 
     from .. import authority_broker, authority_key, authority_marker
@@ -2146,7 +2159,7 @@ def downgrade_external_directory_authority(
     if raw_payload is not None and raw_payload.get("envelope_version") == 1:
         try:
             secret, loaded_id = authority_key.load_key(env=env, workspace=workspace)
-            unsigned_record = authority_broker.verify_store_envelope(secret, raw_payload, loaded_id)
+            verified = authority_broker.verify_store_envelope(secret, raw_payload, loaded_id)
             key_material = (secret, loaded_id)
         except (OSError, ValueError) as exc:
             raise OSError(
@@ -2155,6 +2168,15 @@ def downgrade_external_directory_authority(
                 "store-hmac.key (or BRIGADE_AUTHORITY_KEY_FILE) and retry. "
                 "the store and marker were not changed"
             ) from exc
+        try:
+            inner_digest = _authority_target_digest(verified)
+        except OSError as exc:
+            raise OSError(
+                "authority downgrade refuses a store envelope bound to a different target"
+            ) from exc
+        if inner_digest != fingerprint:
+            raise OSError("authority downgrade refuses a store envelope bound to a different target")
+        unsigned_record = verified
 
     try:
         marker_bytes = marker_path.read_bytes()
@@ -2192,7 +2214,6 @@ def downgrade_external_directory_authority(
     except OSError as exc:
         raise OSError("authority downgrade audit is unavailable; marker not removed") from exc
 
-    isolation_backup: bytes | None = None
     sequence_path = authority_key.sequence_path(env=env)
     try:
         sequence_backup = sequence_path.read_bytes()
@@ -2200,39 +2221,56 @@ def downgrade_external_directory_authority(
         sequence_backup = None
     except OSError:
         sequence_backup = None
+    try:
+        if isolation_path.is_file() and not isolation_path.is_symlink():
+            isolation_backup = isolation_path.read_bytes()
+        else:
+            isolation_backup = None
+    except OSError:
+        isolation_backup = None
 
-    mutated_store = False
-    mutated_sequence = False
-    mutated_isolation = False
-    mutated_marker = False
+    changed: dict[Path, bytes] = {}
+    marker_removed = False
+
+    def _record_change(path: Path, backup: bytes | None) -> None:
+        if backup is not None:
+            changed[path] = backup
+        _downgrade_durability_checkpoint(path)
 
     def _restore_all() -> None:
-        if mutated_store and store_backup is not None:
-            _restore_authority_file(store_path, store_backup)
-        if mutated_sequence and sequence_backup is not None:
-            _restore_authority_file(sequence_path, sequence_backup)
-        if mutated_isolation and isolation_backup is not None:
-            _restore_authority_file(isolation_path, isolation_backup)
-        if mutated_marker and marker_bytes is not None:
+        for path, backup in changed.items():
+            _restore_authority_file(path, backup)
+        if marker_removed and marker_bytes is not None:
             _restore_authority_file(marker_path, marker_bytes)
 
     try:
         if unsigned_record is not None:
-            _publish_authority_store_payload(store_path, unsigned_record)
-            mutated_store = True
+            _publish_authority_store_payload(
+                store_path,
+                unsigned_record,
+                on_replaced=lambda: _record_change(store_path, store_backup),
+            )
             if key_material is not None:
                 digest = _authority_target_digest(unsigned_record)
-                if authority_key.drop_sequence(digest, env=env, secret=key_material[0], key_id=key_material[1]):
-                    mutated_sequence = True
-        isolation_backup = turn_off_authority_store_isolation(workspace)
-        mutated_isolation = isolation_backup is not None
+                authority_key.drop_sequence(
+                    digest,
+                    env=env,
+                    secret=key_material[0],
+                    key_id=key_material[1],
+                    on_replaced=lambda: _record_change(sequence_path, sequence_backup),
+                )
+        turn_off_authority_store_isolation(
+            workspace,
+            on_replaced=lambda: _record_change(isolation_path, isolation_backup),
+        )
         if marker_bytes is not None:
             try:
                 marker_path.unlink()
             except FileNotFoundError:
                 pass
             else:
-                mutated_marker = True
+                marker_removed = True
+                _downgrade_durability_checkpoint(marker_path)
     except OSError:
         try:
             _restore_all()
@@ -2245,7 +2283,7 @@ def downgrade_external_directory_authority(
         "actor": actor_value,
         "created_at": utc_now_iso_z(),
         "phase": "complete",
-        "removed": mutated_marker,
+        "removed": marker_removed,
         "store_unwrapped": unsigned_record is not None,
         "target": resolved,
         "target_fingerprint": fingerprint,

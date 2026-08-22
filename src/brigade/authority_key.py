@@ -23,7 +23,7 @@ import os
 import secrets
 import stat
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from . import component_paths
@@ -306,7 +306,9 @@ def clear_key_cache() -> None:
     _CACHE.clear()
 
 
-def _write_private_json(path: Path, payload: dict) -> None:
+def _write_private_json(
+    path: Path, payload: dict, *, on_replaced: Callable[[], None] | None = None
+) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     descriptor = -1
@@ -324,6 +326,8 @@ def _write_private_json(path: Path, payload: dict) -> None:
         os.close(descriptor)
         descriptor = -1
         os.replace(temporary, path)
+        if on_replaced is not None:
+            on_replaced()
         _fsync_directory(path.parent)
     finally:
         if descriptor != -1:
@@ -366,7 +370,12 @@ def load_sequence(*, env: Mapping[str, str] | None = None, secret: bytes, key_id
 
 
 def write_sequence(
-    records: Mapping[str, int], *, env: Mapping[str, str] | None = None, secret: bytes, key_id: str
+    records: Mapping[str, int],
+    *,
+    env: Mapping[str, str] | None = None,
+    secret: bytes,
+    key_id: str,
+    on_replaced: Callable[[], None] | None = None,
 ) -> None:
     from . import authority_broker
 
@@ -381,7 +390,7 @@ def write_sequence(
         },
         "records": dict(records),
     }
-    _write_private_json(sequence_path(env=env), payload)
+    _write_private_json(sequence_path(env=env), payload, on_replaced=on_replaced)
 
 
 def next_sequence(target_digest: str, *, env: Mapping[str, str] | None = None, secret: bytes, key_id: str) -> int:
@@ -397,12 +406,19 @@ def sequence_for(target_digest: str, *, env: Mapping[str, str] | None = None, se
     return records.get(target_digest)
 
 
-def drop_sequence(target_digest: str, *, env: Mapping[str, str] | None = None, secret: bytes, key_id: str) -> bool:
+def drop_sequence(
+    target_digest: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    secret: bytes,
+    key_id: str,
+    on_replaced: Callable[[], None] | None = None,
+) -> bool:
     """Remove one target from the sequence file so a later re-sign can start clean."""
 
     records = load_sequence(env=env, secret=secret, key_id=key_id)
     if target_digest not in records:
         return False
     del records[target_digest]
-    write_sequence(records, env=env, secret=secret, key_id=key_id)
+    write_sequence(records, env=env, secret=secret, key_id=key_id, on_replaced=on_replaced)
     return True

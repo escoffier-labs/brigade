@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -269,10 +270,14 @@ _ISOLATION_EXTERNAL_KEY_LINE = re.compile(
 )
 
 
-def turn_off_authority_store_isolation(target: Path) -> bytes | None:
+def turn_off_authority_store_isolation(
+    target: Path, *, on_replaced: Callable[[], None] | None = None
+) -> bytes | None:
     """Set ``authority_store.isolation`` to ``off`` in place.
 
     Returns the previous file bytes when a line was changed, otherwise ``None``.
+    Dest bytes are replaced before ``on_replaced`` so a durability failure can
+    still restore the original file.
     """
 
     path = config_path(target.expanduser().resolve())
@@ -286,7 +291,17 @@ def turn_off_authority_store_isolation(target: Path) -> bytes | None:
     updated, count = _ISOLATION_EXTERNAL_KEY_LINE.subn(r"\1\2off\2\3", text, count=1)
     if count == 0:
         return None
-    path.write_text(updated, encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(updated, encoding="utf-8")
+        os.replace(temporary, path)
+        if on_replaced is not None:
+            on_replaced()
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
     return original
 
 

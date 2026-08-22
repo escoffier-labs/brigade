@@ -666,6 +666,97 @@ def test_authority_downgrade_fails_closed_when_external_key_removed(
     assert not authority_marker.audit_path().exists()
 
 
+def test_downgrade_rejects_cross_target_envelope(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A valid envelope copied from target B must not downgrade as target A."""
+
+    dest = tmp_path / "alpha-workspace"
+    other = tmp_path / "bravo-workspace"
+    dest.mkdir()
+    other.mkdir()
+    _bind_workspace(dest)
+    _bind_workspace(other)
+    dest_store = _store_path(dest)
+    other_store = _store_path(other)
+    planted = other_store.read_bytes()
+    other_inner = json.loads(planted)["record"]
+    dest_store.write_bytes(planted)
+    marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(dest))
+    before_marker = marker.read_bytes()
+    with pytest.raises(OSError, match="different target"):
+        ledger.downgrade_external_directory_authority(dest)
+    assert dest_store.read_bytes() == planted
+    current = json.loads(dest_store.read_text(encoding="utf-8"))
+    assert current.get("envelope_version") == 1
+    assert current["record"]["target"] == other_inner["target"]
+    assert current["record"]["target"] != str(dest.resolve())
+    assert marker.is_file()
+    assert marker.read_bytes() == before_marker
+    assert authority_marker.marker_exists(dest)
+    assert not authority_marker.audit_path().exists()
+    assert (
+        cli.main(
+            [
+                "security",
+                "authority",
+                "downgrade",
+                "--target",
+                str(dest),
+                "--confirm",
+            ]
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert "different target" in err
+    assert dest_store.read_bytes() == planted
+    assert marker.read_bytes() == before_marker
+
+
+@pytest.mark.parametrize("artifact", ["store", "sequence", "isolation"])
+def test_downgrade_restores_all_artifacts_after_durability_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact: str
+) -> None:
+    """A durability-step failure after dest replace must restore every changed artifact."""
+
+    _bind_workspace(tmp_path)
+    store = _store_path(tmp_path)
+    marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+    sequence = authority_key.sequence_path()
+    config = tmp_path / ".brigade" / "security.toml"
+    before_store = store.read_bytes()
+    before_marker = marker.read_bytes()
+    before_sequence = sequence.read_bytes()
+    before_config = config.read_bytes()
+    fail_path = {
+        "store": store,
+        "sequence": sequence,
+        "isolation": config,
+    }[artifact].resolve()
+
+    def _boom(path: Path) -> None:
+        if path.resolve() == fail_path:
+            raise OSError("injected durability failure")
+
+    monkeypatch.setattr(ledger, "_downgrade_durability_checkpoint", _boom)
+    with pytest.raises(OSError, match="injected durability failure"):
+        ledger.downgrade_external_directory_authority(tmp_path)
+    assert store.read_bytes() == before_store
+    assert json.loads(before_store).get("envelope_version") == 1
+    assert marker.is_file()
+    assert marker.read_bytes() == before_marker
+    assert authority_marker.marker_exists(tmp_path)
+    assert sequence.read_bytes() == before_sequence
+    assert config.read_bytes() == before_config
+    assert 'isolation = "external-key"' in before_config.decode("utf-8")
+    secret, key_id = authority_key.load_key(workspace=tmp_path)
+    assert (
+        authority_key.sequence_for(authority_marker.target_fingerprint(tmp_path), secret=secret, key_id=key_id)
+        is not None
+    )
+
+
 def test_authority_downgrade_tty_no_cancels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
