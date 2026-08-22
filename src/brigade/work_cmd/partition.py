@@ -11,6 +11,11 @@ When GraphTrail is unavailable the partition degrades cleanly to
 file-overlap-only. Empty effective footprints are conservative: their wave
 is exclusive (they conflict with every other ready task, including other
 empty-footprint tasks).
+
+Campaign ready sets (#814 / #999) compose those per-repo waves at query
+time: global wave N is each member's local wave N, in campaign order.
+Cross-repo path identity is not a conflict. Empty footprints stay exclusive
+inside their member repository only.
 """
 
 from __future__ import annotations
@@ -23,30 +28,133 @@ from . import footprint as footprint_mod
 
 MODE_FILE_OVERLAP = "file_overlap"
 MODE_FILE_OVERLAP_SYMBOL_IMPACT = "file_overlap+symbol_impact"
-MODE_CAMPAIGN_DEFERRED = "campaign_deferred"
 
 
 def partition_campaign_ready(
     ready: Sequence[dict[str, Any]],
     *,
     members: Sequence[dict[str, Any]] | None = None,
+    tasks_by_id: dict[str, dict[str, Any]] | None = None,
+    impact_runner: Any | None = None,
 ) -> dict[str, Any]:
-    """Seam for future cross-repo wave aggregation over a campaign ready set.
+    """Compose campaign waves from each member's per-repo footprint partition.
 
-    Per-repo footprint waves (#778) do not yet compose across campaign members
-    (#814). Callers that pass ``--parallel-safe`` with ``--campaign`` get a
-    stable deferred marker instead of inventing waves. ``ready`` and
-    ``members`` are accepted so a later implementation can reuse the same
-    signature without a CLI break.
+    For every configured member in campaign order: select that member's
+    repo-qualified ready tasks, run :func:`partition_ready` against the
+    member target and code graph, then place local wave N into global
+    wave N. File and symbol-impact safety stay intra-repo. Matching
+    relative paths in separate repositories do not conflict.
+
+    Per-member GraphTrail degradation is reported without discarding the
+    file-overlap waves that member still produced. ``tasks_by_id`` should
+    be the qualified synthetic ledger map; when omitted, footprints look
+    up empty and those tasks become exclusive inside their member.
     """
-    del ready, members  # reserved for a future aggregator
-    return {
-        "waves": [],
-        "wave_count": 0,
-        "partition_mode": MODE_CAMPAIGN_DEFERRED,
-        "partition_degraded": True,
-        "partition_degraded_reason": "cross-repo wave aggregation not implemented",
+    lookup = tasks_by_id if tasks_by_id is not None else {}
+    member_list = [member for member in (members or []) if isinstance(member, dict)]
+    ready_by_member: dict[str, list[dict[str, Any]]] = {}
+    for item in ready:
+        member_id = _ready_member_id(item)
+        if not member_id:
+            continue
+        ready_by_member.setdefault(member_id, []).append(item)
+
+    composed_tasks: list[list[dict[str, Any]]] = []
+    composed_exclusive: list[bool] = []
+    member_partitions: list[dict[str, Any]] = []
+    modes: list[str] = []
+    degraded = False
+    degrade_reasons: list[str] = []
+
+    for member in member_list:
+        member_id = str(member.get("id") or "").strip()
+        if not member_id:
+            continue
+        member_ready = ready_by_member.get(member_id) or []
+        if not member_ready:
+            continue
+        target = _member_partition_target(member)
+        local = partition_ready(
+            member_ready,
+            lookup,
+            target,
+            impact_runner=impact_runner,
+        )
+        member_report: dict[str, Any] = {
+            "member_id": member_id,
+            "partition_mode": local.get("partition_mode"),
+            "partition_degraded": bool(local.get("partition_degraded")),
+            "wave_count": int(local.get("wave_count") or 0),
+        }
+        if local.get("partition_degraded_reason"):
+            member_report["partition_degraded_reason"] = local["partition_degraded_reason"]
+        member_partitions.append(member_report)
+        mode = str(local.get("partition_mode") or MODE_FILE_OVERLAP)
+        modes.append(mode)
+        if local.get("partition_degraded"):
+            degraded = True
+            reason = local.get("partition_degraded_reason")
+            if isinstance(reason, str) and reason.strip():
+                degrade_reasons.append(f"{member_id}: {reason.strip()}")
+        for index, wave in enumerate(local.get("waves") or []):
+            if not isinstance(wave, dict):
+                continue
+            tasks = [task for task in (wave.get("tasks") or []) if isinstance(task, dict)]
+            if not tasks:
+                continue
+            while len(composed_tasks) <= index:
+                composed_tasks.append([])
+                composed_exclusive.append(False)
+            local_exclusive = bool(wave.get("exclusive"))
+            if not composed_tasks[index] and local_exclusive and len(tasks) == 1:
+                composed_exclusive[index] = True
+            composed_tasks[index].extend(tasks)
+            if len(composed_tasks[index]) > 1:
+                composed_exclusive[index] = False
+
+    wave_payloads = [
+        {
+            "index": index,
+            "task_ids": [str(item.get("id") or "") for item in wave],
+            "tasks": list(wave),
+            "exclusive": composed_exclusive[index],
+        }
+        for index, wave in enumerate(composed_tasks)
+    ]
+    if MODE_FILE_OVERLAP_SYMBOL_IMPACT in modes and MODE_FILE_OVERLAP not in modes:
+        partition_mode = MODE_FILE_OVERLAP_SYMBOL_IMPACT
+    else:
+        partition_mode = MODE_FILE_OVERLAP
+    payload: dict[str, Any] = {
+        "waves": wave_payloads,
+        "wave_count": len(wave_payloads),
+        "partition_mode": partition_mode,
+        "partition_degraded": degraded,
+        "member_partitions": member_partitions,
     }
+    if degraded and degrade_reasons:
+        payload["partition_degraded_reason"] = "; ".join(degrade_reasons)
+    elif degraded:
+        payload["partition_degraded_reason"] = "graphtrail unavailable"
+    return payload
+
+
+def _ready_member_id(item: dict[str, Any]) -> str:
+    repo = item.get("repo")
+    if isinstance(repo, str) and repo.strip():
+        return repo.strip()
+    task_id = str(item.get("id") or "")
+    if ":" not in task_id:
+        return ""
+    member_id, local_id = task_id.split(":", 1)
+    if not member_id.strip() or not local_id.strip():
+        return ""
+    return member_id.strip()
+
+
+def _member_partition_target(member: dict[str, Any]) -> Path:
+    raw = member.get("target") or member.get("path") or "."
+    return Path(str(raw)).expanduser()
 
 
 def partition_ready(

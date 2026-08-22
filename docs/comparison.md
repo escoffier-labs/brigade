@@ -22,7 +22,7 @@ Learning columns also differ. Brigade scores captured verification receipts, the
 
 | Project | Ready work | Claim safety | Parallel and run control | Task-store boundary | Verification | Official source |
 | --- | --- | --- | --- | --- | --- | --- |
-| Brigade | Stable ready set | Fail-closed compare-and-set claims | 0.27: waves, campaigns, declared wall-clock and worker-dispatch limits | Machine-local JSON under `.brigade/`, not distributed | Verify receipts (command, exit code, Git state) | [README](https://github.com/escoffier-labs/brigade) |
+| Brigade | Stable ready set | Fail-closed compare-and-set claims | 0.27: per-repo waves, campaign-composed waves, declared wall-clock and worker-dispatch limits | Machine-local JSON under `.brigade/`, not distributed | Verify receipts (command, exit code, Git state) | [README](https://github.com/escoffier-labs/brigade) |
 | Beads | Built-in ready / dependency graph | Atomic claim | Agent workflow plus Dolt sync | Dolt-backed distributed store (`bd dolt push` / `pull`) | Task history | [README](https://github.com/gastownhall/beads) |
 | Gas Town | Beads-backed work | Not documented | Multi-agent runtime (Mayor, rigs, polecats, convoys) | Beads ledger | Operational state | [README](https://github.com/gastownhall/gastown) |
 | nWave | Artifacts across 7 waves | Not documented | Human approval between waves plus TDD gates | Git-tracked artifacts | Phase validation and audit logs | [README](https://github.com/nWave-ai/nWave) |
@@ -75,7 +75,7 @@ On 2026-08-13 the GitHub repository named in the `aiconfigsync` package metadata
 - Work ledger is machine-local JSON, not a distributed Beads/Dolt store.
 - Ordinary runs have no hard run-budget unless declared. Declared enforcement today covers wall-clock and worker-dispatch ceilings only.
 - Model, tool, token, and cost dimensions stay observed unless an adapter owns an enforcement boundary.
-- Cross-repo campaigns aggregate ready work. Campaign-aware parallel wave composition remains deferred.
+- Cross-repo campaigns aggregate ready work and compose parallel-safe waves at query time from each member's per-repo partition. Waves are not persisted; member ledgers stay authoritative.
 - Center views are read-only. Cloud registry commands track provider work. They do not execute that work.
 - External activity observations are best-effort.
 - Safe targeted handoffs may auto-file. Ambiguous or risky notes wait for review.
