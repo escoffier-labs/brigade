@@ -819,6 +819,16 @@ def append_event(
         finally:
             os.close(fd)
 
+    # Fleet sync (issue #1123): best-effort report of the appended event to the
+    # configured fleet hub. Never raises into the journal writer and never
+    # blocks beyond the client's short timeout.
+    try:
+        from brigade import fleet_client
+
+        fleet_client.report_journal_event(envelope, journal_path=journal_path)
+    except Exception:  # pragma: no cover - reporting must never break journaling
+        pass
+
     return _envelope_to_event(envelope)
 
 
