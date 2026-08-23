@@ -262,10 +262,14 @@ class TestClient:
         token_file = tmp_path / "token.txt"
         token_file.write_text(token + "\n")
         self.home.mkdir(parents=True, exist_ok=True)
-        # A Windows-style path written with single backslashes into a basic
-        # TOML string; the escape sequences would otherwise be interpreted.
+        # A Windows-style token_file path: the parsed TOML value carries
+        # single backslashes. Written as a basic string with escaped
+        # backslashes so the 3.10 fallback parser and stdlib tomllib agree
+        # (the fallback mis-handles TOML literal strings).
         raw = str(token_file).replace("/", "\\")
-        (self.home / "fleet.toml").write_text('[fleet]\nhub_url = "' + url + "\"\ntoken_file = '" + raw + "'\n")
+        escaped = raw.replace("\\", "\\\\")
+        (self.home / "fleet.toml").write_text(f'[fleet]\nhub_url = "{url}"\ntoken_file = "{escaped}"\n')
+        assert fleet_client._read_fleet_section(self.home / "fleet.toml")["token_file"] == raw
         assert fleet_client.load_fleet_config()["token"] == token
 
     def test_no_config_is_noop(self):
