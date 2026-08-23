@@ -18,6 +18,7 @@ from brigade import proc
 from brigade import roster
 from brigade import runguard
 from brigade import runs_cmd
+from tests import thread_sync
 from tests.run_test_helpers import HEALTHY_SEAT_HEALTH_CHILD_SETUP
 
 
@@ -2147,10 +2148,9 @@ codex_cloud.run_cloud_task = blocked_cloud
 import sys
 from brigade import aboyeur, acpx_adapter, agents, cli, codex_cloud, proc
 from brigade.proc import ExecutableIdentity
-# This test measures how fast the run reaches a blocked phase and then cancels it, on a
-# 5s deadline. The #578 slice A seat-health probe runs before that phase and does real
-# transport work, which pushes the phase past the deadline. Seat health is not under
-# test here, so neutralize it for this child process only.
+# The #578 slice A seat-health probe runs before the blocked phase and does real
+# transport work. Seat health is not under test here, so neutralize it for this
+# child process only.
 aboyeur._write_run_seat_health_receipt = lambda *args, **kwargs: None
 {setup}
 raise SystemExit(cli.main([
@@ -2163,20 +2163,24 @@ raise SystemExit(cli.main([
     child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
     child = subprocess.Popen([sys.executable, "-c", script], env=child_env, start_new_session=True)
     worker_pid = None
+
+    def blocked_phase_ready() -> bool:
+        nonlocal worker_pid
+        if child.poll() is not None:
+            pytest.fail(f"run exited before reaching blocked {phase}")
+        try:
+            run_meta = json.loads((output_dir / "run.json").read_text())
+            worker_pid = int(worker_pid_path.read_text())
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        return run_meta.get("status") == expected_status and (repo / ".brigade" / "run.lock").is_dir()
+
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                run_meta = json.loads((output_dir / "run.json").read_text())
-                worker_pid = int(worker_pid_path.read_text())
-            except (OSError, ValueError, json.JSONDecodeError):
-                time.sleep(0.02)
-                continue
-            if run_meta.get("status") == expected_status and (repo / ".brigade" / "run.lock").is_dir():
-                break
-            time.sleep(0.02)
-        else:
-            pytest.fail(f"run did not reach blocked {phase}")
+        thread_sync.wait_for_predicate(
+            blocked_phase_ready,
+            description=f"run to reach blocked {phase}",
+            poll_interval=0.02,
+        )
 
         child.send_signal(sig)
         deadline = time.monotonic() + 3
