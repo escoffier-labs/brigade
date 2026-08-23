@@ -481,6 +481,30 @@ def test_ingest_fails_closed_on_invalid_handoff_sources(tmp_path, capsys):
     assert "no handoff inbox" not in err
 
 
+def test_ingest_fails_closed_on_non_file_handoff_sources(tmp_path, capsys):
+    # A directory at the config path is broken config, not an absent one.
+    workspace = tmp_path / "wsDir"
+    (workspace / ".brigade" / "handoff-sources.json").mkdir(parents=True)
+    (workspace / ".claude" / "memory-handoffs").mkdir(parents=True)
+
+    rc = ingest_mod.run(target=workspace)
+    assert rc == ingest_mod.INVALID_SOURCE_CONFIG
+    assert rc != ingest_mod.NO_HANDOFF_INBOX
+    assert "not a regular file" in capsys.readouterr().err
+
+
+def test_ingest_fails_closed_on_dangling_symlink_handoff_sources(tmp_path, capsys):
+    # A broken symlink is a dangling config pointer, not an absent config.
+    workspace = tmp_path / "wsLink"
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".claude" / "memory-handoffs").mkdir(parents=True)
+    (workspace / ".brigade" / "handoff-sources.json").symlink_to(workspace / "nope.json")
+
+    rc = ingest_mod.run(target=workspace)
+    assert rc == ingest_mod.INVALID_SOURCE_CONFIG
+    assert "not a regular file" in capsys.readouterr().err
+
+
 def test_ingest_fails_closed_on_unreadable_handoff_sources(tmp_path, capsys, monkeypatch):
     workspace = tmp_path / "wsA"
     (workspace / ".brigade").mkdir(parents=True)
