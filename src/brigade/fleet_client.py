@@ -1,12 +1,37 @@
 """Fleet client: best-effort event reporting to the fleet hub (issue #1123).
 
-``report_event`` POSTs one denormalized run event to the configured hub with a
-short timeout (2s). On any failure the event is appended to a local spool
+``report_event`` POSTs one denormalized run event to the configured hub. On
+any failure the event is appended to a local spool
 (``<brigade-home>/fleet-spool/<node_id>.jsonl``) and the caller proceeds;
 reporting never raises into the journal writer. ``flush_spool`` re-POSTs
-spooled events in order and truncates the spool only on full success; it is
-called opportunistically before each successful report and by
+spooled events in order; it runs when a spool exists at report time and on
 ``brigade fleet flush``.
+
+Contract (the journal writer depends on every line of this):
+
+- **Bounded latency.** One HTTP request per ``report_event`` call, executed
+  on a worker thread joined with a hard deadline (``REPORT_TIMEOUT_SECONDS``).
+  The deadline covers name resolution, connect, send, and the response, so a
+  hostname ``hub_url`` with a dead resolver or a slow-drip hub cannot block
+  the journal writer. A request that outruns the deadline is abandoned (the
+  daemon thread finishes on its own socket timeout) and the event is
+  spooled; if the abandoned request did land, the hub's dedupe absorbs the
+  replay.
+- **Spool integrity.** Spool mutations run under a per-node lock file
+  (``<spool>.lock``: ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on
+  Windows) plus a process-level lock, so concurrent runs on one node cannot
+  erase each other's events. Partial flushes rewrite via a temp file and
+  ``os.replace``; a flush that delivered nothing does not touch the file.
+- **Bounded spool.** The spool is capped at ``MAX_SPOOL_BYTES``; when an
+  append would exceed it the oldest events are dropped (logged once per
+  drop on the ``brigade.fleet`` logger). A 4xx response other than
+  401/408/429 marks the batch as poison: it is dropped and logged rather
+  than retried forever. 401 (bad token), 5xx, and network failures keep the
+  spool for a later flush.
+- **Never raises.** ``report_event`` swallows ``Exception``.
+  ``KeyboardInterrupt``/``SystemExit`` are re-raised only after the event
+  has been made durable in the spool, so an interrupt never loses an event
+  that the journal already committed.
 
 Configuration (never stores secrets): ``~/.brigade/fleet.toml``::
 
@@ -15,30 +40,54 @@ Configuration (never stores secrets): ``~/.brigade/fleet.toml``::
     token_file = "/path/to/token"
 
 ``BRIGADE_FLEET_HUB_URL`` overrides ``hub_url``; the token comes from
-``BRIGADE_FLEET_TOKEN`` or the ``token_file`` contents. When no hub is
-configured the client is a no-op: zero behavior change for existing users.
+``BRIGADE_FLEET_TOKEN`` or the ``token_file`` contents. Empty environment
+values count as unset. When no hub is configured the client is a no-op:
+zero behavior change for existing users.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from . import toml_compat as tomllib
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None  # type: ignore[assignment]
 
 FLEET_CONFIG_REL_PATH = Path(".brigade") / "fleet.toml"
 SPOOL_DIRNAME = "fleet-spool"
 REPORT_TIMEOUT_SECONDS = 2.0
 FLUSH_TIMEOUT_SECONDS = 5.0
 FLUSH_BATCH_SIZE = 100
+MAX_SPOOL_BYTES = 16 * 1024 * 1024
+# 4xx statuses that are transient or operator-fixable: keep the spool.
+_RETRYABLE_4XX = frozenset({401, 408, 429})
+
+_LOG = logging.getLogger("brigade.fleet")
+_SPOOL_PROCESS_LOCK = threading.Lock()
 
 
 class FleetClientError(RuntimeError):
     """Operator-facing configuration problem (never raised on report paths)."""
+
+
+class _PoisonResponse(Exception):
+    """The hub rejected the batch permanently (non-retryable 4xx)."""
 
 
 def brigade_home() -> Path:
@@ -53,8 +102,9 @@ def load_fleet_config() -> dict[str, str]:
     """Return {"hub_url": ..., "token": ...}; values may be absent (empty).
 
     Precedence: ``BRIGADE_FLEET_HUB_URL`` over ``[fleet] hub_url``;
-    ``BRIGADE_FLEET_TOKEN`` over the contents of ``[fleet] token_file``. The
-    file is always consulted for whichever value the environment did not set.
+    ``BRIGADE_FLEET_TOKEN`` over the contents of ``[fleet] token_file``. An
+    empty or whitespace-only environment value is treated as unset. The file
+    is always consulted for whichever value the environment did not set.
     """
     hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip()
     token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
@@ -95,9 +145,7 @@ def _read_fleet_section(config_path: Path) -> dict[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
-def spool_path(node_id: str) -> Path:
-    safe_node_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in node_id) or "unknown"
-    return brigade_home() / SPOOL_DIRNAME / f"{safe_node_id}.jsonl"
+# --- node identity ---------------------------------------------------------
 
 
 def find_workspace_for_path(start: Path) -> Path | None:
@@ -119,9 +167,22 @@ def find_workspace_for_path(start: Path) -> Path | None:
     return None
 
 
+def _home_identity_target() -> Path:
+    """Directory whose ``.brigade/node.toml`` is the per-user fallback identity.
+
+    ``node.node_path(target)`` appends ``.brigade/node.toml``, so the target
+    for the default ``~/.brigade`` home is ``~`` (→ ``~/.brigade/node.toml``).
+    A ``BRIGADE_HOME`` override that does not end in ``.brigade`` is used as
+    the target directly (→ ``$BRIGADE_HOME/.brigade/node.toml``).
+    """
+    home = brigade_home()
+    return home.parent if home.name == ".brigade" else home
+
+
 def resolve_node_id(base_path: Path | None = None) -> str:
-    """Best-effort node id: nearest ancestor ``.brigade/node.toml``, then
-    ``<brigade-home>/.brigade/node.toml``, else ``"unknown"``. Never raises."""
+    """Best-effort node id: nearest ancestor ``.brigade/node.toml``, then the
+    per-user fallback (see ``_home_identity_target``), else ``"unknown"``.
+    Never raises."""
     from . import node as node_mod
 
     start = base_path if base_path is not None else Path.cwd()
@@ -129,33 +190,113 @@ def resolve_node_id(base_path: Path | None = None) -> str:
         workspace = find_workspace_for_path(start)
         identity = node_mod.load_identity(workspace) if workspace is not None else None
         if identity is None:
-            identity = node_mod.load_identity(brigade_home())
+            identity = node_mod.load_identity(_home_identity_target())
     except Exception:
         identity = None
     return identity.node_id if identity is not None else "unknown"
 
 
-def _post_events(hub_url: str, token: str, body: dict[str, Any] | list[dict[str, Any]], *, timeout: float) -> None:
+# --- transport ---------------------------------------------------------------
+
+
+def _post_events_blocking(hub_url: str, token: str, body: Any, *, timeout: float) -> None:
     request = urllib.request.Request(
         hub_url.rstrip("/") + "/events",
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        if response.status != 200:
-            raise FleetClientError(f"hub returned HTTP {response.status}")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise FleetClientError(f"hub returned HTTP {response.status}")
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500 and exc.code not in _RETRYABLE_4XX:
+            raise _PoisonResponse(f"hub rejected batch with HTTP {exc.code}") from exc
+        raise
 
 
-def _spool_append(path: Path, event: dict[str, Any]) -> None:
+def _post_events(hub_url: str, token: str, body: Any, *, timeout: float) -> None:
+    """POST with a hard wall-clock deadline covering DNS, connect, and read.
+
+    Runs the request on a daemon thread and joins with ``timeout``; the
+    socket timeout is the same value so the thread cannot linger for long.
+    Raises ``TimeoutError`` when the deadline passes, ``_PoisonResponse`` for
+    a permanent rejection, or whatever the request raised.
+    """
+    outcome: dict[str, BaseException] = {}
+
+    def _run() -> None:
+        try:
+            _post_events_blocking(hub_url, token, body, timeout=timeout)
+        except BaseException as exc:  # noqa: BLE001 - carried to the caller
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_run, name="brigade-fleet-post", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError(f"fleet hub request exceeded {timeout}s")
+    if "error" in outcome:
+        raise outcome["error"]
+
+
+# --- spool -------------------------------------------------------------------
+
+
+def spool_path(node_id: str) -> Path:
+    safe_node_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in node_id) or "unknown"
+    return brigade_home() / SPOOL_DIRNAME / f"{safe_node_id}.jsonl"
+
+
+@contextmanager
+def _spool_lock(path: Path) -> Iterator[None]:
+    """Cross-process + cross-thread guard for one node's spool.
+
+    Mirrors ``run_journal._append_critical_section``'s lock-file shape
+    (``fcntl.flock`` on an adjacent lock file) with an ``msvcrt.locking``
+    branch so the same guarantee holds on Windows.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True) + "\n")
+    lock_path = path.with_name(path.name + ".lock")
+    with _SPOOL_PROCESS_LOCK:
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        locked = False
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                locked = True
+            elif msvcrt is not None:  # pragma: no cover - Windows
+                while True:
+                    try:
+                        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                        locked = True
+                        break
+                    except OSError:
+                        continue
+            yield
+        finally:
+            try:
+                if locked:
+                    if fcntl is not None:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    elif msvcrt is not None:  # pragma: no cover - Windows
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            finally:
+                os.close(fd)
+
+
+def _encode(event: dict[str, Any]) -> str:
+    return json.dumps(event, sort_keys=True)
 
 
 def _read_spool(path: Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return events
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -168,6 +309,85 @@ def _read_spool(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def _write_spool_atomic(path: Path, events: list[dict[str, Any]]) -> None:
+    """Replace the spool contents atomically; remove it when empty."""
+    if not events:
+        path.unlink(missing_ok=True)
+        return
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write("\n".join(_encode(e) for e in events) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def _spool_append_locked(path: Path, event: dict[str, Any]) -> None:
+    """Append under the caller's lock, enforcing ``MAX_SPOOL_BYTES``.
+
+    When the append would exceed the cap, the oldest events are dropped until
+    the newest half of the cap remains, and the drop is logged.
+    """
+    line = _encode(event) + "\n"
+    try:
+        current = path.stat().st_size
+    except OSError:
+        current = 0
+    if current + len(line.encode("utf-8")) > MAX_SPOOL_BYTES:
+        events = _read_spool(path)
+        events.append(event)
+        kept: list[dict[str, Any]] = []
+        budget = MAX_SPOOL_BYTES // 2
+        for candidate in reversed(events):
+            size = len(_encode(candidate).encode("utf-8")) + 1
+            if size > budget:
+                break
+            budget -= size
+            kept.append(candidate)
+        kept.reverse()
+        dropped = len(events) - len(kept)
+        _LOG.warning("fleet spool %s exceeded %d bytes; dropped %d oldest event(s)", path, MAX_SPOOL_BYTES, dropped)
+        _write_spool_atomic(path, kept)
+        return
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def _flush_locked(
+    path: Path,
+    hub: str,
+    token: str,
+    *,
+    max_batches: int | None,
+    timeout: float,
+) -> int:
+    events = _read_spool(path)
+    if not events:
+        path.unlink(missing_ok=True)
+        return 0
+    index = 0
+    delivered = 0
+    batches = 0
+    while index < len(events) and (max_batches is None or batches < max_batches):
+        batch = events[index : index + FLUSH_BATCH_SIZE]
+        try:
+            _post_events(hub, token, batch, timeout=timeout)
+        except _PoisonResponse as exc:
+            _LOG.warning("fleet spool %s: dropping %d event(s): %s", path, len(batch), exc)
+            index += len(batch)
+            batches += 1
+            continue
+        except Exception:
+            break
+        index += len(batch)
+        delivered += len(batch)
+        batches += 1
+    if index == 0:
+        return 0
+    _write_spool_atomic(path, events[index:])
+    return delivered
+
+
 def flush_spool(
     node_id: str,
     *,
@@ -178,11 +398,11 @@ def flush_spool(
 ) -> int:
     """Re-POST spooled events in order, ``FLUSH_BATCH_SIZE`` per request.
 
-    Delivered events are removed from the spool; undelivered ones are kept in
-    their original order so the next flush resumes where this one stopped.
-    The hub dedupes on (node_id, run_id, sequence, digest), so a batch that
-    was received but whose response was lost is harmless to resend. Returns
-    the number of delivered events. Never raises for network failures.
+    Delivered (or poison-dropped) events are removed from the spool via an
+    atomic rewrite; undelivered ones keep their order so the next flush
+    resumes where this one stopped. A flush that makes no progress leaves
+    the file untouched. Returns the number of delivered events. Never raises
+    for network failures.
     """
     config = load_fleet_config()
     hub = hub_url or config["hub_url"]
@@ -190,23 +410,11 @@ def flush_spool(
     path = spool_path(node_id)
     if not hub or not path.is_file():
         return 0
-    events = _read_spool(path)
-    index = 0
-    batches = 0
-    while index < len(events) and (max_batches is None or batches < max_batches):
-        batch = events[index : index + FLUSH_BATCH_SIZE]
-        try:
-            _post_events(hub, tok, batch, timeout=timeout)
-        except Exception:
-            break
-        index += len(batch)
-        batches += 1
-    if index < len(events):
-        kept = [json.dumps(e, sort_keys=True) for e in events[index:]]
-        path.write_text("\n".join(kept) + "\n", encoding="utf-8")
-    else:
-        path.unlink(missing_ok=True)
-    return index
+    with _spool_lock(path):
+        return _flush_locked(path, hub, tok, max_batches=max_batches, timeout=timeout)
+
+
+# --- reporting ---------------------------------------------------------------
 
 
 def report_event(
@@ -220,9 +428,12 @@ def report_event(
     Best-effort by contract: no hub configured → False without side effects;
     delivery failure → the event lands in the local spool and False returns.
     When a spool already exists the new event is appended to it and the spool
-    is flushed in order (one request, short timeout) so the hub never sees
+    is flushed in order (one request, short deadline) so the hub never sees
     this node's events out of sequence. Exactly one HTTP request is made per
-    call, bounded by ``REPORT_TIMEOUT_SECONDS``. Never raises into the caller.
+    call, bounded by ``REPORT_TIMEOUT_SECONDS`` end to end.
+
+    ``Exception`` never escapes. ``KeyboardInterrupt``/``SystemExit`` are
+    re-raised, but only after the event is durable in the spool.
     """
     try:
         config = load_fleet_config()
@@ -233,25 +444,56 @@ def report_event(
         event = {**event, "node_id": resolved_node_id}
         token = config["token"]
         spool = spool_path(resolved_node_id)
-        if spool.is_file():
-            _spool_append(spool, event)
-            flush_spool(resolved_node_id, max_batches=1, timeout=REPORT_TIMEOUT_SECONDS)
-            return not spool.is_file()
-        try:
-            _post_events(hub, token, event, timeout=REPORT_TIMEOUT_SECONDS)
-            return True
-        except Exception:
-            _spool_append(spool, event)
-            return False
     except Exception:
         return False
+
+    interrupted: BaseException | None = None
+    delivered = False
+    try:
+        if spool.is_file():
+            with _spool_lock(spool):
+                _spool_append_locked(spool, event)
+                try:
+                    _flush_locked(spool, hub, token, max_batches=1, timeout=REPORT_TIMEOUT_SECONDS)
+                except (KeyboardInterrupt, SystemExit) as exc:
+                    interrupted = exc
+            delivered = not spool.is_file()
+        else:
+            try:
+                _post_events(hub, token, event, timeout=REPORT_TIMEOUT_SECONDS)
+                delivered = True
+            except (KeyboardInterrupt, SystemExit) as exc:
+                interrupted = exc
+            except Exception:
+                pass
+            if not delivered:
+                with _spool_lock(spool):
+                    _spool_append_locked(spool, event)
+    except (KeyboardInterrupt, SystemExit) as exc:
+        # Interrupt during spool bookkeeping: the append/replace steps are
+        # atomic, so the spool is consistent; make a last attempt to keep the
+        # event, then propagate.
+        interrupted = exc
+        if not delivered:
+            try:
+                with _spool_lock(spool):
+                    if event not in _read_spool(spool):
+                        _spool_append_locked(spool, event)
+            except Exception:
+                pass
+    except Exception:
+        return False
+    if interrupted is not None:
+        raise interrupted
+    return delivered
 
 
 def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None = None) -> bool:
     """Denormalize a run_event.v1 envelope into a fleet event and report it.
 
     Identity fields (node_id, repo) come from the workspace that owns the
-    journal so the hub view is a plain group-by. Never raises.
+    journal so the hub view is a plain group-by. Never raises ``Exception``;
+    see ``report_event`` for the interrupt contract.
     """
     try:
         raw_payload = envelope.get("payload")
@@ -269,9 +511,9 @@ def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None 
         }
         if not all(event[k] is not None for k in ("run_id", "state", "ts", "sequence", "digest")):
             return False
-        return report_event(event, base_path=journal_path)
     except Exception:
         return False
+    return report_event(event, base_path=journal_path)
 
 
 def fetch_status(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:

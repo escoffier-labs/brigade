@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.request
 from pathlib import Path
@@ -516,3 +517,346 @@ class TestCli:
         assert _format_age("2026-08-23T11:00:00Z", now=now) == "1h"
         assert _format_age("not-a-date", now=now) == "-"
         assert _format_age(None, now=now) == "-"
+
+
+class TestSpoolHardening:
+    """Review HOLD items on d2342dcc: atomic rewrite, lock, cap, poison, deadline, interrupts."""
+
+    @pytest.fixture(autouse=True)
+    def _home(self, tmp_path, monkeypatch):
+        self.home = tmp_path / "brigade-home"
+        monkeypatch.setenv("BRIGADE_HOME", str(self.home))
+
+    def _spooled(self, node: str = "11111111-1111-4111-8111-111111111111", n: int = 3) -> Path:
+        spool = fleet_client.spool_path(node)
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        spool.write_text("".join(json.dumps(_event(node=node, seq=i), sort_keys=True) + "\n" for i in range(1, n + 1)))
+        return spool
+
+    def test_failed_flush_does_not_rewrite_spool(self, monkeypatch):
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+        spool = self._spooled()
+        before = spool.stat()
+        writes: list[Path] = []
+        real = fleet_client._write_spool_atomic
+        monkeypatch.setattr(fleet_client, "_write_spool_atomic", lambda p, e: writes.append(p) or real(p, e))
+        assert fleet_client.flush_spool(_event()["node_id"]) == 0
+        assert writes == []
+        assert spool.stat().st_size == before.st_size
+        assert spool.stat().st_mtime_ns == before.st_mtime_ns
+
+    def test_failed_report_with_spool_only_appends(self, monkeypatch):
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+        spool = self._spooled()
+        writes: list[Path] = []
+        real = fleet_client._write_spool_atomic
+        monkeypatch.setattr(fleet_client, "_write_spool_atomic", lambda p, e: writes.append(p) or real(p, e))
+        assert fleet_client.report_event(_event(seq=4)) is False
+        assert writes == []
+        assert [json.loads(line)["sequence"] for line in spool.read_text().splitlines()] == [1, 2, 3, 4]
+
+    def test_partial_flush_rewrites_via_tmp_and_replace(self, hub, monkeypatch):
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        monkeypatch.setattr(fleet_client, "FLUSH_BATCH_SIZE", 1)
+        spool = self._spooled()
+        replaced: list[tuple[str, str]] = []
+        real_replace = fleet_client.os.replace
+        monkeypatch.setattr(
+            fleet_client.os, "replace", lambda a, b: replaced.append((str(a), str(b))) or real_replace(a, b)
+        )
+        assert fleet_client.flush_spool(_event()["node_id"], max_batches=1) == 1
+        assert replaced == [(str(spool) + ".tmp", str(spool))]
+        assert not (spool.parent / (spool.name + ".tmp")).exists()
+        assert [json.loads(line)["sequence"] for line in spool.read_text().splitlines()] == [2, 3]
+
+    def test_concurrent_append_and_flush_lose_nothing(self, hub, monkeypatch):
+        """Threads append while another flushes; every event reaches the hub exactly once."""
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        monkeypatch.setattr(fleet_client, "FLUSH_BATCH_SIZE", 5)
+        node = _event()["node_id"]
+        self._spooled(node, n=20)
+        errors: list[BaseException] = []
+
+        def appender(start: int) -> None:
+            try:
+                for seq in range(start, start + 20):
+                    with fleet_client._spool_lock(fleet_client.spool_path(node)):
+                        fleet_client._spool_append_locked(fleet_client.spool_path(node), _event(node=node, seq=seq))
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        def flusher() -> None:
+            try:
+                for _ in range(6):
+                    fleet_client.flush_spool(node)
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=appender, args=(100,)),
+            threading.Thread(target=appender, args=(200,)),
+            threading.Thread(target=flusher),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        assert errors == []
+        fleet_client.flush_spool(node)
+        conn = fleet_hub.init_db(db)
+        try:
+            seqs = sorted(r[0] for r in conn.execute("SELECT sequence FROM events").fetchall())
+        finally:
+            conn.close()
+        assert seqs == list(range(1, 21)) + list(range(100, 120)) + list(range(200, 220))
+        assert not fleet_client.spool_path(node).exists()
+
+    def test_spool_lock_is_exclusive_across_holders(self, tmp_path):
+        import fcntl as _fcntl
+
+        spool = fleet_client.spool_path("lock-node")
+        with fleet_client._spool_lock(spool):
+            lock_path = spool.with_name(spool.name + ".lock")
+            fd = os.open(str(lock_path), os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+
+    def test_spool_cap_drops_oldest_and_logs(self, monkeypatch, caplog):
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+        one = len(json.dumps(_event(seq=1), sort_keys=True)) + 1
+        monkeypatch.setattr(fleet_client, "MAX_SPOOL_BYTES", one * 10)
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            for seq in range(1, 13):
+                fleet_client.report_event(_event(seq=seq))
+        spool = fleet_client.spool_path(_event()["node_id"])
+        seqs = [json.loads(line)["sequence"] for line in spool.read_text().splitlines()]
+        assert seqs[-1] == 12
+        assert len(seqs) <= 10 and seqs == sorted(seqs)
+        assert spool.stat().st_size <= one * 10
+        assert any("dropped" in r.message for r in caplog.records)
+
+    def test_poison_4xx_batch_is_dropped_not_retried(self, hub, monkeypatch, caplog):
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        monkeypatch.setattr(fleet_client, "FLUSH_BATCH_SIZE", 1)
+        node = _event()["node_id"]
+        spool = fleet_client.spool_path(node)
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        spool.write_text(
+            json.dumps({"node_id": node, "run_id": ""})
+            + "\n"
+            + json.dumps(_event(node=node, seq=2), sort_keys=True)
+            + "\n"
+        )
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            assert fleet_client.flush_spool(node) == 1
+        assert not spool.exists()
+        assert any("dropping 1 event" in r.message for r in caplog.records)
+        conn = fleet_hub.init_db(db)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    def test_401_keeps_spool(self, hub, monkeypatch):
+        url, _token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "rotated-away")
+        node = _event()["node_id"]
+        self._spooled(node, n=2)
+        assert fleet_client.flush_spool(node) == 0
+        assert len(fleet_client.spool_path(node).read_text().splitlines()) == 2
+
+    def test_report_deadline_covers_slow_resolution(self, monkeypatch):
+        """A hung getaddrinfo (dead resolver) cannot hold the journal writer past the deadline."""
+        import socket
+        import time
+
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://hub.invalid.tailnet:3774")
+        monkeypatch.setattr(fleet_client, "REPORT_TIMEOUT_SECONDS", 0.5)
+        release = threading.Event()
+
+        def hung_getaddrinfo(*args, **kwargs):
+            release.wait(10)
+            raise socket.gaierror("resolver dead")
+
+        monkeypatch.setattr(socket, "getaddrinfo", hung_getaddrinfo)
+        started = time.monotonic()
+        try:
+            assert fleet_client.report_event(_event()) is False
+        finally:
+            release.set()
+        assert time.monotonic() - started < 1.5
+        spool = fleet_client.spool_path(_event()["node_id"])
+        assert spool.is_file()
+
+    def test_report_deadline_covers_slow_drip_response(self, monkeypatch):
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Drip(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                # Drip the request's *response* slowly: the status line only
+                # arrives after the client's deadline has passed.
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                time.sleep(3)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+                except OSError:
+                    pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Drip)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", f"http://127.0.0.1:{server.server_address[1]}")
+            monkeypatch.setattr(fleet_client, "REPORT_TIMEOUT_SECONDS", 0.5)
+            started = time.monotonic()
+            assert fleet_client.report_event(_event()) is False
+            assert time.monotonic() - started < 1.5
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_keyboard_interrupt_during_post_spools_then_reraises(self, monkeypatch):
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+
+        def interrupt(*a, **kw):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(fleet_client, "_post_events", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            fleet_client.report_event(_event())
+        spool = fleet_client.spool_path(_event()["node_id"])
+        assert [json.loads(line)["sequence"] for line in spool.read_text().splitlines()] == [1]
+        # With a spool present the event is appended before the flush runs.
+        with pytest.raises(KeyboardInterrupt):
+            fleet_client.report_event(_event(seq=2))
+        assert [json.loads(line)["sequence"] for line in spool.read_text().splitlines()] == [1, 2]
+
+    def test_journal_hook_keeps_event_durable_on_interrupt(self, tmp_path, monkeypatch):
+        from brigade import node as node_mod
+        from brigade import run_journal
+
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+        workspace = tmp_path / "ws"
+        (workspace / ".brigade").mkdir(parents=True)
+        node_mod.ensure_identity(workspace)
+        journal = workspace / ".brigade" / "runs" / "runA" / "events" / "lifecycle.jsonl"
+
+        def interrupt(*a, **kw):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(fleet_client, "_post_events", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            run_journal.append_event(
+                journal,
+                run_id="runA",
+                event_type="run.created",
+                payload={"status": "created"},
+                idempotency_key="k1",
+                expected_previous_sequence=0,
+            )
+        # Journal line is durable and the event is in the spool, not lost.
+        assert len(run_journal.read_journal(journal).events) == 1
+        spool_files = list((self.home / "fleet-spool").glob("*.jsonl"))
+        assert len(spool_files) == 1
+        assert json.loads(spool_files[0].read_text().splitlines()[0])["sequence"] == 1
+
+    def test_non_interrupt_base_exception_in_hook_is_swallowed(self, tmp_path, monkeypatch):
+        from brigade import node as node_mod
+        from brigade import run_journal
+
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+        workspace = tmp_path / "ws"
+        (workspace / ".brigade").mkdir(parents=True)
+        node_mod.ensure_identity(workspace)
+        journal = workspace / ".brigade" / "runs" / "runA" / "events" / "lifecycle.jsonl"
+
+        class Odd(BaseException):
+            pass
+
+        def boom(*a, **kw):
+            raise Odd
+
+        monkeypatch.setattr(fleet_client, "report_journal_event", boom)
+        event = run_journal.append_event(
+            journal,
+            run_id="runA",
+            event_type="run.created",
+            payload={"status": "created"},
+            idempotency_key="k1",
+            expected_previous_sequence=0,
+        )
+        assert event.sequence == 1
+
+    def test_home_identity_fallback_path(self, tmp_path, monkeypatch):
+        from brigade import node as node_mod
+
+        home = tmp_path / "operator" / ".brigade"
+        monkeypatch.setenv("BRIGADE_HOME", str(home))
+        identity = node_mod.ensure_identity(tmp_path / "operator")  # writes <operator>/.brigade/node.toml
+        assert node_mod.node_path(tmp_path / "operator") == home / "node.toml"
+        assert fleet_client.resolve_node_id(tmp_path / "elsewhere") == identity.node_id
+
+
+class TestHubHardening:
+    def test_empty_strings_and_negative_sequence_rejected(self, hub):
+        url, token, _db = hub
+        for bad in (
+            {**_event(), "node_id": ""},
+            {**_event(), "run_id": "  "},
+            {**_event(), "digest": ""},
+            {**_event(), "sequence": -1},
+            {**_event(), "sequence": True},
+        ):
+            status, payload = _post(url, token, bad)
+            assert status == 400, bad
+        assert _post(url, token, {**_event(), "sequence": 0})[0] == 200
+
+    def test_status_one_row_per_run_when_sequence_has_two_digests(self, hub):
+        url, token, _db = hub
+        _post(url, token, [_event(seq=1, digest="a"), _event(seq=1, digest="b")])
+        runs = _get(url, "/status", token)[1]["runs"]
+        assert len(runs) == 1
+        assert runs[0]["digest"] == "b"
+
+    def test_handler_has_idle_timeout_and_constant_time_auth(self, hub):
+        handler = fleet_hub.make_handler("tok", Path("/nonexistent"))
+        assert handler.timeout == 30
+        import inspect
+
+        assert "compare_digest" in inspect.getsource(handler._authorized)
+
+    def test_sqlite_operational_error_is_500(self, hub, monkeypatch):
+        import sqlite3
+
+        url, token, _db = hub
+
+        def broken(conn, raw):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(fleet_hub, "store_events", broken)
+        status, payload = _post(url, token, _event())
+        assert status == 500
+        assert "database" in payload["error"]
+        status, payload = _get(url, "/status", token)
+        assert status == 200
+
+
+def test_conftest_clears_fleet_env():
+    assert "BRIGADE_FLEET_HUB_URL" not in os.environ
+    assert "BRIGADE_FLEET_TOKEN" not in os.environ

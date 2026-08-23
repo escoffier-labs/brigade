@@ -20,6 +20,7 @@ versioned schema (PRAGMA user_version).
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import sqlite3
@@ -103,18 +104,15 @@ def _validate_event(raw: Any) -> dict[str, Any]:
     event: dict[str, Any] = {}
     for field, kind in EVENT_FIELDS.items():
         value = raw.get(field)
-        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
-            expected = "a non-empty string" if kind is str else "an integer"
-            raise FleetHubError(f"event field {field!r} must be {expected}")
+        if kind is str:
+            if not isinstance(value, str) or not value.strip():
+                raise FleetHubError(f"event field {field!r} must be a non-empty string")
+        elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise FleetHubError(f"event field {field!r} must be a non-negative integer")
         event[field] = value
     for field in OPTIONAL_STR_FIELDS:
         value = raw.get(field)
-        if value is None:
-            event[field] = None
-        elif isinstance(value, str) and value.strip():
-            event[field] = value
-        else:
-            event[field] = None
+        event[field] = value if isinstance(value, str) and value.strip() else None
     return event
 
 
@@ -159,13 +157,18 @@ def store_events(conn: sqlite3.Connection, raw_events: Any) -> dict[str, int]:
 
 
 def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> list[dict[str, Any]]:
-    """Latest event per (node_id, run_id); non-terminal runs unless include_all."""
+    """Latest event per (node_id, run_id); non-terminal runs unless include_all.
+
+    Exactly one row per (node_id, run_id): ties on sequence (same sequence
+    seen with two digests) resolve to the most recently received, then the
+    larger digest, so the view never shows a run twice.
+    """
     rows = conn.execute(
-        "SELECT e.node_id, e.run_id, e.repo, e.seat, e.harness, e.state, e.ts, e.sequence, e.digest "
-        "FROM events e JOIN ("
-        "  SELECT node_id, run_id, MAX(sequence) AS max_seq FROM events GROUP BY node_id, run_id"
-        ") m ON e.node_id = m.node_id AND e.run_id = m.run_id AND e.sequence = m.max_seq "
-        "ORDER BY e.node_id, e.run_id"
+        "SELECT node_id, run_id, repo, seat, harness, state, ts, sequence, digest FROM ("
+        "  SELECT e.*, ROW_NUMBER() OVER ("
+        "    PARTITION BY node_id, run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
+        "  ) AS rn FROM events e"
+        ") WHERE rn = 1 ORDER BY node_id, run_id"
     ).fetchall()
     result = []
     for row in rows:
@@ -205,13 +208,16 @@ def _load_token(args: argparse.Namespace) -> str:
 def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
     class _Handler(BaseHTTPRequestHandler):
         server_version = "brigade-fleet-hub/1"
+        # Idle-socket guard: a peer that connects and never sends a request
+        # line cannot pin a handler thread forever (pre-auth).
+        timeout = 30
 
         def log_message(self, fmt: str, *log_args: Any) -> None:  # quiet by default
             pass
 
         def _authorized(self) -> bool:
             auth = self.headers.get("Authorization", "")
-            return auth == f"Bearer {token}"
+            return hmac.compare_digest(auth.encode("utf-8"), f"Bearer {token}".encode("utf-8"))
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload).encode("utf-8")
@@ -233,13 +239,17 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
                 include_all = parse_qs(query).get("all", [""])[0].lower() in ("1", "true", "yes")
                 try:
                     conn = init_db(Path(db_path))
-                except FleetHubError as exc:
-                    self._send_json(500, {"error": str(exc)})
+                except (FleetHubError, sqlite3.Error) as exc:
+                    self._send_json(500, {"error": f"hub database error: {exc}"})
                     return
                 try:
-                    self._send_json(200, {"runs": latest_status(conn, include_all=include_all)})
+                    runs = latest_status(conn, include_all=include_all)
+                except sqlite3.Error as exc:
+                    self._send_json(500, {"error": f"hub database error: {exc}"})
+                    return
                 finally:
                     conn.close()
+                self._send_json(200, {"runs": runs})
                 return
             self._send_json(404, {"error": "not found"})
 
@@ -267,13 +277,16 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 conn = init_db(Path(db_path))
-            except FleetHubError as exc:
-                self._send_json(500, {"error": str(exc)})
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_json(500, {"error": f"hub database error: {exc}"})
                 return
             try:
                 counts = store_events(conn, parsed)
             except FleetHubError as exc:
                 self._send_json(400, {"error": str(exc)})
+                return
+            except sqlite3.Error as exc:
+                self._send_json(500, {"error": f"hub database error: {exc}"})
                 return
             finally:
                 conn.close()

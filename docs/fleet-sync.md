@@ -67,8 +67,20 @@ Client (`src/brigade/fleet_client.py`, hooked from `run_journal.append_event`
 after the journal write completes and the lock is released):
 
 - No hub configured → no-op, no spool directory is created.
-- One HTTP request per append, 2s timeout; any failure spools to
-  `<brigade-home>/fleet-spool/<node_id>.jsonl` and returns. Never raises.
+- One HTTP request per append, run on a worker thread joined with a hard
+  2s deadline that covers name resolution, connect, and the response (a
+  hostname `hub_url` with a dead resolver cannot block the writer). Any
+  failure spools to `<brigade-home>/fleet-spool/<node_id>.jsonl` and
+  returns. `Exception` never escapes; `KeyboardInterrupt`/`SystemExit` are
+  re-raised only after the event is durable in the spool.
+- Spool mutations take a per-node lock file (`flock` on POSIX,
+  `msvcrt.locking` on Windows) so concurrent runs on one node cannot erase
+  each other's events. Partial flushes rewrite via temp file + `os.replace`;
+  a flush that delivers nothing leaves the file untouched.
+- The spool is capped at 16 MiB (oldest events dropped, logged on the
+  `brigade.fleet` logger). A non-retryable 4xx (anything but 401/408/429)
+  drops that batch as poison instead of retrying forever; 401, 5xx, and
+  network failures keep the spool.
 - When a spool exists, new events are appended to it and the spool is flushed
   in order (100 per request) so the hub never sees a node's events out of
   sequence. `brigade fleet flush` drains it explicitly.
