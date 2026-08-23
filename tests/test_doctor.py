@@ -2879,6 +2879,60 @@ def test_doctor_lineage_check_reports_missing_branch_point_event(tmp_path: Path)
     assert "child2" not in detail2.split("findings")[1]
 
 
+def test_doctor_lineage_rejects_symlinked_parent_without_following(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    # An external directory the attacker controls, with its own valid journal.
+    external = tmp_path / "external-parent"
+    _lineage_parent_run(workspace, external)
+    # A child names a sibling "parent" that is really a symlink to the external dir.
+    (runs_root / "parent").symlink_to(external, target_is_directory=True)
+    _lineage_child_run(runs_root, "child", "parent", "any-event")
+
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+
+    # The symlinked parent is treated as missing, not followed to the external journal.
+    assert status == doctor_mod.WARN
+    assert "parent run directory missing: parent" in detail
+
+
+def test_doctor_lineage_counts_journal_terminal_run_as_terminal(tmp_path: Path):
+    from brigade import run_lifecycle, runguard
+
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    run_dir = runs_root / "stale"
+    run_dir.mkdir(parents=True)
+    # run.json says running, but the journal durably recorded run.completed.
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run.v1",
+                "status": "running",
+                "cwd": str(workspace),
+                "lock_workspace": str(workspace),
+                "started_at": "2026-08-17T12:00:00Z",
+                "lifecycle_journal_requested": True,
+            }
+        )
+        + "\n"
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="run.completed",
+            payload={"status": "ok"},
+            idempotency_key="stale-completed",
+            workspace=workspace,
+        )
+
+    _status, _name, detail = doctor_mod._check_run_lineage(workspace)
+    # Doctor must agree with inspect/show, which read the journal: terminal=1.
+    assert "terminal=1" in detail
+
+
 def test_doctor_full_lineage_flags_inconsistent_child_beyond_scan_limit(tmp_path: Path):
     workspace = tmp_path
     runs_root = workspace / ".brigade" / "runs"

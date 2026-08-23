@@ -288,7 +288,7 @@ def _check_run_lineage(target: Path, *, full: bool = False) -> CheckResult:
         meta = _read_run_meta_fail_safe(run_dir / "run.json")
         if meta is None:
             continue
-        if runs_cmd._is_terminal(meta):
+        if runs_cmd._run_display_is_terminal(run_dir, meta):
             terminal_runs += 1
         lineage = meta.get("lineage")
         if not isinstance(lineage, dict):
@@ -304,7 +304,9 @@ def _check_run_lineage(target: Path, *, full: bool = False) -> CheckResult:
             findings.append(f"{run_dir.name} (malformed parent run id: {parent_id})")
             continue
         try:
-            parent_missing = not parent_dir.is_dir()
+            # A symlinked parent could point outside the runs root; treat it as
+            # missing rather than following it to an external journal.
+            parent_missing = parent_dir.is_symlink() or not parent_dir.is_dir()
         except OSError:
             parent_missing = True
         if parent_missing:
