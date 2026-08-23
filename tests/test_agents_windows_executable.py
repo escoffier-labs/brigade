@@ -91,6 +91,24 @@ def test_run_agent_launches_resolved_windows_exe(monkeypatch):
     assert stdin_payloads == [b"do it"]
 
 
+def test_run_agent_uses_command_prefix_for_cursor_on_windows(monkeypatch):
+    node = r"C:\\Cursor\\versions\\current\\node.exe"
+    index = r"C:\\Cursor\\versions\\current\\index.js"
+    launched: list[list[str]] = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(proc, "which", _fake_windows_which({node: node}))
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: launched.append(argv) or agents.proc.Result(0, "ok", ""),
+    )
+
+    result = agents.run_agent("cursor", "do it", command=(node, index))
+
+    assert result.ok is True
+    assert launched == [[node, index, "-p", "--output-format", "text", "-f", "do it"]]
+
+
 def test_run_agent_resolves_once_from_child_path(monkeypatch):
     parent = r"C:\\parent\\codex.exe"
     child = r"C:\\child\\codex.exe"

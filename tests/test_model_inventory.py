@@ -137,6 +137,23 @@ def test_cursor_inventory_is_loaded_once_for_repeated_seats(monkeypatch):
     assert calls == [["cursor-agent", "models"]]
 
 
+def test_cursor_inventory_uses_command_prefix(monkeypatch):
+    command = ("C:/Cursor/versions/current/node.exe", "C:/Cursor/versions/current/index.js")
+    calls = []
+
+    def fake_run(argv):
+        calls.append(argv)
+        return agents.proc.Result(0, _cursor_listing("composer-2.5"), "")
+
+    monkeypatch.setattr(model_inventory, "_run_cursor_inventory", fake_run, raising=False)
+
+    result = model_inventory.ModelInventoryInspector().inspect("cursor", "composer-2.5", command)
+
+    assert result is not None
+    assert result.state == "exact"
+    assert calls == [[*command, "models"]]
+
+
 def test_cursor_inventory_uses_regular_file_capture(monkeypatch):
     listing = _cursor_listing("composer-2.5", "kimi-k2.7-code", "glm-5.2-high")
 

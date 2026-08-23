@@ -28,7 +28,7 @@ from . import (
     verification_contract,
     worker_events,
 )
-from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_env
+from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_command, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
@@ -383,6 +383,7 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
             name=name,
             cli=raw.get("cli"),
             role=raw.get("role") or "",
+            command=_as_command(raw.get("command"), f"agents.{name}.command"),
             timeout_seconds=raw.get("timeout_seconds"),
             model=raw.get("model"),
             reasoning=raw.get("reasoning"),
@@ -745,6 +746,7 @@ def _resume_locked(
         model=orchestrator.model,
         reasoning=orchestrator.reasoning,
         env=dict(orchestrator.env) if orchestrator.env is not None else None,
+        command=orchestrator.command,
     )
     synth_captured = message_envelope.emit(
         final.text,

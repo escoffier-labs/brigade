@@ -53,6 +53,15 @@ CheckName = Literal[
     "model-reachability",
     "isolation-compatibility",
 ]
+
+
+def _resolve_agent_executable(seat: Any) -> proc.ExecutableIdentity:
+    command = getattr(seat, "command", None)
+    if command is None:
+        return agents.resolve_agent_executable(seat.cli)
+    return agents.resolve_agent_executable(seat.cli, command=command)
+
+
 CheckStatus = Literal["passed", "degraded", "failed"]
 HealthStatus = Literal["healthy", "degraded", "unhealthy"]
 
@@ -340,7 +349,7 @@ class SeatHealthProbe:
     def _executable_version(self, seat: Any) -> str | None:
         if not self._collect_executable_version or self._adapter is not None or getattr(seat, "cli", None) is None:
             return None
-        identity = agents.resolve_agent_executable(seat.cli)
+        identity = _resolve_agent_executable(seat)
         if not identity.runnable:
             return None
         try:
@@ -399,7 +408,7 @@ class SeatHealthProbe:
         if name == "executable-identity":
             if seat.cli is None:
                 return SeatHealthCheck(name, "degraded", "endpoint seat has no local executable")
-            identity = agents.resolve_agent_executable(seat.cli)
+            identity = _resolve_agent_executable(seat)
             if not identity.runnable:
                 return SeatHealthCheck(name, "failed", identity.detail, cause_code="missing-executable")
             return SeatHealthCheck(name, "passed", f"{identity.command} ({identity.kind})")
@@ -475,7 +484,7 @@ class SeatHealthProbe:
             return SeatHealthCheck(
                 "transport-liveness", "degraded", "endpoint liveness requires a provider-safe status operation"
             )
-        identity = agents.resolve_agent_executable(seat.cli)
+        identity = _resolve_agent_executable(seat)
         if not identity.runnable:
             return SeatHealthCheck("transport-liveness", "failed", identity.detail, cause_code="missing-executable")
         return SeatHealthCheck("transport-liveness", "passed", "direct executable is runnable")
@@ -492,7 +501,9 @@ class SeatHealthProbe:
         if not allow_model_smoke:
             return SeatHealthCheck("model-reachability", "degraded", "model check is owned by roster doctor inventory")
         if seat.transport == "direct" and seat.cli is not None:
-            inspected = model_inventory.ModelInventoryInspector().inspect(seat.cli, seat.model)
+            inspected = model_inventory.ModelInventoryInspector().inspect(
+                seat.cli, seat.model, getattr(seat, "command", None)
+            )
             if inspected is not None:
                 if inspected.state == "exact":
                     return SeatHealthCheck("model-reachability", "passed", inspected.detail)
@@ -531,6 +542,7 @@ class SeatHealthProbe:
                     model=seat.model,
                     reasoning=seat.reasoning,
                     env=seat.env,
+                    command=getattr(seat, "command", None),
                 )
             return _model_smoke_result(result.ok, result.text, result.detail, result.failure_kind, result.timed_out)
         finally:
@@ -552,7 +564,7 @@ class SeatHealthProbe:
 def seat_fingerprint(seat: Any, roster: Any, *, executable_version: str | None = None) -> str:
     """Hash only stable, redacted probe inputs.  Never include executable paths or secrets."""
     cli = getattr(seat, "cli", None)
-    identity = agents.resolve_agent_executable(cli) if cli else None
+    identity = _resolve_agent_executable(seat) if cli else None
     env = getattr(seat, "env", None) or {}
     env_presence = {str(key): bool(os.environ.get(_env_target(str(key)))) for key in env}
     endpoint = _redacted_endpoint(getattr(seat, "endpoint", None))

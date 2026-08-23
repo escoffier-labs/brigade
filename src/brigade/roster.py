@@ -35,6 +35,7 @@ class Agent:
     name: str
     cli: str | None
     role: str
+    command: tuple[str, ...] | None = None
     timeout_seconds: float | None = None
     endpoint: str | None = None
     model: str | None = None
@@ -177,6 +178,14 @@ def _as_optional_str(value: object, field: str) -> str | None:
     if value is None:
         return None
     return _as_str(value, field)
+
+
+def _as_command(value: object, field: str) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{field} must be a non-empty list of strings")
+    return tuple(_as_str(item, field) for item in value)
 
 
 def _as_requires(value: object, agent_name: str) -> dict[str, str] | None:
@@ -469,6 +478,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
         stats = _as_stats(raw_agent.get("stats"), agent_name)
         caveats = _as_string_list(raw_agent.get("caveats"), f"agents.{agent_name}.caveats")
         capabilities = _as_capabilities(raw_agent.get("capabilities"), f"agents.{agent_name}.capabilities")
+        command = _as_command(raw_agent.get("command"), f"agents.{agent_name}.command")
 
         cli_raw = raw_agent.get("cli")
         has_endpoint = endpoint is not None and model is not None
@@ -487,6 +497,16 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             raise ValueError(
                 f"agents.{agent_name}.env overrides support direct CLI seats only; "
                 f"acpx, codex-cloud, and endpoint seats manage their own environment"
+            )
+        if command is not None and (
+            transport_raw != "direct"
+            or cli is None
+            or cli.startswith("codex-cloud:")
+            or (cli == "codex" and codex_transport == "app-server")
+        ):
+            raise ValueError(
+                f"agents.{agent_name}.command overrides support direct CLI seats only; "
+                f"acpx, codex-cloud, app-server, and endpoint seats manage their own command"
             )
         if env is not None and cli == "codex" and codex_transport == "app-server":
             raise ValueError(
@@ -515,6 +535,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             name=agent_name,
             cli=cli,
             role=role,
+            command=command,
             timeout_seconds=timeout_seconds_for_agent,
             endpoint=endpoint,
             model=model,
