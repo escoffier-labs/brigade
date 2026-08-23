@@ -48,6 +48,14 @@ Brigade already has most of the pieces, but they stop at separate boundaries:
   cancellation, recovery, and receipt projection under `.brigade/runs/`.
 - The Oracle adapter can send a one-shot prompt to Gemini's browser UI through
   `oracle --engine browser`.
+- Oracle 0.18.0 made live browser cookie syncing opt-in upstream
+  ([change](https://github.com/steipete/oracle/commit/3a185f55918a8f0dd36f9c2f0144550616b88803),
+  [repair](https://github.com/steipete/oracle/pull/383)). Brigade requires an
+  explicit cookie strategy (`--browser-cookie-sync`, a configured browser
+  profile, or another supported Oracle cookie source); it never relies on
+  Oracle's default, and auth-failure diagnostics name this requirement.
+  See `docs/runbooks/research-live-acceptance.md` and the adapter in
+  [`src/brigade/agents.py`](https://github.com/escoffier-labs/brigade/blob/main/src/brigade/agents.py).
 - The roster can select a `researcher`, but the role is a single string and
   cannot express planning, extraction, synthesis, and review separately.
 - Center has no Research surface and should not infer state by reading research
@@ -447,6 +455,7 @@ after the read-only view proves the status contract.
 | Legacy runs stay visible | Dual-store list, show, and open tests. |
 | Center can project without disk access | JSON schema fixtures for status, show, and doctor. |
 | Oracle works live | Separate live acceptance receipt, never substituted by a stub. |
+| Oracle cookie sync is explicit | A clean Oracle 0.18+ install passes live auth only with an explicit cookie strategy (e.g. `--browser-cookie-sync`); the requirement is documented in the runbook and named in adapter diagnostics. |
 
 All counted verification must run through `brigade work verify run`, followed
 by outcome capture for the implementation card or skill.
