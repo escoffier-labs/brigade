@@ -1089,6 +1089,24 @@ def run_agent(
     safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides, resolved_secret_targets)
     safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides, resolved_secret_targets)
 
+    if result.output_limit_exceeded:
+        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        overflow_detail = f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"
+        failure_detail = scrub_detail(safe_stderr.strip() or overflow_detail)[:200]
+        return AgentResult(
+            text=safe_text,
+            ok=False,
+            detail=failure_detail,
+            failure_phase="harness",
+            failure_kind="output-limit",
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            timed_out=result.code == 124,
+            requested_model=model,
+            reasoning=reasoning,
+        )
+
     if result.decode_failed:
         safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
         failure_detail = scrub_detail(safe_stderr.strip() or result.decode_failure_detail)[:200]
@@ -1337,6 +1355,19 @@ def run_codex_appserver(
             reasoning=reasoning,
         )
     text = turn.text.strip()
+    if len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
+        return AgentResult(
+            text=proc.bound_text(text),
+            ok=False,
+            detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"[:200],
+            failure_phase="harness",
+            failure_kind="output-limit",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=model,
+            reasoning=reasoning,
+        )
     if not turn.ok:
         return AgentResult(
             text=text,

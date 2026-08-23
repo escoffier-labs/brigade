@@ -6,9 +6,23 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
-from . import agents, localio
+from . import agents, localio, message_envelope, proc
 from .run_transport import Assignment, WorkerAttempt, WorkerResult
 from .worker_failure import normalized_failure
+
+
+def _bound_capture_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return proc.bound_text(value, proc.MAX_CAPTURE_BYTES)
+
+
+def _bound_message_text(value: str) -> str:
+    return message_envelope.truncate_utf8(value, message_envelope.MESSAGE_WRAP_MAX_BYTES)
+
+
+def _bound_detail(value: str) -> str:
+    return proc.bound_text(value, proc.MAX_CAPTURE_BYTES)
 
 
 def assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]:
@@ -46,8 +60,8 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
             "worker": result.worker,
             "task": result.task,
             "ok": result.ok,
-            "detail": result.detail,
-            "text": result.text,
+            "detail": _bound_detail(result.detail),
+            "text": _bound_message_text(result.text),
         }
         if result.failure_phase is not None:
             entry["failure_phase"] = result.failure_phase
@@ -146,8 +160,8 @@ def _attempt_payload(attempt: WorkerAttempt, *, attempt_number: int) -> dict[str
 def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
     payload: dict[str, object] = {
         "ok": result.ok,
-        "detail": result.detail,
-        "text": result.text,
+        "detail": _bound_detail(result.detail),
+        "text": _bound_message_text(result.text),
     }
     if result.failure_phase is not None:
         payload["failure_phase"] = result.failure_phase
@@ -228,30 +242,54 @@ def write_worker_logs(output_dir: Path, results: list[WorkerResult]) -> list[Wor
             prefix = f"worker-{index:03d}-{worker}-attempt-{attempt_index:03d}-{kind}"
             stdout_ref = f"logs/{prefix}.stdout.log"
             stderr_ref = f"logs/{prefix}.stderr.log"
-            localio.write_text_atomic(output_dir / stdout_ref, attempt.stdout or "")
-            localio.write_text_atomic(output_dir / stderr_ref, attempt.stderr or "")
-            recorded_attempts.append(replace(attempt, stdout_log=stdout_ref, stderr_log=stderr_ref))
+            bounded_stdout = _bound_capture_text(attempt.stdout) or ""
+            bounded_stderr = _bound_capture_text(attempt.stderr) or ""
+            localio.write_text_atomic(output_dir / stdout_ref, bounded_stdout)
+            localio.write_text_atomic(output_dir / stderr_ref, bounded_stderr)
+            recorded_attempts.append(
+                replace(
+                    attempt,
+                    stdout=bounded_stdout,
+                    stderr=bounded_stderr,
+                    stdout_log=stdout_ref,
+                    stderr_log=stderr_ref,
+                )
+            )
 
-        recorded_result = replace(result, attempts=tuple(recorded_attempts))
+        recorded_result = replace(
+            result,
+            text=_bound_message_text(result.text),
+            detail=_bound_detail(result.detail),
+            stdout=_bound_capture_text(result.stdout),
+            stderr=_bound_capture_text(result.stderr),
+            attempts=tuple(recorded_attempts),
+        )
         if result.stdout is not None or result.stderr is not None:
             logs_dir.mkdir(parents=True, exist_ok=True)
             prefix = f"worker-{index:03d}-{worker}"
             stdout_ref = f"logs/{prefix}.stdout.log"
             stderr_ref = f"logs/{prefix}.stderr.log"
-            localio.write_text_atomic(output_dir / stdout_ref, result.stdout or "")
-            localio.write_text_atomic(output_dir / stderr_ref, result.stderr or "")
+            localio.write_text_atomic(output_dir / stdout_ref, recorded_result.stdout or "")
+            localio.write_text_atomic(output_dir / stderr_ref, recorded_result.stderr or "")
             recorded_result = replace(recorded_result, stdout_log=stdout_ref, stderr_log=stderr_ref)
         recorded.append(recorded_result)
     return recorded
 
 
 def write_agent_logs(output_dir: Path, label: str, result: agents.AgentResult) -> agents.AgentResult:
-    if result.stdout is None and result.stderr is None:
-        return result
+    bounded = replace(
+        result,
+        text=_bound_message_text(result.text),
+        detail=_bound_detail(result.detail),
+        stdout=_bound_capture_text(result.stdout),
+        stderr=_bound_capture_text(result.stderr),
+    )
+    if bounded.stdout is None and bounded.stderr is None:
+        return bounded
     logs_dir = output_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     stdout_ref = f"logs/{label}.stdout.log"
     stderr_ref = f"logs/{label}.stderr.log"
-    localio.write_text_atomic(output_dir / stdout_ref, result.stdout or "")
-    localio.write_text_atomic(output_dir / stderr_ref, result.stderr or "")
-    return replace(result, stdout_log=stdout_ref, stderr_log=stderr_ref)
+    localio.write_text_atomic(output_dir / stdout_ref, bounded.stdout or "")
+    localio.write_text_atomic(output_dir / stderr_ref, bounded.stderr or "")
+    return replace(bounded, stdout_log=stdout_ref, stderr_log=stderr_ref)

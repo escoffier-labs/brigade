@@ -1914,6 +1914,19 @@ def _run_codex_appserver_worker(
         if registry is not None and active_turn_id is not None:
             registry.unregister(worker, active_turn_id)
     text = turn.text.strip()
+    if len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
+        return agents.AgentResult(
+            text=proc.bound_text(text),
+            ok=False,
+            detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"[:200],
+            failure_phase="harness",
+            failure_kind="output-limit",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=agent.model,
+            reasoning=agent.reasoning,
+        )
     if not turn.ok:
         timed_out = bool(getattr(turn, "timed_out", False))
         failure_kind = "timeout" if timed_out else "interrupted" if turn.status == "interrupted" else None

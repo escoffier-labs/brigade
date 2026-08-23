@@ -1,4 +1,5 @@
 import errno
+import io
 import locale
 import os
 import signal
@@ -11,6 +12,39 @@ from pathlib import Path
 import pytest
 
 from brigade import proc
+
+
+class _RecordingBytesIO(io.BytesIO):
+    def __init__(self, initial=b""):
+        super().__init__(initial)
+        self.written = bytearray()
+
+    def write(self, data):
+        self.written.extend(data)
+        return super().write(data)
+
+
+class _StubProcess:
+    """Popen stand-in with readable pipes for the streaming collector."""
+
+    def __init__(self, stdout=b"", stderr=b"", returncode=0, pid=4242, wait_error=None):
+        self.pid = pid
+        self.returncode = returncode
+        self.stdout = io.BytesIO(stdout)
+        self.stderr = io.BytesIO(stderr)
+        self.stdin = _RecordingBytesIO()
+        self._wait_error = wait_error
+        self._poll_error = None
+
+    def poll(self):
+        if self._poll_error is not None:
+            raise self._poll_error
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self._wait_error is not None:
+            raise self._wait_error
+        return self.returncode
 
 
 def test_process_registry_escalates_every_owned_process_group(monkeypatch):
@@ -56,17 +90,10 @@ def test_process_registry_escalates_every_owned_process_group(monkeypatch):
 def test_registered_windows_process_starts_in_new_process_group(monkeypatch):
     captured = {}
 
-    class StubProcess:
-        pid = 4242
-        returncode = 0
-
-        def communicate(self, *, input, timeout):
-            return b"ok\n", b""
-
     def fake_popen(args, **kwargs):
         captured["args"] = args
         captured.update(kwargs)
-        return StubProcess()
+        return _StubProcess(stdout=b"ok\n")
 
     monkeypatch.setattr(proc.os, "name", "nt")
     monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
@@ -74,18 +101,13 @@ def test_registered_windows_process_starts_in_new_process_group(monkeypatch):
     result = proc.run(["worker.exe"], process_registry=proc.ProcessRegistry())
 
     assert result.code == 0
+    assert result.stdout == "ok\n"
     assert captured["creationflags"] == getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     assert "start_new_session" not in captured
 
 
 def test_registered_process_terminates_before_unregister_on_base_exception(monkeypatch):
     events = []
-
-    class StubProcess:
-        pid = 4242
-
-        def communicate(self, *, input, timeout):
-            raise KeyboardInterrupt
 
     class StubRegistry:
         def register(self, process):
@@ -97,7 +119,9 @@ def test_registered_process_terminates_before_unregister_on_base_exception(monke
         def unregister(self, process):
             events.append(("unregister", process.pid))
 
-    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: StubProcess())
+    stub = _StubProcess()
+    stub._poll_error = KeyboardInterrupt()
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: stub)
 
     with pytest.raises(KeyboardInterrupt):
         proc.run(["worker"], process_registry=StubRegistry())
@@ -159,41 +183,21 @@ def test_windows_registry_targets_tree_after_group_leader_exits(monkeypatch):
     assert calls[0][0] == ["taskkill", "/PID", "4242", "/T", "/F"]
 
 
-def test_registered_timeout_never_uses_unbounded_output_drain(monkeypatch):
-    communicate_timeouts = []
-
-    class StubProcess:
-        pid = 4242
-        returncode = 0
-
-        def communicate(self, *, input=None, timeout=None):
-            communicate_timeouts.append(timeout)
-            raise subprocess.TimeoutExpired(
-                ["worker"],
-                timeout,
-                output=b"partial output",
-                stderr=b"partial error",
-            )
-
-    class StubRegistry:
-        def register(self, process):
-            pass
-
-        def terminate(self, process):
-            pass
-
-        def unregister(self, process):
-            pass
-
-    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: StubProcess())
-
-    result = proc.run(["worker"], timeout=0.01, process_registry=StubRegistry())
+def test_registered_timeout_never_uses_unbounded_output_drain():
+    result = proc.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdout.write('partial output'); sys.stdout.flush(); time.sleep(5)",
+        ],
+        timeout=0.2,
+        process_registry=proc.ProcessRegistry(terminate_grace=0.05, kill_grace=0.05),
+    )
 
     assert result.code == 124
     assert result.stdout == "partial output"
-    assert result.stderr.startswith("partial error")
-    assert len(communicate_timeouts) == 2
-    assert all(timeout is not None for timeout in communicate_timeouts)
+    assert "timeout after" in result.stderr
+    assert result.total_bytes <= proc.MAX_CAPTURE_BYTES
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
@@ -286,25 +290,22 @@ def test_windows_registry_taskkill_timeout_is_bounded_and_falls_back(monkeypatch
     assert process.killed is True
 
 
-def test_windows_run_without_registry_keeps_legacy_subprocess_path(monkeypatch):
-    calls = []
+def test_windows_run_without_registry_still_starts_process_group(monkeypatch):
+    captured = {}
 
-    def fake_run(*args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=b"ok\n", stderr=b"")
+    def fake_popen(args, **kwargs):
+        captured.update(kwargs)
+        return _StubProcess(stdout=b"ok\n")
 
     monkeypatch.setattr(proc.os, "name", "nt")
-    monkeypatch.setattr(proc.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        proc.subprocess,
-        "Popen",
-        lambda *args, **kwargs: pytest.fail("legacy proc.run must not use Popen"),
-    )
+    monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
 
     result = proc.run(["worker.exe"])
 
     assert result.code == 0
-    assert len(calls) == 1
+    assert result.stdout == "ok\n"
+    assert captured["creationflags"] == getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    assert captured["stdin"] is subprocess.DEVNULL
 
 
 def test_run_captures_exit_and_output():
@@ -370,7 +371,7 @@ def test_run_classifies_launch_errors_without_absolute_paths(monkeypatch, launch
     def raise_launch_error(*args, **kwargs):
         raise launch_error
 
-    monkeypatch.setattr(proc.subprocess, "run", raise_launch_error)
+    monkeypatch.setattr(proc.subprocess, "Popen", raise_launch_error)
 
     result = proc.run(["/private/bin/worker"])
 
@@ -379,89 +380,87 @@ def test_run_classifies_launch_errors_without_absolute_paths(monkeypatch, launch
     assert "/private/bin/worker" not in result.stderr
 
 
-def test_run_preserves_partial_output_on_timeout(monkeypatch):
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(
-            cmd=["worker"],
-            timeout=3.0,
-            output=b"partial stdout\n",
-            stderr=b"partial stderr\n",
-        )
-
-    monkeypatch.setattr(proc.subprocess, "run", timeout)
-
-    result = proc.run(["worker"], timeout=3.0)
+def test_run_preserves_partial_output_on_timeout():
+    result = proc.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys,time; "
+                "sys.stdout.write('partial stdout\\n'); sys.stdout.flush(); "
+                "sys.stderr.write('partial stderr\\n'); sys.stderr.flush(); "
+                "time.sleep(5)"
+            ),
+        ],
+        timeout=0.3,
+    )
 
     assert result.code == 124
     assert result.stdout == "partial stdout\n"
-    assert result.stderr == "partial stderr\ntimeout after 3.0s"
+    assert result.stderr.startswith("partial stderr\n")
+    assert "timeout after 0.3s" in result.stderr
 
 
 def test_run_feeds_stdin_when_provided(monkeypatch):
     captured = {}
+    stub = _StubProcess(stdout=b"ok\n")
 
-    def fake_run(*args, **kwargs):
+    def fake_popen(*args, **kwargs):
         captured.update(kwargs)
-        return subprocess.CompletedProcess(args=kwargs.get("args") or args, returncode=0, stdout=b"ok\n", stderr=b"")
+        return stub
 
-    monkeypatch.setattr(proc.subprocess, "run", fake_run)
+    monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
     result = proc.run(["codex", "exec", "-"], stdin=b"plan prompt")
     assert result.code == 0
-    assert captured["input"] == b"plan prompt"
-    assert "stdin" not in captured
+    assert captured["stdin"] is subprocess.PIPE
+    assert bytes(stub.stdin.written) == b"plan prompt"
 
 
 def test_run_uses_devnull_stdin_when_stdin_omitted(monkeypatch):
     captured = {}
 
-    def fake_run(*args, **kwargs):
+    def fake_popen(*args, **kwargs):
         captured.update(kwargs)
-        return subprocess.CompletedProcess(args=kwargs.get("args") or args, returncode=0, stdout=b"", stderr=b"")
+        return _StubProcess()
 
-    monkeypatch.setattr(proc.subprocess, "run", fake_run)
+    monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
     proc.run(["true"])
     assert captured["stdin"] is subprocess.DEVNULL
-    assert "input" not in captured
 
 
 def test_run_decodes_valid_utf8_with_byte_0x9d_despite_cp1252_locale(monkeypatch):
     payload = "review complete: \u275d\n".encode("utf-8")
     assert b"\x9d" in payload
-
-    def fake_run(*args, **kwargs):
-        assert kwargs.get("text") is not True
-        return subprocess.CompletedProcess(args[0], 0, payload, b"")
-
-    monkeypatch.setattr(proc.subprocess, "run", fake_run)
     monkeypatch.setattr(locale, "getpreferredencoding", lambda *args, **kwargs: "cp1252")
 
-    result = proc.run(["worker"])
+    result = proc.run(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(" + repr(payload) + ")"],
+    )
 
     assert result.code == 0
     assert result.stdout == "review complete: \u275d\n"
     assert result.stderr == ""
 
 
-def test_run_timeout_normalizes_none_output(monkeypatch):
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=["worker"], timeout=3.0, output=None, stderr=None)
-
-    monkeypatch.setattr(proc.subprocess, "run", timeout)
-
-    result = proc.run(["worker"], timeout=3.0)
+def test_run_timeout_normalizes_none_output():
+    result = proc.run(
+        [sys.executable, "-c", "import time; time.sleep(5)"],
+        timeout=0.2,
+    )
 
     assert result.code == 124
     assert result.stdout == ""
-    assert result.stderr == "timeout after 3.0s"
+    assert result.stderr == "timeout after 0.2s"
 
 
-def test_run_returns_typed_failure_for_invalid_utf8(monkeypatch):
-    def fake_run(*args, **kwargs):
-        return subprocess.CompletedProcess(args[0], 0, b"\x9d alone is invalid utf-8", b"stderr ok\n")
-
-    monkeypatch.setattr(proc.subprocess, "run", fake_run)
-
-    result = proc.run(["worker"])
+def test_run_returns_typed_failure_for_invalid_utf8():
+    result = proc.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'\\x9d alone is invalid utf-8'); sys.stderr.write('stderr ok\\n')",
+        ]
+    )
 
     assert result.code == 0
     assert result.decode_failed is True
@@ -472,15 +471,10 @@ def test_run_returns_typed_failure_for_invalid_utf8(monkeypatch):
     assert result.stderr.startswith("stderr ok\nchild stdout is not valid UTF-8 (utf-8):")
 
 
-def test_run_preserves_valid_prefix_on_invalid_utf8(monkeypatch):
-    payload = b"prefix\n\x9d"
-
-    def fake_run(*args, **kwargs):
-        return subprocess.CompletedProcess(args[0], 0, payload, b"")
-
-    monkeypatch.setattr(proc.subprocess, "run", fake_run)
-
-    result = proc.run(["worker"])
+def test_run_preserves_valid_prefix_on_invalid_utf8():
+    result = proc.run(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'prefix\\n\\x9d')"],
+    )
 
     assert result.code == 0
     assert result.decode_failed is True
@@ -520,32 +514,42 @@ def test_seat_process_registry_terminate_delegates_to_parent(monkeypatch):
     assert terminated == [1234]
 
 
-def test_seat_registry_timeout_yields_code_124_not_attribute_error(monkeypatch):
+def test_seat_registry_timeout_yields_code_124_not_attribute_error():
     """A seat-scoped registry passed to proc.run must not raise AttributeError on timeout."""
 
-    class StubProcess:
-        pid = 9999
-        returncode = 0
-
-        def communicate(self, *, input=None, timeout=None):
-            raise subprocess.TimeoutExpired(
-                ["worker"],
-                timeout,
-                output=b"out",
-                stderr=b"err",
-            )
-
-    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: StubProcess())
-    monkeypatch.setattr(
-        proc,
-        "_terminate_processes",
-        lambda processes, **kwargs: None,
-    )
-
-    parent = proc.ProcessRegistry(terminate_grace=0, kill_grace=0)
+    parent = proc.ProcessRegistry(terminate_grace=0.05, kill_grace=0.05)
     seat_registry = parent.for_seat("grok")
 
-    result = proc.run(["worker"], timeout=0.01, process_registry=seat_registry)
+    result = proc.run(
+        [sys.executable, "-c", "import time; time.sleep(5)"],
+        timeout=0.2,
+        process_registry=seat_registry,
+    )
 
     assert result.code == 124
     assert "timeout after" in result.stderr
+
+
+def test_run_caps_combined_output_and_sets_overflow_flag():
+    overflow = proc.MAX_CAPTURE_BYTES + 4096
+    stdout_n = overflow // 2
+    stderr_n = overflow - stdout_n
+    result = proc.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys;"
+                f"sys.stdout.buffer.write(b'O' * {stdout_n});"
+                f"sys.stderr.buffer.write(b'E' * {stderr_n});"
+                "sys.stdout.buffer.flush(); sys.stderr.buffer.flush()"
+            ),
+        ],
+        timeout=5.0,
+    )
+
+    assert result.output_limit_exceeded is True
+    assert result.total_bytes == proc.MAX_CAPTURE_BYTES
+    assert result.stdout_bytes + result.stderr_bytes == proc.MAX_CAPTURE_BYTES
+    assert len(result.stdout.encode("utf-8")) + len(result.stderr.encode("utf-8")) >= proc.MAX_CAPTURE_BYTES
+    assert "combined output exceeded" in result.stderr

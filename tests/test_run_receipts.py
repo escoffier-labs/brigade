@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from brigade import message_envelope, provenance
-from brigade.run_receipts import worker_payload
+from brigade import message_envelope, proc, provenance
+from brigade.run_receipts import worker_payload, write_agent_logs, write_worker_logs
 from brigade.run_transport import WorkerResult
 
 
@@ -134,3 +134,34 @@ def test_admit_message_rejects_forged_upgraded_labels_without_authority():
         assert admission.delivered is False
         assert "authority" in admission.reason or "not deliverable" in admission.reason
         assert f"[envelope trust.label={label}]" not in message_envelope.wrap_message_body("implementation output", env)
+
+
+def test_worker_payload_and_logs_truncate_beyond_declared_bounds(tmp_path: Path):
+    from brigade import agents
+
+    oversized_text = "T" * (message_envelope.MESSAGE_WRAP_MAX_BYTES + 128)
+    oversized_stdout = "S" * (proc.MAX_CAPTURE_BYTES + 128)
+    result = WorkerResult(
+        worker="coder",
+        task="implement it",
+        text=oversized_text,
+        ok=False,
+        detail="D" * 32,
+        stdout=oversized_stdout,
+        stderr="e",
+        failure_phase="harness",
+        failure_kind="output-limit",
+    )
+    recorded = write_worker_logs(tmp_path, [result])[0]
+    entry = worker_payload([recorded])[0]
+    assert len(entry["text"].encode("utf-8")) == message_envelope.MESSAGE_WRAP_MAX_BYTES
+    assert len((tmp_path / recorded.stdout_log).read_bytes()) == proc.MAX_CAPTURE_BYTES
+    assert len((tmp_path / recorded.stderr_log).read_bytes()) <= proc.MAX_CAPTURE_BYTES
+
+    agent = write_agent_logs(
+        tmp_path,
+        "planner",
+        agents.AgentResult(text=oversized_text, ok=True, stdout=oversized_stdout, stderr="e"),
+    )
+    assert len(agent.text.encode("utf-8")) == message_envelope.MESSAGE_WRAP_MAX_BYTES
+    assert len((tmp_path / agent.stdout_log).read_bytes()) == proc.MAX_CAPTURE_BYTES
