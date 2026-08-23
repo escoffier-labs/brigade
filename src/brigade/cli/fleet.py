@@ -46,8 +46,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_serve.add_argument("--host", required=True, help="Interface to bind (required; never all interfaces by default).")
     p_serve.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"TCP port (default {DEFAULT_PORT}).")
-    p_serve.add_argument("--db", type=Path, default=None, help="SQLite database path (default ~/.brigade/fleet-hub.db).")
-    p_serve.add_argument("--token-file", type=Path, default=None, help="Bearer token file (else BRIGADE_FLEET_TOKEN env).")
+    p_serve.add_argument(
+        "--db", type=Path, default=None, help="SQLite database path (default ~/.brigade/fleet-hub.db)."
+    )
+    p_serve.add_argument(
+        "--token-file", type=Path, default=None, help="Bearer token file (else BRIGADE_FLEET_TOKEN env)."
+    )
     p_serve.set_defaults(func=_dispatch_serve)
 
     p_status = fleet_sub.add_parser("status", help="Show latest run state per node from the fleet hub.")

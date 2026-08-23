@@ -66,11 +66,22 @@ def load_fleet_config() -> dict[str, str]:
     if not token:
         token_file = section.get("token_file")
         if isinstance(token_file, str) and token_file.strip():
-            try:
-                token = Path(token_file).expanduser().read_text(encoding="utf-8").strip()
-            except OSError:
-                token = ""
+            token = _read_token_file(token_file)
     return {"hub_url": hub_url, "token": token}
+
+
+def _read_token_file(raw_path: str) -> str:
+    """Read a token file; tolerate a Windows path written with backslashes
+    (tried as-is first, then with backslashes normalized to ``/``)."""
+    candidates = [raw_path.strip()]
+    if "\\" in raw_path:
+        candidates.append(raw_path.strip().replace("\\", "/"))
+    for candidate in candidates:
+        try:
+            return Path(candidate).expanduser().read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+    return ""
 
 
 def _read_fleet_section(config_path: Path) -> dict[str, Any]:

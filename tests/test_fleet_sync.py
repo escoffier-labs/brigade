@@ -12,7 +12,13 @@ import pytest
 from brigade import fleet_client, fleet_hub
 
 
-def _event(node: str = "11111111-1111-4111-8111-111111111111", run_id: str = "r1", seq: int = 1, digest: str | None = None, state: str = "run.created") -> dict:
+def _event(
+    node: str = "11111111-1111-4111-8111-111111111111",
+    run_id: str = "r1",
+    seq: int = 1,
+    digest: str | None = None,
+    state: str = "run.created",
+) -> dict:
     return {
         "node_id": node,
         "run_id": run_id,
@@ -164,9 +170,7 @@ class TestClient:
         token_file = tmp_path / "token.txt"
         token_file.write_text(token + "\n")
         self.home.mkdir(parents=True, exist_ok=True)
-        (self.home / "fleet.toml").write_text(
-            f'[fleet]\nhub_url = "{url}"\ntoken_file = "{token_file.as_posix()}"\n'
-        )
+        (self.home / "fleet.toml").write_text(f'[fleet]\nhub_url = "{url}"\ntoken_file = "{token_file.as_posix()}"\n')
 
     def test_unreachable_hub_spools_does_not_raise(self, monkeypatch):
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
@@ -183,7 +187,7 @@ class TestClient:
         fleet_client.report_event(_event(seq=2))
         spool_files = list((self.home / "fleet-spool").glob("*.jsonl"))
         node_file = spool_files[0].name
-        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "")
+        monkeypatch.delenv("BRIGADE_FLEET_HUB_URL", raising=False)
         self._config(tmp_path, url, token)
         flushed = fleet_client.flush_spool(Path(node_file).stem)
         assert flushed == 2
@@ -201,7 +205,7 @@ class TestClient:
         url, token, db = hub
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
         fleet_client.report_event(_event(seq=1))
-        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "")
+        monkeypatch.delenv("BRIGADE_FLEET_HUB_URL", raising=False)
         self._config(tmp_path, url, token)
         delivered = fleet_client.report_event(_event(seq=2))
         assert delivered is True
@@ -244,6 +248,24 @@ class TestClient:
         assert remaining == [3]
         assert fleet_client.flush_spool(node_id) == 1
         assert not spool.exists()
+
+    def test_empty_env_values_fall_through_to_file(self, hub, monkeypatch, tmp_path):
+        url, token, _db = hub
+        self._config(tmp_path, url, token)
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "")
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "  ")
+        assert fleet_client.load_fleet_config() == {"hub_url": url, "token": token}
+
+    def test_backslash_token_file_path_is_tolerated(self, hub, tmp_path):
+        url, token, _db = hub
+        token_file = tmp_path / "token.txt"
+        token_file.write_text(token + "\n")
+        self.home.mkdir(parents=True, exist_ok=True)
+        # A Windows-style path written with single backslashes into a basic
+        # TOML string; the escape sequences would otherwise be interpreted.
+        raw = str(token_file).replace("/", "\\")
+        (self.home / "fleet.toml").write_text('[fleet]\nhub_url = "' + url + "\"\ntoken_file = '" + raw + "'\n")
+        assert fleet_client.load_fleet_config()["token"] == token
 
     def test_no_config_is_noop(self):
         assert fleet_client.load_fleet_config() == {"hub_url": "", "token": ""}
@@ -420,7 +442,23 @@ class TestCli:
         monkeypatch.setattr(fleet_hub, "run", lambda **kw: captured.update(kw) or 0)
         token_file = tmp_path / "tok"
         db = tmp_path / "hub.db"
-        assert cli.main(["fleet", "serve", "--host", "127.0.0.1", "--port", "4000", "--db", str(db), "--token-file", str(token_file)]) == 0
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "4000",
+                    "--db",
+                    str(db),
+                    "--token-file",
+                    str(token_file),
+                ]
+            )
+            == 0
+        )
         assert captured == {"host": "127.0.0.1", "port": 4000, "db_path": db, "token_file": token_file}
 
     def test_status_json_and_table(self, hub, monkeypatch, capsys):
