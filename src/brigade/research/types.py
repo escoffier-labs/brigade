@@ -134,6 +134,52 @@ class ReviewResult:
     attempt_id: str
 
 
+ClaimResult = Literal["backed", "disputed", "insufficient", "skipped"]
+VALID_CLAIM_RESULTS: frozenset[str] = frozenset(get_args(ClaimResult))
+
+
+@dataclass(frozen=True)
+class ClaimRecord:
+    """One validated reviewer judgement about a factual claim in the final report.
+
+    ``span`` is a ``(start, end)`` character-offset pair into the exact report
+    text whose digest is bound into the parent :class:`ClaimAudit`.
+    """
+
+    claim_id: str
+    span: tuple[int, int]
+    text_digest: str
+    source_ids: tuple[str, ...]
+    finding_fingerprints: tuple[str, ...]
+    result: ClaimResult
+    explanation: str
+    conflicting_source_ids: tuple[str, ...] = ()
+    conflicting_finding_fingerprints: tuple[str, ...] = ()
+    limitation_span: tuple[int, int] | None = None
+    limitation_stated: bool = False
+
+
+@dataclass(frozen=True)
+class ClaimAudit:
+    """Versioned claim-support record bound to one exact final report digest.
+
+    ``accepted`` is derived by Brigade from the validated records; it is never
+    copied from the reviewer response. ``reviewer_accepted`` retains the
+    reviewer's own veto for transparency.
+    """
+
+    report_digest: str
+    synthesis_attempt_id: str
+    reviewer_seat: str
+    review_attempt_id: str
+    claims: tuple[ClaimRecord, ...]
+    counts: Mapping[str, int]
+    exceptions: tuple[Mapping[str, Any], ...]
+    reviewer_accepted: bool
+    accepted: bool
+    detail: str
+
+
 @dataclass(frozen=True)
 class SynthesisRecord:
     seat: str
@@ -177,6 +223,7 @@ class ResumeState:
     audit: CitationAudit | None = None
     review: ReviewResult | None = None
     synthesis: SynthesisRecord | None = None
+    claim_audit: ClaimAudit | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +237,7 @@ class ResearchResult:
     synthesis_attempt_id: str
     fallbacks: tuple[FallbackRecord, ...]
     stats: dict[str, Any]
+    claim_audit: ClaimAudit | None = None
 
 
 @dataclass(frozen=True)
@@ -258,6 +306,7 @@ class Caps:
     max_local_docs_per_round: int = 5
     max_content_chars: int = 15000
     max_report_tokens: int = 8192
+    max_review_tokens: int = 4096
     max_empty_rounds: int = 2
     synthesis_window: int = 10
 

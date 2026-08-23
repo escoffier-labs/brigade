@@ -454,12 +454,8 @@ def export_run(
     try:
         payload_root = staging / WORK_RUN_PAYLOAD_DIR
         _copy_run_tree_refuse_special(run_dir, payload_root)
-        # Omit crashed checkpoint temp bodies; they cannot become truthful refs.
-        cp_dir = payload_root / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
-        if cp_dir.is_dir():
-            for temp_path in sorted(cp_dir.glob(".checkpoint.*.tmp")):
-                if temp_path.is_file() and not temp_path.is_symlink():
-                    temp_path.unlink()
+        # Crashed checkpoint temps cannot become truthful refs; the strip
+        # helper removes them unread (#646).
         run_checkpoint.strip_checkpoint_bodies_for_export(payload_root)
         try:
             worker_events.project_worker_streams_for_export(payload_root)

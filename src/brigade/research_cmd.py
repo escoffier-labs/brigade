@@ -25,6 +25,7 @@ from .research.sources.browser_ai import BrowserAiProvider
 from .research.types import (
     Caps,
     CitationAudit,
+    ClaimAudit,
     Finding,
     ResearchLanes,
     ResearchProfile,
@@ -375,7 +376,8 @@ class CancellationWatcher(Thread):
 
 
 def resume_state(target: Path, run_id: str) -> ResumeState:
-    from .research.types import ReviewResult, SynthesisRecord
+    from .research import claim_audit as claim_audit_mod
+    from .research.types import ClaimAudit, ReviewResult, SynthesisRecord
 
     sidecar = registry.read_research(target, run_id)
     phases = sidecar.get("phases") or {}
@@ -388,6 +390,12 @@ def resume_state(target: Path, run_id: str) -> ResumeState:
     findings = registry.read_verified_artifact(target, run_id, extraction.get("artifact"))
     report = registry.read_verified_artifact(target, run_id, synthesis.get("artifact"))
     audit = registry.read_verified_artifact(target, run_id, review.get("artifact"))
+    claim_meta = review.get("claim_audit") if isinstance(review.get("claim_audit"), dict) else None
+    claim_audit = None
+    if claim_meta is not None:
+        loaded_claim = registry.read_verified_artifact(target, run_id, claim_meta.get("artifact"))
+        if isinstance(loaded_claim, ClaimAudit):
+            claim_audit = loaded_claim
     review_meta = review.get("review") if isinstance(review.get("review"), dict) else None
     review_result = None
     if isinstance(review_meta, dict) and review.get("status") == "completed":
@@ -419,7 +427,16 @@ def resume_state(target: Path, run_id: str) -> ResumeState:
     findings_ok = sources_ok and extraction.get("status") == "completed" and findings is not None
     report_ok = findings_ok and synthesis.get("status") == "completed" and report is not None
     audit_ok = report_ok and review.get("status") == "completed" and audit is not None
-    review_ok = audit_ok and review_result is not None
+    # Claim records must bind to the exact report text and synthesis attempt
+    # that is being resumed; stale records force a fresh review.
+    claim_ok = (
+        audit_ok
+        and claim_audit is not None
+        and isinstance(report, str)
+        and synthesis_record is not None
+        and claim_audit_mod.matches_report(claim_audit, report=report, synthesis_attempt_id=synthesis_record.attempt_id)
+    )
+    review_ok = claim_ok and review_result is not None
     return ResumeState(
         plan=plan if isinstance(plan, str) else None,
         sources=sources if sources_ok else None,
@@ -428,6 +445,7 @@ def resume_state(target: Path, run_id: str) -> ResumeState:
         audit=audit if audit_ok else None,
         review=review_result if review_ok else None,
         synthesis=synthesis_record if report_ok else None,
+        claim_audit=claim_audit if claim_ok else None,
     )
 
 
@@ -703,6 +721,8 @@ def _publish_final_artifacts(
     # Citation audit was already persisted at review; refresh digest refs for finals.
     audit_ref = registry.write_citation_audit(target, run_id, result.citation_audit)
     _check()
+    claim_ref = registry.write_claim_audit(target, run_id, result.claim_audit) if result.claim_audit else None
+    _check()
     md = reportmod.render_markdown(
         question=question,
         markdown_report=result.report,
@@ -736,6 +756,7 @@ def _publish_final_artifacts(
         "handoff": handoff_ref,
         "findings": finding_ref,
         "citation_audit": audit_ref,
+        **({"claim_audit": claim_ref} if claim_ref is not None else {}),
     }
 
 
@@ -1453,6 +1474,9 @@ def run(
             def persist_citation_audit(audit: CitationAudit) -> dict[str, str]:
                 return registry.write_citation_audit(target, run_id, audit)
 
+            def persist_claim_audit(audit: ClaimAudit) -> dict[str, str]:
+                return registry.write_claim_audit(target, run_id, audit)
+
             watcher = CancellationWatcher(
                 target=target,
                 run_id=run_id,
@@ -1471,6 +1495,7 @@ def run(
                 persist_findings=persist_findings,
                 persist_draft_report=persist_draft_report,
                 persist_citation_audit=persist_citation_audit,
+                persist_claim_audit=persist_claim_audit,
             )
             try:
                 try:
@@ -1565,6 +1590,7 @@ def run(
                             "handoff": registry.HANDOFF_ARTIFACT,
                             "findings": registry.FINDINGS_ARTIFACT,
                             "citation_audit": registry.CITATION_AUDIT_ARTIFACT,
+                            **({"claim_audit": registry.CLAIM_AUDIT_ARTIFACT} if "claim_audit" in artifacts else {}),
                         },
                         blockers=blockers,
                         budget_projection=coordinator.projection.to_payload(),
@@ -2612,6 +2638,48 @@ def _show_artifact_verification(
     return {name: registry.artifact_verification_state(target, run_id, ref) for name, ref in sorted(refs.items())}
 
 
+def _show_claim_audit_projection(target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[str, object] | None:
+    """Bounded claim-audit status: artifact reference and counts, never the records.
+
+    Returns ``None`` (rendered as ``claim audit unavailable``) for legacy runs
+    and for runs completed before claim audits existed; those are never
+    silently upgraded.
+    """
+    from .research import claim_audit as claim_audit_mod
+
+    if rec.get("legacy"):
+        return None
+    ref = _show_artifact_refs(rec).get("claim_audit")
+    if ref is None:
+        try:
+            research = registry.read_research(target, run_id)
+        except FileNotFoundError:
+            return None
+        phases = research.get("phases") if isinstance(research.get("phases"), Mapping) else {}
+        review = phases.get("review") if isinstance(phases, Mapping) else None
+        meta = review.get("claim_audit") if isinstance(review, Mapping) else None
+        if isinstance(meta, Mapping):
+            ref = meta.get("artifact")
+    if not isinstance(ref, Mapping):
+        return None
+    verification = registry.artifact_verification_state(target, run_id, ref)
+    projection: dict[str, object] = {
+        "artifact": ref.get("path"),
+        "digest": ref.get("digest"),
+        "verification": verification,
+        "accepted": None,
+        "report_digest": None,
+        "counts": {},
+    }
+    if verification != "verified":
+        return projection
+    loaded = registry.read_verified_artifact(target, run_id, ref)
+    summary = claim_audit_mod.summary_counts(loaded if isinstance(loaded, claim_audit_mod.ClaimAudit) else None)
+    if summary is not None:
+        projection.update(summary)
+    return projection
+
+
 def _show_payload(*, target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[str, object]:
     from dataclasses import asdict, is_dataclass
 
@@ -2650,6 +2718,7 @@ def _show_payload(*, target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[
                 elif loaded is not None:
                     citation_audit = loaded
     sources, sources_verification = _show_sources_projection(target, run_id, rec, research)
+    claim_audit = _show_claim_audit_projection(target, run_id, rec)
     return {
         "schema": "brigade.research.show.v2",
         "schema_version": 2,
@@ -2657,6 +2726,7 @@ def _show_payload(*, target: Path, run_id: str, rec: Mapping[str, Any]) -> dict[
         "research": _sanitize_projection_value(research) if research is not None else None,
         "findings": _sanitize_projection_value(findings) if findings is not None else None,
         "citation_audit": _sanitize_projection_value(citation_audit) if citation_audit is not None else None,
+        "claim_audit": claim_audit,
         "sources": sources,
         "sources_verification": sources_verification,
         "report": _show_report_projection(target, run_id, rec),
@@ -2840,6 +2910,13 @@ def cli_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
         print(f"handoff_export_count: {handoff_state.get('export_count')}")
         if handoff_state.get("suggested_next_command"):
             print(f"handoff_export_command: {handoff_state.get('suggested_next_command')}")
+    from .research import claim_audit as claim_audit_mod
+
+    claim_projection = _show_claim_audit_projection(target, run_id, rec)
+    if claim_projection is None or claim_projection.get("verification") != "verified":
+        print("claim_audit: unavailable")
+    else:
+        print(claim_audit_mod.summary_line(claim_projection))
     for b in rec.get("blockers", []):
         print(f"blocker: {b}")
     return 0

@@ -46,6 +46,7 @@ RESEARCH_PHASES: tuple[str, ...] = (
 SOURCES_ARTIFACT = "sources.json"
 FINDINGS_ARTIFACT = "findings.json"
 CITATION_AUDIT_ARTIFACT = "citation-audit.json"
+CLAIM_AUDIT_ARTIFACT = "claim-audit.json"
 RESEARCH_ARTIFACT = "research.json"
 RESEARCH_SIDECAR_LOCK = "research.json.lock"
 DRAFT_REPORT_ARTIFACT = "report.draft.md"
@@ -497,6 +498,15 @@ def write_citation_audit(target: Path, run_id: str, audit: Any) -> dict[str, str
     return _artifact_ref(CITATION_AUDIT_ARTIFACT, _file_digest(path))
 
 
+def write_claim_audit(target: Path, run_id: str, audit: Any) -> dict[str, str]:
+    from . import claim_audit as claim_audit_mod
+
+    path = standard_run_dir(target, run_id) / CLAIM_AUDIT_ARTIFACT
+    payload = receipt_schema.stamp_research_claim_audit(claim_audit_mod.to_payload(audit))
+    localio.write_json(path, payload)
+    return _artifact_ref(CLAIM_AUDIT_ARTIFACT, _file_digest(path))
+
+
 def write_text_artifact(target: Path, run_id: str, name: str, text: str) -> dict[str, str]:
     if not _is_relative_contained(name):
         raise ValueError(f"artifact name escapes run directory: {name}")
@@ -712,6 +722,10 @@ def read_verified_artifact(target: Path, run_id: str, artifact: Any) -> Any | No
                 return tuple(_finding_from_dict(item) for item in findings)
             if path_name == CITATION_AUDIT_ARTIFACT:
                 return _citation_audit_from_dict(payload)
+            if path_name == CLAIM_AUDIT_ARTIFACT:
+                from . import claim_audit as claim_audit_mod
+
+                return claim_audit_mod.from_payload(payload)
             return payload
         except (KeyError, TypeError, ValueError):
             return None
