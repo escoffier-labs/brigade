@@ -126,6 +126,19 @@ def main() -> int:
                 )
             elif "DIE" in prompt:
                 return 1
+            elif "FLOOD" in prompt:
+                chunk = "D" * 400
+                for _ in range(80):
+                    _notify(
+                        "item/agentMessage/delta",
+                        {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "itemId": f"{turn_id}-msg",
+                            "delta": chunk,
+                        },
+                    )
+                _complete_turn(thread_id, turn_id, "completed", chunk * 80)
             else:
                 if "NOISE" in prompt:
                     _notify("totally/unknown", {"threadId": thread_id, "mystery": True})

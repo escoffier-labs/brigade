@@ -179,6 +179,7 @@ LEGACY_FAILURE_KIND_MAP: dict[str, FailureClass] = {
     "browser-auth": FailureClass.AUTH_REQUIRED,
     "command-not-found": FailureClass.EXECUTABLE_UNAVAILABLE,
     "decode-failure": FailureClass.TRANSPORT_UNAVAILABLE,
+    "output-limit": FailureClass.TRANSPORT_UNAVAILABLE,
     "empty-output": FailureClass.OUTPUT_CONTRACT_VIOLATION,
     "env-ref-missing": FailureClass.CONFIGURATION_INVALID,
     "grok-fallback-missing": FailureClass.CONFIGURATION_INVALID,

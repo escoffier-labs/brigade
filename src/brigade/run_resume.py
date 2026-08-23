@@ -642,10 +642,15 @@ def _resume_locked(
                 entry["detail"] = redact_approval_token(str(exc))[:200]
                 entry["status"] = "failed"
                 continue
-            entry["text"] = redact_approval_token(turn.text).strip()
-            entry["ok"] = turn.ok and bool(turn.text.strip())
+            entry["text"] = message_envelope.truncate_utf8(redact_approval_token(turn.text).strip())
+            entry["ok"] = turn.ok and bool(entry["text"])
             entry["detail"] = "" if entry["ok"] else redact_approval_token(turn.detail or f"turn {turn.status}")[:200]
             entry["status"] = turn.status
+            if getattr(turn, "output_limit_exceeded", False):
+                entry["ok"] = False
+                entry["failure_phase"] = "harness"
+                entry["failure_kind"] = "output-limit"
+                entry["detail"] = redact_approval_token(turn.detail or entry["detail"])[:200]
             captured = message_envelope.emit(
                 entry["text"],
                 kind="worker-result",

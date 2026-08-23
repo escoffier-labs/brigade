@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -247,6 +250,246 @@ def test_windows_appserver_uses_group_and_registry_tree_termination(monkeypatch)
     assert captured["creationflags"] == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     assert "start_new_session" not in captured
     assert events == [("register", 4242), ("terminate", 4242), ("unregister", 4242)]
+
+
+class _BudgetStubServer:
+    def __init__(self):
+        self._output_limit_exceeded = False
+        self._capture_budgets = {}
+        self._orphan_budget = proc.ByteBudget()
+
+    def capture_budget(self, thread_id=None):
+        if thread_id is None:
+            return self._orphan_budget
+        return self._capture_budgets.setdefault(thread_id, proc.ByteBudget())
+
+    def reset_capture(self, thread_id):
+        self._capture_budgets[thread_id] = proc.ByteBudget()
+
+    def _signal_output_limit(self):
+        self._output_limit_exceeded = True
+        for budget in self._capture_budgets.values():
+            budget.overflowed = True
+
+    def request(self, method, params, timeout=None):  # noqa: ARG002
+        return {"turn": {"id": "turn-1"}}
+
+
+def test_consume_caps_deltas_during_accumulation(monkeypatch):
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 256)
+    q: queue.Queue = queue.Queue()
+    server = _BudgetStubServer()
+    thread = codex_appserver.CodexThread(server, "thread-1", q)
+    chunk = "D" * 50
+    for _ in range(20):
+        q.put(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"itemId": "msg-1", "delta": chunk},
+            }
+        )
+    q.put(
+        {
+            "method": "turn/completed",
+            "params": {"turn": {"id": "turn-1", "status": "completed", "items": []}},
+        }
+    )
+
+    result = thread.run_turn("work", timeout=2.0)
+
+    assert result.output_limit_exceeded is True
+    assert result.ok is False
+    assert len(result.text.encode("utf-8")) <= 256
+    assert server.capture_budget("thread-1").used <= 256
+    assert server.capture_budget("thread-1").overflowed is True
+    assert "combined output exceeded" in result.detail
+
+
+def test_read_loop_stops_queueing_after_line_cap(monkeypatch):
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    captured = {"queued": 0, "peak": 0}
+
+    class RecordingQueue:
+        def __init__(self):
+            self._items = []
+
+        def put(self, msg):
+            if msg is codex_appserver._OUTPUT_LIMIT or msg is codex_appserver._DEAD:
+                return
+            size = len(json.dumps(msg).encode("utf-8"))
+            captured["queued"] += size
+            captured["peak"] = max(captured["peak"], captured["queued"])
+
+    server = codex_appserver.AppServer(argv=FAKE)
+    server._queues["t-flood"] = RecordingQueue()
+    server.reset_capture("t-flood")
+    flood_line = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": "t-flood", "itemId": "m", "delta": "X" * 200},
+        }
+    )
+    lines = "\n".join([flood_line] * 20) + "\n"
+
+    class FakeProc:
+        stdout = io.BytesIO(lines.encode("utf-8"))
+
+    server._proc = FakeProc()
+    server._read_loop()
+
+    assert server._output_limit_exceeded is True
+    assert captured["peak"] <= 512
+    assert server.capture_budget("t-flood").overflowed is True
+
+
+class _VirtualRecordStream:
+    """A single virtual JSONL record that is never fully materialized."""
+
+    def __init__(self, prefix: bytes, fill_size: int, suffix: bytes, fill: bytes = b"X"):
+        if len(fill) != 1:
+            raise ValueError("fill must be one byte")
+        self._prefix = prefix
+        self._fill_size = fill_size
+        self._suffix = suffix
+        self._fill = fill
+        self._offset = 0
+        self.bytes_served = 0
+        self.max_request = 0
+        self.total = len(prefix) + fill_size + len(suffix)
+
+    def read(self, n: int = -1) -> bytes:
+        if n < 0:
+            raise AssertionError("unbounded stdout read would buffer the whole record")
+        self.max_request = max(self.max_request, n)
+        if self._offset >= self.total or n == 0:
+            return b""
+        end = min(self._offset + n, self.total)
+        chunk = self._slice(self._offset, end)
+        self._offset = end
+        self.bytes_served += len(chunk)
+        return chunk
+
+    def _slice(self, start: int, end: int) -> bytes:
+        prefix_end = len(self._prefix)
+        fill_end = prefix_end + self._fill_size
+        parts = []
+        cur = start
+        if cur < prefix_end:
+            take = min(end, prefix_end)
+            parts.append(self._prefix[cur:take])
+            cur = take
+        if cur < end and cur < fill_end:
+            count = min(end, fill_end) - cur
+            parts.append(self._fill * count)
+            cur += count
+        if cur < end:
+            suffix_start = cur - fill_end
+            suffix_end = end - fill_end
+            parts.append(self._suffix[suffix_start:suffix_end])
+        return b"".join(parts)
+
+
+class _RecordingRegistry:
+    def __init__(self) -> None:
+        self.terminated: list[object] = []
+
+    def register(self, process):  # noqa: ARG002
+        return None
+
+    def terminate(self, process):
+        self.terminated.append(process)
+
+    def unregister(self, process):  # noqa: ARG002
+        return None
+
+
+def _tracking_loads(parsed_sizes: list[int]):
+    real_loads = json.loads
+
+    def tracking_loads(s, *args, **kwargs):
+        if isinstance(s, (bytes, bytearray)):
+            parsed_sizes.append(len(s))
+        elif isinstance(s, str):
+            parsed_sizes.append(len(s.encode("utf-8")))
+        else:
+            parsed_sizes.append(0)
+        return real_loads(s, *args, **kwargs)
+
+    return tracking_loads
+
+
+def test_read_loop_oversized_valid_record_trips_cap_without_full_buffer(monkeypatch):
+    cap = 512
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", cap)
+    parsed_sizes: list[int] = []
+    monkeypatch.setattr(codex_appserver.json, "loads", _tracking_loads(parsed_sizes))
+
+    prefix = (
+        b'{"jsonrpc":"2.0","method":"item/completed",'
+        b'"params":{"threadId":"t-oversize","item":{"type":"agentMessage","text":"'
+    )
+    suffix = b'"}}}\n'
+    fill_size = cap + 4096
+    stream = _VirtualRecordStream(prefix, fill_size, suffix)
+    assert stream.total > cap
+
+    registry = _RecordingRegistry()
+    server = codex_appserver.AppServer(argv=FAKE, process_registry=registry)
+
+    class FakeProc:
+        stdout = stream
+
+    server._proc = FakeProc()
+    server._read_loop()
+
+    assert server._output_limit_exceeded is True
+    assert stream.bytes_served <= cap + 1
+    assert stream.max_request <= cap + 1
+    assert stream.bytes_served < stream.total
+    assert all(size <= cap for size in parsed_sizes)
+    assert registry.terminated
+    assert server.capture_budget(None).overflowed is True
+    assert server.capture_budget(None).used == cap
+
+
+def test_read_loop_oversized_malformed_record_trips_cap_and_charges_budget(monkeypatch):
+    cap = 512
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", cap)
+    parsed_sizes: list[int] = []
+    monkeypatch.setattr(codex_appserver.json, "loads", _tracking_loads(parsed_sizes))
+
+    fill_size = cap + 4096
+    stream = _VirtualRecordStream(b'{"not-json ', fill_size, b"\n", fill=b"A")
+    assert stream.total > cap
+
+    registry = _RecordingRegistry()
+    server = codex_appserver.AppServer(argv=FAKE, process_registry=registry)
+
+    class FakeProc:
+        stdout = stream
+
+    server._proc = FakeProc()
+    server._read_loop()
+
+    assert server._output_limit_exceeded is True
+    assert server.capture_budget(None).overflowed is True
+    assert server.capture_budget(None).used == cap
+    assert stream.bytes_served <= cap + 1
+    assert stream.bytes_served < stream.total
+    assert parsed_sizes == []
+    assert registry.terminated
+
+
+def test_flood_turn_signals_output_limit_under_small_cap(monkeypatch):
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 4096)
+    with _server() as server:
+        thread = server.start_thread(cwd=Path("/tmp"))
+        result = thread.run_turn("FLOOD now", timeout=10.0)
+    assert result.output_limit_exceeded is True
+    assert result.ok is False
+    assert len(result.text.encode("utf-8")) <= 4096
+    assert "combined output exceeded" in result.detail
 
 
 def test_appserver_env_reaches_child_without_seat_env(monkeypatch):

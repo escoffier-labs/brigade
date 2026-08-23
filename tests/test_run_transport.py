@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
+import time
 
 import pytest
 
-from brigade import agents, message_envelope, run_transport
+from brigade import agents, message_envelope, proc, run_transport
 from brigade.roster import Agent, Roster
 from brigade.run_transport import Assignment
 
@@ -259,3 +262,120 @@ def test_worker_result_gate_rejects_cross_channel_synthesis_request():
     )
     assert foreign.delivered is False
     assert "not an allowlisted" in foreign.reason
+
+
+def test_finish_truncates_worker_text_before_envelope_emit(monkeypatch, tmp_path):
+    oversized = "W" * (message_envelope.MESSAGE_WRAP_MAX_BYTES + 4096)
+    results, _prompts = _dispatch(
+        monkeypatch,
+        tmp_path,
+        [Assignment(worker="coder", task="implement it")],
+        {"coder": [agents.AgentResult(text=oversized, ok=True, stdout=oversized, stderr="e")]},
+    )
+
+    worker = results[0]
+    assert worker.ok is True
+    assert len(worker.text.encode("utf-8")) == message_envelope.MESSAGE_WRAP_MAX_BYTES
+    assert worker.text == oversized[: message_envelope.MESSAGE_WRAP_MAX_BYTES]
+    assert worker.provenance is not None
+    assert worker.provenance["hashes"]["content"]
+    assert len((worker.stdout or "").encode("utf-8")) <= proc.MAX_CAPTURE_BYTES
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_worker_output_overflow_kills_group_and_caps_all_artifacts(tmp_path, monkeypatch):
+    from brigade.run_receipts import worker_payload, write_agent_logs, write_worker_logs
+
+    sentinel = tmp_path / "descendant-sentinel"
+    overflow = proc.MAX_CAPTURE_BYTES + 4096
+    worker_code = (
+        "import os, sys, time\n"
+        f"sentinel = {str(sentinel)!r}\n"
+        f"overflow = {overflow}\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    time.sleep(2)\n"
+        "    with open(sentinel, 'w', encoding='utf-8') as handle:\n"
+        "        handle.write('alive')\n"
+        "    os._exit(0)\n"
+        "stdout_n = overflow // 2\n"
+        "stderr_n = overflow - stdout_n\n"
+        "sys.stdout.buffer.write(b'O' * stdout_n)\n"
+        "sys.stderr.buffer.write(b'E' * stderr_n)\n"
+        "sys.stdout.buffer.flush()\n"
+        "sys.stderr.buffer.flush()\n"
+        "while True:\n"
+        "    sys.stdout.buffer.write(b'x' * 4096)\n"
+        "    sys.stdout.buffer.flush()\n"
+        "    time.sleep(0.05)\n"
+    )
+    monkeypatch.setattr(agents, "build_argv", lambda *args, **kwargs: [sys.executable, "-c", worker_code])
+    monkeypatch.setattr(
+        agents,
+        "resolve_agent_executable",
+        lambda cli_ref, path=None: proc.ExecutableIdentity(
+            command="python",
+            path=sys.executable,
+            kind="native",
+            runnable=True,
+            detail="fake overflowing seat",
+        ),
+    )
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "coder": Agent(name="coder", cli="pi", role="write"),
+        },
+        max_workers=1,
+    )
+    results = run_transport.dispatch(
+        [Assignment(worker="coder", task="implement it")],
+        roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False, **kw: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+        direct=True,
+    )
+    worker = results[0]
+    deadline = time.monotonic() + 1.5
+    while not sentinel.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert worker.ok is False
+    assert worker.failure_phase == "harness"
+    assert worker.failure_kind == "output-limit"
+    assert not sentinel.exists()
+    retained = len((worker.stdout or "").encode("utf-8")) + len((worker.stderr or "").encode("utf-8"))
+    assert retained <= proc.MAX_CAPTURE_BYTES + 200
+    assert len(worker.text.encode("utf-8")) <= message_envelope.MESSAGE_WRAP_MAX_BYTES
+
+    recorded = write_worker_logs(tmp_path, [worker])[0]
+    persisted = len((recorded.stdout or "").encode("utf-8")) + len((recorded.stderr or "").encode("utf-8"))
+    assert persisted <= proc.MAX_CAPTURE_BYTES + 200
+    payload = worker_payload([recorded])[0]
+    assert len(payload["text"].encode("utf-8")) <= message_envelope.MESSAGE_WRAP_MAX_BYTES
+    for ref in (recorded.stdout_log, recorded.stderr_log):
+        if ref is None:
+            continue
+        assert len((tmp_path / ref).read_bytes()) <= proc.MAX_CAPTURE_BYTES
+    agent_recorded = write_agent_logs(
+        tmp_path,
+        "overflow-agent",
+        agents.AgentResult(
+            text="A" * (message_envelope.MESSAGE_WRAP_MAX_BYTES + 50),
+            ok=False,
+            detail="d",
+            stdout="S" * (proc.MAX_CAPTURE_BYTES + 50),
+            stderr="E" * 16,
+            failure_phase="harness",
+            failure_kind="output-limit",
+        ),
+    )
+    assert len(agent_recorded.text.encode("utf-8")) <= message_envelope.MESSAGE_WRAP_MAX_BYTES
+    assert len((tmp_path / agent_recorded.stdout_log).read_bytes()) <= proc.MAX_CAPTURE_BYTES
+    assert len((tmp_path / agent_recorded.stderr_log).read_bytes()) <= proc.MAX_CAPTURE_BYTES
