@@ -2376,6 +2376,10 @@ def _supported_branch_snapshot(parent_run_dir: Path, branch_event: Any) -> tuple
     return projection.snapshot, None
 
 
+_TERMINAL_BRANCH_EVENT_TYPES = frozenset({"run.completed", "run.failed", "run.interrupted"})
+_TERMINAL_PARENT_EVENT_ERROR = "cannot branch a durable child from a terminal parent event"
+
+
 def _child_status_followup(status: str) -> tuple[str, dict[str, Any]] | None:
     from . import run_lifecycle
 
@@ -2384,8 +2388,12 @@ def _child_status_followup(status: str) -> tuple[str, dict[str, Any]] | None:
     event_type = run_lifecycle.STATUS_EVENT_TYPE.get(status)
     if event_type is None:
         return None
-    if event_type in {"run.completed", "run.failed", "run.interrupted"}:
-        return event_type, {"status": status, "detail": "branched child snapshot"}
+    if event_type in _TERMINAL_BRANCH_EVENT_TYPES:
+        return event_type, {
+            "status": status,
+            "detail": "branched child snapshot",
+            "error": _TERMINAL_PARENT_EVENT_ERROR,
+        }
     return event_type, {"detail": "branched child snapshot"}
 
 
@@ -2409,6 +2417,54 @@ def _rewrite_parent_owned_path(value: object, *, parent_run_dir: Path, child_run
     if resolved == parent_resolved:
         return str(child_run_dir)
     return str(child_run_dir / resolved.relative_to(parent_resolved))
+
+
+def _is_absolute_path_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and Path(value).is_absolute()
+
+
+def _child_owned_artifacts_path(value: object, *, parent_run_dir: Path, child_run_dir: Path) -> str | None:
+    """Map a parent artifacts path onto a child-owned location.
+
+    Paths under the parent run dir keep their relative suffix under the child
+    dir. Any other absolute path (an operator-chosen output dir, a repo path)
+    is re-rooted at the child run dir so the child never inherits the parent's
+    external output location. Relative or empty values are left unchanged
+    (return None so the caller keeps the original).
+    """
+    if not _is_absolute_path_string(value):
+        return None
+    if _absolute_path_under(value, parent_run_dir):
+        return _rewrite_parent_owned_path(value, parent_run_dir=parent_run_dir, child_run_dir=child_run_dir)
+    return str(child_run_dir)
+
+
+def _materialize_child_artifacts(child_run_dir: Path, child_meta: dict[str, Any]) -> None:
+    """Create a rewritten artifacts dir when it is a child-owned path.
+
+    A dangling rewritten path is recorded only when it can be created under
+    the child run dir. Otherwise fall back to the child run dir itself so
+    downstream readers never treat a missing child artifacts path as an error.
+    """
+    artifacts = child_meta.get("artifacts")
+    if not isinstance(artifacts, str) or not artifacts:
+        return
+    path = Path(artifacts)
+    try:
+        child_resolved = child_run_dir.resolve()
+        resolved = path.resolve()
+    except OSError:
+        child_meta["artifacts"] = str(child_run_dir)
+        return
+    if resolved == child_resolved:
+        return
+    if child_resolved not in resolved.parents:
+        child_meta["artifacts"] = str(child_run_dir)
+        return
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        child_meta["artifacts"] = str(child_run_dir)
 
 
 def _child_receipt_from_parent_snapshot(
@@ -2448,12 +2504,22 @@ def _child_receipt_from_parent_snapshot(
     child.pop("failure_kind", None)
     child.pop("worker_failure_summary", None)
     artifacts = child.get("artifacts")
-    if _absolute_path_under(artifacts, parent_run_dir):
-        child["artifacts"] = _rewrite_parent_owned_path(
-            artifacts, parent_run_dir=parent_run_dir, child_run_dir=child_run_dir
-        )
-    if _absolute_path_under(child.get("handoff"), parent_run_dir):
+    remapped = _child_owned_artifacts_path(artifacts, parent_run_dir=parent_run_dir, child_run_dir=child_run_dir)
+    if remapped is not None:
+        child["artifacts"] = remapped
+    elif _is_absolute_path_string(artifacts):
+        child.pop("artifacts", None)
+    if _is_absolute_path_string(child.get("handoff")):
         child.pop("handoff", None)
+    if _is_terminal(child):
+        child["error"] = _TERMINAL_PARENT_EVENT_ERROR
+        child["failure_phase"] = "runs-child"
+        child["failure_kind"] = "terminal-parent-event"
+        child["failure"] = {
+            "phase": "runs-child",
+            "kind": "terminal-parent-event",
+            "detail": _TERMINAL_PARENT_EVENT_ERROR,
+        }
     child["lineage"] = {
         "kind": "child",
         "parent_run_id": parent_run_id,
@@ -2518,6 +2584,9 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
     if target_status != "started" and followup is None:
         print(f"error: unsupported branch point status: {target_status}", file=sys.stderr)
         return 2
+    if _is_terminal(dict(snapshot)) or (followup is not None and followup[0] in _TERMINAL_BRANCH_EVENT_TYPES):
+        print(f"error: {_TERMINAL_PARENT_EVENT_ERROR}", file=sys.stderr)
+        return 2
     runs_root = parent_run_dir.parent
     child_run_dir = aboyeur.make_run_dir(runs_root)
     child_meta = _child_receipt_from_parent_snapshot(
@@ -2539,11 +2608,12 @@ def child(parent_run: str | Path, event_id: str, *, cwd: Path, runs_dir: Path | 
         run_journal.RunJournalError,
     )
     try:
-        child_bootstrap = dict(child_meta)
-        child_bootstrap["status"] = "started"
         with runguard.run_lock(workspace, run_dir=child_run_dir):
             try:
                 child_run_dir.mkdir(parents=True, exist_ok=False)
+                _materialize_child_artifacts(child_run_dir, child_meta)
+                child_bootstrap = dict(child_meta)
+                child_bootstrap["status"] = "started"
                 localio.write_json(child_run_dir / "run.json", receipt_schema.stamp_run_receipt(child_bootstrap))
                 run_lifecycle.prepare_lifecycle_journal(child_run_dir, workspace=workspace)
                 run_lifecycle.record_lifecycle_event(
