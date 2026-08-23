@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -252,6 +253,43 @@ def test_hook_run_unwired_path_times_out_when_git_stat_hangs(tmp_path: Path, mon
     elapsed = time.monotonic() - started
     assert elapsed < 2.0
     assert json.loads(capsys.readouterr().out) == envelope.degraded_envelope("SessionStart")
+
+
+def test_hook_run_returns_when_followup_filesystem_stalls(tmp_path: Path, monkeypatch, capsys):
+    """Post-timeout latch/log writes must not block past the hook timeout.
+
+    After the timed worker expires, ``_bounded_timeout_followup`` used to
+    persist latch state and the hook log synchronously in the parent. A
+    target filesystem that stalls during those writes then blocked Claude
+    Code beyond the configured timeout — the hang the isolation exists to
+    prevent, in the timeout-handling path itself.
+    """
+    target = _wired_claude(tmp_path)
+    monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.1)
+
+    def hang_payload(_event: str, _payload: dict, *, pin=None) -> dict | None:
+        time.sleep(5)
+        return None
+
+    release_stall = threading.Event()
+
+    def hang_followup_fs(*_args, **_kwargs):
+        release_stall.wait(timeout=5)
+
+    monkeypatch.setattr(runtime, "handle_payload", hang_payload)
+    monkeypatch.setattr(runtime, "write_session_state", hang_followup_fs)
+    monkeypatch.setattr(runtime, "read_session_state", lambda *_args, **_kwargs: {"session_id": "session-1"})
+    monkeypatch.setattr(envelope, "append_log", hang_followup_fs)
+    payload = json.dumps(_payload(target, "PreToolUse"))
+    capsys.readouterr()
+    started = time.monotonic()
+    try:
+        assert runtime.hook_run(event="PreToolUse", package=PACKAGE_REF, stdin_text=payload) == 0
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+        assert json.loads(capsys.readouterr().out) == envelope.degraded_envelope("PreToolUse")
+    finally:
+        release_stall.set()
 
 
 def test_hook_run_latches_after_repeated_timeouts(tmp_path: Path, monkeypatch, capsys):

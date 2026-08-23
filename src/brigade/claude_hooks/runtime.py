@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from queue import Empty
@@ -2868,7 +2869,7 @@ def _terminate_process(proc: mp.Process | mp.context.ForkProcess) -> None:
     proc.join(timeout=1)
     if proc.is_alive():
         proc.kill()
-        proc.join()
+        proc.join(timeout=0.2)
 
 
 def _recv_timed_handle_payload_result(
@@ -3183,25 +3184,35 @@ def _clear_hook_timeouts(target: Path, session_id: str) -> None:
     write_session_state(target, session_id, updated)
 
 
-def _timeout_followup_target(
-    event: str,
-    log_target_text: str,
-    session_id: str,
-    detail: str,
-    queue: mp.Queue,
-) -> None:
-    try:
-        target = Path(log_target_text)
-        state = _record_hook_timeout(target, session_id)
-        envelope.append_log(target, f"{event}: degraded: {detail}")
-        if state.get("hook_latched") is True:
-            envelope.append_log(target, f"{event}: latched after repeated timeouts")
-            _mark_hook_latch_announced(target, session_id)
-            queue.put("latched")
-        else:
-            queue.put("degraded")
-    except Exception:  # noqa: BLE001 - follow-up must not raise into the parent
-        queue.put("degraded")
+def _run_best_effort_bounded(
+    fn: Callable[[], Any],
+    *,
+    timeout: float,
+    default: Any,
+) -> Any:
+    """Run ``fn`` in a daemon thread; return ``default`` if it exceeds ``timeout``.
+
+    Post-timeout latch/log writes and claim cleanup must not run in the
+    ``hook_run`` parent. A stalled target filesystem (or Windows, where
+    ``fork`` is unavailable and spawn exceeds this budget) degrades
+    instead of hanging Claude Code past the hook timeout.
+    """
+    box: list[Any] = [default]
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            box[0] = fn()
+        except Exception:  # noqa: BLE001 - parent must still emit a valid envelope
+            box[0] = default
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_run, name="brigade-hook-best-effort", daemon=True)
+    thread.start()
+    if not done.wait(timeout=max(timeout, 0.0)):
+        return default
+    return box[0]
 
 
 def _apply_timeout_followup_inprocess(event: str, target: Path, session_id: str, detail: str) -> str:
@@ -3220,33 +3231,36 @@ def _apply_timeout_followup_inprocess(event: str, target: Path, session_id: str,
 def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
     """Record timeout/latch without blocking past a short budget.
 
-    The path was already resolved inside the timed worker. A later stall on
-    the same tree must still not hang Claude Code.
+    The path was already resolved inside the timed worker. Latch-state and
+    log writes still touch that tree; they run best-effort under a hard cap
+    so a later stall cannot hang the parent.
     """
     detail = str(exc)
-    if sys.platform == "win32":
-        return _apply_timeout_followup_inprocess(event, log_target, session_id, detail)
-
-    ctx = mp.get_context("fork")
-    queue: mp.Queue = ctx.Queue()
-    proc = ctx.Process(
-        target=_timeout_followup_target,
-        args=(event, str(log_target), session_id, detail, queue),
-        daemon=True,
+    return _run_best_effort_bounded(
+        lambda: _apply_timeout_followup_inprocess(event, log_target, session_id, detail),
+        timeout=_TIMEOUT_FOLLOWUP_SECONDS,
+        default="degraded",
     )
-    try:
-        proc.start()
-        try:
-            status = queue.get(timeout=_TIMEOUT_FOLLOWUP_SECONDS)
-        except Empty:
-            _terminate_process(proc)
-            return "degraded"
-        return "latched" if status == "latched" else "degraded"
-    finally:
-        if proc.is_alive():
-            _terminate_process(proc)
-        queue.close()
-        queue.join_thread()
+
+
+def _bounded_release_claim(path: Path | None) -> None:
+    if path is None:
+        return
+    _run_best_effort_bounded(
+        lambda: compaction_marker.release_claim_path(path),
+        timeout=_TIMEOUT_FOLLOWUP_SECONDS,
+        default=None,
+    )
+
+
+def _bounded_complete_claim(path: Path | None) -> None:
+    if path is None:
+        return
+    _run_best_effort_bounded(
+        lambda: compaction_marker.complete_claim_path(path),
+        timeout=_TIMEOUT_FOLLOWUP_SECONDS,
+        default=None,
+    )
 
 
 def hook_run(
@@ -3265,7 +3279,9 @@ def hook_run(
 
     The parent reads bounded stdin, spawns the timed worker, and enforces
     the timeout. Pin resolution, target discovery, log-target lookup, latch
-    I/O, and ``handle_payload`` run only inside that worker.
+    I/O, and ``handle_payload`` run only inside that worker. Post-timeout
+    latch/log persistence and claim cleanup are best-effort under a hard
+    cap so a stalled tree cannot hang the parent after the worker returns.
     """
     if package != PACKAGE_REF:
         return 0
@@ -3292,9 +3308,8 @@ def hook_run(
             envelope.emit_stdout(envelope.empty_envelope(event))
             return 0
     except HookDegraded as exc:
-        if claim_path is not None:
-            compaction_marker.release_claim_path(claim_path)
-            claim_path = None
+        _bounded_release_claim(claim_path)
+        claim_path = None
         followup_target = exc.log_target if exc.log_target is not None else log_target
         if followup_target is not None and _is_timeout_degraded(exc):
             if _bounded_timeout_followup(event, followup_target, session_id, exc) == "latched":
@@ -3303,23 +3318,20 @@ def hook_run(
         envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
     except Exception:  # noqa: BLE001 - hooks must fail open instead of breaking the harness
-        if claim_path is not None:
-            compaction_marker.release_claim_path(claim_path)
-            claim_path = None
+        _bounded_release_claim(claim_path)
+        claim_path = None
         envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
 
     try:
         envelope.emit_stdout(result if result is not None else envelope.empty_envelope(event))
     except Exception:  # noqa: BLE001 - stdout failure still fails open
-        if claim_path is not None:
-            compaction_marker.release_claim_path(claim_path)
-            claim_path = None
+        _bounded_release_claim(claim_path)
+        claim_path = None
         try:
             envelope.emit_stdout(envelope.degraded_envelope(event))
         except Exception:  # noqa: BLE001
             pass
         return 0
-    if claim_path is not None:
-        compaction_marker.complete_claim_path(claim_path)
+    _bounded_complete_claim(claim_path)
     return 0
