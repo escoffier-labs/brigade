@@ -2957,23 +2957,22 @@ def hook_run(
         payload, raw = _load_hook_stdin(stdin_text=stdin_text)
         session_id = _session_id_from_payload(payload)
         log_target = _resolve_log_target(payload, pin=pin)
-        if log_target is None:
-            result = handle_payload(event, payload, pin=pin)
-            result, claim_path = _strip_claim(result)
-            _emit_result(event, result, target=None)
-            if claim_path is not None:
-                compaction_marker.complete_claim_path(claim_path)
-            return 0
-        latched, announce = _read_hook_latch(log_target, session_id)
-        if latched:
-            if announce:
-                _emit_latched(event, log_target, session_id)
-            else:
-                envelope.emit_stdout(envelope.empty_envelope(event))
-            return 0
+        if log_target is not None:
+            latched, announce = _read_hook_latch(log_target, session_id)
+            if latched:
+                if announce:
+                    _emit_latched(event, log_target, session_id)
+                else:
+                    envelope.emit_stdout(envelope.empty_envelope(event))
+                return 0
+        # Unwired / unpinned events (log_target is None) still run handle_payload
+        # under the timeout worker. SessionStart's init hint resolves cwd and
+        # stats `.git`; a stalled filesystem must return the timeout envelope
+        # instead of blocking Claude Code.
         result = _run_timed_handle_payload(event, raw, pin=pin)
         result, claim_path = _strip_claim(result)
-        _clear_hook_timeouts(log_target, session_id)
+        if log_target is not None:
+            _clear_hook_timeouts(log_target, session_id)
     except HookDegraded as exc:
         if claim_path is not None:
             compaction_marker.release_claim_path(claim_path)

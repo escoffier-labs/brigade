@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from brigade import cli
@@ -99,6 +100,99 @@ def test_hook_run_pin_restricts_to_wired_workspace(tmp_path: Path, monkeypatch, 
     assert result is not None
     assert "work brief: pinned" in result["hookSpecificOutput"]["additionalContext"]
     assert calls == [workspace.resolve()]
+
+
+def test_hook_run_session_start_hints_init_for_unwired_git_repo(tmp_path: Path, capsys):
+    repo = tmp_path / "fresh-repo"
+    (repo / ".git").mkdir(parents=True)
+    capsys.readouterr()
+    assert (
+        runtime.hook_run(
+            event="SessionStart",
+            package=PACKAGE_REF,
+            stdin_text=json.dumps(_payload(repo, "SessionStart")),
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert f"brigade init --target {repo.resolve()}" in context
+    assert "--harnesses claude" in context
+
+
+def test_hook_run_other_events_stay_silent_for_unwired_git_repo(tmp_path: Path, capsys):
+    repo = tmp_path / "fresh-repo"
+    (repo / ".git").mkdir(parents=True)
+    capsys.readouterr()
+    assert (
+        runtime.hook_run(
+            event="PreToolUse",
+            package=PACKAGE_REF,
+            stdin_text=json.dumps(_payload(repo, "PreToolUse", tool_name="Bash")),
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == envelope.empty_envelope("PreToolUse")
+
+
+def test_hook_run_unwired_path_times_out_when_target_resolution_hangs(tmp_path: Path, monkeypatch, capsys):
+    """Unpinned unwired events must use the timed worker (issue #1051).
+
+    ``_resolve_log_target`` returning None used to call ``handle_payload`` in
+    the parent, so ``effective_hook_target`` path resolution or the SessionStart
+    ``.git`` check could block Claude Code indefinitely.
+    """
+    repo = tmp_path / "unwired-git"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(runtime, "_resolve_log_target", lambda *_args, **_kwargs: None)
+
+    def hang_target(_payload: dict, *, pin=None) -> Path | None:
+        time.sleep(5)
+        return None
+
+    monkeypatch.setattr(runtime, "effective_hook_target", hang_target)
+    capsys.readouterr()
+    started = time.monotonic()
+    assert (
+        runtime.hook_run(
+            event="SessionStart",
+            package=PACKAGE_REF,
+            stdin_text=json.dumps(_payload(repo, "SessionStart")),
+        )
+        == 0
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert json.loads(capsys.readouterr().out) == envelope.degraded_envelope("SessionStart")
+
+
+def test_hook_run_unwired_path_times_out_when_git_stat_hangs(tmp_path: Path, monkeypatch, capsys):
+    """A stalled ``.git`` exists() check on an unwired SessionStart must not block."""
+    repo = tmp_path / "unwired-git"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.1)
+    original_exists = Path.exists
+
+    def hanging_exists(self: Path) -> bool:
+        if self.name == ".git":
+            time.sleep(5)
+        return original_exists(self)
+
+    monkeypatch.setattr(Path, "exists", hanging_exists)
+    capsys.readouterr()
+    started = time.monotonic()
+    assert (
+        runtime.hook_run(
+            event="SessionStart",
+            package=PACKAGE_REF,
+            stdin_text=json.dumps(_payload(repo, "SessionStart")),
+        )
+        == 0
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert json.loads(capsys.readouterr().out) == envelope.degraded_envelope("SessionStart")
 
 
 def test_hook_run_latches_after_repeated_timeouts(tmp_path: Path, monkeypatch, capsys):
