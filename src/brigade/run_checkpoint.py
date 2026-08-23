@@ -1240,9 +1240,14 @@ def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
         return []
     replaced: list[dict[str, Any]] = []
     # Only content-addressed ``{sha}.json`` bodies can be rewritten to a truthful
-    # artifact reference. Crashed ``.checkpoint.*.tmp`` temp bodies have no
-    # canonical hash path, so callers omit them from the export tree before this
-    # runs (see verification._archive_verify_run); they are never rewritten here.
+    # artifact reference. A crashed ``.checkpoint.*.tmp`` temp (mkstemp in
+    # write_checkpoint) has no canonical hash path and may hold an arbitrary
+    # prefix of a private body, so it is removed from the export copy without
+    # ever being read or parsed (#646 / #654).
+    for path in sorted(cp_dir.glob(_CHECKPOINT_TEMP_GLOB)):
+        if path.is_symlink() or not path.is_file():
+            refuse_checkpoint_body_export(reason="checkpoint export temp path is not a regular file")
+        path.unlink()
     for path in sorted(cp_dir.glob("*.json")):
         if not path.is_file() or path.is_symlink():
             refuse_checkpoint_body_export(reason="checkpoint export path is not a regular file")
@@ -1280,6 +1285,11 @@ def assert_export_tree_has_no_checkpoint_bodies(root: Path) -> None:
     for path in paths:
         if not path.is_file():
             continue
+        if path.name.startswith(".checkpoint.") and path.name.endswith(".tmp"):
+            # A crashed temp can never be a truthful artifact reference, even
+            # when its bytes happen to parse as one; its presence alone is a
+            # leak (#646 / #654). Refuse without reading it.
+            refuse_checkpoint_body_export(reason="crashed checkpoint temp crossed an export boundary")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
