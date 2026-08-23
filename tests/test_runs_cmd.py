@@ -4257,6 +4257,30 @@ def test_runs_inspect_reports_corrupt_own_journal(tmp_path, capsys):
     assert "lifecycle journal" in capsys.readouterr().err
 
 
+def test_runs_inspect_survives_journal_oserror(tmp_path, capsys, monkeypatch):
+    from brigade import run_journal, run_lifecycle
+
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    run_dir = runs_root / "unreadable"
+    _write_minimal_run(run_dir, task="task", status="running", started_at="2026-08-17T13:00:00Z")
+    journal = run_lifecycle._journal_path(run_dir)
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b'{"event":"run.started"}\n')
+
+    def _boom(_path):
+        raise OSError("simulated I/O error")
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", _boom)
+
+    # A journal that raises OSError must yield a controlled diagnostic, not a crash.
+    assert runs_cmd.inspect(run_dir.name, cwd=workspace) == 2
+    assert "lifecycle journal" in capsys.readouterr().err
+    # show must still render (terminal derivation falls back, no exception).
+    assert runs_cmd.show(run_dir) == 0
+    assert "terminal:" in capsys.readouterr().out
+
+
 def test_runs_show_prints_terminal_line(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     runs_root = workspace / ".brigade" / "runs"

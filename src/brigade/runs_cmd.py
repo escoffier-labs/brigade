@@ -507,12 +507,14 @@ def _terminal_lifecycle_event(run_dir: Path):
     from . import run_journal, run_lifecycle
 
     journal_path = run_lifecycle._journal_path(run_dir)
-    if not journal_path.is_file():
-        return None
     try:
+        if not journal_path.is_file():
+            return None
         report = run_journal.read_journal_bounded(journal_path)
     except run_journal.RunJournalError as exc:
         raise ValueError(f"lifecycle journal is unreadable: {exc.diagnostic}") from exc
+    except OSError as exc:
+        raise ValueError(f"lifecycle journal is unreadable: {exc}") from exc
     if report.partial_tail is not None:
         raise ValueError("lifecycle journal ends in a partial trailing record")
     if report.chain_errors:
