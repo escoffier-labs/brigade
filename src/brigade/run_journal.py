@@ -819,6 +819,20 @@ def append_event(
         finally:
             os.close(fd)
 
+    # Fleet sync (issue #1123): best-effort report of the appended event to the
+    # configured fleet hub. The journal line is already durable here, so no
+    # exception from reporting may surface as a failure of this append: the
+    # client makes the event durable in its spool before letting
+    # KeyboardInterrupt/SystemExit through, and everything else is swallowed.
+    try:
+        from brigade import fleet_client
+
+        fleet_client.report_journal_event(envelope, journal_path=journal_path)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # pragma: no cover - reporting must never break journaling
+        pass
+
     return _envelope_to_event(envelope)
 
 

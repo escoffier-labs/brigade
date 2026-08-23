@@ -71,6 +71,7 @@ from . import (
     roster as _roster_group,
     runs as _runs_group,
     node as _node_group,
+    fleet as _fleet_group,
     guard as _guard_group,
     scrub as _scrub_group,
     security as _security_group,
@@ -194,6 +195,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _runs_group.register(sub)
     _node_group.register(sub)
+    _fleet_group.register(sub)
     _guard_group.register(sub)
     _scrub_group.register(sub)
     _security_group.register(sub)
