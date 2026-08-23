@@ -21,6 +21,7 @@ import pytest
 
 from brigade import doctor as doctor_mod
 from brigade.work_cmd import ledger
+from tests.support import PRIVATE_DIRECTORY_MODE
 
 
 _PROOF_COMPONENTS = (".brigade", "work", "imports", "proofs")
@@ -40,7 +41,7 @@ def _plant_legacy_unsigned_record(target: Path, directories: dict[str, dict[str,
         "directories": directories,
     }
     path = ledger._directory_authority_store_path(target)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.mkdir(mode=PRIVATE_DIRECTORY_MODE, parents=True, exist_ok=True)
     path.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     return path
 

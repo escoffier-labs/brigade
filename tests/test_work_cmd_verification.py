@@ -21,6 +21,7 @@ from tests.work_cmd_test_helpers import (
     _write_json,
     _init_git_repo,
 )
+from tests.support import PRIVATE_FILE_MODE
 
 
 def _init_git_repo_with_head(path):
@@ -2978,7 +2979,7 @@ def test_archive_verify_run_strips_recovery_checkpoint_bodies(tmp_path):
     cp_dir.mkdir(parents=True)
     sha = hashlib.sha256(body).hexdigest()
     (cp_dir / f"{sha}.json").write_bytes(body)
-    os.chmod(cp_dir / f"{sha}.json", 0o600)
+    os.chmod(cp_dir / f"{sha}.json", PRIVATE_FILE_MODE)
 
     archive_root = tmp_path / "verify-archive"
     removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)

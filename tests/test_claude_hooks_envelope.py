@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import stat
 from pathlib import Path
 
 import pytest
@@ -12,6 +11,7 @@ from brigade.claude_hooks import envelope, runtime
 from brigade.claude_hooks.package import MANAGED_EVENTS, PACKAGE_REF
 from brigade.install import install_selection
 from brigade.selection import Selection
+from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 
 
 def _wired_claude(tmp_path: Path) -> Path:
@@ -83,7 +83,7 @@ def test_injection_begins_with_anti_truncation_and_persists_full_copy(tmp_path: 
     persisted = list(envelope.injections_root(target).glob("*.txt"))
     assert len(persisted) == 1
     assert persisted[0].read_text(encoding="utf-8") == "alpha\nbeta\ngamma\n"
-    assert stat.S_IMODE(persisted[0].stat().st_mode) == 0o600
+    assert_private_mode(persisted[0], PRIVATE_FILE_MODE)
 
 
 def test_item_cap_emits_elision_banner_naming_items_cap(tmp_path: Path):
@@ -193,7 +193,7 @@ def test_persisted_copy_is_atomic_private_and_cleaned(tmp_path: Path):
     files = list(envelope.injections_root(target).glob("*.txt"))
     assert len(files) <= envelope.MAX_INJECTION_FILES
     for path in files:
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert_private_mode(path, PRIVATE_FILE_MODE)
 
 
 def test_hook_timeout_covers_whole_operation(tmp_path: Path, monkeypatch, capsys):

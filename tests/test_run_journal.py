@@ -20,6 +20,7 @@ import pytest
 
 from brigade import run_events, run_journal
 from brigade import run_checkpoint
+from tests.support import PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, assert_private_mode
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "run-lifecycle"
 GOLDEN_LIFECYCLE_PATH = FIXTURES / "golden-lifecycle.jsonl"
@@ -114,9 +115,8 @@ def test_ensure_journal_creates_private_directory_and_file(tmp_path):
 
     assert journal_path.is_file()
     assert journal_path.parent.is_dir()
-    if os.name != "nt":
-        assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
-        assert stat.S_IMODE(journal_path.parent.stat().st_mode) == 0o700
+    assert_private_mode(journal_path, PRIVATE_FILE_MODE)
+    assert_private_mode(journal_path.parent, PRIVATE_DIRECTORY_MODE)
 
 
 def test_append_event_writes_canonical_line_with_fsync(tmp_path, monkeypatch):
@@ -386,8 +386,7 @@ def test_recover_partial_tail_quarantines_suffix_then_truncates(tmp_path):
     assert report.partial_bytes == partial_suffix
     assert report.quarantine_path.is_file()
     assert report.quarantine_path.read_bytes() == partial_suffix
-    if os.name != "nt":
-        assert stat.S_IMODE(report.quarantine_path.stat().st_mode) == 0o600
+    assert_private_mode(report.quarantine_path, PRIVATE_FILE_MODE)
     if os.name == "nt":
         # Text-mode descriptors translate line endings on Windows.
         assert journal_path.read_bytes().splitlines() == complete_bytes.splitlines()
@@ -705,7 +704,6 @@ def test_read_journal_reports_noncanonical_lines_as_chain_errors(tmp_path):
     assert report.events == []
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX permission bits")
 def test_ensure_journal_modes_hold_under_permissive_umask(tmp_path):
     journal_path = _journal_path(_run_dir(tmp_path))
     previous_umask = os.umask(0)
@@ -714,11 +712,10 @@ def test_ensure_journal_modes_hold_under_permissive_umask(tmp_path):
     finally:
         os.umask(previous_umask)
 
-    assert stat.S_IMODE(journal_path.parent.stat().st_mode) == 0o700
-    assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
+    assert_private_mode(journal_path.parent, PRIVATE_DIRECTORY_MODE)
+    assert_private_mode(journal_path, PRIVATE_FILE_MODE)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX permission bits")
 def test_ensure_journal_corrects_permissive_preexisting_modes(tmp_path):
     journal_path = _journal_path(_run_dir(tmp_path))
     parent = journal_path.parent
@@ -730,8 +727,8 @@ def test_ensure_journal_corrects_permissive_preexisting_modes(tmp_path):
 
     run_journal.ensure_journal(journal_path)
 
-    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
-    assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
+    assert_private_mode(parent, PRIVATE_DIRECTORY_MODE)
+    assert_private_mode(journal_path, PRIVATE_FILE_MODE)
 
 
 def test_ensure_journal_rejects_symlinked_events_directory(tmp_path):
@@ -776,8 +773,7 @@ def test_recover_partial_tail_creates_private_quarantine_dir(tmp_path):
 
     report = run_journal.recover_partial_tail(journal_path, quarantine_dir)
 
-    if os.name != "nt":
-        assert stat.S_IMODE(quarantine_dir.stat().st_mode) == 0o700
+    assert_private_mode(quarantine_dir, PRIVATE_DIRECTORY_MODE)
     assert report.quarantine_path is not None
 
 
@@ -843,9 +839,8 @@ def test_fallback_ensure_journal_creates_private_directory_and_file(tmp_path, mo
 
     assert journal_path.is_file()
     assert journal_path.parent.is_dir()
-    if os.name != "nt":
-        assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
-        assert stat.S_IMODE(journal_path.parent.stat().st_mode) == 0o700
+    assert_private_mode(journal_path, PRIVATE_FILE_MODE)
+    assert_private_mode(journal_path.parent, PRIVATE_DIRECTORY_MODE)
 
 
 def test_fallback_append_read_and_recover_partial_tail(tmp_path, monkeypatch):
@@ -930,7 +925,6 @@ def test_fallback_open_nofollow_closes_fd_when_verify_identity_raises(tmp_path, 
     assert excinfo.value.errno == errno.EBADF
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX permission bits")
 def test_fallback_enforce_dir_mode_corrects_via_lstat_without_o_directory(tmp_path, monkeypatch):
     _disable_posix_open_guards(monkeypatch)
     events_dir = _journal_path(_run_dir(tmp_path)).parent
@@ -949,7 +943,7 @@ def test_fallback_enforce_dir_mode_corrects_via_lstat_without_o_directory(tmp_pa
 
     run_journal._enforce_dir_mode(events_dir)
 
-    assert stat.S_IMODE(events_dir.stat().st_mode) == 0o700
+    assert_private_mode(events_dir, PRIVATE_DIRECTORY_MODE)
 
 
 # -- read_journal_bounded (issue #568 slice 5, Task 1) ------------------------
@@ -2144,7 +2138,7 @@ def test_append_critical_section_releases_fcntl_lock_after_exception(tmp_path, m
         f"{lock_path.name!r} even when the protected mutation raises"
     )
     assert not lock_path.is_symlink()
-    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+    assert_private_mode(lock_path, PRIVATE_FILE_MODE)
 
     script = r"""
 import fcntl
@@ -2209,7 +2203,7 @@ import time
 from pathlib import Path
 
 lock_path, locked_file, release_file = map(Path, sys.argv[1:4])
-fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, int("600", 8))
 fcntl.flock(fd, fcntl.LOCK_EX)
 locked_file.write_text("locked")
 deadline = time.monotonic() + 60.0

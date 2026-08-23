@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import stat
 from pathlib import Path
 
 import pytest
@@ -13,6 +12,7 @@ import pytest
 from brigade import cli, memory_vault
 from brigade.card_identity import valid_card_id
 from brigade.projection import kernel
+from tests.support import PRIVATE_DIRECTORY_MODE, assert_private_mode
 
 
 def _write_vault_config(
@@ -116,7 +116,7 @@ def test_propose_writes_an_additive_inbox_note_with_stable_id(workspace, capsys,
     assert not list((vault / "Brigade Memory").rglob("*.md"))
     staging = target / ".brigade" / "vault-propose"
     assert staging.is_dir()
-    assert stat.S_IMODE(staging.stat().st_mode) == 0o700
+    assert_private_mode(staging, PRIVATE_DIRECTORY_MODE)
     assert list(staging.iterdir()) == []
 
 

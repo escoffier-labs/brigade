@@ -13,6 +13,7 @@ import pytest
 
 from brigade import provenance
 from brigade.work_cmd import constants, helpers, ledger
+from tests.support import PRIVATE_FILE_MODE
 
 
 def _read_imports_in_child(target: str) -> None:
@@ -1800,7 +1801,12 @@ def test_import_inbox_rollback_short_write_restores_all_prior_bytes(
 ) -> None:
     parent, name = ledger._open_import_inbox_parent(tmp_path, create=True)
     before = b'{"text":"before"}\n'
-    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        PRIVATE_FILE_MODE,
+        dir_fd=parent,
+    )
     try:
         os.write(descriptor, before)
     finally:
@@ -1827,7 +1833,12 @@ def test_import_inbox_rollback_zero_write_fails_without_reporting_success(
 ) -> None:
     parent, name = ledger._open_import_inbox_parent(tmp_path, create=True)
     before = b'{"text":"before"}\n'
-    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        PRIVATE_FILE_MODE,
+        dir_fd=parent,
+    )
     try:
         os.write(descriptor, before)
     finally:

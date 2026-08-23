@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests import thread_sync
+from tests.support import PRIVATE_FILE_MODE
 
 from brigade import aboyeur
 from brigade import cli
@@ -3497,7 +3498,7 @@ def test_runs_recover_fails_closed_on_invalid_latest_checkpoint(tmp_path, capsys
     sha = hashlib.sha256(_writer_bytes(run_json_obj)).hexdigest()
     cp_file = run_checkpoint.checkpoint_path(run_dir, sha)
     cp_file.write_bytes(b"x" * len(_writer_bytes(run_json_obj)))
-    os.chmod(cp_file, 0o600)
+    os.chmod(cp_file, PRIVATE_FILE_MODE)
     lock_path = workspace / ".brigade" / "run.lock"
 
     rc = runs_cmd.recover(str(run_dir), cwd=workspace)
@@ -3890,7 +3891,7 @@ def test_runs_recover_invalid_checkpoint_surfaces_bounded_reason_and_preserves_l
     sha = hashlib.sha256(_writer_bytes(run_json_obj)).hexdigest()
     cp_file = run_checkpoint.checkpoint_path(run_dir, sha)
     cp_file.write_bytes(b"x" * len(_writer_bytes(run_json_obj)))
-    os.chmod(cp_file, 0o600)
+    os.chmod(cp_file, PRIVATE_FILE_MODE)
     lock_path = workspace / ".brigade" / "run.lock"
 
     rc = runs_cmd.recover(str(run_dir), cwd=workspace)

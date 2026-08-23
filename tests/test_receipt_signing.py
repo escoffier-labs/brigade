@@ -1,15 +1,15 @@
 import json
-import stat
 import sys
 from pathlib import Path
 
 from brigade import cli, localio, receipt_signing, runbook_cmd, work_cmd
+from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 
 
 def _write_key(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value)
-    path.chmod(0o600)
+    path.chmod(PRIVATE_FILE_MODE)
 
 
 def test_receipts_keygen_writes_private_key_and_refuses_without_force(tmp_path, capsys):
@@ -19,7 +19,7 @@ def test_receipts_keygen_writes_private_key_and_refuses_without_force(tmp_path, 
 
     assert rc == 0
     assert key_path.is_file()
-    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+    assert_private_mode(key_path, PRIVATE_FILE_MODE)
     key_text = key_path.read_text().strip()
     assert len(key_text) == 64
     int(key_text, 16)
@@ -34,7 +34,7 @@ def test_receipts_keygen_writes_private_key_and_refuses_without_force(tmp_path, 
     assert cli.main(["receipts", "keygen", "--target", str(tmp_path), "--force"]) == 0
     capsys.readouterr()
     assert key_path.read_text().strip() != key_text
-    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+    assert_private_mode(key_path, PRIVATE_FILE_MODE)
 
 
 def test_work_verify_receipt_without_key_keeps_unsigned_digest_shape(tmp_path, capsys, monkeypatch):

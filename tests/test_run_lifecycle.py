@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import signal
-import stat
 import threading
 from pathlib import Path
 
@@ -36,6 +35,7 @@ from brigade import (
     runguard,
     run_transport,
 )
+from tests.support import PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, assert_private_mode
 from brigade import roster as roster_mod
 
 _REQUEST_FIELD = "lifecycle_journal_requested"
@@ -782,8 +782,8 @@ def test_prepare_lifecycle_journal_private_journal_under_matching_held_run_lock(
 
     journal = _journal_path(run_dir)
     assert journal.is_file()
-    assert stat.S_IMODE(journal.stat().st_mode) == 0o600
-    assert stat.S_IMODE(journal.parent.stat().st_mode) == 0o700
+    assert_private_mode(journal, PRIVATE_FILE_MODE)
+    assert_private_mode(journal.parent, PRIVATE_DIRECTORY_MODE)
     # prepare only activates; it appends no event.
     assert _events(run_dir) == []
 
