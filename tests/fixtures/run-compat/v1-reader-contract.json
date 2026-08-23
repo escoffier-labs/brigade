@@ -1,13 +1,18 @@
 {
-  "comment": "Pinned previous-release run.json reader contract for #637. Derived from tag v0.25.0 (949d6df799347d63e5fdf643e2fea0de6a64215d), the last release tag before journal authority landed in #607. Do not edit silently: any change must update this comment and the derived_from.sources entries together.",
+  "comment": "Pinned previous-release run.json reader contract for #637. Derived from tag v0.25.0 (tag object 949d6df799347d63e5fdf643e2fea0de6a64215d, commit 5c1dcba55c26e0c9924e5f7078ab221caf1550b1), the last release tag before journal authority landed in #607. Do not edit silently: any change must update this comment and the derived_from.sources entries together.",
   "derived_from": {
     "tag": "v0.25.0",
-    "commit": "949d6df799347d63e5fdf643e2fea0de6a64215d",
+    "commit": "5c1dcba55c26e0c9924e5f7078ab221caf1550b1",
     "sources": [
       {
         "path": "src/brigade/runs_cmd.py",
         "lines": "12-36",
         "captures": "_NONTERMINAL_STATUSES accepted set and _read_json parse behavior (JSON object, no schema_version gate)"
+      },
+      {
+        "path": "src/brigade/runs_cmd.py",
+        "lines": "199-204",
+        "captures": "_is_terminal: any truthy finished_at implies terminal regardless of status"
       },
       {
         "path": "src/brigade/run_resume.py",
@@ -16,8 +21,8 @@
       },
       {
         "path": "src/brigade/aboyeur.py",
-        "lines": "1898-1906",
-        "captures": "writer always emits schema, task, status, and started_at on brigade.run.v1"
+        "lines": "1898-1922",
+        "captures": "writer always emits schema, task, cwd, orchestrator, dry_run, read_only, status, started_at, status_started_at, suspected_noop, code_graph_brief, drift_impact_brief, evidence_brief, brief_budget on brigade.run.v1"
       }
     ]
   },
@@ -45,6 +50,23 @@
   ],
   "parse_behavior": {
     "require_json_object": true,
-    "ignore_unknown_keys": true
-  }
+    "ignore_unknown_keys": true,
+    "finished_at_implies_terminal": true
+  },
+  "writer_always_emits": [
+    "schema",
+    "task",
+    "cwd",
+    "orchestrator",
+    "dry_run",
+    "read_only",
+    "status",
+    "started_at",
+    "status_started_at",
+    "suspected_noop",
+    "code_graph_brief",
+    "drift_impact_brief",
+    "evidence_brief",
+    "brief_budget"
+  ]
 }
