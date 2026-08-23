@@ -1,4 +1,4 @@
-"""brigade fleet command group (issue #1123): hub serve, status, spool flush."""
+"""brigade fleet command group (issues #1123, #1125): hub serve, status, spool flush, claims."""
 
 from __future__ import annotations
 
@@ -62,6 +62,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_flush = fleet_sub.add_parser("flush", help="Re-POST locally spooled events to the fleet hub.")
     p_flush.set_defaults(func=_dispatch_flush)
 
+    p_claims = fleet_sub.add_parser("claims", help="List active repo claims held on the fleet hub.")
+    p_claims.add_argument("--all", action="store_true", help="Include expired claims.")
+    p_claims.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
+    p_claims.set_defaults(func=_dispatch_claims)
+
 
 def _dispatch_serve(args: argparse.Namespace) -> int:
     from .. import fleet_hub
@@ -103,6 +108,43 @@ def _dispatch_status(args: argparse.Namespace) -> int:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
     if not rows:
         print("(no active fleet runs)")
+    return 0
+
+
+def _dispatch_claims(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    try:
+        claims = fleet_client.fetch_claims(include_all=args.all)
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps({"claims": claims}, indent=2, sort_keys=True))
+        return 0
+    headers = ("target", "node", "conductor", "acquired", "expires")
+    rows = []
+    for claim in claims:
+        expires = str(claim.get("expires_at") or "-")
+        if claim.get("expired"):
+            expires += " (expired)"
+        rows.append(
+            [
+                str(claim.get("target") or "-"),
+                str(claim.get("owner_node") or "-")[:12],
+                str(claim.get("owner_conductor") or "-"),
+                _format_age(claim.get("acquired_at")),
+                expires,
+            ]
+        )
+    widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
+    print("  ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True)))
+    for row in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
+    if not rows:
+        print("(no active fleet claims)")
     return 0
 
 

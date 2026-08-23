@@ -1,4 +1,5 @@
-"""Fleet hub: central run-event collector on the tailnet (issue #1123, phase 2).
+"""Fleet hub: central run-event collector and claim arbiter on the tailnet
+(issue #1123 phase 2, issue #1125 phase 4).
 
 A small stdlib-only HTTP service (``http.server.ThreadingHTTPServer`` +
 ``sqlite3``) that accepts ``POST /events`` from fleet nodes and answers
@@ -11,6 +12,12 @@ Endpoints:
   Responds ``{"accepted": n, "duplicate": m}``.
 - ``GET /status`` — bearer auth; latest state per (node_id, run_id) for
   non-terminal runs. ``?all=1`` includes terminal runs.
+- ``POST /claims`` — bearer auth; ``{"action": "acquire"|"renew"|"release",
+  "target": ..., "node_id": ..., "conductor"?: ..., "ttl_seconds"?: ...}``.
+  One unique row per target grants the claim to exactly one owner; a held
+  target answers 409 with the current owner. A claim past its TTL is
+  reclaimable by anyone; an unexpired one is never silently stolen.
+- ``GET /claims`` — bearer auth; active claims (``?all=1`` includes expired).
 
 The token comes from ``BRIGADE_FLEET_TOKEN`` or ``--token-file``; it is never
 persisted by Brigade. The database is one SQLite file in WAL mode with a
@@ -31,9 +38,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
+
+CLAIM_ACTIONS = frozenset({"acquire", "renew", "release"})
+DEFAULT_CLAIM_TTL_SECONDS = 900
+CLAIM_TTL_MIN_SECONDS = 1
+CLAIM_TTL_MAX_SECONDS = 86400
 
 EVENT_FIELDS = {
     "node_id": str,
@@ -61,6 +73,21 @@ CREATE TABLE IF NOT EXISTS events (
     ts TEXT NOT NULL,
     received_at TEXT NOT NULL,
     PRIMARY KEY (node_id, run_id, sequence, digest)
+);
+"""
+
+# Server-arbitrated repo claims (schema v2): one row per target grants the
+# target to exactly one (owner_node, owner_conductor). expires_at is Unix
+# epoch seconds so expiry comparisons are numeric, not string-format bound.
+_CLAIMS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS claims (
+    target TEXT NOT NULL PRIMARY KEY,
+    owner_node TEXT NOT NULL,
+    owner_conductor TEXT,
+    acquired_at TEXT NOT NULL,
+    renewed_at TEXT NOT NULL,
+    ttl_seconds INTEGER NOT NULL,
+    expires_at REAL NOT NULL
 );
 """
 
@@ -92,6 +119,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             f"fleet hub database {db_path} has schema version {current}; this brigade supports {SCHEMA_VERSION}"
         )
     conn.execute(_SCHEMA)
+    conn.execute(_CLAIMS_SCHEMA)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     conn.commit()
@@ -190,6 +218,150 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
     return result
 
 
+# --- claims (issue #1125, phase 4) ------------------------------------------
+
+
+def _now_epoch() -> float:
+    return datetime.now(timezone.utc).timestamp()
+
+
+def _epoch_to_iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+
+def _validate_claim_request(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise FleetHubError("claim request must be a JSON object")
+    request: dict[str, Any] = {}
+    action = raw.get("action")
+    if not isinstance(action, str) or action not in CLAIM_ACTIONS:
+        raise FleetHubError("claim field 'action' must be one of: acquire, renew, release")
+    request["action"] = action
+    for field in ("target", "node_id"):
+        value = raw.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise FleetHubError(f"claim field {field!r} must be a non-empty string")
+        request[field] = value.strip()
+    conductor = raw.get("conductor")
+    request["conductor"] = conductor.strip() if isinstance(conductor, str) and conductor.strip() else None
+    ttl = raw.get("ttl_seconds", DEFAULT_CLAIM_TTL_SECONDS)
+    if not isinstance(ttl, int) or isinstance(ttl, bool) or not CLAIM_TTL_MIN_SECONDS <= ttl <= CLAIM_TTL_MAX_SECONDS:
+        raise FleetHubError(
+            f"claim field 'ttl_seconds' must be an integer in [{CLAIM_TTL_MIN_SECONDS}, {CLAIM_TTL_MAX_SECONDS}]"
+        )
+    request["ttl_seconds"] = ttl
+    return request
+
+
+def _claim_payload(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "target": row[0],
+        "owner_node": row[1],
+        "owner_conductor": row[2],
+        "acquired_at": row[3],
+        "renewed_at": row[4],
+        "ttl_seconds": row[5],
+        "expires_at": _epoch_to_iso(row[6]),
+    }
+
+
+_CLAIM_COLUMNS = "target, owner_node, owner_conductor, acquired_at, renewed_at, ttl_seconds, expires_at"
+
+
+def _fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | None:
+    return conn.execute(f"SELECT {_CLAIM_COLUMNS} FROM claims WHERE target = ?", (target,)).fetchone()
+
+
+def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any]]:
+    """Arbitrate one claim request; returns (http_status, response_payload).
+
+    ``acquire`` grants a free or expired target, is idempotent for the current
+    owner (extending the TTL, preserving ``acquired_at`` while live), and
+    answers 409 with the owner for a held target. ``renew`` extends only an
+    unexpired claim held by the caller. ``release`` deletes only the caller's
+    row. Each mutation is a single SQL statement, so two concurrent callers
+    cannot both win.
+    """
+    request = _validate_claim_request(raw)
+    target = request["target"]
+    node = request["node_id"]
+    conductor = request["conductor"]
+    ttl = request["ttl_seconds"]
+    now = _now_epoch()
+    now_iso = _epoch_to_iso(now)
+    if request["action"] == "acquire":
+        cursor = conn.execute(
+            "INSERT INTO claims (target, owner_node, owner_conductor, acquired_at, renewed_at, ttl_seconds, expires_at) "  # noqa: E501
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(target) DO UPDATE SET "
+            "owner_node = excluded.owner_node, "
+            "owner_conductor = excluded.owner_conductor, "
+            "acquired_at = CASE WHEN claims.owner_node = excluded.owner_node "
+            "AND claims.owner_conductor IS excluded.owner_conductor "
+            "AND claims.expires_at > ? THEN claims.acquired_at ELSE excluded.acquired_at END, "
+            "renewed_at = excluded.renewed_at, "
+            "ttl_seconds = excluded.ttl_seconds, "
+            "expires_at = excluded.expires_at "
+            "WHERE claims.expires_at <= ? "
+            "OR (claims.owner_node = excluded.owner_node AND claims.owner_conductor IS excluded.owner_conductor)",
+            (target, node, conductor, now_iso, now_iso, ttl, now + ttl, now, now),
+        )
+        conn.commit()
+        if cursor.rowcount == 1:
+            row = _fetch_claim(conn, target)
+            written = (target, node, conductor, now_iso, now_iso, ttl, now + ttl)
+            return 200, {"granted": True, "claim": _claim_payload(row if row is not None else written)}
+        row = _fetch_claim(conn, target)
+        owner = _claim_payload(row) if row is not None else None
+        held_by = owner["owner_node"] if owner is not None else "unknown"
+        return 409, {"granted": False, "error": f"target {target!r} is held by {held_by}", "owner": owner}
+    if request["action"] == "renew":
+        cursor = conn.execute(
+            "UPDATE claims SET renewed_at = ?, ttl_seconds = ?, expires_at = ? "
+            "WHERE target = ? AND owner_node = ? AND owner_conductor IS ? AND expires_at > ?",
+            (now_iso, ttl, now + ttl, target, node, conductor, now),
+        )
+        conn.commit()
+        if cursor.rowcount == 1:
+            row = _fetch_claim(conn, target)
+            written = (target, node, conductor, now_iso, now_iso, ttl, now + ttl)
+            return 200, {"renewed": True, "claim": _claim_payload(row if row is not None else written)}
+        row = _fetch_claim(conn, target)
+        if row is not None and (row[1], row[2]) != (node, conductor) and row[6] > now:
+            return 409, {
+                "renewed": False,
+                "error": f"target {target!r} is held by {row[1]}",
+                "owner": _claim_payload(row),
+            }
+        return 409, {"renewed": False, "error": f"claim on {target!r} is expired or missing", "owner": None}
+    cursor = conn.execute(
+        "DELETE FROM claims WHERE target = ? AND owner_node = ? AND owner_conductor IS ?",
+        (target, node, conductor),
+    )
+    conn.commit()
+    if cursor.rowcount == 1:
+        return 200, {"released": True}
+    row = _fetch_claim(conn, target)
+    if row is not None:
+        return 409, {"released": False, "error": f"target {target!r} is held by {row[1]}", "owner": _claim_payload(row)}
+    return 200, {"released": False}
+
+
+def list_claims(conn: sqlite3.Connection, *, include_all: bool = False) -> list[dict[str, Any]]:
+    """All active claims (expired ones only with ``include_all``)."""
+    now = _now_epoch()
+    rows = conn.execute(f"SELECT {_CLAIM_COLUMNS} FROM claims ORDER BY target").fetchall()
+    result = []
+    for row in rows:
+        expired = row[6] <= now
+        if expired and not include_all:
+            continue
+        payload = _claim_payload(row)
+        payload["expired"] = expired
+        result.append(payload)
+    return result
+
+
 def _load_token(args: argparse.Namespace) -> str:
     token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
     if token:
@@ -232,7 +404,7 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
             if path == "/health":
                 self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
                 return
-            if path == "/status":
+            if path in ("/status", "/claims"):
                 if not self._authorized():
                     self._send_json(401, {"error": "unauthorized"})
                     return
@@ -242,20 +414,24 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
                 except (FleetHubError, sqlite3.Error) as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
                     return
+                payload: dict[str, Any]
                 try:
-                    runs = latest_status(conn, include_all=include_all)
+                    if path == "/status":
+                        payload = {"runs": latest_status(conn, include_all=include_all)}
+                    else:
+                        payload = {"claims": list_claims(conn, include_all=include_all)}
                 except sqlite3.Error as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
                     return
                 finally:
                     conn.close()
-                self._send_json(200, {"runs": runs})
+                self._send_json(200, payload)
                 return
             self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
             path = self.path.partition("?")[0]
-            if path != "/events":
+            if path not in ("/events", "/claims"):
                 self._send_json(404, {"error": "not found"})
                 return
             if not self._authorized():
@@ -280,8 +456,12 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_json(500, {"error": f"hub database error: {exc}"})
                 return
+            body_payload: dict[str, Any]
             try:
-                counts = store_events(conn, parsed)
+                if path == "/events":
+                    status, body_payload = 200, dict(store_events(conn, parsed))
+                else:
+                    status, body_payload = handle_claim(conn, parsed)
             except FleetHubError as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
@@ -290,7 +470,7 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
                 return
             finally:
                 conn.close()
-            self._send_json(200, counts)
+            self._send_json(status, body_payload)
 
     return _Handler
 

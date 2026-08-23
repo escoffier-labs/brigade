@@ -297,6 +297,7 @@ def _resolved_scheduler(args, roster) -> str:
 
 def dispatch(args) -> int:
     from .. import aboyeur as aboyeur_mod
+    from .. import fleet_client
     from .. import run_budget
     from .. import runguard
     from .. import roster as roster_mod
@@ -498,6 +499,12 @@ def dispatch(args) -> int:
                         "output_warnings": output_warnings,
                     },
                 )
+            # Hub-arbitrated cross-machine claim (issue #1125): ask the fleet
+            # hub for the repo before taking the local lease. No hub or an
+            # unreachable hub falls back to the local run.lock below.
+            lifecycle.enter_context(
+                fleet_client.repo_claim(fleet_client.resolve_claim_target(run_cwd), base_path=run_cwd)
+            )
             lifecycle.enter_context(
                 runguard.run_lock(
                     run_cwd,
@@ -682,6 +689,9 @@ def dispatch(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         if worktree_cwd is not None and keep_worktree:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
+        return 2
+    except fleet_client.FleetClaimHeldError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     except TimeoutError as exc:
         detail = " ".join(str(exc).split()) or "worker dispatch timed out"
