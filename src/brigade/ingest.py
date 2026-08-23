@@ -135,8 +135,8 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
 def _handoff_source_inbox_paths(target: Path) -> list[Path]:
     """Inbox directories declared in `.brigade/handoff-sources.json`.
 
-    Raises ValueError when the file exists but cannot be parsed, so ingest
-    does not go green while omitting configured roots.
+    Raises ValueError when the file exists but cannot be read or parsed, so
+    ingest does not go green while omitting configured roots.
     """
     from .handoff_cmd.models import default_sources_path
     from .handoff_cmd.sources import _load_sources
@@ -146,7 +146,7 @@ def _handoff_source_inbox_paths(target: Path) -> list[Path]:
         return []
     try:
         config = _load_sources(target, sources_path)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         raise ValueError(f"invalid handoff source config {sources_path}: {exc}") from exc
     return [watched.root / watched.inbox for watched in config.watched]
 

@@ -481,6 +481,28 @@ def test_ingest_fails_closed_on_invalid_handoff_sources(tmp_path, capsys):
     assert "no handoff inbox" not in err
 
 
+def test_ingest_fails_closed_on_unreadable_handoff_sources(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "wsA"
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".claude" / "memory-handoffs").mkdir(parents=True)
+    (workspace / ".brigade" / "handoff-sources.json").write_text('{"sources": []}')
+
+    from brigade.handoff_cmd import sources as sources_mod
+
+    def boom(_target, _sources_path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(sources_mod, "_load_sources", boom)
+    rc = ingest_mod.run(target=workspace)
+    assert rc == ingest_mod.INVALID_SOURCE_CONFIG
+    assert ingest_mod.skip_reason(rc) == ingest_mod.SKIP_INVALID_SOURCE_CONFIG
+    err = capsys.readouterr().err
+    assert "invalid handoff source config" in err
+    assert "permission denied" in err
+    assert "no handoff inbox" not in err
+    assert "Traceback" not in err
+
+
 def test_fleet_ingest_reports_invalid_source_config_not_missing_inbox(tmp_path, capsys):
     from brigade.repos_cmd import ingest_fleet
 
