@@ -4836,6 +4836,20 @@ def test_dispatch_routes_codex_through_appserver(monkeypatch, tmp_path):
     assert '"item/completed"' in events_file.read_text()
 
 
+def test_worker_event_writer_truncates_before_persist(tmp_path, monkeypatch):
+    monkeypatch.setattr(aboyeur.proc, "MAX_CAPTURE_BYTES", 256)
+    writer = aboyeur._worker_event_writer(tmp_path, "cook")
+    assert writer is not None
+    writer(
+        {
+            "method": "item/completed",
+            "params": {"item": {"type": "agentMessage", "text": "X" * 1000}},
+        }
+    )
+    payload = (tmp_path / "cook.jsonl").read_bytes()
+    assert len(payload) <= 256 + 1
+
+
 @pytest.mark.parametrize(
     ("detail", "timed_out", "expected_kind"),
     [

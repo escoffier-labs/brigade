@@ -643,6 +643,30 @@ def test_run_agent_captures_output(monkeypatch):
     assert res.timed_out is False
 
 
+def test_run_agent_maps_output_limit_overflow_to_harness_failure(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(
+            -9,
+            "O" * 100,
+            "combined output exceeded 1048576 byte limit",
+            output_limit_exceeded=True,
+            stdout_bytes=100,
+            stderr_bytes=agents.proc.MAX_CAPTURE_BYTES - 100,
+        ),
+    )
+
+    result = agents.run_agent("codex", "do it")
+
+    assert result.ok is False
+    assert result.failure_phase == "harness"
+    assert result.failure_kind == "output-limit"
+    assert result.text == "O" * 100
+    assert "combined output exceeded" in result.detail
+
+
 def test_run_agent_rejects_decode_failure_even_when_exit_zero(monkeypatch):
     decode_error = "child stderr is not valid UTF-8 (utf-8): 'utf-8' codec can't decode byte 0x9d in position 0"
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)

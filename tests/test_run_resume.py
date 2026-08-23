@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import agents, codex_appserver, runguard, run_resume, runs_cmd
+from brigade import agents, codex_appserver, message_envelope, provenance, runguard, run_resume, runs_cmd
 
 
 def _write_run_dir(tmp_path: Path, *, results: list[dict]) -> Path:
@@ -317,6 +317,53 @@ def test_resume_re_envelopes_output_and_drops_transplanted_identity(tmp_path, mo
     )
     assert "finished now" in admitted
     assert "part" not in admitted
+
+
+def test_resume_truncates_worker_text_before_envelope_hash(tmp_path, monkeypatch):
+    oversized = "W" * (message_envelope.MESSAGE_WRAP_MAX_BYTES + 4096)
+    bounded = message_envelope.truncate_utf8(oversized)
+
+    class HugeThread(_StubThread):
+        def run_turn(self, prompt, *, timeout, on_event=None):  # noqa: ARG002
+            return codex_appserver.TurnResult(
+                text=oversized,
+                ok=True,
+                status="complete",
+                thread_id=self.thread_id,
+            )
+
+    class HugeServer(_StubServer):
+        def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):  # noqa: ARG002
+            self.resumed.append(thread_id)
+            return HugeThread(thread_id)
+
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "part",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", HugeServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 0
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["text"] == bounded
+    assert len(results[0]["text"].encode("utf-8")) == message_envelope.MESSAGE_WRAP_MAX_BYTES
+    assert results[0]["provenance"]["hashes"]["content"] == provenance.content_sha256(bounded)
+    assert results[0]["provenance"]["hashes"]["content"] != provenance.content_sha256(oversized)
 
 
 def test_resume_with_nothing_resumable_reports_and_exits_2(tmp_path, capsys):

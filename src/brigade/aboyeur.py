@@ -1799,6 +1799,16 @@ def _worker_prompt(
     return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
 
 
+def _contains_event_marker(value: Any, marker: str) -> bool:
+    if isinstance(value, str):
+        return marker in value
+    if isinstance(value, list):
+        return any(_contains_event_marker(item, marker) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_event_marker(item, marker) for item in value.values())
+    return False
+
+
 def _redact_event_marker(value: Any, marker: str) -> Any:
     if isinstance(value, str):
         return value.replace(marker, "[redacted]")
@@ -1830,12 +1840,11 @@ def _worker_event_writer(
         if correlation_marker is not None:
             params = msg.get("params") if isinstance(msg, dict) else None
             item = params.get("item") if isinstance(params, dict) else None
-            rendered = json.dumps(msg, sort_keys=True, default=str)
             if (
                 msg.get("method") == "item/completed"
                 and isinstance(item, dict)
                 and item.get("type") == "commandExecution"
-                and correlation_marker in rendered
+                and _contains_event_marker(msg, correlation_marker)
                 and workspace is not None
             ):
                 thread_id = params.get("threadId")
@@ -1856,7 +1865,7 @@ def _worker_event_writer(
             safe_msg = _redact_event_marker(msg, correlation_marker)
         if path is not None:
             with path.open("a") as fh:
-                fh.write(json.dumps(safe_msg) + "\n")
+                fh.write(proc.bound_text(json.dumps(safe_msg, default=str), proc.MAX_CAPTURE_BYTES) + "\n")
         if verbose and safe_msg.get("method") == "item/completed":
             item = (safe_msg.get("params") or {}).get("item") or {}
             print(f"worker {worker}: {item.get('type', 'item')} completed", file=sys.stderr)
@@ -1914,6 +1923,19 @@ def _run_codex_appserver_worker(
         if registry is not None and active_turn_id is not None:
             registry.unregister(worker, active_turn_id)
     text = turn.text.strip()
+    if getattr(turn, "output_limit_exceeded", False) or len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
+        return agents.AgentResult(
+            text=proc.bound_text(text),
+            ok=False,
+            detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"[:200],
+            failure_phase="harness",
+            failure_kind="output-limit",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=agent.model,
+            reasoning=agent.reasoning,
+        )
     if not turn.ok:
         timed_out = bool(getattr(turn, "timed_out", False))
         failure_kind = "timeout" if timed_out else "interrupted" if turn.status == "interrupted" else None

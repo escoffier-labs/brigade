@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 _STREAM_ENCODING = "utf-8"
+MAX_CAPTURE_BYTES = 1_048_576
+_READ_CHUNK_BYTES = 4096
 _UNSUPPORTED_WINDOWS_SUFFIXES: dict[str, str] = {
     ".ps1": "PowerShell script",
     ".vbs": "VBScript",
@@ -180,6 +182,9 @@ class Result:
     stderr: str
     stdout_decode_error: str | None = None
     stderr_decode_error: str | None = None
+    output_limit_exceeded: bool = False
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
 
     @property
     def decode_failed(self) -> bool:
@@ -188,6 +193,10 @@ class Result:
     @property
     def decode_failure_detail(self) -> str:
         return self.stderr_decode_error or self.stdout_decode_error or "child output is not valid UTF-8"
+
+    @property
+    def total_bytes(self) -> int:
+        return self.stdout_bytes + self.stderr_bytes
 
     def json(self) -> Optional[object]:
         try:
@@ -214,13 +223,25 @@ def _decoded_output(stdout: str | bytes | None, stderr: str | bytes | None) -> t
     return out_text, err_text, out_error, err_error
 
 
+def _observed_bytes(value: str | bytes | None, decoded: str) -> int:
+    if isinstance(value, (bytes, bytearray)):
+        return len(value)
+    if isinstance(value, str):
+        return len(value.encode(_STREAM_ENCODING))
+    return len(decoded.encode(_STREAM_ENCODING))
+
+
 def _result_from_output(
     *,
     code: int,
     stdout: str | bytes | None,
     stderr: str | bytes | None,
+    stdout_bytes: int | None = None,
+    stderr_bytes: int | None = None,
+    output_limit_exceeded: bool = False,
 ) -> Result:
     out_text, err_text, stdout_error, stderr_error = _decoded_output(stdout, stderr)
+    out_text, err_text = bound_text_pair(out_text, err_text)
     for stream_error in (stdout_error, stderr_error):
         if stream_error is not None:
             if err_text and not err_text.endswith("\n"):
@@ -232,7 +253,267 @@ def _result_from_output(
         stderr=err_text,
         stdout_decode_error=stdout_error,
         stderr_decode_error=stderr_error,
+        output_limit_exceeded=output_limit_exceeded,
+        stdout_bytes=_observed_bytes(stdout, out_text) if stdout_bytes is None else stdout_bytes,
+        stderr_bytes=_observed_bytes(stderr, err_text) if stderr_bytes is None else stderr_bytes,
     )
+
+
+def bound_text(text: str, max_bytes: int | None = None) -> str:
+    """Return ``text`` truncated to at most ``max_bytes`` of UTF-8."""
+
+    limit = MAX_CAPTURE_BYTES if max_bytes is None else max_bytes
+    raw = text.encode(_STREAM_ENCODING)
+    if len(raw) <= limit:
+        return text
+    return raw[:limit].decode(_STREAM_ENCODING, errors="ignore")
+
+
+def bound_text_pair(stdout: str, stderr: str, max_bytes: int | None = None) -> tuple[str, str]:
+    """Keep combined UTF-8 of ``stdout`` + ``stderr`` at or below ``max_bytes``."""
+
+    limit = MAX_CAPTURE_BYTES if max_bytes is None else max_bytes
+    out = bound_text(stdout, limit)
+    remaining = max(0, limit - len(out.encode(_STREAM_ENCODING)))
+    return out, bound_text(stderr, remaining)
+
+
+class ByteBudget:
+    """Count retained bytes and refuse further accumulation after the cap."""
+
+    def __init__(self, max_bytes: int | None = None) -> None:
+        self._max_bytes = max_bytes
+        self._lock = threading.Lock()
+        self.used = 0
+        self.overflowed = False
+
+    @property
+    def max_bytes(self) -> int:
+        return MAX_CAPTURE_BYTES if self._max_bytes is None else self._max_bytes
+
+    def try_add(self, n: int) -> bool:
+        """Accept all ``n`` bytes, or reject and trip overflow."""
+
+        if n <= 0:
+            return not self.overflowed
+        with self._lock:
+            if self.overflowed:
+                return False
+            if self.used + n > self.max_bytes:
+                self.overflowed = True
+                return False
+            self.used += n
+            return True
+
+    def accept(self, n: int) -> int:
+        """Accept as many of ``n`` bytes as remain; trip if truncated."""
+
+        if n <= 0:
+            return 0
+        with self._lock:
+            if self.overflowed:
+                return 0
+            remaining = self.max_bytes - self.used
+            if remaining <= 0:
+                self.overflowed = True
+                return 0
+            taken = n if n <= remaining else remaining
+            self.used += taken
+            if n > remaining:
+                self.overflowed = True
+            return taken
+
+
+def _process_group_kwargs() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"start_new_session": True}
+    if os.name == "nt":
+        return {"creationflags": _WINDOWS_NEW_PROCESS_GROUP}
+    return {}
+
+
+class _BoundedCollector:
+    """Retain combined stdout/stderr up to ``MAX_CAPTURE_BYTES``."""
+
+    def __init__(self, max_bytes: int = MAX_CAPTURE_BYTES) -> None:
+        self.max_bytes = max_bytes
+        self._lock = threading.Lock()
+        self._buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        self.stdout_bytes = 0
+        self.stderr_bytes = 0
+        self.overflowed = False
+        self.overflow = threading.Event()
+
+    def feed(self, stream: str, data: bytes) -> bool:
+        """Retain bytes under the combined cap. Return False after overflow."""
+
+        if not data:
+            return not self.overflowed
+        with self._lock:
+            if self.overflowed:
+                return False
+            remaining = self.max_bytes - (self.stdout_bytes + self.stderr_bytes)
+            if remaining <= 0:
+                self.overflowed = True
+                self.overflow.set()
+                return False
+            accepted = data[:remaining]
+            self._buffers[stream].extend(accepted)
+            if stream == "stdout":
+                self.stdout_bytes += len(accepted)
+            else:
+                self.stderr_bytes += len(accepted)
+            if len(data) > remaining:
+                self.overflowed = True
+                self.overflow.set()
+                return False
+            return True
+
+    def snapshot(self) -> tuple[bytes, bytes]:
+        with self._lock:
+            return bytes(self._buffers["stdout"]), bytes(self._buffers["stderr"])
+
+
+def _stop_child(process: subprocess.Popen[bytes], process_registry: ProcessRegistry | None) -> None:
+    if process_registry is not None:
+        process_registry.terminate(process)
+        return
+    _terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
+
+
+def _write_stdin(process: subprocess.Popen[bytes], stdin: bytes | None) -> None:
+    if process.stdin is None:
+        return
+    try:
+        if stdin is not None:
+            process.stdin.write(stdin)
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+
+
+def _join_readers(threads: list[threading.Thread], timeout: float) -> None:
+    deadline = time.monotonic() + max(timeout, 0.0)
+    for reader in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        reader.join(timeout=remaining)
+
+
+def _readers_alive(threads: list[threading.Thread]) -> bool:
+    return any(reader.is_alive() for reader in threads)
+
+
+def _collect_process_output(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+    stdin: bytes | None,
+    process_registry: ProcessRegistry | None,
+) -> Result:
+    collector = _BoundedCollector()
+
+    def read_stream(stream: Any, name: str) -> None:
+        try:
+            while True:
+                chunk = stream.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if not collector.feed(name, chunk):
+                    break
+        except OSError:
+            pass
+
+    threads: list[threading.Thread] = []
+    for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+        if stream is None:
+            continue
+        reader = threading.Thread(target=read_stream, args=(stream, name), daemon=True)
+        reader.start()
+        threads.append(reader)
+
+    stdin_thread: threading.Thread | None = None
+    if process.stdin is not None:
+        stdin_thread = threading.Thread(target=_write_stdin, args=(process, stdin), daemon=True)
+        stdin_thread.start()
+
+    timed_out = False
+    deadline = time.monotonic() + max(timeout, 0.0)
+    try:
+        while True:
+            if collector.overflowed:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            process_exited = process.poll() is not None
+            if process_exited and not _readers_alive(threads):
+                break
+            collector.overflow.wait(timeout=min(0.05, remaining))
+    except BaseException:
+        _stop_child(process, process_registry)
+        raise
+
+    if timed_out or collector.overflowed:
+        _stop_child(process, process_registry)
+
+    _join_readers(threads, _TIMED_OUT_DRAIN_SECONDS)
+    if stdin_thread is not None:
+        stdin_thread.join(timeout=_TIMED_OUT_DRAIN_SECONDS)
+    if _readers_alive(threads):
+        _stop_child(process, process_registry)
+        _join_readers(threads, _TIMED_OUT_DRAIN_SECONDS)
+        if stdin_thread is not None:
+            stdin_thread.join(timeout=_TIMED_OUT_DRAIN_SECONDS)
+
+    if process.poll() is None:
+        _stop_child(process, process_registry)
+        try:
+            process.wait(timeout=_TIMED_OUT_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+
+    stdout_bytes, stderr_bytes = collector.snapshot()
+    code = process.returncode
+    if timed_out:
+        code = 124
+    elif code is None:
+        code = -1
+
+    result = _result_from_output(
+        code=code,
+        stdout=stdout_bytes,
+        stderr=stderr_bytes,
+        stdout_bytes=collector.stdout_bytes,
+        stderr_bytes=collector.stderr_bytes,
+        output_limit_exceeded=collector.overflowed,
+    )
+    extras: list[str] = []
+    if collector.overflowed:
+        extras.append(f"combined output exceeded {MAX_CAPTURE_BYTES} byte limit")
+    if timed_out:
+        extras.append(f"timeout after {timeout}s")
+    if extras:
+        stderr = result.stderr
+        if stderr and not stderr.endswith("\n"):
+            stderr += "\n"
+        return Result(
+            code=result.code,
+            stdout=result.stdout,
+            stderr=stderr + "\n".join(extras),
+            stdout_decode_error=result.stdout_decode_error,
+            stderr_decode_error=result.stderr_decode_error,
+            output_limit_exceeded=result.output_limit_exceeded,
+            stdout_bytes=result.stdout_bytes,
+            stderr_bytes=result.stderr_bytes,
+        )
+    return result
 
 
 @dataclass(frozen=True)
@@ -367,98 +648,36 @@ def run(
     process_registry: ProcessRegistry | None = None,
 ) -> Result:
     try:
-        if process_registry is not None:
-            process_group_kwargs: dict[str, Any] = {}
-            if os.name == "posix":
-                process_group_kwargs["start_new_session"] = True
-            elif os.name == "nt":
-                process_group_kwargs["creationflags"] = _WINDOWS_NEW_PROCESS_GROUP
-            process = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
-                env=env,
-                cwd=cwd,
-                shell=False,
-                **process_group_kwargs,
-            )
-            process_registry.register(process)
-            try:
-                process_stdout, process_stderr = process.communicate(input=stdin, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                process_registry.terminate(process)
-                try:
-                    process_stdout, process_stderr = process.communicate(timeout=_TIMED_OUT_DRAIN_SECONDS)
-                except subprocess.TimeoutExpired as drain_exc:
-                    process_stdout, process_stderr = drain_exc.output, drain_exc.stderr
-                    for stream_name in ("stdout", "stderr"):
-                        stream = getattr(process, stream_name, None)
-                        if stream is not None:
-                            try:
-                                stream.close()
-                            except OSError:
-                                pass
-                result = _result_from_output(code=124, stdout=process_stdout, stderr=process_stderr)
-                timeout_detail = f"timeout after {timeout}s"
-                result_stderr = result.stderr
-                if result_stderr and not result_stderr.endswith("\n"):
-                    result_stderr += "\n"
-                return Result(
-                    code=124,
-                    stdout=result.stdout,
-                    stderr=result_stderr + timeout_detail,
-                    stdout_decode_error=result.stdout_decode_error,
-                    stderr_decode_error=result.stderr_decode_error,
-                )
-            except BaseException:
-                process_registry.terminate(process)
-                raise
-            finally:
-                process_registry.unregister(process)
-            return _result_from_output(
-                code=process.returncode,
-                stdout=process_stdout,
-                stderr=process_stderr,
-            )
-        if stdin is None:
-            cp = subprocess.run(
-                args,
-                capture_output=True,
-                text=False,
-                timeout=timeout,
-                env=env,
-                cwd=cwd,
-                check=False,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-            )
-        else:
-            cp = subprocess.run(
-                args,
-                capture_output=True,
-                text=False,
-                timeout=timeout,
-                env=env,
-                cwd=cwd,
-                check=False,
-                shell=False,
-                input=stdin,
-            )
-        return _result_from_output(code=cp.returncode, stdout=cp.stdout, stderr=cp.stderr)
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+            env=env,
+            cwd=cwd,
+            shell=False,
+            **_process_group_kwargs(),
+        )
     except OSError as exc:
         code, message = _launch_failure(args, exc)
         return Result(code=code, stdout="", stderr=message)
-    except subprocess.TimeoutExpired as exc:
-        result = _result_from_output(code=124, stdout=exc.stdout, stderr=exc.stderr)
-        timeout_detail = f"timeout after {timeout}s"
-        stderr = result.stderr
-        if stderr and not stderr.endswith("\n"):
-            stderr += "\n"
-        return Result(
-            code=124,
-            stdout=result.stdout,
-            stderr=stderr + timeout_detail,
-            stdout_decode_error=result.stdout_decode_error,
-            stderr_decode_error=result.stderr_decode_error,
+
+    if process_registry is not None:
+        process_registry.register(process)
+    try:
+        return _collect_process_output(
+            process,
+            timeout=timeout,
+            stdin=stdin,
+            process_registry=process_registry,
         )
+    finally:
+        if process_registry is not None:
+            process_registry.unregister(process)
+        for stream_name in ("stdout", "stderr", "stdin"):
+            stream = getattr(process, stream_name, None)
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
