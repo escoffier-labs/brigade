@@ -95,6 +95,34 @@ def test_render_brigade_runs_error_is_empty_state_with_diagnostic():
     assert "CLI diagnostic" in fragment
     assert "runs directory not found" in fragment
     assert "<root>" not in fragment
+    assert 'class="error"' not in fragment
+
+
+def test_run_detail_docs_name_verification_command_field():
+    text = Path(__file__).resolve().parents[1].joinpath("docs", "receipt-schemas.md").read_text(encoding="utf-8")
+    start = text.index("### `brigade.run-detail.v1`")
+    end = text.index("### `brigade.run-watch.v1`")
+    section = text[start:end]
+    assert "`command`" in section
+    assert "command label" not in section
+
+
+def test_render_brigade_runs_cli_failure_is_error_state_not_empty():
+    messages = (
+        "command timed out",
+        "invalid JSON from command",
+        "error: permission denied reading runs store",
+        "expected JSON object from command",
+    )
+    for message in messages:
+        fragment = run_timeline.render(
+            {"brigade": {"error": message}, "verify": {"runs": []}},
+            "unused",
+        )
+        assert "No Brigade runs yet." not in fragment, message
+        assert "CLI diagnostic" not in fragment, message
+        assert 'class="error"' in fragment, message
+        assert message in fragment
 
 
 def test_render_lists_verify_runs_newest_first_with_bounded_receipts():

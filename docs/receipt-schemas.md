@@ -973,7 +973,7 @@ Both commands share one serializer:
 - `workers`: per-result state (ok/status, bounded detail, duration, exit code,
   timeout flag, requested model, transport, failure class).
 - `verification`: verify receipt summaries (receipt run id, status, duration,
-  command label, and exit code) from recorded ground truth.
+  `command`, and exit code) from recorded ground truth.
 - `briefs`: attachment markers for the Code Intelligence (`code-graph`),
   drift (`drift-impact`), and Evidence Ledger (`evidence`) briefs.
 

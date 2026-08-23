@@ -132,13 +132,25 @@ def _run_id_details(run_id: object) -> str:
     return f"<details><summary>Run ID</summary><code>{rendered}</code></details>"
 
 
+_MISSING_RUNS_DIR_MARKER = "runs directory not found"
+
+
+def _is_missing_runs_directory(error: object) -> bool:
+    """True only for the CLI's missing-runs-dir message, not other fetch failures."""
+    return _MISSING_RUNS_DIR_MARKER in str(error)
+
+
 def _render_brigade_panel(payload: dict) -> str:
     title = "Brigade runs"
     error = payload.get("error")
     if error:
-        # A missing runs directory is an empty state, not a failure.
-        detail = f"<details><summary>{html.esc('CLI diagnostic')}</summary><pre>{html.esc(str(error))}</pre></details>"
-        return html.panel(html.esc(title), f"<p>{html.esc('No Brigade runs yet.')}</p>{detail}")
+        if _is_missing_runs_directory(error):
+            # A missing runs directory is an empty state, not a failure.
+            detail = (
+                f"<details><summary>{html.esc('CLI diagnostic')}</summary><pre>{html.esc(str(error))}</pre></details>"
+            )
+            return html.panel(html.esc(title), f"<p>{html.esc('No Brigade runs yet.')}</p>{detail}")
+        return html.error_panel(title, str(error))
 
     runs = payload.get("runs")
     if not isinstance(runs, list) or not runs:
