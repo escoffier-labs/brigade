@@ -130,7 +130,7 @@ class TestClient:
         token_file.write_text(token + "\n")
         self.home.mkdir(parents=True, exist_ok=True)
         (self.home / "fleet.toml").write_text(
-            f'[fleet]\nhub_url = "{url}"\ntoken_file = "{token_file}"\n'
+            f'[fleet]\nhub_url = "{url}"\ntoken_file = "{token_file.as_posix()}"\n'
         )
 
     def test_unreachable_hub_spools_does_not_raise(self, monkeypatch):
