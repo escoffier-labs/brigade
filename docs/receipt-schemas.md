@@ -747,6 +747,7 @@ transport env path. See `docs/skill-registry.md`.
 | `capability_fingerprint` | string | no | |
 | `route` | object | no | Route manifest |
 | `route_fingerprint` | string | no | |
+| `reused_evidence_ref` | string | no | Reused verify receipt path when `evidence_ref` was canonicalized through `reused_from` (#650) |
 
 ---
 

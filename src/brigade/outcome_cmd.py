@@ -838,6 +838,7 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
     capability_fingerprint_value = payload.get("capability_fingerprint")
     route = payload.get("route")
     route_fingerprint_value = payload.get("route_fingerprint")
+    reused_evidence_ref = payload.get("reused_evidence_ref")
     try:
         return core.OutcomeRecord(
             artifact_id=str(payload["artifact_id"]),
@@ -860,6 +861,9 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
             route_fingerprint=route_fingerprint_value
             if isinstance(route_fingerprint_value, str) and route_fingerprint_value
             else None,
+            reused_evidence_ref=reused_evidence_ref
+            if isinstance(reused_evidence_ref, str) and reused_evidence_ref
+            else None,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -871,23 +875,88 @@ def load_records(target: Path) -> list[core.OutcomeRecord]:
     return [record for record in records if record is not None]
 
 
-def _canonical_verify_evidence_ref(target: Path, evidence_ref: str) -> str:
-    """Follow ``reused_from`` when ``evidence_ref`` names a verify receipt path."""
-    if not evidence_ref:
-        return evidence_ref
+CANONICAL_EVIDENCE_SCHEMA_VERSION = 1
+
+
+def _canonical_evidence_path(target: Path) -> Path:
+    """Persisted ``evidence_ref -> canonical evidence_ref`` map for legacy ledger rows.
+
+    Rows written before #634 stored the reused receipt path. Canonicalizing them
+    used to re-open the receipt on every rank/score/reconcile and silently
+    stopped collapsing once the receipt was pruned (#650). The map records each
+    resolution once; later reads consult it before touching the receipts dir.
+    """
+    return _records_path(target).parent / "evidence-canonical.json"
+
+
+def _load_canonical_evidence_map(target: Path) -> dict[str, str]:
+    payload = localio.read_json_dict(_canonical_evidence_path(target))
+    if not isinstance(payload, dict):
+        return {}
+    refs = payload.get("refs")
+    if not isinstance(refs, dict):
+        return {}
+    return {str(key): str(value) for key, value in refs.items() if isinstance(key, str) and isinstance(value, str)}
+
+
+def _save_canonical_evidence_map(target: Path, refs: dict[str, str]) -> None:
+    payload = {"schema_version": CANONICAL_EVIDENCE_SCHEMA_VERSION, "refs": dict(sorted(refs.items()))}
+    try:
+        localio.write_json(_canonical_evidence_path(target), payload)
+    except OSError:
+        # Best-effort durability: a read-only target still scores correctly
+        # this run; the next writable read persists the resolutions.
+        return
+
+
+def _resolve_canonical_verify_evidence_ref(target: Path, evidence_ref: str) -> str | None:
+    """Follow ``reused_from`` on disk; ``None`` when the receipt cannot be read."""
     path = Path(evidence_ref).expanduser()
-    if path.name != "receipt.json":
-        return evidence_ref
     payload = localio.read_json_dict(path)
     if not isinstance(payload, dict):
-        return evidence_ref
+        return None
     from .work_cmd import verification as verify_mod
 
     return verify_mod.canonical_verify_evidence_ref(target, payload)
 
 
-def _with_canonical_verify_evidence(target: Path, record: core.OutcomeRecord) -> core.OutcomeRecord:
-    canonical = _canonical_verify_evidence_ref(target, record.evidence_ref)
+def _canonical_verify_evidence_ref(
+    target: Path,
+    evidence_ref: str,
+    *,
+    cache: dict[str, str] | None = None,
+    resolved: dict[str, str] | None = None,
+) -> str:
+    """Follow ``reused_from`` when ``evidence_ref`` names a verify receipt path.
+
+    ``cache`` is the persisted map consulted first; ``resolved`` collects new
+    on-disk resolutions (identity mappings included, so an unchanged original
+    receipt is never re-opened either) for the caller to persist.
+    """
+    if not evidence_ref:
+        return evidence_ref
+    if cache is not None and evidence_ref in cache:
+        return cache[evidence_ref]
+    if Path(evidence_ref).expanduser().name != "receipt.json":
+        return evidence_ref
+    canonical = _resolve_canonical_verify_evidence_ref(target, evidence_ref)
+    if canonical is None:
+        return evidence_ref
+    if cache is not None:
+        cache[evidence_ref] = canonical
+    if resolved is not None:
+        resolved[evidence_ref] = canonical
+    return canonical
+
+
+def _with_canonical_verify_evidence(
+    target: Path,
+    record: core.OutcomeRecord,
+    *,
+    cache: dict[str, str] | None = None,
+    resolved: dict[str, str] | None = None,
+) -> core.OutcomeRecord:
+    canonical = _canonical_verify_evidence_ref(target, record.evidence_ref, cache=cache, resolved=resolved)
     if canonical == record.evidence_ref:
         return record
     return dataclasses.replace(record, evidence_ref=canonical)
@@ -897,10 +966,21 @@ def load_scoring_records(target: Path) -> list[core.OutcomeRecord]:
     """Load ledger rows with verify evidence canonicalized through ``reused_from``.
 
     Append-only disk rows stay untouched; scoring/rank/explain/reconcile see one
-    signal for an original receipt and any reused twin.
+    signal for an original receipt and any reused twin. Resolutions are read
+    from, and persisted to, ``memory/outcome/evidence-canonical.json`` so each
+    distinct receipt is opened at most once across the ledger's lifetime and a
+    legacy reused row keeps collapsing after its receipt is pruned (#650).
     """
     target = target.expanduser().resolve()
-    return [_with_canonical_verify_evidence(target, record) for record in load_records(target)]
+    cache = _load_canonical_evidence_map(target)
+    resolved: dict[str, str] = {}
+    records = [
+        _with_canonical_verify_evidence(target, record, cache=cache, resolved=resolved)
+        for record in load_records(target)
+    ]
+    if resolved:
+        _save_canonical_evidence_map(target, cache)
+    return records
 
 
 def _last_record_digest(path: Path) -> str | None:
@@ -1182,6 +1262,8 @@ def _record_payload(record: core.OutcomeRecord) -> dict:
         row.pop("route", None)
     if row.get("route_fingerprint") is None:
         row.pop("route_fingerprint", None)
+    if row.get("reused_evidence_ref") is None:
+        row.pop("reused_evidence_ref", None)
     return row
 
 
@@ -2092,6 +2174,7 @@ def capture(
     run_agent: dict[str, Any] | None = None
     route_run_payload: dict[str, Any] | None = None
     route_run_json: Path | None = None
+    reused_evidence_ref: str | None = None
     if run_receipt is not None:
         receipt, run_json, error = _resolve_run_receipt(target, run_receipt)
         if receipt is None or run_json is None:
@@ -2117,6 +2200,9 @@ def capture(
             return 1
         effective_status = str(receipt.get("status") or "")
         evidence_ref = verify_mod.canonical_verify_evidence_ref(target, receipt)
+        own_ref = verify_mod._verify_receipt_evidence_ref(receipt)
+        if own_ref and own_ref != evidence_ref:
+            reused_evidence_ref = own_ref
         ts = str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso())
         code_graph_delta = _compact_code_graph_delta(receipt)
         signal = core.signal_value(source, effective_status)
@@ -2139,6 +2225,7 @@ def capture(
         capability_fingerprint=capability_fingerprint(manifest),
         route=route,
         route_fingerprint=route_fingerprint(route),
+        reused_evidence_ref=reused_evidence_ref,
     )
     companion = _outcome_causal_receipt(record, receipt)
     try:
