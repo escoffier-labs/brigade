@@ -3065,6 +3065,92 @@ def test_runs_child_does_not_inherit_parent_control_socket_or_parent_paths(tmp_p
         run_control.control_transport_from_run(child_dir)
 
 
+def test_runs_child_does_not_inherit_external_artifacts_or_handoff(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    external_out = tmp_path / "operator-out"
+    external_out.mkdir()
+    (external_out / "parent-only.txt").write_text("parent output\n")
+    external_handoff = tmp_path / "repo-handoff.md"
+    external_handoff.write_text("parent handoff\n")
+    events = _write_checkpointed_parent_run(
+        workspace,
+        parent_dir,
+        extra={
+            "artifacts": str(external_out),
+            "handoff": str(external_handoff),
+        },
+    )
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    child_meta = json.loads((child_dir / "run.json").read_text())
+
+    assert child_meta.get("artifacts") == str(child_dir)
+    assert child_meta.get("artifacts") != str(external_out)
+    assert "handoff" not in child_meta
+    assert not (child_dir / "parent-only.txt").exists()
+    assert (external_out / "parent-only.txt").read_text() == "parent output\n"
+
+
+def test_runs_child_materializes_rewritten_artifacts_directory(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    parent_out = parent_dir / "out"
+    events = _write_checkpointed_parent_run(
+        workspace,
+        parent_dir,
+        extra={"artifacts": str(parent_out)},
+    )
+    assert not parent_out.exists()
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    child_meta = json.loads((child_dir / "run.json").read_text())
+    child_out = child_dir / "out"
+
+    assert child_meta.get("artifacts") == str(child_out)
+    assert child_out.is_dir()
+    assert child_out.resolve().parent == child_dir.resolve()
+
+
+def test_runs_child_refuses_terminal_parent_event(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_terminal_parent_run(workspace, parent_dir)
+    failed_event = next(event for event in events if event.event_type == "run.failed")
+
+    assert runs_cmd.child(parent_dir.name, failed_event.event_id, cwd=workspace) == 2
+    err = capsys.readouterr().err
+    assert "cannot branch a durable child from a terminal parent event" in err
+    children = [path for path in runs_root.iterdir() if path.name != parent_dir.name]
+    assert children == []
+
+
+def test_runs_child_still_branches_from_earlier_nonterminal_event(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_terminal_parent_run(workspace, parent_dir)
+    planning_event = next(event for event in events if event.event_type == "run.planning.started")
+
+    assert runs_cmd.child(parent_dir.name, planning_event.event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    child_meta = json.loads((child_dir / "run.json").read_text())
+    assert child_meta["status"] == "planning"
+    assert "cannot branch a durable child from a terminal parent event" not in child_meta.get("error", "")
+
+
 def test_runs_show_prints_ground_truth(tmp_path, capsys):
     run_dir = tmp_path / "run"
     _write_run_artifacts(run_dir)
@@ -3259,6 +3345,30 @@ def _write_checkpointed_parent_run(
             event_type="run.planning.started",
             payload={"detail": "planning"},
             idempotency_key="parent-planning",
+            workspace=workspace,
+        )
+    return _events(run_dir)
+
+
+def _write_terminal_parent_run(
+    workspace: Path,
+    run_dir: Path,
+    *,
+    extra: dict | None = None,
+) -> list[run_journal.RunEvent]:
+    """Checkpoint-covered parent whose latest paired event is terminal."""
+    _write_checkpointed_parent_run(workspace, run_dir, extra=extra)
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["status"] = "failed"
+    meta["finished_at"] = "2026-08-17T12:05:00Z"
+    meta["error"] = "parent timed out"
+    _localio().write_json(run_dir / "run.json", meta)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="run.failed",
+            payload={"status": "failed", "detail": "parent timed out"},
+            idempotency_key="parent-failed",
             workspace=workspace,
         )
     return _events(run_dir)
