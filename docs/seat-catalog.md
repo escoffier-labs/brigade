@@ -185,12 +185,39 @@ Brigade never auto-pulls ollama models: dispatch fails unless the model is alrea
 ### Gemini web via oracle (browser cookie lane)
 
 The only lane here that is neither an API nor a coding CLI. [oracle](https://github.com/steipete/oracle)
-drives a real `gemini.google.com` session using the Chrome cookies Agent Pantry
-syncs, so it costs no API key and no metered quota. It is a consult seat: one
-shot, no tools, no file writes.
+drives a real `gemini.google.com` session from a browser cookie jar, so it
+costs no API key and no metered quota. It is a consult seat: one shot, no
+tools, and no writes inside the target workspace.
 
 Requires a user-installed `oracle` (`npm install -g @steipete/oracle`) and a
-pantry-synced cookie jar. Brigade installs neither.
+working browser cookie source. Brigade installs neither. Agent Pantry can
+sync an encrypted cookie jar between machines; that is not enough by itself
+on current Oracle.
+
+Brigade invokes `oracle --engine browser -p <prompt>` and does not pass
+`--browser-cookie-sync`, a browser profile, or any other cookie-source flag.
+That argv was written against Oracle **0.16.1**, where live Chrome cookie
+copy was on by default on non-Windows hosts. Oracle **0.18.0** made that
+copy opt-in. A clean 0.18.0+ install can therefore pass `which oracle` and
+the doctor executable check while lacking the cookies needed for a live
+browser run.
+
+Before treating Oracle synthesis as ready, either:
+
+1. Enable an explicit Oracle cookie source on the browser host (for example
+   `--browser-cookie-sync`, or a configured browser profile), then run the
+   [live acceptance runbook](runbooks/research-live-acceptance.md), or
+2. Leave the browser lane optional and let a grounded profile fall back to
+   Luna when doctor or a live run reports `browser-auth`.
+
+`brigade research doctor` reports the installed Oracle version string,
+`auth_status`, and `model_attestation` (usually `unverified`). It does not
+classify the 0.16.1-vs-0.18.0 cookie-sync default, and `last_live_smoke`
+stays empty until a maintainer records a real browser pass. Hermetic adapter
+tests cover command construction and failure handling only.
+
+Remote Gemini through `oracle bridge` or `--remote-host` is unsupported.
+Those paths still default to the ChatGPT browser executor.
 
 ```toml
 [agents.researcher]
@@ -203,9 +230,12 @@ timeout_seconds = 300
 Models the browser engine accepts: `gemini-3.5-flash`, `gemini-3.1-pro`, and
 `gemini-3-deep-think` (browser-only; oracle rejects it in API mode).
 
-Read-only enforcement is `hard` by construction, since oracle has no filesystem
-write path. When the seat fails with a login or expired-session message, run
-`brigade pantry expiry-alert` and re-sync the source before retrying.
+Read-only enforcement is `hard` for writes inside the target workspace:
+Brigade never passes an output-file flag or a filesystem-writing tool
+surface. Oracle may still keep its own sessions and artifacts outside that
+workspace. When the seat fails with a login or expired-session message, run
+`brigade pantry expiry-alert` and re-sync the source before retrying, then
+confirm the Oracle cookie source is still explicit on 0.18.0+.
 
 A browser round trip is much slower than a CLI seat. The research engine asks
 for a 30 second planning call, which a browser session will not meet, so the

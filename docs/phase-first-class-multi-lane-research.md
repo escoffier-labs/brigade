@@ -175,8 +175,16 @@ Compatibility rules:
   session. Luna fallback synthesis gets a fresh review invocation with only the
   cited artifact packet as input.
 
-The browser adapter remains hard read-only. Brigade invokes Oracle without
-output-file flags, API flags, or a filesystem-writing tool surface.
+The browser adapter remains hard read-only for writes inside the target
+workspace. Brigade invokes Oracle without output-file flags, API flags, or a
+filesystem-writing tool surface. Oracle may still keep its own sessions and
+artifacts outside that workspace.
+
+Brigade still emits `oracle --engine browser -p <prompt>` and does not pass
+`--browser-cookie-sync`. That matches Oracle 0.16.1 defaults. Oracle 0.18.0
+made cookie copy opt-in, so a clean install can pass the executable check
+while failing live browser auth. See `docs/seat-catalog.md` and
+`docs/runbooks/research-live-acceptance.md`.
 
 ## Discovery modes
 

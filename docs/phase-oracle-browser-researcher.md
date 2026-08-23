@@ -2,6 +2,16 @@
 
 > This adapter phase is complete. New research orchestration work is specified
 > in `docs/phase-first-class-multi-lane-research.md`.
+>
+> Current compatibility: this phase shipped against Oracle **0.16.1**, where
+> live Chrome cookie copy was on by default on non-Windows hosts. Oracle
+> **0.18.0** made that copy opt-in (`--browser-cookie-sync`). Brigade still
+> invokes `oracle --engine browser -p <prompt>` and does not pass a
+> cookie-source flag. A clean 0.18.0+ install can pass the executable check
+> while lacking cookies for a live browser run. Operator setup lives in
+> `docs/seat-catalog.md` and `docs/runbooks/research-live-acceptance.md`.
+> Read-only is `hard` for writes inside the target workspace; Oracle may
+> still keep sessions and artifacts outside that workspace.
 
 ## Goal
 

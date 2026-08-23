@@ -5,13 +5,22 @@ against oracle's published docs/cli-reference.md and docs/gemini.md rather than
 a local `oracle --help`. That is why they live here and not in
 tests/test_agents_model_pin.py, whose stated invariant is that every adapter it
 covers has a confirmed model flag on an installed CLI.
+
+These tests stay hermetic. They do not prove live Oracle authentication,
+cookie-sync readiness, or model identity.
 """
 
 import json
+import re
 import shutil
 import sys
+from pathlib import Path
 
 from brigade import agents
+
+
+ROOT = Path(__file__).resolve().parents[1]
+_ORACLE_VERSION_RE = re.compile(r"\b(\d+)\.(\d+)\.(\d+)\b")
 
 
 def _stub_proc(monkeypatch, code, stdout, stderr):
@@ -30,8 +39,8 @@ def test_oracle_argv_pins_the_browser_engine():
 
 
 def test_oracle_argv_is_identical_under_read_only():
-    # Oracle has no filesystem write path, so read-only needs no flag and no
-    # prompt instruction. The argv must not change at all.
+    # Brigade does not pass an output-file flag, so read-only needs no flag
+    # and no prompt instruction. The argv must not change at all.
     assert agents.build_argv("oracle", "P", read_only=True) == agents.build_argv("oracle", "P")
     assert agents.build_argv("oracle", "P", sandbox="read-only") == agents.build_argv("oracle", "P")
 
@@ -57,6 +66,7 @@ def test_oracle_argv_never_emits_heartbeat_or_an_api_path():
         agents.build_argv("oracle", "P", model="gemini-3.1-pro"),
     ):
         assert "--heartbeat" not in argv
+        assert "--browser-cookie-sync" not in argv
         assert argv[argv.index("--engine") + 1] == "browser"
 
 
@@ -167,3 +177,53 @@ def test_oracle_argv_survives_a_real_exec(tmp_path, monkeypatch):
         "-p",
         "hello",
     ]
+
+
+def _parse_oracle_version(text: str) -> tuple[int, int, int] | None:
+    match = _ORACLE_VERSION_RE.search(text)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def test_oracle_browser_version_boundaries():
+    # Adapter written against 0.16.1 defaults; cookie copy became opt-in
+    # at 0.18.0. Keep the documented cutover pinned to the constants.
+    assert agents.ORACLE_BROWSER_TESTED_VERSION == (0, 16, 1)
+    assert agents.ORACLE_BROWSER_COOKIE_SYNC_OPT_IN_SINCE == (0, 18, 0)
+    assert agents.ORACLE_BROWSER_TESTED_VERSION < agents.ORACLE_BROWSER_COOKIE_SYNC_OPT_IN_SINCE
+    assert _parse_oracle_version("oracle 0.16.1") == (0, 16, 1)
+    assert _parse_oracle_version("0.18.0") == (0, 18, 0)
+    assert _parse_oracle_version("not-a-version") is None
+    assert (0, 16, 1) < agents.ORACLE_BROWSER_COOKIE_SYNC_OPT_IN_SINCE
+    assert (0, 18, 0) >= agents.ORACLE_BROWSER_COOKIE_SYNC_OPT_IN_SINCE
+    assert (0, 18, 1) >= agents.ORACLE_BROWSER_COOKIE_SYNC_OPT_IN_SINCE
+
+
+def test_oracle_docs_state_browser_compatibility_explicitly() -> None:
+    catalog = (ROOT / "docs" / "seat-catalog.md").read_text(encoding="utf-8")
+    runbook = (ROOT / "docs" / "runbooks" / "research-live-acceptance.md").read_text(encoding="utf-8")
+    phase = (ROOT / "docs" / "phase-oracle-browser-researcher.md").read_text(encoding="utf-8")
+    research = (ROOT / "docs" / "phase-first-class-multi-lane-research.md").read_text(encoding="utf-8")
+
+    def flat(text: str) -> str:
+        return re.sub(r"\s+", " ", text)
+
+    for text in (catalog, runbook, phase, research):
+        collapsed = flat(text)
+        assert "oracle --engine browser -p <prompt>" in collapsed
+        assert "--browser-cookie-sync" in collapsed
+        assert "0.16.1" in collapsed
+        assert "0.18.0" in collapsed
+        assert "workspace" in collapsed.lower()
+
+    assert "does not pass `--browser-cookie-sync`" in flat(catalog)
+    assert "opt-in" in catalog
+    assert "unverified" in catalog
+    assert "unsupported" in catalog.lower()
+    assert "hermetic" in runbook.lower()
+    assert "do not prove live Oracle authentication" in runbook
+    assert "Do not treat Oracle synthesis as ready by default" in runbook
+    assert "CLI version" in runbook
+    assert "outside that workspace" in flat(catalog)
+    assert "outside that workspace" in flat(research)

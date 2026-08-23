@@ -291,14 +291,25 @@ def _crush_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | N
     return ["crush", "run", task]
 
 
+# Cookie-copy policy as implemented by upstream Oracle, not by Brigade.
+# 0.16.1: live Chrome cookie copy default-on except Windows.
+# 0.18.0: cookie copy is opt-in (`--browser-cookie-sync`).
+# Brigade still emits `oracle --engine browser -p <prompt>` and does not
+# pass a cookie-source flag, so a clean 0.18.0+ install can pass the
+# executable check while lacking cookies for a live browser run.
+ORACLE_BROWSER_TESTED_VERSION: tuple[int, int, int] = (0, 16, 1)
+ORACLE_BROWSER_COOKIE_SYNC_OPT_IN_SINCE: tuple[int, int, int] = (0, 18, 0)
+
+
 def _oracle_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
-    # Oracle is a one-shot consult CLI with no filesystem write path, so
-    # read_only needs neither a flag nor a prompt instruction and the argv is
-    # identical either way. --engine browser pins the run to the cookie lane
-    # that Agent Pantry keeps fresh, so the adapter can never silently fall
-    # back to an API key. --heartbeat is deliberately never passed: stdout
-    # carries the answer, and oracle emits plain unrendered markdown there
-    # whenever stdout is not a TTY.
+    # Oracle is a one-shot consult CLI. Brigade does not pass output-file
+    # flags, so the adapter does not write into the target workspace. Oracle
+    # may still keep its own sessions and artifacts outside that workspace.
+    # --engine browser pins the run to the cookie lane so the adapter can
+    # never silently fall back to an API key. Brigade does not pass
+    # --browser-cookie-sync; Oracle 0.18.0 made that copy opt-in. --heartbeat
+    # is deliberately never passed: stdout carries the answer, and oracle
+    # emits plain unrendered markdown there whenever stdout is not a TTY.
     return ["oracle", "--engine", "browser", "-p", prompt]
 
 
@@ -348,7 +359,9 @@ READ_ONLY_ENFORCEMENT: dict[str, str] = {
     "crush": "soft",
     "claude": "hard",
     "opencode": "none",
-    # Hard by construction rather than by sandbox: oracle cannot write files.
+    # Hard for workspace writes: Brigade never gives oracle an output-file
+    # flag or a filesystem-writing tool surface. Oracle may still write
+    # sessions and artifacts outside the target workspace.
     "oracle": "hard",
 }
 
@@ -544,8 +557,9 @@ _ORACLE_AUTH_RE = re.compile(
 def _oracle_auth_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
     """Turn an oracle browser-session auth failure into a pantry next step.
 
-    Oracle reads its cookies from the Chrome profile Agent Pantry syncs, so a
-    stale jar is an operator action, not a model failure. Everything else about
+    Oracle may read cookies from a Chrome profile Agent Pantry syncs, but
+    Brigade does not pass an explicit cookie-source flag. A stale or missing
+    jar is an operator action, not a model failure. Everything else about
     oracle failing stays generic.
     """
     if cli_ref != "oracle":
