@@ -254,7 +254,8 @@ def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None 
     journal so the hub view is a plain group-by. Never raises.
     """
     try:
-        payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+        raw_payload = envelope.get("payload")
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
         workspace = find_workspace_for_path(journal_path) if journal_path is not None else None
         event = {
             "run_id": envelope.get("run_id"),

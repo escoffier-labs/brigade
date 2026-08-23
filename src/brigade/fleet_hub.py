@@ -297,7 +297,7 @@ def run(*, host: str | None, port: int, db_path: Path, token_file: Path | None) 
         print(f"error: {exc}", file=sys.stderr)
         return 2
     server = make_server(host, port, Path(db_path).expanduser(), token)
-    bound_host, bound_port = server.server_address[:2]
+    bound_host, bound_port = str(server.server_address[0]), int(server.server_address[1])
     print(f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()})")
     try:
         server.serve_forever()
