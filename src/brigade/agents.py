@@ -567,8 +567,10 @@ def _oracle_auth_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
     """Turn an oracle browser-session auth failure into a pantry next step.
 
     Oracle reads its cookies from the Chrome profile Agent Pantry syncs, so a
-    stale jar is an operator action, not a model failure. Everything else about
-    oracle failing stays generic.
+    stale jar is an operator action, not a model failure. Since Oracle 0.18.0,
+    live browser cookie syncing is also opt-in upstream, so a clean 0.18+
+    install can pass the executable check while lacking the cookies a live
+    browser run needs. Everything else about oracle failing stays generic.
     """
     if cli_ref != "oracle":
         return None
@@ -577,8 +579,11 @@ def _oracle_auth_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
         return None
     return (
         "oracle could not use the browser session; the synced cookies are "
-        "likely stale. Check `brigade pantry expiry-alert`, then re-sync the "
-        "pantry source before retrying"
+        "likely stale or cookie sync is disabled. Oracle 0.18+ makes live "
+        "browser cookie syncing opt-in: enable it explicitly "
+        "(e.g. --browser-cookie-sync or a configured browser profile), check "
+        "`brigade pantry expiry-alert`, then re-sync the pantry source before "
+        "retrying"
     )
 
 

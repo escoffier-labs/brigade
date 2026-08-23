@@ -8,7 +8,7 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -2093,6 +2093,82 @@ def test_receipt_since_requires_exact_completed_audit_boundary(tmp_path: Path):
     write_receipt("matching")
 
     assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is True
+
+
+def _tracked_verify_capture_boundary(tmp_path: Path) -> tuple[Path, Path, datetime, str]:
+    target = _git_wired_claude(tmp_path)
+    source = target / "source.py"
+    receipt_path = target / ".brigade" / "work" / "verify-runs" / "captured" / "receipt.json"
+    outcome_records = target / "memory" / "outcome" / "records.jsonl"
+    outcome_lock = outcome_records.parent / ".records.lock"
+    miseledger_cursor = target / ".brigade" / "work" / "miseledger-export-cursor.json"
+    miseledger_export = target / ".brigade" / "work" / "miseledger-export-captured.jsonl"
+
+    source.write_text("value = 1\n")
+    for path in (receipt_path, outcome_records, outcome_lock, miseledger_cursor, miseledger_export):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("baseline\n")
+    subprocess.run(
+        [
+            "git",
+            "add",
+            "-f",
+            "source.py",
+            ".brigade/work/verify-runs/captured/receipt.json",
+            "memory/outcome/records.jsonl",
+            "memory/outcome/.records.lock",
+            ".brigade/work/miseledger-export-cursor.json",
+            ".brigade/work/miseledger-export-captured.jsonl",
+        ],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=target, check=True, capture_output=True, text=True)
+
+    source.write_text("value = 2\n")
+    threshold = localio.utc_now()
+    fingerprint = runtime._session_fingerprint("captured-session")
+    from brigade.work_cmd.verification import _tree_fingerprint
+
+    receipt_tree = _tree_fingerprint(target)
+    assert receipt_tree is not None
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "run_id": "captured",
+                "target": str(target.resolve()),
+                "status": "completed",
+                "started_at": (threshold + timedelta(seconds=1)).isoformat(),
+                "completed_at": (threshold + timedelta(seconds=2)).isoformat(),
+                "tree_fingerprint": receipt_tree,
+                "harness_session": {"harness": "claude", "fingerprint": fingerprint},
+            }
+        )
+        + "\n"
+    )
+    outcome_records.write_text('{"signal_value": 1}\n')
+    outcome_lock.write_text("lock\n")
+    miseledger_cursor.write_text('{"raw_hashes": ["captured"]}\n')
+    miseledger_export.write_text('{"receipt": "captured"}\n')
+
+    return target, source, threshold, fingerprint
+
+
+def test_receipt_since_ignores_verify_and_outcome_capture_artifacts(tmp_path: Path):
+    target, _, threshold, fingerprint = _tracked_verify_capture_boundary(tmp_path)
+
+    assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is True
+
+
+def test_receipt_since_rejects_source_edit_after_outcome_capture(tmp_path: Path):
+    target, source, threshold, fingerprint = _tracked_verify_capture_boundary(tmp_path)
+    assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is True
+
+    source.write_text("value = 3\n")
+
+    assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is False
 
 
 def test_receipt_since_fails_open_when_tree_snapshot_is_unavailable(tmp_path: Path):
