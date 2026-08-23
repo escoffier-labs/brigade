@@ -74,6 +74,8 @@ RESEARCH_FINDINGS_SCHEMA = "brigade.research.findings.v1"
 RESEARCH_FINDINGS_VERSION = 1
 RESEARCH_CITATION_AUDIT_SCHEMA = "brigade.research.citation-audit.v1"
 RESEARCH_CITATION_AUDIT_VERSION = 1
+RESEARCH_CLAIM_AUDIT_SCHEMA = "brigade.research.claim-audit.v1"
+RESEARCH_CLAIM_AUDIT_VERSION = 1
 
 
 def stamp_research_sidecar(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -93,6 +95,14 @@ def stamp_research_citation_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
         **payload,
         "schema": RESEARCH_CITATION_AUDIT_SCHEMA,
         "schema_version": RESEARCH_CITATION_AUDIT_VERSION,
+    }
+
+
+def stamp_research_claim_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "schema": RESEARCH_CLAIM_AUDIT_SCHEMA,
+        "schema_version": RESEARCH_CLAIM_AUDIT_VERSION,
     }
 
 

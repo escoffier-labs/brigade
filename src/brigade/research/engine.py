@@ -18,11 +18,13 @@ from ..run_lifecycle import LifecycleJournalError
 from ..untrusted import wrap_untrusted
 from . import extract as _extract
 from .llm import ResearchSeatError
+from . import claim_audit as claim_audit_mod
 from .provenance import audit_citations, citation_token
 from .sources.browser_ai import BrowserAiDiscoveryError
 from .types import (
     Caps,
     CitationAudit,
+    ClaimAudit,
     FallbackRecord,
     Finding,
     ResearchLanes,
@@ -56,8 +58,15 @@ Audit the report against the cited finding packet. Do not continue any prior mod
 **Citation audit:** accepted={audit_accepted}; unresolved={unresolved}
 **Findings packet:**
 {packet}
+Check every factual claim in the report against the packet only. Do not fetch new evidence.
+For each claim give its character span [start, end) in the report text exactly as shown above,
+the [source:<id>] ids that back it, and a result: "backed" (packet supports it), "disputed"
+(packet findings conflict; list conflicting_source_ids), "insufficient" (evidence too thin; if the
+report states that limit next to the claim, give limitation_span), or "skipped" (not checked).
 Return ONLY JSON:
-{{"accepted": true, "detail": "citations resolve", "rejected_claims": []}}"""
+{{"accepted": true, "detail": "citations resolve", "rejected_claims": [],
+ "claims": [{{"claim_id": "c1", "span": [0, 40], "source_ids": ["src-..."], "result": "backed",
+             "explanation": "...", "conflicting_source_ids": [], "limitation_span": null}}]}}"""
 
 REPAIR_PROMPT = """Repair the research report so every claim is supported by the finding packet.
 **Question:** {q}
@@ -130,6 +139,7 @@ class ResearchEngine:
     persist_findings: Callable[[tuple[Finding, ...]], Any] | None = None
     persist_draft_report: Callable[[str], Any] | None = None
     persist_citation_audit: Callable[[CitationAudit], Any] | None = None
+    persist_claim_audit: Callable[[ClaimAudit], Any] | None = None
     cancelled: Event | None = None
     fallbacks: list[FallbackRecord] = field(default_factory=list)
     _cancelled: bool = field(default=False, init=False)
@@ -162,9 +172,23 @@ class ResearchEngine:
         self._ensure_time("synthesis")
         report, synthesis = self._resume_or_synthesize(question, findings, resume)
         self._check_cancel("synthesis")
-        if resume is not None and resume.audit is not None and resume.review is not None and resume.review.accepted:
+        resumable_review = (
+            resume is not None
+            and resume.audit is not None
+            and resume.review is not None
+            and resume.review.accepted
+            and resume.claim_audit is not None
+            and resume.claim_audit.accepted
+            and claim_audit_mod.matches_report(
+                resume.claim_audit, report=report, synthesis_attempt_id=synthesis.attempt_id
+            )
+        )
+        if resumable_review:
+            assert resume is not None and resume.audit is not None and resume.review is not None
+            assert resume.claim_audit is not None
             audit = resume.audit
             review = resume.review
+            claim_audit = resume.claim_audit
             self._phase_start("review")
             self._phase_done(
                 "review",
@@ -172,21 +196,24 @@ class ResearchEngine:
                 accepted=review.accepted,
                 attempt_id=review.attempt_id,
                 seat=review.seat,
+                claim_audit=claim_audit_mod.summary_counts(claim_audit),
                 resumed=True,
             )
         else:
             audit = audit_citations(report, findings)
             self._ensure_time("review")
-            review = self._review(question, report, findings, audit, synthesis.attempt_id)
+            review, claim_audit = self._review(question, report, findings, audit, synthesis.attempt_id)
             self._check_cancel("review")
-            if not audit.accepted or not review.accepted:
+            if not audit.accepted or not claim_audit.accepted:
                 self._ensure_time("repair")
-                report, repair_attempt_id = self._repair_once(question, report, findings, audit, review)
+                report, repair_attempt_id = self._repair_once(question, report, findings, audit, review, claim_audit)
                 self._check_cancel("repair")
+                # The repair produced a new report digest: the prior claim audit
+                # no longer binds and both checks rerun against the new text.
                 audit = audit_citations(report, findings)
                 # Second review must stay independent of the repair generation and
                 # must not erase the completed repair phase entry.
-                review = self._review(
+                review, claim_audit = self._review(
                     question,
                     report,
                     findings,
@@ -195,8 +222,9 @@ class ResearchEngine:
                     reset_downstream=("publishing",),
                 )
                 self._check_cancel("review")
-        if not audit.accepted or not review.accepted:
-            raise ResearchRunError("review", "review-rejected", review.detail or "citation audit or review rejected")
+        if not audit.accepted or not claim_audit.accepted:
+            detail = claim_audit.detail if not claim_audit.accepted else review.detail
+            raise ResearchRunError("review", "review-rejected", detail or "citation audit or review rejected")
         return ResearchResult(
             report=report,
             findings=findings,
@@ -207,6 +235,7 @@ class ResearchEngine:
             synthesis_attempt_id=synthesis.attempt_id,
             fallbacks=tuple(self.fallbacks),
             stats=self._stats(findings, sources),
+            claim_audit=claim_audit,
         )
 
     def _resume_or_plan(self, question: str, resume: ResumeState | None) -> str:
@@ -587,7 +616,7 @@ class ResearchEngine:
         generation_attempt_id: str,
         *,
         reset_downstream: bool | Sequence[str] | None = None,
-    ) -> ReviewResult:
+    ) -> tuple[ReviewResult, ClaimAudit]:
         self._phase_start("review", reset_downstream=reset_downstream)
         packet = self._finding_packet(question, findings)
         prompt = REVIEW_PROMPT.format(
@@ -603,7 +632,7 @@ class ResearchEngine:
                 self.lanes.reviewer.last_attempt_id = None
             text = self.lanes.reviewer.complete(
                 [{"role": "user", "content": prompt}],
-                max_tokens=1024,
+                max_tokens=self.caps.max_review_tokens,
                 temperature=0.1,
             )
         except ResearchSeatError as exc:
@@ -641,9 +670,25 @@ class ResearchEngine:
             seat=str(getattr(self.lanes.reviewer, "seat", "reviewer")),
             attempt_id=attempt_id,
         )
+        try:
+            records = claim_audit_mod.parse_claim_records(data.get("claims"), report=report, findings=findings)
+        except claim_audit_mod.ClaimAuditError as exc:
+            raise ResearchRunError("review", f"claim-audit-{exc.kind}", exc.detail) from exc
+        claim_audit = claim_audit_mod.derive_claim_audit(
+            report=report,
+            synthesis_attempt_id=generation_attempt_id,
+            reviewer_seat=result.seat,
+            review_attempt_id=result.attempt_id,
+            reviewer_accepted=result.accepted,
+            claims=records,
+            reviewer_detail=result.detail,
+        )
         artifact: Any = "citation-audit.json"
         if self.persist_citation_audit is not None:
             artifact = self.persist_citation_audit(audit)
+        claim_artifact: Any = "claim-audit.json"
+        if self.persist_claim_audit is not None:
+            claim_artifact = self.persist_claim_audit(claim_audit)
         self._phase_done(
             "review",
             artifact=artifact,
@@ -660,8 +705,12 @@ class ResearchEngine:
                 "seat": result.seat,
                 "attempt_id": result.attempt_id,
             },
+            claim_audit={
+                "artifact": claim_artifact,
+                **(claim_audit_mod.summary_counts(claim_audit) or {}),
+            },
         )
-        return result
+        return result, claim_audit
 
     def _repair_once(
         self,
@@ -670,6 +719,7 @@ class ResearchEngine:
         findings: tuple[Finding, ...],
         audit: CitationAudit,
         review: ReviewResult,
+        claim_audit: ClaimAudit | None = None,
     ) -> tuple[str, str]:
         self._phase_start("repair")
         backend = self._synthesis_backend
@@ -678,7 +728,14 @@ class ResearchEngine:
                 raise ResearchRunError("repair", "no-synthesizer", "no synthesis seats configured")
             backend = self.lanes.synthesizers[0]
         packet = self._finding_packet(question, findings)
-        rejected_text = json.dumps(list(review.rejected_claims))
+        rejected = list(review.rejected_claims)
+        if claim_audit is not None:
+            for record in claim_audit.claims:
+                if record.result in ("disputed", "skipped") or (
+                    record.result == "insufficient" and not record.limitation_stated
+                ):
+                    rejected.append(f"{record.result}: {report[record.span[0] : record.span[1]]}")
+        rejected_text = json.dumps(rejected)
         prompt = REPAIR_PROMPT.format(
             q=question,
             report=self._wrap_model_output(report),
