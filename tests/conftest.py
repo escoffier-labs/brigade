@@ -77,6 +77,17 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_fleet_hub(monkeypatch):
+    """Never let an operator's exported fleet hub leak into the suite.
+
+    With ``BRIGADE_FLEET_HUB_URL`` set every ``run_journal.append_event`` would
+    report to a live hub (and pay the 2s timeout when it is down).
+    """
+    monkeypatch.delenv("BRIGADE_FLEET_HUB_URL", raising=False)
+    monkeypatch.delenv("BRIGADE_FLEET_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
     """Redirect user-level ``~/.brigade`` sticky state away from the real home.
 
