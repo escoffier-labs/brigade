@@ -1276,13 +1276,30 @@ def seed_cancelled_run_after_synthesis(target: Path) -> str:
     return run_id
 
 
-def seed_cancelled_run_after_accepted_review(target: Path) -> str:
+def seed_cancelled_run_after_accepted_review(target: Path, *, claim_audit: bool = True) -> str:
+    from brigade.research import claim_audit as claim_audit_mod
     from brigade.research.types import CitationAudit
 
     run_id = seed_cancelled_run_after_synthesis(target)
     audit = CitationAudit(accepted=True, citations=(), unresolved=())
     audit_ref = registry.write_citation_audit(target, run_id, audit)
     sidecar = registry.read_research(target, run_id)
+    claim_meta: dict[str, object] | None = None
+    if claim_audit:
+        report = registry.read_verified_artifact(target, run_id, sidecar["phases"]["synthesis"]["artifact"])
+        assert isinstance(report, str)
+        derived = claim_audit_mod.derive_claim_audit(
+            report=report,
+            synthesis_attempt_id="luna:synthesis",
+            reviewer_seat="luna",
+            review_attempt_id="luna:review",
+            reviewer_accepted=True,
+            claims=(),
+        )
+        claim_meta = {
+            "artifact": registry.write_claim_audit(target, run_id, derived),
+            **(claim_audit_mod.summary_counts(derived) or {}),
+        }
     registry.update_research(
         target,
         run_id,
@@ -1302,6 +1319,7 @@ def seed_cancelled_run_after_accepted_review(target: Path) -> str:
                     "seat": "luna",
                     "attempt_id": "luna:review",
                 },
+                **({"claim_audit": claim_meta} if claim_meta is not None else {}),
             },
             "publishing": {"status": "cancelled"},
         },
