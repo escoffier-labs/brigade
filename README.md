@@ -105,6 +105,7 @@ Brigade is not a hosted memory service, automatic release bot, or full autonomou
 - [Execution model](docs/execution-model.md) · [Work closeout](docs/work-closeout.md) · [Outcome scoring](docs/outcome-scoring.md)
 - [Memory care](docs/memory-care.md) · [Memory operations](docs/memory-operations.md) · [Code intelligence](docs/code-intelligence.md) · [MCP sync](docs/mcp-sync.md)
 - [Agents guide](docs/agents-guide.md) · [Agent-assisted setup](docs/agent-assisted-setup.md) · [README coverage](docs/readme-coverage.md)
+- [Runbooks](docs/runbooks/README.md) · [Fleet hub on a Proxmox LXC](docs/runbooks/fleet-hub-hogwarts.md)
 - [Security](docs/security.md) · [Command inventory](docs/command-inventory.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md)
 
 ## License
