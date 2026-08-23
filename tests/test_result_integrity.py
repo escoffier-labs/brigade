@@ -1,4 +1,4 @@
-from brigade.result_integrity import _progress_only, validate_final_output
+from brigade.result_integrity import _progress_only, _split_clauses, validate_final_output
 
 # Issue #1099: grok CLI 1.0.5 on Windows glued the progress sentence to the
 # final answer with no space after the period.
@@ -53,6 +53,32 @@ def test_glued_capitalized_sentence_start_is_accepted():
 def test_single_progress_sentence_with_file_extension_is_still_rejected():
     text = "Reviewing the README.md first."
     failure = validate_final_output(text)
+    assert _split_clauses(text) == [text]
+    assert _progress_only(text) is True
+    assert failure is not None
+    assert failure.kind == "non-final-output"
+
+
+def test_glued_final_starting_with_short_word_is_accepted():
+    text = "Inspecting the repo.it is a durable child run."
+    assert _split_clauses(text) == ["Inspecting the repo.", "it is a durable child run."]
+    assert _progress_only(text) is False
+    assert validate_final_output(text) is None
+
+
+def test_progress_only_with_long_file_extension_is_still_rejected():
+    text = "Reviewing the App.csproj first."
+    failure = validate_final_output(text)
+    assert _split_clauses(text) == [text]
+    assert _progress_only(text) is True
+    assert failure is not None
+    assert failure.kind == "non-final-output"
+
+
+def test_progress_only_with_version_digits_is_still_rejected():
+    text = "Reviewing Brigade v1.2 first."
+    failure = validate_final_output(text)
+    assert _split_clauses(text) == [text]
     assert _progress_only(text) is True
     assert failure is not None
     assert failure.kind == "non-final-output"
