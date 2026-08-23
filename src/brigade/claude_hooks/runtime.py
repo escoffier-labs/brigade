@@ -9,11 +9,12 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from queue import Empty
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator
+from typing import Any, BinaryIO, Callable, Iterator
 
 from .. import localio
 from ..component_paths import cache_root
@@ -21,8 +22,12 @@ from ..work_cmd.verification import _tree_fingerprint
 from ..wiring import resolve_wired_target
 from . import compaction_marker, envelope
 from .package import PACKAGE_REF
+from .paths import is_operator_home, resolved_path
 
 BRIEF_TIMEOUT_SECONDS = 10
+HOOK_TIMEOUT_LATCH_AFTER = 2
+_TIMEOUT_FOLLOWUP_SECONDS = 0.5
+_HOOK_OUTCOME_KINDS = frozenset({"ok", "latched", "latched_silent"})
 MAX_RECENT_SESSION_STATES = 512
 MAX_HOOK_STDIN_BYTES = 1_048_576
 MAX_HOOK_STDIN_STRING_CHARS = 262_144
@@ -31,6 +36,7 @@ MAX_HOOK_STDIN_NESTING_DEPTH = 32
 _HOOK_STDIN_READ_CHUNK = 4096
 CLAUDE_SESSION_ENV = "BRIGADE_CLAUDE_SESSION"
 _HOOK_WORKER_EVENT_ENV = "BRIGADE_HOOK_WORKER_EVENT"
+_HOOK_PIN_ENV = "BRIGADE_HOOK_PIN_TARGET"
 _HOOK_TEST_HANG_ENV = "BRIGADE_HOOK_TEST_HANG_SECONDS"
 _HOOK_TIMEOUT_ENV = "BRIGADE_HOOK_TIMEOUT_SECONDS"
 _HOOK_WORKER_COMMAND = (
@@ -40,6 +46,10 @@ _HOOK_WORKER_COMMAND = (
 
 class HookDegraded(Exception):
     """Internal hook failure that must fail open with a doctor pointer."""
+
+    def __init__(self, message: str, *, log_target: Path | None = None) -> None:
+        super().__init__(message)
+        self.log_target = log_target
 
 
 _SHELL_SEPARATORS = {"&&", "||", ";", "|", "|&", "&", "\n"}
@@ -560,6 +570,64 @@ def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
             if wired is not None:
                 return wired
     return resolve_wired_target(payload.get("cwd"))
+
+
+def _path_is_within(inner: Path, outer: Path) -> bool:
+    resolved_inner = resolved_path(inner)
+    resolved_outer = resolved_path(outer)
+    if resolved_inner is None or resolved_outer is None:
+        return False
+    try:
+        return resolved_inner.is_relative_to(resolved_outer)
+    except ValueError:
+        return False
+
+
+def _hook_pin_from_env() -> Path | None:
+    raw = os.environ.get(_HOOK_PIN_ENV)
+    if raw is None or not raw.strip():
+        return None
+    return resolved_path(Path(raw))
+
+
+def _resolve_pin(target: Path | None) -> Path | None:
+    if target is None:
+        return _hook_pin_from_env()
+    resolved = resolved_path(target)
+    if resolved is None or is_operator_home(resolved):
+        return None
+    return resolved
+
+
+def _session_id_from_payload(payload: dict[str, Any]) -> str:
+    raw = payload.get("session_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return "unknown"
+
+
+def effective_hook_target(payload: dict[str, Any], *, pin: Path | None = None) -> Path | None:
+    """Return the workspace a hook may operate on, or None to no-op.
+
+    User-scope installs fire for every Claude session. Home is never a work
+    target (even when wired): fingerprinting and brief against that tree is
+    what times out on every tool call. An optional ``--target`` pin restricts
+    work to that wired workspace and no-ops everywhere else.
+    """
+    derived = wired_target_from_payload(payload)
+    resolved_pin = _resolve_pin(pin)
+    if resolved_pin is not None:
+        if derived is not None and _path_is_within(derived, resolved_pin):
+            return None if is_operator_home(derived) else derived
+        raw_cwd = payload.get("cwd")
+        if isinstance(raw_cwd, str) and raw_cwd.strip():
+            cwd = resolved_path(Path(raw_cwd))
+            if cwd is not None and _path_is_within(cwd, resolved_pin) and not is_operator_home(resolved_pin):
+                return resolved_pin if resolve_wired_target(str(resolved_pin)) is not None else None
+        return None
+    if derived is None or is_operator_home(derived):
+        return None
+    return derived
 
 
 def _session_repo_union(session_id: str, *seeds: Path, task_epoch: str | None = None) -> list[str]:
@@ -1972,6 +2040,9 @@ def _new_state(target: Path, session_id: str, *, task_epoch: str | None = None) 
         "briefed": False,
         "write_observed": False,
         "verify_denied_count": 0,
+        "hook_timeout_count": 0,
+        "hook_latched": False,
+        "hook_latch_announced": False,
         "repo_fingerprint": repo_worktree_fingerprint(target),
     }
     if task_epoch is not None:
@@ -2036,6 +2107,11 @@ def _normalize_state(
     denied = payload.get("verify_denied_count")
     if isinstance(denied, int) and not isinstance(denied, bool) and denied >= 0:
         normalized["verify_denied_count"] = denied
+    timeout_count = payload.get("hook_timeout_count")
+    if isinstance(timeout_count, int) and not isinstance(timeout_count, bool) and timeout_count >= 0:
+        normalized["hook_timeout_count"] = timeout_count
+    normalized["hook_latched"] = payload.get("hook_latched") is True
+    normalized["hook_latch_announced"] = payload.get("hook_latch_announced") is True
     last_write = localio.parse_iso_datetime(payload.get("last_write_at"))
     if last_write is not None and last_write <= now:
         normalized["last_write_at"] = last_write.isoformat()
@@ -2200,12 +2276,12 @@ def _strip_claim(result: dict[str, Any] | None) -> tuple[dict[str, Any] | None, 
     return cleaned, Path(raw)
 
 
-def _handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any] | None:
+def _handle_pre_compact(payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
     """Record a pending restore marker; PreCompact cannot inject context."""
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return None
-    target = wired_target_from_payload(payload)
+    target = effective_hook_target(payload, pin=pin)
     if target is None:
         return None
     trigger_detail = payload.get("trigger")
@@ -2222,7 +2298,7 @@ def _handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any] | None:
+def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
     """Restore the brief once after compaction; absent markers stay near-free."""
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -2234,7 +2310,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any] | None
     if not compaction_marker.marker_present(key):
         return None
     # Confirm the workspace is still a Claude-wired Brigade repo before claiming.
-    target = resolve_wired_target(str(workspace))
+    target = effective_hook_target(payload, pin=pin)
     if target is None:
         return None
     try:
@@ -2258,15 +2334,16 @@ def _handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any] | None
         raise
 
 
-def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
+    pin = pin if pin is not None else _hook_pin_from_env()
     if event == "PreCompact":
-        return _handle_pre_compact(payload)
+        return _handle_pre_compact(payload, pin=pin)
     if event == "UserPromptSubmit":
-        return _handle_user_prompt_submit(payload)
+        return _handle_user_prompt_submit(payload, pin=pin)
 
-    target = wired_target_from_payload(payload)
+    target = effective_hook_target(payload, pin=pin)
     if target is None:
-        if event == "SessionStart":
+        if event == "SessionStart" and pin is None:
             return _unwired_init_hint(payload)
         return None
     session_id = payload.get("session_id")
@@ -2682,17 +2759,107 @@ def _maybe_test_hang() -> None:
         time.sleep(seconds)
 
 
-def _isolated_handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+def _isolated_handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
     _maybe_test_hang()
-    return handle_payload(event, payload)
+    return handle_payload(event, payload, pin=pin)
+
+
+def _raw_pin_target_from_env() -> Path | None:
+    """Return the pin path from the worker env without touching the filesystem."""
+    raw = os.environ.get(_HOOK_PIN_ENV)
+    if raw is None or not raw.strip():
+        return None
+    return Path(raw)
+
+
+def _path_or_none(value: object) -> Path | None:
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str) and value:
+        return Path(value)
+    return None
+
+
+def _hook_run_body(
+    event: str,
+    payload: dict[str, Any],
+    *,
+    pin_target: Path | None,
+    on_prologue: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Run every filesystem-touching ``hook_run`` step.
+
+    The parent process must not call this. Pin resolution, target discovery,
+    log-target lookup, latch I/O, ``.git`` checks, and ``handle_payload`` all
+    belong inside the timed worker so a stalled filesystem cannot outlive the
+    configured hook timeout.
+    """
+    pin = _resolve_pin(pin_target)
+    session_id = _session_id_from_payload(payload)
+    log_target = _resolve_log_target(payload, pin=pin)
+    latched = False
+    announce = False
+    if log_target is not None:
+        latched, announce = _read_hook_latch(log_target, session_id)
+    if on_prologue is not None:
+        on_prologue(
+            {
+                "log_target": str(log_target) if log_target is not None else None,
+                "session_id": session_id,
+                "latched": latched,
+                "announce": announce,
+            }
+        )
+    if latched and log_target is not None:
+        if announce:
+            envelope.append_log(log_target, f"{event}: latched after repeated timeouts")
+            _mark_hook_latch_announced(log_target, session_id)
+            return {
+                "kind": "latched",
+                "result": envelope.latched_envelope(event),
+                "log_target": str(log_target),
+                "claim_path": None,
+                "session_id": session_id,
+            }
+        return {
+            "kind": "latched_silent",
+            "result": envelope.empty_envelope(event),
+            "log_target": str(log_target),
+            "claim_path": None,
+            "session_id": session_id,
+        }
+
+    result = _isolated_handle_payload(event, payload, pin=pin)
+    result, claim_path = _strip_claim(result)
+    if log_target is not None:
+        _clear_hook_timeouts(log_target, session_id)
+        if result is None:
+            envelope.append_log(log_target, f"{event}: empty envelope")
+    return {
+        "kind": "ok",
+        "result": result,
+        "log_target": str(log_target) if log_target is not None else None,
+        "claim_path": str(claim_path) if claim_path is not None else None,
+        "session_id": session_id,
+    }
 
 
 def _hook_worker_main() -> None:
-    """Run ``handle_payload`` in an isolated child process (issue #735)."""
+    """Run the full hook body in an isolated child process (issue #735)."""
     event = os.environ.get(_HOOK_WORKER_EVENT_ENV, "")
     payload, _raw = _load_hook_stdin()
-    result = _isolated_handle_payload(event, payload)
-    sys.stdout.write(json.dumps(result))
+
+    def on_prologue(info: dict[str, Any]) -> None:
+        sys.stdout.write(json.dumps({"phase": "prologue", **info}) + "\n")
+        sys.stdout.flush()
+
+    outcome = _hook_run_body(
+        event,
+        payload,
+        pin_target=_raw_pin_target_from_env(),
+        on_prologue=on_prologue,
+    )
+    sys.stdout.write(json.dumps({"phase": "done", **outcome}) + "\n")
 
 
 def _terminate_process(proc: mp.Process | mp.context.ForkProcess) -> None:
@@ -2702,7 +2869,7 @@ def _terminate_process(proc: mp.Process | mp.context.ForkProcess) -> None:
     proc.join(timeout=1)
     if proc.is_alive():
         proc.kill()
-        proc.join()
+        proc.join(timeout=0.2)
 
 
 def _recv_timed_handle_payload_result(
@@ -2726,22 +2893,65 @@ def _recv_timed_handle_payload_result(
     raise RuntimeError(str(value))
 
 
-def _fork_timed_handle_payload_target(event: str, payload: dict[str, Any], queue: mp.Queue) -> None:
+def _recv_timed_hook_run_result(
+    queue: mp.Queue,
+    proc: mp.Process | mp.context.ForkProcess,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
     try:
-        result = _isolated_handle_payload(event, payload)
+        status, value = queue.get(timeout=timeout)
+    except Empty as exc:
+        _terminate_process(proc)
+        raise HookDegraded("hook operation timed out") from exc
+
+    log_target: Path | None = None
+    if status == "prologue":
+        if isinstance(value, dict):
+            log_target = _path_or_none(value.get("log_target"))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_process(proc)
+            raise HookDegraded("hook operation timed out", log_target=log_target)
+        try:
+            status, value = queue.get(timeout=remaining)
+        except Empty as exc:
+            _terminate_process(proc)
+            raise HookDegraded("hook operation timed out", log_target=log_target) from exc
+
+    proc.join(timeout=1)
+    if proc.is_alive():
+        _terminate_process(proc)
+    if status == "ok":
+        if isinstance(value, dict):
+            return value
+        raise RuntimeError("timed hook worker returned a non-object result")
+    if isinstance(value, BaseException):
+        if isinstance(value, HookDegraded) and value.log_target is None:
+            value.log_target = log_target
+        raise value
+    raise RuntimeError(str(value))
+
+
+def _fork_timed_handle_payload_target(event: str, payload: dict[str, Any], queue: mp.Queue, pin: Path | None) -> None:
+    try:
+        result = _isolated_handle_payload(event, payload, pin=pin)
         queue.put(("ok", result))
     except Exception as exc:  # noqa: BLE001 - marshal failure back to parent
         queue.put(("err", exc))
 
 
-def _fork_timed_handle_payload_worker(event: str, raw: str, *, timeout: float) -> dict[str, Any] | None:
+def _fork_timed_handle_payload_worker(
+    event: str, raw: str, *, timeout: float, pin: Path | None = None
+) -> dict[str, Any] | None:
     payload = _parse_hook_stdin(raw.encode("utf-8"))
 
     ctx = mp.get_context("fork")
     queue: mp.Queue = ctx.Queue()
     proc = ctx.Process(
         target=_fork_timed_handle_payload_target,
-        args=(event, payload, queue),
+        args=(event, payload, queue, pin),
         daemon=True,
     )
     try:
@@ -2754,9 +2964,107 @@ def _fork_timed_handle_payload_worker(event: str, raw: str, *, timeout: float) -
         queue.join_thread()
 
 
-def _subprocess_timed_handle_payload(event: str, raw: str, *, timeout: float) -> dict[str, Any] | None:
+def _fork_timed_hook_run_target(
+    event: str,
+    payload: dict[str, Any],
+    queue: mp.Queue,
+    pin_target: Path | None,
+) -> None:
+    try:
+
+        def on_prologue(info: dict[str, Any]) -> None:
+            queue.put(("prologue", info))
+
+        outcome = _hook_run_body(event, payload, pin_target=pin_target, on_prologue=on_prologue)
+        queue.put(("ok", outcome))
+    except Exception as exc:  # noqa: BLE001 - marshal failure back to parent
+        queue.put(("err", exc))
+
+
+def _fork_timed_hook_run_worker(
+    event: str, raw: str, *, timeout: float, pin_target: Path | None = None
+) -> dict[str, Any]:
+    payload = _parse_hook_stdin(raw.encode("utf-8"))
+
+    ctx = mp.get_context("fork")
+    queue: mp.Queue = ctx.Queue()
+    proc = ctx.Process(
+        target=_fork_timed_hook_run_target,
+        args=(event, payload, queue, pin_target),
+        daemon=True,
+    )
+    try:
+        proc.start()
+        return _recv_timed_hook_run_result(queue, proc, timeout=timeout)
+    finally:
+        if proc.is_alive():
+            _terminate_process(proc)
+        queue.close()
+        queue.join_thread()
+
+
+def _log_target_from_worker_stdout(stdout: str | None) -> Path | None:
+    if not stdout:
+        return None
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("phase") == "prologue":
+            return _path_or_none(parsed.get("log_target"))
+    return None
+
+
+def _outcome_from_worker_stdout(stdout: str | None) -> dict[str, Any] | None:
+    if not stdout or not stdout.strip():
+        return None
+    done: dict[str, Any] | None = None
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text or text == "null":
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        if parsed.get("phase") == "done" or parsed.get("kind") in _HOOK_OUTCOME_KINDS:
+            done = parsed
+            continue
+        if parsed.get("phase") == "prologue":
+            continue
+        done = {
+            "kind": "ok",
+            "result": parsed,
+            "log_target": None,
+            "claim_path": None,
+            "session_id": "unknown",
+        }
+    return done
+
+
+def _subprocess_timed_handle_payload(
+    event: str, raw: str, *, timeout: float, pin: Path | None = None
+) -> dict[str, Any] | None:
+    outcome = _subprocess_timed_hook_run(event, raw, timeout=timeout, pin_target=pin)
+    raw_result = outcome.get("result")
+    return raw_result if isinstance(raw_result, dict) else None
+
+
+def _subprocess_timed_hook_run(
+    event: str, raw: str, *, timeout: float, pin_target: Path | None = None
+) -> dict[str, Any]:
     env = os.environ.copy()
     env[_HOOK_WORKER_EVENT_ENV] = event
+    if pin_target is not None:
+        env[_HOOK_PIN_ENV] = str(pin_target)
+    else:
+        env.pop(_HOOK_PIN_ENV, None)
     try:
         completed = subprocess.run(
             [sys.executable, "-c", _HOOK_WORKER_COMMAND],
@@ -2768,100 +3076,312 @@ def _subprocess_timed_handle_payload(event: str, raw: str, *, timeout: float) ->
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise HookDegraded("hook operation timed out") from exc
+        captured = exc.stdout if isinstance(exc.stdout, str) else ""
+        raise HookDegraded(
+            "hook operation timed out",
+            log_target=_log_target_from_worker_stdout(captured),
+        ) from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or f"exit {completed.returncode}"
         raise RuntimeError(detail)
-    stdout = completed.stdout.strip()
-    if not stdout or stdout == "null":
-        return None
-    parsed = json.loads(stdout)
-    return parsed if isinstance(parsed, dict) else None
+    outcome = _outcome_from_worker_stdout(completed.stdout)
+    if outcome is None:
+        return {
+            "kind": "ok",
+            "result": None,
+            "log_target": None,
+            "claim_path": None,
+            "session_id": "unknown",
+        }
+    return outcome
 
 
-def _run_timed_handle_payload(event: str, raw: str) -> dict[str, Any] | None:
+def _run_timed_handle_payload(event: str, raw: str, *, pin: Path | None = None) -> dict[str, Any] | None:
+    """Run the full hook body under the configured timeout.
+
+    ``pin`` is the unresolved CLI/env target. The worker resolves it. The
+    parent must not call ``_resolve_pin`` / ``_resolve_log_target`` first.
+    """
     timeout = _hook_timeout_seconds()
     if sys.platform == "win32":
-        return _subprocess_timed_handle_payload(event, raw, timeout=timeout)
-    return _fork_timed_handle_payload_worker(event, raw, timeout=timeout)
+        return _subprocess_timed_hook_run(event, raw, timeout=timeout, pin_target=pin)
+    return _fork_timed_hook_run_worker(event, raw, timeout=timeout, pin_target=pin)
 
 
-def _emit_result(event: str, result: dict[str, Any] | None, *, target: Path | None) -> None:
-    payload = result if result is not None else envelope.empty_envelope(event)
-    envelope.emit_stdout(payload)
-    if target is not None and result is None:
-        envelope.append_log(target, f"{event}: empty envelope")
+def _normalize_timed_outcome(value: object) -> dict[str, Any]:
+    if value is None:
+        return {
+            "kind": "ok",
+            "result": None,
+            "log_target": None,
+            "claim_path": None,
+            "session_id": "unknown",
+        }
+    if isinstance(value, dict) and value.get("kind") in _HOOK_OUTCOME_KINDS:
+        return value
+    if isinstance(value, dict):
+        return {
+            "kind": "ok",
+            "result": value,
+            "log_target": None,
+            "claim_path": None,
+            "session_id": "unknown",
+        }
+    raise TypeError(f"timed hook worker returned {type(value).__name__}")
 
 
-def _resolve_log_target(payload: dict[str, Any] | None) -> Path | None:
+def _resolve_log_target(payload: dict[str, Any] | None, *, pin: Path | None = None) -> Path | None:
     if not isinstance(payload, dict):
         return None
-    wired = resolve_wired_target(payload.get("cwd"))
-    if wired is not None:
-        return wired
-    raw = payload.get("cwd")
-    if isinstance(raw, str) and raw:
+    return effective_hook_target(payload, pin=pin)
+
+
+def _is_timeout_degraded(exc: BaseException) -> bool:
+    return "timed out" in str(exc)
+
+
+def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
+    state = read_session_state(target, session_id)
+    if not isinstance(state, dict) or state.get("hook_latched") is not True:
+        return False, False
+    return True, state.get("hook_latch_announced") is not True
+
+
+def _mark_hook_latch_announced(target: Path, session_id: str) -> None:
+    state = read_session_state(target, session_id)
+    if not isinstance(state, dict):
+        return
+    if state.get("hook_latch_announced") is True:
+        return
+    updated = dict(state)
+    updated["hook_latched"] = True
+    updated["hook_latch_announced"] = True
+    write_session_state(target, session_id, updated)
+
+
+def _record_hook_timeout(target: Path, session_id: str) -> dict[str, Any]:
+    state = read_session_state(target, session_id)
+    updated: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
+    count = updated.get("hook_timeout_count")
+    next_count = count + 1 if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 1
+    updated["hook_timeout_count"] = next_count
+    if next_count >= HOOK_TIMEOUT_LATCH_AFTER:
+        updated["hook_latched"] = True
+    write_session_state(target, session_id, updated)
+    return updated
+
+
+def _clear_hook_timeouts(target: Path, session_id: str) -> None:
+    state = read_session_state(target, session_id)
+    if not isinstance(state, dict):
+        return
+    if state.get("hook_latched") is True:
+        return
+    if not state.get("hook_timeout_count"):
+        return
+    updated = dict(state)
+    updated["hook_timeout_count"] = 0
+    write_session_state(target, session_id, updated)
+
+
+def _run_best_effort_bounded(
+    fn: Callable[[], Any],
+    *,
+    timeout: float,
+    default: Any,
+) -> Any:
+    """Run ``fn`` in a daemon thread; return ``default`` if it exceeds ``timeout``.
+
+    Timeout-path latch/state writes on the target workspace, that path's
+    target-tree hook.log, and claim cleanup must not run on the
+    ``hook_run`` parent stack. A stalled target filesystem (or Windows,
+    where ``fork`` is unavailable and spawn exceeds this budget) degrades
+    instead of hanging Claude Code past the hook timeout.
+
+    The #735 doctor-pointer / error diagnostic write is not this helper.
+    That local ``hook.log`` is a required contract file and is written
+    synchronously by ``_append_degraded_diagnostic``.
+    """
+    box: list[Any] = [default]
+    done = threading.Event()
+
+    def _run() -> None:
         try:
-            return Path(raw).expanduser().resolve(strict=False)
-        except OSError:
-            return None
-    return None
+            box[0] = fn()
+        except Exception:  # noqa: BLE001 - parent must still emit a valid envelope
+            box[0] = default
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_run, name="brigade-hook-best-effort", daemon=True)
+    thread.start()
+    if not done.wait(timeout=max(timeout, 0.0)):
+        return default
+    return box[0]
 
 
-def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
+def _apply_timeout_followup_inprocess(event: str, target: Path, session_id: str, detail: str) -> str:
+    try:
+        state = _record_hook_timeout(target, session_id)
+        envelope.append_log(target, f"{event}: degraded: {detail}")
+        if state.get("hook_latched") is True:
+            envelope.append_log(target, f"{event}: latched after repeated timeouts")
+            _mark_hook_latch_announced(target, session_id)
+            return "latched"
+        return "degraded"
+    except OSError:
+        return "degraded"
+
+
+def _append_degraded_diagnostic(event: str, log_target: Path | None, detail: object) -> None:
+    """Write the #735 doctor-pointer ``hook.log`` before ``hook_run`` returns.
+
+    Callers and the envelope tests read
+    ``.brigade/work/claude-hooks/hook.log`` immediately after the hook
+    exits. Creating the parent directory and appending the line must
+    finish on this stack — a best-effort daemon thread can lose the write
+    or race the reader. Use this only on the error / doctor-pointer /
+    degraded path, where the timed worker already returned (or never
+    started). Timeout latch/state on a possibly stalled target stays
+    behind ``_run_best_effort_bounded``.
+    """
+    try:
+        if log_target is not None:
+            envelope.append_log(log_target, f"{event}: degraded: {detail}")
+            return
+        cwd = Path.cwd()
+        if not is_operator_home(cwd):
+            envelope.append_log(cwd, f"{event}: degraded: {detail}")
+    except OSError:
+        return
+
+
+def _append_error_diagnostic(event: str, log_target: Path | None, exc: BaseException) -> None:
+    """Write the #735 error ``hook.log`` before ``hook_run`` returns."""
+    if log_target is None:
+        return
+    try:
+        envelope.append_log(log_target, f"{event}: error: {type(exc).__name__}: {exc}")
+    except OSError:
+        return
+
+
+def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
+    """Record timeout latch/state without blocking past a short budget.
+
+    The path was already resolved inside the timed worker. Latch-state
+    writes (and that path's target-tree hook.log) still touch that tree;
+    they run best-effort under a hard cap so a later stall cannot hang
+    the parent. Non-timeout doctor-pointer logs use
+    ``_append_degraded_diagnostic`` instead.
+    """
+    detail = str(exc)
+    return _run_best_effort_bounded(
+        lambda: _apply_timeout_followup_inprocess(event, log_target, session_id, detail),
+        timeout=_TIMEOUT_FOLLOWUP_SECONDS,
+        default="degraded",
+    )
+
+
+def _bounded_release_claim(path: Path | None) -> None:
+    if path is None:
+        return
+    _run_best_effort_bounded(
+        lambda: compaction_marker.release_claim_path(path),
+        timeout=_TIMEOUT_FOLLOWUP_SECONDS,
+        default=None,
+    )
+
+
+def _bounded_complete_claim(path: Path | None) -> None:
+    if path is None:
+        return
+    _run_best_effort_bounded(
+        lambda: compaction_marker.complete_claim_path(path),
+        timeout=_TIMEOUT_FOLLOWUP_SECONDS,
+        default=None,
+    )
+
+
+def hook_run(
+    *,
+    event: str,
+    package: str,
+    stdin_text: str | None = None,
+    target: Path | None = None,
+) -> int:
     """Run one managed Claude hook under the #735 output contract.
 
     Always exits 0. Stdout is exactly one schema-valid JSON object (empty
-    envelope, degraded doctor pointer, or a rendered decision/injection).
-    Diagnostics go to the local hook log, never to the session stream.
+    envelope, degraded doctor pointer, latched notice, or a rendered
+    decision/injection). Diagnostics go to the local hook log, never to the
+    session stream.
+
+    The parent reads bounded stdin, spawns the timed worker, and enforces
+    the timeout. Pin resolution, target discovery, log-target lookup, latch
+    I/O, and ``handle_payload`` run only inside that worker. Post-timeout
+    latch/state persistence and claim cleanup are best-effort under a hard
+    cap so a stalled tree cannot hang the parent after the worker returns.
+    The doctor-pointer / error ``hook.log`` write is synchronous and
+    finishes before this function returns.
     """
     if package != PACKAGE_REF:
         return 0
 
-    log_target: Path | None = None
     raw = ""
     claim_path: Path | None = None
+    log_target: Path | None = None
+    session_id = "unknown"
+    result: dict[str, Any] | None = None
     try:
         payload, raw = _load_hook_stdin(stdin_text=stdin_text)
-        log_target = _resolve_log_target(payload)
-        result = _run_timed_handle_payload(event, raw)
-        result, claim_path = _strip_claim(result)
+        session_id = _session_id_from_payload(payload)
+        outcome = _normalize_timed_outcome(_run_timed_handle_payload(event, raw, pin=target))
+        log_target = _path_or_none(outcome.get("log_target"))
+        session_id = str(outcome.get("session_id") or session_id)
+        claim_path = _path_or_none(outcome.get("claim_path"))
+        kind = str(outcome.get("kind") or "ok")
+        raw_result = outcome.get("result")
+        result = raw_result if isinstance(raw_result, dict) else None
+        if kind == "latched":
+            envelope.emit_stdout(envelope.latched_envelope(event))
+            return 0
+        if kind == "latched_silent":
+            envelope.emit_stdout(envelope.empty_envelope(event))
+            return 0
     except HookDegraded as exc:
-        if claim_path is not None:
-            compaction_marker.release_claim_path(claim_path)
-            claim_path = None
-        if log_target is not None:
-            envelope.append_log(log_target, f"{event}: degraded: {exc}")
+        _bounded_release_claim(claim_path)
+        claim_path = None
+        followup_target = exc.log_target if exc.log_target is not None else log_target
+        if followup_target is not None and _is_timeout_degraded(exc):
+            if _bounded_timeout_followup(event, followup_target, session_id, exc) == "latched":
+                envelope.emit_stdout(envelope.latched_envelope(event))
+                return 0
         else:
-            # Best-effort log under cwd when the repo is not yet wired.
-            try:
-                envelope.append_log(Path.cwd(), f"{event}: degraded: {exc}")
-            except OSError:
-                pass
+            _append_degraded_diagnostic(event, followup_target, exc)
         envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
     except Exception as exc:  # noqa: BLE001 - hooks must fail open instead of breaking the harness
-        if claim_path is not None:
-            compaction_marker.release_claim_path(claim_path)
-            claim_path = None
-        if log_target is not None:
-            envelope.append_log(log_target, f"{event}: error: {type(exc).__name__}: {exc}")
+        _bounded_release_claim(claim_path)
+        claim_path = None
+        _append_error_diagnostic(event, log_target, exc)
         envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
 
     try:
-        _emit_result(event, result, target=log_target)
+        envelope.emit_stdout(result if result is not None else envelope.empty_envelope(event))
     except Exception as exc:  # noqa: BLE001 - stdout failure still fails open
-        if claim_path is not None:
-            compaction_marker.release_claim_path(claim_path)
-            claim_path = None
+        _bounded_release_claim(claim_path)
+        claim_path = None
         if log_target is not None:
-            envelope.append_log(log_target, f"{event}: emit failed: {exc}")
+            try:
+                envelope.append_log(log_target, f"{event}: emit failed: {exc}")
+            except OSError:
+                pass
         try:
             envelope.emit_stdout(envelope.degraded_envelope(event))
         except Exception:  # noqa: BLE001
             pass
         return 0
-    if claim_path is not None:
-        compaction_marker.complete_claim_path(claim_path)
+    _bounded_complete_claim(claim_path)
     return 0

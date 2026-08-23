@@ -24,6 +24,10 @@ MAX_LOG_BYTES = 256_000
 LOG_NAME = "hook.log"
 INJECTIONS_DIRNAME = "injections"
 DOCTOR_POINTER = "Brigade hook degraded; run `brigade doctor --target .` for details."
+LATCH_POINTER = (
+    "Brigade work-loop hook disabled for this session after repeated timeouts. "
+    "It will stay off until the session restarts."
+)
 CapName = Literal["items", "chars", "oversized"]
 
 _HOME_PATH_RE = re.compile(re.escape(str(Path.home().expanduser().resolve())))
@@ -45,6 +49,16 @@ def degraded_envelope(event: str) -> dict[str, Any]:
         "hookSpecificOutput": {
             "hookEventName": event,
             "additionalContext": DOCTOR_POINTER,
+        }
+    }
+
+
+def latched_envelope(event: str) -> dict[str, Any]:
+    """One-shot notice after the session timeout circuit breaker opens."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": LATCH_POINTER,
         }
     }
 

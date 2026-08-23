@@ -80,7 +80,9 @@ def _dispatch_impl(args) -> int:
     if args.work_command == "hook-run":
         from ...claude_hooks.runtime import hook_run
 
-        return hook_run(event=args.event, package=args.package)
+        if args.target is None:
+            return hook_run(event=args.event, package=args.package)
+        return hook_run(event=args.event, package=args.package, target=args.target)
     if args.work_command == "sweep":
         if args.sweep_args:
             if args.sweep_args[0] != "closeout":

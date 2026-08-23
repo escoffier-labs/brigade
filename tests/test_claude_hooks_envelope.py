@@ -200,7 +200,7 @@ def test_hook_timeout_covers_whole_operation(tmp_path: Path, monkeypatch, capsys
     target = _wired_claude(tmp_path)
     monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.01)
 
-    def hang(_event: str, _payload: dict) -> dict | None:
+    def hang(_event: str, _payload: dict, **_kwargs) -> dict | None:
         import time
 
         time.sleep(1)
