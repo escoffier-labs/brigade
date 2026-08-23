@@ -19,6 +19,8 @@ import pytest
 
 from brigade.claude_hooks import envelope, runtime
 from brigade.claude_hooks.package import PACKAGE_REF
+from brigade.install import install_selection
+from brigade.selection import Selection
 
 
 class _CountingBytesIO(io.BytesIO):
@@ -162,12 +164,14 @@ def test_mutation_trailing_input_within_limit_is_rejected_before_worker(monkeypa
 
 
 def test_hook_run_reads_real_stdin_through_limited_binary_reader(monkeypatch, capsys, tmp_path: Path):
+    selection = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    assert install_selection(tmp_path, selection) == 0
     payload = {"session_id": "s", "cwd": str(tmp_path), "hook_event_name": "SessionStart"}
     raw = json.dumps(payload).encode("utf-8")
     proxy = _StdinProxy(raw)
     worker_calls: list[str] = []
 
-    def _capture(event: str, payload_raw: str) -> dict[str, Any]:
+    def _capture(event: str, payload_raw: str, **_kwargs) -> dict[str, Any]:
         worker_calls.append(payload_raw)
         return {}
 

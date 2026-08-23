@@ -53,7 +53,8 @@ def managed_groups() -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def hook_script_text() -> str:
+def hook_script_text(*, pin: Path | None = None) -> str:
+    pin_flag = f" --target {shlex.quote(str(pin))}" if pin is not None else ""
     return (
         "#!/usr/bin/env sh\n"
         f"# Brigade-managed Claude Code work-loop hook ({PACKAGE_REF}).\n"
@@ -74,7 +75,7 @@ def hook_script_text() -> str:
         'if [ -z "$event" ]; then\n'
         "  exit 0\n"
         "fi\n"
-        f'exec brigade work hook-run --event "$event" --package "{PACKAGE_REF}"\n'
+        f'exec brigade work hook-run --event "$event" --package "{PACKAGE_REF}"{pin_flag}\n'
     )
 
 
@@ -151,19 +152,27 @@ def is_managed_user_handler(value: object, script_path: Path, event: str | None 
 
 def is_managed_handler(value: object, event: str | None = None) -> bool:
     tokens = _command_tokens(value)
-    if tokens is None:
+    if tokens is None or len(tokens) < 7:
         return False
-    parsed_event = tokens[4] if len(tokens) > 4 else None
-    return bool(
-        len(tokens) == 7
-        and Path(tokens[0]).name == "brigade"
+    parsed_event = tokens[4]
+    if not (
+        Path(tokens[0]).name == "brigade"
         and tokens[1:4] == ["work", "hook-run", "--event"]
         and parsed_event in MANAGED_EVENTS
         and (event is None or parsed_event == event)
-        and tokens[5] == "--package"
-        and tokens[6].startswith(f"{PACKAGE_ID}@")
-        and len(tokens[6]) > len(PACKAGE_ID) + 1
-    )
+    ):
+        return False
+    package: str | None = None
+    index = 5
+    while index < len(tokens):
+        flag = tokens[index]
+        if flag in {"--package", "--target"} and index + 1 < len(tokens):
+            if flag == "--package":
+                package = tokens[index + 1]
+            index += 2
+            continue
+        return False
+    return bool(package is not None and package.startswith(f"{PACKAGE_ID}@") and len(package) > len(PACKAGE_ID) + 1)
 
 
 def _is_python_interpreter(token: str) -> bool:

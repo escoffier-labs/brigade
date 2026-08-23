@@ -110,7 +110,7 @@ Instead of wiring repos one at a time, install the work-loop hooks once at user 
 brigade work hooks install --scope user
 ```
 
-From then on, every repo the agent opens gets the work brief injected at session start, and an unwired repo gets the exact `brigade init` command printed for the agent to run. Agents can wire new repos themselves and close the verified-work loop without another human command. Remove it with `brigade work hooks uninstall --scope user`. Only Brigade-owned hook entries are touched.
+From then on, every repo the agent opens gets the work brief injected at session start, and an unwired repo gets the exact `brigade init` command printed for the agent to run. The home directory is never treated as a work target. Pass `--target <wired-workspace>` to pin `hook-run` to one workspace; omit it to stay multi-repo. Agents can wire new repos themselves and close the verified-work loop without another human command. Remove it with `brigade work hooks uninstall --scope user`. Only Brigade-owned hook entries are touched.
 
 ## After install: the agent work loop
 
