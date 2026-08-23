@@ -98,6 +98,7 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
         checks.extend(_check_hermes(ctx.target))
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
     checks.append(_check_recovery_checkpoints(ctx.target))
+    checks.append(_check_unreconciled_run_lock(ctx.target))
     checks.extend(_check_journal_event_headroom(ctx.target))
     checks.append(_check_run_lineage(ctx.target))
     checks.extend(_check_outcome_loop(ctx))
@@ -344,6 +345,28 @@ def _check_run_lineage(target: Path, *, full: bool = False) -> CheckResult:
     if not_examined:
         return (WARN, _LINEAGE_CHECK_NAME, detail)
     return (OK, _LINEAGE_CHECK_NAME, detail)
+
+
+def _check_unreconciled_run_lock(target: Path) -> CheckResult:
+    """Report a dead-owner lock that is safe to release on the next claim."""
+    from brigade import runguard
+
+    try:
+        verdict = runguard.inspect_run_lock_reconcile(target)
+    except (runguard.RunGuardError, OSError, RuntimeError):
+        return (OK, "run lock: unreconciled", "unable to inspect run lock")
+    if verdict == "unreconciled":
+        return (
+            WARN,
+            "run lock: unreconciled",
+            "stale lock held by a finished or expired run with no live owner; "
+            "it will release on the next `brigade run` claim",
+        )
+    if verdict == "live":
+        return (OK, "run lock: unreconciled", "lock held by a live owner")
+    if verdict == "invalid":
+        return (WARN, "run lock: unreconciled", "run lock is present but unreadable")
+    return (OK, "run lock: unreconciled", "no stale unreconciled lock")
 
 
 def _check_recovery_checkpoints(target: Path, *, full: bool = False) -> CheckResult:

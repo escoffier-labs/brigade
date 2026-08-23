@@ -13,7 +13,7 @@ import stat
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic as _monotonic
 from time import monotonic_ns as _monotonic_ns
@@ -34,6 +34,11 @@ _NONTERMINAL_RUN_STATUSES = frozenset(
         "running",
     }
 )
+
+# Conservative lease TTL used only when the owner is dead and the run is not
+# still marked active. Activated-journal in-progress runs still require
+# explicit `brigade runs recover`.
+STALE_LOCK_RECONCILE_MAX_AGE = timedelta(hours=24)
 
 
 class _RunLockClock:
@@ -496,6 +501,150 @@ def _retain_claim(path: Path, claimed: Path) -> Path:
     return retained
 
 
+def _owner_run_meta(owner: dict[str, object] | None) -> dict[str, object] | None:
+    if owner is None:
+        return None
+    raw_run_dir = owner.get("run_dir")
+    if not isinstance(raw_run_dir, str) or not raw_run_dir:
+        return None
+    try:
+        payload = json.loads((Path(raw_run_dir).expanduser().resolve() / "run.json").read_text())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError, RuntimeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _owner_run_is_terminal(owner: dict[str, object] | None) -> bool:
+    meta = _owner_run_meta(owner)
+    if meta is None:
+        return False
+    if meta.get("finished_at"):
+        return True
+    status = meta.get("status")
+    return isinstance(status, str) and status not in _NONTERMINAL_RUN_STATUSES
+
+
+def _owner_run_is_active(owner: dict[str, object] | None) -> bool:
+    meta = _owner_run_meta(owner)
+    if meta is None:
+        return False
+    if meta.get("finished_at"):
+        return False
+    status = meta.get("status")
+    return isinstance(status, str) and status in _NONTERMINAL_RUN_STATUSES
+
+
+def _parse_lock_acquired_at(owner: dict[str, object] | None) -> datetime | None:
+    if owner is None:
+        return None
+    raw = owner.get("acquired_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _lock_is_older_than(
+    path: Path,
+    owner: dict[str, object] | None,
+    max_age: timedelta,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    acquired = _parse_lock_acquired_at(owner)
+    if acquired is None:
+        try:
+            acquired = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            return False
+    clock = now if now is not None else datetime.now(timezone.utc)
+    return clock - acquired >= max_age
+
+
+def _lock_is_reconcileable(path: Path, owner: dict[str, object] | None = None) -> bool:
+    """True when a dead-owner lock is safe to release without explicit recover.
+
+    Never true while the owner process is alive or the run is still
+    non-terminal (active / thread-attached). A terminal receipt is enough.
+    A bounded-age lock with no live owner and no active run is also
+    reconcileable (orphan / missing receipt).
+    """
+    if not _lock_is_stale(path):
+        return False
+    if owner is None:
+        owner = _read_lock_owner(path)
+    if _owner_run_is_active(owner):
+        return False
+    if _owner_run_is_terminal(owner):
+        return True
+    return _lock_is_older_than(path, owner, STALE_LOCK_RECONCILE_MAX_AGE)
+
+
+def inspect_run_lock_reconcile(workspace: Path) -> str:
+    """Read-only lock reconcile verdict: ``absent``, ``live``, ``unreconciled``, ``skipped``, or ``invalid``.
+
+    Never mutates the lock. ``unreconciled`` means a later claim or
+    ``reconcile_run_lock`` may release it.
+    """
+    try:
+        path = lock_path(workspace)
+    except (RunGuardError, OSError, RuntimeError):
+        return "invalid"
+    try:
+        if _lock_path_is_directory(path) is None:
+            return "absent"
+    except RunLockError:
+        return "invalid"
+    try:
+        stale = _lock_is_stale(path)
+    except RunLockError:
+        return "invalid"
+    if not stale:
+        return "live"
+    owner = _read_lock_owner(path)
+    if _lock_is_reconcileable(path, owner):
+        return "unreconciled"
+    return "skipped"
+
+
+def reconcile_run_lock(workspace: Path) -> str:
+    """Release a dead-owner terminal or TTL-expired lock.
+
+    Returns ``released``, ``live``, ``skipped``, ``absent``, or ``invalid``.
+    A live owner is never touched. An active / non-terminal run is skipped
+    even when the recorded pid is dead (existing stale-lock recovery or
+    ``brigade runs recover`` still owns that path).
+    """
+    try:
+        path = lock_path(workspace)
+    except (RunGuardError, OSError, RuntimeError):
+        return "invalid"
+    try:
+        if _lock_path_is_directory(path) is None:
+            return "absent"
+    except RunLockError:
+        return "invalid"
+    try:
+        if not _lock_is_stale(path):
+            return "live"
+    except RunLockError:
+        return "invalid"
+    owner = _read_lock_owner(path)
+    if not _lock_is_reconcileable(path, owner):
+        return "skipped"
+    claimed_owner = _claim_stale_lock(path)
+    if claimed_owner is None:
+        return "skipped"
+    claimed, claimed_meta = claimed_owner
+    _finish_claimed_recovery(path, claimed, claimed_meta)
+    return "released"
+
+
 def _claim_is_activated(owner: dict[str, object] | None) -> bool:
     if owner is None:
         return False
@@ -520,6 +669,9 @@ def _invoke_before_terminalize(
     before_terminalize: Callable[[dict[str, object] | None], None] | None,
 ) -> None:
     if before_terminalize is None:
+        if _lock_is_reconcileable(claimed, owner):
+            _finish_claimed_recovery(path, claimed, owner)
+            return
         if _claim_is_activated(owner):
             retained = _retain_claim(path, claimed)
             raise RunLockError(

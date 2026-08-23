@@ -42,6 +42,7 @@ def test_init_creates_gitignore_when_missing(tmp_target: Path):
     assert ".brigade/handoff-sources.json" in gi
     assert ".brigade/daily.toml" in gi
     assert ".brigade/memory-care.toml" in gi
+    assert ".brigade/node.toml" in gi
     assert ".brigade/vault.toml" in gi
     assert ".brigade/vault-propose/" in gi
     assert ".brigade/reviews.toml" in gi
@@ -68,6 +69,7 @@ def test_init_gitignore_leaves_mcp_catalog_trackable_but_ignores_local_state(tmp
         ".brigade/work/verify-runs/run.json",
         ".brigade/security/cache.json",
         ".brigade/runs/session.json",
+        ".brigade/node.toml",
     ):
         result = _git(repo, "check-ignore", ignored)
         assert result.returncode == 0, result.stderr
@@ -230,6 +232,7 @@ def test_gitignore_block_includes_claude_section_when_selected():
     assert ".brigade/dogfood.toml" in block
     assert ".brigade/handoff-sources.json" in block
     assert ".brigade/memory-care.toml" in block
+    assert ".brigade/node.toml" in block
     assert ".brigade/vault.toml" in block
     assert ".brigade/vault-propose/" in block
     assert ".brigade/runs/" in block
@@ -310,6 +313,7 @@ def test_install_writes_gitignore_block(tmp_path):
     assert ".claude/memory-handoffs/*" in gi
     assert ".codex/memory-handoffs/*" in gi
     assert ".brigade/dogfood.toml" in gi
+    assert ".brigade/node.toml" in gi
     assert ".brigade/runs/" in gi
     assert ".brigade/work/" in gi
 

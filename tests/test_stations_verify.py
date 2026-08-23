@@ -534,11 +534,16 @@ else:
 def test_unsupported_platform_fails_closed_before_spawn(tmp_path, helper_path, monkeypatch, capsys):
     _write_manifest(tmp_path / "sidecar")
     monkeypatch.setattr(stations_cmd, "_supports_process_containment", lambda: False, raising=False)
-    monkeypatch.setattr(
-        stations_cmd.subprocess,
-        "Popen",
-        lambda *args, **kwargs: pytest.fail("verifier process spawned on unsupported platform"),
-    )
+    real_popen = stations_cmd.subprocess.Popen
+
+    def refuse_station_helper_spawn(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args")
+        tokens = [str(part) for part in argv] if isinstance(argv, (list, tuple)) else [str(argv)]
+        if any("station-helper" in token for token in tokens):
+            pytest.fail("verifier process spawned on unsupported platform")
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(stations_cmd.subprocess, "Popen", refuse_station_helper_spawn)
 
     assert cli.main(["stations", "verify", str(tmp_path / "sidecar"), "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)

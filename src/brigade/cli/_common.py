@@ -64,6 +64,7 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
             "run-cloud",
             "route",
             "runs",
+            "node",
             "model",
             "dogfood",
         ],
