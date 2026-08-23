@@ -27,6 +27,7 @@ _CLIENT_VERSION = "0.0.0"
 _REQUEST_TIMEOUT = 30.0
 _INTERRUPT_GRACE = 5.0
 _ORPHAN_LIMIT = 1000
+_READ_CHUNK_BYTES = 4096
 _DEAD = object()  # queue sentinel: server process is gone
 _OUTPUT_LIMIT = object()  # queue sentinel: capture cap exceeded
 
@@ -43,6 +44,37 @@ _DELTA_METHODS = frozenset(
         "process/outputDelta",
     }
 )
+
+
+def _byte_stream(stdout: Any) -> Any:
+    """Prefer the binary buffer so text-mode iteration cannot hold an unbounded line."""
+
+    buffer = getattr(stdout, "buffer", None)
+    return stdout if buffer is None else buffer
+
+
+def _read_stdout_chunk(stream: Any, n: int) -> bytes:
+    """Read at most ``n`` bytes without blocking for a full chunk on a live pipe.
+
+    ``BufferedReader.read(n)`` on a pipe waits until ``n`` bytes or EOF, so a
+    short JSONL line would stall until the child closed stdout. ``read1``
+    returns as soon as any data is available.
+    """
+
+    if n <= 0:
+        return b""
+    reader = getattr(stream, "read1", None)
+    if not callable(reader):
+        reader = stream.read
+    try:
+        chunk = reader(n)
+    except (OSError, ValueError):
+        return b""
+    if not chunk:
+        return b""
+    if isinstance(chunk, str):
+        return chunk.encode("utf-8")
+    return bytes(chunk)
 
 
 def _message_thread_id(msg: dict) -> str | None:
@@ -256,31 +288,79 @@ class AppServer:
             except Exception:
                 pass
 
+    def _trip_output_limit(self, line_bytes: int, thread_id: str | None = None) -> None:
+        """Charge ``line_bytes`` against the cap (overflowing) and stop the child."""
+
+        self.capture_budget(thread_id).accept(line_bytes)
+        self._signal_output_limit()
+
+    def _charge_record(self, line_bytes: int, thread_id: str | None) -> bool:
+        """Account ``line_bytes`` against the cap. False means overflow."""
+
+        if not self.capture_budget(thread_id).try_add(line_bytes):
+            self._signal_output_limit()
+            return False
+        return True
+
+    def _ingest_line(self, raw: bytes) -> bool:
+        """Charge one JSONL record, then parse. False means the cap tripped.
+
+        A record larger than the cap is charged and rejected before
+        ``json.loads``. Malformed or non-object records are charged too, so
+        they cannot bypass the cap by failing to parse.
+        """
+
+        if self._output_limit_exceeded:
+            return False
+        stripped = raw.strip()
+        if not stripped:
+            return True
+        line_bytes = len(stripped)
+        if line_bytes > proc_mod.MAX_CAPTURE_BYTES:
+            self._trip_output_limit(line_bytes)
+            return False
+        try:
+            msg = json.loads(stripped)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            return self._charge_record(line_bytes, None)
+        if not isinstance(msg, dict):
+            return self._charge_record(line_bytes, None)
+        thread_id = _message_thread_id(msg)
+        if not self._charge_record(line_bytes, thread_id):
+            return False
+        if msg.get("id") is not None and "method" in msg:
+            self._handle_server_request(msg)
+        elif msg.get("id") is not None:
+            self._handle_response(msg)
+        elif "method" in msg:
+            self._route_notification(msg)
+        return True
+
     def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
-        for line in self._proc.stdout:
-            if self._output_limit_exceeded:
+        stream = _byte_stream(self._proc.stdout)
+        leftover = bytearray()
+        limit = proc_mod.MAX_CAPTURE_BYTES
+        chunk_size = _READ_CHUNK_BYTES
+        while not self._output_limit_exceeded:
+            newline_at = leftover.find(b"\n")
+            if newline_at < 0:
+                if len(leftover) > limit:
+                    self._trip_output_limit(len(leftover))
+                    leftover.clear()
+                    break
+                chunk = _read_stdout_chunk(stream, min(chunk_size, limit + 1 - len(leftover)))
+                if not chunk:
+                    if leftover and not self._ingest_line(bytes(leftover)):
+                        leftover.clear()
+                    break
+                leftover.extend(chunk)
+                continue
+            raw = bytes(leftover[:newline_at])
+            del leftover[: newline_at + 1]
+            if not self._ingest_line(raw):
+                leftover.clear()
                 break
-            line = line.strip()
-            if not line:
-                continue
-            line_bytes = len(line.encode("utf-8"))
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(msg, dict):
-                continue
-            thread_id = _message_thread_id(msg)
-            if not self.capture_budget(thread_id).try_add(line_bytes):
-                self._signal_output_limit()
-                break
-            if msg.get("id") is not None and "method" in msg:
-                self._handle_server_request(msg)
-            elif msg.get("id") is not None:
-                self._handle_response(msg)
-            elif "method" in msg:
-                self._route_notification(msg)
         overflowed = self._output_limit_exceeded
         with self._state_lock:
             self._dead = True
