@@ -1303,7 +1303,19 @@ def _resolve_run_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] | No
             return None, None, f"run receipt not found: {run_id}"
         _, payload, run_json = runs[0]
         return payload, run_json, None
-    matches = [(payload, run_json) for child, payload, run_json in runs if child.name.startswith(run_id)]
+    from . import node as node_mod
+    from . import run_id as run_id_mod
+
+    try:
+        identity = node_mod.load_identity(target)
+    except node_mod.NodeIdentityError:
+        identity = None
+    local_short = identity.short_id if identity is not None else None
+    matches = [
+        (payload, run_json)
+        for child, payload, run_json in runs
+        if run_id_mod.run_id_matches(child.name, run_id, local_short=local_short)
+    ]
     if not matches:
         return None, None, f"run receipt not found: {run_id}"
     if len(matches) > 1:

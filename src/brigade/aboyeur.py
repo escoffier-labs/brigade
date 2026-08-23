@@ -505,9 +505,18 @@ def _loads_first_json_object(text: str) -> object:
     return json.loads(text)
 
 
-def make_run_dir(base: Path, now: datetime | None = None) -> Path:
+def make_run_dir(base: Path, now: datetime | None = None, *, workspace: Path | None = None) -> Path:
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
-    return base / f"{stamp}-{uuid4().hex[:8]}"
+    local_id = f"{stamp}-{uuid4().hex[:8]}"
+    from . import node as node_mod
+    from . import run_id as run_id_mod
+
+    inferred = workspace if workspace is not None else node_mod.infer_workspace_from_runs_dir(base)
+    try:
+        identity = node_mod.ensure_identity(inferred)
+    except node_mod.NodeIdentityError:
+        return base / local_id
+    return base / run_id_mod.format_run_id(identity.short_id, local_id)
 
 
 def _resolve_authority_state(run_dir: Path) -> str:

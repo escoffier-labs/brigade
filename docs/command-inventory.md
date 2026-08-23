@@ -40,6 +40,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade mcp`: 14 command path(s)
 - `brigade memory`: 23 command path(s)
 - `brigade model`: 7 command path(s)
+- `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade openclaw-fragments` (extras): 1 command path(s)
 - `brigade operator`: 24 command path(s)
@@ -273,6 +274,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade model trial run`
 - `brigade model trial show`
 - `brigade model trial summary`
+- `brigade node`
 - `brigade notifications event plan` (extras)
 - `brigade notifications event record` (extras)
 - `brigade notifications setup plan` (extras)

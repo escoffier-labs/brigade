@@ -63,6 +63,20 @@ def resolve_served_run_id(run_id: str, runs_root: Path) -> Path | None:
         return None
     if not root.is_dir():
         return None
+    from . import node as node_mod
+    from . import run_id as run_id_mod
+
+    workspace = node_mod.infer_workspace_from_runs_dir(root)
+    for name in run_id_mod.lookup_names_for_workspace(run_id, workspace):
+        if not _SERVED_RUN_ID.fullmatch(name):
+            continue
+        resolved = _resolve_contained_run_dir(root, name)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _resolve_contained_run_dir(root: Path, run_id: str) -> Path | None:
     candidate = root / run_id
     try:
         if candidate.is_symlink():

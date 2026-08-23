@@ -229,9 +229,18 @@ def _resolve_run_dir(run: str | Path, *, cwd: Path, runs_dir: Path | None = None
             return None, f"error: no runs found in {root}"
         return runs[0][0].resolve(), None
     run_dir = (root / raw).resolve()
-    if not run_dir.is_dir():
-        return None, f"error: run directory not found: {run_dir}"
-    return run_dir, None
+    if run_dir.is_dir():
+        return run_dir, None
+    from . import run_id as run_id_mod
+
+    resolved_root = _resolved_runs_root(root)
+    for name in run_id_mod.lookup_names_for_workspace(str(raw), cwd):
+        if not _is_bare_run_id(name):
+            continue
+        candidate = (root / name).resolve()
+        if candidate.is_dir() and candidate.parent == resolved_root and candidate.name == name:
+            return candidate, None
+    return None, f"error: run directory not found: {run_dir}"
 
 
 def _line(label: str, value: object | None) -> None:
@@ -462,6 +471,18 @@ def _resolve_sibling_run_dir(runs_root: Path, run_id: str) -> Path | None:
     """
     if not _is_bare_run_id(run_id):
         return None
+    from . import node as node_mod
+    from . import run_id as run_id_mod
+
+    workspace = node_mod.infer_workspace_from_runs_dir(runs_root)
+    for name in run_id_mod.lookup_names_for_workspace(run_id, workspace):
+        if not _is_bare_run_id(name):
+            continue
+        candidate = runs_root / name
+        if candidate.parent != runs_root or candidate.name != name:
+            continue
+        if candidate.is_dir():
+            return candidate
     candidate = runs_root / run_id
     if candidate.parent != runs_root or candidate.name != run_id:
         return None
