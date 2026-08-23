@@ -59,7 +59,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roster`: 4 command path(s)
 - `brigade route`: 1 command path(s)
 - `brigade run`: 1 command path(s)
-- `brigade run-cloud`: 4 command path(s)
+- `brigade run-cloud`: 14 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 18 command path(s)
 - `brigade scrub`: 1 command path(s)
@@ -467,6 +467,16 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade route`
 - `brigade run`
 - `brigade run-cloud adopt`
+- `brigade run-cloud grokbot ack-cancel`
+- `brigade run-cloud grokbot cancel`
+- `brigade run-cloud grokbot claim`
+- `brigade run-cloud grokbot complete`
+- `brigade run-cloud grokbot enqueue`
+- `brigade run-cloud grokbot expire`
+- `brigade run-cloud grokbot fail`
+- `brigade run-cloud grokbot renew`
+- `brigade run-cloud grokbot start`
+- `brigade run-cloud grokbot status`
 - `brigade run-cloud register`
 - `brigade run-cloud status`
 - `brigade run-cloud sweep`

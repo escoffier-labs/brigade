@@ -116,6 +116,32 @@ The Agent Activity dashboard is visual-first: machine cards (rocinante / shadowf
 
 Use `brigade run cloud register` / `adopt` (parser group `brigade run-cloud`) to record dispatches. Codex Cloud register-on-dispatch is automatic from `codex-cloud` seats. Cursor cloud remains an unwired source until an API key exists. `brigade run cloud status --json` joins the registry against best-effort provider state and GitHub branch/PR ground truth. `brigade run cloud sweep` writes a receipted report only. Nothing is deleted automatically. Stale READY entries (threshold `stale_ready_hours`, default 6) surface in `brigade work brief`.
 
+### Grok Bot local job queue
+
+`brigade run cloud grokbot` creates a private local queue contract. It does not call a live provider, commission Grok Bot, or add a synchronous roster seat. The protected MCP adapter is the future network boundary. `cloud_tracker` reconciliation is planned for PR 2.
+
+Queue data lives below `.brigade/cloud/grokbot/` with private file permissions. Submit a complete task envelope from a JSON file with `enqueue --spec`; do not put task instructions, verification commands, credentials, headers, environment values, or artifact bodies on the command line. The envelope identifies a bounded role, repository, base ref, owned paths, artifact kind, and timeout. Completion reads a second JSON file with `complete --artifact`; it accepts artifact references only, such as a GitHub draft-PR URL and branch, a branch and commit, or a report path and SHA-256.
+
+Jobs move through `queued`, `claimed`, `running`, `completed`, `failed`, `expired`, and `canceled`. A bot claims work with its own opaque bot and lease IDs plus a bounded lease duration. The same claim can be retried safely, and `renew` extends the current unexpired lease within the job deadline. `cancel` ends queued work immediately or records a cancellation request for a live lease. The lease holder uses `ack-cancel` to finish that cancellation. `expire` never requeues a job; it finalizes a job after its deadline or lease expires.
+
+Only safe projections are printed by `status` and mutation commands. They include job identity, state, timing, task hash, and artifact metadata, but never the envelope's `instructions` or `verification_commands`.
+
+```bash
+brigade run cloud grokbot enqueue \
+  --target . \
+  --spec .brigade-inputs/grokbot-task.json \
+  --idempotency-key issue-1130-scout
+
+brigade run cloud grokbot claim \
+  --target . \
+  --job-id grokbot-0123456789abcdef01234567 \
+  --bot-id scout-01 \
+  --lease-id lease-01234567 \
+  --lease-seconds 300
+
+brigade run cloud grokbot status --target . --json
+```
+
 For a remote T3 controller journal already available locally, configure an alias and a repo-relative journal path in `.brigade/center/agent-activity-sources.json`:
 
 ```json

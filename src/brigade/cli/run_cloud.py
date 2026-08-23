@@ -59,17 +59,64 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_sweep.add_argument("--target", type=Path, default=Path("."))
     p_sweep.add_argument("--json", action="store_true")
 
+    p_grokbot = cloud_sub.add_parser("grokbot", help="Manage the private local Grok Bot job queue.")
+    grokbot_sub = p_grokbot.add_subparsers(dest="grokbot_command", metavar="<grokbot-command>")
+    grokbot_sub.required = True
+
+    def add_target(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--target", type=Path, default=Path("."))
+        command.add_argument("--json", action="store_true")
+
+    p_enqueue = grokbot_sub.add_parser("enqueue", help="Queue a Grok Bot envelope from a JSON file.")
+    add_target(p_enqueue)
+    p_enqueue.add_argument("--spec", type=Path, required=True, help="Path to the private task envelope JSON file.")
+    p_enqueue.add_argument("--idempotency-key", required=True)
+
+    for name, help_text in (("claim", "Claim a queued job."), ("renew", "Renew a current job lease.")):
+        command = grokbot_sub.add_parser(name, help=help_text)
+        add_target(command)
+        command.add_argument("--job-id", required=True)
+        command.add_argument("--bot-id", required=True)
+        command.add_argument("--lease-id", required=True)
+        command.add_argument("--lease-seconds", required=True, type=int)
+
+    for name, help_text in (("start", "Mark a claimed job running."), ("fail", "Mark a live job failed."), ("ack-cancel", "Acknowledge a requested cancellation.")):
+        command = grokbot_sub.add_parser(name, help=help_text)
+        add_target(command)
+        command.add_argument("--job-id", required=True)
+        command.add_argument("--bot-id", required=True)
+        command.add_argument("--lease-id", required=True)
+
+    p_complete = grokbot_sub.add_parser("complete", help="Complete a running job with artifact references.")
+    add_target(p_complete)
+    p_complete.add_argument("--job-id", required=True)
+    p_complete.add_argument("--bot-id", required=True)
+    p_complete.add_argument("--lease-id", required=True)
+    p_complete.add_argument("--artifact", type=Path, required=True, help="Path to the completion artifact JSON file.")
+
+    for name, help_text in (("cancel", "Cancel a queued job or request cancellation."), ("expire", "Expire a deadline or lease-expired job.")):
+        command = grokbot_sub.add_parser(name, help=help_text)
+        add_target(command)
+        command.add_argument("--job-id", required=True)
+
+    p_grokbot_status = grokbot_sub.add_parser("status", help="Show safe Grok Bot job projections.")
+    add_target(p_grokbot_status)
+    p_grokbot_status.add_argument("--job-id", default=None)
+
     p.set_defaults(func=dispatch)
 
 
 def dispatch(args) -> int:
-    from .. import cloud_tracker
-
     command = getattr(args, "run_cloud_command", None)
     target = Path(args.target).expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+
+    if command == "grokbot":
+        return _dispatch_grokbot(args, target)
+
+    from .. import cloud_tracker
 
     if command == "register":
         try:
@@ -167,3 +214,77 @@ def dispatch(args) -> int:
 
     print(f"error: unknown cloud command: {command}", file=sys.stderr)
     return 2
+
+
+def _dispatch_grokbot(args, target: Path) -> int:
+    """Dispatch local queue operations without loading envelopes into CLI arguments."""
+    from .. import grokbot_jobs
+
+    command = args.grokbot_command
+    try:
+        if command == "enqueue":
+            result = grokbot_jobs.enqueue(target, _read_json_object(args.spec, "--spec"), args.idempotency_key)
+        elif command == "claim":
+            result = grokbot_jobs.claim(target, args.job_id, args.bot_id, args.lease_id, args.lease_seconds)
+        elif command == "renew":
+            result = grokbot_jobs.renew(target, args.job_id, args.bot_id, args.lease_id, args.lease_seconds)
+        elif command == "start":
+            result = grokbot_jobs.transition(target, args.job_id, args.bot_id, args.lease_id, "running")
+        elif command == "complete":
+            result = grokbot_jobs.transition(
+                target,
+                args.job_id,
+                args.bot_id,
+                args.lease_id,
+                "completed",
+                artifact=_read_json_object(args.artifact, "--artifact"),
+            )
+        elif command == "fail":
+            result = grokbot_jobs.transition(target, args.job_id, args.bot_id, args.lease_id, "failed")
+        elif command == "cancel":
+            result = grokbot_jobs.cancel(target, args.job_id)
+        elif command == "ack-cancel":
+            result = grokbot_jobs.acknowledge_cancel(target, args.job_id, args.bot_id, args.lease_id)
+        elif command == "expire":
+            result = grokbot_jobs.expire(target, args.job_id)
+        elif command == "status":
+            result = grokbot_jobs.status(target, args.job_id)
+        else:  # argparse makes this unreachable.
+            print(f"error: unknown Grok Bot command: {command}", file=sys.stderr)
+            return 2
+    except grokbot_jobs.GrokbotJobError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    _print_grokbot_result(result)
+    return 0
+
+
+def _read_json_object(path: Path, option: str) -> dict:
+    """Load a command payload only from a regular JSON file."""
+    if not path.is_file():
+        raise ValueError(f"{option} is not a file: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid JSON object in {option}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid JSON object in {option}")
+    return payload
+
+
+def _print_grokbot_result(result: dict) -> None:
+    """Render safe queue projections without exposing task envelope content."""
+    if "jobs" in result:
+        jobs = result["jobs"]
+        print(f"grokbot jobs: {len(jobs)}")
+        for job in jobs:
+            print(f"job {job['job_id']} state={job['state']}")
+        return
+    print(f"job {result['job_id']} state={result['state']}")
