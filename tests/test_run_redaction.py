@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import subprocess
-import stat
 import sys
 import textwrap
 import time
@@ -15,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from brigade import cli, run_checkpoint, run_events, run_journal, run_projector, run_redaction, run_shadow
+from tests.support import PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, assert_private_mode
 
 RUN_ID = "20260730-190000-redact"
 SECRET = "secret-value-that-must-not-survive"
@@ -491,8 +491,8 @@ def test_redaction_quarantines_rewrites_rechains_and_reprojects(tmp_path):
     assert b'"sequence_end": 2' in record
     assert report.quarantine_path.is_file()
     assert SECRET.encode() in report.quarantine_path.read_bytes()
-    assert stat.S_IMODE(report.quarantine_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(report.quarantine_path.parent.stat().st_mode) == 0o700
+    assert_private_mode(report.quarantine_path, PRIVATE_FILE_MODE)
+    assert_private_mode(report.quarantine_path.parent, PRIVATE_DIRECTORY_MODE)
 
     verified = run_journal.read_journal_bounded(_journal_path(run_dir))
     assert verified.chain_errors == []
@@ -1368,7 +1368,7 @@ def test_redaction_rejects_symlinked_transaction_parent_without_external_write(t
     if symlink_level == "redactions":
         redactions.symlink_to(external, target_is_directory=True)
     else:
-        redactions.mkdir(mode=0o700)
+        redactions.mkdir(mode=PRIVATE_DIRECTORY_MODE)
         operation_id = run_redaction._operation_id(RUN_ID, 2, 2, REASON_CODE)
         (redactions / operation_id).symlink_to(external, target_is_directory=True)
 
@@ -2284,10 +2284,10 @@ def test_redaction_normalizes_private_file_modes(tmp_path):
         reason=REASON_CODE,
         operator_confirmed=True,
     )
-    assert stat.S_IMODE(journal.stat().st_mode) == 0o600
-    assert stat.S_IMODE(report.quarantine_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE((report.record_path.parent / "state.json").stat().st_mode) == 0o600
-    assert stat.S_IMODE(report.record_path.stat().st_mode) == 0o600
+    assert_private_mode(journal, PRIVATE_FILE_MODE)
+    assert_private_mode(report.quarantine_path, PRIVATE_FILE_MODE)
+    assert_private_mode(report.record_path.parent / "state.json", PRIVATE_FILE_MODE)
+    assert_private_mode(report.record_path, PRIVATE_FILE_MODE)
 
     report.quarantine_path.chmod(0o644)
     run_redaction.redact_journal(
@@ -2297,7 +2297,7 @@ def test_redaction_normalizes_private_file_modes(tmp_path):
         reason=REASON_CODE,
         operator_confirmed=True,
     )
-    assert stat.S_IMODE(report.quarantine_path.stat().st_mode) == 0o600
+    assert_private_mode(report.quarantine_path, PRIVATE_FILE_MODE)
 
 
 @pytest.mark.parametrize(

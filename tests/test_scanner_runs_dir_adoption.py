@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from brigade.work_cmd import helpers, ledger, scanners as scanners_mod
+from tests.support import PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE
 
 
 def _unfixed_open_scanner_runs_directory(target: Path, *, create: bool) -> int:
@@ -209,7 +210,7 @@ def test_foreign_or_forged_unbound_tree_is_still_refused(tmp_path: Path, monkeyp
     with pytest.raises(OSError, match="world-writable"):
         scanners_mod._open_scanner_runs_directory(writable, create=True)
     assert not _runs_root_is_bound(writable)
-    helpers._scanner_runs_root(writable).chmod(0o700)
+    helpers._scanner_runs_root(writable).chmod(PRIVATE_DIRECTORY_MODE)
 
     _plant_unbound_forged_runs_tree(forged)
     receipt = scanners_mod._scanner_run_one(
@@ -265,7 +266,7 @@ def test_doctor_and_init_repair_released_unbound_runs_root(tmp_path: Path) -> No
 def test_forged_receipt_in_verifier_created_run_dir_is_rejected(tmp_path: Path) -> None:
     root = scanners_mod._open_scanner_runs_directory(tmp_path, create=True)
     run_id = "verifier-run"
-    os.mkdir(run_id, 0o700, dir_fd=root)
+    os.mkdir(run_id, PRIVATE_DIRECTORY_MODE, dir_fd=root)
     run = os.open(run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
     try:
         ledger._record_verifier_owned_directory(
@@ -341,9 +342,9 @@ def _install_posix_standin_for_nt_dirfd(monkeypatch: pytest.MonkeyPatch) -> None
         return os.open(name, directory_flags, dir_fd=parent)
 
     def mkdir_child(parent: int, name: str) -> None:
-        os.mkdir(name, 0o700, dir_fd=parent)
+        os.mkdir(name, PRIVATE_DIRECTORY_MODE, dir_fd=parent)
 
-    def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def open_file(parent: int, name: str, flags: int, mode: int = PRIVATE_FILE_MODE) -> int:
         if flags & os.O_CREAT:
             return os.open(name, flags, mode, dir_fd=parent)
         return os.open(name, flags, dir_fd=parent)

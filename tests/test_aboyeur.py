@@ -1,7 +1,6 @@
 import json
 import os
 import signal
-import stat
 import subprocess
 import sys
 import time
@@ -19,6 +18,7 @@ from brigade import provenance
 from brigade import runguard
 from brigade.roster import Agent, Roster
 from tests.run_test_helpers import HEALTHY_SEAT_HEALTH_CHILD_SETUP, run_aboyeur_guarded
+from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
@@ -3589,7 +3589,7 @@ def test_write_sidecar_revision_creates_private_revision_under_umask_022(tmp_pat
         os.umask(previous_umask)
 
     revision = _sidecar_revisions(output_dir, "worker-results")[0]
-    assert stat.S_IMODE(revision.stat().st_mode) == 0o600
+    assert_private_mode(revision, PRIVATE_FILE_MODE)
 
 
 def test_write_sidecar_revision_fsyncs_revision_directory_before_projection_write(tmp_path, monkeypatch):

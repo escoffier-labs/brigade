@@ -22,6 +22,7 @@ import pytest
 
 from brigade import run_checkpoint, run_events, run_journal, run_lifecycle, runguard
 from brigade import localio
+from tests.support import PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, assert_private_mode
 
 RUN_ID = "20260727-153045-a1b2c3d4"
 
@@ -55,7 +56,7 @@ def _place_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
     sha = hashlib.sha256(run_json_bytes).hexdigest()
     final = cp_dir / f"{sha}.json"
     final.write_bytes(run_json_bytes)
-    os.chmod(final, 0o600)
+    os.chmod(final, PRIVATE_FILE_MODE)
     return final
 
 
@@ -227,7 +228,7 @@ def test_validate_checkpoint_open_fd_hardening(tmp_path):
     # link count above one (hard link the real file)
     real = cp_dir / f"{sha}.json"
     real.write_bytes(run_json_bytes)
-    os.chmod(real, 0o600)
+    os.chmod(real, PRIVATE_FILE_MODE)
     extra = cp_dir / "link.json"
     os.link(real, extra)
     with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
@@ -238,7 +239,7 @@ def test_validate_checkpoint_open_fd_hardening(tmp_path):
     # size mismatch
     wrong_bytes = _writer_bytes({"status": "started", "extra": "diff"})
     real.write_bytes(wrong_bytes)
-    os.chmod(real, 0o600)
+    os.chmod(real, PRIVATE_FILE_MODE)
     with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
         run_checkpoint.validate_checkpoint(run_dir, payload)
     assert excinfo.value.category == "size-mismatch"
@@ -246,7 +247,7 @@ def test_validate_checkpoint_open_fd_hardening(tmp_path):
     # digest mismatch (right size, wrong bytes)
     same_size = b"x" * len(run_json_bytes)
     real.write_bytes(same_size)
-    os.chmod(real, 0o600)
+    os.chmod(real, PRIVATE_FILE_MODE)
     with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
         run_checkpoint.validate_checkpoint(run_dir, payload)
     assert excinfo.value.category == "digest-mismatch"
@@ -256,12 +257,12 @@ def test_validate_checkpoint_open_fd_hardening(tmp_path):
     # of the JSON object they parse to. The digest check passes (file bytes
     # hash to the declared sha256), then the writer-byte equality check fails.
     real.write_bytes(run_json_bytes)
-    os.chmod(real, 0o600)
+    os.chmod(real, PRIVATE_FILE_MODE)
     non_writer = b'{"status":"planning"}\n'  # compact, not writer canonical
     non_writer_sha = hashlib.sha256(non_writer).hexdigest()
     non_writer_path = cp_dir / f"{non_writer_sha}.json"
     non_writer_path.write_bytes(non_writer)
-    os.chmod(non_writer_path, 0o600)
+    os.chmod(non_writer_path, PRIVATE_FILE_MODE)
     bad_payload = _checkpoint_payload(non_writer)
     bad_payload["sha256"] = non_writer_sha
     bad_payload["path"] = f"events/recovery-checkpoints/{non_writer_sha}.json"
@@ -280,8 +281,8 @@ def test_publish_checkpoint_file_writes_private_file_with_matching_digest(tmp_pa
     final = run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
 
     assert final.is_file()
-    assert stat.S_IMODE(final.stat().st_mode) == 0o600
-    assert stat.S_IMODE(final.parent.stat().st_mode) == 0o700
+    assert_private_mode(final, PRIVATE_FILE_MODE)
+    assert_private_mode(final.parent, PRIVATE_DIRECTORY_MODE)
     assert final == run_checkpoint.checkpoint_path(run_dir, hashlib.sha256(run_json_bytes).hexdigest())
     assert final.read_bytes() == run_json_bytes
     assert hashlib.sha256(final.read_bytes()).hexdigest() == hashlib.sha256(run_json_bytes).hexdigest()
@@ -307,7 +308,7 @@ def test_publish_checkpoint_file_mismatched_collision_fails_closed(tmp_path):
     final = _place_checkpoint_file(run_dir, run_json_bytes)
     # Corrupt the existing file in place (same path, different bytes).
     final.write_bytes(_writer_bytes({"status": "failed"}))
-    os.chmod(final, 0o600)
+    os.chmod(final, PRIVATE_FILE_MODE)
     before = final.read_bytes()
 
     with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
@@ -347,7 +348,7 @@ def test_publish_checkpoint_file_unsafe_collision_fails_closed(tmp_path):
     # link count above one collision
     real = cp_dir / f"{sha}.json"
     real.write_bytes(run_json_bytes)
-    os.chmod(real, 0o600)
+    os.chmod(real, PRIVATE_FILE_MODE)
     extra = cp_dir / "extra.json"
     os.link(real, extra)
     with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
@@ -510,7 +511,7 @@ def test_publish_checkpoint_file_removes_temp_when_collision_verify_raises(tmp_p
     final = cp_dir / f"{sha}.json"
     cp_dir.mkdir(parents=True, exist_ok=True)
     final.write_bytes(_writer_bytes({"status": "different"}))
-    os.chmod(final, 0o600)
+    os.chmod(final, PRIVATE_FILE_MODE)
 
     with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
         run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
@@ -528,7 +529,7 @@ def test_publish_checkpoint_file_removes_temp_when_collision_open_fails_raw(tmp_
     final = cp_dir / f"{sha}.json"
     cp_dir.mkdir(parents=True, exist_ok=True)
     final.write_bytes(run_json_bytes)
-    os.chmod(final, 0o600)
+    os.chmod(final, PRIVATE_FILE_MODE)
 
     real_open = os.open
 
@@ -622,7 +623,7 @@ def test_publish_checkpoint_file_succeeds_without_fchmod(tmp_path, monkeypatch):
     final = run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
 
     assert final.is_file()
-    assert stat.S_IMODE(final.stat().st_mode) == 0o600
+    assert_private_mode(final, PRIVATE_FILE_MODE)
     assert final.read_bytes() == run_json_bytes
 
 
@@ -1064,7 +1065,7 @@ def test_validate_checkpoint_preserves_primary_when_close_also_fails(tmp_path, m
     cp_dir.mkdir(parents=True)
     real = cp_dir / f"{sha}.json"
     real.write_bytes(_writer_bytes({"status": "started", "extra": "diff"}))
-    os.chmod(real, 0o600)
+    os.chmod(real, PRIVATE_FILE_MODE)
     payload = _checkpoint_payload(run_json_bytes)
 
     opened = _tracking_open_factory(monkeypatch)
@@ -1147,7 +1148,7 @@ def test_verify_collision_preserves_primary_when_close_also_fails(tmp_path, monk
     cp_dir.mkdir(parents=True)
     final = cp_dir / f"{sha}.json"
     final.write_bytes(_writer_bytes({"status": "different"}))
-    os.chmod(final, 0o600)
+    os.chmod(final, PRIVATE_FILE_MODE)
 
     opened = _tracking_open_factory(monkeypatch)
     monkeypatch.setattr(os, "close", _fail_last_close_factory(opened, monkeypatch))
@@ -1248,7 +1249,7 @@ def _place_deep_checkpoint(run_dir: Path, deep_json: bytes) -> tuple[Path, dict]
     cp_dir.mkdir(parents=True, exist_ok=True)
     final = cp_dir / f"{sha}.json"
     final.write_bytes(deep_json)
-    os.chmod(final, 0o600)
+    os.chmod(final, PRIVATE_FILE_MODE)
     return final, _checkpoint_payload(deep_json)
 
 
@@ -1559,7 +1560,7 @@ def test_recover_from_checkpoint_fails_on_invalid_latest_checkpoint(tmp_path, mo
     sha = hashlib.sha256(_writer_bytes(run_json_obj)).hexdigest()
     cp_file = run_checkpoint.checkpoint_path(run_dir, sha)
     cp_file.write_bytes(b"x" * len(_writer_bytes(run_json_obj)))
-    os.chmod(cp_file, 0o600)
+    os.chmod(cp_file, PRIVATE_FILE_MODE)
 
     with pytest.raises(run_checkpoint.CheckpointError):
         run_checkpoint.recover_from_checkpoint(run_dir, None)
@@ -3319,7 +3320,7 @@ def test_strip_checkpoint_bodies_for_export_removes_crashed_temp(tmp_path):
     # A crash mid-write leaves an arbitrary, not-necessarily-JSON prefix.
     crashed = cp_dir / ".checkpoint.abc123.tmp"
     crashed.write_bytes(b'{"schema": "brigade.run.v1", "task": "SECRET_CRASHED_' + b"\xff\xfe")
-    os.chmod(crashed, 0o600)
+    os.chmod(crashed, PRIVATE_FILE_MODE)
 
     export_copy = tmp_path / "export-copy"
     shutil.copytree(run_dir, export_copy)

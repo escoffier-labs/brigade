@@ -24,6 +24,7 @@ from brigade.run_shadow import (  # RED: constants land in Task 2
     REASON_NO_EVIDENCE,
     REASON_NO_JOURNAL,
 )
+from tests.support import PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, assert_private_mode
 
 _REQUEST_FIELD = "lifecycle_journal_requested"
 
@@ -740,10 +741,8 @@ def test_artifact_permissions_and_encoding(enabled, tmp_path):
     _write_run_json_locked(repo, run_dir, "started")
 
     artifact = run_shadow.shadow_artifact_path(run_dir)
-    mode = artifact.stat().st_mode & 0o777
-    assert mode == 0o600
-    events_mode = (run_dir / "events").stat().st_mode & 0o777
-    assert events_mode == 0o700
+    assert_private_mode(artifact, PRIVATE_FILE_MODE)
+    assert_private_mode(run_dir / "events", PRIVATE_DIRECTORY_MODE)
     raw = artifact.read_bytes()
     assert raw.endswith(b"\n")
     assert not raw.endswith(b"\n\n")

@@ -48,6 +48,7 @@ from tests.component_install_helpers import (
     write_test_manifest,
     write_verified_cache,
 )
+from tests.support import PRIVATE_DIRECTORY_MODE, assert_private_mode
 
 _SMOKE_COMPONENTS = component_manifest.KNOWN_COMPONENT_IDS
 _FOUR_ENGINE_IDS = tuple(cid for cid in component_manifest.KNOWN_COMPONENT_IDS if cid != "agent-notify")
@@ -221,7 +222,7 @@ def _write_prior_managed(paths: dict[str, Path]) -> dict[str, bytes]:
             payload = f"prior-{path.name}".encode()
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(payload)
-            path.chmod(0o700)
+            path.chmod(PRIVATE_DIRECTORY_MODE)
             prior[path.name] = payload
     return prior
 
@@ -290,7 +291,7 @@ def _seed_rollback_pair(
         path = Path(component_paths.managed_executable_path(roots.data_root, component_id))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(_rollback_payload(component_id, version="current"))
-        path.chmod(0o700)
+        path.chmod(PRIVATE_DIRECTORY_MODE)
     return previous, current
 
 
@@ -1711,7 +1712,7 @@ def test_setup_rollback_four_to_five_never_removes_external_path_agent_notify(tm
     path_dir.mkdir()
     path_notify = path_dir / "agent-notify"
     path_notify.write_bytes(b"external-path-agent-notify")
-    path_notify.chmod(0o700)
+    path_notify.chmod(PRIVATE_DIRECTORY_MODE)
     # Current transaction points at PATH, not the managed path.
     record = current.components["agent-notify"]
     altered = component_state.InstalledState(
@@ -1752,7 +1753,7 @@ def test_setup_rollback_four_to_five_never_removes_env_override_agent_notify(tmp
     override = tmp_path / "override" / "agent-notify"
     override.parent.mkdir()
     override.write_bytes(b"env-override-agent-notify")
-    override.chmod(0o700)
+    override.chmod(PRIVATE_DIRECTORY_MODE)
 
     assert setup_native_components(rollback=True, env=env) == 0
     # Managed transaction binary is removed; env-override binary is never touched.
@@ -1771,7 +1772,7 @@ def test_setup_rollback_four_to_five_leaves_foreign_managed_path_untouched(tmp_p
     managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
     foreign = b"foreign-managed-path-bytes-not-in-transaction"
     managed_notify.write_bytes(foreign)
-    managed_notify.chmod(0o700)
+    managed_notify.chmod(PRIVATE_DIRECTORY_MODE)
     # Record still claims the managed path, but bytes no longer match the transaction.
     assert current.components["agent-notify"].executable == str(managed_notify)
 
@@ -2180,7 +2181,7 @@ def test_setup_last_download_failure_preserves_managed_bin(tmp_path, monkeypatch
     for component_id, path in paths.items():
         if component_id in prior:
             assert path.read_bytes() == prior[component_id]
-            assert path.stat().st_mode & 0o777 == 0o700
+            assert_private_mode(path, PRIVATE_DIRECTORY_MODE)
         else:
             assert not path.exists()
 
@@ -2198,7 +2199,7 @@ def test_setup_smoke_failure_restores_old_files_and_removes_new_files(tmp_path, 
     for component_id, path in paths.items():
         if component_id in prior:
             assert path.read_bytes() == prior[component_id]
-            assert path.stat().st_mode & 0o777 == 0o700
+            assert_private_mode(path, PRIVATE_DIRECTORY_MODE)
         else:
             assert not path.exists()
 
@@ -2224,7 +2225,7 @@ def test_setup_materialize_failure_restores_managed_bin(tmp_path, monkeypatch):
     for component_id, path in paths.items():
         if component_id in prior:
             assert path.read_bytes() == prior[component_id]
-            assert path.stat().st_mode & 0o777 == 0o700
+            assert_private_mode(path, PRIVATE_DIRECTORY_MODE)
         else:
             assert not path.exists()
 
@@ -2356,7 +2357,7 @@ def test_restore_managed_executables_restores_bytes_and_mode(tmp_path):
     path_a.write_bytes(b"original-a")
     path_a.chmod(0o754)
     path_b.write_bytes(b"original-b")
-    path_b.chmod(0o700)
+    path_b.chmod(PRIVATE_DIRECTORY_MODE)
 
     snapshot = _snapshot_managed_executables([path_a, path_b])
 
@@ -2370,7 +2371,7 @@ def test_restore_managed_executables_restores_bytes_and_mode(tmp_path):
     assert path_a.read_bytes() == b"original-a"
     assert path_b.read_bytes() == b"original-b"
     assert oct(path_a.stat().st_mode & 0o777) == oct(0o754)
-    assert oct(path_b.stat().st_mode & 0o777) == oct(0o700)
+    assert_private_mode(path_b, PRIVATE_DIRECTORY_MODE)
 
 
 def test_restore_managed_executables_removes_newly_created_paths(tmp_path):

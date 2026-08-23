@@ -14,6 +14,7 @@ import pytest
 from brigade import authority_key
 from brigade.work_cmd import helpers, ledger
 from brigade.work_cmd import nt_dirfd
+from tests.support import PRIVATE_FILE_MODE
 
 
 def _link_directory(link: Path, target: Path) -> None:
@@ -242,7 +243,7 @@ def test_authority_store_survives_missing_posix_open_flags(tmp_path: Path, monke
     monkeypatch.setattr(ledger, "_nt_dirfd_available", lambda: True)
     monkeypatch.setattr(authority_key, "_nt_nofollow_available", lambda: True)
 
-    def open_path_file(path: Path | str, flags: int, mode: int = 0o600) -> int:
+    def open_path_file(path: Path | str, flags: int, mode: int = PRIVATE_FILE_MODE) -> int:
         create = bool(flags & os.O_CREAT)
         exclusive = bool(flags & os.O_EXCL)
         write = bool(flags & (os.O_WRONLY | os.O_RDWR))
@@ -273,7 +274,7 @@ def test_authority_store_closes_temp_handle_before_replace(tmp_path: Path, monke
     write_fds: list[int] = []
 
     def wrap_open(real_open):
-        def tracking_open(path: Path, flags: int, mode: int = 0o600) -> int:
+        def tracking_open(path: Path, flags: int, mode: int = PRIVATE_FILE_MODE) -> int:
             descriptor = real_open(path, flags, mode)
             if flags & os.O_CREAT:
                 write_fds.append(descriptor)

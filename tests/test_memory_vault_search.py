@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import stat
 from pathlib import Path
 
 import pytest
 
 from brigade import cli, memory_vault
+from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 
 
 def _write_vault_config(
@@ -205,7 +205,7 @@ def test_index_search_show_round_trip_and_result_contract(workspace, capsys) -> 
     assert indexed["index_path"] == ".brigade/vault-index/index.json"
 
     index_file = target / ".brigade" / "vault-index" / "index.json"
-    assert stat.S_IMODE(index_file.stat().st_mode) == 0o600
+    assert_private_mode(index_file, PRIVATE_FILE_MODE)
     assert "vault" not in json.loads(index_file.read_text()) or json.loads(index_file.read_text()).get("vault") in {
         None,
         "redacted:operator-vault",

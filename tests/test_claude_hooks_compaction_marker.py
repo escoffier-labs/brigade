@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -14,6 +13,7 @@ from brigade.claude_hooks import compaction_marker, envelope, runtime
 from brigade.claude_hooks.package import MANAGED_EVENTS, PACKAGE_REF
 from brigade.install import install_selection
 from brigade.selection import Selection
+from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 
 
 def _wired_claude(tmp_path: Path) -> Path:
@@ -56,7 +56,7 @@ def test_marker_lives_in_cache_not_repo(tmp_path: Path, marker_env: dict[str, st
     target = _wired_claude(tmp_path)
     path = compaction_marker.write_pending("sess-a", target, env=marker_env)
     assert path.is_file()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert_private_mode(path, PRIVATE_FILE_MODE)
     assert ".brigade" not in path.parts or path.parts[path.parts.index(".brigade") - 1] != "repo"
     assert str(path).startswith(str(Path(marker_env["XDG_CACHE_HOME"])))
     assert not any(target.rglob("pending.json"))
