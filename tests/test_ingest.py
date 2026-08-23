@@ -472,11 +472,46 @@ def test_ingest_fails_closed_on_invalid_handoff_sources(tmp_path, capsys):
     (workspace / ".brigade" / "handoff-sources.json").write_text("{broken")
 
     rc = ingest_mod.run(target=workspace)
-    assert rc == 2
+    assert rc == ingest_mod.INVALID_SOURCE_CONFIG
+    assert rc != ingest_mod.NO_HANDOFF_INBOX
+    assert ingest_mod.skip_reason(rc) == ingest_mod.SKIP_INVALID_SOURCE_CONFIG
     err = capsys.readouterr().err
     assert "invalid handoff source config" in err
     assert "invalid JSON" in err
     assert "no handoff inbox" not in err
+
+
+def test_fleet_ingest_reports_invalid_source_config_not_missing_inbox(tmp_path, capsys):
+    from brigade.repos_cmd import ingest_fleet
+
+    owner = tmp_path / "workspace"
+    writer = tmp_path / "writer-repo"
+    owner.mkdir()
+    writer.mkdir()
+    (owner / ".brigade").mkdir()
+    (owner / ".brigade" / "repos.toml").write_text(
+        "[[repo]]\n"
+        'id = "owner"\n'
+        'label = "owner"\n'
+        'path = "."\n'
+        "[[repo]]\n"
+        'id = "writer-repo"\n'
+        'label = "writer"\n'
+        f'path = "{writer}"\n'
+    )
+    inbox = writer / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (writer / ".brigade").mkdir()
+    (writer / ".brigade" / "handoff-sources.json").write_text("{broken")
+    (inbox / "note.md").write_text("# Memory Handoff\n")
+
+    rc = ingest_fleet(target=owner, apply=True, json_output=True)
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    by_id = {item["repo_id"]: item["reason"] for item in payload["skipped"]}
+    assert by_id["writer-repo"] == ingest_mod.SKIP_INVALID_SOURCE_CONFIG
+    assert by_id["writer-repo"] != ingest_mod.SKIP_NO_HANDOFF_INBOX
+    assert by_id["owner"] == ingest_mod.SKIP_NO_HANDOFF_INBOX
 
 
 def test_ingest_processes_configured_non_target_root(tmp_path):
