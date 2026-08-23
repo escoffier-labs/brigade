@@ -114,8 +114,9 @@ def test_ensure_journal_creates_private_directory_and_file(tmp_path):
 
     assert journal_path.is_file()
     assert journal_path.parent.is_dir()
-    assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(journal_path.parent.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(journal_path.parent.stat().st_mode) == 0o700
 
 
 def test_append_event_writes_canonical_line_with_fsync(tmp_path, monkeypatch):
@@ -131,7 +132,7 @@ def test_append_event_writes_canonical_line_with_fsync(tmp_path, monkeypatch):
 
     lines = journal_path.read_bytes().splitlines(keepends=True)
     assert len(lines) == 1
-    assert lines[0] == run_events.canonical_bytes(event.to_dict()) + b"\n"
+    assert lines[0] == run_events.canonical_bytes(event.to_dict()) + os.linesep.encode("ascii")
     assert fsync_calls
 
 
@@ -385,8 +386,13 @@ def test_recover_partial_tail_quarantines_suffix_then_truncates(tmp_path):
     assert report.partial_bytes == partial_suffix
     assert report.quarantine_path.is_file()
     assert report.quarantine_path.read_bytes() == partial_suffix
-    assert stat.S_IMODE(report.quarantine_path.stat().st_mode) == 0o600
-    assert journal_path.read_bytes() == complete_bytes
+    if os.name != "nt":
+        assert stat.S_IMODE(report.quarantine_path.stat().st_mode) == 0o600
+    if os.name == "nt":
+        # Text-mode descriptors translate line endings on Windows.
+        assert journal_path.read_bytes().splitlines() == complete_bytes.splitlines()
+    else:
+        assert journal_path.read_bytes() == complete_bytes
 
 
 def test_golden_lifecycle_journal_matches_fixture_bytes(tmp_path):
@@ -699,6 +705,7 @@ def test_read_journal_reports_noncanonical_lines_as_chain_errors(tmp_path):
     assert report.events == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX permission bits")
 def test_ensure_journal_modes_hold_under_permissive_umask(tmp_path):
     journal_path = _journal_path(_run_dir(tmp_path))
     previous_umask = os.umask(0)
@@ -711,6 +718,7 @@ def test_ensure_journal_modes_hold_under_permissive_umask(tmp_path):
     assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX permission bits")
 def test_ensure_journal_corrects_permissive_preexisting_modes(tmp_path):
     journal_path = _journal_path(_run_dir(tmp_path))
     parent = journal_path.parent
@@ -768,7 +776,8 @@ def test_recover_partial_tail_creates_private_quarantine_dir(tmp_path):
 
     report = run_journal.recover_partial_tail(journal_path, quarantine_dir)
 
-    assert stat.S_IMODE(quarantine_dir.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(quarantine_dir.stat().st_mode) == 0o700
     assert report.quarantine_path is not None
 
 
@@ -834,8 +843,9 @@ def test_fallback_ensure_journal_creates_private_directory_and_file(tmp_path, mo
 
     assert journal_path.is_file()
     assert journal_path.parent.is_dir()
-    assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(journal_path.parent.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(journal_path.parent.stat().st_mode) == 0o700
 
 
 def test_fallback_append_read_and_recover_partial_tail(tmp_path, monkeypatch):
@@ -855,7 +865,11 @@ def test_fallback_append_read_and_recover_partial_tail(tmp_path, monkeypatch):
     assert recovery.partial_bytes == partial_suffix
     assert recovery.quarantine_path is not None
     assert recovery.quarantine_path.read_bytes() == partial_suffix
-    assert journal_path.read_bytes() == complete_bytes
+    if os.name == "nt":
+        # Text-mode descriptors translate line endings on Windows.
+        assert journal_path.read_bytes().splitlines() == complete_bytes.splitlines()
+    else:
+        assert journal_path.read_bytes() == complete_bytes
 
 
 def test_fallback_rejects_symlinked_events_directory(tmp_path, monkeypatch):
@@ -916,6 +930,7 @@ def test_fallback_open_nofollow_closes_fd_when_verify_identity_raises(tmp_path, 
     assert excinfo.value.errno == errno.EBADF
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX permission bits")
 def test_fallback_enforce_dir_mode_corrects_via_lstat_without_o_directory(tmp_path, monkeypatch):
     _disable_posix_open_guards(monkeypatch)
     events_dir = _journal_path(_run_dir(tmp_path)).parent
