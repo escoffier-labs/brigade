@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -238,6 +239,64 @@ func TestIsBusyRecognizesBusyFamilyCodes(t *testing.T) {
 	}
 }
 
+func TestIsBusyRecognizesDriverBusySnapshot(t *testing.T) {
+	err := realBusySnapshot(t)
+	if !IsBusy(err) {
+		t.Fatalf("IsBusy(%T %v) = false, want real SQLITE_BUSY_SNAPSHOT", err, err)
+	}
+	if !IsBusy(fmt.Errorf("backfill: %w", err)) {
+		t.Fatal("wrapped driver BUSY_SNAPSHOT must still classify via the result code")
+	}
+	code, ok := sqliteErrorCode(err)
+	if !ok || !isBusyFamilyCode(code) {
+		t.Fatalf("driver snapshot code = (%d, %v), want BUSY-family (517)", code, ok)
+	}
+}
+
+func TestBeginImmediateAvoidsBusySnapshot(t *testing.T) {
+	path := t.TempDir() + "/immediate.db"
+	db := openWAL(t, path, 0)
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE t(x INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO t(x) VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, conn, err := beginImmediate(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	defer tx.rollback()
+
+	var n int
+	if err := tx.QueryRow("SELECT count(*) FROM t").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+
+	other := openWAL(t, path, 0)
+	defer other.Close()
+	_, lockErr := other.Exec("BEGIN IMMEDIATE")
+	if lockErr == nil {
+		t.Fatal("second BEGIN IMMEDIATE succeeded; first txn did not hold the reserved lock")
+	}
+	if !IsBusy(lockErr) {
+		t.Fatalf("reserved-lock contention %T %v must be BUSY-family, not a snapshot surprise", lockErr, lockErr)
+	}
+	if code, ok := sqliteErrorCode(lockErr); ok && code == sqliteBusySnapshot {
+		t.Fatalf("second writer saw BUSY_SNAPSHOT (%d); reserved lock should surface plain BUSY", code)
+	}
+
+	if _, err := tx.Exec("UPDATE t SET x = x + 1"); err != nil {
+		t.Fatalf("immediate txn write after a read must not fail: %v", err)
+	}
+	if err := tx.commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRetryOnBusyRetriesSnapshotThenSucceeds(t *testing.T) {
 	n := 0
 	err := RetryOnBusy(func() error {
@@ -366,6 +425,66 @@ func realBusyResultCode(t *testing.T) error {
 		t.Fatalf("held-lock error %T %v has no result Code()", err, err)
 	}
 	return err
+}
+
+func realBusySnapshot(t *testing.T) error {
+	t.Helper()
+	path := t.TempDir() + "/snap.db"
+	db := openWAL(t, path, 0)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec("CREATE TABLE t(x INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO t(x) VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	reader, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	writer, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+
+	if _, err := reader.ExecContext(ctx, "BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := reader.QueryRowContext(ctx, "SELECT count(*) FROM t").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, "UPDATE t SET x = x + 1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = reader.ExecContext(ctx, "UPDATE t SET x = x + 1")
+	if err == nil {
+		t.Fatal("expected SQLITE_BUSY_SNAPSHOT from a deferred upgrade after a concurrent commit")
+	}
+	return err
+}
+
+func openWAL(t *testing.T, path string, timeoutMS int) *sql.DB {
+	t.Helper()
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)", path, timeoutMS)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	return db
 }
 
 func openImmediate(t *testing.T, path string) *sql.DB {

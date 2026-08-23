@@ -65,7 +65,7 @@ const (
 	backfillMalformed
 )
 
-func indexProvenanceProjections(tx *sql.Tx, itemID string, env provenance.Envelope) error {
+func indexProvenanceProjections(tx execQuerier, itemID string, env provenance.Envelope) error {
 	pairs := []struct {
 		key   string
 		value string
@@ -92,7 +92,7 @@ func indexProvenanceProjections(tx *sql.Tx, itemID string, env provenance.Envelo
 	return nil
 }
 
-func replaceProvenanceProjections(tx *sql.Tx, itemID string, env provenance.Envelope) error {
+func replaceProvenanceProjections(tx execQuerier, itemID string, env provenance.Envelope) error {
 	if _, err := tx.Exec(`delete from item_metadata where item_id = ? and key in (?,?,?,?,?)`,
 		itemID,
 		MetaKeyProvenanceOrigin,
@@ -109,18 +109,18 @@ func replaceProvenanceProjections(tx *sql.Tx, itemID string, env provenance.Enve
 // AppendProvenanceEvent inserts one immutable provenance_events row for a real
 // trust transition. The event id includes the occurrence timestamp so cycles
 // such as quarantined -> untrusted -> quarantined -> untrusted each append.
-func AppendProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any) error {
+func AppendProvenanceEvent(tx execQuerier, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any) error {
 	return appendProvenanceEvent(tx, itemID, fromLabel, toLabel, contentHash, contentScope, operatorCommand, evidence, false)
 }
 
 // AppendIdempotentProvenanceEvent inserts a repair/backfill provenance event
 // with a deterministic id (no wall-clock component) so concurrent identical
 // repairs collapse via INSERT OR IGNORE.
-func AppendIdempotentProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any) error {
+func AppendIdempotentProvenanceEvent(tx execQuerier, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any) error {
 	return appendProvenanceEvent(tx, itemID, fromLabel, toLabel, contentHash, contentScope, operatorCommand, evidence, true)
 }
 
-func appendProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any, idempotent bool) error {
+func appendProvenanceEvent(tx execQuerier, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any, idempotent bool) error {
 	if evidence == nil {
 		evidence = map[string]any{}
 	}
@@ -459,12 +459,16 @@ limit ?`, afterID, batchSize)
 	if err := rows.Err(); err != nil {
 		return result, err
 	}
+	if err := rows.Close(); err != nil {
+		return result, err
+	}
 
-	tx, err := db.Begin()
+	tx, conn, err := beginImmediate(db)
 	if err != nil {
 		return result, err
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+	defer tx.rollback()
 
 	for _, row := range batch {
 		result.Scanned++
@@ -486,7 +490,7 @@ limit ?`, afterID, batchSize)
 		}
 		result.Events += events
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.commit(); err != nil {
 		return result, err
 	}
 	if err := db.QueryRow(`select count(*) from items where id > ?`, result.Cursor).Scan(&result.Remaining); err != nil {
@@ -495,7 +499,7 @@ limit ?`, afterID, batchSize)
 	return result, nil
 }
 
-func backfillOneItem(tx *sql.Tx, itemID, text, metadataJSON, rawHash, rawPath, sourceID, collectionID, externalID string) (outcome backfillOutcome, events int, evidence *BackfillItemEvidence, err error) {
+func backfillOneItem(tx execQuerier, itemID, text, metadataJSON, rawHash, rawPath, sourceID, collectionID, externalID string) (outcome backfillOutcome, events int, evidence *BackfillItemEvidence, err error) {
 	// Re-read inside the write transaction so concurrent backfills observe the
 	// latest provenance state rather than a stale pre-tx snapshot.
 	var liveMetadataJSON, liveText string
@@ -591,7 +595,7 @@ func backfillOneItem(tx *sql.Tx, itemID, text, metadataJSON, rawHash, rawPath, s
 	return backfillUpdated, 1, nil, nil
 }
 
-func buildInferredBackfillEnvelope(tx *sql.Tx, itemID, text, rawHash, sourceID, collectionID, externalID string) (provenance.Envelope, error) {
+func buildInferredBackfillEnvelope(tx execQuerier, itemID, text, rawHash, sourceID, collectionID, externalID string) (provenance.Envelope, error) {
 	var sourceKind, collectionExternalID string
 	_ = tx.QueryRow(`select kind from sources where id = ?`, sourceID).Scan(&sourceKind)
 	_ = tx.QueryRow(`select external_id from collections where id = ?`, collectionID).Scan(&collectionExternalID)
@@ -692,7 +696,7 @@ func validateRetainableEnvelope(env provenance.Envelope) error {
 	return nil
 }
 
-func projectionsComplete(tx *sql.Tx, itemID string, env provenance.Envelope) bool {
+func projectionsComplete(tx execQuerier, itemID string, env provenance.Envelope) bool {
 	want := map[string]string{
 		MetaKeyProvenanceOrigin:       env.Origin,
 		MetaKeyProvenanceModality:     env.Modality,

@@ -739,13 +739,10 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		go func() {
 			defer wg.Done()
 			<-start
-			var err error
-			for attempt := 0; attempt < 32; attempt++ {
-				_, err = BackfillProvenance(db, 10, "")
-				if err == nil || !IsBusy(err) {
-					break
-				}
-			}
+			// BEGIN IMMEDIATE plus RetryOnBusy: snapshot 517 cannot fire, and
+			// waitable BUSY (5) is retried. Do not loop on the exhaustion
+			// wrapper — that error is not IsBusy and would hide a real fail.
+			_, err := BackfillProvenance(db, 10, "")
 			errs <- err
 		}()
 	}

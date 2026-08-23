@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +11,65 @@ import (
 	"time"
 	"unicode"
 )
+
+// execQuerier is the statement surface shared by *sql.Tx and an immediate
+// write transaction started with BEGIN IMMEDIATE on a pinned connection.
+type execQuerier interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// immediateTx is a write transaction that took the reserved lock at BEGIN
+// so a later statement cannot hit SQLITE_BUSY_SNAPSHOT (517).
+type immediateTx struct {
+	ctx  context.Context
+	conn *sql.Conn
+	done bool
+}
+
+func (t *immediateTx) Exec(query string, args ...any) (sql.Result, error) {
+	return t.conn.ExecContext(t.ctx, query, args...)
+}
+
+func (t *immediateTx) QueryRow(query string, args ...any) *sql.Row {
+	return t.conn.QueryRowContext(t.ctx, query, args...)
+}
+
+func (t *immediateTx) commit() error {
+	if t.done {
+		return nil
+	}
+	_, err := t.conn.ExecContext(t.ctx, "COMMIT")
+	t.done = true
+	return err
+}
+
+func (t *immediateTx) rollback() {
+	if t.done {
+		return
+	}
+	_, _ = t.conn.ExecContext(t.ctx, "ROLLBACK")
+	t.done = true
+}
+
+// beginImmediate starts a write transaction that takes the reserved lock
+// immediately. database/sql Begin() is BEGIN DEFERRED: the first SELECT
+// creates a snapshot, and a later write after another connection commits
+// returns SQLITE_BUSY_SNAPSHOT (517) at once — busy_timeout does not wait
+// on 517. BEGIN IMMEDIATE makes contention plain SQLITE_BUSY (5), which
+// busy_timeout and RetryOnBusy already handle.
+func beginImmediate(db *sql.DB) (*immediateTx, *sql.Conn, error) {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	return &immediateTx{ctx: ctx, conn: conn}, conn, nil
+}
 
 // sqliteBusyPrimary is SQLITE_BUSY. Extended codes keep this in the low 8 bits:
 // SQLITE_BUSY_RECOVERY=261, SQLITE_BUSY_SNAPSHOT=517, SQLITE_BUSY_TIMEOUT=773.

@@ -23,6 +23,7 @@ Releases before this changelog was started are on the [releases page](https://gi
 - `import discovered` lists per-source failures but exits 0 when at least one
   source imported; exit 1 is reserved for total failure (no source imported).
   Fixes #1052.
+- Provenance backfill takes the reserved lock with `BEGIN IMMEDIATE` so a concurrent WAL commit cannot return `SQLITE_BUSY_SNAPSHOT` (517). `busy_timeout` does not wait on 517; contention becomes waitable `SQLITE_BUSY` (5) and the existing `RetryOnBusy` wrapper still applies. Fixes #1083.
 - `import sourceharvest` (and the crawl wrappers that call it) and provenance backfill retry the SQLITE_BUSY family (5, 261, 517) with a bounded total wait, so a concurrent writer no longer fails the crawl or hangs the suite. Exhausted contention names the holder-diagnosis instead of the raw SQLite string. Fixes #1067.
 - `archive.Open` restores the pre-#1073 10s global `busy_timeout` so unwrapped command paths keep their contention tolerance. The two retry-wrapped paths bound their own wait via retry count, backoff, and `MaxTotalWait` rather than by shrinking the DSN timeout. `IsBusy` classifies by the SQLite result code (low 8 bits == 5) and cannot be tripped by parenthesized 5/261/517 in subprocess stderr. Fixes #1085.
 - Content eligibility is centralized for every body-emitting read surface.
