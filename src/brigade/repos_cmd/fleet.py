@@ -937,8 +937,9 @@ def ingest_fleet(
             promote_cards=promote_cards,
             route_documents=route_documents,
         )
-        if rc == 2:
-            skipped.append({"repo_id": entry.repo_id, "reason": "no handoff inbox"})
+        reason = ingest_mod.skip_reason(rc)
+        if reason is not None:
+            skipped.append({"repo_id": entry.repo_id, "reason": reason})
             continue
         per_repo.append(
             {

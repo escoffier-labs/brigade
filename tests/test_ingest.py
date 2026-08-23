@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import textwrap
@@ -462,6 +463,150 @@ def test_missing_inbox_returns_error(tmp_target: Path):
     tmp_target.mkdir()
     rc = ingest_mod.run(target=tmp_target)
     assert rc == 2
+
+
+def test_ingest_fails_closed_on_invalid_handoff_sources(tmp_path, capsys):
+    workspace = tmp_path / "wsA"
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".claude" / "memory-handoffs").mkdir(parents=True)
+    (workspace / ".brigade" / "handoff-sources.json").write_text("{broken")
+
+    rc = ingest_mod.run(target=workspace)
+    assert rc == ingest_mod.INVALID_SOURCE_CONFIG
+    assert rc != ingest_mod.NO_HANDOFF_INBOX
+    assert ingest_mod.skip_reason(rc) == ingest_mod.SKIP_INVALID_SOURCE_CONFIG
+    err = capsys.readouterr().err
+    assert "invalid handoff source config" in err
+    assert "invalid JSON" in err
+    assert "no handoff inbox" not in err
+
+
+def test_ingest_fails_closed_on_non_file_handoff_sources(tmp_path, capsys):
+    # A directory at the config path is broken config, not an absent one.
+    workspace = tmp_path / "wsDir"
+    (workspace / ".brigade" / "handoff-sources.json").mkdir(parents=True)
+    (workspace / ".claude" / "memory-handoffs").mkdir(parents=True)
+
+    rc = ingest_mod.run(target=workspace)
+    assert rc == ingest_mod.INVALID_SOURCE_CONFIG
+    assert rc != ingest_mod.NO_HANDOFF_INBOX
+    assert "not a regular file" in capsys.readouterr().err
+
+
+def test_ingest_fails_closed_on_dangling_symlink_handoff_sources(tmp_path, capsys):
+    # A broken symlink is a dangling config pointer, not an absent config.
+    workspace = tmp_path / "wsLink"
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".claude" / "memory-handoffs").mkdir(parents=True)
+    (workspace / ".brigade" / "handoff-sources.json").symlink_to(workspace / "nope.json")
+
+    rc = ingest_mod.run(target=workspace)
+    assert rc == ingest_mod.INVALID_SOURCE_CONFIG
+    assert "not a regular file" in capsys.readouterr().err
+
+
+def test_ingest_fails_closed_on_unreadable_handoff_sources(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "wsA"
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".claude" / "memory-handoffs").mkdir(parents=True)
+    (workspace / ".brigade" / "handoff-sources.json").write_text('{"sources": []}')
+
+    from brigade.handoff_cmd import sources as sources_mod
+
+    def boom(_target, _sources_path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(sources_mod, "_load_sources", boom)
+    rc = ingest_mod.run(target=workspace)
+    assert rc == ingest_mod.INVALID_SOURCE_CONFIG
+    assert ingest_mod.skip_reason(rc) == ingest_mod.SKIP_INVALID_SOURCE_CONFIG
+    err = capsys.readouterr().err
+    assert "invalid handoff source config" in err
+    assert "permission denied" in err
+    assert "no handoff inbox" not in err
+    assert "Traceback" not in err
+
+
+def test_fleet_ingest_reports_invalid_source_config_not_missing_inbox(tmp_path, capsys):
+    from brigade.repos_cmd import ingest_fleet
+
+    owner = tmp_path / "workspace"
+    writer = tmp_path / "writer-repo"
+    owner.mkdir()
+    writer.mkdir()
+    (owner / ".brigade").mkdir()
+    (owner / ".brigade" / "repos.toml").write_text(
+        "[[repo]]\n"
+        'id = "owner"\n'
+        'label = "owner"\n'
+        'path = "."\n'
+        "[[repo]]\n"
+        'id = "writer-repo"\n'
+        'label = "writer"\n'
+        f'path = "{writer}"\n'
+    )
+    inbox = writer / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (writer / ".brigade").mkdir()
+    (writer / ".brigade" / "handoff-sources.json").write_text("{broken")
+    (inbox / "note.md").write_text("# Memory Handoff\n")
+
+    rc = ingest_fleet(target=owner, apply=True, json_output=True)
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    by_id = {item["repo_id"]: item["reason"] for item in payload["skipped"]}
+    assert by_id["writer-repo"] == ingest_mod.SKIP_INVALID_SOURCE_CONFIG
+    assert by_id["writer-repo"] != ingest_mod.SKIP_NO_HANDOFF_INBOX
+    assert by_id["owner"] == ingest_mod.SKIP_NO_HANDOFF_INBOX
+
+
+def test_ingest_processes_configured_non_target_root(tmp_path):
+    workspace = tmp_path / "wsA"
+    other = tmp_path / "rootB"
+    remote_inbox = other / ".claude" / "memory-handoffs"
+    remote_inbox.mkdir(parents=True)
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".brigade" / "handoff-sources.json").write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {"root": ".", "inboxes": [".claude/memory-handoffs"]},
+                    {"root": str(other), "inboxes": [".claude/memory-handoffs"]},
+                ]
+            }
+        )
+    )
+    _write_handoff(
+        remote_inbox,
+        "2026-08-19-1500-repro.md",
+        """\
+        # Memory Handoff
+
+        ## Type
+        setup
+
+        ## Title
+        non-target root
+
+        ## Summary
+        A handoff sitting in a second configured root must be ingested.
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        TOOLS.md
+
+        ## Suggested document content
+        - second-root entry
+        """,
+    )
+
+    rc = ingest_mod.run(target=workspace, promote_cards=True, route_documents=True)
+    assert rc == 0
+    assert (workspace / "TOOLS.md").read_text().count("second-root entry") == 1
+    assert (remote_inbox / "processed" / "2026-08-19-1500-repro.md").is_file()
+    assert not (remote_inbox / "2026-08-19-1500-repro.md").exists()
 
 
 def test_ingest_scans_multiple_writer_inboxes(tmp_path):
