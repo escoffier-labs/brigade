@@ -179,7 +179,7 @@ def test_canonical_json_digest_excludes_top_level_keys_and_hashes_files(tmp_path
     assert localio.canonical_json_digest(payload, exclude_keys={"digest", "digests"}) == expected
 
     blob = tmp_path / "blob.txt"
-    blob.write_text("hello\n")
+    blob.write_bytes(b"hello\n")  # bytes: write_text emits CRLF on Windows
     assert localio.file_sha256(blob) == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
 
 
@@ -191,3 +191,27 @@ def test_canonical_json_digest_excludes_top_level_keys_only():
     edited_digest = localio.canonical_json_digest(edited, exclude_keys={"digests"})
 
     assert base_digest != edited_digest
+
+
+def test_write_text_atomic_writes_lf_not_platform_newline(tmp_path: Path):
+    """Regression: on Windows, text mode without newline= translated LF to CRLF.
+
+    run.json is written through this helper, and run_checkpoint compares it byte
+    for byte against a canonical form that only ever contains LF, so a CRLF file
+    could never match and every dispatch failed with "base bytes differ from
+    writer canonical form".
+    """
+    path = tmp_path / "run.json"
+    localio.write_text_atomic(path, json.dumps({"a": 1, "b": 2}, indent=2, sort_keys=True) + "\n")
+
+    raw = path.read_bytes()
+    assert b"\r\n" not in raw
+    assert raw.count(b"\n") == 4
+
+
+def test_write_text_exclusive_writes_lf_not_platform_newline(tmp_path: Path):
+    """The exclusive writer shares write_text_atomic's newline exposure."""
+    path = tmp_path / "once.json"
+    localio.write_text_exclusive(path, "first\nsecond\n")
+
+    assert path.read_bytes() == b"first\nsecond\n"

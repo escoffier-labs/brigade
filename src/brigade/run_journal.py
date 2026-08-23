@@ -56,7 +56,7 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _HAS_O_NOFOLLOW = _O_NOFOLLOW != 0
 _HAS_O_DIRECTORY = _O_DIRECTORY != 0
-_HAS_FCHMOD = hasattr(os, "fchmod")
+_HAS_FCHMOD = hasattr(os, "fchmod") and os.name == "posix"
 # O_NOFOLLOW rejects symlinked targets so a pre-placed symlink cannot redirect
 # journal writes or quarantine captures outside the private run-artifact tree.
 _OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_APPEND

@@ -57,7 +57,7 @@ def write_text_atomic(path: Path, data: str) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
@@ -121,7 +121,7 @@ def write_text_exclusive(path: Path, data: str) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
