@@ -260,9 +260,15 @@ def _guard_handoff_path(path: Path, *, target: Path, policy: str) -> dict[str, A
     }
 
 
-def lint_targets(target: Path, paths: list[Path] | None = None) -> tuple[HandoffLintResult, ...]:
+def lint_targets(
+    target: Path, paths: list[Path] | None = None, sources: Path | None = None
+) -> tuple[HandoffLintResult, ...]:
     target = target.expanduser().resolve()
-    candidates = tuple(_resolve_lint_path(target, path) for path in paths) if paths else _pending_handoff_paths(target)
+    candidates = (
+        tuple(_resolve_lint_path(target, path) for path in paths)
+        if paths
+        else _pending_handoff_paths(target, sources=sources)
+    )
     return tuple(lint_file(path) for path in candidates)
 
 
