@@ -92,6 +92,9 @@ def test_seat_invoker_forwards_controls(monkeypatch, tmp_path: Path) -> None:
     assert captured["direct"] is True
     assert captured["run_id"] == "research-1"
     assert captured["cwd"] == tmp_path
+    # #996: output_dir must be forwarded so run_transport writes the
+    # message-envelopes.jsonl audit sidecar for seat-driven dispatches.
+    assert captured["output_dir"] == tmp_path / ".brigade" / "runs" / "research-1"
     selected = captured["roster"].agents["luna"]
     assert selected.model == "gpt-5.6-luna"
     assert selected.reasoning == "medium"

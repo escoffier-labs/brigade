@@ -135,6 +135,7 @@ class SeatInvoker:
                 fail_fast=True,
                 process_registry=self.process_registry,
                 events_dir=self.events_dir,
+                output_dir=self.output_dir,
                 run_id=self.run_id,
                 on_dispatch_requested=self.on_dispatch_requested,
                 on_dispatch_observed=self.on_dispatch_observed,
