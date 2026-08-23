@@ -135,6 +135,9 @@ func TestRetryOnBusyBoundedFailureNamesHolderDiagnosis(t *testing.T) {
 	if strings.Contains(msg, "SQLITE_BUSY") {
 		t.Fatalf("bounded failure %q must not emit the raw SQLITE_BUSY string", msg)
 	}
+	if !IsBusy(err) {
+		t.Fatalf("bounded failure %q must preserve BUSY-family classification", msg)
+	}
 	if !strings.Contains(msg, "db=") {
 		t.Fatalf("bounded failure %q must name the locked database", msg)
 	}
