@@ -2817,3 +2817,133 @@ def test_init_hint_quotes_hostile_directory_names(tmp_path: Path):
     tokens = _shlex.split(context.split(": brigade ", 1)[1].splitlines()[0])
     assert tokens[:2] == ["init", "--target"]
     assert tokens[2] == str(repo.resolve())
+
+
+def test_stop_ignores_stale_entries_from_prior_task_with_reused_session_id(tmp_path: Path, monkeypatch):
+    """A dispatched task reusing a session id must not re-arm the stop gate for
+    repos only earlier tasks touched (#992)."""
+    repo_a = _configured_git_repo(tmp_path / "repo-a")
+    repo_b = _configured_git_repo(tmp_path / "repo-b")
+    session_id = "fleet-reused-session"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+
+    # Task 1: mutate repo A, link repo B into the session graph, then abandon
+    # the task while its verification gate is still armed.
+    runtime.handle_payload("SessionStart", _payload(repo_a, "SessionStart", session_id=session_id, source="startup"))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            repo_a,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(repo_a / "tracked.txt"), "content": "after\n"},
+        ),
+    )
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            repo_a,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Bash",
+            tool_input={"command": f"cd {repo_b} && pwd"},
+        ),
+    )
+    blocked = runtime.handle_payload("Stop", _payload(repo_a, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked["decision"] == "block"
+    assert str(repo_a.resolve()) in blocked["reason"]
+
+    # Task 2: same session id, different repo, read-only. The stale entries
+    # from task 1 must not block this task or rejoin its repo graph.
+    runtime.handle_payload(
+        "SessionStart", _payload(repo_b, "SessionStart", session_id=session_id, source="startup", cwd=str(repo_b))
+    )
+    stopped = runtime.handle_payload(
+        "Stop", _payload(repo_b, "Stop", session_id=session_id, stop_hook_active=False, cwd=str(repo_b))
+    )
+    assert stopped is None
+    state_b = runtime.read_session_state(repo_b, session_id)
+    assert str(repo_a.resolve()) not in (state_b.get("session_repos") or [])
+
+
+def test_read_only_task_does_not_inherit_prior_task_mutation(tmp_path: Path, monkeypatch):
+    """mutated/write_observed must be re-evaluated per task, not latched for the
+    lifetime of a reused session id (#992)."""
+    target = _configured_git_repo(tmp_path / "repo")
+    session_id = "fleet-reused-session"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id, source="startup"))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Edit",
+            tool_input={"file_path": str(target / "tracked.txt")},
+        ),
+    )
+    assert runtime.read_session_state(target, session_id)["write_observed"] is True
+
+    # A later dispatched task with the same session id only reads this repo.
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id, source="startup"))
+    runtime.handle_payload(
+        "PreToolUse",
+        _payload(target, "PreToolUse", session_id=session_id, tool_name="Bash", tool_input={"command": "ls"}),
+    )
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(target, "PostToolUse", session_id=session_id, tool_name="Bash", tool_input={"command": "ls"}),
+    )
+    assert runtime.read_session_state(target, session_id)["write_observed"] is False
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
+    )
+
+
+def test_new_task_that_mutates_is_still_gated(tmp_path: Path, monkeypatch):
+    """Per-task scoping must not weaken the loop: a task that writes is gated."""
+    target = _configured_git_repo(tmp_path / "repo")
+    session_id = "fleet-reused-session"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id, source="startup"))
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id, source="startup"))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "tracked.txt"), "content": "after\n"},
+        ),
+    )
+    blocked = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked["decision"] == "block"
+    assert "brigade work verify run" in blocked["reason"]
+
+
+def test_resume_source_keeps_current_task_gate(tmp_path: Path, monkeypatch):
+    """Resuming (or compacting) a session continues the same task; its armed
+    gate must survive the SessionStart."""
+    target = _configured_git_repo(tmp_path / "repo")
+    session_id = "resumed-session"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id, source="startup"))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "tracked.txt"), "content": "after\n"},
+        ),
+    )
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id, source="resume"))
+    blocked = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked["decision"] == "block"

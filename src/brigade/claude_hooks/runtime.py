@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 
 from .. import localio
+from ..component_paths import cache_root
 from ..work_cmd.verification import _tree_fingerprint
 from ..wiring import resolve_wired_target
 from . import compaction_marker, envelope
@@ -100,6 +101,46 @@ def _state_path(target: Path, session_id: str) -> Path:
     slug = localio.slugify(session_id, fallback="session")[:80]
     suffix = localio.stable_hash(session_id)[:8]
     return _sessions_root(target) / f"{slug}-{suffix}.json"
+
+
+# SessionStart sources that begin a new dispatched task. Fleet dispatchers
+# reuse one Claude session id across unrelated tasks, so the session id alone
+# cannot scope work-loop state; each of these sources marks a task boundary.
+# ``resume`` and ``compact`` continue the same logical task and keep its state.
+_TASK_BOUNDARY_SOURCES = {"clear", "startup"}
+
+
+def _task_epoch_path(session_id: str) -> Path:
+    root = Path(cache_root()) / "brigade" / "claude-hooks" / "task-epochs"
+    return root / f"{localio.stable_hash(session_id)}.json"
+
+
+def _current_task_epoch(session_id: str) -> str | None:
+    try:
+        record = localio.read_json_dict(_task_epoch_path(session_id))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    epoch = record.get("task_epoch")
+    return epoch if isinstance(epoch, str) and epoch else None
+
+
+def _begin_task_epoch(session_id: str) -> str | None:
+    epoch = f"{localio.utc_now_iso()}#{os.getpid()}"
+    try:
+        localio.write_json(_task_epoch_path(session_id), {"session_id": session_id, "task_epoch": epoch})
+    except (OSError, ValueError):
+        # Fail open: without a durable boundary marker the hook falls back to
+        # per-session scoping instead of guessing at task membership.
+        return _current_task_epoch(session_id)
+    return epoch
+
+
+def _task_epoch_for_event(event: str, payload: dict[str, Any], session_id: str) -> str | None:
+    if event == "SessionStart" and payload.get("source") in _TASK_BOUNDARY_SOURCES:
+        return _begin_task_epoch(session_id)
+    return _current_task_epoch(session_id)
 
 
 def read_session_state(target: Path, session_id: str) -> dict[str, Any] | None:
@@ -521,7 +562,7 @@ def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
     return resolve_wired_target(payload.get("cwd"))
 
 
-def _session_repo_union(session_id: str, *seeds: Path) -> list[str]:
+def _session_repo_union(session_id: str, *seeds: Path, task_epoch: str | None = None) -> list[str]:
     repos: set[str] = set()
     pending = [seed.expanduser().resolve() for seed in seeds]
     seen: set[str] = set()
@@ -535,6 +576,10 @@ def _session_repo_union(session_id: str, *seeds: Path) -> list[str]:
         state = read_session_state(current, session_id)
         if state is None:
             continue
+        if task_epoch is not None and state.get("task_epoch") != task_epoch:
+            # An earlier dispatched task's repo graph; a reused session id must
+            # not pull those repos back into the current task's scope (#992).
+            continue
         raw_repos = state.get("session_repos")
         if not isinstance(raw_repos, list):
             continue
@@ -544,13 +589,17 @@ def _session_repo_union(session_id: str, *seeds: Path) -> list[str]:
     return sorted(repos)
 
 
-def _link_session_targets(session_id: str, *targets: Path) -> None:
-    sorted_repos = _session_repo_union(session_id, *targets)
+def _link_session_targets(session_id: str, *targets: Path, task_epoch: str | None = None) -> None:
+    sorted_repos = _session_repo_union(session_id, *targets, task_epoch=task_epoch)
     for repo in sorted_repos:
         target = Path(repo)
         state = read_session_state(target, session_id)
         if state is None:
             continue
+        if task_epoch is not None and state.get("task_epoch") != task_epoch:
+            # This repo is entering the current task, so its stale entry from a
+            # previous task expires now instead of latching write_observed.
+            state = _normalize_state(target, session_id, state, task_epoch=task_epoch)
         if state.get("session_repos") == sorted_repos:
             continue
         updated = dict(state)
@@ -558,15 +607,21 @@ def _link_session_targets(session_id: str, *targets: Path) -> None:
         write_session_state(target, session_id, updated)
 
 
-def _touch_session_targets(session_id: str, target: Path, payload: dict[str, Any]) -> None:
+def _touch_session_targets(
+    session_id: str,
+    target: Path,
+    payload: dict[str, Any],
+    *,
+    task_epoch: str | None = None,
+) -> None:
     cwd_target = resolve_wired_target(payload.get("cwd"))
     if cwd_target is not None:
-        _link_session_targets(session_id, target, cwd_target)
+        _link_session_targets(session_id, target, cwd_target, task_epoch=task_epoch)
     else:
-        _link_session_targets(session_id, target)
+        _link_session_targets(session_id, target, task_epoch=task_epoch)
 
 
-def _stop_targets(payload: dict[str, Any], session_id: str) -> list[Path]:
+def _stop_targets(payload: dict[str, Any], session_id: str, *, task_epoch: str | None = None) -> list[Path]:
     cwd_target = resolve_wired_target(payload.get("cwd"))
     ordered: list[Path] = []
     seen: set[str] = set()
@@ -582,6 +637,10 @@ def _stop_targets(payload: dict[str, Any], session_id: str) -> list[Path]:
         return ordered
     state = read_session_state(cwd_target, session_id)
     raw_repos = state.get("session_repos") if isinstance(state, dict) else None
+    if task_epoch is not None and isinstance(state, dict) and state.get("task_epoch") != task_epoch:
+        # A previous task's repo graph: evaluating it would demand wiring,
+        # verification, or handoffs for directories this task never touched.
+        raw_repos = None
     if isinstance(raw_repos, list):
         for raw in raw_repos:
             if isinstance(raw, str) and raw:
@@ -1904,8 +1963,8 @@ def _verify_replacement(
     )
 
 
-def _new_state(target: Path, session_id: str) -> dict[str, Any]:
-    return {
+def _new_state(target: Path, session_id: str, *, task_epoch: str | None = None) -> dict[str, Any]:
+    state: dict[str, Any] = {
         "session_id": session_id,
         "session_fingerprint": _session_fingerprint(session_id),
         "target": str(target),
@@ -1915,6 +1974,9 @@ def _new_state(target: Path, session_id: str) -> dict[str, Any]:
         "verify_denied_count": 0,
         "repo_fingerprint": repo_worktree_fingerprint(target),
     }
+    if task_epoch is not None:
+        state["task_epoch"] = task_epoch
+    return state
 
 
 def _is_handoff_path(target: Path, raw_path: object) -> bool:
@@ -1935,9 +1997,23 @@ def _is_handoff_tool_write(target: Path, tool_input: dict[str, Any]) -> bool:
     return _is_handoff_path(target, tool_input.get("file_path") or tool_input.get("notebook_path"))
 
 
-def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | None) -> dict[str, Any]:
-    normalized = _new_state(target, session_id)
+def _normalize_state(
+    target: Path,
+    session_id: str,
+    payload: dict[str, Any] | None,
+    *,
+    task_epoch: str | None = None,
+) -> dict[str, Any]:
+    normalized = _new_state(target, session_id, task_epoch=task_epoch)
     if not isinstance(payload, dict):
+        return normalized
+    if task_epoch is not None and payload.get("task_epoch") != task_epoch:
+        # State written by an earlier dispatched task under the same reused
+        # session id. ``write_observed`` must be re-earned by this task's own
+        # writes and another task's repo graph must not re-arm this task's
+        # stop gate (#992). Only the brief marker survives: the session id
+        # already received its once-per-repo brief injection.
+        normalized["briefed"] = payload.get("briefed") is True
         return normalized
     now = localio.utc_now()
     started = localio.parse_iso_datetime(payload.get("started_at"))
@@ -1977,6 +2053,10 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
         normalized["exercised_artifact_id"] = exercised.strip()
         kind = payload.get("exercised_artifact_kind")
         normalized["exercised_artifact_kind"] = kind if isinstance(kind, str) and kind.strip() else "skill"
+    if task_epoch is None:
+        persisted_epoch = payload.get("task_epoch")
+        if isinstance(persisted_epoch, str) and persisted_epoch:
+            normalized["task_epoch"] = persisted_epoch
     return normalized
 
 
@@ -2193,12 +2273,13 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if not isinstance(session_id, str) or not session_id:
         return None
 
+    task_epoch = _task_epoch_for_event(event, payload, session_id)
     persisted_state = read_session_state(target, session_id)
-    state = _normalize_state(target, session_id, persisted_state)
+    state = _normalize_state(target, session_id, persisted_state, task_epoch=task_epoch)
     if persisted_state != state:
         write_session_state(target, session_id, state)
     if event != "Stop":
-        _touch_session_targets(session_id, target, payload)
+        _touch_session_targets(session_id, target, payload, task_epoch=task_epoch)
     if event == "SessionStart":
         # True starts and Claude's inject-capable compact source both clear any
         # leftover marker so UserPromptSubmit does not double-inject.
@@ -2377,11 +2458,11 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         shared_tree_notes: list[str] = []
         handoff_target: Path | None = None
         context_target: Path | None = None
-        for stop_target in _stop_targets(payload, session_id):
+        for stop_target in _stop_targets(payload, session_id, task_epoch=task_epoch):
             if not stop_target.is_dir():
                 continue
             stop_state = read_session_state(stop_target, session_id)
-            stop_state = _normalize_state(stop_target, session_id, stop_state)
+            stop_state = _normalize_state(stop_target, session_id, stop_state, task_epoch=task_epoch)
             if not stop_state.get("write_observed"):
                 continue
             fingerprint = stop_state.get("session_fingerprint")
