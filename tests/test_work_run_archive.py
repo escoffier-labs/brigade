@@ -107,6 +107,25 @@ def test_export_import_round_trip_and_validate(tmp_path: Path):
     assert (run_dir / "run.json").is_file()
 
 
+def test_export_strips_crashed_checkpoint_temp(tmp_path: Path):
+    """#646/#654: a crashed ``.checkpoint.*.tmp`` holding private bytes must not
+    reach the archive payload, and the source run tree must keep it."""
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID, with_checkpoint_body=True)
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    crashed = cp_dir / ".checkpoint.xyz789.tmp"
+    crashed.write_bytes(b'{"schema": "brigade.run.v1", "secret_marker": "crashed-temp-must-not-export')
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+
+    assert crashed.exists()
+    payload_cp = archive / "payload" / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    assert not (payload_cp / crashed.name).exists()
+    assert not list(payload_cp.glob(".checkpoint.*.tmp"))
+    archive_bytes = b"".join(p.read_bytes() for p in archive.rglob("*") if p.is_file())
+    assert b"crashed-temp-must-not-export" not in archive_bytes
+    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(archive / "payload")
+
+
 def test_export_strips_private_checkpoint_bodies(tmp_path: Path):
     run_dir = _seed_run(tmp_path / "runs" / RUN_ID, with_checkpoint_body=True)
     archive = tmp_path / "archive"

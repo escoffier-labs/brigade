@@ -3185,8 +3185,10 @@ def test_archive_verify_run_omits_misnamed_artifact_reference(tmp_path):
 
 
 def test_archive_verify_run_fails_closed_when_crashed_temp_not_omitted(tmp_path, monkeypatch):
-    """If the omission step is bypassed, the export-boundary assert must fail
-    closed rather than archive a private crashed-temp body."""
+    """If the omission step is bypassed, the export boundary must still fail
+    closed rather than archive a private crashed-temp body: the strip helper
+    removes the temp unread (#646), and the resulting manifest mismatch refuses
+    the archive."""
     from brigade import run_checkpoint
     from brigade.work_cmd import helpers, verification
 
@@ -3205,10 +3207,13 @@ def test_archive_verify_run_fails_closed_when_crashed_temp_not_omitted(tmp_path,
     monkeypatch.setattr(verification, "_expected_verify_archive_manifest", _no_omissions)
 
     archive_root = tmp_path / "verify-archive"
-    with pytest.raises(run_checkpoint.CheckpointError, match="checkpoint body crossed an export boundary"):
+    with pytest.raises((run_checkpoint.CheckpointError, OSError)):
         verification._archive_verify_run(run_dir, archive_root)
 
     assert not (archive_root / run_dir.name).exists()
+    assert not list(archive_root.rglob(".checkpoint.*.tmp"))
+    leaked = b"".join(p.read_bytes() for p in archive_root.rglob("*") if p.is_file())
+    assert b"SECRET_PRIVATE_BODY" not in leaked
 
 
 def test_prune_verify_runs_omits_hash_mismatched_checkpoint_and_remains_bounded(tmp_path):
