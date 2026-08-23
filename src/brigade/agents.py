@@ -1355,7 +1355,7 @@ def run_codex_appserver(
             reasoning=reasoning,
         )
     text = turn.text.strip()
-    if len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
+    if getattr(turn, "output_limit_exceeded", False) or len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
         return AgentResult(
             text=proc.bound_text(text),
             ok=False,

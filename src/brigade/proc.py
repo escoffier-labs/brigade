@@ -241,6 +241,7 @@ def _result_from_output(
     output_limit_exceeded: bool = False,
 ) -> Result:
     out_text, err_text, stdout_error, stderr_error = _decoded_output(stdout, stderr)
+    out_text, err_text = bound_text_pair(out_text, err_text)
     for stream_error in (stdout_error, stderr_error):
         if stream_error is not None:
             if err_text and not err_text.endswith("\n"):
@@ -258,13 +259,69 @@ def _result_from_output(
     )
 
 
-def bound_text(text: str, max_bytes: int = MAX_CAPTURE_BYTES) -> str:
+def bound_text(text: str, max_bytes: int | None = None) -> str:
     """Return ``text`` truncated to at most ``max_bytes`` of UTF-8."""
 
+    limit = MAX_CAPTURE_BYTES if max_bytes is None else max_bytes
     raw = text.encode(_STREAM_ENCODING)
-    if len(raw) <= max_bytes:
+    if len(raw) <= limit:
         return text
-    return raw[:max_bytes].decode(_STREAM_ENCODING, errors="ignore")
+    return raw[:limit].decode(_STREAM_ENCODING, errors="ignore")
+
+
+def bound_text_pair(stdout: str, stderr: str, max_bytes: int | None = None) -> tuple[str, str]:
+    """Keep combined UTF-8 of ``stdout`` + ``stderr`` at or below ``max_bytes``."""
+
+    limit = MAX_CAPTURE_BYTES if max_bytes is None else max_bytes
+    out = bound_text(stdout, limit)
+    remaining = max(0, limit - len(out.encode(_STREAM_ENCODING)))
+    return out, bound_text(stderr, remaining)
+
+
+class ByteBudget:
+    """Count retained bytes and refuse further accumulation after the cap."""
+
+    def __init__(self, max_bytes: int | None = None) -> None:
+        self._max_bytes = max_bytes
+        self._lock = threading.Lock()
+        self.used = 0
+        self.overflowed = False
+
+    @property
+    def max_bytes(self) -> int:
+        return MAX_CAPTURE_BYTES if self._max_bytes is None else self._max_bytes
+
+    def try_add(self, n: int) -> bool:
+        """Accept all ``n`` bytes, or reject and trip overflow."""
+
+        if n <= 0:
+            return not self.overflowed
+        with self._lock:
+            if self.overflowed:
+                return False
+            if self.used + n > self.max_bytes:
+                self.overflowed = True
+                return False
+            self.used += n
+            return True
+
+    def accept(self, n: int) -> int:
+        """Accept as many of ``n`` bytes as remain; trip if truncated."""
+
+        if n <= 0:
+            return 0
+        with self._lock:
+            if self.overflowed:
+                return 0
+            remaining = self.max_bytes - self.used
+            if remaining <= 0:
+                self.overflowed = True
+                return 0
+            taken = n if n <= remaining else remaining
+            self.used += taken
+            if n > remaining:
+                self.overflowed = True
+            return taken
 
 
 def _process_group_kwargs() -> dict[str, Any]:
@@ -380,7 +437,10 @@ def _collect_process_output(
         reader.start()
         threads.append(reader)
 
-    _write_stdin(process, stdin)
+    stdin_thread: threading.Thread | None = None
+    if process.stdin is not None:
+        stdin_thread = threading.Thread(target=_write_stdin, args=(process, stdin), daemon=True)
+        stdin_thread.start()
 
     timed_out = False
     deadline = time.monotonic() + max(timeout, 0.0)
@@ -404,9 +464,13 @@ def _collect_process_output(
         _stop_child(process, process_registry)
 
     _join_readers(threads, _TIMED_OUT_DRAIN_SECONDS)
+    if stdin_thread is not None:
+        stdin_thread.join(timeout=_TIMED_OUT_DRAIN_SECONDS)
     if _readers_alive(threads):
         _stop_child(process, process_registry)
         _join_readers(threads, _TIMED_OUT_DRAIN_SECONDS)
+        if stdin_thread is not None:
+            stdin_thread.join(timeout=_TIMED_OUT_DRAIN_SECONDS)
 
     if process.poll() is None:
         _stop_child(process, process_registry)
@@ -435,21 +499,21 @@ def _collect_process_output(
         extras.append(f"combined output exceeded {MAX_CAPTURE_BYTES} byte limit")
     if timed_out:
         extras.append(f"timeout after {timeout}s")
-    if not extras:
-        return result
-    stderr = result.stderr
-    if stderr and not stderr.endswith("\n"):
-        stderr += "\n"
-    return Result(
-        code=result.code,
-        stdout=result.stdout,
-        stderr=stderr + "\n".join(extras),
-        stdout_decode_error=result.stdout_decode_error,
-        stderr_decode_error=result.stderr_decode_error,
-        output_limit_exceeded=result.output_limit_exceeded,
-        stdout_bytes=result.stdout_bytes,
-        stderr_bytes=result.stderr_bytes,
-    )
+    if extras:
+        stderr = result.stderr
+        if stderr and not stderr.endswith("\n"):
+            stderr += "\n"
+        return Result(
+            code=result.code,
+            stdout=result.stdout,
+            stderr=stderr + "\n".join(extras),
+            stdout_decode_error=result.stdout_decode_error,
+            stderr_decode_error=result.stderr_decode_error,
+            output_limit_exceeded=result.output_limit_exceeded,
+            stdout_bytes=result.stdout_bytes,
+            stderr_bytes=result.stderr_bytes,
+        )
+    return result
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -247,6 +249,112 @@ def test_windows_appserver_uses_group_and_registry_tree_termination(monkeypatch)
     assert captured["creationflags"] == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     assert "start_new_session" not in captured
     assert events == [("register", 4242), ("terminate", 4242), ("unregister", 4242)]
+
+
+class _BudgetStubServer:
+    def __init__(self):
+        self._output_limit_exceeded = False
+        self._capture_budgets = {}
+        self._orphan_budget = proc.ByteBudget()
+
+    def capture_budget(self, thread_id=None):
+        if thread_id is None:
+            return self._orphan_budget
+        return self._capture_budgets.setdefault(thread_id, proc.ByteBudget())
+
+    def reset_capture(self, thread_id):
+        self._capture_budgets[thread_id] = proc.ByteBudget()
+
+    def _signal_output_limit(self):
+        self._output_limit_exceeded = True
+        for budget in self._capture_budgets.values():
+            budget.overflowed = True
+
+    def request(self, method, params, timeout=None):  # noqa: ARG002
+        return {"turn": {"id": "turn-1"}}
+
+
+def test_consume_caps_deltas_during_accumulation(monkeypatch):
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 256)
+    q: queue.Queue = queue.Queue()
+    server = _BudgetStubServer()
+    thread = codex_appserver.CodexThread(server, "thread-1", q)
+    chunk = "D" * 50
+    for _ in range(20):
+        q.put(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"itemId": "msg-1", "delta": chunk},
+            }
+        )
+    q.put(
+        {
+            "method": "turn/completed",
+            "params": {"turn": {"id": "turn-1", "status": "completed", "items": []}},
+        }
+    )
+
+    result = thread.run_turn("work", timeout=2.0)
+
+    assert result.output_limit_exceeded is True
+    assert result.ok is False
+    assert len(result.text.encode("utf-8")) <= 256
+    assert server.capture_budget("thread-1").used <= 256
+    assert server.capture_budget("thread-1").overflowed is True
+    assert "combined output exceeded" in result.detail
+
+
+def test_read_loop_stops_queueing_after_line_cap(monkeypatch):
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    captured = {"queued": 0, "peak": 0}
+
+    class RecordingQueue:
+        def __init__(self):
+            self._items = []
+
+        def put(self, msg):
+            if msg is codex_appserver._OUTPUT_LIMIT or msg is codex_appserver._DEAD:
+                return
+            size = len(json.dumps(msg).encode("utf-8"))
+            captured["queued"] += size
+            captured["peak"] = max(captured["peak"], captured["queued"])
+
+    server = codex_appserver.AppServer(argv=FAKE)
+    server._queues["t-flood"] = RecordingQueue()
+    server.reset_capture("t-flood")
+    flood_line = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": "t-flood", "itemId": "m", "delta": "X" * 200},
+        }
+    )
+    lines = "\n".join([flood_line] * 20) + "\n"
+
+    class FakeStdout:
+        def __iter__(self):
+            return iter(lines.splitlines(keepends=True))
+
+    class FakeProc:
+        stdout = FakeStdout()
+
+    server._proc = FakeProc()
+    server._read_loop()
+
+    assert server._output_limit_exceeded is True
+    assert captured["peak"] <= 512
+    assert server.capture_budget("t-flood").overflowed is True
+
+
+def test_flood_turn_signals_output_limit_under_small_cap(monkeypatch):
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 4096)
+    with _server() as server:
+        thread = server.start_thread(cwd=Path("/tmp"))
+        result = thread.run_turn("FLOOD now", timeout=10.0)
+    assert result.output_limit_exceeded is True
+    assert result.ok is False
+    assert len(result.text.encode("utf-8")) <= 4096
+    assert "combined output exceeded" in result.detail
 
 
 def test_appserver_env_reaches_child_without_seat_env(monkeypatch):

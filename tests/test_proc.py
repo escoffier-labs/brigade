@@ -553,3 +553,50 @@ def test_run_caps_combined_output_and_sets_overflow_flag():
     assert result.stdout_bytes + result.stderr_bytes == proc.MAX_CAPTURE_BYTES
     assert len(result.stdout.encode("utf-8")) + len(result.stderr.encode("utf-8")) >= proc.MAX_CAPTURE_BYTES
     assert "combined output exceeded" in result.stderr
+
+
+def test_large_stdin_does_not_block_timeout_or_overflow_monitor():
+    """Stdin must be written concurrently so a child filling stdout cannot deadlock past timeout."""
+
+    started = time.monotonic()
+    result = proc.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys;"
+                "sys.stdout.buffer.write(b'O' * (2 * 1024 * 1024));"
+                "sys.stdout.buffer.flush();"
+                "sys.stdin.buffer.read()"
+            ),
+        ],
+        timeout=0.1,
+        stdin=b"I" * (2 * 1024 * 1024),
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.8
+    assert result.output_limit_exceeded or result.code == 124
+
+
+def test_overflow_truncates_returned_text_at_utf8_boundary():
+    """A cap cut inside a multibyte char must not return text over the cap."""
+
+    prefix = proc.MAX_CAPTURE_BYTES - 1
+    result = proc.run(
+        [
+            sys.executable,
+            "-c",
+            (f"import sys;sys.stdout.buffer.write(b'A' * {prefix} + b'\\xe2\\x82\\xac')"),
+        ],
+        timeout=5.0,
+    )
+
+    assert result.output_limit_exceeded is True
+    assert len(result.stdout.encode("utf-8")) <= proc.MAX_CAPTURE_BYTES
+
+
+def test_bound_text_pair_stays_at_or_below_cap():
+    overshot = ("A" * (proc.MAX_CAPTURE_BYTES - 1)) + "\ufffd"
+    stdout, stderr = proc.bound_text_pair(overshot, "E", proc.MAX_CAPTURE_BYTES)
+    assert len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")) <= proc.MAX_CAPTURE_BYTES

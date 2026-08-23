@@ -28,6 +28,7 @@ _REQUEST_TIMEOUT = 30.0
 _INTERRUPT_GRACE = 5.0
 _ORPHAN_LIMIT = 1000
 _DEAD = object()  # queue sentinel: server process is gone
+_OUTPUT_LIMIT = object()  # queue sentinel: capture cap exceeded
 
 # Chatty per-token notifications: consumed for salvage, never forwarded to on_event.
 _DELTA_METHODS = frozenset(
@@ -44,6 +45,21 @@ _DELTA_METHODS = frozenset(
 )
 
 
+def _message_thread_id(msg: dict) -> str | None:
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        return None
+    thread_id = params.get("threadId")
+    if isinstance(thread_id, str):
+        return thread_id
+    thread = params.get("thread")
+    if isinstance(thread, dict):
+        ident = thread.get("id")
+        if isinstance(ident, str):
+            return ident
+    return None
+
+
 class AppServerError(RuntimeError):
     """Spawn, handshake, transport, or server-reported request failure."""
 
@@ -56,6 +72,7 @@ class TurnResult:
     thread_id: str
     detail: str = ""
     timed_out: bool = False
+    output_limit_exceeded: bool = False
 
 
 class AppServer:
@@ -80,6 +97,9 @@ class AppServer:
         self._queues: dict[str, queue.Queue] = {}
         self._orphans: deque[tuple[str, dict]] = deque(maxlen=_ORPHAN_LIMIT)
         self._dead = False
+        self._capture_budgets: dict[str, proc_mod.ByteBudget] = {}
+        self._orphan_budget = proc_mod.ByteBudget()
+        self._output_limit_exceeded = False
 
     def __enter__(self) -> "AppServer":
         self.start()
@@ -139,7 +159,7 @@ class AppServer:
 
     def request(self, method: str, params: dict, timeout: float = _REQUEST_TIMEOUT) -> dict:
         with self._state_lock:
-            if self._dead:
+            if self._dead or self._output_limit_exceeded:
                 raise AppServerError("app-server exited")
             self._next_id += 1
             req_id = self._next_id
@@ -179,10 +199,19 @@ class AppServer:
             params["sandbox"] = sandbox
         return params
 
+    def capture_budget(self, thread_id: str | None = None) -> proc_mod.ByteBudget:
+        if thread_id is None:
+            return self._orphan_budget
+        return self._capture_budgets.setdefault(thread_id, proc_mod.ByteBudget())
+
+    def reset_capture(self, thread_id: str) -> None:
+        self._capture_budgets[thread_id] = proc_mod.ByteBudget()
+
     def _attach(self, thread_id: str) -> "CodexThread":
         q: queue.Queue = queue.Queue()
         with self._state_lock:
             self._queues[thread_id] = q
+            self._capture_budgets.setdefault(thread_id, proc_mod.ByteBudget())
             dead = self._dead
             for orphan_id, msg in list(self._orphans):
                 if orphan_id == thread_id:
@@ -204,24 +233,55 @@ class AppServer:
             except (BrokenPipeError, OSError) as exc:
                 raise AppServerError("app-server exited") from exc
 
+    def _signal_output_limit(self) -> None:
+        """Stop accumulating, wake waiters, and terminate the child."""
+
+        with self._state_lock:
+            if self._output_limit_exceeded:
+                pending: list[dict] = []
+                queues: list[queue.Queue] = []
+            else:
+                self._output_limit_exceeded = True
+                pending = list(self._pending.values())
+                self._pending.clear()
+                queues = list(self._queues.values())
+        for entry in pending:
+            entry["event"].set()
+        for q in queues:
+            q.put(_OUTPUT_LIMIT)
+        proc = self._proc
+        if proc is not None:
+            try:
+                self._process_registry.terminate(cast("subprocess.Popen[bytes]", proc))
+            except Exception:
+                pass
+
     def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
         for line in self._proc.stdout:
+            if self._output_limit_exceeded:
+                break
             line = line.strip()
             if not line:
                 continue
+            line_bytes = len(line.encode("utf-8"))
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if not isinstance(msg, dict):
                 continue
+            thread_id = _message_thread_id(msg)
+            if not self.capture_budget(thread_id).try_add(line_bytes):
+                self._signal_output_limit()
+                break
             if msg.get("id") is not None and "method" in msg:
                 self._handle_server_request(msg)
             elif msg.get("id") is not None:
                 self._handle_response(msg)
             elif "method" in msg:
                 self._route_notification(msg)
+        overflowed = self._output_limit_exceeded
         with self._state_lock:
             self._dead = True
             pending = list(self._pending.values())
@@ -230,7 +290,7 @@ class AppServer:
         for entry in pending:
             entry["event"].set()
         for q in queues:
-            q.put(_DEAD)
+            q.put(_OUTPUT_LIMIT if overflowed else _DEAD)
 
     def _handle_response(self, msg: dict) -> None:
         with self._state_lock:
@@ -272,6 +332,8 @@ class AppServer:
             self._route_to_thread(thread_id, msg)
 
     def _route_to_thread(self, thread_id: str, msg: dict) -> None:
+        if self._output_limit_exceeded:
+            return
         with self._state_lock:
             q = self._queues.get(thread_id)
             if q is None:
@@ -311,6 +373,9 @@ class CodexThread:
         params: dict = {"threadId": self.thread_id, "input": [{"type": "text", "text": prompt}]}
         if effort is not None:
             params["effort"] = effort
+        reset_capture = getattr(self._server, "reset_capture", None)
+        if reset_capture is not None:
+            reset_capture(self.thread_id)
         try:
             result = self._server.request(
                 "turn/start",
@@ -329,6 +394,8 @@ class CodexThread:
         deadline = time.monotonic() + timeout
 
         completed = self._consume(deadline, turn_id, deltas, completed_texts, on_event)
+        if completed is _OUTPUT_LIMIT or self._server_output_limited():
+            return self._output_limit_result(deltas, completed_texts)
         if completed is not None:
             return self._finish(completed, deltas, completed_texts)
 
@@ -338,6 +405,8 @@ class CodexThread:
         except AppServerError:
             pass
         completed = self._consume(time.monotonic() + _INTERRUPT_GRACE, turn_id, deltas, completed_texts, on_event)
+        if completed is _OUTPUT_LIMIT or self._server_output_limited():
+            return self._output_limit_result(deltas, completed_texts)
         salvaged = self._salvage(deltas, completed_texts)
         detail = f"timeout after {timeout}s; interrupted"
         if completed is _DEAD:
@@ -368,6 +437,8 @@ class CodexThread:
         Returns the turn/completed message, the _DEAD sentinel, or None on deadline.
         """
         while True:
+            if self._server_output_limited():
+                return _OUTPUT_LIMIT
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
@@ -375,6 +446,8 @@ class CodexThread:
                 msg = self._queue.get(timeout=remaining)
             except queue.Empty:
                 return None
+            if msg is _OUTPUT_LIMIT:
+                return _OUTPUT_LIMIT
             if msg is _DEAD:
                 return _DEAD
             method = msg.get("method", "")
@@ -383,7 +456,8 @@ class CodexThread:
                 item_id = params.get("itemId")
                 delta = params.get("delta")
                 if method == "item/agentMessage/delta" and isinstance(item_id, str) and isinstance(delta, str):
-                    deltas.setdefault(item_id, []).append(delta)
+                    if not self._retain_turn_text(delta, deltas, item_id):
+                        return _OUTPUT_LIMIT
                 continue
             if on_event is not None:
                 try:
@@ -393,9 +467,56 @@ class CodexThread:
             if method == "item/completed":
                 item = params.get("item") or {}
                 if item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
-                    completed_texts.append(item["text"])
+                    if not self._retain_completed_text(item["text"], completed_texts):
+                        return _OUTPUT_LIMIT
             elif method == "turn/completed" and (params.get("turn") or {}).get("id") == turn_id:
                 return msg
+
+    def _server_output_limited(self) -> bool:
+        if getattr(self._server, "_output_limit_exceeded", False):
+            return True
+        budget = getattr(self._server, "capture_budget", None)
+        if budget is None:
+            return False
+        return bool(budget(self.thread_id).overflowed)
+
+    def _retain_turn_text(self, delta: str, deltas: dict[str, list[str]], item_id: str) -> bool:
+        """Append a delta under the shared capture cap. False means overflow."""
+
+        raw = delta.encode("utf-8")
+        taken = self._server.capture_budget(self.thread_id).accept(len(raw))
+        if taken <= 0:
+            self._server._signal_output_limit()
+            return False
+        if taken < len(raw):
+            deltas.setdefault(item_id, []).append(proc_mod.bound_text(delta, taken))
+            self._server._signal_output_limit()
+            return False
+        deltas.setdefault(item_id, []).append(delta)
+        return True
+
+    def _retain_completed_text(self, text: str, completed_texts: list[str]) -> bool:
+        raw = text.encode("utf-8")
+        taken = self._server.capture_budget(self.thread_id).accept(len(raw))
+        if taken <= 0:
+            self._server._signal_output_limit()
+            return False
+        if taken < len(raw):
+            completed_texts.append(proc_mod.bound_text(text, taken))
+            self._server._signal_output_limit()
+            return False
+        completed_texts.append(text)
+        return True
+
+    def _output_limit_result(self, deltas: dict, completed_texts: list[str]) -> TurnResult:
+        return TurnResult(
+            text=proc_mod.bound_text(self._salvage(deltas, completed_texts)),
+            ok=False,
+            status="failed",
+            thread_id=self.thread_id,
+            detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
+            output_limit_exceeded=True,
+        )
 
     def _finish(self, completed, deltas: dict, completed_texts: list[str]) -> TurnResult:
         if completed is _DEAD:
@@ -414,6 +535,15 @@ class CodexThread:
             if isinstance(item, dict) and item.get("type") == "agentMessage"
         ]
         text = (agent_texts[-1] if agent_texts else "") or self._salvage(deltas, completed_texts)
+        if len(text.encode("utf-8")) > proc_mod.MAX_CAPTURE_BYTES:
+            return TurnResult(
+                text=proc_mod.bound_text(text),
+                ok=False,
+                status="failed",
+                thread_id=self.thread_id,
+                detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
+                output_limit_exceeded=True,
+            )
         if status == "completed":
             return TurnResult(
                 text=text,
