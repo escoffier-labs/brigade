@@ -58,6 +58,26 @@ _OPERATIONAL_ERRORS = (
     ),
 )
 _CLAUSE_SPLIT = re.compile(r"(?:\r?\n)+|(?<=[.!?])\s+")
+# Providers sometimes omit the space after a sentence terminator
+# (`...answering.media-cli is...`). Split there too, but only when the
+# next token looks like a sentence start — not a version digit (`v1.2`).
+_GLUED_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])(?=[A-Za-z])")
+# A period is a filename dot only when the char before it is an identifier
+# and the token after it is a known code/doc extension. Length is not the
+# signal: short words (`it`, `is`, `the`) must stay split, and longer
+# extensions (`csproj`) must re-merge. Hyphenated identifiers (`media-cli`)
+# are not extensions. `!` / `?` are never filename dots.
+_IDENTIFIER_BEFORE_DOT = re.compile(r"[A-Za-z0-9_]\.\Z")
+_EXTENSION_TOKEN = re.compile(r"\A([A-Za-z0-9]+)(?![A-Za-z0-9-])")
+_FILE_EXTENSIONS = frozenset(
+    """
+    bash bat c cc cfg cmake cmd conf cpp cs csproj css csv cxx dart diff
+    env ex exs fs fsproj go gradle h hpp hs htm html ini java js json jsx
+    kt kts lock log lua m md mjs mk mm nix patch php pl pm proto ps1 py pyi
+    rb rs rst sbt scala scss sh sln sql swift tf toml ts tsx txt vb vbproj
+    vue xml yaml yml zig zsh
+    """.split()
+)
 _FUTURE_INTENT = re.compile(
     r"\A\s*(?:(?:first|next|now)\s*,?\s*)?"
     r"(?:i\s+(?:will|shall|need to|plan to|am going to)|i['’](?:ll|m going to)|let me)\b",
@@ -169,8 +189,40 @@ def _tool_only(text: str) -> bool:
     )
 
 
+def _is_filename_dot_join(previous: str, following: str) -> bool:
+    """True when previous ends with `identifier.` and following starts with a known extension."""
+    if _IDENTIFIER_BEFORE_DOT.search(previous) is None:
+        return False
+    match = _EXTENSION_TOKEN.match(following)
+    if match is None:
+        return False
+    return match.group(1).lower() in _FILE_EXTENSIONS
+
+
+def _expand_glued_sentences(clause: str) -> list[str]:
+    parts = [part.strip() for part in _GLUED_SENTENCE_SPLIT.split(clause) if part.strip()]
+    if len(parts) <= 1:
+        return parts or [clause]
+    merged = [parts[0]]
+    for part in parts[1:]:
+        if _is_filename_dot_join(merged[-1], part):
+            merged[-1] += part
+        else:
+            merged.append(part)
+    return merged
+
+
+def _split_clauses(text: str) -> list[str]:
+    clauses: list[str] = []
+    for clause in _CLAUSE_SPLIT.split(text):
+        stripped = clause.strip()
+        if stripped:
+            clauses.extend(_expand_glued_sentences(stripped))
+    return clauses
+
+
 def _progress_only(text: str) -> bool:
-    clauses = [clause.strip() for clause in _CLAUSE_SPLIT.split(text) if clause.strip()]
+    clauses = _split_clauses(text)
     if not clauses:
         return False
     explicit_progress = False
