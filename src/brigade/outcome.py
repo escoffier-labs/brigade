@@ -90,6 +90,15 @@ class OutcomeRecord:
     capability_fingerprint: str | None = None
     route: dict[str, Any] | None = None
     route_fingerprint: str | None = None
+    reused_evidence_ref: str | None = None
+    """Provenance for a capture invoked against a ``reused_from`` verify receipt.
+
+    ``evidence_ref`` already names the canonical (original) receipt so scoring
+    collapses original and reused captures to one signal (#634). This keeps the
+    reused receipt path on the row itself, so the provenance survives receipt
+    pruning instead of living only in the receipts directory (#650). ``None``
+    when the capture was not reused, and on rows written before this field.
+    """
 
 
 @dataclass(frozen=True)
@@ -445,6 +454,21 @@ def candidate_regression_withheld(helped: int, hurt: int) -> bool:
     return hurt > 0 and helped <= hurt
 
 
+def candidate_install_margin_met(helped: int, hurt: int, *, install_min_helped: int) -> bool:
+    """Return True when a regressed candidate cohort's clears outnumber hurts by a real margin.
+
+    ``candidate_regression_withheld`` releases the hold as soon as clears strictly
+    outnumber hurts, which would install on ``helped=2, hurt=1`` (#648). A margin
+    of one is a coin flip, especially while pre-#647 ledgers still hold
+    mixed-signal generic buckets. Require the same number of independent clears
+    over the hurts as a clean candidate needs in total: ``helped >= hurt +
+    install_min_helped``. A cohort with no hurts is unaffected.
+    """
+    if hurt <= 0:
+        return True
+    return helped >= hurt + install_min_helped
+
+
 def candidate_install_reason(helped: int, hurt: int) -> str:
     """Reason string for a candidate install that cleared the hurt gate."""
     if hurt > 0:
@@ -472,6 +496,15 @@ def decide(
     if current_status == "candidate":
         if candidate_regression_withheld(score.helped, score.hurt):
             return Decision(score.artifact_id, "hold", "candidate", "withheld: verified regression present")
+        if score.helped >= config.install_min_helped and not candidate_install_margin_met(
+            score.helped, score.hurt, install_min_helped=config.install_min_helped
+        ):
+            return Decision(
+                score.artifact_id,
+                "hold",
+                "candidate",
+                f"withheld: verified helped margin over regressions below {config.install_min_helped}",
+            )
         if score.helped >= config.install_min_helped and score.helped > score.hurt:
             return Decision(
                 score.artifact_id,
