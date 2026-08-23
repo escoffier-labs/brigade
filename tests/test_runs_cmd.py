@@ -4270,3 +4270,92 @@ def test_runs_show_prints_terminal_line(tmp_path, capsys):
 
     assert runs_cmd.show(active) == 0
     assert "terminal: no" in capsys.readouterr().out
+
+
+def _write_stale_snapshot_with_terminal_journal(workspace: Path, run_dir: Path) -> str:
+    """Journal has run.completed; run.json still says running. Return event id."""
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run.v1",
+                "status": "running",
+                "cwd": str(workspace),
+                "lock_workspace": str(workspace),
+                "started_at": "2026-08-17T12:00:00Z",
+                "lifecycle_journal_requested": True,
+            }
+        )
+        + "\n"
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="run.completed",
+            payload={"status": "ok"},
+            idempotency_key="stale-completed",
+            workspace=workspace,
+        )
+    stale = json.loads((run_dir / "run.json").read_text())
+    stale["status"] = "running"
+    stale.pop("finished_at", None)
+    (run_dir / "run.json").write_text(json.dumps(stale) + "\n")
+    report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
+    terminal = next(event for event in report.events if event.event_type == "run.completed")
+    return terminal.event_id
+
+
+def test_inspect_show_detail_treat_journal_terminal_as_terminal_when_run_json_stale(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "crashed"
+    event_id = _write_stale_snapshot_with_terminal_journal(workspace, run_dir)
+
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta.get("status") == "running"
+    assert not meta.get("finished_at")
+    assert runs_cmd._is_terminal(meta) is False
+
+    assert runs_cmd.inspect(run_dir.name, cwd=workspace) == 0
+    inspect_out = capsys.readouterr().out
+    assert "terminal: yes" in inspect_out
+    assert f"terminal event: {event_id}" in inspect_out
+    assert "terminal: no" not in inspect_out
+
+    assert runs_cmd.show(run_dir) == 0
+    show_out = capsys.readouterr().out
+    assert "terminal: yes" in show_out
+    assert "terminal: no" not in show_out
+
+    payload, diagnostic, _rc = runs_cmd.run_detail_contract(run_dir)
+    assert diagnostic is None
+    assert payload is not None
+    assert payload["run"]["terminal"] == "terminal"
+
+
+def test_bare_run_id_rejects_path_valued_parent_ids():
+    assert runs_cmd._is_bare_run_id("20260817-120000-parent-aaaaaa") is True
+    assert runs_cmd._is_bare_run_id("legacy") is True
+    assert runs_cmd._is_bare_run_id("../evil") is False
+    assert runs_cmd._is_bare_run_id("..") is False
+    assert runs_cmd._is_bare_run_id("/tmp/evil") is False
+    assert runs_cmd._is_bare_run_id("parent/../evil") is False
+    assert runs_cmd._resolve_sibling_run_dir(Path("runs-root"), "../evil") is None
+
+
+def test_validate_child_branch_point_rejects_traversal_parent_id(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    child_dir = workspace / ".brigade" / "runs" / "child"
+    child_dir.mkdir(parents=True)
+    lineage = {
+        "kind": "child",
+        "parent_run_id": "../evil",
+        "branch_point_event_id": "evt-1",
+    }
+    _event, parent_dir, error = runs_cmd._validate_child_branch_point(child_dir, lineage)
+    assert _event is None
+    assert parent_dir is None
+    assert error is not None
+    assert "malformed parent_run_id" in error

@@ -431,6 +431,43 @@ def _artifact_signature(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 
 
+_BARE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _is_bare_run_id(run_id: object) -> bool:
+    """True when *run_id* is a single run-directory name, not a path.
+
+    Imported or corrupt receipts can carry absolute or traversal-valued
+    ``parent_run_id`` strings. Those must never be joined onto the runs root.
+    """
+    if not isinstance(run_id, str) or not run_id or run_id in {".", ".."}:
+        return False
+    if "/" in run_id or "\\" in run_id or "\x00" in run_id:
+        return False
+    if os.sep in run_id or (os.altsep is not None and os.altsep in run_id):
+        return False
+    path = Path(run_id)
+    if path.is_absolute() or bool(path.anchor) or len(path.parts) != 1:
+        return False
+    if path.parts[0] in {".", ".."}:
+        return False
+    return bool(_BARE_RUN_ID_RE.fullmatch(run_id))
+
+
+def _resolve_sibling_run_dir(runs_root: Path, run_id: str) -> Path | None:
+    """Join *run_id* under *runs_root* only when it is a bare run id.
+
+    Returns ``None`` for a malformed id so callers treat it as a finding
+    (or fail closed) instead of following a path outside the run tree.
+    """
+    if not _is_bare_run_id(run_id):
+        return None
+    candidate = runs_root / run_id
+    if candidate.parent != runs_root or candidate.name != run_id:
+        return None
+    return candidate
+
+
 def _is_terminal(meta: dict[str, Any]) -> bool:
     status = meta.get("status")
     if meta.get("finished_at"):
@@ -438,7 +475,26 @@ def _is_terminal(meta: dict[str, Any]) -> bool:
     return isinstance(status, str) and status not in _NONTERMINAL_STATUSES
 
 
-def _terminal_label(meta: Mapping[str, Any]) -> str:
+def _run_display_is_terminal(run_dir: Path, meta: Mapping[str, Any]) -> bool:
+    """Display terminal state: a journal terminal event wins over stale run.json.
+
+    A crash after fsyncing a terminal lifecycle event but before replacing
+    ``run.json`` leaves a non-terminal snapshot. When a journal is present and
+    contains a terminal event, inspect/show/run-detail treat the run as
+    terminal so they never contradict the journal they also cite. Legacy runs
+    without a lifecycle journal still read terminal purely from ``run.json``.
+    """
+    if _is_terminal(dict(meta)):
+        return True
+    try:
+        return _terminal_lifecycle_event(run_dir) is not None
+    except ValueError:
+        return False
+
+
+def _terminal_label(meta: Mapping[str, Any], *, run_dir: Path | None = None) -> str:
+    if run_dir is not None:
+        return "terminal" if _run_display_is_terminal(run_dir, meta) else "running"
     return "terminal" if _is_terminal(dict(meta)) else "running"
 
 
@@ -1891,7 +1947,7 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
                 "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
                 "suspected_noop": True if meta.get("suspected_noop") is True else None,
                 "resume_available": _resume_available(run_dir),
-                "terminal": _terminal_label(meta),
+                "terminal": _terminal_label(meta, run_dir=run_dir),
                 "lineage": _detail_lineage_section(run_dir, meta),
             },
         ),
@@ -2549,7 +2605,9 @@ def _validate_child_branch_point(
     if not isinstance(branch_id, str) or not branch_id.strip():
         return None, None, "corrupt branch point event: child lineage is missing branch_point_event_id"
 
-    parent_run_dir = child_run_dir.parent / parent_id
+    parent_run_dir = _resolve_sibling_run_dir(child_run_dir.parent, parent_id)
+    if parent_run_dir is None:
+        return None, None, "corrupt branch point event: child lineage has a malformed parent_run_id"
     try:
         if parent_run_dir.is_symlink() or not parent_run_dir.is_dir():
             return None, None, f"parent run directory not found: {parent_id}"
@@ -3352,7 +3410,7 @@ def show(run_dir: Path, *, json_output: bool = False) -> int:
 
     print(f"run: {run_dir}")
     _line("status", run_meta.get("status"))
-    print(f"terminal: {'yes' if _is_terminal(run_meta) else 'no'}")
+    print(f"terminal: {'yes' if _run_display_is_terminal(run_dir, run_meta) else 'no'}")
     _line("task", run_meta.get("task"))
     _line("cwd", run_meta.get("cwd"))
     mode = "read-only" if run_meta.get("read_only") else "normal"
@@ -3413,7 +3471,8 @@ def inspect(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    print(f"terminal: {'yes' if _is_terminal(meta) else 'no'}")
+    is_terminal = _is_terminal(meta) or terminal_event is not None
+    print(f"terminal: {'yes' if is_terminal else 'no'}")
     if terminal_event is not None:
         _line("terminal event", terminal_event.event_id)
     return 0

@@ -257,19 +257,28 @@ _RUN_LINEAGE_SCAN_LIMIT = 50
 _RUN_LINEAGE_FINDING_PREVIEW = 8
 
 
-def _check_run_lineage(target: Path) -> CheckResult:
+def _check_run_lineage(target: Path, *, full: bool = False) -> CheckResult:
     """Read-only lineage-consistency verdict across recorded runs (#594).
 
     Children whose parent run directory is missing, or whose branch-point
     event id is absent from the parent journal, are findings — never crashes.
     Legacy runs without lineage metadata are valid roots.
+
+    The default path examines the newest ``_RUN_LINEAGE_SCAN_LIMIT`` run
+    directories. ``full=True`` (``doctor --full``) scans every run. A
+    bounded pass that skips directories WARNs with ``not_examined=N`` so
+    the cap is never a silent OK.
     """
     from brigade import run_journal, run_lifecycle, runs_cmd
 
     runs_root = target / ".brigade" / "runs"
     all_dirs, scan_omitted = _immediate_run_dirs(runs_root)
-    scanned = all_dirs[:_RUN_LINEAGE_SCAN_LIMIT]
-    scan_omitted += len(all_dirs) - len(scanned)
+    if full:
+        scanned = all_dirs
+        not_examined = 0
+    else:
+        scanned = all_dirs[:_RUN_LINEAGE_SCAN_LIMIT]
+        not_examined = len(all_dirs) - len(scanned)
 
     roots = 0
     children = 0
@@ -290,7 +299,10 @@ def _check_run_lineage(target: Path) -> CheckResult:
         if not isinstance(parent_id, str) or not parent_id:
             findings.append(f"{run_dir.name} (child lineage has no parent run id)")
             continue
-        parent_dir = runs_root / parent_id
+        parent_dir = runs_cmd._resolve_sibling_run_dir(runs_root, parent_id)
+        if parent_dir is None:
+            findings.append(f"{run_dir.name} (malformed parent run id: {parent_id})")
+            continue
         try:
             parent_missing = not parent_dir.is_dir()
         except OSError:
@@ -318,12 +330,16 @@ def _check_run_lineage(target: Path) -> CheckResult:
             findings.append(f"{run_dir.name} (branch point event absent from parent journal: {branch_event_id})")
 
     detail = f"roots={roots} children={children} terminal={terminal_runs} scanned={len(scanned)} omitted={scan_omitted}"
+    if not_examined:
+        detail = f"{detail} not_examined={not_examined} (capped; run `brigade doctor --full`)"
     if findings:
         shown = findings[:_RUN_LINEAGE_FINDING_PREVIEW]
         detail = f"{detail}; findings: {'; '.join(shown)}"
         remaining = len(findings) - len(shown)
         if remaining > 0:
             detail = f"{detail}, ... {remaining} more"
+        return (WARN, _LINEAGE_CHECK_NAME, detail)
+    if not_examined:
         return (WARN, _LINEAGE_CHECK_NAME, detail)
     return (OK, _LINEAGE_CHECK_NAME, detail)
 
@@ -956,17 +972,24 @@ def _replace_recovery_check_with_full(
     checks: List[ScopedCheckResult],
     target: Path,
 ) -> List[ScopedCheckResult]:
-    """Swap the bounded recovery-checkpoint aggregate for the exhaustive one.
+    """Swap bounded recovery-checkpoint and lineage aggregates for exhaustive ones.
 
-    The public station callback always emits the bounded (8-preview) verdict so
-    its contract stays unchanged; ``run --full`` re-runs the check with
+    The public station callback always emits the bounded verdict so its
+    contract stays unchanged; ``run --full`` re-runs each check with
     ``full=True`` and substitutes it in place, preserving the original scope.
+    Lineage's full pass drops the newest-50 cap and examines every run.
     """
-    full_status, _name, full_detail = _check_recovery_checkpoints(target, full=True)
+    full_recovery = _check_recovery_checkpoints(target, full=True)
+    full_lineage = _check_run_lineage(target, full=True)
+    replacements = {
+        _RECOVERY_CHECKPOINTS_NAME: full_recovery,
+        _LINEAGE_CHECK_NAME: full_lineage,
+    }
     replaced: List[ScopedCheckResult] = []
     for check in checks:
         status, name, detail, scope = _normalize_scoped_check(check)
-        if name == _RECOVERY_CHECKPOINTS_NAME:
+        if name in replacements:
+            full_status, _name, full_detail = replacements[name]
             replaced.append(_scoped_check(full_status, name, full_detail, scope))
         else:
             replaced.append((status, name, detail, scope))

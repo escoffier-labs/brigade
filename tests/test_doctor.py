@@ -2877,3 +2877,66 @@ def test_doctor_lineage_check_reports_missing_branch_point_event(tmp_path: Path)
     status2, _name, detail2 = doctor_mod._check_run_lineage(workspace)
     assert status2 == doctor_mod.WARN  # first child still reported
     assert "child2" not in detail2.split("findings")[1]
+
+
+def test_doctor_full_lineage_flags_inconsistent_child_beyond_scan_limit(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    _lineage_child_run(runs_root, "old-orphan", "gone-parent", "gone-event")
+    old = runs_root / "old-orphan"
+    os.utime(old, (1_000_000.0, 1_000_000.0))
+
+    newer_epoch = 2_000_000.0
+    for index in range(doctor_mod._RUN_LINEAGE_SCAN_LIMIT):
+        name = f"newer-{index:02d}"
+        dummy = runs_root / name
+        dummy.mkdir(parents=True)
+        (dummy / "run.json").write_text(json.dumps({"status": "ok"}) + "\n")
+        os.utime(dummy, (newer_epoch + index, newer_epoch + index))
+
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+    assert "old-orphan" not in detail
+    assert "not_examined=1" in detail
+    assert "brigade doctor --full" in detail
+    assert status == doctor_mod.WARN
+
+    status_full, _name, detail_full = doctor_mod._check_run_lineage(workspace, full=True)
+    assert status_full == doctor_mod.WARN
+    assert "old-orphan" in detail_full
+    assert "parent run directory missing: gone-parent" in detail_full
+    assert "not_examined=" not in detail_full
+
+    bounded = doctor_mod._normalize_scoped_check(doctor_mod._check_run_lineage(workspace))
+    replaced = doctor_mod._replace_recovery_check_with_full([bounded], workspace)
+    assert replaced[0][2] == detail_full
+    assert "old-orphan" in replaced[0][2]
+
+
+def test_doctor_lineage_rejects_path_valued_parent_run_id(tmp_path: Path, monkeypatch):
+    from brigade import run_journal
+
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    evil = tmp_path / "evil"
+    event_id = _lineage_parent_run(workspace, evil)
+    _lineage_child_run(runs_root, "trav-child", "../evil", event_id)
+    _lineage_child_run(runs_root, "abs-child", str(evil.resolve()), event_id)
+
+    journal_reads: list[Path] = []
+    real_read = run_journal.read_journal_bounded
+
+    def _tracking_read(path, *args, **kwargs):
+        journal_reads.append(Path(path).resolve())
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", _tracking_read)
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+
+    assert status == doctor_mod.WARN
+    assert "malformed parent run id: ../evil" in detail
+    assert "trav-child" in detail
+    assert "abs-child" in detail
+    assert "malformed parent run id:" in detail
+    evil_root = evil.resolve()
+    assert all(evil_root not in path.parents and path != evil_root for path in journal_reads)
+    assert all(runs_root.resolve() in path.parents or path == runs_root.resolve() for path in journal_reads)
