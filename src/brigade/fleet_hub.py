@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 SCHEMA_VERSION = 1
 DEFAULT_PORT = 3774
@@ -43,7 +44,8 @@ EVENT_FIELDS = {
 }
 OPTIONAL_STR_FIELDS = ("repo", "seat", "harness")
 
-TERMINAL_STATES = frozenset({"run.completed", "run.failed", "run.cancelled", "run.aborted"})
+# Terminal run_event.v1 lifecycle types (see run_events.EVENT_TYPES).
+TERMINAL_STATES = frozenset({"run.completed", "run.failed", "run.interrupted"})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -71,12 +73,25 @@ def _utc_now() -> str:
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:
+    """Open the hub database, creating the schema on first use.
+
+    WAL mode for concurrent readers; ``PRAGMA user_version`` records the schema
+    version. A database written by a newer hub is refused rather than
+    silently reinterpreted.
+    """
     db_path = Path(db_path).expanduser()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current > SCHEMA_VERSION:
+        conn.close()
+        raise FleetHubError(
+            f"fleet hub database {db_path} has schema version {current}; this brigade supports {SCHEMA_VERSION}"
+        )
     conn.execute(_SCHEMA)
+    conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     conn.commit()
     return conn
@@ -113,11 +128,11 @@ def store_events(conn: sqlite3.Connection, raw_events: Any) -> dict[str, int]:
         raise FleetHubError("body must be an event object or array of events")
     if len(raw_list) > 1000:
         raise FleetHubError("too many events in one POST (max 1000)")
+    events = [_validate_event(raw) for raw in raw_list]
     accepted = 0
     duplicate = 0
     received_at = _utc_now()
-    for raw in raw_list:
-        event = _validate_event(raw)
+    for event in events:
         cursor = conn.execute(
             "INSERT OR IGNORE INTO events "
             "(node_id, run_id, sequence, digest, repo, seat, harness, state, ts, received_at) "
@@ -215,8 +230,12 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
                 if not self._authorized():
                     self._send_json(401, {"error": "unauthorized"})
                     return
-                include_all = query in ("all=1", "all=true")
-                conn = init_db(Path(db_path))
+                include_all = parse_qs(query).get("all", [""])[0].lower() in ("1", "true", "yes")
+                try:
+                    conn = init_db(Path(db_path))
+                except FleetHubError as exc:
+                    self._send_json(500, {"error": str(exc)})
+                    return
                 try:
                     self._send_json(200, {"runs": latest_status(conn, include_all=include_all)})
                 finally:
@@ -246,7 +265,11 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self._send_json(400, {"error": "body is not valid JSON"})
                 return
-            conn = init_db(Path(db_path))
+            try:
+                conn = init_db(Path(db_path))
+            except FleetHubError as exc:
+                self._send_json(500, {"error": str(exc)})
+                return
             try:
                 counts = store_events(conn, parsed)
             except FleetHubError as exc:
