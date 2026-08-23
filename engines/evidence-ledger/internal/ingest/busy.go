@@ -21,6 +21,22 @@ type sqliteResultCoder interface {
 	Code() int
 }
 
+// busyRetryExhaustedError keeps the SQLite result code available to callers
+// after RetryOnBusy replaces the driver text with a holder diagnosis.
+type busyRetryExhaustedError struct {
+	attempts  int
+	diagnosis string
+	code      int
+}
+
+func (e busyRetryExhaustedError) Error() string {
+	return fmt.Sprintf("evidence database still locked after %d retries; %s", e.attempts, e.diagnosis)
+}
+
+func (e busyRetryExhaustedError) Code() int {
+	return e.code
+}
+
 // DefaultBusyRetries is the number of attempts (initial try plus retries)
 // around an import or backfill that hits a BUSY-family lock.
 const DefaultBusyRetries = 4
@@ -149,7 +165,8 @@ func RetryOnBusy(fn func() error, opts BusyRetryOptions) error {
 			diag = text
 		}
 	}
-	return fmt.Errorf("evidence database still locked after %d retries; %s", opts.Attempts, diag)
+	code, _ := sqliteErrorCode(last)
+	return busyRetryExhaustedError{attempts: opts.Attempts, diagnosis: diag, code: code}
 }
 
 // DiagnoseLockHolder names the evidence database and any process that
