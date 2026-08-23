@@ -472,6 +472,23 @@ def run_cursor(
         env=child_env,
         process_registry=process_registry,
     )
+    if result.output_limit_exceeded:
+        detail = (result.stderr.strip() or f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit")[:200]
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=detail,
+            failure_phase="harness",
+            failure_kind="output-limit",
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.code,
+            timed_out=result.code == 124,
+            transport="acpx",
+            requested_model=model,
+            acpx_version=installed,
+            safe_events=(auth_event,),
+        )
     if result.decode_failed:
         detail = (result.stderr.strip() or result.decode_failure_detail)[:200]
         return AgentResult(

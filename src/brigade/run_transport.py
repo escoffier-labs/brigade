@@ -32,6 +32,12 @@ INJECTION_QUARANTINE_KIND = "injection-quarantine"
 INVALID_ENDPOINT_HOST = "invalid-endpoint"
 
 
+def _bound_capture_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return proc.bound_text(value, proc.MAX_CAPTURE_BYTES)
+
+
 @dataclass(frozen=True)
 class Assignment:
     worker: str
@@ -815,8 +821,9 @@ def dispatch(
             terminal_agent: Agent,
             attempts: list[WorkerAttempt] | None = None,
         ) -> WorkerResult:
+            bounded_text = message_envelope.truncate_utf8(result.text)
             captured = message_envelope.emit(
-                result.text,
+                bounded_text,
                 kind="worker-result",
                 producer=worker_producer,
                 from_seat=terminal_agent.name,
@@ -826,7 +833,7 @@ def dispatch(
                 assignment_id=message_envelope.assignment_id_for(assignment.worker, assignment.task),
                 session_harness=terminal_agent.cli,
             )
-            delivered_text = result.text if captured.delivered else ""
+            delivered_text = bounded_text if captured.delivered else ""
             delivered_ok = result.ok if captured.delivered else False
             delivered_detail = result.detail if captured.delivered else (captured.reason or result.detail)
             return WorkerResult(
@@ -835,13 +842,17 @@ def dispatch(
                 text=delivered_text,
                 ok=delivered_ok,
                 detail=delivered_detail,
-                failure_phase=result.failure_phase if captured.delivered else "dispatch",
-                failure_kind=result.failure_kind if captured.delivered else "unclassified",
+                failure_phase=(
+                    result.failure_phase if captured.delivered or result.failure_phase is not None else "dispatch"
+                ),
+                failure_kind=(
+                    result.failure_kind if captured.delivered or result.failure_kind is not None else "unclassified"
+                ),
                 transport_warning=result.transport_warning,
                 thread_id=result.thread_id,
                 status=result.status,
-                stdout=result.stdout,
-                stderr=result.stderr,
+                stdout=_bound_capture_text(result.stdout),
+                stderr=_bound_capture_text(result.stderr),
                 exit_code=result.exit_code,
                 timed_out=result.timed_out,
                 duration_seconds=max(0.0, round(time.monotonic() - started, 3)),

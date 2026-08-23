@@ -2781,3 +2781,216 @@ def test_doctor_authority_base_stripped_never_mutates_run_tree(tmp_path: Path, m
         assert before == after, f"authority verdict mutated the run tree under {_label}"
         (run_dir / "run.json").write_bytes(projected_bytes)
         monkeypatch.undo()
+
+
+def _lineage_child_run(runs_root: Path, name: str, parent_id: str, branch_event_id: str) -> Path:
+    run_dir = runs_root / name
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run.v1",
+                "status": "ok",
+                "started_at": "2026-08-17T13:00:00Z",
+                "finished_at": "2026-08-17T13:00:01Z",
+                "lineage": {
+                    "kind": "child",
+                    "parent_run_id": parent_id,
+                    "branch_point_event_id": branch_event_id,
+                },
+            }
+        )
+        + "\n"
+    )
+    return run_dir
+
+
+def _lineage_parent_run(workspace: Path, parent_dir: Path) -> str:
+    """Create a minimal journal-bearing parent; return one recorded event id."""
+    from brigade import run_lifecycle, runguard
+
+    parent_dir.mkdir(parents=True)
+    localio_json = {
+        "schema": "brigade.run.v1",
+        "status": "ok",
+        "cwd": str(workspace),
+        "lock_workspace": str(workspace),
+        "started_at": "2026-08-17T12:00:00Z",
+        "finished_at": "2026-08-17T12:00:02Z",
+        "lifecycle_journal_requested": True,
+    }
+    (parent_dir / "run.json").write_text(json.dumps(localio_json) + "\n")
+    with runguard.run_lock(workspace, run_dir=parent_dir):
+        run_lifecycle.prepare_lifecycle_journal(parent_dir, workspace=workspace)
+        run_lifecycle.record_lifecycle_event(
+            parent_dir,
+            event_type="run.completed",
+            payload={"status": "ok"},
+            idempotency_key="lineage-parent-completed",
+            workspace=workspace,
+        )
+    from brigade import run_journal
+
+    report = run_journal.read_journal_bounded(run_lifecycle._journal_path(parent_dir))
+    return report.events[-1].event_id
+
+
+def test_doctor_lineage_check_accepts_legacy_roots(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    legacy = runs_root / "legacy"
+    legacy.mkdir(parents=True)
+    (legacy / "run.json").write_text(json.dumps({"status": "ok"}) + "\n")
+
+    status, name, detail = doctor_mod._check_run_lineage(workspace)
+
+    assert status == doctor_mod.OK
+    assert name == "runs: lineage consistency"
+    assert "children=0" in detail
+    assert "findings" not in detail
+
+
+def test_doctor_lineage_check_reports_missing_parent_directory(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    _lineage_child_run(runs_root, "orphan", "gone-parent", "gone-event")
+
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+
+    assert status == doctor_mod.WARN
+    assert "parent run directory missing: gone-parent" in detail
+
+
+def test_doctor_lineage_check_reports_missing_branch_point_event(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    event_id = _lineage_parent_run(workspace, runs_root / "parent")
+    _lineage_child_run(runs_root, "child", "parent", "no-such-event-id")
+
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+
+    assert status == doctor_mod.WARN
+    assert "branch point event absent from parent journal: no-such-event-id" in detail
+
+    # The real branch point verifies cleanly.
+    _lineage_child_run(runs_root, "child2", "parent", event_id)
+    status2, _name, detail2 = doctor_mod._check_run_lineage(workspace)
+    assert status2 == doctor_mod.WARN  # first child still reported
+    assert "child2" not in detail2.split("findings")[1]
+
+
+def test_doctor_lineage_rejects_symlinked_parent_without_following(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    # An external directory the attacker controls, with its own valid journal.
+    external = tmp_path / "external-parent"
+    _lineage_parent_run(workspace, external)
+    # A child names a sibling "parent" that is really a symlink to the external dir.
+    (runs_root / "parent").symlink_to(external, target_is_directory=True)
+    _lineage_child_run(runs_root, "child", "parent", "any-event")
+
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+
+    # The symlinked parent is treated as missing, not followed to the external journal.
+    assert status == doctor_mod.WARN
+    assert "parent run directory missing: parent" in detail
+
+
+def test_doctor_lineage_counts_journal_terminal_run_as_terminal(tmp_path: Path):
+    from brigade import run_lifecycle, runguard
+
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    run_dir = runs_root / "stale"
+    run_dir.mkdir(parents=True)
+    # run.json says running, but the journal durably recorded run.completed.
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run.v1",
+                "status": "running",
+                "cwd": str(workspace),
+                "lock_workspace": str(workspace),
+                "started_at": "2026-08-17T12:00:00Z",
+                "lifecycle_journal_requested": True,
+            }
+        )
+        + "\n"
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="run.completed",
+            payload={"status": "ok"},
+            idempotency_key="stale-completed",
+            workspace=workspace,
+        )
+
+    _status, _name, detail = doctor_mod._check_run_lineage(workspace)
+    # Doctor must agree with inspect/show, which read the journal: terminal=1.
+    assert "terminal=1" in detail
+
+
+def test_doctor_full_lineage_flags_inconsistent_child_beyond_scan_limit(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    _lineage_child_run(runs_root, "old-orphan", "gone-parent", "gone-event")
+    old = runs_root / "old-orphan"
+    os.utime(old, (1_000_000.0, 1_000_000.0))
+
+    newer_epoch = 2_000_000.0
+    for index in range(doctor_mod._RUN_LINEAGE_SCAN_LIMIT):
+        name = f"newer-{index:02d}"
+        dummy = runs_root / name
+        dummy.mkdir(parents=True)
+        (dummy / "run.json").write_text(json.dumps({"status": "ok"}) + "\n")
+        os.utime(dummy, (newer_epoch + index, newer_epoch + index))
+
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+    assert "old-orphan" not in detail
+    assert "not_examined=1" in detail
+    assert "brigade doctor --full" in detail
+    assert status == doctor_mod.WARN
+
+    status_full, _name, detail_full = doctor_mod._check_run_lineage(workspace, full=True)
+    assert status_full == doctor_mod.WARN
+    assert "old-orphan" in detail_full
+    assert "parent run directory missing: gone-parent" in detail_full
+    assert "not_examined=" not in detail_full
+
+    bounded = doctor_mod._normalize_scoped_check(doctor_mod._check_run_lineage(workspace))
+    replaced = doctor_mod._replace_recovery_check_with_full([bounded], workspace)
+    assert replaced[0][2] == detail_full
+    assert "old-orphan" in replaced[0][2]
+
+
+def test_doctor_lineage_rejects_path_valued_parent_run_id(tmp_path: Path, monkeypatch):
+    from brigade import run_journal
+
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    evil = tmp_path / "evil"
+    event_id = _lineage_parent_run(workspace, evil)
+    _lineage_child_run(runs_root, "trav-child", "../evil", event_id)
+    _lineage_child_run(runs_root, "abs-child", str(evil.resolve()), event_id)
+
+    journal_reads: list[Path] = []
+    real_read = run_journal.read_journal_bounded
+
+    def _tracking_read(path, *args, **kwargs):
+        journal_reads.append(Path(path).resolve())
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", _tracking_read)
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+
+    assert status == doctor_mod.WARN
+    assert "malformed parent run id: ../evil" in detail
+    assert "trav-child" in detail
+    assert "abs-child" in detail
+    assert "malformed parent run id:" in detail
+    evil_root = evil.resolve()
+    assert all(evil_root not in path.parents and path != evil_root for path in journal_reads)
+    assert all(runs_root.resolve() in path.parents or path == runs_root.resolve() for path in journal_reads)
