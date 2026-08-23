@@ -99,6 +99,7 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
     checks.append(_check_recovery_checkpoints(ctx.target))
     checks.extend(_check_journal_event_headroom(ctx.target))
+    checks.append(_check_run_lineage(ctx.target))
     checks.extend(_check_outcome_loop(ctx))
     checks.extend(_check_directory_authority(ctx.target))
     return checks
@@ -249,6 +250,100 @@ def _check_journal_event_headroom(target: Path) -> List[CheckResult]:
                 )
             )
     return checks
+
+
+_LINEAGE_CHECK_NAME = "runs: lineage consistency"
+_RUN_LINEAGE_SCAN_LIMIT = 50
+_RUN_LINEAGE_FINDING_PREVIEW = 8
+
+
+def _check_run_lineage(target: Path, *, full: bool = False) -> CheckResult:
+    """Read-only lineage-consistency verdict across recorded runs (#594).
+
+    Children whose parent run directory is missing, or whose branch-point
+    event id is absent from the parent journal, are findings — never crashes.
+    Legacy runs without lineage metadata are valid roots.
+
+    The default path examines the newest ``_RUN_LINEAGE_SCAN_LIMIT`` run
+    directories. ``full=True`` (``doctor --full``) scans every run. A
+    bounded pass that skips directories WARNs with ``not_examined=N`` so
+    the cap is never a silent OK.
+    """
+    from brigade import run_journal, run_lifecycle, runs_cmd
+
+    runs_root = target / ".brigade" / "runs"
+    all_dirs, scan_omitted = _immediate_run_dirs(runs_root)
+    if full:
+        scanned = all_dirs
+        not_examined = 0
+    else:
+        scanned = all_dirs[:_RUN_LINEAGE_SCAN_LIMIT]
+        not_examined = len(all_dirs) - len(scanned)
+
+    roots = 0
+    children = 0
+    terminal_runs = 0
+    findings: list[str] = []
+    for run_dir in scanned:
+        meta = _read_run_meta_fail_safe(run_dir / "run.json")
+        if meta is None:
+            continue
+        if runs_cmd._run_display_is_terminal(run_dir, meta):
+            terminal_runs += 1
+        lineage = meta.get("lineage")
+        if not isinstance(lineage, dict):
+            roots += 1
+            continue
+        children += 1
+        parent_id = lineage.get("parent_run_id")
+        if not isinstance(parent_id, str) or not parent_id:
+            findings.append(f"{run_dir.name} (child lineage has no parent run id)")
+            continue
+        parent_dir = runs_cmd._resolve_sibling_run_dir(runs_root, parent_id)
+        if parent_dir is None:
+            findings.append(f"{run_dir.name} (malformed parent run id: {parent_id})")
+            continue
+        try:
+            # A symlinked parent could point outside the runs root; treat it as
+            # missing rather than following it to an external journal.
+            parent_missing = parent_dir.is_symlink() or not parent_dir.is_dir()
+        except OSError:
+            parent_missing = True
+        if parent_missing:
+            findings.append(f"{run_dir.name} (parent run directory missing: {parent_id})")
+            continue
+        branch_event_id = lineage.get("branch_point_event_id")
+        if not isinstance(branch_event_id, str) or not branch_event_id:
+            findings.append(f"{run_dir.name} (child lineage has no branch point event id)")
+            continue
+        journal_path = run_lifecycle._journal_path(parent_dir)
+        try:
+            if not journal_path.is_file():
+                findings.append(f"{run_dir.name} (parent {parent_id} has no lifecycle journal to verify branch point)")
+                continue
+            report = run_journal.read_journal_bounded(journal_path)
+        except (OSError, run_journal.RunJournalError):
+            findings.append(f"{run_dir.name} (parent {parent_id} journal unreadable)")
+            continue
+        if report.partial_tail is not None or report.chain_errors:
+            findings.append(f"{run_dir.name} (parent {parent_id} journal corrupt)")
+            continue
+        if not any(event.event_id == branch_event_id for event in report.events):
+            findings.append(f"{run_dir.name} (branch point event absent from parent journal: {branch_event_id})")
+
+    detail = f"roots={roots} children={children} terminal={terminal_runs} scanned={len(scanned)} omitted={scan_omitted}"
+    if not_examined:
+        detail = f"{detail} not_examined={not_examined} (capped; run `brigade doctor --full`)"
+    if findings:
+        shown = findings[:_RUN_LINEAGE_FINDING_PREVIEW]
+        detail = f"{detail}; findings: {'; '.join(shown)}"
+        remaining = len(findings) - len(shown)
+        if remaining > 0:
+            detail = f"{detail}, ... {remaining} more"
+        return (WARN, _LINEAGE_CHECK_NAME, detail)
+    if not_examined:
+        return (WARN, _LINEAGE_CHECK_NAME, detail)
+    return (OK, _LINEAGE_CHECK_NAME, detail)
 
 
 def _check_recovery_checkpoints(target: Path, *, full: bool = False) -> CheckResult:
@@ -879,17 +974,24 @@ def _replace_recovery_check_with_full(
     checks: List[ScopedCheckResult],
     target: Path,
 ) -> List[ScopedCheckResult]:
-    """Swap the bounded recovery-checkpoint aggregate for the exhaustive one.
+    """Swap bounded recovery-checkpoint and lineage aggregates for exhaustive ones.
 
-    The public station callback always emits the bounded (8-preview) verdict so
-    its contract stays unchanged; ``run --full`` re-runs the check with
+    The public station callback always emits the bounded verdict so its
+    contract stays unchanged; ``run --full`` re-runs each check with
     ``full=True`` and substitutes it in place, preserving the original scope.
+    Lineage's full pass drops the newest-50 cap and examines every run.
     """
-    full_status, _name, full_detail = _check_recovery_checkpoints(target, full=True)
+    full_recovery = _check_recovery_checkpoints(target, full=True)
+    full_lineage = _check_run_lineage(target, full=True)
+    replacements = {
+        _RECOVERY_CHECKPOINTS_NAME: full_recovery,
+        _LINEAGE_CHECK_NAME: full_lineage,
+    }
     replaced: List[ScopedCheckResult] = []
     for check in checks:
         status, name, detail, scope = _normalize_scoped_check(check)
-        if name == _RECOVERY_CHECKPOINTS_NAME:
+        if name in replacements:
+            full_status, _name, full_detail = replacements[name]
             replaced.append(_scoped_check(full_status, name, full_detail, scope))
         else:
             replaced.append((status, name, detail, scope))

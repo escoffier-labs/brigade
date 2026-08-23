@@ -4164,3 +4164,222 @@ def test_runs_recover_authority_projection_failure_fails_closed(tmp_path, monkey
     err = capsys.readouterr().err
     assert "projection failed" in err
     assert "raw projector detail" not in err
+
+
+def test_runs_inspect_shows_child_lineage_and_children(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    capsys.readouterr()
+
+    assert runs_cmd.inspect(parent_dir.name, cwd=workspace) == 0
+    out = capsys.readouterr().out
+    assert f"run: {parent_dir}" in out
+    assert f"run id: {parent_dir.name}" in out
+    assert "children:" in out
+    assert child_dir.name in out
+    assert "terminal:" in out
+
+    assert runs_cmd.inspect(child_dir, cwd=workspace) == 0
+    out = capsys.readouterr().out
+    assert "kind: child" in out
+    assert f"parent run: {parent_dir.name}" in out
+    assert f"branch point: {events[-1].event_id}" in out
+
+
+def test_runs_inspect_legacy_root_has_no_lineage(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    _write_minimal_run(
+        runs_root / "legacy",
+        task="legacy task",
+        status="ok",
+        started_at="2026-05-26T14:00:00Z",
+    )
+
+    assert runs_cmd.inspect("legacy", cwd=workspace) == 0
+    out = capsys.readouterr().out
+    assert "lineage:" not in out
+    assert "terminal: yes" in out
+
+
+def test_runs_inspect_running_run_is_not_terminal(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    _write_minimal_run(
+        runs_root / "active",
+        task="running task",
+        status="running",
+        started_at="2026-05-26T14:00:00Z",
+    )
+
+    assert runs_cmd.inspect("active", cwd=workspace) == 0
+    assert "terminal: no" in capsys.readouterr().out
+
+
+def test_runs_inspect_reports_unknown_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    (workspace / ".brigade" / "runs").mkdir(parents=True)
+
+    assert runs_cmd.inspect("no-such-run", cwd=workspace) == 2
+    assert "run directory not found" in capsys.readouterr().err
+
+
+def test_runs_inspect_reports_corrupt_run_json(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    (runs_root / "broken").mkdir()
+    (runs_root / "broken" / "run.json").write_text("not json")
+
+    assert runs_cmd.inspect("broken", cwd=workspace) == 2
+    assert "run.json is not valid JSON" in capsys.readouterr().err
+
+
+def test_runs_inspect_reports_corrupt_own_journal(tmp_path, capsys):
+    from brigade import run_lifecycle
+
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    run_dir = runs_root / "broken"
+    _write_minimal_run(run_dir, task="task", status="ok", started_at="2026-08-17T13:00:00Z")
+    journal = run_lifecycle._journal_path(run_dir)
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b'{"partial":')
+
+    assert runs_cmd.inspect(run_dir.name, cwd=workspace) == 2
+    assert "lifecycle journal" in capsys.readouterr().err
+
+
+def test_runs_inspect_survives_journal_oserror(tmp_path, capsys, monkeypatch):
+    from brigade import run_journal, run_lifecycle
+
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    run_dir = runs_root / "unreadable"
+    _write_minimal_run(run_dir, task="task", status="running", started_at="2026-08-17T13:00:00Z")
+    journal = run_lifecycle._journal_path(run_dir)
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b'{"event":"run.started"}\n')
+
+    def _boom(_path):
+        raise OSError("simulated I/O error")
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", _boom)
+
+    # A journal that raises OSError must yield a controlled diagnostic, not a crash.
+    assert runs_cmd.inspect(run_dir.name, cwd=workspace) == 2
+    assert "lifecycle journal" in capsys.readouterr().err
+    # show must still render (terminal derivation falls back, no exception).
+    assert runs_cmd.show(run_dir) == 0
+    assert "terminal:" in capsys.readouterr().out
+
+
+def test_runs_show_prints_terminal_line(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    done = runs_root / "done"
+    _write_minimal_run(done, task="finished", status="ok", started_at="2026-05-26T14:00:00Z")
+    active = runs_root / "active"
+    _write_minimal_run(active, task="in flight", status="running", started_at="2026-05-26T15:00:00Z")
+
+    assert runs_cmd.show(done) == 0
+    assert "terminal: yes" in capsys.readouterr().out
+
+    assert runs_cmd.show(active) == 0
+    assert "terminal: no" in capsys.readouterr().out
+
+
+def _write_stale_snapshot_with_terminal_journal(workspace: Path, run_dir: Path) -> str:
+    """Journal has run.completed; run.json still says running. Return event id."""
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run.v1",
+                "status": "running",
+                "cwd": str(workspace),
+                "lock_workspace": str(workspace),
+                "started_at": "2026-08-17T12:00:00Z",
+                "lifecycle_journal_requested": True,
+            }
+        )
+        + "\n"
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="run.completed",
+            payload={"status": "ok"},
+            idempotency_key="stale-completed",
+            workspace=workspace,
+        )
+    stale = json.loads((run_dir / "run.json").read_text())
+    stale["status"] = "running"
+    stale.pop("finished_at", None)
+    (run_dir / "run.json").write_text(json.dumps(stale) + "\n")
+    report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
+    terminal = next(event for event in report.events if event.event_type == "run.completed")
+    return terminal.event_id
+
+
+def test_inspect_show_detail_treat_journal_terminal_as_terminal_when_run_json_stale(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "crashed"
+    event_id = _write_stale_snapshot_with_terminal_journal(workspace, run_dir)
+
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta.get("status") == "running"
+    assert not meta.get("finished_at")
+    assert runs_cmd._is_terminal(meta) is False
+
+    assert runs_cmd.inspect(run_dir.name, cwd=workspace) == 0
+    inspect_out = capsys.readouterr().out
+    assert "terminal: yes" in inspect_out
+    assert f"terminal event: {event_id}" in inspect_out
+    assert "terminal: no" not in inspect_out
+
+    assert runs_cmd.show(run_dir) == 0
+    show_out = capsys.readouterr().out
+    assert "terminal: yes" in show_out
+    assert "terminal: no" not in show_out
+
+    payload, diagnostic, _rc = runs_cmd.run_detail_contract(run_dir)
+    assert diagnostic is None
+    assert payload is not None
+    assert payload["run"]["terminal"] == "terminal"
+
+
+def test_bare_run_id_rejects_path_valued_parent_ids():
+    assert runs_cmd._is_bare_run_id("20260817-120000-parent-aaaaaa") is True
+    assert runs_cmd._is_bare_run_id("legacy") is True
+    assert runs_cmd._is_bare_run_id("../evil") is False
+    assert runs_cmd._is_bare_run_id("..") is False
+    assert runs_cmd._is_bare_run_id("/tmp/evil") is False
+    assert runs_cmd._is_bare_run_id("parent/../evil") is False
+    assert runs_cmd._resolve_sibling_run_dir(Path("runs-root"), "../evil") is None
+
+
+def test_validate_child_branch_point_rejects_traversal_parent_id(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    child_dir = workspace / ".brigade" / "runs" / "child"
+    child_dir.mkdir(parents=True)
+    lineage = {
+        "kind": "child",
+        "parent_run_id": "../evil",
+        "branch_point_event_id": "evt-1",
+    }
+    _event, parent_dir, error = runs_cmd._validate_child_branch_point(child_dir, lineage)
+    assert _event is None
+    assert parent_dir is None
+    assert error is not None
+    assert "malformed parent_run_id" in error
