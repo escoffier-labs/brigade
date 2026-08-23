@@ -837,6 +837,14 @@ def repo_claim(
                 outcome = acquire_claim(
                     target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds
                 )
+                if not outcome.granted and outcome.reason == "hub-unavailable":
+                    _schedule_orphan_release(
+                        target,
+                        node_id=node_id,
+                        holder=holder,
+                        conductor=conductor,
+                        ttl_seconds=ttl_seconds,
+                    )
             if outcome.granted:
                 warned_unavailable = False
                 continue

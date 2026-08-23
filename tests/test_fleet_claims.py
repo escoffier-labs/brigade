@@ -439,6 +439,46 @@ class TestClientClaims:
             assert reacquired, "heartbeat never re-acquired the lost claim"
         assert fleet_client.fetch_claims() == []
 
+    def test_timed_out_heartbeat_reacquire_releases_orphan(self, hub, monkeypatch):
+        """A re-acquire that commits after its deadline is released after exit."""
+        url, token, db = hub
+        self._env(monkeypatch, url, token)
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.01)
+        monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 0.15)
+        real = fleet_client._post_claim_blocking
+        reacquire_started = threading.Event()
+        reacquire_finished = threading.Event()
+        acquire_calls = 0
+
+        def delayed_reacquire(hub_url, tok, body, *, timeout):
+            nonlocal acquire_calls
+            if body["action"] == "acquire":
+                acquire_calls += 1
+                if acquire_calls == 2:
+                    reacquire_started.set()
+                    time.sleep(0.1)
+                    result = real(hub_url, tok, body, timeout=timeout)
+                    reacquire_finished.set()
+                    return result
+            return real(hub_url, tok, body, timeout=timeout)
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", delayed_reacquire)
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60):
+            conn = fleet_hub.init_db(db)
+            try:
+                conn.execute("DELETE FROM claims")
+                conn.commit()
+            finally:
+                conn.close()
+            assert reacquire_started.wait(5)
+
+        assert reacquire_finished.wait(5), "abandoned re-acquire never reached the hub"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and fleet_client.fetch_claims(include_all=True):
+            time.sleep(0.02)
+        assert fleet_client.fetch_claims(include_all=True) == [], "timed-out re-acquire left an orphaned claim"
+
     def test_release_with_renew_in_flight_never_resurrects(self, hub, monkeypatch):
         """A heartbeat renew that lands after release must not re-acquire the
         row: the released target stays free instead of leaking for a TTL."""

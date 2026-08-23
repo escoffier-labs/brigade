@@ -86,5 +86,17 @@ after the journal write completes and the lock is released):
   sequence. `brigade fleet flush` drains it explicitly.
 - `brigade fleet status [--all] [--json]`.
 
+## Phase 4 claims
+
+The claim key is the bare workspace directory name, matching the `repo` key
+on fleet events. Unrelated repositories with the same directory basename
+therefore arbitrate against each other. Separate worktrees of one repository
+have different directory names and do not arbitrate against each other.
+
+Claims are best-effort protection layered over the local run lock. If the hub
+rejects the configured token with HTTP 401, the client logs one WARNING and
+continues under the local lock alone, just as it does when the hub is
+unreachable.
+
 Run the hub under a process supervisor on the CT, e.g.
 `brigade fleet serve --host "$(tailscale ip -4)" --token-file /etc/brigade/fleet-token`.
