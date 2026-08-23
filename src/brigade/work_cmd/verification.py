@@ -327,6 +327,13 @@ def _verify_execution_argv(argv: list[str], target: Path) -> list[str]:
 _VERIFY_CANCELED_RC = 130
 _VERIFY_INTERRUPTED_COMMAND_STATUS = "interrupted"
 _VERIFY_CANCELED_RECEIPT_STATUS = "canceled"
+_TREE_FINGERPRINT_EVIDENCE_PATHS = (
+    ".brigade/work/verify-runs",
+    "memory/outcome/records.jsonl",
+    "memory/outcome/.records.lock",
+    ".brigade/work/miseledger-export-cursor.json",
+    ":(glob).brigade/work/miseledger-export-*.jsonl",
+)
 
 
 def _verify_child_popen_kwargs() -> dict[str, Any]:
@@ -1467,7 +1474,7 @@ def _stamp_harness_session(receipt: dict[str, Any]) -> None:
 
 
 def _tree_fingerprint(target: Path) -> str | None:
-    """Git tree object for HEAD plus tracked and non-ignored untracked files."""
+    """Git tree object for HEAD plus substantive tracked and untracked writes."""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             index_file = Path(tmpdir) / "index"
@@ -1476,6 +1483,17 @@ def _tree_fingerprint(target: Path) -> str | None:
                 return None
             add_all = _git_with_index(target, index_file, "add", "-A")
             if add_all.returncode != 0:
+                return None
+            reset_evidence = _git_with_index(
+                target,
+                index_file,
+                "reset",
+                "-q",
+                "HEAD",
+                "--",
+                *_TREE_FINGERPRINT_EVIDENCE_PATHS,
+            )
+            if reset_evidence.returncode != 0:
                 return None
             write_tree = _git_with_index(target, index_file, "write-tree")
             if write_tree.returncode != 0:
