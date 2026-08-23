@@ -62,8 +62,8 @@ def _get(url: str, path: str, token: str | None) -> tuple[int, dict]:
         return exc.code, json.loads(exc.read())
 
 
-def _claim(action: str = "acquire", node: str = NODE_A, target: str = "repo-a", **extra) -> dict:
-    return {"action": action, "node_id": node, "target": target, **extra}
+def _claim(action: str = "acquire", node: str = NODE_A, target: str = "repo-a", holder: str = "h1", **extra) -> dict:
+    return {"action": action, "node_id": node, "target": target, "holder": holder, **extra}
 
 
 class TestHubClaims:
@@ -82,12 +82,14 @@ class TestHubClaims:
         assert claim["owner_node"] == NODE_A
         assert claim["ttl_seconds"] == 120
         assert claim["expires_at"] > claim["acquired_at"]
+        assert "holder_token" not in claim  # the fencing token is never echoed
         # Machine B collides: one winner, one refusal naming the owner.
-        status, payload = _post(url, token, _claim(node=NODE_B))
+        status, payload = _post(url, token, _claim(node=NODE_B, holder="h2"))
         assert status == 409 and payload["granted"] is False
         assert NODE_A in payload["error"]
         assert payload["owner"]["owner_node"] == NODE_A
         assert payload["owner"]["expires_at"] == claim["expires_at"]
+        assert "holder_token" not in payload["owner"]
 
     def test_acquire_is_idempotent_for_owner_and_preserves_acquired_at(self, hub, clock):
         url, token, _db = hub
@@ -102,9 +104,9 @@ class TestHubClaims:
         url, token, _db = hub
         assert _post(url, token, _claim(ttl_seconds=100))[1]["granted"] is True
         clock["now"] += 99
-        assert _post(url, token, _claim(node=NODE_B))[0] == 409  # not silently stolen
+        assert _post(url, token, _claim(node=NODE_B, holder="h2"))[0] == 409  # not silently stolen
         clock["now"] += 2  # past the TTL: crashed owner auto-reclaims
-        status, payload = _post(url, token, _claim(node=NODE_B))
+        status, payload = _post(url, token, _claim(node=NODE_B, holder="h2"))
         assert status == 200 and payload["granted"] is True
         assert payload["claim"]["owner_node"] == NODE_B
         # The old owner's renew is refused, not honored.
@@ -147,10 +149,26 @@ class TestHubClaims:
 
     def test_conductor_distinguishes_owners_on_one_node(self, hub):
         url, token, _db = hub
-        assert _post(url, token, _claim(conductor="c1"))[1]["granted"] is True
-        status, payload = _post(url, token, _claim(conductor="c2"))
+        assert _post(url, token, _claim(conductor="c1", holder="hc1"))[1]["granted"] is True
+        status, payload = _post(url, token, _claim(conductor="c2", holder="hc2"))
         assert status == 409 and payload["owner"]["owner_conductor"] == "c1"
-        assert _post(url, token, _claim(conductor="c1"))[1]["granted"] is True
+        assert _post(url, token, _claim(conductor="c1", holder="hc1"))[1]["granted"] is True
+
+    def test_holder_token_fences_sibling_release_and_renew(self, hub):
+        """A sibling run sharing the node identity cannot touch a live claim."""
+        url, token, _db = hub
+        assert _post(url, token, _claim(holder="hA"))[1]["granted"] is True
+        # Same node, same conductor, different (or unknown) fencing token:
+        # release and renew are both refused and the row survives.
+        status, payload = _post(url, token, _claim("release", holder="hB"))
+        assert status == 409 and payload["released"] is False
+        assert payload["owner"]["owner_node"] == NODE_A
+        status, payload = _post(url, token, _claim("renew", holder="hB"))
+        assert status == 409 and payload["renewed"] is False
+        assert [c["target"] for c in _get(url, "/claims", token)[1]["claims"]] == ["repo-a"]
+        # The real holder still can.
+        assert _post(url, token, _claim("renew", holder="hA"))[1]["renewed"] is True
+        assert _post(url, token, _claim("release", holder="hA"))[1]["released"] is True
 
     def test_validation_rejects_malformed_requests(self, hub):
         url, token, _db = hub
@@ -159,7 +177,8 @@ class TestHubClaims:
             {**_claim(), "action": "steal"},
             {**_claim(), "action": None},
             {**_claim(), "target": " "},
-            {"action": "acquire", "target": "repo-a"},
+            {"action": "acquire", "target": "repo-a", "holder": "h1"},
+            {"action": "acquire", "target": "repo-a", "node_id": NODE_A},
             {**_claim(), "ttl_seconds": 0},
             {**_claim(), "ttl_seconds": fleet_hub.CLAIM_TTL_MAX_SECONDS + 1},
             {**_claim(), "ttl_seconds": True},
@@ -169,6 +188,17 @@ class TestHubClaims:
             assert status == 400, bad
             assert "error" in payload
         assert _post(url, token, _claim(ttl_seconds=fleet_hub.CLAIM_TTL_MIN_SECONDS))[0] == 200
+
+    def test_unknown_and_malformed_node_ids_rejected(self, hub):
+        """Two identity-less or cloned nodes must never both be granted."""
+        url, token, _db = hub
+        for bad_id in ("unknown", "a b", "-leading-dash", "x" * 200, "node\nid"):
+            status, payload = _post(url, token, _claim(node=bad_id))
+            assert status == 400, bad_id
+            assert "node_id" in payload["error"]
+        # The holder token gets the same treatment.
+        assert _post(url, token, _claim(holder="unknown"))[0] == 400
+        assert _post(url, token, _claim(holder="h 1"))[0] == 400
 
     def test_claims_listing_filters_expired_unless_all(self, hub, clock):
         url, token, _db = hub
@@ -180,6 +210,20 @@ class TestHubClaims:
         assert active[0]["expired"] is False
         everything = _get(url, "/claims?all=1", token)[1]["claims"]
         assert [(c["target"], c["expired"]) for c in everything] == [("repo-a", True), ("repo-b", False)]
+        assert all("holder_token" not in c for c in everything)
+
+    def test_acquire_prunes_expired_rows(self, hub, clock):
+        url, token, db = hub
+        _post(url, token, _claim(target="repo-a", ttl_seconds=100))
+        _post(url, token, _claim(target="repo-b", ttl_seconds=100))
+        clock["now"] += 200
+        assert _post(url, token, _claim(target="repo-c", holder="h3"))[1]["granted"] is True
+        conn = fleet_hub.init_db(db)
+        try:
+            targets = [r[0] for r in conn.execute("SELECT target FROM claims ORDER BY target").fetchall()]
+        finally:
+            conn.close()
+        assert targets == ["repo-c"]
 
     def test_phase2_database_upgrades_in_place(self, tmp_path):
         db = tmp_path / "phase2.db"
@@ -195,12 +239,30 @@ class TestHubClaims:
         finally:
             conn.close()
 
+    def test_pre_holder_token_claims_table_is_recreated(self, tmp_path):
+        db = tmp_path / "early-v2.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE claims (target TEXT PRIMARY KEY, owner_node TEXT, expires_at REAL)")
+        conn.execute("INSERT INTO claims VALUES ('stale', 'n', 0)")
+        conn.execute("PRAGMA user_version=2")
+        conn.commit()
+        conn.close()
+        conn = fleet_hub.init_db(db)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+            assert "holder_token" in columns
+            assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+        finally:
+            conn.close()
+
 
 class TestClientClaims:
     @pytest.fixture(autouse=True)
     def _home(self, tmp_path, monkeypatch):
         self.home = tmp_path / "brigade-home"
         monkeypatch.setenv("BRIGADE_HOME", str(self.home))
+        # Claims require a real node identity; give these tests one.
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: NODE_A)
 
     def _env(self, monkeypatch, url: str, token: str) -> None:
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
@@ -219,11 +281,13 @@ class TestClientClaims:
     def test_renew_and_release_roundtrip(self, hub, monkeypatch):
         url, token, _db = hub
         self._env(monkeypatch, url, token)
-        fleet_client.acquire_claim("repo-a", node_id=NODE_A)
-        assert fleet_client.renew_claim("repo-a", node_id=NODE_A).granted is True
-        assert fleet_client.renew_claim("repo-a", node_id=NODE_B).reason == "held"
-        assert fleet_client.release_claim("repo-a", node_id=NODE_A).granted is True
-        assert fleet_client.renew_claim("repo-a", node_id=NODE_A).reason == "missing"
+        won = fleet_client.acquire_claim("repo-a", node_id=NODE_A)
+        holder = won.holder
+        assert won.granted is True and holder
+        assert fleet_client.renew_claim("repo-a", node_id=NODE_A, holder=holder).granted is True
+        assert fleet_client.renew_claim("repo-a", node_id=NODE_B, holder="h-other").reason == "held"
+        assert fleet_client.release_claim("repo-a", node_id=NODE_A, holder=holder).granted is True
+        assert fleet_client.renew_claim("repo-a", node_id=NODE_A, holder=holder).reason == "missing"
         assert fleet_client.fetch_claims() == []
 
     def test_no_hub_and_unreachable_hub_reasons(self, monkeypatch):
@@ -267,6 +331,83 @@ class TestClientClaims:
     def test_repo_claim_no_hub_is_noop(self):
         with fleet_client.repo_claim("repo-a") as decision:
             assert decision.reason == "no-hub"
+
+    def test_repo_claim_without_identity_stays_local(self, hub, monkeypatch, caplog):
+        """No usable node identity: never contact the hub, warn, run on the local lock."""
+        url, token, _db = hub
+        self._env(monkeypatch, url, token)
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "unknown")
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            with fleet_client.repo_claim("repo-a") as decision:
+                assert (decision.granted, decision.reason) == (False, "no-identity")
+        assert fleet_client.fetch_claims(include_all=True) == []
+        assert sum("no usable fleet node identity" in r.message for r in caplog.records) == 1
+
+    def test_lost_acquire_response_recovers_with_same_holder(self, hub, monkeypatch):
+        """The hub commits but the response is lost: one retry with the same
+        fencing token is granted idempotently and the run stays protected."""
+        url, token, _db = hub
+        self._env(monkeypatch, url, token)
+        real = fleet_client._post_claim_blocking
+        calls = {"acquire": 0}
+
+        def lossy(hub_url, tok, body, *, timeout):
+            status, payload = real(hub_url, tok, body, timeout=timeout)
+            if body["action"] == "acquire":
+                calls["acquire"] += 1
+                if calls["acquire"] == 1:
+                    raise TimeoutError("response lost after commit")
+            return status, payload
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", lossy)
+        with fleet_client.repo_claim("repo-a") as decision:
+            assert decision.granted is True
+            assert [c["target"] for c in fleet_client.fetch_claims()] == ["repo-a"]
+        assert calls["acquire"] == 2
+        assert fleet_client.fetch_claims() == []
+
+    def test_lost_acquire_twice_schedules_orphan_release(self, hub, monkeypatch):
+        """Both acquire responses lost: fail open locally, but a background
+        release clears the row the hub committed so other machines are not
+        blocked for the full TTL."""
+        url, token, _db = hub
+        self._env(monkeypatch, url, token)
+        monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 0.05)
+        real = fleet_client._post_claim_blocking
+
+        def lossy(hub_url, tok, body, *, timeout):
+            status, payload = real(hub_url, tok, body, timeout=timeout)
+            if body["action"] == "acquire":
+                raise TimeoutError("response lost after commit")
+            return status, payload
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", lossy)
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60) as decision:
+            assert (decision.granted, decision.reason) == (False, "hub-unavailable")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and fleet_client.fetch_claims(include_all=True):
+                time.sleep(0.02)
+            assert fleet_client.fetch_claims(include_all=True) == [], "orphaned claim never released"
+
+    def test_freed_mid_request_is_retried_once(self, hub, monkeypatch):
+        """A 409 with no owner means the target freed mid-request; retry
+        instead of refusing a target nobody holds."""
+        url, token, _db = hub
+        self._env(monkeypatch, url, token)
+        real = fleet_client._post_claim_blocking
+        calls = {"n": 0}
+
+        def freed_once(hub_url, tok, body, *, timeout):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return 409, {"granted": False, "owner": None, "error": "raced"}
+            return real(hub_url, tok, body, timeout=timeout)
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", freed_once)
+        with fleet_client.repo_claim("repo-a") as decision:
+            assert decision.granted is True
+            assert [c["target"] for c in fleet_client.fetch_claims()] == ["repo-a"]
+        assert fleet_client.fetch_claims() == []
 
     def test_repo_claim_heartbeat_renews_and_reacquires(self, hub, monkeypatch):
         url, token, db = hub
@@ -398,6 +539,39 @@ class TestDispatchWiring:
         assert self._run(ws, roster_path) == 0
         assert [(c["target"], c["owner_node"]) for c in held_during_run] == [("ws", identity.node_id)]
         assert fleet_client.fetch_claims() == []
+
+    def test_claim_taken_after_local_lock(self, hub, workspace, monkeypatch):
+        """The hub claim is only ever held by the run that owns run.lock, so a
+        queued sibling can neither run unclaimed nor release the winner's claim."""
+        from contextlib import contextmanager
+
+        from brigade import aboyeur, runguard
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        ws, roster_path = workspace
+        order = []
+        real_lock = runguard.run_lock
+        real_claim = fleet_client.repo_claim
+
+        @contextmanager
+        def tracking_lock(*a, **kw):
+            with real_lock(*a, **kw) as path:
+                order.append("lock")
+                yield path
+
+        @contextmanager
+        def tracking_claim(*a, **kw):
+            with real_claim(*a, **kw) as decision:
+                order.append("claim")
+                yield decision
+
+        monkeypatch.setattr(runguard, "run_lock", tracking_lock)
+        monkeypatch.setattr(fleet_client, "repo_claim", tracking_claim)
+        monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: 0)
+        assert self._run(ws, roster_path) == 0
+        assert order == ["lock", "claim"]
 
     def test_hub_down_falls_back_to_local_lock(self, workspace, monkeypatch):
         from brigade import aboyeur

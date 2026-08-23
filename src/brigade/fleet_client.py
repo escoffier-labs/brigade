@@ -56,7 +56,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
@@ -64,6 +66,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from . import toml_compat as tomllib
 
@@ -555,6 +558,16 @@ def fetch_status(*, hub_url: str | None = None, include_all: bool = False) -> li
 # --- hub-arbitrated claims (issue #1125, phase 4) ----------------------------
 
 
+# Mirrors the hub's CLAIM_ID_PATTERN: a claimable identity is well-formed and
+# never the literal "unknown" (two identity-less machines must not both be
+# granted the same target).
+_CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _node_id_is_claimable(node_id: str) -> bool:
+    return node_id != "unknown" and bool(_CLAIM_ID_RE.match(node_id))
+
+
 @dataclass(frozen=True)
 class ClaimDecision:
     """Outcome of one claim operation against the hub.
@@ -562,8 +575,11 @@ class ClaimDecision:
     ``granted`` is True when the operation succeeded (acquired / renewed /
     released). ``reason`` explains a False: ``"held"`` (another owner holds
     the target; see ``owner``), ``"missing"`` (no live claim to renew or
-    release), ``"no-hub"`` (no hub configured), or ``"hub-unavailable"``
+    release), ``"no-hub"`` (no hub configured), ``"no-identity"`` (this node
+    has no usable identity to claim with), or ``"hub-unavailable"``
     (network/hub failure — callers fall back to the local run lock).
+    ``holder`` is the fencing token this operation used; renew and release
+    must present the same token.
     """
 
     granted: bool
@@ -571,6 +587,7 @@ class ClaimDecision:
     claim: dict[str, Any] | None = None
     owner: dict[str, Any] | None = None
     detail: str | None = None
+    holder: str | None = None
 
 
 class FleetClaimHeldError(FleetClientError):
@@ -626,6 +643,7 @@ def _claim_op(
     action: str,
     target: str,
     *,
+    holder: str,
     node_id: str | None = None,
     conductor: str | None = None,
     ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
@@ -638,11 +656,15 @@ def _claim_op(
         config = load_fleet_config()
         hub = hub_url or config["hub_url"]
         if not hub:
-            return ClaimDecision(granted=False, reason="no-hub")
+            return ClaimDecision(granted=False, reason="no-hub", holder=holder)
+        resolved_node = node_id or resolve_node_id(base_path)
+        if not _node_id_is_claimable(resolved_node):
+            return ClaimDecision(granted=False, reason="no-identity", detail=resolved_node, holder=holder)
         body: dict[str, Any] = {
             "action": action,
             "target": target,
-            "node_id": node_id or resolve_node_id(base_path),
+            "node_id": resolved_node,
+            "holder": holder,
             "ttl_seconds": int(ttl_seconds),
         }
         if conductor:
@@ -653,31 +675,35 @@ def _claim_op(
             timeout=CLAIM_TIMEOUT_SECONDS,
         )
     except Exception as exc:
-        return ClaimDecision(granted=False, reason="hub-unavailable", detail=str(exc))
+        return ClaimDecision(granted=False, reason="hub-unavailable", detail=str(exc), holder=holder)
     payload = payload if isinstance(payload, dict) else {}
     detail = payload.get("error") if isinstance(payload.get("error"), str) else None
     owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
     if status == 200 and payload.get(_CLAIM_OK_KEYS[action]) is True:
         claim = payload.get("claim") if isinstance(payload.get("claim"), dict) else None
-        return ClaimDecision(granted=True, reason="ok", claim=claim)
+        return ClaimDecision(granted=True, reason="ok", claim=claim, holder=holder)
     if status in (200, 409):
         return ClaimDecision(
-            granted=False, reason="held" if owner is not None else "missing", owner=owner, detail=detail
+            granted=False, reason="held" if owner is not None else "missing", owner=owner, detail=detail, holder=holder
         )
-    return ClaimDecision(granted=False, reason="hub-unavailable", detail=detail or f"hub returned HTTP {status}")
+    return ClaimDecision(
+        granted=False, reason="hub-unavailable", detail=detail or f"hub returned HTTP {status}", holder=holder
+    )
 
 
-def acquire_claim(target: str, **kwargs: Any) -> ClaimDecision:
-    return _claim_op("acquire", target, **kwargs)
+def acquire_claim(target: str, *, holder: str | None = None, **kwargs: Any) -> ClaimDecision:
+    """Acquire ``target``; a fresh fencing token is minted unless ``holder``
+    is passed (pass the same token to retry a lost response idempotently)."""
+    return _claim_op("acquire", target, holder=holder or uuid4().hex, **kwargs)
 
 
-def renew_claim(target: str, **kwargs: Any) -> ClaimDecision:
-    return _claim_op("renew", target, **kwargs)
+def renew_claim(target: str, *, holder: str, **kwargs: Any) -> ClaimDecision:
+    return _claim_op("renew", target, holder=holder, **kwargs)
 
 
-def release_claim(target: str, **kwargs: Any) -> ClaimDecision:
+def release_claim(target: str, *, holder: str, **kwargs: Any) -> ClaimDecision:
     kwargs.pop("ttl_seconds", None)
-    return _claim_op("release", target, **kwargs)
+    return _claim_op("release", target, holder=holder, **kwargs)
 
 
 def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
@@ -701,6 +727,32 @@ def _claim_renew_interval(ttl_seconds: int) -> float:
     return max(1.0, ttl_seconds / 3)
 
 
+ORPHAN_RELEASE_RETRY_SECONDS = 30.0
+
+
+def _schedule_orphan_release(
+    target: str, *, node_id: str, holder: str, conductor: str | None, ttl_seconds: int
+) -> None:
+    """Best-effort background cleanup after a lost acquire response.
+
+    The hub may have committed a row for this holder that we never saw; left
+    alone it would block every other machine for the full TTL. A daemon
+    thread retries ``release`` until the hub gives any definitive answer
+    (released, already gone, or held by someone else) or the TTL window
+    passes and expiry makes the point moot.
+    """
+
+    def _loop() -> None:
+        deadline = time.monotonic() + ttl_seconds
+        while time.monotonic() < deadline:
+            time.sleep(min(ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
+            outcome = release_claim(target, node_id=node_id, holder=holder, conductor=conductor)
+            if outcome.reason != "hub-unavailable":
+                return
+
+    threading.Thread(target=_loop, name="brigade-fleet-claim-orphan-release", daemon=True).start()
+
+
 @contextmanager
 def repo_claim(
     target: str,
@@ -712,18 +764,49 @@ def repo_claim(
     """Hold a hub-arbitrated claim on ``target`` for the duration of the block.
 
     The resilience contract from the epic: with no hub configured this is a
-    no-op, and an unreachable hub degrades to today's local run.lock behavior
-    with a single log line — never a new failure mode. A target held by
-    another owner raises ``FleetClaimHeldError`` naming the owner and its
-    expiry. A granted claim is renewed on a daemon heartbeat (every ttl/3;
-    a claim the hub lost is re-acquired) and released on exit, best-effort.
+    no-op; a node with no usable identity, or an unreachable hub, degrades to
+    today's local run.lock behavior with a single log line — never a new
+    failure mode. A target held by another owner raises
+    ``FleetClaimHeldError`` naming the owner and its expiry.
+
+    Acquire mints a fencing token for this holder, so a sibling run sharing
+    the node identity can never release or renew this claim. A lost acquire
+    response is retried once with the same token (idempotent on the hub); if
+    the hub is still unreachable a background thread keeps trying to release
+    any row the lost request may have committed. A 409 with no owner (the
+    target freed mid-request) is also retried once instead of failing
+    closed. A granted claim is renewed on a daemon heartbeat (every ttl/3; a
+    claim the hub lost is re-acquired) and released on exit, best-effort.
     """
-    decision = acquire_claim(target, base_path=base_path, conductor=conductor, ttl_seconds=ttl_seconds)
-    if decision.reason == "no-hub":
-        yield decision
+    try:
+        hub_configured = bool(load_fleet_config()["hub_url"])
+    except Exception:
+        hub_configured = False
+    if not hub_configured:
+        yield ClaimDecision(granted=False, reason="no-hub")
         return
+    node_id = resolve_node_id(base_path)
+    if not _node_id_is_claimable(node_id):
+        _LOG.warning("no usable fleet node identity (%r); relying on the local run lock alone for %s", node_id, target)
+        yield ClaimDecision(granted=False, reason="no-identity", detail=node_id)
+        return
+    holder = uuid4().hex
+    decision = acquire_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
+    if not decision.granted and decision.reason in ("hub-unavailable", "missing"):
+        # One retry with the same fencing token: a lost response may have
+        # committed the row (idempotent for this holder), and a 409 with no
+        # owner means the target freed mid-request.
+        decision = acquire_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
     if not decision.granted and decision.reason == "hub-unavailable":
         _LOG.warning("fleet hub unreachable (%s); falling back to the local run lock for %s", decision.detail, target)
+        _schedule_orphan_release(target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds)
+        yield decision
+        return
+    if not decision.granted and decision.reason == "missing":
+        # Twice refused with no owner to blame: a hub inconsistency, not a
+        # real holder. Fail open on the local lock rather than refusing a
+        # target nobody holds.
+        _LOG.warning("fleet hub refused %s twice without naming an owner; relying on the local run lock", target)
         yield decision
         return
     if not decision.granted:
@@ -735,17 +818,18 @@ def repo_claim(
             "another machine or conductor is working this repo (wait for release or TTL expiry)",
             owner=decision.owner,
         )
-    node_id = (decision.claim or {}).get("owner_node") or resolve_node_id(base_path)
     stop = threading.Event()
 
     def _renew_loop() -> None:
         warned_unavailable = False
         while not stop.wait(_claim_renew_interval(ttl_seconds)):
-            outcome = renew_claim(target, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
+            outcome = renew_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
             if not outcome.granted and outcome.reason == "missing":
                 # The hub lost or expired our row (e.g. hub restart from
-                # backup, or a shared-identity release); take it back.
-                outcome = acquire_claim(target, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
+                # backup); take it back under the same fencing token.
+                outcome = acquire_claim(
+                    target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds
+                )
             if outcome.granted:
                 warned_unavailable = False
                 continue
@@ -767,4 +851,4 @@ def repo_claim(
         yield decision
     finally:
         stop.set()
-        release_claim(target, node_id=node_id, conductor=conductor)
+        release_claim(target, holder=holder, node_id=node_id, conductor=conductor)

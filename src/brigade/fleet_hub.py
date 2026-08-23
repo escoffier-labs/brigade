@@ -13,10 +13,16 @@ Endpoints:
 - ``GET /status`` — bearer auth; latest state per (node_id, run_id) for
   non-terminal runs. ``?all=1`` includes terminal runs.
 - ``POST /claims`` — bearer auth; ``{"action": "acquire"|"renew"|"release",
-  "target": ..., "node_id": ..., "conductor"?: ..., "ttl_seconds"?: ...}``.
-  One unique row per target grants the claim to exactly one owner; a held
-  target answers 409 with the current owner. A claim past its TTL is
-  reclaimable by anyone; an unexpired one is never silently stolen.
+  "target": ..., "node_id": ..., "holder": ..., "conductor"?: ...,
+  "ttl_seconds"?: ...}``. One unique row per target grants the claim to
+  exactly one holder; a held target answers 409 with the current owner. The
+  ``holder`` value is a per-acquisition fencing token: renew and release
+  require it to match the stored row, so a sibling process sharing the same
+  node identity can never extend or delete another holder's live claim (the
+  token is never echoed back to other callers). A claim past its TTL is
+  reclaimable by anyone; an unexpired one is never silently stolen. Expired
+  rows are pruned on every acquire. ``node_id`` must be a real identity
+  (``[A-Za-z0-9._-]``, max 128 chars, never the literal ``unknown``).
 - ``GET /claims`` — bearer auth; active claims (``?all=1`` includes expired).
 
 The token comes from ``BRIGADE_FLEET_TOKEN`` or ``--token-file``; it is never
@@ -30,6 +36,7 @@ import argparse
 import hmac
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -46,6 +53,9 @@ CLAIM_ACTIONS = frozenset({"acquire", "renew", "release"})
 DEFAULT_CLAIM_TTL_SECONDS = 900
 CLAIM_TTL_MIN_SECONDS = 1
 CLAIM_TTL_MAX_SECONDS = 86400
+# Two cloned or identity-less machines must never both be granted a target:
+# a claim identity has to be a real, well-formed node id, never "unknown".
+CLAIM_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 EVENT_FIELDS = {
     "node_id": str,
@@ -77,13 +87,16 @@ CREATE TABLE IF NOT EXISTS events (
 """
 
 # Server-arbitrated repo claims (schema v2): one row per target grants the
-# target to exactly one (owner_node, owner_conductor). expires_at is Unix
-# epoch seconds so expiry comparisons are numeric, not string-format bound.
+# target to exactly one holder. holder_token is the per-acquisition fencing
+# token (renew/release must present it; it is never sent to other callers).
+# expires_at is Unix epoch seconds so expiry comparisons are numeric, not
+# string-format bound.
 _CLAIMS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS claims (
     target TEXT NOT NULL PRIMARY KEY,
     owner_node TEXT NOT NULL,
     owner_conductor TEXT,
+    holder_token TEXT NOT NULL,
     acquired_at TEXT NOT NULL,
     renewed_at TEXT NOT NULL,
     ttl_seconds INTEGER NOT NULL,
@@ -119,6 +132,11 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             f"fleet hub database {db_path} has schema version {current}; this brigade supports {SCHEMA_VERSION}"
         )
     conn.execute(_SCHEMA)
+    # Claims are ephemeral TTL state: a pre-holder-token claims table (early
+    # v2 builds) is dropped and recreated rather than migrated.
+    claims_columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+    if claims_columns and "holder_token" not in claims_columns:
+        conn.execute("DROP TABLE claims")
     conn.execute(_CLAIMS_SCHEMA)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -237,11 +255,17 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
     if not isinstance(action, str) or action not in CLAIM_ACTIONS:
         raise FleetHubError("claim field 'action' must be one of: acquire, renew, release")
     request["action"] = action
-    for field in ("target", "node_id"):
+    for field in ("target", "node_id", "holder"):
         value = raw.get(field)
         if not isinstance(value, str) or not value.strip():
             raise FleetHubError(f"claim field {field!r} must be a non-empty string")
         request[field] = value.strip()
+    for field in ("node_id", "holder"):
+        if request[field] == "unknown" or not CLAIM_ID_PATTERN.match(request[field]):
+            raise FleetHubError(
+                f"claim field {field!r} must be a real identity "
+                "([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')"
+            )
     conductor = raw.get("conductor")
     request["conductor"] = conductor.strip() if isinstance(conductor, str) and conductor.strip() else None
     ttl = raw.get("ttl_seconds", DEFAULT_CLAIM_TTL_SECONDS)
@@ -265,46 +289,55 @@ def _claim_payload(row: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
+# Payload columns only: holder_token is a fencing capability and is never
+# serialized to callers (it would let anyone forge a renew/release).
 _CLAIM_COLUMNS = "target, owner_node, owner_conductor, acquired_at, renewed_at, ttl_seconds, expires_at"
 
 
 def _fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | None:
-    return conn.execute(f"SELECT {_CLAIM_COLUMNS} FROM claims WHERE target = ?", (target,)).fetchone()
+    """Row as (_CLAIM_COLUMNS..., holder_token); the token is index 7."""
+    return conn.execute(f"SELECT {_CLAIM_COLUMNS}, holder_token FROM claims WHERE target = ?", (target,)).fetchone()
 
 
 def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any]]:
     """Arbitrate one claim request; returns (http_status, response_payload).
 
-    ``acquire`` grants a free or expired target, is idempotent for the current
-    owner (extending the TTL, preserving ``acquired_at`` while live), and
-    answers 409 with the owner for a held target. ``renew`` extends only an
-    unexpired claim held by the caller. ``release`` deletes only the caller's
-    row. Each mutation is a single SQL statement, so two concurrent callers
-    cannot both win.
+    ``acquire`` prunes expired rows, grants a free or expired target, is
+    idempotent for the current holder (retrying a lost response extends the
+    TTL and preserves ``acquired_at`` while live), and answers 409 with the
+    owner for a held target. ``renew`` extends only an unexpired claim whose
+    stored fencing token matches the caller's ``holder``; ``release`` deletes
+    only that row — a sibling process on the same node without the token can
+    neither extend nor delete a live claim. Each mutation is a single SQL
+    statement, so two concurrent callers cannot both win.
     """
     request = _validate_claim_request(raw)
     target = request["target"]
     node = request["node_id"]
     conductor = request["conductor"]
+    holder = request["holder"]
     ttl = request["ttl_seconds"]
     now = _now_epoch()
     now_iso = _epoch_to_iso(now)
     if request["action"] == "acquire":
+        conn.execute("DELETE FROM claims WHERE expires_at <= ?", (now,))
         cursor = conn.execute(
-            "INSERT INTO claims (target, owner_node, owner_conductor, acquired_at, renewed_at, ttl_seconds, expires_at) "  # noqa: E501
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "INSERT INTO claims "
+            "(target, owner_node, owner_conductor, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(target) DO UPDATE SET "
             "owner_node = excluded.owner_node, "
             "owner_conductor = excluded.owner_conductor, "
-            "acquired_at = CASE WHEN claims.owner_node = excluded.owner_node "
-            "AND claims.owner_conductor IS excluded.owner_conductor "
+            "holder_token = excluded.holder_token, "
+            "acquired_at = CASE WHEN claims.holder_token = excluded.holder_token "
+            "AND claims.owner_node = excluded.owner_node "
             "AND claims.expires_at > ? THEN claims.acquired_at ELSE excluded.acquired_at END, "
             "renewed_at = excluded.renewed_at, "
             "ttl_seconds = excluded.ttl_seconds, "
             "expires_at = excluded.expires_at "
             "WHERE claims.expires_at <= ? "
-            "OR (claims.owner_node = excluded.owner_node AND claims.owner_conductor IS excluded.owner_conductor)",
-            (target, node, conductor, now_iso, now_iso, ttl, now + ttl, now, now),
+            "OR (claims.holder_token = excluded.holder_token AND claims.owner_node = excluded.owner_node)",
+            (target, node, conductor, holder, now_iso, now_iso, ttl, now + ttl, now, now),
         )
         conn.commit()
         if cursor.rowcount == 1:
@@ -318,8 +351,8 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
     if request["action"] == "renew":
         cursor = conn.execute(
             "UPDATE claims SET renewed_at = ?, ttl_seconds = ?, expires_at = ? "
-            "WHERE target = ? AND owner_node = ? AND owner_conductor IS ? AND expires_at > ?",
-            (now_iso, ttl, now + ttl, target, node, conductor, now),
+            "WHERE target = ? AND holder_token = ? AND owner_node = ? AND expires_at > ?",
+            (now_iso, ttl, now + ttl, target, holder, node, now),
         )
         conn.commit()
         if cursor.rowcount == 1:
@@ -327,7 +360,7 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
             written = (target, node, conductor, now_iso, now_iso, ttl, now + ttl)
             return 200, {"renewed": True, "claim": _claim_payload(row if row is not None else written)}
         row = _fetch_claim(conn, target)
-        if row is not None and (row[1], row[2]) != (node, conductor) and row[6] > now:
+        if row is not None and row[6] > now and (row[7] != holder or row[1] != node):
             return 409, {
                 "renewed": False,
                 "error": f"target {target!r} is held by {row[1]}",
@@ -335,8 +368,8 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
             }
         return 409, {"renewed": False, "error": f"claim on {target!r} is expired or missing", "owner": None}
     cursor = conn.execute(
-        "DELETE FROM claims WHERE target = ? AND owner_node = ? AND owner_conductor IS ?",
-        (target, node, conductor),
+        "DELETE FROM claims WHERE target = ? AND holder_token = ? AND owner_node = ?",
+        (target, holder, node),
     )
     conn.commit()
     if cursor.rowcount == 1:

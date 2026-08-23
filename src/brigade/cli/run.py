@@ -499,18 +499,21 @@ def dispatch(args) -> int:
                         "output_warnings": output_warnings,
                     },
                 )
-            # Hub-arbitrated cross-machine claim (issue #1125): ask the fleet
-            # hub for the repo before taking the local lease. No hub or an
-            # unreachable hub falls back to the local run.lock below.
-            lifecycle.enter_context(
-                fleet_client.repo_claim(fleet_client.resolve_claim_target(run_cwd), base_path=run_cwd)
-            )
             lifecycle.enter_context(
                 runguard.run_lock(
                     run_cwd,
                     run_dir=output_dir,
                     wait_seconds=_resolved_run_lock_wait_seconds(args, run_cwd),
                 )
+            )
+            # Hub-arbitrated cross-machine claim (issue #1125), taken after
+            # the local lease so only the run that owns run.lock ever holds
+            # (or releases) the hub claim — a queued sibling can neither run
+            # unclaimed nor delete the winner's claim. No hub, no node
+            # identity, or an unreachable hub falls back to the local
+            # run.lock taken above.
+            lifecycle.enter_context(
+                fleet_client.repo_claim(fleet_client.resolve_claim_target(run_cwd), base_path=run_cwd)
             )
             if args.worktree:
                 worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
