@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON run contracts rewrite home-directory prefixes (`/home/<user>`, `/Users/<user>`) to `~` on every string that enters the list, show, latest, and watch payloads. Artifacts and human CLI output are unchanged. Refs #631. Refs #958.
 
 ### Fixed
+- The v0.25.0 run-reader compatibility test now exercises JSON-object rejection, unknown-key tolerance, and `finished_at` terminality from input behavior instead of fixture-driven assertions, and builds its legacy snapshot from the writer's full emitted shape. Refs #654, #640.
 - Stop-hook tree fingerprints now exclude verify-run receipts, outcome ledger capture files, and inline MiseLedger indexing artifacts. A captured verification can close a session without treating its own evidence as uncovered work, while later source, configuration, and documentation edits still invalidate the receipt. Fixes #1132.
 - The blocked-phase cancellation CLI test now waits up to 30 seconds for the run receipt, subprocess, and lock before signaling, avoiding false startup failures on contended CI runners while retaining the cancellation ordering check. Fixes #1126.
 - The non-scorecard `brigade outcome reconcile` decide path no longer installs a regressed candidate on a margin of one (`helped=2, hurt=1`). A cohort with verified regressions now needs `helped >= hurt + install_min_helped` and holds with `withheld: verified helped margin over regressions below N` until then; clean cohorts are unchanged. Refs #654.
