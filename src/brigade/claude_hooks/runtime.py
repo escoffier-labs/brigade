@@ -3192,10 +3192,15 @@ def _run_best_effort_bounded(
 ) -> Any:
     """Run ``fn`` in a daemon thread; return ``default`` if it exceeds ``timeout``.
 
-    Post-timeout latch/log writes and claim cleanup must not run in the
-    ``hook_run`` parent. A stalled target filesystem (or Windows, where
-    ``fork`` is unavailable and spawn exceeds this budget) degrades
+    Timeout-path latch/state writes on the target workspace, that path's
+    target-tree hook.log, and claim cleanup must not run on the
+    ``hook_run`` parent stack. A stalled target filesystem (or Windows,
+    where ``fork`` is unavailable and spawn exceeds this budget) degrades
     instead of hanging Claude Code past the hook timeout.
+
+    The #735 doctor-pointer / error diagnostic write is not this helper.
+    That local ``hook.log`` is a required contract file and is written
+    synchronously by ``_append_degraded_diagnostic``.
     """
     box: list[Any] = [default]
     done = threading.Event()
@@ -3228,12 +3233,47 @@ def _apply_timeout_followup_inprocess(event: str, target: Path, session_id: str,
         return "degraded"
 
 
-def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
-    """Record timeout/latch without blocking past a short budget.
+def _append_degraded_diagnostic(event: str, log_target: Path | None, detail: object) -> None:
+    """Write the #735 doctor-pointer ``hook.log`` before ``hook_run`` returns.
 
-    The path was already resolved inside the timed worker. Latch-state and
-    log writes still touch that tree; they run best-effort under a hard cap
-    so a later stall cannot hang the parent.
+    Callers and the envelope tests read
+    ``.brigade/work/claude-hooks/hook.log`` immediately after the hook
+    exits. Creating the parent directory and appending the line must
+    finish on this stack — a best-effort daemon thread can lose the write
+    or race the reader. Use this only on the error / doctor-pointer /
+    degraded path, where the timed worker already returned (or never
+    started). Timeout latch/state on a possibly stalled target stays
+    behind ``_run_best_effort_bounded``.
+    """
+    try:
+        if log_target is not None:
+            envelope.append_log(log_target, f"{event}: degraded: {detail}")
+            return
+        cwd = Path.cwd()
+        if not is_operator_home(cwd):
+            envelope.append_log(cwd, f"{event}: degraded: {detail}")
+    except OSError:
+        return
+
+
+def _append_error_diagnostic(event: str, log_target: Path | None, exc: BaseException) -> None:
+    """Write the #735 error ``hook.log`` before ``hook_run`` returns."""
+    if log_target is None:
+        return
+    try:
+        envelope.append_log(log_target, f"{event}: error: {type(exc).__name__}: {exc}")
+    except OSError:
+        return
+
+
+def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
+    """Record timeout latch/state without blocking past a short budget.
+
+    The path was already resolved inside the timed worker. Latch-state
+    writes (and that path's target-tree hook.log) still touch that tree;
+    they run best-effort under a hard cap so a later stall cannot hang
+    the parent. Non-timeout doctor-pointer logs use
+    ``_append_degraded_diagnostic`` instead.
     """
     detail = str(exc)
     return _run_best_effort_bounded(
@@ -3280,8 +3320,10 @@ def hook_run(
     The parent reads bounded stdin, spawns the timed worker, and enforces
     the timeout. Pin resolution, target discovery, log-target lookup, latch
     I/O, and ``handle_payload`` run only inside that worker. Post-timeout
-    latch/log persistence and claim cleanup are best-effort under a hard
+    latch/state persistence and claim cleanup are best-effort under a hard
     cap so a stalled tree cannot hang the parent after the worker returns.
+    The doctor-pointer / error ``hook.log`` write is synchronous and
+    finishes before this function returns.
     """
     if package != PACKAGE_REF:
         return 0
@@ -3315,19 +3357,27 @@ def hook_run(
             if _bounded_timeout_followup(event, followup_target, session_id, exc) == "latched":
                 envelope.emit_stdout(envelope.latched_envelope(event))
                 return 0
+        else:
+            _append_degraded_diagnostic(event, followup_target, exc)
         envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
-    except Exception:  # noqa: BLE001 - hooks must fail open instead of breaking the harness
+    except Exception as exc:  # noqa: BLE001 - hooks must fail open instead of breaking the harness
         _bounded_release_claim(claim_path)
         claim_path = None
+        _append_error_diagnostic(event, log_target, exc)
         envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
 
     try:
         envelope.emit_stdout(result if result is not None else envelope.empty_envelope(event))
-    except Exception:  # noqa: BLE001 - stdout failure still fails open
+    except Exception as exc:  # noqa: BLE001 - stdout failure still fails open
         _bounded_release_claim(claim_path)
         claim_path = None
+        if log_target is not None:
+            try:
+                envelope.append_log(log_target, f"{event}: emit failed: {exc}")
+            except OSError:
+                pass
         try:
             envelope.emit_stdout(envelope.degraded_envelope(event))
         except Exception:  # noqa: BLE001
