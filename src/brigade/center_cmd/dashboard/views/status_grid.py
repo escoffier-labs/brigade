@@ -30,6 +30,7 @@ _BORDER = "rgba(11,11,11,0.10)"
 _TILES = (
     ("handoff_issues", "Handoffs"),
     ("memory_care", "Memory care"),
+    ("scheduled_care", "Scheduled care"),
     ("outcome_loop", "Verify loop"),
     ("inbox_hygiene", "Inbox hygiene"),
     ("pending_tasks", "Pending tasks"),
@@ -78,6 +79,11 @@ def _tile_counts(payload: dict, key: str) -> tuple[int | None, dict]:
     if key == "memory_care":
         section = _section(payload, key)
         return _int(section, "issue_count"), section
+    if key == "scheduled_care":
+        section = _section(payload, key)
+        count = _int(section, "count")
+        # Absent key is "no repeated failures", not a missing fetch — old briefs omit it.
+        return (0 if count is None else count), section
     if key == "inbox_hygiene":
         section = _section(payload, key)
         return _int(section, "issue_count"), section
@@ -124,6 +130,12 @@ def _top_issue_detail(section: dict) -> str:
     return detail
 
 
+def _scheduled_care_names(section: dict) -> str:
+    entries = section.get("entries") if isinstance(section.get("entries"), list) else []
+    names = [str(item.get("id")) for item in entries if isinstance(item, dict) and item.get("id")]
+    return ", ".join(names[:5])
+
+
 def _tile_meaning(key: str, section: dict, count: int | None) -> str:
     if key == "handoff_issues":
         if count is None:
@@ -143,6 +155,12 @@ def _tile_meaning(key: str, section: dict, count: int | None) -> str:
         base = f"{_plural(count, 'card needs', 'cards need')} memory care."
         detail = _top_issue_detail(section)
         return f"{base} Top issue: {detail}." if detail else base
+    if key == "scheduled_care":
+        if count is None or count <= 0:
+            return "No care entries are failing repeatedly."
+        names = _scheduled_care_names(section)
+        suffix = f" ({names})" if names else ""
+        return f"{_plural(count, 'care entry has', 'care entries have')} repeated failed receipts.{suffix}"
     if key == "outcome_loop":
         if count is None:
             return "Verify-loop counts are not available."
@@ -233,6 +251,13 @@ def _summary_strip(payload: dict) -> str:
         sentences.append(f"{new_handoffs} new handoff {noun} waiting.")
     else:
         sentences.append("No new handoff issues.")
+
+    scheduled = _tile_counts(payload, "scheduled_care")[0]
+    if scheduled:
+        noun = "entry is" if scheduled == 1 else "entries are"
+        names = _scheduled_care_names(_section(payload, "scheduled_care"))
+        suffix = f" ({names})" if names else ""
+        sentences.append(f"{scheduled} scheduled care {noun} failing repeatedly.{suffix}")
 
     care_issues = _tile_counts(payload, "memory_care")[0]
     if care_issues is None:

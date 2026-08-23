@@ -242,6 +242,7 @@ def _compact_repo_fleet_health(payload: dict[str, Any]) -> dict[str, Any]:
 def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = False) -> dict[str, Any]:
     from ... import (
         aboyeur,
+        care_cmd,
         center_cmd,
         chat_cmd,
         context_cmd,
@@ -377,6 +378,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "top_issue": memory_health["top_issue"],
             "autofix_plan": memory_health.get("autofix_plan"),
         },
+        "scheduled_care": care_cmd.repeated_failure_summary(target),
         "security_health": {
             "config_path": security_health["config_path"],
             "valid": security_health["valid"],
@@ -853,6 +855,15 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"blocked={autofix_plan.get('blocked_count')} "
                 f"command={autofix_plan.get('suggested_next_command')}"
             )
+
+    scheduled_care = payload.get("scheduled_care") if isinstance(payload.get("scheduled_care"), dict) else {}
+    if scheduled_care:
+        fail_count = int(scheduled_care.get("count") or 0)
+        print(f"care_repeated_failures: {fail_count}")
+        for rec in scheduled_care.get("entries") or []:
+            if not isinstance(rec, dict):
+                continue
+            print(f"care_repeated_failure: {rec.get('id')} consecutive={rec.get('consecutive_failures')}")
 
     security_health = payload.get("security_health") if isinstance(payload.get("security_health"), dict) else {}
     if security_health:
