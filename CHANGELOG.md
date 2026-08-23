@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON run contracts rewrite home-directory prefixes (`/home/<user>`, `/Users/<user>`) to `~` on every string that enters the list, show, latest, and watch payloads. Artifacts and human CLI output are unchanged. Refs #631. Refs #958.
 
 ### Fixed
+- Direct CLI roster seats can now set `command = ["executable", "fixed-prefix", ...]` to override
+  the executable and insert fixed arguments before the adapter argv. This provides a supported
+  Windows Cursor path through the bundled `versions/<version>/node.exe` and `index.js`, instead of
+  the unsupported `cursor-agent.cmd` shim. Fixes #1100.
+
 - Bounded SQLite retry failures retain their BUSY-family result code after
   replacing the driver error text with holder diagnosis. Callers can retry
   primary `SQLITE_BUSY` (5), recovery (261), and snapshot (517) results

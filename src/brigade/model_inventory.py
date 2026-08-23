@@ -54,14 +54,16 @@ class ModelInventoryInspector:
 
     def __init__(self) -> None:
         self._inventories: dict[str, _HarnessInventory] = {}
-        self._results: dict[tuple[str, str], ModelInventoryResult] = {}
+        self._results: dict[tuple[str, str, tuple[str, ...] | None], ModelInventoryResult] = {}
 
-    def inspect(self, cli_ref: str, requested: str) -> ModelInventoryResult | None:
-        key = (cli_ref, requested)
+    def inspect(
+        self, cli_ref: str, requested: str, command: tuple[str, ...] | None = None
+    ) -> ModelInventoryResult | None:
+        key = (cli_ref, requested, command)
         if key in self._results:
             return self._results[key]
         if cli_ref in _LIST_COMMANDS:
-            result = self._inspect_listed(cli_ref, requested)
+            result = self._inspect_listed(cli_ref, requested, command)
         elif cli_ref.startswith("ollama:"):
             result = self._inspect_ollama(requested)
         else:
@@ -69,8 +71,8 @@ class ModelInventoryInspector:
         self._results[key] = result
         return result
 
-    def _inspect_listed(self, cli_ref: str, requested: str) -> ModelInventoryResult:
-        inventory = self._inventory(cli_ref)
+    def _inspect_listed(self, cli_ref: str, requested: str, command: tuple[str, ...] | None) -> ModelInventoryResult:
+        inventory = self._inventory(cli_ref, command)
         harness = "Cursor" if cli_ref == "cursor" else "Grok"
         if inventory.error:
             return ModelInventoryResult(
@@ -107,15 +109,15 @@ class ModelInventoryInspector:
             f"model {requested!r} is absent from live {harness} inventory",
         )
 
-    def _inventory(self, cli_ref: str) -> _HarnessInventory:
-        cached = self._inventories.get(cli_ref)
+    def _inventory(self, cli_ref: str, command: tuple[str, ...] | None = None) -> _HarnessInventory:
+        key = f"{cli_ref}\0{command!r}"
+        cached = self._inventories.get(key)
         if cached is not None:
             return cached
-        result = (
-            _run_cursor_inventory()
-            if cli_ref == "cursor"
-            else proc.run(_LIST_COMMANDS[cli_ref], timeout=_INVENTORY_TIMEOUT_SECONDS)
-        )
+        if cli_ref == "cursor":
+            result = _run_cursor_inventory([*command, "models"]) if command is not None else _run_cursor_inventory()
+        else:
+            result = proc.run(_LIST_COMMANDS[cli_ref], timeout=_INVENTORY_TIMEOUT_SECONDS)
         if result.code != 0:
             diagnostic = result.stderr.strip() or result.stdout.strip() or f"exit {result.code}"
             inventory = _HarnessInventory(error=diagnostic[:160])
@@ -128,7 +130,7 @@ class ModelInventoryInspector:
                 inventory = _HarnessInventory(error="command returned no model IDs")
             else:
                 inventory = _HarnessInventory(models=models)
-        self._inventories[cli_ref] = inventory
+        self._inventories[key] = inventory
         return inventory
 
     def _inspect_ollama(self, requested: str) -> ModelInventoryResult:
@@ -170,12 +172,12 @@ class ModelInventoryInspector:
         return ModelInventoryResult(state, requested, (), diagnostic[:200])
 
 
-def _run_cursor_inventory() -> proc.Result:
+def _run_cursor_inventory(command: list[str] | None = None) -> proc.Result:
     """Capture Cursor inventory through a file because its pipe output truncates at 8 KiB."""
     with tempfile.TemporaryFile() as stdout:
         try:
             completed = subprocess.run(
-                _LIST_COMMANDS["cursor"],
+                command or _LIST_COMMANDS["cursor"],
                 stdout=stdout,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
