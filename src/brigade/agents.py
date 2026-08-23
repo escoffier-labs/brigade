@@ -294,12 +294,10 @@ def _crush_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | N
 def _oracle_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
     # Oracle is a one-shot consult CLI with no filesystem write path, so
     # read_only needs neither a flag nor a prompt instruction and the argv is
-    # identical either way. --engine browser pins the run to the cookie lane
-    # that Agent Pantry keeps fresh, so the adapter can never silently fall
-    # back to an API key. --heartbeat is deliberately never passed: stdout
-    # carries the answer, and oracle emits plain unrendered markdown there
-    # whenever stdout is not a TTY.
-    return ["oracle", "--engine", "browser", "-p", prompt]
+    # identical either way. Keep this to the stock upstream consult contract.
+    # Browser routing is added after feature detection, because older and
+    # unmodified Oracle installations need not accept the optional engine flag.
+    return ["oracle", "-p", prompt]
 
 
 _ADAPTERS: dict[str, Callable[[str, bool, str | None, Path | None], List[str]]] = {
@@ -540,6 +538,26 @@ _ORACLE_AUTH_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ORACLE_BROWSER_ENGINE_HELP_RE = re.compile(r"--engine\b[^\n]*\bbrowser\b", re.IGNORECASE)
+
+
+def _oracle_supports_browser_engine(
+    executable: str,
+    *,
+    env: dict[str, str] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> bool:
+    """Whether this Oracle executable advertises the optional browser engine."""
+    result = proc.run(
+        [executable, "--help"],
+        timeout=5.0,
+        env=env,
+        process_registry=process_registry,
+    )
+    if result.code != 0:
+        return False
+    return bool(_ORACLE_BROWSER_ENGINE_HELP_RE.search("\n".join((result.stdout, result.stderr))))
+
 
 def _oracle_auth_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
     """Turn an oracle browser-session auth failure into a pantry next step.
@@ -634,6 +652,7 @@ def build_argv(
     reasoning: str | None = None,
     cwd: Path | None = None,
     resume_session_id: str | None = None,
+    oracle_browser_engine: bool = False,
 ) -> List[str]:
     if resume_session_id is not None:
         if cli_ref != "grok":
@@ -664,6 +683,8 @@ def build_argv(
             "codex-cloud:<env-id>)"
         )
     argv = builder(prompt, read_only, sandbox, cwd)
+    if cli_ref == "oracle" and oracle_browser_engine:
+        argv = [argv[0], "--engine", "browser", *argv[1:]]
     if resume_session_id is not None:
         argv = [argv[0], "--resume", resume_session_id, *argv[1:]]
     if model is not None:
@@ -1013,6 +1034,14 @@ def run_agent(
             )
 
     try:
+        oracle_browser_engine = False
+        if cli_ref == "oracle":
+            assert executable.path is not None
+            oracle_browser_engine = _oracle_supports_browser_engine(
+                executable.path,
+                env=child_env,
+                process_registry=process_registry,
+            )
         argv = build_argv(
             cli_ref,
             prompt,
@@ -1022,6 +1051,7 @@ def run_agent(
             reasoning=reasoning,
             cwd=cwd,
             resume_session_id=resume_session_id,
+            oracle_browser_engine=oracle_browser_engine,
         )
     except UnsupportedSandboxError as exc:
         # A builder rejected the launch before spawning because the requested
