@@ -568,6 +568,9 @@ def _add_care_nodes(
         if not entry.get("runbook_present"):
             state = "missing" if care_enabled else "disabled"
         receipt = entry.get("last_receipt")
+        consecutive = entry.get("consecutive_failures")
+        if isinstance(consecutive, int) and consecutive >= care_cmd.REPEATED_FAILURE_THRESHOLD and state == "enabled":
+            state = "failed"
         nodes[f"care_job:{entry_id}"] = _node(
             node_id=f"care_job:{entry_id}",
             kind="care_job",
@@ -580,9 +583,11 @@ def _add_care_nodes(
                 or ("redacted:unsafe-path" if entry.get("runbook") else None)
             ),
             schedule={"source": "brigade_care", "cadence": CARE_CADENCE.get(entry_id, "scheduled")},
-            counts={},
+            counts={"consecutive_failures": consecutive if isinstance(consecutive, int) else 0},
             latest_run=_public_run_from_receipt(receipt if isinstance(receipt, dict) else None),
-            next_action=None if state == "enabled" else "brigade care install",
+            next_action=(
+                "brigade care status" if state == "failed" else (None if state == "enabled" else "brigade care install")
+            ),
         )
 
 
@@ -1096,9 +1101,12 @@ def _safe_care_status(target: Path) -> dict[str, Any]:
                     "runbook_id": entry.runbook_id,
                     "runbook_present": (target / entry.runbook_rel).is_file() if entry.runbook_rel else False,
                     "last_receipt": None,
+                    "consecutive_failures": 0,
+                    "repeated_failure": False,
                 }
                 for entry in care_cmd.CARE_ENTRIES
             ],
+            "repeated_failures": [],
         }
 
 
