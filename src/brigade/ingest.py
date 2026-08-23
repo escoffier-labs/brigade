@@ -56,6 +56,22 @@ KNOWN_SECTIONS = {
     "suggested document content",
 }
 
+# ingest_into status codes. Fleet maps these to skip reasons; do not collapse
+# a broken handoff-sources.json into the missing-inbox path.
+NO_HANDOFF_INBOX = 2
+INVALID_SOURCE_CONFIG = 3
+SKIP_NO_HANDOFF_INBOX = "no handoff inbox"
+SKIP_INVALID_SOURCE_CONFIG = "invalid handoff source config"
+
+
+def skip_reason(rc: int) -> str | None:
+    """Return the fleet skip reason for a non-success `ingest_into` status."""
+    if rc == NO_HANDOFF_INBOX:
+        return SKIP_NO_HANDOFF_INBOX
+    if rc == INVALID_SOURCE_CONFIG:
+        return SKIP_INVALID_SOURCE_CONFIG
+    return None
+
 
 def has_salvageable_structure(sections: Dict[str, str]) -> bool:
     """Return whether parsed Markdown has enough structure for manual recovery.
@@ -85,19 +101,59 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
     Reads `.brigade/config.json` when present and returns one inbox per
     writer harness in the selection (alphabetical by harness id). Falls back
     to the legacy `.claude/memory-handoffs/` path for pre-v0.3.0 installs.
+    Also includes every existing inbox declared in `.brigade/handoff-sources.json`,
+    including roots outside `target`, so a second configured root is ingested.
     """
     from .config import load_config
 
+    paths: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        if not path.is_dir():
+            return
+        resolved = path.resolve()
+        key = str(resolved)
+        if key in seen:
+            return
+        seen.add(key)
+        paths.append(resolved)
+
     cfg = load_config(target)
     if cfg is None:
-        legacy = target / ".claude" / "memory-handoffs"
-        return [legacy] if legacy.is_dir() else []
-    paths: list[Path] = []
-    for h in sorted(cfg.selection.harnesses):
-        rel = WRITER_INBOXES.get(h)
-        if rel and (target / rel).is_dir():
-            paths.append(target / rel)
+        add(target / ".claude" / "memory-handoffs")
+    else:
+        for h in sorted(cfg.selection.harnesses):
+            rel = WRITER_INBOXES.get(h)
+            if rel:
+                add(target / rel)
+    for extra in _handoff_source_inbox_paths(target):
+        add(extra)
     return paths
+
+
+def _handoff_source_inbox_paths(target: Path) -> list[Path]:
+    """Inbox directories declared in `.brigade/handoff-sources.json`.
+
+    Raises ValueError when the file exists but cannot be read or parsed, so
+    ingest does not go green while omitting configured roots.
+    """
+    from .handoff_cmd.models import default_sources_path
+    from .handoff_cmd.sources import _load_sources
+
+    sources_path = default_sources_path(target)
+    if not sources_path.is_file():
+        # A dangling symlink or a non-file (e.g. a directory) at the config path
+        # is a broken configuration, not an absent one: fail closed so ingest
+        # does not go green while silently omitting configured roots.
+        if sources_path.is_symlink() or sources_path.exists():
+            raise ValueError(f"invalid handoff source config {sources_path}: not a regular file")
+        return []
+    try:
+        config = _load_sources(target, sources_path)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid handoff source config {sources_path}: {exc}") from exc
+    return [watched.root / watched.inbox for watched in config.watched]
 
 
 def run(
@@ -147,15 +203,21 @@ def ingest_into(
 ) -> int:
     """Ingest `source`'s handoffs into `owner`'s memory, accumulating `stats`.
 
-    Returns 0 on success, 2 if `source` has no handoff inbox. Used directly by
-    the fleet driver so it can sweep many sources into one owner and report once.
+    Returns 0 on success, `NO_HANDOFF_INBOX` (2) if `source` has no handoff
+    inbox, and `INVALID_SOURCE_CONFIG` (3) if `.brigade/handoff-sources.json`
+    exists but cannot be loaded. The fleet driver maps those statuses through
+    `skip_reason` so a broken config is not reported as a missing inbox.
     """
     inbox_dir = owner / "memory" / "handoff-inbox"
-    handoff_dirs = _resolve_inbox_paths(source)
+    try:
+        handoff_dirs = _resolve_inbox_paths(source)
+    except ValueError as exc:
+        print(f"brigade ingest: {exc}", file=sys.stderr)
+        return INVALID_SOURCE_CONFIG
     if not handoff_dirs:
         legacy = source / ".claude" / "memory-handoffs"
         print(f"brigade ingest: no handoff inbox at {legacy}", file=sys.stderr)
-        return 2
+        return NO_HANDOFF_INBOX
 
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"

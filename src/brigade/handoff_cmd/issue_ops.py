@@ -303,18 +303,24 @@ def _resolve_lint_path(target: Path, path: Path) -> Path:
     return path.resolve()
 
 
-def _pending_handoff_paths(target: Path) -> tuple[Path, ...]:
+def _pending_handoff_paths(target: Path, sources: Path | None = None) -> tuple[Path, ...]:
     paths: list[Path] = []
-    for rel in WRITER_INBOXES:
-        inbox = target / rel
-        if not inbox.is_dir():
+    seen: set[str] = set()
+    specs, _, _ = _draft_inbox_specs(target, sources=sources)
+    for inbox_path, _inbox, _watched in specs:
+        if not inbox_path.is_dir():
             continue
-        for candidate in inbox.glob("*.md"):
+        for candidate in inbox_path.glob("*.md"):
             if not candidate.is_file():
                 continue
             if candidate.name.startswith(".") or candidate.name in IGNORED_HANDOFF_NAMES:
                 continue
-            paths.append(candidate.resolve())
+            resolved = candidate.resolve()
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(resolved)
     return tuple(sorted(paths))
 
 

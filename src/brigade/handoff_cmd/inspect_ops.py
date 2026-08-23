@@ -45,9 +45,9 @@ def inspect(target: Path, sources: Path | None = None) -> HandoffHealth:
         sources_path = None
 
     watched = source_config.watched
-    inboxes = tuple(_inspect_inbox(target, rel, watched) for rel in WRITER_INBOXES)
+    inboxes = _collect_inbox_health(target, watched)
     ingestor = _inspect_ingestor(source_config.ingestor)
-    lint_results = lint_targets(target)
+    lint_results = lint_targets(target, sources=sources)
     warnings: list[str] = []
     pending_total = sum(inbox.pending for inbox in inboxes)
     if pending_total and not sources_loaded and not failures:

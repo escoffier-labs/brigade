@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 from brigade import cli
 from brigade import handoff_cmd
@@ -1011,6 +1012,73 @@ def test_handoff_source_config_drift_reports_missing_configured_inbox(tmp_path, 
     item = payload["imports"][0]
     assert item["metadata"]["source_item_key"] == "handoff-ingest:source-inbox:.missing/memory-handoffs"
     assert item["metadata"]["source_fingerprint"]
+
+
+def _two_root_handoff_workspace(tmp_path, *, watch_local=True, write_local=False, write_remote=True):
+    workspace = tmp_path / "wsA"
+    other = tmp_path / "rootB"
+    local_inbox = workspace / ".claude" / "memory-handoffs"
+    remote_inbox = other / ".claude" / "memory-handoffs"
+    local_inbox.mkdir(parents=True)
+    remote_inbox.mkdir(parents=True)
+    sources = [{"root": str(other), "inboxes": [".claude/memory-handoffs"]}]
+    if watch_local:
+        sources.insert(0, {"root": ".", "inboxes": [".claude/memory-handoffs"]})
+    config = workspace / ".brigade" / "handoff-sources.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"sources": sources}))
+    remote_path = None
+    if write_remote:
+        remote_path = remote_inbox / "2026-08-19-1500-repro.md"
+        remote_path.write_text(NO_CARD_HANDOFF)
+    local_path = None
+    if write_local:
+        local_path = local_inbox / "2026-08-19-1500-local.md"
+        local_path.write_text(NO_CARD_HANDOFF)
+    return workspace, other, remote_path, local_path
+
+
+def test_handoff_doctor_reports_configured_non_target_root(tmp_path, capsys):
+    workspace, other, remote_path, _ = _two_root_handoff_workspace(tmp_path)
+
+    assert handoff_cmd.doctor(target=workspace, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    remote_inbox = (other / ".claude" / "memory-handoffs").resolve()
+    remote_health = next(inbox for inbox in payload["inboxes"] if Path(inbox["path"]).resolve() == remote_inbox)
+    assert remote_health["exists"] is True
+    assert remote_health["pending"] == 1
+    assert remote_health["watched"] is True
+    assert any(Path(result["path"]).resolve() == remote_path.resolve() for result in payload["lint"])
+    assert payload["warnings"] == []
+
+
+def test_handoff_doctor_does_not_treat_same_rel_inbox_on_another_root_as_local(tmp_path, capsys):
+    workspace, other, _, local_path = _two_root_handoff_workspace(
+        tmp_path, watch_local=False, write_local=True, write_remote=True
+    )
+
+    assert handoff_cmd.doctor(target=workspace, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    local_inbox = (workspace / ".claude" / "memory-handoffs").resolve()
+    remote_inbox = (other / ".claude" / "memory-handoffs").resolve()
+    local_health = next(inbox for inbox in payload["inboxes"] if Path(inbox["path"]).resolve() == local_inbox)
+    remote_health = next(inbox for inbox in payload["inboxes"] if Path(inbox["path"]).resolve() == remote_inbox)
+    assert local_health["pending"] == 1
+    assert local_health["watched"] is False
+    assert remote_health["pending"] == 1
+    assert remote_health["watched"] is True
+    assert any("not watched by the source config" in warning for warning in payload["warnings"])
+    assert local_path is not None
+
+
+def test_handoff_lint_discovers_pending_in_configured_non_target_root(tmp_path, capsys):
+    workspace, _other, remote_path, _ = _two_root_handoff_workspace(tmp_path)
+
+    assert handoff_cmd.lint(target=workspace) == 0
+    out = capsys.readouterr().out
+    assert "files: 1" in out
+    assert "2026-08-19-1500-repro.md" in out
+    assert str(remote_path) in out
 
 
 def test_handoff_doctor_accepts_configured_claude_and_codex_inboxes(tmp_path, capsys):
