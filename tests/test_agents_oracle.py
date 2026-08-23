@@ -19,8 +19,16 @@ def _stub_proc(monkeypatch, code, stdout, stderr):
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(code, stdout, stderr))
 
 
-def test_oracle_argv_pins_the_browser_engine():
+def test_oracle_argv_uses_the_stock_upstream_contract():
     assert agents.build_argv("oracle", "P") == [
+        "oracle",
+        "-p",
+        "P",
+    ]
+
+
+def test_oracle_argv_adds_the_browser_engine_only_when_detected():
+    assert agents.build_argv("oracle", "P", oracle_browser_engine=True) == [
         "oracle",
         "--engine",
         "browser",
@@ -41,23 +49,42 @@ def test_oracle_argv_pins_model_after_the_command():
         "oracle",
         "--model",
         "gemini-3.1-pro",
-        "--engine",
-        "browser",
         "-p",
         "P",
     ]
 
 
-def test_oracle_argv_never_emits_heartbeat_or_an_api_path():
-    # stdout is the answer channel: --heartbeat would interleave progress lines
-    # into it, and dropping --engine browser would fall back to an API key.
+def test_oracle_argv_never_emits_heartbeat_and_uses_browser_only_when_detected():
+    # stdout is the answer channel, so --heartbeat would interleave progress
+    # lines into it. Browser routing is an optional CLI feature, not part of
+    # the stock one-shot contract.
     for argv in (
         agents.build_argv("oracle", "P"),
         agents.build_argv("oracle", "P", read_only=True),
         agents.build_argv("oracle", "P", model="gemini-3.1-pro"),
+        agents.build_argv("oracle", "P", oracle_browser_engine=True),
     ):
         assert "--heartbeat" not in argv
-        assert argv[argv.index("--engine") + 1] == "browser"
+    browser_argv = agents.build_argv("oracle", "P", oracle_browser_engine=True)
+    assert browser_argv[browser_argv.index("--engine") + 1] == "browser"
+
+
+def test_oracle_browser_engine_detection_requires_the_stock_help_flag(monkeypatch):
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda *_args, **_kwargs: agents.proc.Result(0, "  -e, --engine <api|browser>\n", ""),
+    )
+    assert agents._oracle_supports_browser_engine("/x/oracle") is True
+
+
+def test_oracle_browser_engine_detection_ignores_fork_only_help(monkeypatch):
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda *_args, **_kwargs: agents.proc.Result(0, "  --browser-profile <name>\n", ""),
+    )
+    assert agents._oracle_supports_browser_engine("/x/oracle") is False
 
 
 def test_oracle_read_only_enforcement_is_hard():
@@ -143,6 +170,9 @@ def test_oracle_argv_survives_a_real_exec(tmp_path, monkeypatch):
     stub.write_text(
         f"#!{sys.executable}\n"
         "import json, sys\n"
+        "if sys.argv[1:] == ['--help']:\n"
+        "    print('  -e, --engine <api|browser>')\n"
+        "    raise SystemExit(0)\n"
         f"json.dump(sys.argv[1:], open({str(argv_log)!r}, 'w'))\n"
         "print('## Answer')\n"
         "print()\n"

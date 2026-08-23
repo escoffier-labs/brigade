@@ -33,8 +33,10 @@ the session, Brigade shells out and reads text back.
 - Require a user-installed `oracle` (MIT, npm `@steipete/oracle`). Brigade does
   not install it, does not bundle Node, and does not add it to the component
   manifest in this phase.
-- Browser engine only (`--engine browser`). The adapter never emits an
-  API-key path, so the lane cannot silently fall off the subscription rail.
+- The stock upstream invocation is `oracle -p <prompt>`. The adapter probes
+  `oracle --help` and adds `--engine browser` only when that executable
+  advertises the option. An unmodified or older upstream binary therefore
+  never receives a fork-only flag.
 - Read-only is hard by construction: oracle has no filesystem write path, so
   no flag and no prompt instruction are needed to enforce it.
 - Scope is the `researcher` role. No run transport, no ChatGPT Pro seat, no
@@ -54,7 +56,7 @@ Four layers, three of them already built:
 | Layer | Component | Change |
 |---|---|---|
 | Auth | Agent Pantry cookie sync | none |
-| Driver | `oracle --engine browser` | none, external binary |
+| Driver | `oracle -p <prompt>` plus detected browser routing | none, external binary |
 | Adapter | `src/brigade/agents.py` | new, small |
 | Caller | roster `researcher` | config only |
 | Timeout | `src/brigade/research/llm.py` | one floor, see below |
@@ -73,9 +75,9 @@ Adapter surface in `src/brigade/agents.py`:
 ```python
 def _oracle_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
     # Oracle has no filesystem write path, so read-only needs no flag and no
-    # prompt instruction. --engine browser pins the run to the cookie lane so
-    # the adapter can never fall back to an API key.
-    return ["oracle", "--engine", "browser", "-p", prompt]
+    # prompt instruction. Keep the base argv compatible with stock upstream;
+    # add browser routing only after its help output advertises that option.
+    return ["oracle", "-p", prompt]
 ```
 
 Registrations:
@@ -83,7 +85,7 @@ Registrations:
 - `_ADAPTERS["oracle"] = _oracle_argv`
 - `READ_ONLY_ENFORCEMENT["oracle"] = "hard"`
 - `_MODEL_PIN["oracle"] = ("--model", _pin_after_cmd)`, producing
-  `oracle --model gemini-3.1-pro --engine browser -p <prompt>`
+  `oracle --model gemini-3.1-pro -p <prompt>` before optional browser routing
 
 `command_for` needs no entry: it falls through to the ref name, and the binary
 is already called `oracle`.
@@ -141,7 +143,7 @@ Models the browser engine accepts: `gemini-3.5-flash`, `gemini-3.1-pro`, and
 ## Verification
 
 - [x] Unit test `_oracle_argv` argv construction, including model pin position.
-- [x] Test that the adapter never emits an API-mode argv.
+- [x] Test the stock argv and browser-engine feature detection separately.
 - [x] Test `READ_ONLY_ENFORCEMENT` reports `hard`, and that
       `brigade run --read-only` raises no soft-enforcement warning for an
       oracle seat. In scope despite the researcher-only boundary, because
@@ -162,7 +164,7 @@ What is proven, and by what:
 
 | Claim | Evidence |
 |---|---|
-| argv shape, model pin position, no `--heartbeat`, no API path | unit, `tests/test_agents_oracle.py` |
+| stock argv, model pin position, and detected browser extension | unit, `tests/test_agents_oracle.py` |
 | argv survives a real `exec` | stub binary on a narrowed PATH records its own argv |
 | stdout is the answer channel at the Brigade layer | stub returns markdown, `run_agent` returns it verbatim |
 | auth failure on the nonzero-exit path | `run_agent` returns `failure_kind="browser-auth"` |
