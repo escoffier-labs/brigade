@@ -147,9 +147,7 @@ def _handoff_source_inbox_paths(target: Path) -> list[Path]:
         # is a broken configuration, not an absent one: fail closed so ingest
         # does not go green while silently omitting configured roots.
         if sources_path.is_symlink() or sources_path.exists():
-            raise ValueError(
-                f"invalid handoff source config {sources_path}: not a regular file"
-            )
+            raise ValueError(f"invalid handoff source config {sources_path}: not a regular file")
         return []
     try:
         config = _load_sources(target, sources_path)
