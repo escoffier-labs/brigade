@@ -80,7 +80,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         command.add_argument("--lease-id", required=True)
         command.add_argument("--lease-seconds", required=True, type=int)
 
-    for name, help_text in (("start", "Mark a claimed job running."), ("fail", "Mark a live job failed."), ("ack-cancel", "Acknowledge a requested cancellation.")):
+    for name, help_text in (
+        ("start", "Mark a claimed job running."),
+        ("fail", "Mark a live job failed."),
+        ("ack-cancel", "Acknowledge a requested cancellation."),
+    ):
         command = grokbot_sub.add_parser(name, help=help_text)
         add_target(command)
         command.add_argument("--job-id", required=True)
@@ -94,7 +98,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_complete.add_argument("--lease-id", required=True)
     p_complete.add_argument("--artifact", type=Path, required=True, help="Path to the completion artifact JSON file.")
 
-    for name, help_text in (("cancel", "Cancel a queued job or request cancellation."), ("expire", "Expire a deadline or lease-expired job.")):
+    for name, help_text in (
+        ("cancel", "Cancel a queued job or request cancellation."),
+        ("expire", "Expire a deadline or lease-expired job."),
+    ):
         command = grokbot_sub.add_parser(name, help=help_text)
         add_target(command)
         command.add_argument("--job-id", required=True)

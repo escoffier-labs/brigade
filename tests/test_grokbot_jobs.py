@@ -138,6 +138,34 @@ def test_enqueue_is_idempotent_only_for_identical_canonical_task_content(tmp_pat
     assert exc.value.reason == "idempotency-conflict"
 
 
+def test_enqueue_recovers_a_job_when_the_idempotency_write_failed(tmp_path: Path, monkeypatch):
+    original_replace = grokbot_jobs.os.replace
+    calls = 0
+
+    def fail_index_replace(source, destination, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected idempotency write failure")
+        return original_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(grokbot_jobs.os, "replace", fail_index_replace)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
+        grokbot_jobs.enqueue(tmp_path, _spec(), "request-recovery", now=NOW)
+
+    monkeypatch.setattr(grokbot_jobs.os, "replace", original_replace)
+    recovered = grokbot_jobs.enqueue(tmp_path, _spec(), "request-recovery", now=NOW)
+    changed = _spec()
+    changed["label"] = "Different task"
+
+    assert recovered["idempotent"] is True
+    assert len(list((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("*.json"))) == 1
+    raw = json.loads((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{recovered['job_id']}.json").read_text())
+    assert raw["idempotency_key_hash"] == "sha256:" + __import__("hashlib").sha256(b"request-recovery").hexdigest()
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^idempotency-conflict$"):
+        grokbot_jobs.enqueue(tmp_path, changed, "request-recovery", now=NOW)
+
+
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
@@ -329,14 +357,30 @@ def test_valid_lifecycle_transition_and_draft_pr_artifact(tmp_path: Path):
 @pytest.mark.parametrize(
     ("artifact_kind", "artifact", "reason"),
     [
-        ("draft-pr", {"kind": "draft-pr", "url": "http://github.com/example/brigade/pull/1", "branch": "safe"}, "invalid-artifact"),
-        ("draft-pr", {"kind": "draft-pr", "url": "https://github.com/example/brigade/issues/1", "branch": "safe"}, "invalid-artifact"),
-        ("draft-pr", {"kind": "draft-pr", "url": "https://github.com/example/brigade/pull/1", "branch": "bad@{ref"}, "invalid-artifact"),
+        (
+            "draft-pr",
+            {"kind": "draft-pr", "url": "http://github.com/example/brigade/pull/1", "branch": "safe"},
+            "invalid-artifact",
+        ),
+        (
+            "draft-pr",
+            {"kind": "draft-pr", "url": "https://github.com/example/brigade/issues/1", "branch": "safe"},
+            "invalid-artifact",
+        ),
+        (
+            "draft-pr",
+            {"kind": "draft-pr", "url": "https://github.com/example/brigade/pull/1", "branch": "bad@{ref"},
+            "invalid-artifact",
+        ),
         ("branch", {"kind": "branch", "branch": "../bad", "commit": "a" * 40}, "invalid-artifact"),
         ("branch", {"kind": "branch", "branch": "safe", "commit": "A" * 40}, "invalid-artifact"),
         ("report", {"kind": "report", "path": "/report.md", "sha256": "a" * 64}, "invalid-artifact"),
         ("report", {"kind": "report", "path": "report.md", "sha256": "A" * 64}, "invalid-artifact"),
-        ("branch", {"kind": "draft-pr", "url": "https://github.com/example/brigade/pull/1", "branch": "safe"}, "artifact-mismatch"),
+        (
+            "branch",
+            {"kind": "draft-pr", "url": "https://github.com/example/brigade/pull/1", "branch": "safe"},
+            "artifact-mismatch",
+        ),
     ],
 )
 def test_completed_artifacts_are_exact_and_match_specification(
@@ -359,9 +403,12 @@ def test_branch_and_report_artifacts_complete_their_allowed_roles(tmp_path: Path
     ):
         grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
         grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW)
-        assert grokbot_jobs.transition(
-            tmp_path, job_id, "bot-a", "lease-a", "completed", artifact=artifact, now=NOW
-        )["state"] == "completed"
+        assert (
+            grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "completed", artifact=artifact, now=NOW)[
+                "state"
+            ]
+            == "completed"
+        )
 
 
 def test_failure_terminalizes_claimed_or_running_job(tmp_path: Path):
@@ -399,6 +446,58 @@ def test_cancel_queued_and_cooperative_live_job(tmp_path: Path):
     assert grokbot_jobs.acknowledge_cancel(tmp_path, live_job, "bot-a", "lease-a", now=NOW)["state"] == "canceled"
 
 
+def test_cancel_requested_claim_cannot_start(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+    grokbot_jobs.cancel(tmp_path, job_id, now=NOW)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^cancel-requested$"):
+        grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW)
+
+
+def test_mutation_rejects_backward_clock(tmp_path: Path):
+    job_id = _enqueue(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^clock-regression$"):
+        grokbot_jobs.renew(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW - timedelta(seconds=1))
+
+
+def test_storage_os_errors_use_the_unsafe_storage_reason(tmp_path: Path, monkeypatch, capsys):
+    job_id = _enqueue(tmp_path)
+    original_open = grokbot_jobs.os.open
+
+    def fail_job_open(path, *args, **kwargs):
+        if path == f"{job_id}.json" and kwargs.get("dir_fd") is not None:
+            raise OSError("injected read failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(grokbot_jobs.os, "open", fail_job_open)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
+        grokbot_jobs.get_job(tmp_path, job_id)
+
+    assert _run_grokbot(tmp_path, "status", "--job-id", job_id) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "error: unsafe-storage"
+
+
+@pytest.mark.skipif(grokbot_jobs.os.name != "posix", reason="POSIX directory descriptor contract")
+def test_posix_storage_write_stays_anchored_when_visible_directory_is_replaced(tmp_path: Path):
+    root = tmp_path / ".brigade" / "cloud" / "grokbot"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with grokbot_jobs._storage_paths(tmp_path) as storage:
+        moved = root / "jobs-pinned"
+        (root / "jobs").rename(moved)
+        (root / "jobs").symlink_to(outside, target_is_directory=True)
+        grokbot_jobs._write_json_file(storage.jobs, "probe.json", {"anchored": True})
+
+    assert json.loads((moved / "probe.json").read_text()) == {"anchored": True}
+    assert not (outside / "probe.json").exists()
+
+
 def test_expiry_never_requeues_and_late_completion_is_rejected(tmp_path: Path):
     queued_job = _enqueue(tmp_path)
     assert grokbot_jobs.expire(tmp_path, queued_job, now=NOW + timedelta(seconds=900))["state"] == "expired"
@@ -421,12 +520,23 @@ def test_expiry_never_requeues_and_late_completion_is_rejected(tmp_path: Path):
 
 @pytest.mark.parametrize(
     "corruption",
-    ["task_hash", "timestamps", "item_revision", "lease_deadline", "invalid_bot", "invalid_cancel"],
+    ["task_hash", "timestamps", "item_revision", "lease_deadline", "invalid_bot", "invalid_cancel", "completed_cancel"],
 )
 def test_corrupted_lifecycle_records_fail_closed(tmp_path: Path, corruption: str):
     job_id = _enqueue(tmp_path)
-    if corruption in {"lease_deadline", "invalid_bot", "invalid_cancel"}:
+    if corruption in {"lease_deadline", "invalid_bot", "invalid_cancel", "completed_cancel"}:
         grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+    if corruption == "completed_cancel":
+        grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW)
+        grokbot_jobs.transition(
+            tmp_path,
+            job_id,
+            "bot-a",
+            "lease-a",
+            "completed",
+            artifact={"kind": "draft-pr", "url": "https://github.com/example/brigade/pull/1", "branch": "safe"},
+            now=NOW,
+        )
     path = tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{job_id}.json"
     raw = __import__("json").loads(path.read_text())
     if corruption == "task_hash":
@@ -439,8 +549,10 @@ def test_corrupted_lifecycle_records_fail_closed(tmp_path: Path, corruption: str
         raw["lease_expires_at"] = "2026-08-23T12:15:01Z"
     elif corruption == "invalid_bot":
         raw["bot_id"] = "bot id"
-    else:
+    elif corruption == "invalid_cancel":
         raw["cancel_requested_at"] = "2026-08-23T11:59:59Z"
+    else:
+        raw["cancel_requested_at"] = raw["updated_at"]
     path.write_text(__import__("json").dumps(raw))
 
     with pytest.raises(grokbot_jobs.GrokbotJobError, match="^corrupt-storage$"):
@@ -481,55 +593,62 @@ def test_cli_grokbot_lifecycle_commands_keep_private_content_out_of_output(tmp_p
     assert "pytest -q tests/test_grokbot_jobs.py" not in queued.out
     job_id = queued.out.split()[1]
 
-    assert _run_grokbot(
-        tmp_path,
-        "claim",
-        "--job-id",
-        job_id,
-        "--bot-id",
-        "bot-a",
-        "--lease-id",
-        "lease-a",
-        "--lease-seconds",
-        "60",
-        "--json",
-    ) == 0
+    assert (
+        _run_grokbot(
+            tmp_path,
+            "claim",
+            "--job-id",
+            job_id,
+            "--bot-id",
+            "bot-a",
+            "--lease-id",
+            "lease-a",
+            "--lease-seconds",
+            "60",
+            "--json",
+        )
+        == 0
+    )
     claimed = capsys.readouterr().out
     assert json.loads(claimed)["state"] == "claimed"
     assert "instructions" not in claimed and "verification_commands" not in claimed
 
-    assert _run_grokbot(
-        tmp_path,
-        "renew",
-        "--job-id",
-        job_id,
-        "--bot-id",
-        "bot-a",
-        "--lease-id",
-        "lease-a",
-        "--lease-seconds",
-        "60",
-    ) == 0
+    assert (
+        _run_grokbot(
+            tmp_path,
+            "renew",
+            "--job-id",
+            job_id,
+            "--bot-id",
+            "bot-a",
+            "--lease-id",
+            "lease-a",
+            "--lease-seconds",
+            "60",
+        )
+        == 0
+    )
     assert f"job {job_id} state=claimed" in capsys.readouterr().out
 
-    assert _run_grokbot(
-        tmp_path, "start", "--job-id", job_id, "--bot-id", "bot-a", "--lease-id", "lease-a"
-    ) == 0
+    assert _run_grokbot(tmp_path, "start", "--job-id", job_id, "--bot-id", "bot-a", "--lease-id", "lease-a") == 0
     assert f"job {job_id} state=running" in capsys.readouterr().out
 
-    assert _run_grokbot(
-        tmp_path,
-        "complete",
-        "--job-id",
-        job_id,
-        "--bot-id",
-        "bot-a",
-        "--lease-id",
-        "lease-a",
-        "--artifact",
-        str(artifact_path),
-        "--json",
-    ) == 0
+    assert (
+        _run_grokbot(
+            tmp_path,
+            "complete",
+            "--job-id",
+            job_id,
+            "--bot-id",
+            "bot-a",
+            "--lease-id",
+            "lease-a",
+            "--artifact",
+            str(artifact_path),
+            "--json",
+        )
+        == 0
+    )
     completed = capsys.readouterr().out
     assert json.loads(completed)["state"] == "completed"
     assert "instructions" not in completed and "verification_commands" not in completed
@@ -538,18 +657,21 @@ def test_cli_grokbot_lifecycle_commands_keep_private_content_out_of_output(tmp_p
         assert _run_grokbot(tmp_path, "enqueue", "--spec", str(spec_path), "--idempotency-key", f"cli-{suffix}") == 0
         next_job = capsys.readouterr().out.split()[1]
         if suffix == "fail":
-            assert _run_grokbot(
-                tmp_path,
-                "claim",
-                "--job-id",
-                next_job,
-                "--bot-id",
-                "bot-a",
-                "--lease-id",
-                "lease-a",
-                "--lease-seconds",
-                "60",
-            ) == 0
+            assert (
+                _run_grokbot(
+                    tmp_path,
+                    "claim",
+                    "--job-id",
+                    next_job,
+                    "--bot-id",
+                    "bot-a",
+                    "--lease-id",
+                    "lease-a",
+                    "--lease-seconds",
+                    "60",
+                )
+                == 0
+            )
             capsys.readouterr()
             command = ["fail", "--job-id", next_job, "--bot-id", "bot-a", "--lease-id", "lease-a"]
         else:
@@ -559,24 +681,27 @@ def test_cli_grokbot_lifecycle_commands_keep_private_content_out_of_output(tmp_p
 
     assert _run_grokbot(tmp_path, "enqueue", "--spec", str(spec_path), "--idempotency-key", "cli-ack") == 0
     cancel_job = capsys.readouterr().out.split()[1]
-    assert _run_grokbot(
-        tmp_path,
-        "claim",
-        "--job-id",
-        cancel_job,
-        "--bot-id",
-        "bot-a",
-        "--lease-id",
-        "lease-a",
-        "--lease-seconds",
-        "60",
-    ) == 0
+    assert (
+        _run_grokbot(
+            tmp_path,
+            "claim",
+            "--job-id",
+            cancel_job,
+            "--bot-id",
+            "bot-a",
+            "--lease-id",
+            "lease-a",
+            "--lease-seconds",
+            "60",
+        )
+        == 0
+    )
     capsys.readouterr()
     assert _run_grokbot(tmp_path, "cancel", "--job-id", cancel_job) == 0
     capsys.readouterr()
-    assert _run_grokbot(
-        tmp_path, "ack-cancel", "--job-id", cancel_job, "--bot-id", "bot-a", "--lease-id", "lease-a"
-    ) == 0
+    assert (
+        _run_grokbot(tmp_path, "ack-cancel", "--job-id", cancel_job, "--bot-id", "bot-a", "--lease-id", "lease-a") == 0
+    )
     assert f"job {cancel_job} state=canceled" in capsys.readouterr().out
 
     assert _run_grokbot(tmp_path, "status", "--job-id", job_id, "--json") == 0
@@ -594,7 +719,10 @@ def test_cli_grokbot_lifecycle_commands_keep_private_content_out_of_output(tmp_p
     ("command", "expected_error"),
     [
         (("enqueue", "--spec", "missing.json", "--idempotency-key", "missing"), "--spec is not a file"),
-        (("claim", "--job-id", "not-a-job", "--bot-id", "bot-a", "--lease-id", "lease-a", "--lease-seconds", "60"), "invalid-job-id"),
+        (
+            ("claim", "--job-id", "not-a-job", "--bot-id", "bot-a", "--lease-id", "lease-a", "--lease-seconds", "60"),
+            "invalid-job-id",
+        ),
     ],
 )
 def test_cli_grokbot_rejects_invalid_inputs_with_exit_2(tmp_path: Path, capsys, command, expected_error: str):
@@ -634,18 +762,21 @@ def test_cli_grokbot_complete_rejects_invalid_artifact_files(
     if payload is not None:
         artifact_path.write_text(payload)
 
-    assert _run_grokbot(
-        tmp_path,
-        "complete",
-        "--job-id",
-        job_id,
-        "--bot-id",
-        "bot-a",
-        "--lease-id",
-        "lease-a",
-        "--artifact",
-        str(artifact_path),
-    ) == 2
+    assert (
+        _run_grokbot(
+            tmp_path,
+            "complete",
+            "--job-id",
+            job_id,
+            "--bot-id",
+            "bot-a",
+            "--lease-id",
+            "lease-a",
+            "--artifact",
+            str(artifact_path),
+        )
+        == 2
+    )
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.strip().startswith("error: ")
