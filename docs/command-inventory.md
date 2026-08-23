@@ -475,6 +475,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs events`
 - `brigade runs export`
 - `brigade runs import`
+- `brigade runs inspect`
 - `brigade runs interrupt`
 - `brigade runs latest`
 - `brigade runs list`

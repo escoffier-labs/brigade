@@ -2781,3 +2781,99 @@ def test_doctor_authority_base_stripped_never_mutates_run_tree(tmp_path: Path, m
         assert before == after, f"authority verdict mutated the run tree under {_label}"
         (run_dir / "run.json").write_bytes(projected_bytes)
         monkeypatch.undo()
+
+
+def _lineage_child_run(runs_root: Path, name: str, parent_id: str, branch_event_id: str) -> Path:
+    run_dir = runs_root / name
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run.v1",
+                "status": "ok",
+                "started_at": "2026-08-17T13:00:00Z",
+                "finished_at": "2026-08-17T13:00:01Z",
+                "lineage": {
+                    "kind": "child",
+                    "parent_run_id": parent_id,
+                    "branch_point_event_id": branch_event_id,
+                },
+            }
+        )
+        + "\n"
+    )
+    return run_dir
+
+
+def _lineage_parent_run(workspace: Path, parent_dir: Path) -> str:
+    """Create a minimal journal-bearing parent; return one recorded event id."""
+    from brigade import run_lifecycle, runguard
+
+    parent_dir.mkdir(parents=True)
+    localio_json = {
+        "schema": "brigade.run.v1",
+        "status": "ok",
+        "cwd": str(workspace),
+        "lock_workspace": str(workspace),
+        "started_at": "2026-08-17T12:00:00Z",
+        "finished_at": "2026-08-17T12:00:02Z",
+        "lifecycle_journal_requested": True,
+    }
+    (parent_dir / "run.json").write_text(json.dumps(localio_json) + "\n")
+    with runguard.run_lock(workspace, run_dir=parent_dir):
+        run_lifecycle.prepare_lifecycle_journal(parent_dir, workspace=workspace)
+        run_lifecycle.record_lifecycle_event(
+            parent_dir,
+            event_type="run.completed",
+            payload={"status": "ok"},
+            idempotency_key="lineage-parent-completed",
+            workspace=workspace,
+        )
+    from brigade import run_journal
+
+    report = run_journal.read_journal_bounded(run_lifecycle._journal_path(parent_dir))
+    return report.events[-1].event_id
+
+
+def test_doctor_lineage_check_accepts_legacy_roots(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    legacy = runs_root / "legacy"
+    legacy.mkdir(parents=True)
+    (legacy / "run.json").write_text(json.dumps({"status": "ok"}) + "\n")
+
+    status, name, detail = doctor_mod._check_run_lineage(workspace)
+
+    assert status == doctor_mod.OK
+    assert name == "runs: lineage consistency"
+    assert "children=0" in detail
+    assert "findings" not in detail
+
+
+def test_doctor_lineage_check_reports_missing_parent_directory(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    _lineage_child_run(runs_root, "orphan", "gone-parent", "gone-event")
+
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+
+    assert status == doctor_mod.WARN
+    assert "parent run directory missing: gone-parent" in detail
+
+
+def test_doctor_lineage_check_reports_missing_branch_point_event(tmp_path: Path):
+    workspace = tmp_path
+    runs_root = workspace / ".brigade" / "runs"
+    event_id = _lineage_parent_run(workspace, runs_root / "parent")
+    _lineage_child_run(runs_root, "child", "parent", "no-such-event-id")
+
+    status, _name, detail = doctor_mod._check_run_lineage(workspace)
+
+    assert status == doctor_mod.WARN
+    assert "branch point event absent from parent journal: no-such-event-id" in detail
+
+    # The real branch point verifies cleanly.
+    _lineage_child_run(runs_root, "child2", "parent", event_id)
+    status2, _name, detail2 = doctor_mod._check_run_lineage(workspace)
+    assert status2 == doctor_mod.WARN  # first child still reported
+    assert "child2" not in detail2.split("findings")[1]

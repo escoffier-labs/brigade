@@ -99,6 +99,7 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
     checks.append(_check_recovery_checkpoints(ctx.target))
     checks.extend(_check_journal_event_headroom(ctx.target))
+    checks.append(_check_run_lineage(ctx.target))
     checks.extend(_check_outcome_loop(ctx))
     checks.extend(_check_directory_authority(ctx.target))
     return checks
@@ -249,6 +250,82 @@ def _check_journal_event_headroom(target: Path) -> List[CheckResult]:
                 )
             )
     return checks
+
+
+_LINEAGE_CHECK_NAME = "runs: lineage consistency"
+_RUN_LINEAGE_SCAN_LIMIT = 50
+_RUN_LINEAGE_FINDING_PREVIEW = 8
+
+
+def _check_run_lineage(target: Path) -> CheckResult:
+    """Read-only lineage-consistency verdict across recorded runs (#594).
+
+    Children whose parent run directory is missing, or whose branch-point
+    event id is absent from the parent journal, are findings — never crashes.
+    Legacy runs without lineage metadata are valid roots.
+    """
+    from brigade import run_journal, run_lifecycle, runs_cmd
+
+    runs_root = target / ".brigade" / "runs"
+    all_dirs, scan_omitted = _immediate_run_dirs(runs_root)
+    scanned = all_dirs[:_RUN_LINEAGE_SCAN_LIMIT]
+    scan_omitted += len(all_dirs) - len(scanned)
+
+    roots = 0
+    children = 0
+    terminal_runs = 0
+    findings: list[str] = []
+    for run_dir in scanned:
+        meta = _read_run_meta_fail_safe(run_dir / "run.json")
+        if meta is None:
+            continue
+        if runs_cmd._is_terminal(meta):
+            terminal_runs += 1
+        lineage = meta.get("lineage")
+        if not isinstance(lineage, dict):
+            roots += 1
+            continue
+        children += 1
+        parent_id = lineage.get("parent_run_id")
+        if not isinstance(parent_id, str) or not parent_id:
+            findings.append(f"{run_dir.name} (child lineage has no parent run id)")
+            continue
+        parent_dir = runs_root / parent_id
+        try:
+            parent_missing = not parent_dir.is_dir()
+        except OSError:
+            parent_missing = True
+        if parent_missing:
+            findings.append(f"{run_dir.name} (parent run directory missing: {parent_id})")
+            continue
+        branch_event_id = lineage.get("branch_point_event_id")
+        if not isinstance(branch_event_id, str) or not branch_event_id:
+            findings.append(f"{run_dir.name} (child lineage has no branch point event id)")
+            continue
+        journal_path = run_lifecycle._journal_path(parent_dir)
+        try:
+            if not journal_path.is_file():
+                findings.append(f"{run_dir.name} (parent {parent_id} has no lifecycle journal to verify branch point)")
+                continue
+            report = run_journal.read_journal_bounded(journal_path)
+        except (OSError, run_journal.RunJournalError):
+            findings.append(f"{run_dir.name} (parent {parent_id} journal unreadable)")
+            continue
+        if report.partial_tail is not None or report.chain_errors:
+            findings.append(f"{run_dir.name} (parent {parent_id} journal corrupt)")
+            continue
+        if not any(event.event_id == branch_event_id for event in report.events):
+            findings.append(f"{run_dir.name} (branch point event absent from parent journal: {branch_event_id})")
+
+    detail = f"roots={roots} children={children} terminal={terminal_runs} scanned={len(scanned)} omitted={scan_omitted}"
+    if findings:
+        shown = findings[:_RUN_LINEAGE_FINDING_PREVIEW]
+        detail = f"{detail}; findings: {'; '.join(shown)}"
+        remaining = len(findings) - len(shown)
+        if remaining > 0:
+            detail = f"{detail}, ... {remaining} more"
+        return (WARN, _LINEAGE_CHECK_NAME, detail)
+    return (OK, _LINEAGE_CHECK_NAME, detail)
 
 
 def _check_recovery_checkpoints(target: Path, *, full: bool = False) -> CheckResult:

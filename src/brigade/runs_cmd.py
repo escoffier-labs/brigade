@@ -80,6 +80,7 @@ _RUN_DETAIL_RUN_FIELDS = frozenset(
         "error",
         "suspected_noop",
         "resume_available",
+        "terminal",
         "lineage",
     }
 )
@@ -435,6 +436,32 @@ def _is_terminal(meta: dict[str, Any]) -> bool:
     if meta.get("finished_at"):
         return True
     return isinstance(status, str) and status not in _NONTERMINAL_STATUSES
+
+
+def _terminal_label(meta: Mapping[str, Any]) -> str:
+    return "terminal" if _is_terminal(dict(meta)) else "running"
+
+
+def _terminal_lifecycle_event(run_dir: Path):
+    """Return the first terminal lifecycle event, or None for legacy runs.
+
+    Raises ``ValueError`` when a recorded journal exists but is corrupt; runs
+    without a lifecycle journal are legacy roots and simply have no event.
+    """
+    from . import run_journal, run_lifecycle
+
+    journal_path = run_lifecycle._journal_path(run_dir)
+    if not journal_path.is_file():
+        return None
+    try:
+        report = run_journal.read_journal_bounded(journal_path)
+    except run_journal.RunJournalError as exc:
+        raise ValueError(f"lifecycle journal is unreadable: {exc.diagnostic}") from exc
+    if report.partial_tail is not None:
+        raise ValueError("lifecycle journal ends in a partial trailing record")
+    if report.chain_errors:
+        raise ValueError(f"lifecycle journal is corrupt: {report.chain_errors[0]}")
+    return next((event for event in report.events if event.event_type in _TERMINAL_LIFECYCLE_EVENT_TYPES), None)
 
 
 def _approval_resume_state(meta: Mapping[str, Any]) -> str | None:
@@ -1864,6 +1891,7 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
                 "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
                 "suspected_noop": True if meta.get("suspected_noop") is True else None,
                 "resume_available": _resume_available(run_dir),
+                "terminal": _terminal_label(meta),
                 "lineage": _detail_lineage_section(run_dir, meta),
             },
         ),
@@ -3324,6 +3352,7 @@ def show(run_dir: Path, *, json_output: bool = False) -> int:
 
     print(f"run: {run_dir}")
     _line("status", run_meta.get("status"))
+    print(f"terminal: {'yes' if _is_terminal(run_meta) else 'no'}")
     _line("task", run_meta.get("task"))
     _line("cwd", run_meta.get("cwd"))
     mode = "read-only" if run_meta.get("read_only") else "normal"
@@ -3352,6 +3381,41 @@ def show(run_dir: Path, *, json_output: bool = False) -> int:
     _print_terminal_guidance(run_dir, run_meta)
     if _is_terminal(run_meta):
         return _watch_return_code(run_meta.get("status"))
+    return 0
+
+
+def inspect(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
+    """Show recorded run lineage and terminal lifecycle state (issue #594).
+
+    Read-only: reads run.json, the lifecycle journal, and lineage metadata.
+    Fails closed with a clear error for unknown or corrupt runs.
+    """
+    run_dir, error = _resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 2
+    assert run_dir is not None
+    try:
+        meta = _read_json(run_dir / "run.json")
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if meta is None:
+        print(f"error: run.json not found in {run_dir}", file=sys.stderr)
+        return 2
+
+    print(f"run: {run_dir}")
+    _line("run id", run_dir.name)
+    _line("status", meta.get("status"))
+    _print_lineage(meta, run_dir=run_dir)
+    try:
+        terminal_event = _terminal_lifecycle_event(run_dir)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"terminal: {'yes' if _is_terminal(meta) else 'no'}")
+    if terminal_event is not None:
+        _line("terminal event", terminal_event.event_id)
     return 0
 
 

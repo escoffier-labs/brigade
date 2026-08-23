@@ -4164,3 +4164,109 @@ def test_runs_recover_authority_projection_failure_fails_closed(tmp_path, monkey
     err = capsys.readouterr().err
     assert "projection failed" in err
     assert "raw projector detail" not in err
+
+
+def test_runs_inspect_shows_child_lineage_and_children(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    parent_dir = runs_root / "20260817-120000-parent-aaaaaa"
+    events = _write_checkpointed_parent_run(workspace, parent_dir)
+
+    assert runs_cmd.child(parent_dir.name, events[-1].event_id, cwd=workspace) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    child_dir = Path(out[-1].split("child: ", 1)[1])
+    capsys.readouterr()
+
+    assert runs_cmd.inspect(parent_dir.name, cwd=workspace) == 0
+    out = capsys.readouterr().out
+    assert f"run: {parent_dir}" in out
+    assert f"run id: {parent_dir.name}" in out
+    assert "children:" in out
+    assert child_dir.name in out
+    assert "terminal:" in out
+
+    assert runs_cmd.inspect(child_dir, cwd=workspace) == 0
+    out = capsys.readouterr().out
+    assert "kind: child" in out
+    assert f"parent run: {parent_dir.name}" in out
+    assert f"branch point: {events[-1].event_id}" in out
+
+
+def test_runs_inspect_legacy_root_has_no_lineage(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    _write_minimal_run(
+        runs_root / "legacy",
+        task="legacy task",
+        status="ok",
+        started_at="2026-05-26T14:00:00Z",
+    )
+
+    assert runs_cmd.inspect("legacy", cwd=workspace) == 0
+    out = capsys.readouterr().out
+    assert "lineage:" not in out
+    assert "terminal: yes" in out
+
+
+def test_runs_inspect_running_run_is_not_terminal(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    _write_minimal_run(
+        runs_root / "active",
+        task="running task",
+        status="running",
+        started_at="2026-05-26T14:00:00Z",
+    )
+
+    assert runs_cmd.inspect("active", cwd=workspace) == 0
+    assert "terminal: no" in capsys.readouterr().out
+
+
+def test_runs_inspect_reports_unknown_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    (workspace / ".brigade" / "runs").mkdir(parents=True)
+
+    assert runs_cmd.inspect("no-such-run", cwd=workspace) == 2
+    assert "run directory not found" in capsys.readouterr().err
+
+
+def test_runs_inspect_reports_corrupt_run_json(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    (runs_root / "broken").mkdir()
+    (runs_root / "broken" / "run.json").write_text("not json")
+
+    assert runs_cmd.inspect("broken", cwd=workspace) == 2
+    assert "run.json is not valid JSON" in capsys.readouterr().err
+
+
+def test_runs_inspect_reports_corrupt_own_journal(tmp_path, capsys):
+    from brigade import run_lifecycle
+
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    run_dir = runs_root / "broken"
+    _write_minimal_run(run_dir, task="task", status="ok", started_at="2026-08-17T13:00:00Z")
+    journal = run_lifecycle._journal_path(run_dir)
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b'{"partial":')
+
+    assert runs_cmd.inspect(run_dir.name, cwd=workspace) == 2
+    assert "lifecycle journal" in capsys.readouterr().err
+
+
+def test_runs_show_prints_terminal_line(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    done = runs_root / "done"
+    _write_minimal_run(done, task="finished", status="ok", started_at="2026-05-26T14:00:00Z")
+    active = runs_root / "active"
+    _write_minimal_run(active, task="in flight", status="running", started_at="2026-05-26T15:00:00Z")
+
+    assert runs_cmd.show(done) == 0
+    assert "terminal: yes" in capsys.readouterr().out
+
+    assert runs_cmd.show(active) == 0
+    assert "terminal: no" in capsys.readouterr().out
