@@ -486,7 +486,9 @@ def is_known(cli_ref: str) -> bool:
     return cli_ref in _ADAPTERS or cli_ref.startswith(_OLLAMA_PREFIX) or has_cloud_env
 
 
-def command_for(cli_ref: str) -> str:
+def command_for(cli_ref: str, command: tuple[str, ...] | None = None) -> str:
+    if command is not None:
+        return command[0]
     if cli_ref.startswith(_OLLAMA_PREFIX):
         return "ollama"
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
@@ -500,10 +502,12 @@ def command_for(cli_ref: str) -> str:
     return cli_ref
 
 
-def resolve_agent_executable(cli_ref: str, path: str | None = None) -> proc.ExecutableIdentity:
+def resolve_agent_executable(
+    cli_ref: str, path: str | None = None, command: tuple[str, ...] | None = None
+) -> proc.ExecutableIdentity:
     """Resolve the adapter executable Brigade would launch for cli_ref."""
 
-    return proc.resolve_executable(command_for(cli_ref), path=path)
+    return proc.resolve_executable(command_for(cli_ref, command), path=path)
 
 
 _PROVIDER_PREFLIGHT_RE = re.compile(
@@ -694,8 +698,8 @@ def build_argv(
     return argv
 
 
-def detect(cli_ref: str) -> bool:
-    return resolve_agent_executable(cli_ref).runnable
+def detect(cli_ref: str, command: tuple[str, ...] | None = None) -> bool:
+    return resolve_agent_executable(cli_ref, command=command).runnable
 
 
 def _accepts_process_registry(function: Callable[..., object]) -> bool:
@@ -935,6 +939,7 @@ def run_agent(
     model: str | None = None,
     reasoning: str | None = None,
     env: dict[str, str] | None = None,
+    command: tuple[str, ...] | None = None,
     resume_session_id: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
 ) -> AgentResult:
@@ -961,13 +966,19 @@ def run_agent(
     if resolved_overrides is not None and "PATH" in resolved_overrides:
         assert child_env is not None
         executable_path = child_env["PATH"]
-    executable = resolve_agent_executable(cli_ref, path=executable_path)
+    executable = (
+        resolve_agent_executable(cli_ref, path=executable_path, command=command)
+        if command is not None
+        else resolve_agent_executable(cli_ref, path=executable_path)
+    )
     if not executable.runnable:
         failure_kind = "command-not-found" if executable.kind == "missing" else "unsupported-command-shim"
         return AgentResult(
             text="",
             ok=False,
-            detail=executable.detail if executable.kind != "missing" else f"{command_for(cli_ref)} not installed",
+            detail=(
+                executable.detail if executable.kind != "missing" else f"{command_for(cli_ref, command)} not installed"
+            ),
             failure_phase="dispatch",
             failure_kind=failure_kind,
         )
@@ -1094,7 +1105,7 @@ def run_agent(
         argv[-2:] = ["--sandbox", "read-only", "--always-approve"]
         argv.extend(["--json-schema", _GROK_RESULT_SCHEMA])
     assert executable.path is not None
-    argv = [executable.path, *argv[1:]]
+    argv = [executable.path, *(command[1:] if command is not None else ()), *argv[1:]]
     if cli_ref == "codex":
         result = proc.run(
             argv,

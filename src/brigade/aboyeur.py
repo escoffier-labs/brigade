@@ -1361,6 +1361,8 @@ def _run_orchestrator(
         kwargs["reasoning"] = orchestrator.reasoning
     if orchestrator.env is not None:
         kwargs["env"] = dict(orchestrator.env)
+    if orchestrator.command is not None:
+        kwargs["command"] = orchestrator.command
     result = _call_with_process_registry(
         agents.run_agent,
         orchestrator.cli,
@@ -3191,6 +3193,7 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
         "agents": {
             name: {
                 "cli": agent.cli,
+                "command": list(agent.command) if agent.command is not None else None,
                 "model": agent.model,
                 "reasoning": agent.reasoning,
                 "transport": agent.transport,

@@ -398,3 +398,37 @@ def test_split_by_capability_recency_shifts_the_estimate():
     weighted = outcome.split_by_capability("s", content_current, None, now=now, half_life_seconds=hl)
     assert plain.shrunk_rate == 0.5  # 1 helped / 1 hurt, unweighted
     assert weighted.shrunk_rate > 0.9  # recent success dominates
+
+
+def test_decide_withholds_candidate_on_margin_of_one_over_regression():
+    """#648: helped=2 hurt=1 clears install_min_helped but is a coin-flip margin."""
+    decision = outcome.decide(
+        _score(2, 1),
+        current_status="candidate",
+        last_action_ts=None,
+        now=dt.datetime(2026, 6, 21),
+        config=outcome.ReconcileConfig(),
+    )
+    assert decision.action == "hold"
+    assert decision.new_status == "candidate"
+    assert decision.reason == "withheld: verified helped margin over regressions below 2"
+
+
+def test_decide_installs_candidate_once_margin_reaches_install_min_helped():
+    """#648: helped=3 hurt=1 is hurt + install_min_helped and installs."""
+    decision = outcome.decide(
+        _score(3, 1),
+        current_status="candidate",
+        last_action_ts=None,
+        now=dt.datetime(2026, 6, 21),
+        config=outcome.ReconcileConfig(),
+    )
+    assert decision.action == "install"
+    assert decision.reason == "verified helped outnumbers regressions"
+
+
+def test_candidate_install_margin_met_ignores_clean_cohorts():
+    assert outcome.candidate_install_margin_met(1, 0, install_min_helped=2)
+    assert not outcome.candidate_install_margin_met(2, 1, install_min_helped=2)
+    assert outcome.candidate_install_margin_met(4, 2, install_min_helped=2)
+    assert not outcome.candidate_install_margin_met(3, 2, install_min_helped=2)

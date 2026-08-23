@@ -500,6 +500,29 @@ before run logs or receipts are written. This bounded replacement covers only va
 resolved for that seat; it is not a heuristic scan of the parent environment or historical
 logs. Resume revalidates stored environment tables before any synthesis dispatch.
 
+Direct CLI seats may also set `command` to a non-empty list that replaces the adapter executable
+and inserts fixed prefix arguments before Brigade's normal adapter arguments. Brigade resolves
+only the first list item as the executable and executes the list directly, never through a shell.
+This is useful when a provider supplies a native executable plus a script entry point instead of
+one native CLI binary.
+
+On Windows, Cursor's `cursor-agent.cmd` is a PowerShell shim, not a native executable, so Brigade
+will reject it. Point a direct Cursor seat at the `node.exe` and `index.js` in the installed Cursor
+Agent version directory instead:
+
+```toml
+[agents.cursor_worker]
+cli = "cursor"
+command = [
+  "C:/path/to/cursor-agent/versions/<version>/node.exe",
+  "C:/path/to/cursor-agent/versions/<version>/index.js",
+]
+role = "Implement the assigned change."
+```
+
+The usual Cursor model pin and `-p` arguments remain supplied by the `cursor` adapter. Run
+`brigade roster doctor` after setting the command to confirm that it resolves the native `node.exe`.
+
 Detached runs require artifacts, so `--detach` cannot be combined with `--no-artifacts`.
 It also refuses `--dry-run` and `--inspect`, because the parent process exits before it can print a plan or inspect final artifacts.
 Use `brigade runs watch <run>` to follow a detached run from its artifacts:

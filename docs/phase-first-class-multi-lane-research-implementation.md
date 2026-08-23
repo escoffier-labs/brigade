@@ -29,8 +29,12 @@ impact set to the implementation run.
 - New runs use `run.json` schema `brigade.run.v1` with `kind: "research"`.
 - Runs without `kind` project as `kind: "work"`.
 - Research sidecars use `brigade.research.v1`, `brigade.research.sources.v1`,
-  `brigade.research.findings.v1`, and
-  `brigade.research.citation-audit.v1`.
+  `brigade.research.findings.v1`, `brigade.research.citation-audit.v1`, and
+  `brigade.research.claim-audit.v1` (`claim-audit.json`: one validated record
+  per reviewer-checked factual claim, bound to the final report digest and
+  synthesis attempt; acceptance is derived by Brigade from the records, the
+  reviewer boolean is a veto only; pre-feature runs report
+  `claim_audit: unavailable` and are never upgraded).
 - Research phases are `planning`, `discovery`, `extraction`, `synthesis`,
   `review`, `repair`, and `publishing`.
 - Exit codes are `0` for success, `1` for runtime or doctor failure, `2` for

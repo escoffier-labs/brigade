@@ -3308,6 +3308,69 @@ def test_strip_checkpoint_bodies_for_export_replaces_private_body(tmp_path):
     run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(export_copy)
 
 
+def test_strip_checkpoint_bodies_for_export_removes_crashed_temp(tmp_path):
+    """#646/#654: a crashed ``.checkpoint.*.tmp`` holding private bytes must be
+    stripped on export and the assert must not pass while one remains."""
+    run_dir = _run_dir(tmp_path)
+    private_task = "SECRET_TASK_PROMPT_do_not_export"
+    body = _writer_bytes({"schema": "brigade.run.v1", "status": "planning", "task": private_task})
+    placed = _place_checkpoint_file(run_dir, body)
+    cp_dir = placed.parent
+    # A crash mid-write leaves an arbitrary, not-necessarily-JSON prefix.
+    crashed = cp_dir / ".checkpoint.abc123.tmp"
+    crashed.write_bytes(b'{"schema": "brigade.run.v1", "task": "SECRET_CRASHED_' + b"\xff\xfe")
+    os.chmod(crashed, 0o600)
+
+    export_copy = tmp_path / "export-copy"
+    shutil.copytree(run_dir, export_copy)
+    export_temp = export_copy / "events" / run_checkpoint.CHECKPOINT_DIR_NAME / crashed.name
+
+    # Before stripping, the temp alone is a refusal.
+    with pytest.raises(run_checkpoint.CheckpointError, match="privacy_class=private") as exc_info:
+        run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(export_copy)
+    assert exc_info.value.category == "export-privacy"
+
+    refs = run_checkpoint.strip_checkpoint_bodies_for_export(export_copy)
+    assert len(refs) == 1
+    assert not export_temp.exists()
+    exported_tree = b"".join(p.read_bytes() for p in export_copy.rglob("*") if p.is_file())
+    assert b"SECRET_CRASHED_" not in exported_tree
+    assert private_task.encode() not in exported_tree
+    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(export_copy)
+
+    # Local recovery source keeps its temp and body untouched.
+    assert crashed.exists()
+    assert placed.read_bytes() == body
+
+
+def test_assert_export_tree_refuses_reference_shaped_crashed_temp(tmp_path):
+    """A temp whose bytes happen to parse as an artifact reference is still a
+    leak: the temp pattern itself is refused without reading the file."""
+    run_dir = _run_dir(tmp_path)
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    reference = run_checkpoint.checkpoint_artifact_reference(sha256="a" * 64, byte_size=1)
+    (cp_dir / ".checkpoint.deadbeef.tmp").write_text(json.dumps(reference), encoding="utf-8")
+
+    with pytest.raises(run_checkpoint.CheckpointError, match="crashed checkpoint temp") as exc_info:
+        run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(run_dir)
+    assert exc_info.value.category == "export-privacy"
+
+
+def test_strip_checkpoint_bodies_for_export_refuses_symlinked_temp(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    target = tmp_path / "outside-secret"
+    target.write_text("SECRET", encoding="utf-8")
+    (cp_dir / ".checkpoint.link.tmp").symlink_to(target)
+
+    with pytest.raises(run_checkpoint.CheckpointError, match="not a regular file") as exc_info:
+        run_checkpoint.strip_checkpoint_bodies_for_export(run_dir)
+    assert exc_info.value.category == "export-privacy"
+    assert target.exists()
+
+
 def test_assert_export_tree_refuses_checkpoint_body(tmp_path):
     run_dir = _run_dir(tmp_path)
     body = _writer_bytes({"schema": "brigade.run.v1", "status": "planning", "task": "keep-private"})

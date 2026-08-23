@@ -48,6 +48,21 @@ def test_load_valid_roster(tmp_path):
     assert not roster_mod.is_cli_allowed("claude", r)
 
 
+def test_load_roster_accepts_direct_command_prefix(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "cursor"\nrole = "plan"\n'
+        'command = ["C:/Cursor/versions/current/node.exe", "C:/Cursor/versions/current/index.js"]\n'
+    )
+
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+
+    assert loaded.agents["chef"].command == (
+        "C:/Cursor/versions/current/node.exe",
+        "C:/Cursor/versions/current/index.js",
+    )
+
+
 def test_read_only_capability_defaults_true_and_accepts_boolean(tmp_path):
     loaded = roster_mod.load_roster(_write(tmp_path, VALID))
     assert loaded.agents["coder"].read_only_capable is True

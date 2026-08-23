@@ -508,6 +508,9 @@ def dispatch(
                 kwargs.pop("env", None)
         return runner(*args, **kwargs)
 
+    def direct_command_kwargs(agent: Agent) -> dict[str, tuple[str, ...]]:
+        return {"command": agent.command} if agent.command is not None else {}
+
     def cancel_active_work(futures: dict[Any, int]) -> None:
         for future in futures:
             future.cancel()
@@ -627,6 +630,7 @@ def dispatch(
                     model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                     env=dict(selected_agent.env) if selected_agent.env is not None else None,
+                    **direct_command_kwargs(selected_agent),
                     resume_session_id=resume_session_id,
                     process_registry=seat_process_registry,
                 )
@@ -648,6 +652,7 @@ def dispatch(
                     read_only=effective_read_only,
                     env=dict(selected_agent.env),
                     process_registry=seat_process_registry,
+                    **direct_command_kwargs(selected_agent),
                     **env_kwargs,
                 )
             if selected_agent.cli == "codex" and appserver is not None:
@@ -706,6 +711,7 @@ def dispatch(
                     cwd=cwd,
                     read_only=effective_read_only,
                     process_registry=seat_process_registry,
+                    **direct_command_kwargs(selected_agent),
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is None:
                 return run_direct_agent(
@@ -716,6 +722,7 @@ def dispatch(
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     process_registry=seat_process_registry,
+                    **direct_command_kwargs(selected_agent),
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is None:
                 return run_direct_agent(
@@ -726,6 +733,7 @@ def dispatch(
                     read_only=effective_read_only,
                     model=selected_agent.model,
                     process_registry=seat_process_registry,
+                    **direct_command_kwargs(selected_agent),
                 )
             if sandbox is None and selected_agent.model is None and selected_agent.reasoning is not None:
                 return run_direct_agent(
@@ -736,6 +744,7 @@ def dispatch(
                     read_only=effective_read_only,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
+                    **direct_command_kwargs(selected_agent),
                 )
             if sandbox is not None and selected_agent.model is not None and selected_agent.reasoning is None:
                 return run_direct_agent(
@@ -747,6 +756,7 @@ def dispatch(
                     sandbox=sandbox,
                     model=selected_agent.model,
                     process_registry=seat_process_registry,
+                    **direct_command_kwargs(selected_agent),
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is not None:
                 return run_direct_agent(
@@ -758,6 +768,7 @@ def dispatch(
                     sandbox=sandbox,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
+                    **direct_command_kwargs(selected_agent),
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is not None:
                 return run_direct_agent(
@@ -769,6 +780,7 @@ def dispatch(
                     model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
+                    **direct_command_kwargs(selected_agent),
                 )
             assert sandbox is not None
             assert selected_agent.model is not None
@@ -783,6 +795,7 @@ def dispatch(
                 model=selected_agent.model,
                 reasoning=selected_agent.reasoning,
                 process_registry=seat_process_registry,
+                **direct_command_kwargs(selected_agent),
             )
 
         def invoke(
