@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from queue import Empty
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator
+from typing import Any, BinaryIO, Callable, Iterator
 
 from .. import localio
 from ..component_paths import cache_root
@@ -25,6 +25,8 @@ from .paths import is_operator_home, resolved_path
 
 BRIEF_TIMEOUT_SECONDS = 10
 HOOK_TIMEOUT_LATCH_AFTER = 2
+_TIMEOUT_FOLLOWUP_SECONDS = 0.5
+_HOOK_OUTCOME_KINDS = frozenset({"ok", "latched", "latched_silent"})
 MAX_RECENT_SESSION_STATES = 512
 MAX_HOOK_STDIN_BYTES = 1_048_576
 MAX_HOOK_STDIN_STRING_CHARS = 262_144
@@ -43,6 +45,10 @@ _HOOK_WORKER_COMMAND = (
 
 class HookDegraded(Exception):
     """Internal hook failure that must fail open with a doctor pointer."""
+
+    def __init__(self, message: str, *, log_target: Path | None = None) -> None:
+        super().__init__(message)
+        self.log_target = log_target
 
 
 _SHELL_SEPARATORS = {"&&", "||", ";", "|", "|&", "&", "\n"}
@@ -2757,12 +2763,102 @@ def _isolated_handle_payload(event: str, payload: dict[str, Any], *, pin: Path |
     return handle_payload(event, payload, pin=pin)
 
 
+def _raw_pin_target_from_env() -> Path | None:
+    """Return the pin path from the worker env without touching the filesystem."""
+    raw = os.environ.get(_HOOK_PIN_ENV)
+    if raw is None or not raw.strip():
+        return None
+    return Path(raw)
+
+
+def _path_or_none(value: object) -> Path | None:
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str) and value:
+        return Path(value)
+    return None
+
+
+def _hook_run_body(
+    event: str,
+    payload: dict[str, Any],
+    *,
+    pin_target: Path | None,
+    on_prologue: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Run every filesystem-touching ``hook_run`` step.
+
+    The parent process must not call this. Pin resolution, target discovery,
+    log-target lookup, latch I/O, ``.git`` checks, and ``handle_payload`` all
+    belong inside the timed worker so a stalled filesystem cannot outlive the
+    configured hook timeout.
+    """
+    pin = _resolve_pin(pin_target)
+    session_id = _session_id_from_payload(payload)
+    log_target = _resolve_log_target(payload, pin=pin)
+    latched = False
+    announce = False
+    if log_target is not None:
+        latched, announce = _read_hook_latch(log_target, session_id)
+    if on_prologue is not None:
+        on_prologue(
+            {
+                "log_target": str(log_target) if log_target is not None else None,
+                "session_id": session_id,
+                "latched": latched,
+                "announce": announce,
+            }
+        )
+    if latched and log_target is not None:
+        if announce:
+            envelope.append_log(log_target, f"{event}: latched after repeated timeouts")
+            _mark_hook_latch_announced(log_target, session_id)
+            return {
+                "kind": "latched",
+                "result": envelope.latched_envelope(event),
+                "log_target": str(log_target),
+                "claim_path": None,
+                "session_id": session_id,
+            }
+        return {
+            "kind": "latched_silent",
+            "result": envelope.empty_envelope(event),
+            "log_target": str(log_target),
+            "claim_path": None,
+            "session_id": session_id,
+        }
+
+    result = _isolated_handle_payload(event, payload, pin=pin)
+    result, claim_path = _strip_claim(result)
+    if log_target is not None:
+        _clear_hook_timeouts(log_target, session_id)
+        if result is None:
+            envelope.append_log(log_target, f"{event}: empty envelope")
+    return {
+        "kind": "ok",
+        "result": result,
+        "log_target": str(log_target) if log_target is not None else None,
+        "claim_path": str(claim_path) if claim_path is not None else None,
+        "session_id": session_id,
+    }
+
+
 def _hook_worker_main() -> None:
-    """Run ``handle_payload`` in an isolated child process (issue #735)."""
+    """Run the full hook body in an isolated child process (issue #735)."""
     event = os.environ.get(_HOOK_WORKER_EVENT_ENV, "")
     payload, _raw = _load_hook_stdin()
-    result = _isolated_handle_payload(event, payload, pin=_hook_pin_from_env())
-    sys.stdout.write(json.dumps(result))
+
+    def on_prologue(info: dict[str, Any]) -> None:
+        sys.stdout.write(json.dumps({"phase": "prologue", **info}) + "\n")
+        sys.stdout.flush()
+
+    outcome = _hook_run_body(
+        event,
+        payload,
+        pin_target=_raw_pin_target_from_env(),
+        on_prologue=on_prologue,
+    )
+    sys.stdout.write(json.dumps({"phase": "done", **outcome}) + "\n")
 
 
 def _terminate_process(proc: mp.Process | mp.context.ForkProcess) -> None:
@@ -2792,6 +2888,47 @@ def _recv_timed_handle_payload_result(
     if status == "ok":
         return value if isinstance(value, dict) else None
     if isinstance(value, BaseException):
+        raise value
+    raise RuntimeError(str(value))
+
+
+def _recv_timed_hook_run_result(
+    queue: mp.Queue,
+    proc: mp.Process | mp.context.ForkProcess,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    try:
+        status, value = queue.get(timeout=timeout)
+    except Empty as exc:
+        _terminate_process(proc)
+        raise HookDegraded("hook operation timed out") from exc
+
+    log_target: Path | None = None
+    if status == "prologue":
+        if isinstance(value, dict):
+            log_target = _path_or_none(value.get("log_target"))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_process(proc)
+            raise HookDegraded("hook operation timed out", log_target=log_target)
+        try:
+            status, value = queue.get(timeout=remaining)
+        except Empty as exc:
+            _terminate_process(proc)
+            raise HookDegraded("hook operation timed out", log_target=log_target) from exc
+
+    proc.join(timeout=1)
+    if proc.is_alive():
+        _terminate_process(proc)
+    if status == "ok":
+        if isinstance(value, dict):
+            return value
+        raise RuntimeError("timed hook worker returned a non-object result")
+    if isinstance(value, BaseException):
+        if isinstance(value, HookDegraded) and value.log_target is None:
+            value.log_target = log_target
         raise value
     raise RuntimeError(str(value))
 
@@ -2826,13 +2963,105 @@ def _fork_timed_handle_payload_worker(
         queue.join_thread()
 
 
+def _fork_timed_hook_run_target(
+    event: str,
+    payload: dict[str, Any],
+    queue: mp.Queue,
+    pin_target: Path | None,
+) -> None:
+    try:
+
+        def on_prologue(info: dict[str, Any]) -> None:
+            queue.put(("prologue", info))
+
+        outcome = _hook_run_body(event, payload, pin_target=pin_target, on_prologue=on_prologue)
+        queue.put(("ok", outcome))
+    except Exception as exc:  # noqa: BLE001 - marshal failure back to parent
+        queue.put(("err", exc))
+
+
+def _fork_timed_hook_run_worker(
+    event: str, raw: str, *, timeout: float, pin_target: Path | None = None
+) -> dict[str, Any]:
+    payload = _parse_hook_stdin(raw.encode("utf-8"))
+
+    ctx = mp.get_context("fork")
+    queue: mp.Queue = ctx.Queue()
+    proc = ctx.Process(
+        target=_fork_timed_hook_run_target,
+        args=(event, payload, queue, pin_target),
+        daemon=True,
+    )
+    try:
+        proc.start()
+        return _recv_timed_hook_run_result(queue, proc, timeout=timeout)
+    finally:
+        if proc.is_alive():
+            _terminate_process(proc)
+        queue.close()
+        queue.join_thread()
+
+
+def _log_target_from_worker_stdout(stdout: str | None) -> Path | None:
+    if not stdout:
+        return None
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("phase") == "prologue":
+            return _path_or_none(parsed.get("log_target"))
+    return None
+
+
+def _outcome_from_worker_stdout(stdout: str | None) -> dict[str, Any] | None:
+    if not stdout or not stdout.strip():
+        return None
+    done: dict[str, Any] | None = None
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text or text == "null":
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        if parsed.get("phase") == "done" or parsed.get("kind") in _HOOK_OUTCOME_KINDS:
+            done = parsed
+            continue
+        if parsed.get("phase") == "prologue":
+            continue
+        done = {
+            "kind": "ok",
+            "result": parsed,
+            "log_target": None,
+            "claim_path": None,
+            "session_id": "unknown",
+        }
+    return done
+
+
 def _subprocess_timed_handle_payload(
     event: str, raw: str, *, timeout: float, pin: Path | None = None
 ) -> dict[str, Any] | None:
+    outcome = _subprocess_timed_hook_run(event, raw, timeout=timeout, pin_target=pin)
+    raw_result = outcome.get("result")
+    return raw_result if isinstance(raw_result, dict) else None
+
+
+def _subprocess_timed_hook_run(
+    event: str, raw: str, *, timeout: float, pin_target: Path | None = None
+) -> dict[str, Any]:
     env = os.environ.copy()
     env[_HOOK_WORKER_EVENT_ENV] = event
-    if pin is not None:
-        env[_HOOK_PIN_ENV] = str(pin)
+    if pin_target is not None:
+        env[_HOOK_PIN_ENV] = str(pin_target)
     else:
         env.pop(_HOOK_PIN_ENV, None)
     try:
@@ -2846,29 +3075,58 @@ def _subprocess_timed_handle_payload(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise HookDegraded("hook operation timed out") from exc
+        captured = exc.stdout if isinstance(exc.stdout, str) else ""
+        raise HookDegraded(
+            "hook operation timed out",
+            log_target=_log_target_from_worker_stdout(captured),
+        ) from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or f"exit {completed.returncode}"
         raise RuntimeError(detail)
-    stdout = completed.stdout.strip()
-    if not stdout or stdout == "null":
-        return None
-    parsed = json.loads(stdout)
-    return parsed if isinstance(parsed, dict) else None
+    outcome = _outcome_from_worker_stdout(completed.stdout)
+    if outcome is None:
+        return {
+            "kind": "ok",
+            "result": None,
+            "log_target": None,
+            "claim_path": None,
+            "session_id": "unknown",
+        }
+    return outcome
 
 
 def _run_timed_handle_payload(event: str, raw: str, *, pin: Path | None = None) -> dict[str, Any] | None:
+    """Run the full hook body under the configured timeout.
+
+    ``pin`` is the unresolved CLI/env target. The worker resolves it. The
+    parent must not call ``_resolve_pin`` / ``_resolve_log_target`` first.
+    """
     timeout = _hook_timeout_seconds()
     if sys.platform == "win32":
-        return _subprocess_timed_handle_payload(event, raw, timeout=timeout, pin=pin)
-    return _fork_timed_handle_payload_worker(event, raw, timeout=timeout, pin=pin)
+        return _subprocess_timed_hook_run(event, raw, timeout=timeout, pin_target=pin)
+    return _fork_timed_hook_run_worker(event, raw, timeout=timeout, pin_target=pin)
 
 
-def _emit_result(event: str, result: dict[str, Any] | None, *, target: Path | None) -> None:
-    payload = result if result is not None else envelope.empty_envelope(event)
-    envelope.emit_stdout(payload)
-    if target is not None and result is None:
-        envelope.append_log(target, f"{event}: empty envelope")
+def _normalize_timed_outcome(value: object) -> dict[str, Any]:
+    if value is None:
+        return {
+            "kind": "ok",
+            "result": None,
+            "log_target": None,
+            "claim_path": None,
+            "session_id": "unknown",
+        }
+    if isinstance(value, dict) and value.get("kind") in _HOOK_OUTCOME_KINDS:
+        return value
+    if isinstance(value, dict):
+        return {
+            "kind": "ok",
+            "result": value,
+            "log_target": None,
+            "claim_path": None,
+            "session_id": "unknown",
+        }
+    raise TypeError(f"timed hook worker returned {type(value).__name__}")
 
 
 def _resolve_log_target(payload: dict[str, Any] | None, *, pin: Path | None = None) -> Path | None:
@@ -2925,10 +3183,70 @@ def _clear_hook_timeouts(target: Path, session_id: str) -> None:
     write_session_state(target, session_id, updated)
 
 
-def _emit_latched(event: str, target: Path, session_id: str) -> None:
-    envelope.append_log(target, f"{event}: latched after repeated timeouts")
-    envelope.emit_stdout(envelope.latched_envelope(event))
-    _mark_hook_latch_announced(target, session_id)
+def _timeout_followup_target(
+    event: str,
+    log_target_text: str,
+    session_id: str,
+    detail: str,
+    queue: mp.Queue,
+) -> None:
+    try:
+        target = Path(log_target_text)
+        state = _record_hook_timeout(target, session_id)
+        envelope.append_log(target, f"{event}: degraded: {detail}")
+        if state.get("hook_latched") is True:
+            envelope.append_log(target, f"{event}: latched after repeated timeouts")
+            _mark_hook_latch_announced(target, session_id)
+            queue.put("latched")
+        else:
+            queue.put("degraded")
+    except Exception:  # noqa: BLE001 - follow-up must not raise into the parent
+        queue.put("degraded")
+
+
+def _apply_timeout_followup_inprocess(event: str, target: Path, session_id: str, detail: str) -> str:
+    try:
+        state = _record_hook_timeout(target, session_id)
+        envelope.append_log(target, f"{event}: degraded: {detail}")
+        if state.get("hook_latched") is True:
+            envelope.append_log(target, f"{event}: latched after repeated timeouts")
+            _mark_hook_latch_announced(target, session_id)
+            return "latched"
+        return "degraded"
+    except OSError:
+        return "degraded"
+
+
+def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
+    """Record timeout/latch without blocking past a short budget.
+
+    The path was already resolved inside the timed worker. A later stall on
+    the same tree must still not hang Claude Code.
+    """
+    detail = str(exc)
+    if sys.platform == "win32":
+        return _apply_timeout_followup_inprocess(event, log_target, session_id, detail)
+
+    ctx = mp.get_context("fork")
+    queue: mp.Queue = ctx.Queue()
+    proc = ctx.Process(
+        target=_timeout_followup_target,
+        args=(event, str(log_target), session_id, detail, queue),
+        daemon=True,
+    )
+    try:
+        proc.start()
+        try:
+            status = queue.get(timeout=_TIMEOUT_FOLLOWUP_SECONDS)
+        except Empty:
+            _terminate_process(proc)
+            return "degraded"
+        return "latched" if status == "latched" else "degraded"
+    finally:
+        if proc.is_alive():
+            _terminate_process(proc)
+        queue.close()
+        queue.join_thread()
 
 
 def hook_run(
@@ -2944,73 +3262,59 @@ def hook_run(
     envelope, degraded doctor pointer, latched notice, or a rendered
     decision/injection). Diagnostics go to the local hook log, never to the
     session stream.
+
+    The parent reads bounded stdin, spawns the timed worker, and enforces
+    the timeout. Pin resolution, target discovery, log-target lookup, latch
+    I/O, and ``handle_payload`` run only inside that worker.
     """
     if package != PACKAGE_REF:
         return 0
 
-    log_target: Path | None = None
     raw = ""
     claim_path: Path | None = None
+    log_target: Path | None = None
     session_id = "unknown"
-    pin = _resolve_pin(target)
+    result: dict[str, Any] | None = None
     try:
         payload, raw = _load_hook_stdin(stdin_text=stdin_text)
         session_id = _session_id_from_payload(payload)
-        log_target = _resolve_log_target(payload, pin=pin)
-        if log_target is not None:
-            latched, announce = _read_hook_latch(log_target, session_id)
-            if latched:
-                if announce:
-                    _emit_latched(event, log_target, session_id)
-                else:
-                    envelope.emit_stdout(envelope.empty_envelope(event))
-                return 0
-        # Unwired / unpinned events (log_target is None) still run handle_payload
-        # under the timeout worker. SessionStart's init hint resolves cwd and
-        # stats `.git`; a stalled filesystem must return the timeout envelope
-        # instead of blocking Claude Code.
-        result = _run_timed_handle_payload(event, raw, pin=pin)
-        result, claim_path = _strip_claim(result)
-        if log_target is not None:
-            _clear_hook_timeouts(log_target, session_id)
+        outcome = _normalize_timed_outcome(_run_timed_handle_payload(event, raw, pin=target))
+        log_target = _path_or_none(outcome.get("log_target"))
+        session_id = str(outcome.get("session_id") or session_id)
+        claim_path = _path_or_none(outcome.get("claim_path"))
+        kind = str(outcome.get("kind") or "ok")
+        raw_result = outcome.get("result")
+        result = raw_result if isinstance(raw_result, dict) else None
+        if kind == "latched":
+            envelope.emit_stdout(envelope.latched_envelope(event))
+            return 0
+        if kind == "latched_silent":
+            envelope.emit_stdout(envelope.empty_envelope(event))
+            return 0
     except HookDegraded as exc:
         if claim_path is not None:
             compaction_marker.release_claim_path(claim_path)
             claim_path = None
-        if log_target is not None:
-            if _is_timeout_degraded(exc):
-                state = _record_hook_timeout(log_target, session_id)
-                if state.get("hook_latched") is True:
-                    envelope.append_log(log_target, f"{event}: degraded: {exc}")
-                    _emit_latched(event, log_target, session_id)
-                    return 0
-            envelope.append_log(log_target, f"{event}: degraded: {exc}")
-        else:
-            try:
-                cwd = Path.cwd()
-                if not is_operator_home(cwd):
-                    envelope.append_log(cwd, f"{event}: degraded: {exc}")
-            except OSError:
-                pass
+        followup_target = exc.log_target if exc.log_target is not None else log_target
+        if followup_target is not None and _is_timeout_degraded(exc):
+            if _bounded_timeout_followup(event, followup_target, session_id, exc) == "latched":
+                envelope.emit_stdout(envelope.latched_envelope(event))
+                return 0
         envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
-    except Exception as exc:  # noqa: BLE001 - hooks must fail open instead of breaking the harness
+    except Exception:  # noqa: BLE001 - hooks must fail open instead of breaking the harness
         if claim_path is not None:
             compaction_marker.release_claim_path(claim_path)
             claim_path = None
-        if log_target is not None:
-            envelope.append_log(log_target, f"{event}: error: {type(exc).__name__}: {exc}")
         envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
 
     try:
-        _emit_result(event, result, target=log_target)
-    except Exception as exc:  # noqa: BLE001 - stdout failure still fails open
+        envelope.emit_stdout(result if result is not None else envelope.empty_envelope(event))
+    except Exception:  # noqa: BLE001 - stdout failure still fails open
         if claim_path is not None:
             compaction_marker.release_claim_path(claim_path)
             claim_path = None
-        if log_target is not None:
-            envelope.append_log(log_target, f"{event}: emit failed: {exc}")
         try:
             envelope.emit_stdout(envelope.degraded_envelope(event))
         except Exception:  # noqa: BLE001

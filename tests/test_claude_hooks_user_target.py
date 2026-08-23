@@ -138,9 +138,9 @@ def test_hook_run_other_events_stay_silent_for_unwired_git_repo(tmp_path: Path, 
 def test_hook_run_unwired_path_times_out_when_target_resolution_hangs(tmp_path: Path, monkeypatch, capsys):
     """Unpinned unwired events must use the timed worker (issue #1051).
 
-    ``_resolve_log_target`` returning None used to call ``handle_payload`` in
-    the parent, so ``effective_hook_target`` path resolution or the SessionStart
-    ``.git`` check could block Claude Code indefinitely.
+    ``handle_payload`` used to run in the parent when ``_resolve_log_target``
+    returned None, so ``effective_hook_target`` or the SessionStart ``.git``
+    check could block Claude Code indefinitely.
     """
     repo = tmp_path / "unwired-git"
     (repo / ".git").mkdir(parents=True)
@@ -165,6 +165,65 @@ def test_hook_run_unwired_path_times_out_when_target_resolution_hangs(tmp_path: 
     elapsed = time.monotonic() - started
     assert elapsed < 2.0
     assert json.loads(capsys.readouterr().out) == envelope.degraded_envelope("SessionStart")
+
+
+def test_hook_run_times_out_when_log_target_resolution_hangs(tmp_path: Path, monkeypatch, capsys):
+    """No parent-side filesystem op can hang past the hook timeout (issue #1051).
+
+    ``_resolve_log_target`` used to run in the parent before the timed worker
+    started. An unpinned event whose cwd is on a stalled filesystem then
+    blocked Claude Code regardless of the inner timeout. The hang is on the
+    log-target / target-discovery helper itself, not on ``handle_payload``.
+    """
+    repo = tmp_path / "stalled-cwd"
+    repo.mkdir()
+    monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.1)
+
+    def hang_log_target(*_args, **_kwargs) -> Path | None:
+        time.sleep(5)
+        return None
+
+    monkeypatch.setattr(runtime, "_resolve_log_target", hang_log_target)
+    capsys.readouterr()
+    started = time.monotonic()
+    assert (
+        runtime.hook_run(
+            event="PreToolUse",
+            package=PACKAGE_REF,
+            stdin_text=json.dumps(_payload(repo, "PreToolUse")),
+        )
+        == 0
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert json.loads(capsys.readouterr().out) == envelope.degraded_envelope("PreToolUse")
+
+
+def test_hook_run_times_out_when_pin_resolution_hangs(tmp_path: Path, monkeypatch, capsys):
+    """Pin resolution that touches the filesystem is inside the timed worker."""
+    repo = tmp_path / "stalled-pin"
+    repo.mkdir()
+    monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.1)
+
+    def hang_pin(_target: Path | None) -> Path | None:
+        time.sleep(5)
+        return None
+
+    monkeypatch.setattr(runtime, "_resolve_pin", hang_pin)
+    capsys.readouterr()
+    started = time.monotonic()
+    assert (
+        runtime.hook_run(
+            event="PreToolUse",
+            package=PACKAGE_REF,
+            target=repo,
+            stdin_text=json.dumps(_payload(repo, "PreToolUse")),
+        )
+        == 0
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert json.loads(capsys.readouterr().out) == envelope.degraded_envelope("PreToolUse")
 
 
 def test_hook_run_unwired_path_times_out_when_git_stat_hangs(tmp_path: Path, monkeypatch, capsys):
