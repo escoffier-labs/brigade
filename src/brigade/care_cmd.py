@@ -200,8 +200,63 @@ MEMORY_JOB_ENTRIES: tuple[CareEntry, ...] = (
 )
 
 
+# A care entry that fails this many receipts in a row is "repeatedly failing"
+# and must surface on status, work brief, and the Center dashboard (#985).
+REPEATED_FAILURE_THRESHOLD = 2
+
+
 def _catalog_by_id() -> dict[str, CareEntry]:
     return {entry.entry_id: entry for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES)}
+
+
+def _runbook_identity_key(entry: CareEntry) -> str:
+    """Identity used to recognize predecessor ids that schedule the same runbook."""
+    if entry.runbook_id:
+        return f"id:{entry.runbook_id}"
+    if entry.runbook_rel:
+        return f"path:{entry.runbook_rel}"
+    return f"entry:{entry.entry_id}"
+
+
+def _adopt_installed_aliases(
+    requested: tuple[CareEntry, ...],
+    installed: tuple[CareEntry, ...],
+) -> tuple[tuple[CareEntry, ...], list[dict[str, Any]]]:
+    """Replace requested entries with installed predecessors that share a runbook.
+
+    Bare ``brigade care install`` of the atomic set must not stack ``daily-care``
+    next to ``care-scan`` (same ``daily-care-pass`` runbook) or ``ingest-sweep``
+    next to ``handoff-ingest``. Adopt the installed id instead of creating a
+    second timer (#986).
+    """
+    installed_by_runbook: dict[str, CareEntry] = {}
+    for entry in installed:
+        installed_by_runbook.setdefault(_runbook_identity_key(entry), entry)
+
+    resolved: list[CareEntry] = []
+    adopted: list[dict[str, Any]] = []
+    seen_runbooks: set[str] = set()
+    for entry in requested:
+        key = _runbook_identity_key(entry)
+        covering = installed_by_runbook.get(key)
+        if covering is not None and covering.entry_id != entry.entry_id:
+            adopted.append(
+                {
+                    "requested": entry.entry_id,
+                    "using": covering.entry_id,
+                    "runbook_id": covering.runbook_id,
+                    "runbook": covering.runbook_rel,
+                }
+            )
+            if key not in seen_runbooks:
+                resolved.append(covering)
+                seen_runbooks.add(key)
+            continue
+        if key in seen_runbooks:
+            continue
+        resolved.append(entry)
+        seen_runbooks.add(key)
+    return tuple(resolved), adopted
 
 
 def _resolve_selected_entries(
@@ -684,6 +739,38 @@ def _latest_runbook_receipt(target: Path, runbook_id: str) -> dict[str, Any] | N
     return None
 
 
+def _runbook_receipts(target: Path, runbook_id: str) -> list[dict[str, Any]]:
+    """Newest-first receipts for one runbook. Empty when *runbook_id* is blank."""
+    if not runbook_id:
+        return []
+    return [
+        receipt for receipt in runbook_cmd._run_receipts(target) if str(receipt.get("runbook_id") or "") == runbook_id
+    ]
+
+
+def _consecutive_failed_receipts(receipts: list[dict[str, Any]]) -> int:
+    """Count leading ``failed`` receipts. *receipts* must be newest-first."""
+    count = 0
+    for receipt in receipts:
+        if str(receipt.get("status") or "") == "failed":
+            count += 1
+            continue
+        break
+    return count
+
+
+def _receipt_summary(receipt: dict[str, Any] | None) -> dict[str, Any] | None:
+    if receipt is None:
+        return None
+    return {
+        "run_id": receipt.get("run_id"),
+        "status": receipt.get("status"),
+        "started_at": receipt.get("started_at"),
+        "completed_at": receipt.get("completed_at"),
+        "receipt_path": receipt.get("receipt_path"),
+    }
+
+
 def _entry_status(target: Path, entry: CareEntry) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": entry.entry_id,
@@ -698,18 +785,58 @@ def _entry_status(target: Path, entry: CareEntry) -> dict[str, Any]:
     payload["runbook"] = entry.runbook_rel
     payload["runbook_id"] = entry.runbook_id
     payload["runbook_present"] = path.is_file()
-    receipt = _latest_runbook_receipt(target, entry.runbook_id or "")
-    if receipt is None:
-        payload["last_receipt"] = None
-    else:
-        payload["last_receipt"] = {
-            "run_id": receipt.get("run_id"),
-            "status": receipt.get("status"),
-            "started_at": receipt.get("started_at"),
-            "completed_at": receipt.get("completed_at"),
-            "receipt_path": receipt.get("receipt_path"),
-        }
+    receipts = _runbook_receipts(target, entry.runbook_id or "")
+    consecutive = _consecutive_failed_receipts(receipts)
+    payload["last_receipt"] = _receipt_summary(receipts[0] if receipts else None)
+    payload["consecutive_failures"] = consecutive
+    payload["repeated_failure"] = consecutive >= REPEATED_FAILURE_THRESHOLD
     return payload
+
+
+def _repeated_failure_records(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate repeated failures by runbook so aliases do not double-count."""
+    records: list[dict[str, Any]] = []
+    seen_runbooks: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("repeated_failure"):
+            continue
+        runbook_id = str(entry.get("runbook_id") or entry.get("id") or "")
+        if runbook_id in seen_runbooks:
+            continue
+        seen_runbooks.add(runbook_id)
+        records.append(
+            {
+                "id": entry.get("id"),
+                "runbook_id": entry.get("runbook_id"),
+                "consecutive_failures": entry.get("consecutive_failures"),
+                "last_receipt": entry.get("last_receipt"),
+            }
+        )
+    return records
+
+
+def repeated_failure_summary(target: Path) -> dict[str, Any]:
+    """Receipt-only view of care entries with N consecutive failed receipts.
+
+    Used by ``brigade work brief`` and the Center dashboard. Scans the full
+    catalog (atomic set plus #762 memory jobs) and collapses aliases that
+    share a runbook so ``care-scan`` / ``daily-care`` count once.
+    """
+    target = target.expanduser().resolve()
+    seen_runbooks: set[str] = set()
+    entry_payloads: list[dict[str, Any]] = []
+    for entry in _catalog_by_id().values():
+        key = entry.runbook_id or entry.entry_id
+        if key in seen_runbooks:
+            continue
+        seen_runbooks.add(key)
+        entry_payloads.append(_entry_status(target, entry))
+    records = _repeated_failure_records(entry_payloads)
+    return {
+        "threshold": REPEATED_FAILURE_THRESHOLD,
+        "count": len(records),
+        "entries": records,
+    }
 
 
 def _windows_plan_tasks(*, workspace: Path, entries: tuple[CareEntry, ...]) -> list[dict[str, Any]]:
@@ -788,6 +915,7 @@ def _windows_status(
         "tasks": tasks,
         "entries": [_entry_status(target, entry) for entry in entries],
     }
+    payload["repeated_failures"] = _repeated_failure_records(payload["entries"])
     _print_payload(payload, json_output=json_output)
     return 0
 
@@ -823,6 +951,23 @@ def _print_payload(payload: dict[str, Any], *, json_output: bool) -> None:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
     for key, value in payload.items():
+        if key == "repeated_failures" and isinstance(value, list):
+            print(f"repeated_failures: {len(value)}")
+            for rec in value:
+                if not isinstance(rec, dict):
+                    continue
+                print(f"  - {rec.get('id')}: {rec.get('consecutive_failures')} consecutive failed receipts")
+            continue
+        if key == "adopted" and isinstance(value, list):
+            print(f"adopted: {len(value)}")
+            for rec in value:
+                if not isinstance(rec, dict):
+                    continue
+                print(
+                    f"  - {rec.get('requested')} -> {rec.get('using')} "
+                    f"(runbook {rec.get('runbook_id') or rec.get('runbook')})"
+                )
+            continue
         if key == "entries" and isinstance(value, list):
             print(f"entries: {len(value)}")
             for entry in value:
@@ -838,8 +983,13 @@ def _print_payload(payload: dict[str, Any], *, json_output: bool) -> None:
                     present_bit = " runbook=missing"
                 elif present is True:
                     present_bit = " runbook=present"
+                fail_bit = ""
+                consecutive = entry.get("consecutive_failures")
+                if isinstance(consecutive, int) and consecutive >= REPEATED_FAILURE_THRESHOLD:
+                    fail_bit = f" repeated_failure={consecutive}"
                 print(
-                    f"  - {entry.get('id')}: schedule={entry.get('schedule')} last_receipt={receipt_bit}{present_bit}"
+                    f"  - {entry.get('id')}: schedule={entry.get('schedule')} "
+                    f"last_receipt={receipt_bit}{present_bit}{fail_bit}"
                 )
             continue
         if key == "units" and isinstance(value, list):
@@ -948,6 +1098,7 @@ def _launchd_install(
     json_output: bool,
     home: Path | None,
     entries: tuple[CareEntry, ...],
+    adopted: list[dict[str, Any]] | None = None,
 ) -> int:
     directory = _launchd_dir(home)
     plists = _launchd_plists(workspace=target, home=home, entries=entries)
@@ -959,15 +1110,16 @@ def _launchd_install(
                 print(f"error: refusing to follow symlink registration: {path}", file=sys.stderr)
                 return 2
             path.write_bytes(contents)
-    _print_payload(
-        {
-            "target": str(target),
-            "backend": "launchd",
-            "dry_run": dry_run,
-            "registrations": [str(directory / name) for name in plists],
-        },
-        json_output=json_output,
-    )
+    payload: dict[str, Any] = {
+        "target": str(target),
+        "backend": "launchd",
+        "dry_run": dry_run,
+        "registrations": [str(directory / name) for name in plists],
+        "entries": [_entry_status(target, entry) for entry in entries],
+    }
+    if adopted:
+        payload["adopted"] = adopted
+    _print_payload(payload, json_output=json_output)
     return 0
 
 
@@ -997,13 +1149,15 @@ def _launchd_status(
         state = "tampered"
     elif any(item["status"] == "missing" for item in states):
         state = "missing"
+    entry_payloads = [_entry_status(target, entry) for entry in entries]
     _print_payload(
         {
             "target": str(target),
             "backend": "launchd",
             "status": state,
             "registrations": states,
-            "entries": [_entry_status(target, entry) for entry in entries],
+            "entries": entry_payloads,
+            "repeated_failures": _repeated_failure_records(entry_payloads),
         },
         json_output=json_output,
     )
@@ -1077,6 +1231,15 @@ def install(
             file=sys.stderr,
         )
         return 3
+    adopted: list[dict[str, Any]] = []
+    if not entry_ids:
+        if backend == "systemd":
+            installed = _installed_systemd_entries(target=target, home=home)
+            entries, adopted = _adopt_installed_aliases(entries, installed)
+        elif backend == "launchd":
+            installed = _installed_launchd_entries(target=target, home=home)
+            entries, adopted = _adopt_installed_aliases(entries, installed)
+
     if _uses_schtasks(backend):
         return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
 
@@ -1089,7 +1252,14 @@ def install(
             return rc
 
     if backend == "launchd":
-        return _launchd_install(target=target, dry_run=dry_run, json_output=json_output, home=home, entries=entries)
+        return _launchd_install(
+            target=target,
+            dry_run=dry_run,
+            json_output=json_output,
+            home=home,
+            entries=entries,
+            adopted=adopted,
+        )
 
     if backend == "crontab":
         if entry_ids:
@@ -1108,7 +1278,13 @@ def install(
             entries=entries,
         )
     return _install_systemd(
-        target=target, dry_run=dry_run, adopt=adopt, json_output=json_output, home=home, entries=entries
+        target=target,
+        dry_run=dry_run,
+        adopt=adopt,
+        json_output=json_output,
+        home=home,
+        entries=entries,
+        adopted=adopted,
     )
 
 
@@ -1292,6 +1468,7 @@ def _install_systemd(
     json_output: bool,
     home: Path | None,
     entries: tuple[CareEntry, ...],
+    adopted: list[dict[str, Any]] | None = None,
 ) -> int:
     unit_dir = _systemd_user_dir(home)
     identity = _target_identity(target)
@@ -1372,7 +1549,7 @@ def _install_systemd(
                 "detail": outcome.detail or plan.detail,
             }
             continue
-    payload = {
+    payload: dict[str, Any] = {
         "target": str(target),
         "backend": "systemd",
         "unit_dir": str(unit_dir),
@@ -1382,10 +1559,19 @@ def _install_systemd(
         "entries": [_entry_status(target, entry) for entry in entries],
         "next_commands": [
             "systemctl --user daemon-reload",
-            f"systemctl --user enable --now brigade-care-{identity}-{entries[0].entry_id}.timer",
-            f"systemctl --user list-timers 'brigade-care-{identity}-*.timer'",
+            *(
+                [
+                    f"systemctl --user enable --now brigade-care-{identity}-{entries[0].entry_id}.timer",
+                    f"systemctl --user list-timers 'brigade-care-{identity}-*.timer'",
+                ]
+                if entries
+                else [f"systemctl --user list-timers 'brigade-care-{identity}-*.timer'"]
+            ),
         ],
     }
+    if adopted:
+        payload["adopted"] = adopted
+    payload["repeated_failures"] = _repeated_failure_records(payload["entries"])
     _print_payload(payload, json_output=json_output)
     if blocked:
         if any(unit.get("status") == managed_block.STATUS_MALFORMED for unit in results):
@@ -1665,11 +1851,13 @@ def status_payload(*, target: Path, home: Path | None = None) -> dict[str, Any]:
         selected_entries = installed_systemd
     else:
         selected_entries = CARE_ENTRIES
+    entry_payloads = [_entry_status(target, entry) for entry in selected_entries]
     return {
         "enabled": crontab_enabled or systemd_enabled,
         "target_match": bool(crontab.get("target_match")) or bool(systemd.get("target_match")),
         "backends": {"crontab": crontab, "systemd": systemd},
-        "entries": [_entry_status(target, entry) for entry in selected_entries],
+        "entries": entry_payloads,
+        "repeated_failures": _repeated_failure_records(entry_payloads),
     }
 
 
@@ -1719,10 +1907,12 @@ def status(
         if crontab.get("error"):
             print(f"error: failed to read crontab: {crontab['error']}", file=sys.stderr)
             return 2
+        entry_payloads = [_entry_status(target, entry) for entry in entries]
         crontab_payload: dict[str, Any] = {
             "target": str(target),
             **{k: v for k, v in crontab.items() if k != "error"},
-            "entries": [_entry_status(target, entry) for entry in entries],
+            "entries": entry_payloads,
+            "repeated_failures": _repeated_failure_records(entry_payloads),
         }
         public_status = str(crontab_payload.get("status"))
         _print_payload(crontab_payload, json_output=json_output)
@@ -1731,10 +1921,12 @@ def status(
     if not entry_ids:
         entries = _installed_systemd_entries(target=target, home=home)
     systemd = _systemd_backend_status(target=target, home=home, entries=entries)
+    entry_payloads = [_entry_status(target, entry) for entry in entries]
     payload = {
         "target": str(target),
         **{k: v for k, v in systemd.items() if k != "error"},
-        "entries": [_entry_status(target, entry) for entry in entries],
+        "entries": entry_payloads,
+        "repeated_failures": _repeated_failure_records(entry_payloads),
     }
     worst = str(payload.get("status"))
     _print_payload(payload, json_output=json_output)
