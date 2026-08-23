@@ -55,8 +55,16 @@ def test_render_shows_summary_strip_and_plain_word_tiles():
     assert "No cards are waiting on care review" in fragment
     assert "The work inbox has" in fragment
 
-    for label in ("Handoffs", "Memory care", "Verify loop", "Inbox hygiene", "Pending tasks"):
+    for label in (
+        "Handoffs",
+        "Memory care",
+        "Scheduled care",
+        "Verify loop",
+        "Inbox hygiene",
+        "Pending tasks",
+    ):
         assert label in fragment
+    assert "No care entries are failing repeatedly" in fragment
     # Plain words, never color alone.
     for word in ("ATTENTION", "OK"):
         assert word in fragment
@@ -74,6 +82,27 @@ def test_render_missing_sections_show_missing_tiles():
     assert "not available" in fragment or "unavailable" in fragment
     assert 'class="sg-chip-icon sg-chip-serious"' in fragment
     assert "style=" not in fragment.split("<style", 1)[-1].split("</style>", 1)[-1]
+
+
+def test_render_surfaces_repeated_scheduled_care_failures():
+    payload = {
+        "handoff_issues": {"count": 0},
+        "memory_care": {"issue_count": 0},
+        "scheduled_care": {
+            "threshold": 2,
+            "count": 1,
+            "entries": [{"id": "evidence-crawl", "consecutive_failures": 4}],
+        },
+        "outcome_loop": {"verify_run_count": 0, "record_count": 0},
+        "pending_tasks": [],
+        "inbox_hygiene": {"issue_count": 0},
+    }
+    fragment = status_grid.render(payload, "unused")
+    assert "1 scheduled care entry is failing repeatedly" in fragment
+    assert "evidence-crawl" in fragment
+    assert "care entry has repeated failed receipts" in fragment
+    assert 'data-sg-tile="scheduled_care"' in fragment
+    assert "ATTENTION" in fragment
 
 
 def test_render_error_and_empty_payloads_degrade_safely():

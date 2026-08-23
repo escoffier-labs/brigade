@@ -1316,3 +1316,182 @@ def test_care_cli_dispatch_passes_entry(monkeypatch, tmp_path):
     assert seen["status"]["entry_ids"] == ["care-scan"]
     assert cli.main(["care", "uninstall", "--target", str(tmp_path), "--entry", "handoff-ingest"]) == 0
     assert seen["uninstall"]["entry_ids"] == ["handoff-ingest"]
+
+
+def _write_runbook_receipt(
+    target: Path,
+    *,
+    runbook_id: str,
+    status: str,
+    started_at: str,
+    run_id: str | None = None,
+) -> None:
+    rid = run_id or f"{started_at.replace('-', '').replace(':', '').replace('T', '')[:15]}-{runbook_id}"
+    runs = target / ".brigade" / "runbooks" / "runs" / rid
+    runs.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "run_id": rid,
+        "runbook_id": runbook_id,
+        "status": status,
+        "started_at": started_at,
+        "completed_at": started_at,
+        "receipt_path": str(runs / "receipt.json"),
+    }
+    (runs / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def test_care_bare_install_adopts_predecessor_ids_instead_of_stacking(tmp_path, monkeypatch, capsys):
+    """#986: hubs with care-scan / handoff-ingest must not gain daily-care / ingest-sweep."""
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert (
+        care_cmd.install(
+            target=target,
+            backend="systemd",
+            home=home,
+            entry_ids=["care-scan", "handoff-ingest", "memory-closeout"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, dry_run=True, json_output=True) == 0
+    dry = json.loads(capsys.readouterr().out)
+    adopted = {item["requested"]: item["using"] for item in dry.get("adopted") or []}
+    assert adopted["daily-care"] == "care-scan"
+    assert adopted["ingest-sweep"] == "handoff-ingest"
+    planned_ids = {entry["id"] for entry in dry["entries"]}
+    assert "care-scan" in planned_ids
+    assert "handoff-ingest" in planned_ids
+    assert "daily-care" not in planned_ids
+    assert "ingest-sweep" not in planned_ids
+    unit_names = {item["name"] for item in dry["units"]}
+    identity = care_cmd._target_identity(target)
+    assert f"brigade-care-{identity}-care-scan.service" in unit_names
+    assert f"brigade-care-{identity}-daily-care.service" not in unit_names
+    assert all(item["status"] != "missing" or "daily-care" not in item["name"] for item in dry["units"])
+
+    assert care_cmd.install(target=target, backend="systemd", home=home) == 0
+    assert _unit_path(home, target, "care-scan", ".timer").is_file()
+    assert _unit_path(home, target, "handoff-ingest", ".timer").is_file()
+    assert not _unit_path(home, target, "daily-care", ".service").exists()
+    assert not _unit_path(home, target, "ingest-sweep", ".timer").exists()
+    # Uncovered atomic entries still install.
+    assert _unit_path(home, target, "weekly-outcome-ratchet", ".timer").is_file()
+    assert _unit_path(home, target, "nightly-ops", ".timer").is_file()
+
+
+def test_care_bare_install_adopts_launchd_predecessors(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=target, backend="launchd", home=home, entry_ids=["care-scan"]) == 0
+    capsys.readouterr()
+    assert care_cmd.install(target=target, backend="launchd", home=home, dry_run=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    adopted = {item["requested"]: item["using"] for item in payload.get("adopted") or []}
+    assert adopted["daily-care"] == "care-scan"
+    names = " ".join(payload["registrations"])
+    assert "care-scan" in names
+    assert "daily-care" not in names
+
+
+def test_care_explicit_entry_still_installs_requested_id_beside_predecessor(tmp_path, monkeypatch):
+    """--entry daily-care is explicit; only the bare atomic set adopts aliases."""
+    home = tmp_path / "home"
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["daily-care"]) == 0
+    assert _unit_path(home, target, "care-scan", ".timer").is_file()
+    assert _unit_path(home, target, "daily-care", ".timer").is_file()
+
+
+def test_care_status_and_summary_surface_consecutive_failed_receipts(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
+    monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
+    _write_runbook_receipt(
+        tmp_path, runbook_id="evidence-crawl", status="failed", started_at="2026-08-18T08:00:00+00:00"
+    )
+    _write_runbook_receipt(
+        tmp_path, runbook_id="evidence-crawl", status="failed", started_at="2026-08-17T08:00:00+00:00"
+    )
+    _write_runbook_receipt(
+        tmp_path, runbook_id="evidence-crawl", status="failed", started_at="2026-08-15T08:00:00+00:00"
+    )
+    _write_runbook_receipt(
+        tmp_path, runbook_id="evidence-crawl", status="completed", started_at="2026-08-14T08:00:00+00:00"
+    )
+    _write_runbook_receipt(
+        tmp_path, runbook_id="daily-care-pass", status="failed", started_at="2026-08-18T06:15:00+00:00"
+    )
+    _write_runbook_receipt(
+        tmp_path, runbook_id="daily-care-pass", status="failed", started_at="2026-08-17T06:15:00+00:00"
+    )
+
+    summary = care_cmd.repeated_failure_summary(tmp_path)
+    assert summary["threshold"] == 2
+    assert summary["count"] == 2
+    by_id = {item["id"]: item for item in summary["entries"]}
+    assert by_id["evidence-crawl"]["consecutive_failures"] == 3
+    assert by_id["daily-care"]["consecutive_failures"] == 2
+
+    assert care_cmd.status(target=tmp_path, backend="crontab", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    daily = next(entry for entry in payload["entries"] if entry["id"] == "daily-care")
+    assert daily["consecutive_failures"] == 2
+    assert daily["repeated_failure"] is True
+    assert payload["repeated_failures"][0]["id"] == "daily-care"
+    assert payload["repeated_failures"][0]["consecutive_failures"] == 2
+
+    assert care_cmd.status(target=tmp_path, backend="crontab") == 0
+    out = capsys.readouterr().out
+    assert "repeated_failures: 1" in out
+    assert "daily-care: 2 consecutive failed receipts" in out
+    assert "repeated_failure=2" in out
+
+
+def test_care_one_failed_receipt_is_not_repeated(tmp_path):
+    _write_runbook_receipt(
+        tmp_path, runbook_id="evidence-crawl", status="failed", started_at="2026-08-18T08:00:00+00:00"
+    )
+    _write_runbook_receipt(
+        tmp_path, runbook_id="evidence-crawl", status="completed", started_at="2026-08-17T08:00:00+00:00"
+    )
+    summary = care_cmd.repeated_failure_summary(tmp_path)
+    assert summary["count"] == 0
+
+
+def test_work_brief_prints_repeated_care_failures(tmp_path, monkeypatch, capsys):
+    from brigade import work_cmd
+    from tests.work_cmd_test_helpers import _init_git_repo
+
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
+    _write_runbook_receipt(
+        tmp_path, runbook_id="evidence-crawl", status="failed", started_at="2026-08-18T08:00:00+00:00"
+    )
+    _write_runbook_receipt(
+        tmp_path, runbook_id="evidence-crawl", status="failed", started_at="2026-08-17T08:00:00+00:00"
+    )
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scheduled_care"]["count"] == 1
+    assert payload["scheduled_care"]["entries"][0]["id"] == "evidence-crawl"
+    assert payload["scheduled_care"]["entries"][0]["consecutive_failures"] == 2
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "care_repeated_failures: 1" in out
+    assert "care_repeated_failure: evidence-crawl consecutive=2" in out
