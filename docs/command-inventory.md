@@ -59,7 +59,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run`: 1 command path(s)
 - `brigade run-cloud`: 4 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 17 command path(s)
+- `brigade runs`: 18 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
 - `brigade security`: 16 command path(s)
