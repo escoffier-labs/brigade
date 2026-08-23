@@ -513,7 +513,11 @@ def dispatch(args) -> int:
             # identity, or an unreachable hub falls back to the local
             # run.lock taken above.
             lifecycle.enter_context(
-                fleet_client.repo_claim(fleet_client.resolve_claim_target(run_cwd), base_path=run_cwd)
+                fleet_client.repo_claim(
+                    fleet_client.resolve_claim_target(run_cwd),
+                    base_path=run_cwd,
+                    conductor=lifecycle_seat,
+                )
             )
             if args.worktree:
                 worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)

@@ -439,6 +439,35 @@ class TestClientClaims:
             assert reacquired, "heartbeat never re-acquired the lost claim"
         assert fleet_client.fetch_claims() == []
 
+    def test_release_with_renew_in_flight_never_resurrects(self, hub, monkeypatch):
+        """A heartbeat renew that lands after release must not re-acquire the
+        row: the released target stays free instead of leaking for a TTL."""
+        url, token, _db = hub
+        self._env(monkeypatch, url, token)
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.01)
+        monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.2)  # bounds the exit join
+        renew_started = threading.Event()
+        allow_renew = threading.Event()
+
+        def stuck_renew(target, **kwargs):
+            renew_started.set()
+            allow_renew.wait(5)
+            # By the time this "lands", the main thread has already released:
+            # the hub's answer for the deleted row is "missing".
+            return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
+
+        monkeypatch.setattr(fleet_client, "renew_claim", stuck_renew)
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60):
+            assert renew_started.wait(5)
+        # Exit drained what it could (bounded join), then released.
+        assert fleet_client.fetch_claims(include_all=True) == []
+        # Let the stale renew finish and tempt the re-acquire path.
+        allow_renew.set()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            assert fleet_client.fetch_claims(include_all=True) == [], "released claim was resurrected"
+            time.sleep(0.02)
+
     def test_resolve_claim_target_uses_workspace_name(self, tmp_path):
         from brigade import node as node_mod
 
@@ -538,6 +567,8 @@ class TestDispatchWiring:
         monkeypatch.setattr(aboyeur, "run", fake_run)
         assert self._run(ws, roster_path) == 0
         assert [(c["target"], c["owner_node"]) for c in held_during_run] == [("ws", identity.node_id)]
+        # The dispatch path names its conductor (the orchestrator seat).
+        assert held_during_run[0]["owner_conductor"] == "chef"
         assert fleet_client.fetch_claims() == []
 
     def test_claim_taken_after_local_lock(self, hub, workspace, monkeypatch):

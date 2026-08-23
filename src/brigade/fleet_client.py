@@ -86,7 +86,9 @@ FLUSH_TIMEOUT_SECONDS = 5.0
 FLUSH_BATCH_SIZE = 100
 MAX_SPOOL_BYTES = 16 * 1024 * 1024
 DEFAULT_CLAIM_TTL_SECONDS = 900
-CLAIM_TIMEOUT_SECONDS = 5.0
+# One acquire is retried once, so a configured-but-blackholed hub costs at
+# most 2 x this per `brigade run` before falling open on the local lock.
+CLAIM_TIMEOUT_SECONDS = 2.5
 # 4xx statuses that are transient or operator-fixable: keep the spool.
 _RETRYABLE_4XX = frozenset({401, 408, 429})
 
@@ -825,6 +827,11 @@ def repo_claim(
         while not stop.wait(_claim_renew_interval(ttl_seconds)):
             outcome = renew_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
             if not outcome.granted and outcome.reason == "missing":
+                if stop.is_set():
+                    # "missing" during shutdown is our own release landing
+                    # first; re-acquiring here would resurrect the released
+                    # claim for a full TTL that nothing ever frees.
+                    return
                 # The hub lost or expired our row (e.g. hub restart from
                 # backup); take it back under the same fencing token.
                 outcome = acquire_claim(
@@ -851,4 +858,10 @@ def repo_claim(
         yield decision
     finally:
         stop.set()
+        # Drain the heartbeat before releasing: an in-flight renew/acquire
+        # landing after the DELETE would resurrect the row for a full TTL.
+        # The join is bounded (one renew plus one acquire round-trip); a
+        # thread stuck longer than that is covered by the stop.is_set()
+        # guard above.
+        heartbeat.join(timeout=2 * CLAIM_TIMEOUT_SECONDS + 1)
         release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
