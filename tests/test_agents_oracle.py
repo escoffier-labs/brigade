@@ -104,6 +104,16 @@ def test_oracle_auth_detail_points_at_pantry():
     assert "brigade pantry expiry-alert" in detail
 
 
+def test_oracle_auth_detail_names_the_oracle_018_opt_in_cookie_sync():
+    # Oracle 0.18.0 made live Chrome cookie copying opt-in upstream, so a clean
+    # install can pass the executable check yet lack the cookies a browser run
+    # needs; the diagnostic must say so instead of blaming only staleness.
+    detail = agents._oracle_auth_detail("oracle", "", "Error: not logged in to gemini.google.com")
+    assert detail is not None
+    assert "Oracle 0.18+" in detail
+    assert "--browser-cookie-sync" in detail
+
+
 def test_oracle_auth_detail_matches_expired_cookies():
     detail = agents._oracle_auth_detail("oracle", "browser session expired", "")
     assert detail is not None
