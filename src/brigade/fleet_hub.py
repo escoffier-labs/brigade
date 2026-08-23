@@ -24,6 +24,17 @@ Endpoints:
   rows are pruned on every acquire. ``node_id`` must be a real identity
   (``[A-Za-z0-9._-]``, max 128 chars, never the literal ``unknown``).
 - ``GET /claims`` — bearer auth; active claims (``?all=1`` includes expired).
+- ``GET /`` and ``GET /view/{machines,repos}`` — the server-rendered Fleet
+  dashboard (issue #1124 phase 3; see ``fleet_dashboard``). Same bearer auth,
+  or the ``brigade_fleet_view`` cookie: opening the page once with
+  ``?token=<fleet token>`` from a phone sets an HttpOnly, SameSite=Strict
+  cookie and 303-redirects to the same URL without the token. The cookie
+  value is an HMAC of the token, never the token: it grants read-only
+  dashboard access only (never ``/status``, ``/claims``, or ``/events``),
+  and rotating the hub token invalidates every cookie. Tradeoff: the token
+  transits once in a URL (browser history on that device; the hub logs
+  nothing) and the cookie is a 30-day read-only capability on that device,
+  which is why it is scoped to the HTML routes only.
 
 The token comes from ``BRIGADE_FLEET_TOKEN`` or ``--token-file``; it is never
 persisted by Brigade. The database is one SQLite file in WAL mode with a
@@ -33,21 +44,32 @@ versioned schema (PRAGMA user_version).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
+
+from . import fleet_dashboard
 
 SCHEMA_VERSION = 2
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
+
+# Dashboard cookie (issue #1124): a derived, read-only capability, not the token.
+DASHBOARD_COOKIE = "brigade_fleet_view"
+DASHBOARD_COOKIE_MAX_AGE = 30 * 86400
+_DASHBOARD_COOKIE_PURPOSE = b"brigade-fleet-dashboard-cookie-v1"
+_DASHBOARD_PREFIX = "/view/"
 
 CLAIM_ACTIONS = frozenset({"acquire", "renew", "release"})
 DEFAULT_CLAIM_TTL_SECONDS = 900
@@ -234,6 +256,31 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
             }
         )
     return result
+
+
+def run_started_at(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """Timestamp of the first observed event per (node_id, run_id), for elapsed."""
+    rows = conn.execute(
+        "SELECT node_id, run_id, ts FROM ("
+        "  SELECT node_id, run_id, ts, ROW_NUMBER() OVER ("
+        "    PARTITION BY node_id, run_id ORDER BY sequence ASC, received_at ASC, digest ASC"
+        "  ) AS rn FROM events"
+        ") WHERE rn = 1"
+    ).fetchall()
+    return {(row[0], row[1]): row[2] for row in rows}
+
+
+def node_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every observed node with when the hub last heard from it and its event count."""
+    rows = conn.execute(
+        "SELECT node_id, MAX(received_at), COUNT(*) FROM events GROUP BY node_id ORDER BY node_id"
+    ).fetchall()
+    return [{"node_id": row[0], "last_received_at": row[1], "events": row[2]} for row in rows]
+
+
+def dashboard_cookie_value(token: str) -> str:
+    """Cookie value derived from the hub token; never the token itself."""
+    return hmac.new(token.encode("utf-8"), _DASHBOARD_COOKIE_PURPOSE, hashlib.sha256).hexdigest()
 
 
 # --- claims (issue #1125, phase 4) ------------------------------------------
@@ -424,6 +471,20 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
             auth = self.headers.get("Authorization", "")
             return hmac.compare_digest(auth.encode("utf-8"), f"Bearer {token}".encode("utf-8"))
 
+        def _cookie_authorized(self) -> bool:
+            header = self.headers.get("Cookie", "")
+            if not header:
+                return False
+            jar: SimpleCookie = SimpleCookie()
+            try:
+                jar.load(header)
+            except CookieError:
+                return False
+            morsel = jar.get(DASHBOARD_COOKIE)
+            if morsel is None:
+                return False
+            return hmac.compare_digest(morsel.value.encode("utf-8"), dashboard_cookie_value(token).encode("utf-8"))
+
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status)
@@ -432,10 +493,101 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_html(
+            self,
+            status: int,
+            body: str,
+            *,
+            content_type: str = "text/html; charset=utf-8",
+            nonce: str | None = None,
+            extra_headers: dict[str, str] | None = None,
+        ) -> None:
+            """Dashboard response with the same security headers as ``center serve``."""
+            nonce = nonce or secrets.token_urlsafe(16)
+            csp = (
+                f"default-src 'none'; script-src 'nonce-{nonce}'; script-src-attr 'none'; "
+                f"style-src 'nonce-{nonce}'; img-src 'none'; connect-src 'none'; base-uri 'none'; "
+                "form-action 'self'; frame-ancestors 'none'"
+            )
+            data = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Security-Policy", csp)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Vary", "Cookie")
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _serve_dashboard(self, path: str, query: str) -> None:
+            plain = "text/plain; charset=utf-8"
+            view = fleet_dashboard.DEFAULT_VIEW if path == "/" else path[len(_DASHBOARD_PREFIX) :]
+            if view not in fleet_dashboard.VIEWS:
+                self._send_html(404, "Not found.\n", content_type=plain)
+                return
+            params = parse_qs(query, keep_blank_values=False)
+            presented = params.pop("token", [""])[0]
+            if presented:
+                if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
+                    self._send_html(401, "Unauthorized.\n", content_type=plain)
+                    return
+                # Redirect to the same page without the token so it does not
+                # linger in the address bar; the view is validated above, so
+                # the Location is always one of our own relative routes.
+                cookie = (
+                    f"{DASHBOARD_COOKIE}={dashboard_cookie_value(token)}; Path=/; HttpOnly; "
+                    f"SameSite=Strict; Max-Age={DASHBOARD_COOKIE_MAX_AGE}"
+                )
+                rest = urlencode(params, doseq=True)
+                location = path + (f"?{rest}" if rest else "")
+                self._send_html(303, "", content_type=plain, extra_headers={"Location": location, "Set-Cookie": cookie})
+                return
+            if not (self._authorized() or self._cookie_authorized()):
+                self._send_html(
+                    401,
+                    "Unauthorized: send the fleet bearer token, or open this page once with "
+                    "?token=<fleet token> to set the read-only dashboard cookie.\n",
+                    content_type=plain,
+                )
+                return
+            try:
+                conn = init_db(Path(db_path))
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            try:
+                runs = latest_status(conn, include_all=True)
+                claims = list_claims(conn)
+                started_at = run_started_at(conn)
+                nodes = node_summary(conn)
+            except sqlite3.Error as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            finally:
+                conn.close()
+            nonce = secrets.token_urlsafe(16)
+            page = fleet_dashboard.render_page(
+                view=view,
+                query_string=urlencode(params, doseq=True),
+                runs=runs,
+                claims=claims,
+                nodes=nodes,
+                started_at=started_at,
+                nonce=nonce,
+            )
+            self._send_html(200, page, nonce=nonce)
+
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             path, _, query = self.path.partition("?")
             if path == "/health":
                 self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
+                return
+            if path == "/" or path.startswith(_DASHBOARD_PREFIX):
+                self._serve_dashboard(path, query)
                 return
             if path in ("/status", "/claims"):
                 if not self._authorized():

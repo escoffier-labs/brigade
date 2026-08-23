@@ -21,6 +21,8 @@ The hub exposes these endpoints:
 - `POST /events`, bearer-authenticated event append
 - `GET /status`, bearer-authenticated latest non-terminal state per node and run
 - `GET /status?all=1`, bearer-authenticated state including terminal runs
+- `POST /claims` and `GET /claims`, bearer-authenticated repo claims
+- `GET /` and `GET /view/{machines,repos}`, the Fleet dashboard (bearer token or the dashboard cookie; see below)
 
 Events are deduplicated by `(node_id, run_id, sequence, digest)`. Reposting after a lost response is safe.
 
@@ -275,6 +277,26 @@ brigade fleet flush
 ```
 
 Event reporting is best effort. A failed POST is appended under the Brigade home directory at `fleet-spool/<node_id>.jsonl`; it does not block the journal writer or fail the local run. A later successful report or `brigade fleet flush` sends queued events in order.
+
+### Fleet dashboard from a laptop or phone
+
+The hub serves a read-only web view of the same data at `http://brigade-hub:3774/` (machine cards) and `http://brigade-hub:3774/view/repos` (repo board). From a machine that holds the token, a bearer header works as for `/status`:
+
+```bash
+curl --silent --show-error \
+  -H "Authorization: Bearer $(<~/.brigade/fleet.token)" \
+  http://brigade-hub:3774/ | head
+```
+
+A phone browser cannot send a bearer header, so open the page once with the token in the query string:
+
+```text
+http://brigade-hub:3774/?token=<FLEET_TOKEN>
+```
+
+The hub answers a redirect to `/` without the token and sets a `brigade_fleet_view` cookie (HttpOnly, SameSite=Strict, 30 days). The cookie is an HMAC of the token, not the token: it opens only the dashboard pages, never `/status`, `/claims`, or `/events`, and rotating the hub token invalidates it. Tradeoffs to accept before using it: the token passes once through that device's browser history, and the cookie is a 30-day read-only view of the fleet on that device. Only do this on a device you would enrol in the tailnet, and rotate the token (section 4) if the device is lost. The cookie is not marked `Secure` because the hub is plain HTTP inside Tailscale's encrypted link; do not expose the hub outside the tailnet.
+
+Sort and filter with query parameters, for example `/?attention=1` (only failed, awaiting-approval, or stale runs), `/view/repos?sort=repo`, `/?node=<prefix>`, `/?all=1` (include finished runs). The page refreshes every 10 seconds and works with JavaScript disabled.
 
 ## 8. Back up the SQLite database
 
