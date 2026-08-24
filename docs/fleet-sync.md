@@ -42,7 +42,7 @@ status of each phase.
 | --- | --- | --- |
 | 1. Machine identity, namespaced run ids, lease reaper | #1122 | shipped (#1129) |
 | 2. Fleet hub (`brigade fleet serve`), event POST, store-and-forward, `brigade fleet status` | #1123 | **built, hub CT pending** — code, tests, and CLI are in; the hogwarts CT that hosts `brigade fleet serve` is not provisioned yet |
-| 3. Web dashboard served by the hub | #1124 | not started |
+| 3. Web dashboard served by the hub | #1124 | shipped |
 | 4. Server-arbitrated claims with TTL | #1125 | not started |
 | 5. Dolt sink for versioned history (optional) | #1127 | not started |
 | 6. Cross-repo campaigns on the hub | #1128 | not started |
@@ -85,6 +85,49 @@ after the journal write completes and the lock is released):
   in order (100 per request) so the hub never sees a node's events out of
   sequence. `brigade fleet flush` drains it explicitly.
 - `brigade fleet status [--all] [--json]`.
+
+## Phase 3 surface
+
+Hub-served Fleet dashboard (`src/brigade/fleet_dashboard.py`, routed by
+`fleet_hub.py`), so the fleet view is a page you leave open or check from a
+phone over Tailscale:
+
+- `GET /` and `GET /view/machines` — one card per observed `node_id` (never a
+  hardcoded host list): live run count, when the hub last heard from it, the
+  claims it holds, and a table of its runs (run, repo, seat/harness, state,
+  elapsed, last event).
+- `GET /view/repos` — one row per observed repo: where it is running (node,
+  seat/harness, state, elapsed), its claim (owner node, conductor, TTL
+  remaining), its last outcome, and a `collision` flag when two nodes have
+  live runs on one repo or a live run is not on the claim owner.
+- Attention buckets: `failed`, `awaiting approval` (`run.paused`,
+  `approval.requested`, `approval.held`), `stale` (non-terminal with no event
+  for 30 min), `running`, `queued`, `interrupted`, `succeeded`. The default
+  sort surfaces the first three at the top, oldest first within a bucket.
+- Query params: `sort=attention|age|node|repo|state|seat`, substring filters
+  `node=`, `repo=`, `seat=` (matches seat or harness), `state=` (bucket or raw
+  event type), `attention=1` (needs-attention only), `all=1` (include
+  finished runs). Same params on both boards; the board links carry them
+  across.
+- Server-rendered, stdlib only, no framework or CDN asset. Tables, sorting,
+  and filtering are plain HTML + query params and work with JavaScript off;
+  refresh is a `<meta http-equiv="refresh" content="10">`. The inline
+  script only ticks elapsed timers and adds a client-side text filter.
+- Same bearer auth as the JSON endpoints, plus a cookie for phone use: open
+  the page once with `?token=<fleet token>` and the hub answers a 303 to the
+  same URL without the token and sets `brigade_fleet_view` (HttpOnly,
+  SameSite=Strict, 30 days). The cookie value is an HMAC of the token, never
+  the token, and it authorizes only the HTML routes: it cannot read
+  `/status` or `/claims` or post events or claims, and rotating the hub token
+  invalidates every cookie. Tradeoff: the token transits once in a URL (it
+  lands in that device's browser history; the hub logs nothing) and the
+  cookie is a 30-day read-only capability on that device — treat the device
+  like a tailnet member, and rotate the token if it is lost. Tailscale
+  encrypts the link, so the cookie is not marked `Secure` (the hub is plain
+  HTTP on the tailnet).
+- No token, cookie value, or claim holder token is ever rendered; the
+  response carries the same CSP / no-store / no-referrer headers as
+  `brigade center serve`.
 
 Run the hub under a process supervisor on the CT, e.g.
 `brigade fleet serve --host "$(tailscale ip -4)" --token-file /etc/brigade/fleet-token`.
