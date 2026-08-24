@@ -67,6 +67,34 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_claims.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
     p_claims.set_defaults(func=_dispatch_claims)
 
+    from .. import fleet_export
+
+    p_export = fleet_sub.add_parser(
+        "export",
+        help="Stream hub events or claims deterministically as JSONL or CSV.",
+    )
+    p_export.add_argument(
+        "--since", default=None, help="Only include events at or after this ISO-8601 timestamp (naive means UTC)."
+    )
+    p_export.add_argument("--format", choices=("jsonl", "csv"), default="jsonl", help="Output format (default jsonl).")
+    p_export.add_argument(
+        "--claims", action="store_true", help="Stream the current claims snapshot instead of the event history."
+    )
+    p_export.add_argument(
+        "--db", type=Path, default=None, help="Hub SQLite database path (default ~/.brigade/fleet-hub.db)."
+    )
+    p_export.add_argument("--out", type=Path, default=None, help="Write to this file instead of stdout.")
+    p_export.set_defaults(func=fleet_export.dispatch_export)
+
+    p_sink = fleet_sub.add_parser(
+        "sink",
+        help="Run one optional Dolt sink pass (a documented no-op unless [fleet.sink] enabled = true).",
+    )
+    p_sink.add_argument(
+        "--db", type=Path, default=None, help="Hub SQLite database path (default ~/.brigade/fleet-hub.db)."
+    )
+    p_sink.set_defaults(func=fleet_export.dispatch_sink)
+
 
 def _dispatch_serve(args: argparse.Namespace) -> int:
     from .. import fleet_hub
