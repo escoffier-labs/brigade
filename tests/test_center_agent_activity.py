@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from brigade import center_cmd
+from brigade import center_cmd, grokbot_jobs
 from brigade.center_cmd import agent_activity as activity_records
 from brigade.center_cmd.dashboard.views import agent_activity
 
@@ -80,6 +80,36 @@ def test_center_activity_observes_codex_and_cursor_session_files_without_transcr
     rendered = json.dumps(records)
     assert "private prompt" not in rendered
     assert "private transcript" not in rendered
+
+
+def test_center_activity_projects_grokbot_queue_without_private_instructions(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    job_id = grokbot_jobs.enqueue(
+        tmp_path,
+        {
+            "label": "Center Grok Bot tracker",
+            "role": "implementation-worker",
+            "repository": "example/brigade",
+            "base_ref": "main",
+            "ownership_paths": ["src/brigade/cloud_tracker.py"],
+            "instructions": "PRIVATE CENTER INSTRUCTIONS TOKEN=do-not-display",
+            "verification_commands": ["pytest -q tests/test_center_agent_activity.py"],
+            "artifact": {"kind": "draft-pr"},
+            "timeout_seconds": 900,
+        },
+        "center-grokbot-tracker",
+        now=now,
+    )["job_id"]
+    home = tmp_path / "empty-home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+
+    records = activity_records.collect(tmp_path, now=now)
+    row = next(record for record in records if record["links"].get("task_id") == job_id)
+    assert row["provider"] == "grokbot"
+    assert row["harness"] == "grokbot-cloud"
+    assert row["state"] == "running"
+    assert "PRIVATE CENTER INSTRUCTIONS" not in json.dumps(records)
 
 
 def test_session_discovery_bounds_directory_walks(tmp_path, monkeypatch):

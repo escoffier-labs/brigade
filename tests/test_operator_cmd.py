@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
-from brigade import cli, install as install_mod, operator_cmd, work_cmd
+from brigade import cli, grokbot_jobs, install as install_mod, operator_cmd, work_cmd
 
 
 def _fake_surface_run(argv, timeout=8):
@@ -52,6 +53,29 @@ def test_operator_plan_lists_safe_local_configs(tmp_path, capsys):
     assert {"daily", "handoff-sources", "work-scanners", "security", "tools"} <= ids
     assert "Does not start services." in payload["boundaries"]
     assert payload["profile"] == "local-operator"
+
+
+def test_operator_status_includes_bounded_grokbot_cloud_summary(tmp_path):
+    grokbot_jobs.enqueue(
+        tmp_path,
+        {
+            "label": "Operator Grok Bot job",
+            "role": "implementation-worker",
+            "repository": "example/brigade",
+            "base_ref": "main",
+            "ownership_paths": ["src/brigade/cloud_tracker.py"],
+            "instructions": "PRIVATE OPERATOR INSTRUCTIONS TOKEN=do-not-display",
+            "verification_commands": ["pytest -q tests/test_operator_cmd.py"],
+            "artifact": {"kind": "draft-pr"},
+            "timeout_seconds": 900,
+        },
+        "operator-grokbot-job",
+        now=datetime.now(timezone.utc),
+    )
+
+    payload = operator_cmd.status_payload(tmp_path, profile="local-operator")
+    assert payload["grokbot_cloud"]["job_count"] == 1
+    assert "PRIVATE OPERATOR INSTRUCTIONS" not in json.dumps(payload)
 
 
 def test_operator_internal_dogfood_plan_includes_dogfood(tmp_path, capsys):
