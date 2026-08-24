@@ -448,15 +448,16 @@ class TestClientClaims:
         real_post = fleet_client._post_claim_blocking
         real_deadline = fleet_client._run_with_deadline
         real_release = fleet_client.release_claim
+        real_schedule = fleet_client._schedule_orphan_release
         allow_missing = threading.Event()
         allow_reacquire = threading.Event()
         reacquire_started = threading.Event()
         reacquire_finished = threading.Event()
         timeout_observed = threading.Event()
-        orphan_release_started = threading.Event()
-        orphan_release_finished = threading.Event()
+        cleanup_scheduled = threading.Event()
         acquire_calls = 0
         deadline_calls = 0
+        release_calls = 0
         renew_calls = 0
 
         def blocked_reacquire(hub_url, tok, body, *, timeout):
@@ -491,19 +492,21 @@ class TestClientClaims:
             return fleet_client.ClaimDecision(granted=False, reason="held", holder=kwargs.get("holder"))
 
         def controlled_release(target, **kwargs):
-            orphan_thread = threading.current_thread().name == "brigade-fleet-claim-orphan-release"
-            if orphan_thread:
-                orphan_release_started.set()
-                assert reacquire_finished.wait(30)
-            result = real_release(target, **kwargs)
-            if orphan_thread:
-                orphan_release_finished.set()
-            return result
+            nonlocal release_calls
+            release_calls += 1
+            if release_calls == 1:
+                return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=kwargs.get("holder"))
+            return real_release(target, **kwargs)
+
+        def tracking_schedule(*args, **kwargs):
+            cleanup_scheduled.set()
+            return real_schedule(*args, **kwargs)
 
         monkeypatch.setattr(fleet_client, "_post_claim_blocking", blocked_reacquire)
         monkeypatch.setattr(fleet_client, "_run_with_deadline", controlled_deadline)
         monkeypatch.setattr(fleet_client, "renew_claim", controlled_renew)
         monkeypatch.setattr(fleet_client, "release_claim", controlled_release)
+        monkeypatch.setattr(fleet_client, "_schedule_orphan_release", tracking_schedule)
         with fleet_client.repo_claim("repo-a", ttl_seconds=60):
             conn = fleet_hub.init_db(db)
             try:
@@ -514,11 +517,11 @@ class TestClientClaims:
             allow_missing.set()
             assert reacquire_started.wait(30)
             assert timeout_observed.wait(30), "heartbeat did not abandon the blocked re-acquire"
+            allow_reacquire.set()
+            assert reacquire_finished.wait(30), "abandoned re-acquire never committed"
 
-        assert orphan_release_started.wait(30), "exit did not schedule orphan cleanup"
-        allow_reacquire.set()
-        assert reacquire_finished.wait(30), "abandoned re-acquire never committed"
-        assert orphan_release_finished.wait(30), "orphan cleanup never released the late commit"
+        assert release_calls == 2, "exit did not retry the unavailable release inline"
+        assert not cleanup_scheduled.is_set(), "exit scheduled daemon cleanup"
         assert fleet_client.fetch_claims(include_all=True) == [], "timed-out re-acquire left an orphaned claim"
 
     def test_timed_out_heartbeat_reacquire_stays_held_until_exit(self, hub, monkeypatch):
@@ -526,6 +529,7 @@ class TestClientClaims:
         url, token, db = hub
         self._env(monkeypatch, url, token)
         monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+        monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 0)
         real_post = fleet_client._post_claim_blocking
         real_deadline = fleet_client._run_with_deadline
         real_renew = fleet_client.renew_claim
@@ -570,6 +574,8 @@ class TestClientClaims:
             renew_calls += 1
             if renew_calls == 1:
                 return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
+            if renew_calls > 2:
+                return fleet_client.ClaimDecision(granted=False, reason="held", holder=kwargs.get("holder"))
             assert reacquire_finished.wait(30)
             result = real_renew(target, **kwargs)
             if result.granted:
@@ -600,7 +606,7 @@ class TestClientClaims:
             assert not cleanup_scheduled.is_set(), "orphan cleanup was scheduled while the run was live"
             assert [c["target"] for c in fleet_client.fetch_claims()] == ["repo-a"]
 
-        assert cleanup_scheduled.wait(30), "exit did not schedule orphan cleanup"
+        assert not cleanup_scheduled.is_set(), "definitive exit release scheduled extra cleanup"
         assert fleet_client.fetch_claims(include_all=True) == []
 
     def test_release_with_renew_in_flight_never_resurrects(self, hub, monkeypatch):
