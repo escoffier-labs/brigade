@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,6 +14,29 @@ Each object must contain https url, title, and snippet strings."""
 
 class BrowserAiDiscoveryError(RuntimeError):
     pass
+
+
+_MAX_DECORATED_OUTPUT_CHARS = 256_000
+
+
+def _parse_discovery_payload(raw: str) -> Any:
+    """Read Oracle's final standalone JSON array from bounded decorated stdout."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as original_error:
+        decoder = json.JSONDecoder()
+        payload: Any | None = None
+        decorated = raw[-_MAX_DECORATED_OUTPUT_CHARS:]
+        for match in re.finditer(r"(?m)^[ \t]*\[", decorated):
+            try:
+                candidate, _end = decoder.raw_decode(decorated, match.end() - 1)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, list):
+                payload = candidate
+        if payload is not None:
+            return payload
+        raise original_error
 
 
 class BrowserAiProvider:
@@ -40,7 +64,7 @@ class BrowserAiProvider:
         )
         self.observed_model = getattr(self.backend, "observed_model", None) or "unverified"
         try:
-            parsed = json.loads(raw)
+            parsed = _parse_discovery_payload(raw)
         except json.JSONDecodeError as exc:
             raise BrowserAiDiscoveryError("browser AI discovery returned invalid JSON") from exc
         if not isinstance(parsed, list) or len(parsed) > limit:

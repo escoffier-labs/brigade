@@ -37,6 +37,45 @@ def test_browser_ai_provider_returns_untrusted_sources() -> None:
     assert provider.observed_model == "unverified"
 
 
+def test_browser_ai_provider_accepts_json_wrapped_by_oracle_cli_output() -> None:
+    provider, _backend = _provider(
+        "🧿 oracle 0.18.0 — receipt\n"
+        '[{"url":"https://example.test/a","title":"A","snippet":"Claim A"}]\n'
+        "7.5s · gemini-3.1-pro[browser]"
+    )
+
+    hits = provider.search("query", limit=1)
+
+    assert hits == [{"url": "https://example.test/a", "title": "A", "trust": "browser-ai"}]
+
+
+@pytest.mark.parametrize(
+    "earlier_payload",
+    [
+        "[]",
+        '[{"url":"https://example.test/earlier","title":"Earlier","snippet":"Earlier claim"}]',
+    ],
+)
+def test_browser_ai_provider_uses_final_json_array_from_oracle_cli_output(earlier_payload: str) -> None:
+    provider, _backend = _provider(
+        "oracle prelude\n"
+        f"{earlier_payload}\n"
+        '[{"url":"https://example.test/final","title":"Final","snippet":"Final claim"}]\n'
+        "7.5s · gemini-3.1-pro[browser]"
+    )
+
+    hits = provider.search("query", limit=1)
+
+    assert hits == [{"url": "https://example.test/final", "title": "Final", "trust": "browser-ai"}]
+
+
+def test_browser_ai_provider_validates_non_object_items_in_decorated_final_array() -> None:
+    provider, _backend = _provider('oracle prelude\n["not-an-object"]\n7.5s · gemini-3.1-pro[browser]')
+
+    with pytest.raises(BrowserAiDiscoveryError, match="must be an object"):
+        provider.search("query", limit=1)
+
+
 def test_fetch_does_not_call_backend_again() -> None:
     provider, backend = _provider('[{"url":"https://example.test/a","title":"A","snippet":"Claim A"}]')
 
