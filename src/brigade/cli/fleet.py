@@ -1,4 +1,4 @@
-"""brigade fleet command group (issues #1123, #1125): hub serve, status, spool flush, claims."""
+"""brigade fleet command group (issues #1123, #1125, #1141): hub serve, status, spool flush, claims."""
 
 from __future__ import annotations
 
@@ -62,9 +62,23 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_flush = fleet_sub.add_parser("flush", help="Re-POST locally spooled events to the fleet hub.")
     p_flush.set_defaults(func=_dispatch_flush)
 
-    p_claims = fleet_sub.add_parser("claims", help="List active repo claims held on the fleet hub.")
+    p_claims = fleet_sub.add_parser("claims", help="List active repo claims held on the fleet hub, or release one.")
     p_claims.add_argument("--all", action="store_true", help="Include expired claims.")
     p_claims.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
+    p_claims.add_argument(
+        "--release",
+        metavar="TARGET",
+        default=None,
+        help=(
+            "Release the hub claim on TARGET (a claim left behind by a crashed run). "
+            "Refused unless this node holds it; see --force."
+        ),
+    )
+    p_claims.add_argument(
+        "--force",
+        action="store_true",
+        help="With --release: release the claim even when another node holds it.",
+    )
     p_claims.set_defaults(func=_dispatch_claims)
 
 
@@ -111,11 +125,69 @@ def _dispatch_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _release_claim(target: str, *, force: bool, as_json: bool) -> int:
+    """``brigade fleet claims --release`` (issue #1141): free a claim whose
+    holder token died with its run. Own-node claims only, unless ``force``."""
+    import json as _json
+
+    from .. import fleet_client
+
+    node_id = fleet_client.resolve_node_id()
+    decision = fleet_client.release_claim(target, node_id=node_id, force=force)
+    if decision.reason == "no-hub":
+        print("error: no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)", file=sys.stderr)
+        return 1
+    if decision.reason == "no-identity":
+        print(
+            f"error: no usable fleet node identity ({decision.detail}); run from a Brigade workspace "
+            "with .brigade/node.toml (see `brigade node`)",
+            file=sys.stderr,
+        )
+        return 1
+    if decision.reason == "hub-unavailable":
+        print(f"error: fleet hub claim release failed: {decision.detail}", file=sys.stderr)
+        return 1
+    if as_json:
+        payload = {
+            "target": target,
+            "released": decision.granted,
+            "forced": force,
+            "node_id": node_id,
+            "claim": decision.claim,
+            "owner": decision.owner,
+        }
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+    if decision.granted:
+        claim = decision.claim or {}
+        if not as_json:
+            print(
+                f"released claim on {target!r} held by node {claim.get('owner_node') or '-'} "
+                f"(conductor {claim.get('owner_conductor') or '-'})"
+            )
+        return 0
+    if decision.reason == "held":
+        owner = decision.owner or {}
+        print(
+            f"error: claim on {target!r} is held by node {owner.get('owner_node') or '-'}, not this node "
+            f"({node_id}); pass --force to release it anyway",
+            file=sys.stderr,
+        )
+        return 1
+    if not as_json:
+        print(f"no active claim on {target!r}")
+    return 0
+
+
 def _dispatch_claims(args: argparse.Namespace) -> int:
     import json as _json
 
     from .. import fleet_client
 
+    if args.force and args.release is None:
+        print("error: --force requires --release <target>", file=sys.stderr)
+        return 2
+    if args.release is not None:
+        return _release_claim(args.release, force=args.force, as_json=args.json)
     try:
         claims = fleet_client.fetch_claims(include_all=args.all)
     except fleet_client.FleetClientError as exc:

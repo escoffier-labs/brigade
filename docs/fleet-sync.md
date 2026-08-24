@@ -43,7 +43,7 @@ status of each phase.
 | 1. Machine identity, namespaced run ids, lease reaper | #1122 | shipped (#1129) |
 | 2. Fleet hub (`brigade fleet serve`), event POST, store-and-forward, `brigade fleet status` | #1123 | **built, hub CT pending** — code, tests, and CLI are in; the hogwarts CT that hosts `brigade fleet serve` is not provisioned yet |
 | 3. Web dashboard served by the hub | #1124 | shipped |
-| 4. Server-arbitrated claims with TTL | #1125 | not started |
+| 4. Server-arbitrated claims with TTL | #1125 | shipped (#1140); crash self-lockout recovery #1141 |
 | 5. Dolt sink for versioned history (optional) | #1127 | not started |
 | 6. Cross-repo campaigns on the hub | #1128 | not started |
 
@@ -131,3 +131,26 @@ phone over Tailscale:
 
 Run the hub under a process supervisor on the CT, e.g.
 `brigade fleet serve --host "$(tailscale ip -4)" --token-file /etc/brigade/fleet-token`.
+
+## Phase 4 surface (claims)
+
+Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
+`brigade fleet claims`) are described in full in the CHANGELOG entry for
+#1125. Recovery from a crashed run (#1141):
+
+- A run killed with SIGKILL leaves an unexpired hub claim under its own node
+  whose holder token died with it. On the next `brigade run` in that repo,
+  the Phase 1 lease reconcile frees `run.lock` for the dead owner, and
+  because it did, the hub acquire is sent with `scope: "node"`: the hub
+  replaces an unexpired claim owned by the *same* `node_id` (never another
+  node's) and the run logs one line naming the superseded claim. No TTL
+  wait. A same-node claim with no dead lock to vouch for it (a sibling run,
+  or a run already recovered with `brigade runs recover`) is still refused,
+  with the two ways out named in the error.
+- `brigade fleet claims --release <target> [--json]` frees a claim without
+  its holder token (`POST /claims` `release` with `scope: "node"`): the hub
+  deletes the row only if this node owns it; another node's claim is
+  refused with its owner named. `--force` (`scope: "force"`) releases it
+  anyway. Renew is never token-less.
+- `brigade run --no-fleet-claim` skips the hub claim entirely and relies on
+  the local run lock alone, logged once on the `brigade.fleet` logger.

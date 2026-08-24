@@ -433,6 +433,7 @@ Common `brigade run` flags:
 - `--dry-run` prints planned assignments as JSON and stops before worker dispatch.
 - `--detach` starts the run in a child process, writes child output to `detached.log`, and returns after `run.json` appears.
 - `--wait[=SECONDS]` waits for the target's active run lock instead of failing immediately. A bare `--wait` waits up to 600 seconds. Without this flag, lock conflicts remain fail-fast.
+- `--no-fleet-claim` skips the fleet hub repo claim and relies on the local run lock alone (logged once). The escape hatch when a claim left by a crashed run blocks the repo; `brigade fleet claims --release <target>` frees such a claim (`--force` for another node's).
 - `--allow-dirty` bypasses the default dirty-git-worktree guard.
 - `--worktree` runs agents in a detached git worktree and captures `changes.patch`.
 - `--show-plan` prints assignments before a normal run.

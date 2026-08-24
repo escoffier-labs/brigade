@@ -23,6 +23,15 @@ Endpoints:
   reclaimable by anyone; an unexpired one is never silently stolen. Expired
   rows are pruned on every acquire. ``node_id`` must be a real identity
   (``[A-Za-z0-9._-]``, max 128 chars, never the literal ``unknown``).
+  An optional ``"scope"`` widens who a request may act on (issue #1141):
+  ``"holder"`` (default) is the fencing-token contract above;
+  ``"node"`` on ``acquire`` also supersedes an unexpired claim held by the
+  *same* ``node_id`` under a different token (the caller's local lease
+  reconcile found that run dead) and on ``release`` deletes the row owned by
+  the caller's ``node_id`` without its token (which died with the run);
+  ``"force"`` on ``release`` deletes whatever holds the target. ``holder``
+  is optional for a ``node``/``force`` release; ``renew`` is always
+  ``holder``-scoped.
 - ``GET /claims`` — bearer auth; active claims (``?all=1`` includes expired).
 - ``GET /`` and ``GET /view/{machines,repos}`` — the server-rendered Fleet
   dashboard (issue #1124 phase 3; see ``fleet_dashboard``). Same bearer auth,
@@ -72,6 +81,16 @@ _DASHBOARD_COOKIE_PURPOSE = b"brigade-fleet-dashboard-cookie-v1"
 _DASHBOARD_PREFIX = "/view/"
 
 CLAIM_ACTIONS = frozenset({"acquire", "renew", "release"})
+# Request scopes (issue #1141): "holder" is the fencing-token contract; "node"
+# lets a node act on its own dead holder's row; "force" is the operator
+# override, release only. Renew is never widened: a token-less renew would
+# let any same-node process keep a claim alive.
+CLAIM_SCOPES = frozenset({"holder", "node", "force"})
+CLAIM_ACTION_SCOPES: dict[str, frozenset[str]] = {
+    "acquire": frozenset({"holder", "node"}),
+    "renew": frozenset({"holder"}),
+    "release": CLAIM_SCOPES,
+}
 DEFAULT_CLAIM_TTL_SECONDS = 900
 CLAIM_TTL_MIN_SECONDS = 1
 CLAIM_TTL_MAX_SECONDS = 86400
@@ -302,12 +321,25 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
     if not isinstance(action, str) or action not in CLAIM_ACTIONS:
         raise FleetHubError("claim field 'action' must be one of: acquire, renew, release")
     request["action"] = action
+    scope = raw.get("scope", "holder")
+    if not isinstance(scope, str) or scope not in CLAIM_ACTION_SCOPES[action]:
+        allowed = ", ".join(sorted(CLAIM_ACTION_SCOPES[action]))
+        raise FleetHubError(f"claim field 'scope' for {action} must be one of: {allowed}")
+    request["scope"] = scope
+    # A node/force release has no holder token to present: the token died
+    # with the crashed run it is cleaning up after.
+    holder_optional = action == "release" and scope != "holder"
     for field in ("target", "node_id", "holder"):
         value = raw.get(field)
+        if field == "holder" and holder_optional and value is None:
+            request[field] = None
+            continue
         if not isinstance(value, str) or not value.strip():
             raise FleetHubError(f"claim field {field!r} must be a non-empty string")
         request[field] = value.strip()
     for field in ("node_id", "holder"):
+        if request[field] is None:
+            continue
         if request[field] == "unknown" or not CLAIM_ID_PATTERN.match(request[field]):
             raise FleetHubError(
                 f"claim field {field!r} must be a real identity "
@@ -357,6 +389,14 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
     only that row — a sibling process on the same node without the token can
     neither extend nor delete a live claim. Each mutation is a single SQL
     statement, so two concurrent callers cannot both win.
+
+    ``scope: "node"`` (issue #1141) widens acquire to also replace an
+    unexpired row owned by the caller's own ``node_id`` under another token
+    (the response then carries the replaced row as ``superseded``), and
+    widens release to delete the caller's node's row without a token; a
+    row owned by another node is still refused with 409. ``scope: "force"``
+    (release only) deletes the row whoever owns it. A token-less release
+    reports the deleted row as ``claim``.
     """
     request = _validate_claim_request(raw)
     target = request["target"]
@@ -364,10 +404,14 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
     conductor = request["conductor"]
     holder = request["holder"]
     ttl = request["ttl_seconds"]
+    scope = request["scope"]
     now = _now_epoch()
     now_iso = _epoch_to_iso(now)
     if request["action"] == "acquire":
         conn.execute("DELETE FROM claims WHERE expires_at <= ?", (now,))
+        # Only a same-node supersede needs the prior row (to report what it
+        # replaced); expired rows are already gone, so this is a live claim.
+        prior = _fetch_claim(conn, target) if scope == "node" else None
         cursor = conn.execute(
             "INSERT INTO claims "
             "(target, owner_node, owner_conductor, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
@@ -383,14 +427,18 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
             "ttl_seconds = excluded.ttl_seconds, "
             "expires_at = excluded.expires_at "
             "WHERE claims.expires_at <= ? "
-            "OR (claims.holder_token = excluded.holder_token AND claims.owner_node = excluded.owner_node)",
-            (target, node, conductor, holder, now_iso, now_iso, ttl, now + ttl, now, now),
+            "OR (claims.holder_token = excluded.holder_token AND claims.owner_node = excluded.owner_node) "
+            "OR (? = 1 AND claims.owner_node = excluded.owner_node)",
+            (target, node, conductor, holder, now_iso, now_iso, ttl, now + ttl, now, now, int(scope == "node")),
         )
         conn.commit()
         if cursor.rowcount == 1:
             row = _fetch_claim(conn, target)
             written = (target, node, conductor, now_iso, now_iso, ttl, now + ttl)
-            return 200, {"granted": True, "claim": _claim_payload(row if row is not None else written)}
+            granted: dict[str, Any] = {"granted": True, "claim": _claim_payload(row if row is not None else written)}
+            if prior is not None and prior[7] != holder:
+                granted["superseded"] = _claim_payload(prior)
+            return 200, granted
         row = _fetch_claim(conn, target)
         owner = _claim_payload(row) if row is not None else None
         held_by = owner["owner_node"] if owner is not None else "unknown"
@@ -414,16 +462,43 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
                 "owner": _claim_payload(row),
             }
         return 409, {"renewed": False, "error": f"claim on {target!r} is expired or missing", "owner": None}
+    if scope == "holder":
+        cursor = conn.execute(
+            "DELETE FROM claims WHERE target = ? AND holder_token = ? AND owner_node = ?",
+            (target, holder, node),
+        )
+        conn.commit()
+        if cursor.rowcount == 1:
+            return 200, {"released": True}
+        row = _fetch_claim(conn, target)
+        if row is not None:
+            return 409, {
+                "released": False,
+                "error": f"target {target!r} is held by {row[1]}",
+                "owner": _claim_payload(row),
+            }
+        return 200, {"released": False}
+    # Token-less release (issue #1141): the caller's own node's row, or with
+    # "force" whoever holds the target. One statement, so a concurrent
+    # acquire cannot slip a new owner's row under a node-scoped delete.
+    prior = _fetch_claim(conn, target)
     cursor = conn.execute(
-        "DELETE FROM claims WHERE target = ? AND holder_token = ? AND owner_node = ?",
-        (target, holder, node),
+        "DELETE FROM claims WHERE target = ? AND (? = 1 OR owner_node = ?)",
+        (target, int(scope == "force"), node),
     )
     conn.commit()
     if cursor.rowcount == 1:
-        return 200, {"released": True}
+        released: dict[str, Any] = {"released": True}
+        if prior is not None:
+            released["claim"] = _claim_payload(prior)
+        return 200, released
     row = _fetch_claim(conn, target)
     if row is not None:
-        return 409, {"released": False, "error": f"target {target!r} is held by {row[1]}", "owner": _claim_payload(row)}
+        return 409, {
+            "released": False,
+            "error": f"target {target!r} is held by {row[1]}, not {node}",
+            "owner": _claim_payload(row),
+        }
     return 200, {"released": False}
 
 
