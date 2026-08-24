@@ -24,6 +24,7 @@ DEFAULT_BIND = "127.0.0.1:8766"
 MAX_REQUEST_BYTES = 16_384
 LEASE_SECONDS = 300
 MAX_LISTED_JOBS = 100
+SDK_LOOPBACK_ALLOWED_HOSTS = ("localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "::1", "[::1]:*")
 INSTANCES = frozenset({"operator", "repository-scout", "implementation-worker"})
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 
@@ -286,8 +287,7 @@ def build_app(config: ListenerConfig) -> Callable[..., Any]:
         max_request_body_size=MAX_REQUEST_BYTES,
         host=config.bind_host,
         transport_security=TransportSecuritySettings(
-            allowed_hosts=list(config.allowed_hosts)
-            or ["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "::1", "[::1]:*"],
+            allowed_hosts=_transport_allowed_hosts(config),
             allowed_origins=list(config.allowed_origins),
         ),
     )
@@ -372,14 +372,11 @@ class _GateASGI:
                 "Unauthorized" if reason == "unauthorized" else "Forbidden",
             )
             return
-        if scope.get("method") != "POST":
-            await self.app(scope, receive, send)
-            return
         body, messages, too_large = await _read_bounded_body(receive, self.gate.max_request_bytes)
         if too_large:
             await _reject_http(send, 413, "Request body is too large")
             return
-        if scope.get("path") == "/mcp" and _hidden_or_unknown_tool(body, self.adapter):
+        if scope.get("path") == "/mcp" and _invalid_tool_request(body, self.adapter):
             await _reject_tool(send, body)
             return
         await self.app(scope, _replay_messages(messages), send)
@@ -409,7 +406,7 @@ def _replay_messages(messages: list[dict[str, Any]]) -> Callable[..., Any]:
     return replay
 
 
-def _hidden_or_unknown_tool(body: bytes, adapter: GrokbotAdapter) -> bool:
+def _invalid_tool_request(body: bytes, adapter: GrokbotAdapter) -> bool:
     try:
         request = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -417,7 +414,10 @@ def _hidden_or_unknown_tool(body: bytes, adapter: GrokbotAdapter) -> bool:
     if not isinstance(request, dict) or request.get("method") != "tools/call":
         return False
     params = request.get("params")
-    return not isinstance(params, dict) or params.get("name") not in adapter._tools()
+    if not isinstance(params, dict):
+        return True
+    name = params.get("name")
+    return name not in adapter._tools() or not _valid_tool_arguments(name, params.get("arguments"))
 
 
 async def _reject_http(send: Callable[..., Any], status: int, message: str) -> None:
@@ -463,6 +463,38 @@ def _lease_id(arguments: dict[str, Any]) -> str:
     if not isinstance(lease_id, str):
         raise AdapterError()
     return lease_id
+
+
+def _valid_tool_arguments(name: object, arguments: object) -> bool:
+    schemas: dict[str, dict[str, type[object]]] = {
+        "grokbot_queue_list": {},
+        "grokbot_queue_status": {"job_id": str},
+        "grokbot_queue_cancel": {"job_id": str},
+        "grokbot_queue_expire": {"job_id": str},
+        "grokbot_queue_claim": {"job_id": str, "lease_id": str},
+        "grokbot_queue_renew": {"job_id": str, "lease_id": str},
+        "grokbot_queue_start": {"job_id": str, "lease_id": str},
+        "grokbot_queue_complete": {"job_id": str, "lease_id": str, "artifact": dict},
+        "grokbot_queue_fail": {"job_id": str, "lease_id": str},
+        "grokbot_queue_ack_cancel": {"job_id": str, "lease_id": str},
+    }
+    if not isinstance(name, str):
+        return False
+    expected = schemas.get(name)
+    if expected == {} and arguments is None:
+        return True
+    return (
+        expected is not None
+        and isinstance(arguments, dict)
+        and set(arguments) == set(expected)
+        and all(isinstance(arguments[key], value_type) for key, value_type in expected.items())
+    )
+
+
+def _transport_allowed_hosts(config: ListenerConfig) -> list[str]:
+    if _is_loopback(config.bind_host):
+        return list(dict.fromkeys((*SDK_LOOPBACK_ALLOWED_HOSTS, *config.allowed_hosts)))
+    return list(config.allowed_hosts)
 
 
 def _valid_host(value: str) -> bool:

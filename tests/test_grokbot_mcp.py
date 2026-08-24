@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -204,6 +205,164 @@ def test_streamable_http_app_enforces_bearer_origin_and_body_limit(tmp_path: Pat
             ).status_code
             == 403
         )
+
+
+def test_gate_bounded_reads_every_http_method_and_preserves_bodyless_requests(tmp_path: Path):
+    adapter = _adapter(tmp_path)
+    delivered: list[tuple[str, list[dict[str, object]]]] = []
+
+    async def downstream(scope, receive, send):
+        messages = []
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message.get("type") == "http.disconnect":
+                break
+        delivered.append((scope["method"], messages))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def request(method: str, messages: list[dict[str, object]]) -> list[dict[str, object]]:
+        pending = iter(messages)
+        sent: list[dict[str, object]] = []
+
+        async def receive():
+            return next(pending, {"type": "http.disconnect"})
+
+        async def send(message):
+            sent.append(message)
+
+        await grokbot_mcp._GateASGI(downstream, grokbot_mcp.RequestGate(adapter.config), adapter)(
+            {
+                "type": "http",
+                "method": method,
+                "path": "/health",
+                "headers": [
+                    (b"host", b"127.0.0.1:8766"),
+                    (b"authorization", b"Bearer not-a-real-token"),
+                ],
+            },
+            receive,
+            send,
+        )
+        return sent
+
+    for method in ("GET", "DELETE"):
+        sent = asyncio.run(
+            request(
+                method,
+                [
+                    {"type": "http.request", "body": b"x" * grokbot_mcp.MAX_REQUEST_BYTES, "more_body": True},
+                    {"type": "http.request", "body": b"x", "more_body": False},
+                ],
+            )
+        )
+        assert sent[0]["status"] == 413
+
+    for method in ("GET", "DELETE"):
+        sent = asyncio.run(request(method, [{"type": "http.request", "body": b"", "more_body": False}]))
+        assert sent[0]["status"] == 200
+    assert [method for method, _ in delivered] == ["GET", "DELETE"]
+
+
+def test_loopback_canary_path_keeps_sdk_loopback_hosts_with_a_public_allowlist(tmp_path: Path):
+    from starlette.testclient import TestClient
+
+    config = grokbot_mcp.ListenerConfig(
+        target=tmp_path,
+        instance="implementation-worker",
+        bind_host="127.0.0.1",
+        bind_port=8766,
+        allowed_hosts=("mcp.example.test",),
+        allowed_origins=(),
+        bearer="not-a-real-token",
+    )
+    non_loopback = grokbot_mcp.ListenerConfig(
+        target=tmp_path,
+        instance="implementation-worker",
+        bind_host="mcp.example.test",
+        bind_port=8766,
+        allowed_hosts=("mcp.example.test",),
+        allowed_origins=("https://console.example.test",),
+        bearer="not-a-real-token",
+    )
+    assert set(grokbot_mcp._transport_allowed_hosts(config)) >= {
+        "localhost",
+        "localhost:*",
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "::1",
+        "[::1]:*",
+    }
+    assert grokbot_mcp._transport_allowed_hosts(non_loopback) == ["mcp.example.test"]
+
+    with TestClient(grokbot_mcp.build_app(config), base_url="http://127.0.0.1:8766") as client:
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "grokbot_queue_list", "arguments": {}},
+            },
+            headers={"authorization": "Bearer not-a-real-token"},
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+
+
+def test_mcp_asgi_rejects_extra_and_malformed_raw_tool_arguments(tmp_path: Path):
+    from starlette.testclient import TestClient
+
+    headers = {"authorization": "Bearer not-a-real-token", "content-type": "application/json"}
+    invalid_calls = (
+        ("grokbot_queue_list", {"bot_id": "caller-selected"}),
+        ("grokbot_queue_status", {"job_id": []}),
+        ("grokbot_queue_complete", {"job_id": "grokbot-" + "a" * 24, "lease_id": "lease-a", "artifact": []}),
+    )
+    with TestClient(grokbot_mcp.build_app(_adapter(tmp_path).config), base_url="http://127.0.0.1:8766") as client:
+        for name, arguments in invalid_calls:
+            response = client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+                headers=headers,
+            )
+            assert response.status_code == 400
+            assert response.json() == {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32602, "message": "Invalid request"},
+            }
+
+        valid = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "grokbot_queue_list", "arguments": {}},
+            },
+            headers=headers,
+        )
+        omitted_arguments = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "grokbot_queue_list"},
+            },
+            headers=headers,
+        )
+    assert valid.status_code == 200
+    assert valid.json()["result"]["isError"] is False
+    assert omitted_arguments.status_code == 200
+    assert omitted_arguments.json()["result"]["isError"] is False
 
 
 def test_cli_serve_reports_missing_optional_extra_without_printing_secret(tmp_path: Path, monkeypatch, capsys):
