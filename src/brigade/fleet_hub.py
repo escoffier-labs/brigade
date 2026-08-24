@@ -5,14 +5,37 @@ A small stdlib-only HTTP service (``http.server.ThreadingHTTPServer`` +
 ``sqlite3``) that accepts ``POST /events`` from fleet nodes and answers
 ``GET /status`` with the latest observed state per (node_id, run_id).
 
+Credentials (issue #1150). Two kinds of bearer token, both compared in
+constant time, neither ever logged:
+
+- The **admin token** (``BRIGADE_FLEET_TOKEN`` / ``--token-file``, the one
+  shared secret from before per-node credentials) is the control plane: it
+  manages the ``nodes`` table (``/nodes``), reads ``/status`` and
+  ``/claims``, and enrols the dashboard cookie. It may ``POST /events`` and
+  ``POST /claims`` under *any* ``node_id`` only when the hub runs with
+  ``--allow-admin-writes`` (off by default, so a fleet still on the shared
+  token migrates explicitly); otherwise those posts answer 403.
+- A **node token** (``brigade fleet nodes add <node_id>``; only its SHA-256
+  is stored) *is* the node's identity: ``POST /events`` and ``POST /claims``
+  derive the caller's ``node_id`` from it and answer 403 when a body
+  ``node_id`` differs, so one fleet member can no longer post events or
+  claim operations as another. A revoked token answers 401. Node tokens
+  may also read ``/status`` and ``/claims``.
+
 Endpoints:
 - ``GET /health`` — no auth; liveness probe.
-- ``POST /events`` — bearer auth; body is a single event object or a JSON
-  array of events. Dedupe on UNIQUE(node_id, run_id, sequence, digest).
-  Responds ``{"accepted": n, "duplicate": m}``.
-- ``GET /status`` — bearer auth; latest state per (node_id, run_id) for
-  non-terminal runs. ``?all=1`` includes terminal runs.
-- ``POST /claims`` — bearer auth; ``{"action": "acquire"|"renew"|"release",
+- ``POST /events`` — node token (or admin with ``--allow-admin-writes``);
+  body is a single event object or a JSON array of events, every one
+  carrying the caller's ``node_id``. Dedupe on UNIQUE(node_id, run_id,
+  sequence, digest). Responds ``{"accepted": n, "duplicate": m}``.
+- ``GET /status`` — admin or node token; latest state per (node_id, run_id)
+  for non-terminal runs. ``?all=1`` includes terminal runs.
+- ``GET /nodes`` / ``POST /nodes`` — admin token only; list enrolled nodes,
+  ``{"action": "add", "node_id", "label"?}`` mints a token (returned once,
+  in that response only; an enrolled, unrevoked node answers 409),
+  ``{"action": "revoke", "node_id"}`` marks it revoked (re-add to rotate).
+- ``POST /claims`` — node token (or admin with ``--allow-admin-writes``);
+  ``{"action": "acquire"|"renew"|"release",
   "target": ..., "node_id": ..., "holder": ..., "conductor"?: ...,
   "ttl_seconds"?: ...}``. One unique row per target grants the claim to
   exactly one holder; a held target answers 409 with the current owner. The
@@ -40,12 +63,14 @@ Endpoints:
   when the caller's ``node_id`` owns it the answer also carries
   ``lock_run_dir`` so that node's CLI can find the run and check its lock
   is dead before a token-less release (never to other callers).
-  Trust boundary: ``node_id``, ``lock`` and ``supersede`` are
-  caller-asserted under one shared bearer token, so ``scope`` is an intent
-  marker that keeps *honest* clients from stealing each other's claims (a
-  same-basename workspace, a cloned node identity), not an authorization —
-  the bearer token already authorizes ``force`` and arbitrary claims.
-- ``GET /claims`` — bearer auth; active claims (``?all=1`` includes expired).
+  Trust boundary: ``node_id`` is bound to the node token that presents it,
+  so a member can only act as itself; ``lock``, ``supersede`` and ``scope``
+  remain caller-asserted intent that keeps *honest* clients from stealing
+  each other's claims (a same-basename workspace, a cloned node identity),
+  not an authorization — any enrolled node may still ``force``-release,
+  attributed to its own ``node_id``.
+- ``GET /claims`` — admin or node token; active claims (``?all=1`` includes
+  expired).
 - ``GET /`` and ``GET /view/{machines,repos}`` — the server-rendered Fleet
   dashboard (issue #1124 phase 3; see ``fleet_dashboard``). Same bearer auth,
   or the ``brigade_fleet_view`` cookie: opening the page once with
@@ -58,9 +83,10 @@ Endpoints:
   nothing) and the cookie is a 30-day read-only capability on that device,
   which is why it is scoped to the HTML routes only.
 
-The token comes from ``BRIGADE_FLEET_TOKEN`` or ``--token-file``; it is never
-persisted by Brigade. The database is one SQLite file in WAL mode with a
-versioned schema (PRAGMA user_version).
+The admin token comes from ``BRIGADE_FLEET_TOKEN`` or ``--token-file``; it
+is never persisted by Brigade, and node tokens are persisted only as SHA-256
+digests. The database is one SQLite file in WAL mode with a versioned schema
+(PRAGMA user_version).
 """
 
 from __future__ import annotations
@@ -85,7 +111,7 @@ from urllib.parse import parse_qs, urlencode
 
 from . import fleet_dashboard
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -113,6 +139,11 @@ CLAIM_TTL_MAX_SECONDS = 86400
 # Two cloned or identity-less machines must never both be granted a target:
 # a claim identity has to be a real, well-formed node id, never "unknown".
 CLAIM_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# Per-node credentials (issue #1150): a fresh token is 32 random bytes,
+# url-safe; the hub keeps only its SHA-256 hex digest.
+NODE_TOKEN_BYTES = 32
+NODE_LABEL_MAX_CHARS = 128
+NODE_ACTIONS = frozenset({"add", "revoke"})
 
 EVENT_FIELDS = {
     "node_id": str,
@@ -168,6 +199,20 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 """
 _CLAIMS_LEASE_COLUMNS = ("lock_token", "lock_acquired_at", "lock_run_dir")
+
+# Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
+# node's bearer token. The plaintext token is returned once by the add
+# request and never stored; a revoked row keeps its digest so the old token
+# answers "revoked" (401) rather than silently becoming unknown.
+_NODES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS nodes (
+    node_id TEXT NOT NULL PRIMARY KEY,
+    token_sha256 TEXT NOT NULL UNIQUE,
+    label TEXT,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+"""
 # Bounded so a hostile client cannot bloat the row; a lease token is a uuid4
 # hex and an ISO-8601 stamp, a run_dir a filesystem path.
 LEASE_FIELD_MAX_CHARS = 1024
@@ -175,6 +220,14 @@ LEASE_FIELD_MAX_CHARS = 1024
 
 class FleetHubError(RuntimeError):
     """Hub configuration or request failure with an operator-readable message."""
+
+
+class FleetHubForbidden(FleetHubError):
+    """An authenticated caller asked to act as a node_id its token does not own (HTTP 403)."""
+
+
+class FleetHubConflict(FleetHubError):
+    """The request conflicts with current hub state (HTTP 409)."""
 
 
 def _utc_now() -> str:
@@ -196,9 +249,12 @@ def _claims_table_needs_migration(claims_columns: set[str]) -> bool:
 
 
 # Intra-process serialization for the claims migration, in addition to the
-# SQL-level BEGIN IMMEDIATE: init_db runs per request on a threading server,
-# and a first-touch storm is same-process thread contention, which a plain
-# Python lock resolves deterministically instead of via busy-timeout races.
+# SQL-level BEGIN IMMEDIATE. Schema work happens once at server startup
+# (``make_server`` → ``init_db``), so within one process this is not
+# per-request contention anymore, but ``init_db`` stays lock-guarded so a
+# first-touch storm of concurrent callers (other processes, or tests) is
+# same-process thread contention resolved deterministically instead of via
+# busy-timeout races.
 _MIGRATION_LOCKS: dict[str, threading.Lock] = {}
 _MIGRATION_LOCKS_GUARD = threading.Lock()
 
@@ -208,10 +264,8 @@ def _migration_lock(db_path: Path) -> threading.Lock:
         return _MIGRATION_LOCKS.setdefault(str(db_path), threading.Lock())
 
 
-# Backoff for the migration write lock. init_db runs per request, so a
-# first-touch storm (every request racing to migrate a fresh v2 database)
-# can push a waiter past the 5s busy timeout on a loaded host; each retry
-# first re-checks whether another connection already finished the job.
+# Backoff for the migration write lock. Each retry first re-checks whether
+# another connection already finished the job.
 _MIGRATION_LOCK_DELAYS: tuple[float | None, ...] = (0.05, 0.1, 0.2, 0.4, 0.8, None)
 
 
@@ -266,34 +320,73 @@ def _migrate_claims_table(conn: sqlite3.Connection) -> None:
         raise
 
 
-def init_db(db_path: Path) -> sqlite3.Connection:
-    """Open the hub database, creating the schema on first use.
-
-    WAL mode for concurrent readers; ``PRAGMA user_version`` records the schema
-    version. A database written by a newer hub is refused rather than
-    silently reinterpreted.
-    """
-    db_path = Path(db_path).expanduser()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+def _refuse_newer_schema(conn: sqlite3.Connection, db_path: Path) -> None:
+    """Raise ``FleetHubError`` when ``conn``'s database is from a newer hub."""
     current = conn.execute("PRAGMA user_version").fetchone()[0]
-    if current > SCHEMA_VERSION:
-        conn.close()
+    if not isinstance(current, int) or current > SCHEMA_VERSION:
         raise FleetHubError(
             f"fleet hub database {db_path} has schema version {current}; this brigade supports {SCHEMA_VERSION}"
         )
-    conn.execute(_SCHEMA)
-    if _claims_table_needs_migration(_claims_columns(conn)):
-        with _migration_lock(db_path):
-            # Re-check under the lock: the thread that held it first has
-            # usually done the work already.
-            if _claims_table_needs_migration(_claims_columns(conn)):
-                _migrate_claims_table(conn)
-    conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
-    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-    conn.commit()
+
+
+def open_db(db_path: Path) -> sqlite3.Connection:
+    """Open a read/write connection to an **existing** hub database without
+    touching its schema or persistence mode.
+
+    This is what request handlers use (#1161): schema creation and migration
+    happen exactly once at server startup (``init_db``), so a request can
+    never stall on DDL behind another caller's write lock, but every request
+    still opens a fresh connection, so ``lookup_node_token`` sees enrollments
+    and revocations the moment they commit. The open itself is side-effect
+    free: URI ``mode=rw`` never creates a missing database file, no
+    ``PRAGMA journal_mode`` is issued (WAL is set up once by startup's
+    ``init_db``, not per connection), and any setup or version error,
+    including a database written by a newer hub, closes the connection
+    before raising rather than leaking it.
+    """
+    db_path = Path(db_path).expanduser().resolve()
+    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=rw", timeout=10, uri=True)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        _refuse_newer_schema(conn, db_path)
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def init_db(db_path: Path) -> sqlite3.Connection:
+    """Open the hub database and create/migrate its schema.
+
+    Called once at server startup (``make_server``, before the socket serves
+    any request) and by tools and tests that want a migrated connection;
+    request handlers use the non-migrating ``open_db`` instead. This is also
+    the only place WAL mode is set (#1161): it persists in the database file,
+    so request connections inherit it without re-issuing the pragma.
+    """
+    db_path = Path(db_path).expanduser()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved = db_path.resolve()
+    conn = sqlite3.connect(str(resolved), timeout=10)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        _refuse_newer_schema(conn, resolved)
+        conn.execute(_SCHEMA)
+        if _claims_table_needs_migration(_claims_columns(conn)):
+            with _migration_lock(db_path):
+                # Re-check under the lock: the thread that held it first has
+                # usually done the work already.
+                if _claims_table_needs_migration(_claims_columns(conn)):
+                    _migrate_claims_table(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
+        # v3 -> v4 is one additive table; IF NOT EXISTS is the whole migration.
+        conn.execute(_NODES_SCHEMA)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.commit()
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -315,8 +408,14 @@ def _validate_event(raw: Any) -> dict[str, Any]:
     return event
 
 
-def store_events(conn: sqlite3.Connection, raw_events: Any) -> dict[str, int]:
-    """Insert events with dedupe; returns {"accepted": n, "duplicate": m}."""
+def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str | None = None) -> dict[str, int]:
+    """Insert events with dedupe; returns {"accepted": n, "duplicate": m}.
+
+    With ``caller_node`` (the node_id bound to the caller's node token) every
+    event must carry that node_id; one that does not rejects the whole batch
+    with ``FleetHubForbidden`` (nothing is stored). ``None`` is the admin
+    token with ``--allow-admin-writes``: any node_id.
+    """
     if isinstance(raw_events, dict):
         raw_list = [raw_events]
     elif isinstance(raw_events, list):
@@ -326,6 +425,12 @@ def store_events(conn: sqlite3.Connection, raw_events: Any) -> dict[str, int]:
     if len(raw_list) > 1000:
         raise FleetHubError("too many events in one POST (max 1000)")
     events = [_validate_event(raw) for raw in raw_list]
+    if caller_node is not None:
+        for event in events:
+            if event["node_id"] != caller_node:
+                raise FleetHubForbidden(
+                    f"event node_id {event['node_id']!r} does not match the caller's node token ({caller_node})"
+                )
     accepted = 0
     duplicate = 0
     received_at = _utc_now()
@@ -541,8 +646,13 @@ def _fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | Non
     ).fetchone()
 
 
-def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any]]:
+def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None) -> tuple[int, dict[str, Any]]:
     """Arbitrate one claim request; returns (http_status, response_payload).
+
+    ``caller_node`` is the node_id bound to the caller's node token: a
+    request whose ``node_id`` differs raises ``FleetHubForbidden`` before
+    any read or write (``None`` is the admin token with
+    ``--allow-admin-writes``, which may act as any node).
 
     ``acquire`` prunes expired rows, grants a free or expired target, is
     idempotent for the current holder (retrying a lost response extends the
@@ -572,6 +682,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
     deleted (409 with the current row). Only ``force`` deletes unfenced.
     """
     request = _validate_claim_request(raw)
+    if caller_node is not None and request["node_id"] != caller_node:
+        raise FleetHubForbidden(
+            f"claim node_id {request['node_id']!r} does not match the caller's node token ({caller_node})"
+        )
     target = request["target"]
     node = request["node_id"]
     conductor = request["conductor"]
@@ -736,6 +850,110 @@ def list_claims(conn: sqlite3.Connection, *, include_all: bool = False) -> list[
     return result
 
 
+# --- per-node credentials (issue #1150) -------------------------------------
+
+
+def hash_node_token(token: str) -> str:
+    """The only form of a node token the hub ever stores."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _node_payload(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {"node_id": row[0], "label": row[1], "created_at": row[2], "revoked_at": row[3]}
+
+
+_NODE_COLUMNS = "node_id, label, created_at, revoked_at"
+
+
+def _validate_node_id(node_id: Any) -> str:
+    if not isinstance(node_id, str) or node_id.strip() == "unknown" or not CLAIM_ID_PATTERN.match(node_id.strip()):
+        raise FleetHubError(
+            "field 'node_id' must be a real identity ([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')"
+        )
+    return node_id.strip()
+
+
+def add_node(conn: sqlite3.Connection, node_id: str, label: str | None = None) -> tuple[dict[str, Any], str]:
+    """Enrol ``node_id`` and mint its token; returns (node payload, plaintext token).
+
+    The plaintext exists only in the returned value. An enrolled, unrevoked
+    node raises ``FleetHubConflict`` (revoke first to rotate); a revoked one
+    is re-enrolled under a fresh token in the same single statement, so two
+    concurrent adds cannot both win.
+    """
+    node_id = _validate_node_id(node_id)
+    if label is not None and (not isinstance(label, str) or len(label) > NODE_LABEL_MAX_CHARS):
+        raise FleetHubError(f"field 'label' must be a string of at most {NODE_LABEL_MAX_CHARS} chars")
+    label = label.strip() or None if isinstance(label, str) else None
+    token = secrets.token_urlsafe(NODE_TOKEN_BYTES)
+    cursor = conn.execute(
+        "INSERT INTO nodes (node_id, token_sha256, label, created_at, revoked_at) VALUES (?, ?, ?, ?, NULL) "
+        "ON CONFLICT(node_id) DO UPDATE SET token_sha256 = excluded.token_sha256, label = excluded.label, "
+        "created_at = excluded.created_at, revoked_at = NULL WHERE nodes.revoked_at IS NOT NULL",
+        (node_id, hash_node_token(token), label, _utc_now()),
+    )
+    conn.commit()
+    if cursor.rowcount != 1:
+        raise FleetHubConflict(f"node {node_id!r} is already enrolled; revoke it first to issue a new token")
+    row = conn.execute(f"SELECT {_NODE_COLUMNS} FROM nodes WHERE node_id = ?", (node_id,)).fetchone()
+    return _node_payload(row), token
+
+
+def revoke_node(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None:
+    """Revoke ``node_id``'s token (idempotent); ``None`` when it was never enrolled."""
+    node_id = _validate_node_id(node_id)
+    conn.execute("UPDATE nodes SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL", (_utc_now(), node_id))
+    conn.commit()
+    row = conn.execute(f"SELECT {_NODE_COLUMNS} FROM nodes WHERE node_id = ?", (node_id,)).fetchone()
+    return _node_payload(row) if row is not None else None
+
+
+def list_nodes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every enrolled node (revoked ones included, flagged by ``revoked_at``); never a digest."""
+    rows = conn.execute(f"SELECT {_NODE_COLUMNS} FROM nodes ORDER BY node_id").fetchall()
+    return [_node_payload(row) for row in rows]
+
+
+def lookup_node_token(conn: sqlite3.Connection, presented: str) -> tuple[str | None, bool]:
+    """``(node_id, revoked)`` for a presented node token; ``(None, False)`` when unknown.
+
+    The lookup is by SHA-256 digest (the indexed column), so the timing of
+    the row fetch depends on the digest, not the secret; the stored digest
+    is then compared in constant time.
+    """
+    digest = hash_node_token(presented)
+    row = conn.execute(
+        "SELECT node_id, token_sha256, revoked_at FROM nodes WHERE token_sha256 = ?", (digest,)
+    ).fetchone()
+    if row is None or not hmac.compare_digest(str(row[1]).encode("utf-8"), digest.encode("utf-8")):
+        return None, False
+    return str(row[0]), row[2] is not None
+
+
+def handle_node_request(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any]]:
+    """``POST /nodes`` (admin only): add or revoke a node; returns (status, payload).
+
+    The ``add`` payload carries the plaintext token exactly once; nothing
+    else ever returns it.
+    """
+    if not isinstance(raw, dict):
+        raise FleetHubError("node request must be a JSON object")
+    action = raw.get("action")
+    if not isinstance(action, str) or action not in NODE_ACTIONS:
+        raise FleetHubError("node field 'action' must be one of: add, revoke")
+    node_id = _validate_node_id(raw.get("node_id"))
+    if action == "add":
+        try:
+            node, token = add_node(conn, node_id, raw.get("label"))
+        except FleetHubConflict as exc:
+            return 409, {"added": False, "error": str(exc)}
+        return 200, {"added": True, "node": node, "token": token}
+    revoked = revoke_node(conn, node_id)
+    if revoked is None:
+        return 404, {"revoked": False, "error": f"node {node_id!r} is not enrolled"}
+    return 200, {"revoked": True, "node": revoked}
+
+
 def _load_token(args: argparse.Namespace) -> str:
     token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
     if token:
@@ -751,7 +969,14 @@ def _load_token(args: argparse.Namespace) -> str:
     raise FleetHubError("no fleet hub token: set BRIGADE_FLEET_TOKEN or pass --token-file")
 
 
-def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
+def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False) -> type[BaseHTTPRequestHandler]:
+    """Request handler bound to the admin ``token`` and the hub database.
+
+    ``allow_admin_writes`` lets the admin token ``POST /events`` and
+    ``POST /claims`` under any ``node_id`` (the pre-#1150 shared-token
+    behaviour); off by default so a migration is an explicit choice.
+    """
+
     class _Handler(BaseHTTPRequestHandler):
         server_version = "brigade-fleet-hub/1"
         # Idle-socket guard: a peer that connects and never sends a request
@@ -761,9 +986,37 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
         def log_message(self, fmt: str, *log_args: Any) -> None:  # quiet by default
             pass
 
+        def _bearer(self) -> str | None:
+            """The presented bearer credential, or ``None`` without one."""
+            scheme, _, presented = self.headers.get("Authorization", "").partition(" ")
+            if scheme != "Bearer" or not presented:
+                return None
+            return presented
+
         def _authorized(self) -> bool:
+            """True for the admin token (constant-time)."""
             auth = self.headers.get("Authorization", "")
             return hmac.compare_digest(auth.encode("utf-8"), f"Bearer {token}".encode("utf-8"))
+
+        def _caller(self, conn: sqlite3.Connection) -> tuple[bool, str | None] | None:
+            """``(is_admin, node_id)`` for the request's bearer, having sent a
+            401 and returned ``None`` when it is missing, unknown, or revoked.
+            The admin token is checked first, in constant time; anything
+            else is looked up as a node token."""
+            presented = self._bearer()
+            if presented is None:
+                self._send_json(401, {"error": "unauthorized"})
+                return None
+            if self._authorized():
+                return True, None
+            node_id, revoked = lookup_node_token(conn, presented)
+            if node_id is None:
+                self._send_json(401, {"error": "unauthorized"})
+                return None
+            if revoked:
+                self._send_json(401, {"error": "unauthorized: node token revoked"})
+                return None
+            return False, node_id
 
         def _cookie_authorized(self) -> bool:
             header = self.headers.get("Cookie", "")
@@ -849,7 +1102,9 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
                 )
                 return
             try:
-                conn = init_db(Path(db_path))
+                # Non-migrating connection (#1161): the schema exists because
+                # server startup created it; this open is read/write only.
+                conn = open_db(Path(db_path))
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -883,19 +1138,28 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
             if path == "/" or path.startswith(_DASHBOARD_PREFIX):
                 self._serve_dashboard(path, query)
                 return
-            if path in ("/status", "/claims"):
-                if not self._authorized():
+            if path in ("/status", "/claims", "/nodes"):
+                if self._bearer() is None:
                     self._send_json(401, {"error": "unauthorized"})
                     return
                 include_all = parse_qs(query).get("all", [""])[0].lower() in ("1", "true", "yes")
                 try:
-                    conn = init_db(Path(db_path))
+                    conn = open_db(Path(db_path))
                 except (FleetHubError, sqlite3.Error) as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
                     return
                 payload: dict[str, Any]
                 try:
-                    if path == "/status":
+                    caller = self._caller(conn)
+                    if caller is None:
+                        return
+                    is_admin, _node = caller
+                    if path == "/nodes":
+                        if not is_admin:
+                            self._send_json(403, {"error": "the admin token is required to manage nodes"})
+                            return
+                        payload = {"nodes": list_nodes(conn)}
+                    elif path == "/status":
                         payload = {"runs": latest_status(conn, include_all=include_all)}
                     else:
                         payload = {"claims": list_claims(conn, include_all=include_all)}
@@ -910,37 +1174,65 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
             path = self.path.partition("?")[0]
-            if path not in ("/events", "/claims"):
+            if path not in ("/events", "/claims", "/nodes"):
                 self._send_json(404, {"error": "not found"})
                 return
-            if not self._authorized():
+            if self._bearer() is None:
                 self._send_json(401, {"error": "unauthorized"})
                 return
+            # The database is opened before the body is read: a node token
+            # is resolved against it, and an unauthenticated peer must not
+            # get the hub to read its (up to 8 MiB) body first. This is a
+            # non-migrating connection (#1161): the schema was created once
+            # at server startup.
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                self._send_json(400, {"error": "bad Content-Length"})
-                return
-            if length <= 0 or length > MAX_BODY_BYTES:
-                self._send_json(400, {"error": "missing or oversized body"})
-                return
-            raw = self.rfile.read(length)
-            try:
-                parsed = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
-                return
-            try:
-                conn = init_db(Path(db_path))
+                conn = open_db(Path(db_path))
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_json(500, {"error": f"hub database error: {exc}"})
                 return
             body_payload: dict[str, Any]
             try:
+                caller = self._caller(conn)
+                if caller is None:
+                    return
+                is_admin, caller_node = caller
+                if path == "/nodes":
+                    if not is_admin:
+                        self._send_json(403, {"error": "the admin token is required to manage nodes"})
+                        return
+                elif is_admin and not allow_admin_writes:
+                    self._send_json(
+                        403,
+                        {
+                            "error": "the admin token may not post events or claims: enroll this node with "
+                            "'brigade fleet nodes add' and configure its node token, or start the hub with "
+                            "--allow-admin-writes"
+                        },
+                    )
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self._send_json(400, {"error": "bad Content-Length"})
+                    return
+                if length <= 0 or length > MAX_BODY_BYTES:
+                    self._send_json(400, {"error": "missing or oversized body"})
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_json(400, {"error": "body is not valid JSON"})
+                    return
                 if path == "/events":
-                    status, body_payload = 200, dict(store_events(conn, parsed))
+                    status, body_payload = 200, dict(store_events(conn, parsed, caller_node=caller_node))
+                elif path == "/claims":
+                    status, body_payload = handle_claim(conn, parsed, caller_node=caller_node)
                 else:
-                    status, body_payload = handle_claim(conn, parsed)
+                    status, body_payload = handle_node_request(conn, parsed)
+            except FleetHubForbidden as exc:
+                self._send_json(403, {"error": str(exc)})
+                return
             except FleetHubError as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
@@ -954,12 +1246,24 @@ def make_handler(token: str, db_path: Path) -> type[BaseHTTPRequestHandler]:
     return _Handler
 
 
-def make_server(host: str, port: int, db_path: Path, token: str) -> ThreadingHTTPServer:
-    """Build (but do not serve) the hub HTTPServer; used by tests."""
-    return ThreadingHTTPServer((host, port), make_handler(token, Path(db_path)))
+def make_server(
+    host: str, port: int, db_path: Path, token: str, *, allow_admin_writes: bool = False
+) -> ThreadingHTTPServer:
+    """Build (but do not serve) the hub HTTPServer; used by tests.
+
+    The database is created/migrated exactly once here, before the socket
+    exists, so no request can ever arrive first (#1161). Request handlers then
+    use non-migrating connections (``open_db``), keeping token lookup live per
+    request. Raises ``FleetHubError``/``sqlite3.Error`` on an unusable or
+    too-new database.
+    """
+    init_db(Path(db_path)).close()
+    return ThreadingHTTPServer((host, port), make_handler(token, Path(db_path), allow_admin_writes=allow_admin_writes))
 
 
-def run(*, host: str | None, port: int, db_path: Path, token_file: Path | None) -> int:
+def run(
+    *, host: str | None, port: int, db_path: Path, token_file: Path | None, allow_admin_writes: bool = False
+) -> int:
     if not host:
         print("error: --host is required (the hub never binds all interfaces by default)", file=sys.stderr)
         return 2
@@ -968,9 +1272,16 @@ def run(*, host: str | None, port: int, db_path: Path, token_file: Path | None) 
     except FleetHubError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    server = make_server(host, port, Path(db_path).expanduser(), token)
+    try:
+        server = make_server(host, port, Path(db_path).expanduser(), token, allow_admin_writes=allow_admin_writes)
+    except (FleetHubError, sqlite3.Error) as exc:
+        # Startup migration is the one place the hub touches the schema: if
+        # it cannot be done, refuse to serve rather than 500-ing every request.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     bound_host, bound_port = str(server.server_address[0]), int(server.server_address[1])
-    print(f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()})")
+    mode = "admin writes allowed" if allow_admin_writes else "node tokens required for writes"
+    print(f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()}; {mode})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

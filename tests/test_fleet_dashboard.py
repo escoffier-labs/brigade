@@ -20,7 +20,8 @@ HOLDER_TOKEN = "secret-holder-token-zz"
 @pytest.fixture()
 def hub(tmp_path):
     db = tmp_path / "hub" / "fleet.db"
-    server = fleet_hub.make_server("127.0.0.1", 0, db, TOKEN)
+    # Legacy shared-token mode (pre-#1150): the one token posts as any node.
+    server = fleet_hub.make_server("127.0.0.1", 0, db, TOKEN, allow_admin_writes=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield ("127.0.0.1", server.server_address[1])

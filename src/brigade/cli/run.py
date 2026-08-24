@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import _thread
 import argparse
 import logging
 import math
@@ -478,6 +479,41 @@ def dispatch(args) -> int:
     effective_cwd = run_cwd
     keep_worktree = False
     lifecycle_seat = args.worker or loaded_roster.orchestrator
+    # Set when the fleet heartbeat reports a mid-run credential refusal
+    # (#1161): the outer KeyboardInterrupt handler turns the resulting
+    # interrupt into an accurate credential-failure message instead of
+    # "run canceled by user".
+    fleet_credential_failure: list[str] = []
+
+    def abort_on_fleet_credential_failure(detail: str | None) -> None:
+        """Heartbeat-thread callback (#1161): the hub rejected this machine's
+        token while dispatch is active.
+
+        Print and record the credential failure first. The first terminal
+        receipt wins, so without this the interrupt would be remembered as an
+        operator cancel. Then interrupt the main thread, which unwinds the
+        active dispatch through the same prompt-cancel path as Ctrl-C."""
+        message = (
+            f"error: fleet hub rejected this node's credentials ({detail or 'auth refused'}); "
+            "canceling the active run; enroll this machine with 'brigade fleet nodes add <node_id>' "
+            "and set [fleet] node_token_file"
+        )
+        print(message, file=sys.stderr)
+        fleet_credential_failure.append(detail or "auth refused")
+        if output_dir is not None and (output_dir / "run.json").is_file():
+            try:
+                aboyeur_mod.record_run_termination(
+                    output_dir,
+                    status="failed",
+                    failure_phase="dispatch",
+                    failure_kind="fleet-credentials-rejected",
+                    detail=f"fleet hub rejected this node's credentials ({detail or 'auth refused'}); run canceled",
+                    seat=lifecycle_seat,
+                )
+            except Exception:
+                pass  # the printed error stands; never mask the interrupt
+        _thread.interrupt_main()
+
     try:
         with ExitStack() as lifecycle:
             lifecycle.enter_context(_terminalize_escaped_run(output_dir, seat=lifecycle_seat))
@@ -552,6 +588,7 @@ def dispatch(args) -> int:
                         conductor=lifecycle_seat,
                         lock_owner=runguard.read_lock_owner(lock_path),
                         supersede_dead_owner=dead_owner,
+                        on_credential_failure=abort_on_fleet_credential_failure,
                     )
                 )
             if args.worktree:
@@ -723,10 +760,17 @@ def dispatch(args) -> int:
                         for pruned in _prune_retained_worktrees(runguard.git_root(run_cwd), effective_cwd):
                             print(f"worktree pruned: {pruned}", file=sys.stderr)
     except KeyboardInterrupt:
-        print("error: run canceled by user", file=sys.stderr)
+        if fleet_credential_failure:
+            # The interrupt came from the fleet heartbeat's credential-failure
+            # callback (#1161), which already printed and recorded the reason.
+            print("error: run canceled: fleet hub rejected this node's credentials", file=sys.stderr)
+            rc = 2
+        else:
+            print("error: run canceled by user", file=sys.stderr)
+            rc = 130
         if worktree_cwd is not None and keep_worktree:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
-        return 130
+        return rc
     except runguard.RunGuardError as exc:
         print(f"error: {exc}", file=sys.stderr)
         if worktree_cwd is not None and keep_worktree:

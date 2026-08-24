@@ -12,9 +12,22 @@ import pytest
 
 from brigade import fleet_client, fleet_hub
 
+NODE_A = "11111111-1111-4111-8111-111111111111"
+NODE_B = "22222222-2222-4222-8222-222222222222"
+
+
+def _plant_home_identity(home: Path, node_id: str) -> None:
+    """Write the per-user machine identity at ``<home>/.brigade/node.toml``."""
+    from brigade import node as node_mod
+
+    identity = node_mod.NodeIdentity(node_id=node_id, hostname="fleet-test", roles=(), platform="test")
+    path = node_mod.node_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(node_mod._format_node_toml(identity), encoding="utf-8")
+
 
 def _event(
-    node: str = "11111111-1111-4111-8111-111111111111",
+    node: str = NODE_A,
     run_id: str = "r1",
     seq: int = 1,
     digest: str | None = None,
@@ -37,7 +50,8 @@ def _event(
 def hub(tmp_path):
     db = tmp_path / "hub" / "fleet.db"
     token = "test-token-12345"
-    server = fleet_hub.make_server("127.0.0.1", 0, db, token)
+    # Legacy shared-token mode (pre-#1150): the one token posts as any node.
+    server = fleet_hub.make_server("127.0.0.1", 0, db, token, allow_admin_writes=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", token, db
@@ -166,6 +180,9 @@ class TestClient:
     def _home(self, tmp_path, monkeypatch):
         self.home = tmp_path / "brigade-home"
         monkeypatch.setenv("BRIGADE_HOME", str(self.home))
+        # This machine's hub-facing identity is the home one (#1161): events
+        # are stamped NODE_A and spooled under fleet-spool/NODE_A.jsonl.
+        _plant_home_identity(self.home, NODE_A)
 
     def _config(self, tmp_path, url: str, token: str) -> None:
         token_file = tmp_path / "token.txt"
@@ -277,6 +294,62 @@ class TestClient:
         assert fleet_client.report_event(_event()) is False
         assert not (self.home / "fleet-spool").exists()
 
+    def test_hub_traffic_uses_home_machine_identity(self, hub, tmp_path, monkeypatch):
+        """Hub-facing identity is the per-user home identity: never the nearest
+        workspace ``.brigade/node.toml`` and never an event payload's node_id."""
+        from brigade import node as node_mod
+
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        _plant_home_identity(self.home, NODE_A)
+        workspace = tmp_path / "ws"
+        (workspace / ".brigade").mkdir(parents=True)
+        workspace_identity = node_mod.ensure_identity(workspace)
+        assert workspace_identity.node_id not in (NODE_A, NODE_B)
+        journal = workspace / ".brigade" / "runs" / "runA" / "events" / "lifecycle.jsonl"
+        # Resolution ignores where it is asked: always the home identity.
+        assert fleet_client.resolve_node_id(journal) == NODE_A
+        # A payload claiming another node is re-stamped with the machine identity.
+        assert fleet_client.report_event(_event(NODE_B)) is True
+        conn = fleet_hub.init_db(db)
+        try:
+            rows = [r[0] for r in conn.execute("SELECT node_id FROM events").fetchall()]
+        finally:
+            conn.close()
+        assert rows == [NODE_A]
+        assert not (self.home / "fleet-spool").exists()
+
+    def test_report_event_node_id_keyword_is_accepted_but_ignored(self, hub, tmp_path, monkeypatch):
+        """Source compatibility (#1161): the legacy ``node_id=`` keyword still
+        parses (callers keep working) but never reaches the hub; the delivered
+        row is stamped with ``resolve_node_id()`` alone."""
+        from brigade import node as node_mod
+
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        workspace = tmp_path / "ws"
+        (workspace / ".brigade").mkdir(parents=True)
+        workspace_identity = node_mod.ensure_identity(workspace)
+        assert workspace_identity.node_id not in (NODE_A, NODE_B)
+        # Keyword AND payload both claim another node; base_path points at a
+        # workspace whose own identity is also wrong. All accepted, all ignored.
+        assert (
+            fleet_client.report_event(
+                _event(NODE_B),
+                base_path=workspace,
+                node_id=workspace_identity.node_id,
+            )
+            is True
+        )
+        conn = fleet_hub.init_db(db)
+        try:
+            rows = [r[0] for r in conn.execute("SELECT node_id FROM events").fetchall()]
+        finally:
+            conn.close()
+        assert rows == [NODE_A]
+
     def test_env_hub_url_overrides_config_but_token_file_still_read(self, hub, monkeypatch, tmp_path):
         url, token, _db = hub
         # File points at a dead hub but carries the real token; env URL must win
@@ -307,9 +380,12 @@ class TestJournalHook:
         from brigade import node as node_mod
         from brigade import run_journal
 
+        home = tmp_path / "home"
+        monkeypatch.setenv("BRIGADE_HOME", str(home))
+        _plant_home_identity(home, NODE_A)
         workspace = tmp_path / "ws"
         (workspace / ".brigade").mkdir(parents=True)
-        identity = node_mod.ensure_identity(workspace)
+        node_mod.ensure_identity(workspace)
         journal = workspace / ".brigade" / "runs" / "runA" / "events" / "lifecycle.jsonl"
 
         seen: list[dict] = []
@@ -337,8 +413,9 @@ class TestJournalHook:
         assert seen[0]["ts"] == event.recorded_at
         assert seen[0]["run_id"] == "runA"
         assert seen[0]["repo"] == "ws"
-        # The real resolver finds the workspace identity from the journal path.
-        assert fleet_client.resolve_node_id(journal) == identity.node_id
+        # The real resolver returns the per-machine home identity, not the
+        # workspace-local one that also exists here.
+        assert fleet_client.resolve_node_id(journal) == NODE_A
 
         # A raising reporter must never break the journal writer.
         def boom(*a, **kw):
@@ -357,17 +434,19 @@ class TestJournalHook:
         report = run_journal.read_journal(journal)
         assert len(report.events) == 2
 
-    def test_journal_event_spools_with_real_node_id(self, tmp_path, monkeypatch):
-        """End to end: journal append -> unreachable hub -> spool keyed by node_id."""
+    def test_journal_event_spools_with_machine_node_id(self, tmp_path, monkeypatch):
+        """End to end: journal append -> unreachable hub -> spool keyed by the
+        per-machine home identity while ``repo`` stays the journal workspace."""
         from brigade import node as node_mod
         from brigade import run_journal
 
         home = tmp_path / "home"
         monkeypatch.setenv("BRIGADE_HOME", str(home))
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+        _plant_home_identity(home, NODE_A)
         workspace = tmp_path / "ws"
         (workspace / ".brigade").mkdir(parents=True)
-        identity = node_mod.ensure_identity(workspace)
+        node_mod.ensure_identity(workspace)
         journal = workspace / ".brigade" / "runs" / "runA" / "events" / "lifecycle.jsonl"
         run_journal.append_event(
             journal,
@@ -377,10 +456,10 @@ class TestJournalHook:
             idempotency_key="k1",
             expected_previous_sequence=0,
         )
-        spool = fleet_client.spool_path(identity.node_id)
+        spool = fleet_client.spool_path(NODE_A)
         assert spool.is_file()
         spooled = json.loads(spool.read_text(encoding="utf-8").splitlines()[0])
-        assert spooled["node_id"] == identity.node_id
+        assert spooled["node_id"] == NODE_A
         assert spooled["repo"] == "ws"
         assert spooled["state"] == "run.created"
 
@@ -464,7 +543,13 @@ class TestCli:
             )
             == 0
         )
-        assert captured == {"host": "127.0.0.1", "port": 4000, "db_path": db, "token_file": token_file}
+        assert captured == {
+            "host": "127.0.0.1",
+            "port": 4000,
+            "db_path": db,
+            "token_file": token_file,
+            "allow_admin_writes": False,
+        }
 
     def test_status_json_and_table(self, hub, monkeypatch, capsys):
         from brigade import cli
@@ -495,19 +580,20 @@ class TestCli:
         url, token, db = hub
         home = tmp_path / "home"
         monkeypatch.setenv("BRIGADE_HOME", str(home))
+        _plant_home_identity(home, NODE_A)
         monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
         workspace = tmp_path / "ws"
         (workspace / ".brigade").mkdir(parents=True)
-        identity = node_mod.ensure_identity(workspace)
+        node_mod.ensure_identity(workspace)
         monkeypatch.chdir(workspace)
-        fleet_client.report_event(_event(node=identity.node_id))
+        fleet_client.report_event(_event())
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
         assert cli.main(["fleet", "flush"]) == 0
-        assert f"flushed 1 spooled event(s) for node {identity.node_id}" in capsys.readouterr().out
+        assert f"flushed 1 spooled event(s) for node {NODE_A}" in capsys.readouterr().out
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("SELECT node_id FROM events").fetchone()[0] == identity.node_id
+            assert conn.execute("SELECT node_id FROM events").fetchone()[0] == NODE_A
         finally:
             conn.close()
 
@@ -530,6 +616,9 @@ class TestSpoolHardening:
     def _home(self, tmp_path, monkeypatch):
         self.home = tmp_path / "brigade-home"
         monkeypatch.setenv("BRIGADE_HOME", str(self.home))
+        # Spooling is keyed by the home machine identity (#1161): report_event
+        # appends to fleet-spool/NODE_A.jsonl, matching the _spooled() helper.
+        _plant_home_identity(self.home, NODE_A)
 
     def _spooled(self, node: str = "11111111-1111-4111-8111-111111111111", n: int = 3) -> Path:
         spool = fleet_client.spool_path(node)
@@ -678,6 +767,36 @@ class TestSpoolHardening:
         self._spooled(node, n=2)
         assert fleet_client.flush_spool(node) == 0
         assert len(fleet_client.spool_path(node).read_text().splitlines()) == 2
+
+    def test_report_auth_refusals_keep_the_bounded_spool(self, tmp_path, monkeypatch):
+        """Unlike claims (#1161), events fail soft on HTTP 401/403: every
+        refused event lands in the spool keyed by this machine's identity,
+        which stays ordered and capped by MAX_SPOOL_BYTES."""
+        db = tmp_path / "hub" / "fleet.db"
+        server = fleet_hub.make_server("127.0.0.1", 0, db, "strict-admin-token", allow_admin_writes=False)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}"
+            monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+            one = len(json.dumps(_event(seq=1), sort_keys=True)) + 1
+            monkeypatch.setattr(fleet_client, "MAX_SPOOL_BYTES", one * 4)
+            # Admin bearer against a strict hub: every write is a real 403...
+            monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "strict-admin-token")
+            for seq in range(1, 6):
+                assert fleet_client.report_event(_event(seq=seq)) is False
+            # ...and an enrolled-nowhere node bearer: a real 401 on top.
+            monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "never-enrolled")
+            for seq in range(6, 11):
+                assert fleet_client.report_event(_event(seq=seq)) is False
+            spool = fleet_client.spool_path(NODE_A)
+            assert spool.is_file()
+            seqs = [json.loads(line)["sequence"] for line in spool.read_text().splitlines()]
+            assert seqs == sorted(seqs) and seqs[-1] == 10  # newest kept, order preserved
+            assert spool.stat().st_size <= one * 4  # never unbounded
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_report_deadline_covers_slow_resolution(self, monkeypatch):
         """A hung getaddrinfo (dead resolver) cannot hold the journal writer past the deadline."""
@@ -850,7 +969,7 @@ class TestHubHardening:
 
         url, token, _db = hub
 
-        def broken(conn, raw):
+        def broken(conn, raw, **kwargs):
             raise sqlite3.OperationalError("database is locked")
 
         monkeypatch.setattr(fleet_hub, "store_events", broken)

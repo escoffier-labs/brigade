@@ -1,4 +1,4 @@
-"""brigade fleet command group (issues #1123, #1125, #1141): hub serve, status, spool flush, claims."""
+"""brigade fleet command group (issues #1123, #1125, #1141, #1150): hub serve, status, spool flush, claims, nodes."""
 
 from __future__ import annotations
 
@@ -50,9 +50,41 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--db", type=Path, default=None, help="SQLite database path (default ~/.brigade/fleet-hub.db)."
     )
     p_serve.add_argument(
-        "--token-file", type=Path, default=None, help="Bearer token file (else BRIGADE_FLEET_TOKEN env)."
+        "--token-file", type=Path, default=None, help="Admin bearer token file (else BRIGADE_FLEET_TOKEN env)."
+    )
+    p_serve.add_argument(
+        "--allow-admin-writes",
+        action="store_true",
+        help=(
+            "Let the admin token POST events and claims under any node_id (the pre-node-token shared-token "
+            "mode). Off by default: writes need a node token from `brigade fleet nodes add`."
+        ),
     )
     p_serve.set_defaults(func=_dispatch_serve)
+
+    p_nodes = fleet_sub.add_parser(
+        "nodes",
+        help="Manage per-node hub credentials (admin token): enroll, list, or revoke a node.",
+    )
+    nodes_sub = p_nodes.add_subparsers(dest="nodes_command", metavar="<nodes-command>")
+    nodes_sub.required = True
+    p_nodes_add = nodes_sub.add_parser(
+        "add",
+        help="Enroll a node on the hub and print its token once (the hub stores only a hash).",
+    )
+    p_nodes_add.add_argument("node_id", help="The node identity (`brigade node --machine` on that machine prints it).")
+    p_nodes_add.add_argument("--label", default=None, help="Free-text label, e.g. the hostname.")
+    p_nodes_add.add_argument("--json", action="store_true", help="Emit JSON (includes the token) instead of text.")
+    p_nodes_add.set_defaults(func=_dispatch_nodes_add)
+    p_nodes_list = nodes_sub.add_parser("list", help="List enrolled nodes (revoked ones flagged).")
+    p_nodes_list.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
+    p_nodes_list.set_defaults(func=_dispatch_nodes_list)
+    p_nodes_revoke = nodes_sub.add_parser(
+        "revoke", help="Revoke a node's token; `nodes add` it again to issue a new one."
+    )
+    p_nodes_revoke.add_argument("node_id", help="The node identity to revoke.")
+    p_nodes_revoke.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_nodes_revoke.set_defaults(func=_dispatch_nodes_revoke)
 
     p_status = fleet_sub.add_parser("status", help="Show latest run state per node from the fleet hub.")
     p_status.add_argument("--all", action="store_true", help="Include terminal runs.")
@@ -143,7 +175,87 @@ def _dispatch_serve(args: argparse.Namespace) -> int:
     from .. import fleet_hub
 
     db_path = args.db if args.db is not None else (Path.home() / DEFAULT_DB_REL_PATH)
-    return fleet_hub.run(host=args.host, port=args.port, db_path=db_path, token_file=args.token_file)
+    return fleet_hub.run(
+        host=args.host,
+        port=args.port,
+        db_path=db_path,
+        token_file=args.token_file,
+        allow_admin_writes=bool(args.allow_admin_writes),
+    )
+
+
+def _dispatch_nodes_add(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    try:
+        payload = fleet_client.add_node(args.node_id, label=args.label)
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    node_raw = payload.get("node")
+    node: dict = node_raw if isinstance(node_raw, dict) else {}
+    if args.json:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"enrolled node {node.get('node_id') or args.node_id} (label {node.get('label') or '-'})")
+    print("node token (shown once; the hub keeps only its hash — store it as that machine's node_token_file):")
+    print(str(payload.get("token") or ""))
+    return 0
+
+
+def _dispatch_nodes_list(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    try:
+        nodes = fleet_client.fetch_nodes()
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps({"nodes": nodes}, indent=2, sort_keys=True))
+        return 0
+    headers = ("node", "label", "created", "status")
+    rows = []
+    for node in nodes:
+        revoked = node.get("revoked_at")
+        rows.append(
+            [
+                str(node.get("node_id") or "-"),
+                str(node.get("label") or "-"),
+                _format_age(node.get("created_at")),
+                f"revoked {_format_age(revoked)} ago" if revoked else "active",
+            ]
+        )
+    widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
+    print("  ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True)))
+    for row in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
+    if not rows:
+        print("(no enrolled fleet nodes)")
+    return 0
+
+
+def _dispatch_nodes_revoke(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    try:
+        payload = fleet_client.revoke_node(args.node_id)
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    node_raw = payload.get("node")
+    node: dict = node_raw if isinstance(node_raw, dict) else {}
+    print(f"revoked node {node.get('node_id') or args.node_id} (token no longer accepted)")
+    return 0
 
 
 def _dispatch_export(args: argparse.Namespace) -> int:
@@ -230,8 +342,15 @@ def _print_claim_failure(decision, *, what: str) -> bool:
         return True
     if decision.reason == "no-identity":
         print(
-            f"error: no usable fleet node identity ({decision.detail}); run from a Brigade workspace "
-            "with .brigade/node.toml (see `brigade node`) or pass --node",
+            f"error: no usable fleet node identity ({decision.detail}); initialize this machine's "
+            "identity with `brigade node --machine`, or pass --node",
+            file=sys.stderr,
+        )
+        return True
+    if decision.reason == "auth-failed":
+        print(
+            f"error: fleet hub rejected this node's credentials ({decision.detail}); enroll this machine "
+            "with 'brigade fleet nodes add <node_id>' and set [fleet] node_token_file",
             file=sys.stderr,
         )
         return True

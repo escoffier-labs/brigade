@@ -18,13 +18,16 @@ The examples use the Tailscale MagicDNS name `brigade-hub`. Replace every other 
 The hub exposes these endpoints:
 
 - `GET /health`, unauthenticated liveness check
-- `POST /events`, bearer-authenticated event append
-- `GET /status`, bearer-authenticated latest non-terminal state per node and run
-- `GET /status?all=1`, bearer-authenticated state including terminal runs
-- `POST /claims` and `GET /claims`, bearer-authenticated repo claims
-- `GET /` and `GET /view/{machines,repos}`, the Fleet dashboard (bearer token or the dashboard cookie; see below)
+- `POST /events`, node-token-authenticated event append (the admin token only with `--allow-admin-writes`)
+- `GET /status`, admin- or node-token-authenticated latest non-terminal state per node and run
+- `GET /status?all=1`, the same including terminal runs
+- `POST /claims` (node token) and `GET /claims` (admin or node token), repo claims
+- `GET /nodes` and `POST /nodes`, admin-token-only node enrollment
+- `GET /` and `GET /view/{machines,repos}`, the Fleet dashboard (admin token or the dashboard cookie; see below)
 
 Events are deduplicated by `(node_id, run_id, sequence, digest)`. Reposting after a lost response is safe.
+
+Two credentials exist (see the trust model in `docs/fleet-sync.md`). The **admin token** in `/etc/brigade/fleet-hub.env` is the control plane: it enrolls nodes, reads status and claims, and sets the dashboard cookie. Each machine's **node token** (`brigade fleet nodes add`) is that machine's identity: the hub derives `node_id` from it and refuses an event or claim for any other node with HTTP 403. The hub stores only a SHA-256 of each node token.
 
 ## 1. Create the CT on the Proxmox host
 
@@ -120,7 +123,7 @@ PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin \
 
 Keep `<BRIGADE_GIT_REF>` identical on the hub and clients while rolling out a Phase 2 build. The service uses `/usr/local/bin/brigade`, the pipx entry point created above.
 
-## 4. Create the hub token environment file
+## 4. Create the hub admin token environment file
 
 The 1Password item is named `brigade-fleet-hub`. The command below expects `op` to be authenticated for the vault containing that item and for the item field to be `password`. Run it in the CT as root, or populate the file through an approved root-only provisioning session.
 
@@ -140,7 +143,7 @@ Check only the file metadata, not its contents:
 stat -c '%U:%G %a %n' /etc/brigade/fleet-hub.env
 ```
 
-Expected output includes `root:root 600`. The service reads `BRIGADE_FLEET_TOKEN` from this file. Brigade does not persist the token in SQLite.
+Expected output includes `root:root 600`. The service reads `BRIGADE_FLEET_TOKEN` from this file as the admin token. Brigade does not persist the admin token in SQLite, and node tokens only as SHA-256 digests.
 
 ## 5. Install and start the systemd service
 
@@ -172,6 +175,8 @@ WantedBy=multi-user.target
 ```
 
 The `--host` value is required. Do not bind to all interfaces; the hub is intended to listen on the Tailscale interface only. The explicit `--db` path keeps the database under `/var/lib/brigade`, independent of the service user's home directory.
+
+A new hub starts with node tokens required for writes. Only a hub that must keep serving clients still on the shared token should add `--allow-admin-writes` to `ExecStart`; see *Migration from the shared token* below for when to add it and when to take it away.
 
 Activate it:
 
@@ -208,56 +213,93 @@ curl --fail --silent --show-error \
 
 An empty result is valid before any client reports an event. An HTTP 401 means the request reached the hub but the token did not match.
 
-For a direct endpoint smoke test, post one synthetic non-terminal event from a client. Use a node and run id that cannot be confused with a real run:
+For a direct endpoint smoke test, enroll a throwaway node and post one synthetic non-terminal event with its token. Use a node and run id that cannot be confused with a real run, and revoke the node afterwards:
 
 ```bash
-curl --fail --silent --show-error \
+smoke_token="$(curl --fail --silent --show-error \
   -X POST \
   -H "Authorization: Bearer $(<~/.brigade/fleet.token)" \
   -H 'Content-Type: application/json' \
-  --data '{"node_id":"<NODE_ID>","run_id":"smoke-<RUN_ID>","repo":"<REPO_NAME>","seat":"<SEAT>","harness":"<HARNESS>","state":"run.started","ts":"<ISO8601_UTC>","sequence":1,"digest":"<EVENT_DIGEST>"}' \
+  --data '{"action":"add","node_id":"smoke-<NODE_ID>","label":"smoke test"}' \
+  http://brigade-hub:3774/nodes | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+
+curl --fail --silent --show-error \
+  -X POST \
+  -H "Authorization: Bearer $smoke_token" \
+  -H 'Content-Type: application/json' \
+  --data '{"node_id":"smoke-<NODE_ID>","run_id":"smoke-<RUN_ID>","repo":"<REPO_NAME>","seat":"<SEAT>","harness":"<HARNESS>","state":"run.started","ts":"<ISO8601_UTC>","sequence":1,"digest":"<EVENT_DIGEST>"}' \
   http://brigade-hub:3774/events
 
 curl --fail --silent --show-error \
   -H "Authorization: Bearer $(<~/.brigade/fleet.token)" \
   http://brigade-hub:3774/status
+
+curl --fail --silent --show-error \
+  -X POST \
+  -H "Authorization: Bearer $(<~/.brigade/fleet.token)" \
+  -H 'Content-Type: application/json' \
+  --data '{"action":"revoke","node_id":"smoke-<NODE_ID>"}' \
+  http://brigade-hub:3774/nodes
+unset smoke_token
 ```
 
-The response from `/events` reports `accepted: 1` for the first post. Reposting the same body reports it as a duplicate, which confirms the idempotency key.
+The response from `/events` reports `accepted: 1` for the first post. Reposting the same body reports it as a duplicate, which confirms the idempotency key. Posting the same event with the admin token instead answers HTTP 403 on a hub without `--allow-admin-writes`, which confirms that node tokens are required.
 
-## 7. Configure each Brigade client
+## 7. Enroll and configure each Brigade client
 
-On every machine, install the same Brigade git ref and place the shared token in a user-readable file with mode `0600`. Use the machine's existing secret-distribution process to create the token file.
+Every machine needs its own node token. On the machine, print its machine identity (`brigade node --machine` creates it once under `BRIGADE_HOME`, `~/.brigade/node.toml` by default; this is the identity every event and claim is stamped with, never a workspace-local one):
+
+```bash
+brigade node --machine --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node_id"])'
+```
+
+From the operator machine that holds the admin token (`[fleet] token_file` in its own `~/.brigade/fleet.toml`, or `BRIGADE_FLEET_TOKEN`), enroll that identity. The token is printed once and never again; the hub keeps only its hash:
+
+```bash
+brigade fleet nodes add <NODE_ID> --label <HOSTNAME>
+brigade fleet nodes list
+```
+
+Deliver the printed token to the machine through its existing secret-distribution process and install it as a user-readable file with mode `0600`. The admin token stays on the operator machine only; a node does not need it.
 
 ```bash
 mkdir -p ~/.brigade
-install -m 0600 <CLIENT_TOKEN_FILE> ~/.brigade/fleet.token
+install -m 0600 <NODE_TOKEN_FILE> ~/.brigade/fleet-node.token
 chmod 0700 ~/.brigade
 
 cat > ~/.brigade/fleet.toml <<'EOF'
 [fleet]
 hub_url = "http://brigade-hub:3774"
-token_file = "~/.brigade/fleet.token"
+node_token_file = "~/.brigade/fleet-node.token"
 EOF
 
 chmod 0600 ~/.brigade/fleet.toml
 ```
 
-The config keys are exactly `[fleet] hub_url` and `[fleet] token_file`. `BRIGADE_FLEET_HUB_URL` overrides `hub_url`, and `BRIGADE_FLEET_TOKEN` overrides the token file when set. Do not add a `host`, `port`, or `token` key to this file.
+The config keys are `[fleet] hub_url`, `[fleet] node_token_file` (this machine's identity), and optionally `[fleet] token_file` (the admin token, only where `brigade fleet nodes` runs). `BRIGADE_FLEET_HUB_URL` overrides `hub_url`, `BRIGADE_FLEET_NODE_TOKEN` overrides the node token file, and `BRIGADE_FLEET_TOKEN` overrides the admin token file when set. Do not add a `host`, `port`, or `token` key to this file.
+
+To rotate a machine's credential, revoke and re-enroll it, then replace the file on that machine:
+
+```bash
+brigade fleet nodes revoke <NODE_ID>
+brigade fleet nodes add <NODE_ID> --label <HOSTNAME>
+```
+
+A revoked token is refused with HTTP 401 immediately; events the machine produces in between stay in its local spool and are delivered by the next report or `brigade fleet flush` once the new token is in place.
 
 ### Windows client (Gandalf)
 
-Use the same `[fleet]` keys on the Windows machine. The client expands `~` in `token_file`, so the same config shape works for a native Windows user profile:
+Use the same `[fleet]` keys on the Windows machine. The client expands `~` in `node_token_file`, so the same config shape works for a native Windows user profile:
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.brigade" | Out-Null
-Copy-Item <CLIENT_TOKEN_FILE> "$env:USERPROFILE\.brigade\fleet.token"
+Copy-Item <NODE_TOKEN_FILE> "$env:USERPROFILE\.brigade\fleet-node.token"
 @'
 [fleet]
 hub_url = "http://brigade-hub:3774"
-token_file = "~/.brigade/fleet.token"
+node_token_file = "~/.brigade/fleet-node.token"
 '@ | Set-Content -Encoding utf8 "$env:USERPROFILE\.brigade\fleet.toml"
-icacls "$env:USERPROFILE\.brigade\fleet.token" /inheritance:r /grant:r "$env:USERNAME:(R)" | Out-Null
+icacls "$env:USERPROFILE\.brigade\fleet-node.token" /inheritance:r /grant:r "$env:USERNAME:(R)" | Out-Null
 brigade fleet status
 ```
 
@@ -280,7 +322,7 @@ Event reporting is best effort. A failed POST is appended under the Brigade home
 
 ### Fleet dashboard from a laptop or phone
 
-The hub serves a read-only web view of the same data at `http://brigade-hub:3774/` (machine cards) and `http://brigade-hub:3774/view/repos` (repo board). From a machine that holds the token, a bearer header works as for `/status`:
+The hub serves a read-only web view of the same data at `http://brigade-hub:3774/` (machine cards) and `http://brigade-hub:3774/view/repos` (repo board). The dashboard accepts the admin token (not a node token). From a machine that holds it, a bearer header works as for `/status`:
 
 ```bash
 curl --silent --show-error \
@@ -297,6 +339,17 @@ http://brigade-hub:3774/?token=<FLEET_TOKEN>
 The hub answers a redirect to `/` without the token and sets a `brigade_fleet_view` cookie (HttpOnly, SameSite=Strict, 30 days). The cookie is an HMAC of the token, not the token: it opens only the dashboard pages, never `/status`, `/claims`, or `/events`, and rotating the hub token invalidates it. Tradeoffs to accept before using it: the token passes once through that device's browser history, and the cookie is a 30-day read-only view of the fleet on that device. Only do this on a device you would enrol in the tailnet, and rotate the token (section 4) if the device is lost. The cookie is not marked `Secure` because the hub is plain HTTP inside Tailscale's encrypted link; do not expose the hub outside the tailnet.
 
 Sort and filter with query parameters, for example `/?attention=1` (only failed, awaiting-approval, or stale runs), `/view/repos?sort=repo`, `/?node=<prefix>`, `/?all=1` (include finished runs). The page refreshes every 10 seconds and works with JavaScript disabled.
+
+## Migration from the shared token
+
+A fleet deployed before per-node credentials has one token in `/etc/brigade/fleet-hub.env` and in every client's `token_file`. After the upgrade that token is the admin token, and the hub refuses event and claim posts made with it unless `--allow-admin-writes` is set. Migrate in this order so no machine loses reporting:
+
+1. Back up the database (section 8). The upgrade adds the `nodes` table in place (schema v4); a hub built from an older ref refuses a v4 database, so keep the backup until the rollout is done.
+2. Upgrade the hub (see *Upgrade and rollback*) and add `--allow-admin-writes` to `ExecStart` for the transition. Existing clients keep working exactly as before; each one logs a single `WARNING` per process naming the deprecated shared-token mode.
+3. Upgrade the clients to the same ref.
+4. For each machine, run `brigade fleet nodes add <NODE_ID> --label <HOSTNAME>` from the operator machine, deliver the token, and set `[fleet] node_token_file` on that machine (section 7). Leave `token_file` in place only where `brigade fleet nodes` will run. Check with `brigade fleet nodes list` and, on the machine, `brigade fleet status` followed by a run: the shared-token warning stops once the node token is in use.
+5. When every machine in `brigade fleet nodes list` has posted with its own token (the `WARNING` no longer appears in any client log), remove `--allow-admin-writes` from `ExecStart`, `systemctl daemon-reload`, and restart the service. From then on a machine still on the shared token gets HTTP 403, keeps its events in the local spool, and delivers them once enrolled.
+6. Rotate the admin token (section 4): it was on every machine, and it still enrolls nodes and sets the dashboard cookie.
 
 ## 8. Back up the SQLite database
 
@@ -393,13 +446,17 @@ systemctl start brigade-fleet.service
 journalctl -u brigade-fleet.service -n 50 --no-pager
 ```
 
-Keep the SQLite file during an application rollback. A hub built from this Phase 2 ref refuses a database with a newer `PRAGMA user_version` instead of silently interpreting it. If a future upgrade changes the schema version, use that release's migration and rollback procedure before restoring an older binary.
+Keep the SQLite file during an application rollback. A hub refuses a database with a newer `PRAGMA user_version` instead of silently interpreting it: a database touched by a per-node-credentials hub (schema v4) is refused by a ref before #1150, so a rollback across that boundary restores the pre-upgrade backup from section 8 (losing events and claims received since) or stays on the newer ref with `--allow-admin-writes`.
 
 ## Troubleshooting
 
+### `POST /events` or `POST /claims` returns HTTP 403
+
+The token was accepted but may not act as the `node_id` in the body. Either the client sends the admin token (no `node_token_file` configured; the client also logged the shared-token `WARNING`) to a hub without `--allow-admin-writes`, or the node token installed on the machine was minted for a different `node_id` than the one `brigade node --machine --json` reports there. Compare `brigade node --machine --json` on the machine with `brigade fleet nodes list` on the operator machine, then re-enroll (section 7). Events produced in the meantime stay in the client spool and go out on the next `brigade fleet flush`.
+
 ### `GET /status` or `POST /events` returns HTTP 401
 
-The request reached the hub, but the bearer token differs. Verify that the client points to the intended token file and that the hub environment file was refreshed from the same 1Password item. After changing `/etc/brigade/fleet-hub.env`, restart the service:
+The request reached the hub, but the bearer token matched neither the admin token nor an enrolled, unrevoked node token. A revoked node token answers `unauthorized: node token revoked`; re-enroll it (section 7). Otherwise verify that the client points to the intended token file and that the hub environment file was refreshed from the same 1Password item. After changing `/etc/brigade/fleet-hub.env`, restart the service:
 
 ```bash
 systemctl restart brigade-fleet.service

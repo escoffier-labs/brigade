@@ -22,7 +22,8 @@ NODE_B = "22222222-2222-4222-8222-222222222222"
 def hub(tmp_path):
     db = tmp_path / "hub" / "fleet.db"
     token = "test-token-12345"
-    server = fleet_hub.make_server("127.0.0.1", 0, db, token)
+    # Legacy shared-token mode (pre-#1150): the one token posts as any node.
+    server = fleet_hub.make_server("127.0.0.1", 0, db, token, allow_admin_writes=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", token, db
@@ -64,6 +65,171 @@ def _get(url: str, path: str, token: str | None) -> tuple[int, dict]:
 
 def _claim(action: str = "acquire", node: str = NODE_A, target: str = "repo-a", holder: str = "h1", **extra) -> dict:
     return {"action": action, "node_id": node, "target": target, "holder": holder, **extra}
+
+
+def _plant_home_identity(home: Path, node_id: str) -> None:
+    """Write the per-user machine identity at ``<home>/.brigade/node.toml``."""
+    from brigade import node as node_mod
+
+    identity = node_mod.NodeIdentity(node_id=node_id, hostname="fleet-test", roles=(), platform="test")
+    path = node_mod.node_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(node_mod._format_node_toml(identity), encoding="utf-8")
+
+
+class TestMachineIdentity:
+    """Hub-facing claim identity is the per-user home identity (#1161): the
+    nearest workspace ``.brigade/node.toml`` stays local and is never sent."""
+
+    def _env(self, hub, tmp_path, monkeypatch) -> Path:
+        from brigade import node as node_mod
+
+        url, token, _db = hub
+        home = tmp_path / "home"
+        monkeypatch.setenv("BRIGADE_HOME", str(home))
+        _plant_home_identity(home, NODE_A)
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        ws = tmp_path / "ws"
+        (ws / ".brigade").mkdir(parents=True)
+        workspace_identity = node_mod.ensure_identity(ws)
+        assert workspace_identity.node_id not in (NODE_A, NODE_B)
+        return ws
+
+    def test_claims_resolve_the_home_identity_through_base_path(self, hub, tmp_path, monkeypatch):
+        ws = self._env(hub, tmp_path, monkeypatch)
+        won = fleet_client.acquire_claim("ws", base_path=ws / "src" / "deep")
+        assert won.granted is True
+        assert won.claim is not None and won.claim["owner_node"] == NODE_A
+        assert fleet_client.release_claim("ws", holder=won.holder, node_id=NODE_A).granted is True
+
+    def test_repo_claim_holds_under_the_home_identity(self, hub, tmp_path, monkeypatch):
+        ws = self._env(hub, tmp_path, monkeypatch)
+        with fleet_client.repo_claim("ws", base_path=ws) as decision:
+            assert decision.granted is True
+            assert decision.claim is not None and decision.claim["owner_node"] == NODE_A
+        assert fleet_client.fetch_claims() == []
+
+
+class TestClaimAuthRefusal:
+    """A claim HTTP 401/403 is a stable auth-failed answer (#1161): never
+    retried, never degraded to the local run lock, and repo_claim fails
+    closed instead of yielding a run onto rejected credentials."""
+
+    def _machine_env(self, monkeypatch, tmp_path) -> None:
+        home = tmp_path / "home"
+        monkeypatch.setenv("BRIGADE_HOME", str(home))
+        _plant_home_identity(home, NODE_A)
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "not-a-valid-token")
+
+    def _refusing_hub(self, monkeypatch, status: int) -> list[int]:
+        calls: list[int] = []
+
+        def refuse(*args, **kwargs):
+            calls.append(1)
+            return status, {"error": f"HTTP {status}"}
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", refuse)
+        return calls
+
+    @pytest.mark.parametrize("status", [401, 403], ids=["http-401", "http-403"])
+    def test_auth_refusal_is_auth_failed_and_not_retried(self, tmp_path, monkeypatch, status):
+        self._machine_env(monkeypatch, tmp_path)
+        calls = self._refusing_hub(monkeypatch, status)
+        decision = fleet_client.acquire_claim("repo-a")
+        assert decision.granted is False
+        assert decision.reason == "auth-failed"
+        assert "HTTP" in (decision.detail or "")
+        assert len(calls) == 1  # retrying cannot heal an enrollment problem
+
+    @pytest.mark.parametrize("status", [401, 403], ids=["http-401", "http-403"])
+    def test_repo_claim_raises_without_orphan_release_or_yield(self, tmp_path, monkeypatch, status):
+        self._machine_env(monkeypatch, tmp_path)
+        calls = self._refusing_hub(monkeypatch, status)
+        orphan_releases: list[str] = []
+        monkeypatch.setattr(
+            fleet_client,
+            "_schedule_orphan_release",
+            lambda target, **kw: orphan_releases.append(target),
+        )
+        entered = False
+        with pytest.raises(fleet_client.FleetClaimAuthError) as excinfo:
+            with fleet_client.repo_claim("repo-a"):
+                entered = True
+        assert entered is False  # the guarded block never runs unprotected
+        message = str(excinfo.value)
+        assert "rejected this node's credentials" in message and "'repo-a'" in message
+        assert "brigade fleet nodes add" in message
+        assert len(calls) == 1  # no retry either
+        assert orphan_releases == []  # no orphan-release fallback on bad credentials
+
+
+class TestHeartbeatCredentialRefusal:
+    """A credential refusal seen by the *mid-run heartbeat* (#1161) is handed
+    to ``on_credential_failure`` exactly once and stops the heartbeat;
+    transport/5xx failures keep the existing retry behavior and never call it."""
+
+    @pytest.fixture(autouse=True)
+    def _machine(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BRIGADE_HOME", str(home))
+        _plant_home_identity(home, NODE_A)
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "any-bearer")
+
+    @pytest.mark.parametrize("status", [401, 403], ids=["http-401", "http-403"])
+    def test_midrun_refusal_invokes_the_callback_once_and_stops(self, tmp_path, monkeypatch, status):
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+        state = {"renew_attempts": 0}
+
+        def post(hub_url, tok, body, *, timeout):
+            action = body["action"]
+            if action == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": body["node_id"]}}
+            if action == "renew":
+                state["renew_attempts"] += 1
+                return status, {"error": f"token revoked (HTTP {status})"}
+            return 200, {"released": True}
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+        seen: list[str | None] = []
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_credential_failure=seen.append) as decision:
+            assert decision.granted is True
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not seen:
+                time.sleep(0.02)
+            assert seen == [f"token revoked (HTTP {status})"]
+        # Exactly one refused heartbeat handed over the hub's detail, and the
+        # stopped thread made no further attempts before the bounded join.
+        assert len(seen) == 1
+        assert state["renew_attempts"] == 1
+
+    @pytest.mark.parametrize("refusal", ["http-500", "timeout"], ids=["http-500", "network-timeout"])
+    def test_transport_failures_keep_retrying_without_the_callback(self, tmp_path, monkeypatch, refusal):
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+        state = {"renew_attempts": 0}
+
+        def post(hub_url, tok, body, *, timeout):
+            action = body["action"]
+            if action == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": body["node_id"]}}
+            if action == "renew":
+                state["renew_attempts"] += 1
+                if refusal == "timeout":
+                    raise TimeoutError("hub unreachable")
+                return 500, {"error": "boom"}
+            return 200, {"released": True}
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+        seen: list[str | None] = []
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_credential_failure=seen.append) as decision:
+            assert decision.granted is True
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and state["renew_attempts"] < 3:
+                time.sleep(0.02)
+        assert seen == []  # a transport failure is never a credential answer
+        assert state["renew_attempts"] >= 3, "heartbeat stopped retrying on a transport failure"
 
 
 class TestHubClaims:
@@ -234,7 +400,7 @@ class TestHubClaims:
         conn.close()
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 3
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 4
             assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
         finally:
             conn.close()
@@ -690,6 +856,7 @@ class TestDispatchWiring:
         from brigade import node as node_mod
 
         monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
+        _plant_home_identity(tmp_path / "home", NODE_A)
         ws = tmp_path / "ws"
         (ws / ".brigade").mkdir(parents=True)
         node_mod.ensure_identity(ws)
@@ -720,14 +887,12 @@ class TestDispatchWiring:
         assert [c["owner_node"] for c in fleet_client.fetch_claims()] == [NODE_B]
 
     def test_granted_run_dispatches_and_releases(self, hub, workspace, monkeypatch):
-        from brigade import aboyeur, node as node_mod
+        from brigade import aboyeur
 
         url, token, _db = hub
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
         monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
         ws, roster_path = workspace
-        identity = node_mod.load_identity(ws)
-        assert identity is not None
         held_during_run = []
 
         def fake_run(*a, **kw):
@@ -736,7 +901,7 @@ class TestDispatchWiring:
 
         monkeypatch.setattr(aboyeur, "run", fake_run)
         assert self._run(ws, roster_path) == 0
-        assert [(c["target"], c["owner_node"]) for c in held_during_run] == [("ws", identity.node_id)]
+        assert [(c["target"], c["owner_node"]) for c in held_during_run] == [("ws", NODE_A)]
         # The dispatch path names its conductor (the orchestrator seat).
         assert held_during_run[0]["owner_conductor"] == "chef"
         assert fleet_client.fetch_claims() == []
