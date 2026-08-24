@@ -91,7 +91,9 @@ def test_workers_only_list_claim_and_read_their_configured_role(tmp_path: Path):
 
     with pytest.raises(grokbot_mcp.AdapterError) as unauthorized:
         worker.call_tool("grokbot_queue_claim", {"job_id": scout, "lease_id": "lease-a"})
-    assert unauthorized.value.public_error() == {"error": {"code": "invalid_request", "message": "Tool input failed validation"}}
+    assert unauthorized.value.public_error() == {
+        "error": {"code": "invalid_request", "message": "Tool input failed validation"}
+    }
 
     claimed = worker.call_tool("grokbot_queue_claim", {"job_id": implementation, "lease_id": "lease-a"})
     assert claimed["state"] == "claimed"
@@ -158,7 +160,12 @@ def test_security_gate_checks_host_origin_auth_and_bounded_request_size(tmp_path
     gate = grokbot_mcp.RequestGate(_adapter(tmp_path).config, max_request_bytes=32)
     assert gate.reject_reason({"host": "127.0.0.1:8766", "authorization": "Bearer not-a-real-token"}, 31) is None
     assert gate.reject_reason({"host": "attacker.test", "authorization": "Bearer not-a-real-token"}, 1) == "forbidden"
-    assert gate.reject_reason({"host": "127.0.0.1", "origin": "https://attacker.test", "authorization": "Bearer not-a-real-token"}, 1) == "forbidden"
+    assert (
+        gate.reject_reason(
+            {"host": "127.0.0.1", "origin": "https://attacker.test", "authorization": "Bearer not-a-real-token"}, 1
+        )
+        == "forbidden"
+    )
     assert gate.reject_reason({"host": "127.0.0.1", "authorization": "Bearer wrong"}, 1) == "unauthorized"
     assert gate.reject_reason({"host": "127.0.0.1", "authorization": "Bearer not-a-real-token"}, 33) == "too-large"
 

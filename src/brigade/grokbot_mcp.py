@@ -197,7 +197,12 @@ class GrokbotAdapter:
             if not isinstance(artifact, dict):
                 raise AdapterError()
             return grokbot_jobs.transition(
-                self.config.target, job["job_id"], self.config.bot_id, _lease_id(arguments), "completed", artifact=artifact
+                self.config.target,
+                job["job_id"],
+                self.config.bot_id,
+                _lease_id(arguments),
+                "completed",
+                artifact=artifact,
             )
         raise AdapterError()
 
@@ -301,28 +306,36 @@ def run_listener(config: ListenerConfig) -> None:
 
 def _register_tool(server: Any, adapter: GrokbotAdapter, name: str) -> None:
     """Register a name-specific typed wrapper so the SDK inventory stays exact."""
-
-    def invoke(arguments: dict[str, Any]) -> dict[str, Any]:
-        try:
-            return adapter.call_tool(name, arguments)
-        except AdapterError as exc:
-            return exc.public_error()
+    description = _TOOL_DESCRIPTIONS[name]
 
     if name == "grokbot_queue_list":
-        def invoke() -> dict[str, Any]:  # type: ignore[no-redef]
+
+        def invoke_list() -> dict[str, Any]:
             return _invoke_adapter(adapter, name, {})
+
+        handler: Callable[..., Any] = invoke_list
     elif name in {"grokbot_queue_status", "grokbot_queue_cancel", "grokbot_queue_expire"}:
-        def invoke(job_id: str) -> dict[str, Any]:  # type: ignore[no-redef]
+
+        def invoke_job_id(job_id: str) -> dict[str, Any]:
             return _invoke_adapter(adapter, name, {"job_id": job_id})
+
+        handler = invoke_job_id
     elif name == "grokbot_queue_complete":
-        def invoke(job_id: str, lease_id: str, artifact: dict[str, Any]) -> dict[str, Any]:  # type: ignore[no-redef]
+
+        def invoke_complete(job_id: str, lease_id: str, artifact: dict[str, Any]) -> dict[str, Any]:
             return _invoke_adapter(adapter, name, {"job_id": job_id, "lease_id": lease_id, "artifact": artifact})
+
+        handler = invoke_complete
     else:
-        def invoke(job_id: str, lease_id: str) -> dict[str, Any]:  # type: ignore[no-redef]
+
+        def invoke_lease(job_id: str, lease_id: str) -> dict[str, Any]:
             return _invoke_adapter(adapter, name, {"job_id": job_id, "lease_id": lease_id})
-    invoke.__name__ = name
-    invoke.__doc__ = _TOOL_DESCRIPTIONS[name]
-    server.tool(name=name, description=_TOOL_DESCRIPTIONS[name])(invoke)
+
+        handler = invoke_lease
+
+    handler.__name__ = name
+    handler.__doc__ = description
+    server.tool(name=name, description=description)(handler)
 
 
 def _invoke_adapter(adapter: GrokbotAdapter, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -346,12 +359,18 @@ class _GateASGI:
             return
         headers = {key.decode("latin-1").casefold(): value.decode("latin-1") for key, value in scope.get("headers", [])}
         content_length = headers.get("content-length")
-        if content_length is not None and (not content_length.isdecimal() or int(content_length) > self.gate.max_request_bytes):
+        if content_length is not None and (
+            not content_length.isdecimal() or int(content_length) > self.gate.max_request_bytes
+        ):
             await _reject_http(send, 413, "Request body is too large")
             return
         reason = self.gate.reject_reason(headers, 0)
         if reason is not None:
-            await _reject_http(send, 401 if reason == "unauthorized" else 403, "Unauthorized" if reason == "unauthorized" else "Forbidden")
+            await _reject_http(
+                send,
+                401 if reason == "unauthorized" else 403,
+                "Unauthorized" if reason == "unauthorized" else "Forbidden",
+            )
             return
         if scope.get("method") != "POST":
             await self.app(scope, receive, send)
@@ -366,9 +385,7 @@ class _GateASGI:
         await self.app(scope, _replay_messages(messages), send)
 
 
-async def _read_bounded_body(
-    receive: Callable[..., Any], maximum: int
-) -> tuple[bytes, list[dict[str, Any]], bool]:
+async def _read_bounded_body(receive: Callable[..., Any], maximum: int) -> tuple[bytes, list[dict[str, Any]], bool]:
     body = bytearray()
     messages: list[dict[str, Any]] = []
     while True:

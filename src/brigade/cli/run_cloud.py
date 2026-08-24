@@ -112,7 +112,9 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p_grokbot_serve = grokbot_sub.add_parser("serve", help="Run the role-scoped Grok Bot MCP listener.")
     p_grokbot_serve.add_argument("--target", type=Path, default=Path("."))
-    p_grokbot_serve.add_argument("--instance", required=True, choices=("operator", "repository-scout", "implementation-worker"))
+    p_grokbot_serve.add_argument(
+        "--instance", required=True, choices=("operator", "repository-scout", "implementation-worker")
+    )
     p_grokbot_serve.add_argument("--bind", default="127.0.0.1:8766", help="Listener host:port. Defaults to loopback.")
     p_grokbot_serve.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
     p_grokbot_serve.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
