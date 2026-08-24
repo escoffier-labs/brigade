@@ -593,6 +593,7 @@ class ClaimDecision:
     detail: str | None = None
     holder: str | None = None
     superseded: dict[str, Any] | None = None
+    lock_run_dir: str | None = None
 
 
 class FleetClaimHeldError(FleetClientError):
@@ -660,7 +661,7 @@ def lease_from_lock_owner(owner: Mapping[str, object] | None) -> dict[str, str] 
     return lease
 
 
-_CLAIM_OK_KEYS = {"acquire": "granted", "renew": "renewed", "release": "released"}
+_CLAIM_OK_KEYS = {"acquire": "granted", "renew": "renewed", "release": "released", "inspect": "inspected"}
 
 
 def _claim_op(
@@ -723,7 +724,10 @@ def _claim_op(
     if status == 200 and payload.get(_CLAIM_OK_KEYS[action]) is True:
         claim = payload.get("claim") if isinstance(payload.get("claim"), dict) else None
         superseded = payload.get("superseded") if isinstance(payload.get("superseded"), dict) else None
-        return ClaimDecision(granted=True, reason="ok", claim=claim, holder=holder, superseded=superseded)
+        run_dir = payload.get("lock_run_dir") if isinstance(payload.get("lock_run_dir"), str) else None
+        return ClaimDecision(
+            granted=True, reason="ok", claim=claim, holder=holder, superseded=superseded, lock_run_dir=run_dir
+        )
     if status in (200, 409):
         return ClaimDecision(
             granted=False, reason="held" if owner is not None else "missing", owner=owner, detail=detail, holder=holder
@@ -782,6 +786,15 @@ def release_claim(target: str, *, holder: str | None = None, force: bool = False
     kwargs.pop("ttl_seconds", None)
     scope = "force" if force else ("holder" if holder is not None else "node")
     return _claim_op("release", target, holder=holder, scope=scope, **kwargs)
+
+
+def inspect_claim(target: str, **kwargs: Any) -> ClaimDecision:
+    """The current claim on ``target`` (``claim`` is ``None`` when free).
+    When this node owns it, ``lock_run_dir`` is the run directory recorded
+    at acquire, so an operator release can first check that run's lock is
+    dead (issue #1141). Never raises; ``reason`` explains a failure."""
+    kwargs.pop("ttl_seconds", None)
+    return _claim_op("inspect", target, holder=None, **kwargs)
 
 
 def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:

@@ -36,6 +36,10 @@ Endpoints:
   whatever holds the target. ``holder`` is optional for a ``node``/``force``
   release; ``renew`` is always ``holder``-scoped. A row acquired without a
   ``lock`` lease can never be superseded, only released or expired.
+  ``"inspect"`` (no holder needed) answers the current row for a target;
+  when the caller's ``node_id`` owns it the answer also carries
+  ``lock_run_dir`` so that node's CLI can find the run and check its lock
+  is dead before a token-less release (never to other callers).
   Trust boundary: ``node_id``, ``lock`` and ``supersede`` are
   caller-asserted under one shared bearer token, so ``scope`` is an intent
   marker that keeps *honest* clients from stealing each other's claims (a
@@ -89,7 +93,7 @@ DASHBOARD_COOKIE_MAX_AGE = 30 * 86400
 _DASHBOARD_COOKIE_PURPOSE = b"brigade-fleet-dashboard-cookie-v1"
 _DASHBOARD_PREFIX = "/view/"
 
-CLAIM_ACTIONS = frozenset({"acquire", "renew", "release"})
+CLAIM_ACTIONS = frozenset({"acquire", "renew", "release", "inspect"})
 # Request scopes (issue #1141): "holder" is the fencing-token contract; "node"
 # lets a node act on its own dead holder's row; "force" is the operator
 # override, release only. Renew is never widened: a token-less renew would
@@ -99,6 +103,7 @@ CLAIM_ACTION_SCOPES: dict[str, frozenset[str]] = {
     "acquire": frozenset({"holder", "node"}),
     "renew": frozenset({"holder"}),
     "release": CLAIM_SCOPES,
+    "inspect": frozenset({"holder"}),
 }
 DEFAULT_CLAIM_TTL_SECONDS = 900
 CLAIM_TTL_MIN_SECONDS = 1
@@ -346,7 +351,7 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
     request: dict[str, Any] = {}
     action = raw.get("action")
     if not isinstance(action, str) or action not in CLAIM_ACTIONS:
-        raise FleetHubError("claim field 'action' must be one of: acquire, renew, release")
+        raise FleetHubError("claim field 'action' must be one of: acquire, renew, release, inspect")
     request["action"] = action
     scope = raw.get("scope", "holder")
     if not isinstance(scope, str) or scope not in CLAIM_ACTION_SCOPES[action]:
@@ -355,7 +360,7 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
     request["scope"] = scope
     # A node/force release has no holder token to present: the token died
     # with the crashed run it is cleaning up after.
-    holder_optional = action == "release" and scope != "holder"
+    holder_optional = action == "inspect" or (action == "release" and scope != "holder")
     for field in ("target", "node_id", "holder"):
         value = raw.get(field)
         if field == "holder" and holder_optional and value is None:
@@ -434,10 +439,11 @@ _CLAIM_COLUMNS = "target, owner_node, owner_conductor, acquired_at, renewed_at, 
 
 
 def _fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | None:
-    """Row as (_CLAIM_COLUMNS..., holder_token, lock_token, lock_acquired_at);
-    the fencing token is index 7, the lease token index 8."""
+    """Row as (_CLAIM_COLUMNS..., holder_token, lock_token, lock_acquired_at,
+    lock_run_dir); the fencing token is index 7, the lease token index 8."""
     return conn.execute(
-        f"SELECT {_CLAIM_COLUMNS}, holder_token, lock_token, lock_acquired_at FROM claims WHERE target = ?",
+        f"SELECT {_CLAIM_COLUMNS}, holder_token, lock_token, lock_acquired_at, lock_run_dir "
+        "FROM claims WHERE target = ?",
         (target,),
     ).fetchone()
 
@@ -477,7 +483,18 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
     scope = request["scope"]
     now = _now_epoch()
     now_iso = _epoch_to_iso(now)
+    if request["action"] == "inspect":
+        row = _fetch_claim(conn, target)
+        if row is None or row[6] <= now:
+            return 200, {"inspected": True, "claim": None, "owned": False}
+        inspected: dict[str, Any] = {"inspected": True, "claim": _claim_payload(row), "owned": row[1] == node}
+        if row[1] == node:
+            inspected["lock_run_dir"] = row[10]
+        return 200, inspected
     if request["action"] == "acquire":
+        # One write transaction: the prune, the prior-row read that the
+        # ``superseded`` receipt describes, and the upsert see one state.
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM claims WHERE expires_at <= ?", (now,))
         # Only a same-node supersede needs the prior row (to report what it
         # replaced); expired rows are already gone, so this is a live claim.
@@ -579,8 +596,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
             }
         return 200, {"released": False}
     # Token-less release (issue #1141): the caller's own node's row, or with
-    # "force" whoever holds the target. One statement, so a concurrent
-    # acquire cannot slip a new owner's row under a node-scoped delete.
+    # "force" whoever holds the target. The read and the delete share one
+    # write transaction, so the receipt's ``claim`` is the row the delete
+    # removed — a concurrent acquire cannot slip a new owner in between.
+    conn.execute("BEGIN IMMEDIATE")
     prior = _fetch_claim(conn, target)
     cursor = conn.execute(
         "DELETE FROM claims WHERE target = ? AND (? = 1 OR owner_node = ?)",

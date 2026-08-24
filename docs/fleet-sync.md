@@ -153,14 +153,21 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   is refused with the two ways out named in the error, and so is a
   same-node claim with no dead lock to vouch for it (a sibling run, or a run
   already recovered with `brigade runs recover`).
-- `brigade fleet claims --release <target> [--node NODE_ID] [--force] [--json]`
+- `brigade fleet claims --release <key> [--path] [--node NODE_ID] [--force] [--json]`
   frees a claim without its holder token (`POST /claims` `release` with
   `scope: "node"`): the hub deletes the row only if the given node owns it;
-  another node's claim is refused with its owner named. `<target>` is a
-  claim key or a workspace path (its claim key, node identity, and run lock
-  are then used); a non-`--force` release is refused while a run owner is
-  alive on that workspace's `run.lock`. `--force` (`scope: "force"`)
-  releases it anyway. Renew is never token-less.
+  another node's claim is refused with its owner named. `<key>` is always a
+  claim key; with `--path` it is the workspace directory itself (a directory
+  inside a workspace is refused, never resolved upward). Without `--force`
+  the CLI first proves the run that took the claim is dead: `POST /claims`
+  `inspect` returns the recorded run directory to the owner node only, the
+  CLI maps it to a workspace on this machine (`run.json` `lock_workspace` /
+  `cwd`, or the `.brigade/runs/<id>` layout) and refuses while that
+  `run.lock` has a live owner, or when it cannot resolve the run at all.
+  `--node` other than this machine's identity needs `--force`; `--force`
+  (`scope: "force"`) releases regardless and the JSON receipt says so. The
+  hub reads and deletes in one write transaction, so the receipt is the row
+  it removed. Renew is never token-less.
 - `brigade run --no-fleet-claim` skips the hub claim entirely and relies on
   the local run lock alone, logged once on the `brigade.fleet` logger.
 - Trust boundary: `node_id` and the leases are caller-asserted under the one

@@ -70,22 +70,32 @@ def register(sub: argparse._SubParsersAction) -> None:
         metavar="TARGET",
         default=None,
         help=(
-            "Release the hub claim on TARGET (a claim left behind by a crashed run): a claim key as listed "
-            "by this command, or a workspace path (its claim key, node identity, and run lock are then read "
-            "from that workspace). Refused unless this node holds it and no run owner is alive on the "
-            "workspace's run lock; see --force."
+            "Release the hub claim on TARGET, a claim key as listed by this command (a claim left behind by a "
+            "crashed run). Refused unless this node holds it and the run that took it is verifiably dead "
+            "(its recorded run directory is on this machine and its run lock has no live owner); see --force."
+        ),
+    )
+    p_claims.add_argument(
+        "--path",
+        action="store_true",
+        help=(
+            "With --release: TARGET is a workspace directory, not a key; its claim key, node identity, and run "
+            "lock are used. The directory must be the workspace itself, not a directory inside one."
         ),
     )
     p_claims.add_argument(
         "--node",
         metavar="NODE_ID",
         default=None,
-        help="With --release: the owner node identity to release as (default: the workspace's, else this machine's).",
+        help="With --release: release as this owner node identity; one other than this machine's needs --force.",
     )
     p_claims.add_argument(
         "--force",
         action="store_true",
-        help="With --release: release even when another node holds it or a run owner is alive on the local lock.",
+        help=(
+            "With --release: release even when another node holds it, a run owner is alive on the lock, or "
+            "liveness cannot be verified."
+        ),
     )
     p_claims.set_defaults(func=_dispatch_claims)
 
@@ -133,61 +143,124 @@ def _dispatch_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _release_workspace(raw_target: str) -> tuple[str, Path | None]:
-    """(claim key, workspace) for a ``--release`` argument: a workspace path
-    names its own claim key; a bare key maps to the cwd's workspace only
-    when that workspace's key is the same one."""
-    from .. import fleet_client
-
-    candidate = Path(raw_target).expanduser()
-    if candidate.is_dir():
-        try:
-            workspace = candidate.resolve()
-        except OSError:
-            workspace = candidate
-        return fleet_client.resolve_claim_target(workspace), workspace
-    cwd = Path.cwd()
-    if fleet_client.resolve_claim_target(cwd) == raw_target:
-        return raw_target, fleet_client.find_workspace_for_path(cwd) or cwd
-    return raw_target, None
-
-
-def _release_claim(raw_target: str, *, node_override: str | None, force: bool, as_json: bool) -> int:
-    """``brigade fleet claims --release`` (issue #1141): free a claim whose
-    holder token died with its run. Own-node claims only, and never while a
-    run owner is alive on the workspace's run lock, unless ``force``."""
+def _workspace_from_run_dir(raw_run_dir: str | None) -> Path | None:
+    """The workspace a claim's recorded run directory belongs to, when that
+    directory is on this machine: ``run.json``'s ``lock_workspace`` / ``cwd``,
+    else the ``<workspace>/.brigade/runs/<id>`` layout. ``None`` otherwise."""
     import json as _json
 
-    from .. import fleet_client, runguard
+    if not raw_run_dir:
+        return None
+    run_dir = Path(raw_run_dir).expanduser()
+    if not run_dir.is_dir():
+        return None
+    try:
+        meta = _json.loads((run_dir / "run.json").read_text())
+    except (OSError, ValueError):
+        meta = None
+    if isinstance(meta, dict):
+        for key in ("lock_workspace", "cwd"):
+            value = meta.get(key)
+            if isinstance(value, str) and value and Path(value).expanduser().is_dir():
+                return Path(value).expanduser().resolve()
+    if run_dir.parent.name == "runs" and run_dir.parent.parent.name == ".brigade":
+        return run_dir.parent.parent.parent.resolve()
+    return None
 
-    target, workspace = _release_workspace(raw_target)
-    if node_override is not None and not fleet_client._node_id_is_claimable(node_override):
-        print(f"error: --node {node_override!r} is not a usable fleet node identity", file=sys.stderr)
-        return 1
-    node_id = node_override or fleet_client.resolve_node_id(workspace)
-    if workspace is not None and not force and runguard.inspect_run_lock_reconcile(workspace) == "live":
-        print(
-            f"error: a run owner is still alive on the run lock of {workspace}; refusing to release {target!r} "
-            "(pass --force to release it anyway)",
-            file=sys.stderr,
-        )
-        return 1
-    decision = fleet_client.release_claim(target, node_id=node_id, force=force)
+
+def _print_claim_failure(decision, *, what: str) -> bool:
+    """Print a hub/config failure for ``what`` and return True when there was one."""
     if decision.reason == "no-hub":
         print("error: no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)", file=sys.stderr)
-        return 1
+        return True
     if decision.reason == "no-identity":
         print(
             f"error: no usable fleet node identity ({decision.detail}); run from a Brigade workspace "
             "with .brigade/node.toml (see `brigade node`) or pass --node",
             file=sys.stderr,
         )
-        return 1
+        return True
     if decision.reason == "hub-unavailable":
         detail = decision.detail or ""
-        if "'holder'" in detail or "'scope'" in detail:
+        if "'holder'" in detail or "'scope'" in detail or "'action'" in detail:
             detail += " (this fleet hub predates token-less release; upgrade it)"
-        print(f"error: fleet hub claim release failed: {detail}", file=sys.stderr)
+        print(f"error: fleet hub claim {what} failed: {detail}", file=sys.stderr)
+        return True
+    return False
+
+
+def _release_claim(raw_target: str, *, as_path: bool, node_override: str | None, force: bool, as_json: bool) -> int:
+    """``brigade fleet claims --release`` (issue #1141): free a claim whose
+    holder token died with its run. Without ``force``: this node's claims
+    only, and only when the run that took it is verifiably dead — its
+    recorded run directory resolves to a workspace on this machine whose
+    run lock has no live owner."""
+    import json as _json
+
+    from .. import fleet_client, runguard
+
+    workspace: Path | None = None
+    if as_path:
+        candidate = Path(raw_target).expanduser()
+        if not candidate.is_dir():
+            print(f"error: --path target is not a directory: {raw_target}", file=sys.stderr)
+            return 1
+        try:
+            workspace = candidate.resolve()
+        except OSError:
+            workspace = candidate
+        # Never an ancestor walk: the directory must be the workspace itself.
+        enclosing = fleet_client.find_workspace_for_path(workspace)
+        if enclosing is not None and enclosing != workspace:
+            print(
+                f"error: {workspace} is inside the workspace {enclosing}; pass that workspace path instead",
+                file=sys.stderr,
+            )
+            return 1
+        target = workspace.name
+        local_node = fleet_client.resolve_node_id(workspace)
+    else:
+        target = raw_target
+        local_node = fleet_client.resolve_node_id()
+    if node_override is not None and not fleet_client._node_id_is_claimable(node_override):
+        print(f"error: --node {node_override!r} is not a usable fleet node identity", file=sys.stderr)
+        return 1
+    if node_override is not None and node_override != local_node and not force:
+        print(
+            f"error: --node {node_override} is not this node's identity ({local_node}); releasing another "
+            "node's claim requires --force",
+            file=sys.stderr,
+        )
+        return 1
+    node_id = node_override or local_node
+    if not force:
+        if workspace is None:
+            probe = fleet_client.inspect_claim(target, node_id=node_id)
+            if _print_claim_failure(probe, what="lookup"):
+                return 1
+            if probe.claim is not None and probe.claim.get("owner_node") == node_id:
+                workspace = _workspace_from_run_dir(probe.lock_run_dir)
+                if workspace is None:
+                    why = (
+                        "it records no run directory"
+                        if not probe.lock_run_dir
+                        else f"its run directory {probe.lock_run_dir} is not on this machine"
+                    )
+                    print(
+                        f"error: cannot verify that the run holding {target!r} is dead ({why}); "
+                        "pass --path <workspace> to check that workspace's run lock, or --force",
+                        file=sys.stderr,
+                    )
+                    return 1
+        if workspace is not None and runguard.inspect_run_lock_reconcile(workspace) == "live":
+            print(
+                f"error: a run owner is still alive on the run lock of {workspace}; refusing to release "
+                f"{target!r} (pass --force to release it anyway)",
+                file=sys.stderr,
+            )
+            return 1
+    decision = fleet_client.release_claim(target, node_id=node_id, force=force)
+    if _print_claim_failure(decision, what="release"):
         return 1
     if as_json:
         payload = {
@@ -225,11 +298,13 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
 
     from .. import fleet_client
 
-    if args.release is None and (args.force or args.node is not None):
-        print("error: --force and --node require --release <target>", file=sys.stderr)
+    if args.release is None and (args.force or args.path or args.node is not None):
+        print("error: --force, --path, and --node require --release <target>", file=sys.stderr)
         return 2
     if args.release is not None:
-        return _release_claim(args.release, node_override=args.node, force=args.force, as_json=args.json)
+        return _release_claim(
+            args.release, as_path=args.path, node_override=args.node, force=args.force, as_json=args.json
+        )
     try:
         claims = fleet_client.fetch_claims(include_all=args.all)
     except fleet_client.FleetClientError as exc:
