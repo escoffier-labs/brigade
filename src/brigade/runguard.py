@@ -195,11 +195,17 @@ def _lock_owner_payload(*, owner_token: str, run_dir: Path | None) -> dict[str, 
     }
 
 
-def read_lock_owner(path: Path) -> dict[str, object] | None:
+def read_lock_owner(path: Path | str | None) -> dict[str, object] | None:
     """Published owner metadata (``owner.json``) of the lock directory at
-    ``path`` — the ``run_lock`` yield — or ``None`` when unreadable. The
-    ``owner_token`` is this lease's identity for the fleet hub (issue #1141)."""
-    return _read_lock_owner(path)
+    ``path`` — the ``run_lock`` yield — or ``None`` when absent, unreadable,
+    or not a path (a stubbed lock). The ``owner_token`` is this lease's
+    identity for the fleet hub (issue #1141)."""
+    if path is None:
+        return None
+    try:
+        return _read_lock_owner(Path(path))
+    except TypeError:
+        return None
 
 
 def _read_lock_owner(path: Path) -> dict[str, object] | None:

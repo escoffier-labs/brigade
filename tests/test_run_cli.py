@@ -1290,7 +1290,7 @@ def test_run_cli_passes_wait_seconds_to_run_lock(tmp_path, monkeypatch, wait_arg
     seen = {}
 
     @contextmanager
-    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0):
+    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0, on_reconcile=None):
         seen["cwd"] = cwd
         seen["run_dir"] = run_dir
         seen["wait_seconds"] = wait_seconds
@@ -1311,7 +1311,7 @@ def test_run_cli_records_output_dir_in_run_lock(tmp_path, monkeypatch):
     seen = {}
 
     @contextmanager
-    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0):
+    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0, on_reconcile=None):
         seen["cwd"] = cwd
         seen["run_dir"] = run_dir
         seen["wait_seconds"] = wait_seconds
@@ -1344,7 +1344,7 @@ def test_run_cli_uses_config_run_lock_wait_seconds_default(tmp_path, monkeypatch
     seen = {}
 
     @contextmanager
-    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0):
+    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0, on_reconcile=None):
         seen["wait_seconds"] = wait_seconds
         yield
 
@@ -1375,7 +1375,7 @@ def test_run_cli_wait_zero_overrides_config_default_wait(tmp_path, monkeypatch):
     seen = {}
 
     @contextmanager
-    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0):
+    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0, on_reconcile=None):
         seen["wait_seconds"] = wait_seconds
         yield
 
