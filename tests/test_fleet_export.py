@@ -17,6 +17,7 @@ from brigade import fleet_export, fleet_hub
 FAKE_DOLT_LOG_ENV = "BRIGADE_TEST_DOLT_LOG"
 FAKE_DOLT_CAPTURE_ENV = "BRIGADE_TEST_DOLT_CAPTURE"
 FAKE_DOLT_EXIT_ENV = "BRIGADE_TEST_DOLT_EXIT"
+FAKE_DOLT_STATUS_ENV = "BRIGADE_TEST_DOLT_STATUS"
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -90,11 +91,13 @@ def fake_dolt(tmp_path, monkeypatch):
         f'    *.csv) cp "$a" "${{{FAKE_DOLT_CAPTURE_ENV}}}/${{a##*/}}" ;;\n'
         "  esac\n"
         "done\n"
+        f'if [ "$1" = "status" ]; then printf \'%s\\n\' "${{{FAKE_DOLT_STATUS_ENV}}}"; fi\n'
         f'exit "${{{FAKE_DOLT_EXIT_ENV}:-0}}"\n',
         encoding="utf-8",
     )
     os.chmod(script, 0o755)
     monkeypatch.setenv("PATH", str(bin_dir), prepend=os.pathsep)
+    monkeypatch.setenv(FAKE_DOLT_STATUS_ENV, " M fleet_events")
     return bin_dir
 
 
@@ -185,6 +188,39 @@ class TestExport:
         assert cli.main(["fleet", "export", "--db", str(db), "--since", "day-before-yesterday"]) == 1
         assert "--since must be an ISO-8601 timestamp" in capsys.readouterr().err
 
+    def test_since_and_since_received_filter_different_event_timestamps(self, tmp_path, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(
+            db,
+            [
+                _event(run_id="new-event-old-receipt", ts="2026-08-20T00:00:00+00:00"),
+                _event(run_id="old-event-new-receipt", ts="2026-08-01T00:00:00+00:00"),
+            ],
+        )
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "UPDATE events SET received_at = ? WHERE run_id = ?",
+                ("2026-08-01T00:00:00+00:00", "new-event-old-receipt"),
+            )
+            conn.execute(
+                "UPDATE events SET received_at = ? WHERE run_id = ?",
+                ("2026-08-20T00:00:00+00:00", "old-event-new-receipt"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--since", "2026-08-10"]) == 0
+        event_rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert [row["run_id"] for row in event_rows] == ["new-event-old-receipt"]
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--since-received", "2026-08-10"]) == 0
+        receipt_rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert [row["run_id"] for row in receipt_rows] == ["old-event-new-receipt"]
+
     def test_idempotent_reexport_after_duplicate_ingest(self, tmp_path, capsys):
         from brigade import cli
 
@@ -245,6 +281,31 @@ class TestExport:
         assert b"\r\n" not in streamed
         assert "☃".encode() in streamed
 
+    def test_broken_stdout_pipe_exits_zero_and_replaces_stdout_with_devnull(self, tmp_path, monkeypatch):
+        from brigade import cli
+
+        class BrokenPipeStdout:
+            closed = False
+
+            def reconfigure(self, **kwargs):
+                return None
+
+            def write(self, value):
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def close(self):
+                self.closed = True
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event())
+        broken_stdout = BrokenPipeStdout()
+        monkeypatch.setattr(sys, "stdout", broken_stdout)
+
+        assert cli.main(["fleet", "export", "--db", str(db)]) == 0
+        assert broken_stdout.closed is True
+        assert sys.stdout.name == os.devnull
+        sys.stdout.close()
+
     def test_missing_database_is_an_error_not_a_crash(self, tmp_path, capsys):
         from brigade import cli
 
@@ -271,7 +332,9 @@ class TestExport:
 
         monkeypatch.setattr(fleet_export.sqlite3, "connect", readonly_cantinit)
         assert cli.main(["fleet", "export", "--db", str(db)]) == 1
-        assert "could not open fleet hub database" in capsys.readouterr().err
+        error = capsys.readouterr().err
+        assert "could not open fleet hub database" in error
+        assert "WAL" in error and "-shm" in error
 
     def test_missing_output_directory_is_operator_facing(self, tmp_path, capsys):
         from brigade import cli
@@ -360,7 +423,11 @@ class TestSink:
         assert argv_lines[13:15] == ["sql", "-q"] and argv_lines[15] == fleet_export._DOLT_SCHEMA_CLAIMS
         assert argv_lines[16:20] == ["table", "import", "-r", "fleet_claims"]
         assert argv_lines[20].endswith("fleet_claims.csv")
-        assert len(argv_lines) == 21
+        assert argv_lines[21:23] == ["status", "--porcelain"]
+        assert argv_lines[23:25] == ["add", "-A"]
+        assert argv_lines[25:27] == ["commit", "-m"]
+        assert argv_lines[27].endswith("Z: fleet events/claims")
+        assert len(argv_lines) == 28
         events_csv = capture / "fleet_events.csv"
         claims_csv = capture / "fleet_claims.csv"
         assert events_csv.is_file() and claims_csv.is_file()
@@ -369,6 +436,54 @@ class TestSink:
         assert [row.split(",")[2] for row in event_rows[1:]] == ["1", "2", "1"]
         claim_rows = claims_csv.read_text(encoding="utf-8").splitlines()
         assert claim_rows[1].startswith("repo-a,node-a")
+
+    @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
+    def test_sink_keeps_formula_like_values_raw_while_human_csv_guards_them(
+        self, home, fake_dolt, tmp_path, monkeypatch, capsys
+    ):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        event = _event()
+        event["seat"] = "-worker"
+        _seed_events(db, event)
+        dolt_dir = tmp_path / "dolt-home"
+        log = tmp_path / "dolt.log"
+        capture = tmp_path / "capture"
+        capture.mkdir()
+        monkeypatch.setenv(FAKE_DOLT_LOG_ENV, str(log))
+        monkeypatch.setenv(FAKE_DOLT_CAPTURE_ENV, str(capture))
+        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{dolt_dir}"\n')
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        sink_rows = list(csv.reader(io.StringIO((capture / "fleet_events.csv").read_text(encoding="utf-8"))))
+        assert sink_rows[1][fleet_export.EVENT_COLUMNS.index("seat")] == "-worker"
+
+        capsys.readouterr()
+        assert cli.main(["fleet", "export", "--db", str(db), "--format", "csv"]) == 0
+        export_rows = list(csv.reader(io.StringIO(capsys.readouterr().out)))
+        assert export_rows[1][fleet_export.EVENT_COLUMNS.index("seat")] == "'-worker"
+
+    @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
+    def test_sink_skips_add_and_commit_when_working_set_is_unchanged(self, home, fake_dolt, tmp_path, monkeypatch):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event())
+        dolt_dir = tmp_path / "dolt-home"
+        log = tmp_path / "dolt.log"
+        capture = tmp_path / "capture"
+        capture.mkdir()
+        monkeypatch.setenv(FAKE_DOLT_LOG_ENV, str(log))
+        monkeypatch.setenv(FAKE_DOLT_CAPTURE_ENV, str(capture))
+        monkeypatch.setenv(FAKE_DOLT_STATUS_ENV, "")
+        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{dolt_dir}"\n')
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        argv_lines = log.read_text(encoding="utf-8").splitlines()
+        assert argv_lines[-2:] == ["status", "--porcelain"]
+        assert "add" not in argv_lines
+        assert "commit" not in argv_lines
 
     def test_dolt_failure_reports_error_and_exits_nonzero(self, home, fake_dolt, tmp_path, monkeypatch, capsys):
         from brigade import cli
@@ -418,3 +533,12 @@ class TestSink:
         second = (capture / "fleet_events.csv").read_bytes()
         assert first == second
         assert "-u" in log.read_text(encoding="utf-8").splitlines()
+
+
+def test_export_and_sink_parser_callbacks_are_lazy_wrappers():
+    from brigade import cli
+    from brigade.cli import fleet as fleet_cli
+
+    parser = cli._build_parser()
+    assert parser.parse_args(["fleet", "export"]).func is fleet_cli._dispatch_export
+    assert parser.parse_args(["fleet", "sink"]).func is fleet_cli._dispatch_sink

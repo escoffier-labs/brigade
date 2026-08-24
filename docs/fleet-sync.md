@@ -131,16 +131,19 @@ phone over Tailscale:
 
 ## Export and optional Dolt sink
 
-`brigade fleet export --since <timestamp> --format jsonl|csv [--claims]
-[--db PATH] [--out PATH]` reads the hub database in read-only mode and streams
-events in `(node_id, run_id, sequence, digest)` order. The columns have a fixed
-order, the event digest is included, and exporting the same database twice
-produces identical bytes. `--claims` exports the current claims snapshot in
-`target` order and omits the claim holder token. With `--since`, an event whose
-`ts` cannot be parsed is excluded and counted in the stderr summary. CSV cells
-that start with `=`, `+`, `-`, `@`, a tab, or a carriage return are prefixed
-with a single quote to prevent spreadsheet formula execution. JSONL values are
-unchanged.
+`brigade fleet export [--since <event-timestamp> | --since-received
+<hub-timestamp>] --format jsonl|csv [--claims] [--db PATH] [--out PATH]` reads
+the hub database in read-only mode and streams events in `(node_id, run_id,
+sequence, digest)` order. The columns have a fixed order, the event digest is
+included, and exporting the same database twice produces identical bytes.
+`--claims` exports the current claims snapshot in `target` order and omits the
+claim holder token. `--since` filters on the event's `ts`. `--since-received`
+filters on the hub's `received_at` value. Incremental archives should use
+`--since-received` because a spooled event may reach the hub days after its
+event timestamp. An event whose selected filter timestamp cannot be parsed is
+excluded and counted in the stderr summary. Human-facing CSV cells that start
+with `=`, `+`, `-`, `@`, a tab, or a carriage return are prefixed with a single
+quote to prevent spreadsheet formula execution. JSONL values are unchanged.
 
 Export and sink work stay off the reporting path. Neither command participates
 in journal append, event delivery, claim arbitration, `/status`, `/claims`, or
@@ -167,6 +170,10 @@ precedence over the configured `db` value.
 `dolt table import -u` for `fleet_events`, which is an append-only log, and
 `dolt table import -r` for `fleet_claims`, which is a current-state snapshot.
 Replacing `fleet_claims` removes released claims from Dolt on the next pass.
+The sink CSV keeps source values unchanged. After both imports, the sink checks
+`dolt status --porcelain`. A changed working set is staged with `dolt add -A`
+and committed with a UTC timestamp followed by `fleet events/claims`. An
+unchanged pass skips the add and commit commands.
 A fresh Dolt database is initialized with the local `brigade` identity, so no
 host-level Dolt identity is required. The sink has no Python Dolt dependency.
 If it is disabled, it exits 0 without reading the hub database. If the

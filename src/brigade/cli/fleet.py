@@ -67,14 +67,18 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_claims.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
     p_claims.set_defaults(func=_dispatch_claims)
 
-    from .. import fleet_export
-
     p_export = fleet_sub.add_parser(
         "export",
         help="Stream hub events or claims deterministically as JSONL or CSV.",
     )
-    p_export.add_argument(
+    incremental = p_export.add_mutually_exclusive_group()
+    incremental.add_argument(
         "--since", default=None, help="Only include events at or after this ISO-8601 timestamp (naive means UTC)."
+    )
+    incremental.add_argument(
+        "--since-received",
+        default=None,
+        help="Only include events received by the hub at or after this ISO-8601 timestamp.",
     )
     p_export.add_argument("--format", choices=("jsonl", "csv"), default="jsonl", help="Output format (default jsonl).")
     p_export.add_argument(
@@ -84,7 +88,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--db", type=Path, default=None, help="Hub SQLite database path (default ~/.brigade/fleet-hub.db)."
     )
     p_export.add_argument("--out", type=Path, default=None, help="Write to this file instead of stdout.")
-    p_export.set_defaults(func=fleet_export.dispatch_export)
+    p_export.set_defaults(func=_dispatch_export)
 
     p_sink = fleet_sub.add_parser(
         "sink",
@@ -93,7 +97,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_sink.add_argument(
         "--db", type=Path, default=None, help="Hub SQLite database path (default ~/.brigade/fleet-hub.db)."
     )
-    p_sink.set_defaults(func=fleet_export.dispatch_sink)
+    p_sink.set_defaults(func=_dispatch_sink)
 
 
 def _dispatch_serve(args: argparse.Namespace) -> int:
@@ -101,6 +105,18 @@ def _dispatch_serve(args: argparse.Namespace) -> int:
 
     db_path = args.db if args.db is not None else (Path.home() / DEFAULT_DB_REL_PATH)
     return fleet_hub.run(host=args.host, port=args.port, db_path=db_path, token_file=args.token_file)
+
+
+def _dispatch_export(args: argparse.Namespace) -> int:
+    from .. import fleet_export
+
+    return fleet_export.dispatch_export(args)
+
+
+def _dispatch_sink(args: argparse.Namespace) -> int:
+    from .. import fleet_export
+
+    return fleet_export.dispatch_sink(args)
 
 
 def _dispatch_status(args: argparse.Namespace) -> int:

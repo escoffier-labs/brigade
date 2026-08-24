@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -117,14 +118,14 @@ def resolve_hub_db(raw: str | Path | None = None) -> Path:
     return candidate.expanduser()
 
 
-def parse_since(raw: str | None) -> datetime | None:
-    """Parse ``--since`` as ISO-8601 (``Z`` tolerated); naive means UTC."""
+def parse_since(raw: str | None, *, option: str = "--since") -> datetime | None:
+    """Parse an incremental timestamp as ISO-8601 (``Z`` tolerated); naive means UTC."""
     if raw is None or not raw.strip():
         return None
     try:
         parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
     except ValueError:
-        raise FleetExportError(f"--since must be an ISO-8601 timestamp, got {raw!r}") from None
+        raise FleetExportError(f"{option} must be an ISO-8601 timestamp, got {raw!r}") from None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
@@ -167,31 +168,40 @@ def connect_hub_readonly(db_path: Path) -> sqlite3.Connection:
         conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
         conn.execute("SELECT 1")
     except sqlite3.Error as exc:
-        raise FleetExportError(f"could not open fleet hub database {db_path}: {exc}") from exc
+        raise FleetExportError(
+            f"could not open fleet hub database {db_path}: {exc}; "
+            "a WAL-mode database may require its readable -shm sidecar beside the database"
+        ) from exc
     return conn
 
 
 def iter_event_records(
     conn: sqlite3.Connection,
     since: datetime | None = None,
+    since_received: datetime | None = None,
     stats: ExportStats | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield every hub event in ``(node_id, run_id, sequence, digest)`` order.
 
-    ``since`` filters on the event timestamp (events whose ``ts`` cannot be
-    parsed are excluded while filtering, so the stream stays honest about
-    ordering). Rows stream from the cursor; nothing is materialized whole.
+    ``since`` filters on the event timestamp. ``since_received`` filters on the
+    hub receipt timestamp, which is safer for incremental archival because a
+    spooled event can arrive after its event timestamp. Rows stream from the
+    cursor; nothing is materialized whole.
     """
+    if since is not None and since_received is not None:
+        raise FleetExportError("--since and --since-received cannot be used together")
+    threshold = since_received if since_received is not None else since
+    timestamp_column = "received_at" if since_received is not None else "ts"
     cursor = conn.execute(f"SELECT {', '.join(EVENT_COLUMNS)} FROM events ORDER BY node_id, run_id, sequence, digest")
     for row in cursor:
         record = dict(zip(EVENT_COLUMNS, row, strict=True))
-        if since is not None:
-            ts = _parse_ts(record.get("ts"))
+        if threshold is not None:
+            ts = _parse_ts(record.get(timestamp_column))
             if ts is None:
                 if stats is not None:
                     stats.unparseable_timestamps += 1
                 continue
-            if ts < since:
+            if ts < threshold:
                 continue
         yield record
 
@@ -210,13 +220,23 @@ def iter_claim_records(conn: sqlite3.Connection) -> Iterator[dict[str, Any]]:
         yield record
 
 
-def _write_records(handle: TextIO, records: Iterator[dict[str, Any]], *, columns: tuple[str, ...], fmt: str) -> int:
+def _write_records(
+    handle: TextIO,
+    records: Iterator[dict[str, Any]],
+    *,
+    columns: tuple[str, ...],
+    fmt: str,
+    spreadsheet_safe: bool = False,
+) -> int:
     count = 0
     if fmt == "csv":
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
         for record in records:
-            writer.writerow(["" if record[column] is None else _csv_value(record[column]) for column in columns])
+            values = ["" if record[column] is None else record[column] for column in columns]
+            if spreadsheet_safe:
+                values = [_csv_value(value) for value in values]
+            writer.writerow(values)
             count += 1
     elif fmt == "jsonl":
         for record in records:
@@ -232,9 +252,11 @@ def export_into(
     *,
     db_path: Path,
     since: datetime | None = None,
+    since_received: datetime | None = None,
     fmt: str = "jsonl",
     claims: bool = False,
     stats: ExportStats | None = None,
+    spreadsheet_safe: bool = False,
 ) -> int:
     """Stream one table from the hub database into ``handle``; returns rows."""
     conn = connect_hub_readonly(db_path)
@@ -244,11 +266,19 @@ def export_into(
                 records: Iterator[dict[str, Any]] = iter_claim_records(conn)
                 columns: tuple[str, ...] = CLAIM_COLUMNS
             else:
-                records = iter_event_records(conn, since, stats)
+                records = iter_event_records(conn, since, since_received, stats)
                 columns = EVENT_COLUMNS
-            return _write_records(handle, records, columns=columns, fmt=fmt)
+            return _write_records(
+                handle,
+                records,
+                columns=columns,
+                fmt=fmt,
+                spreadsheet_safe=spreadsheet_safe,
+            )
         except sqlite3.Error as exc:
             raise FleetExportError(f"could not query fleet hub database {db_path}: {exc}") from exc
+        except BrokenPipeError:
+            raise
         except OSError as exc:
             raise FleetExportError(f"could not write fleet export: {exc}") from exc
     finally:
@@ -259,10 +289,14 @@ def dispatch_export(args: argparse.Namespace) -> int:
     """Entry point for ``brigade fleet export``."""
     claims = bool(getattr(args, "claims", False))
     since_raw = getattr(args, "since", None)
+    since_received_raw = getattr(args, "since_received", None)
     try:
         since = parse_since(since_raw)
-        if since is not None and claims:
-            print("note: --since applies to events; the claims snapshot is current state", file=sys.stderr)
+        since_received = parse_since(since_received_raw, option="--since-received")
+        if since is not None and since_received is not None:
+            raise FleetExportError("--since and --since-received cannot be used together")
+        if (since is not None or since_received is not None) and claims:
+            print("note: incremental filters apply to events; the claims snapshot is current state", file=sys.stderr)
         db_path = resolve_hub_db(getattr(args, "db", None))
         out_path = getattr(args, "out", None)
         stats = ExportStats()
@@ -270,23 +304,48 @@ def dispatch_export(args: argparse.Namespace) -> int:
             try:
                 with Path(out_path).expanduser().open("w", newline="", encoding="utf-8") as handle:
                     count = export_into(
-                        handle, db_path=db_path, since=since, fmt=args.format, claims=claims, stats=stats
+                        handle,
+                        db_path=db_path,
+                        since=since,
+                        since_received=since_received,
+                        fmt=args.format,
+                        claims=claims,
+                        stats=stats,
+                        spreadsheet_safe=args.format == "csv",
                     )
             except OSError as exc:
                 raise FleetExportError(f"could not write fleet export to {out_path}: {exc}") from exc
         else:
-            reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
-            if not callable(reconfigure_stdout):
-                raise FleetExportError("stdout cannot be configured for UTF-8 with LF newlines; use --out")
-            reconfigure_stdout(encoding="utf-8", errors="strict", newline="\n")
-            count = export_into(sys.stdout, db_path=db_path, since=since, fmt=args.format, claims=claims, stats=stats)
+            try:
+                reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
+                if not callable(reconfigure_stdout):
+                    raise FleetExportError("stdout cannot be configured for UTF-8 with LF newlines; use --out")
+                reconfigure_stdout(encoding="utf-8", errors="strict", newline="\n")
+                count = export_into(
+                    sys.stdout,
+                    db_path=db_path,
+                    since=since,
+                    since_received=since_received,
+                    fmt=args.format,
+                    claims=claims,
+                    stats=stats,
+                    spreadsheet_safe=args.format == "csv",
+                )
+            except BrokenPipeError:
+                try:
+                    sys.stdout.close()
+                except (BrokenPipeError, OSError):
+                    pass
+                sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+                return 0
     except FleetExportError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     what = "claim(s)" if claims else "event(s)"
     summary = f"exported {count} fleet {what} from {db_path} ({args.format})"
-    if since is not None and not claims:
-        summary += f"; skipped {stats.unparseable_timestamps} event(s) with unparseable ts"
+    if (since is not None or since_received is not None) and not claims:
+        timestamp_column = "received_at" if since_received is not None else "ts"
+        summary += f"; skipped {stats.unparseable_timestamps} event(s) with unparseable {timestamp_column}"
     print(summary, file=sys.stderr)
     return 0
 
@@ -320,8 +379,8 @@ def load_sink_config() -> SinkConfig:
     )
 
 
-def _run_dolt(argv: list[str], *, dolt_binary: str, cwd: Path) -> tuple[bool, str]:
-    """Run one dolt subprocess (fixed argv, no shell); (ok, operator message)."""
+def _run_dolt(argv: list[str], *, dolt_binary: str, cwd: Path) -> tuple[bool, str, str]:
+    """Run one dolt subprocess; return success, operator message, and stdout."""
     command = [dolt_binary, *argv]
     try:
         proc = subprocess.run(  # noqa: S603 - argv is constructed, never shell-interpolated
@@ -333,14 +392,14 @@ def _run_dolt(argv: list[str], *, dolt_binary: str, cwd: Path) -> tuple[bool, st
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return False, f"dolt timed out after {int(DOLT_TIMEOUT_SECONDS)}s: {' '.join(command)}"
+        return False, f"dolt timed out after {int(DOLT_TIMEOUT_SECONDS)}s: {' '.join(command)}", ""
     except OSError as exc:
-        return False, f"could not run dolt: {exc}"
+        return False, f"could not run dolt: {exc}", ""
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         message = detail[-1] if detail else f"exit code {proc.returncode}"
-        return False, f"dolt {' '.join(argv[:2])} failed: {message}"
-    return True, ""
+        return False, f"dolt {' '.join(argv[:2])} failed: {message}", ""
+    return True, "", proc.stdout
 
 
 def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
@@ -375,15 +434,35 @@ def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
             steps.append(["sql", "-q", _DOLT_SCHEMA_CLAIMS])
             steps.append(["table", "import", "-r", SINK_TABLE_CLAIMS, str(claims_csv)])
             for step in steps:
-                ok, message = _run_dolt(step, dolt_binary=dolt_binary, cwd=dolt_dir)
+                ok, message, _ = _run_dolt(step, dolt_binary=dolt_binary, cwd=dolt_dir)
                 if not ok:
                     print(f"error: {message}", file=sys.stderr)
                     return 1
+            ok, message, status = _run_dolt(["status", "--porcelain"], dolt_binary=dolt_binary, cwd=dolt_dir)
+            if not ok:
+                print(f"error: {message}", file=sys.stderr)
+                return 1
+            committed = bool(status.strip())
+            if committed:
+                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                commit_steps = [
+                    ["add", "-A"],
+                    ["commit", "-m", f"{timestamp}: fleet events/claims"],
+                ]
+                for step in commit_steps:
+                    ok, message, _ = _run_dolt(step, dolt_binary=dolt_binary, cwd=dolt_dir)
+                    if not ok:
+                        print(f"error: {message}", file=sys.stderr)
+                        return 1
     except FleetExportError:
         raise
     except (sqlite3.Error, OSError) as exc:
         raise FleetExportError(f"could not export fleet sink data: {exc}") from exc
-    print(f"fleet sink: imported {event_count} event(s) and {claim_count} claim(s) into dolt database {dolt_dir}")
+    commit_status = "committed changes" if committed else "no working-set changes to commit"
+    print(
+        f"fleet sink: imported {event_count} event(s) and {claim_count} claim(s) into dolt database {dolt_dir}; "
+        f"{commit_status}"
+    )
     return 0
 
 
