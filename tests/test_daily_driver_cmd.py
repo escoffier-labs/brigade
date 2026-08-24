@@ -2,6 +2,7 @@ import json
 import os
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from brigade import (
     center_cmd,
     cli,
     daily_cmd,
+    grokbot_jobs,
     handoff_cmd,
     phases_cmd,
     release_cmd,
@@ -98,6 +100,33 @@ def test_daily_status_text_and_json(tmp_path, capsys):
 
     assert cli.main(["daily", "status", "--target", str(tmp_path)]) == 0
     assert "daily status:" in capsys.readouterr().out
+
+
+def test_daily_status_includes_bounded_grokbot_cloud_summary(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    now = datetime.now(timezone.utc)
+    grokbot_jobs.enqueue(
+        tmp_path,
+        {
+            "label": "Daily Grok Bot job",
+            "role": "implementation-worker",
+            "repository": "example/brigade",
+            "base_ref": "main",
+            "ownership_paths": ["src/brigade/cloud_tracker.py"],
+            "instructions": "PRIVATE DAILY INSTRUCTIONS TOKEN=do-not-display",
+            "verification_commands": ["pytest -q tests/test_daily_driver_cmd.py"],
+            "artifact": {"kind": "draft-pr"},
+            "timeout_seconds": 900,
+        },
+        "daily-grokbot-job",
+        now=now,
+    )
+
+    assert daily_cmd.status(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["grokbot_cloud"]["job_count"] == 1
+    assert payload["grokbot_cloud"]["classification_counts"]["pending"] == 1
+    assert "PRIVATE DAILY INSTRUCTIONS" not in json.dumps(payload)
 
 
 def test_daily_status_timeout_degrades_slow_candidate_section(tmp_path, capsys, monkeypatch):

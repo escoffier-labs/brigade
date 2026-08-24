@@ -28,7 +28,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p_register = cloud_sub.add_parser("register", help="Register a dispatched cloud task.")
     p_register.add_argument("--target", type=Path, default=Path("."))
-    p_register.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud"))
+    p_register.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud"))
     p_register.add_argument("--task-id", required=True)
     p_register.add_argument("--label", required=True)
     p_register.add_argument("--prompt-hash", default=None, help="sha256:... of the prompt; never store prompt text.")
@@ -44,7 +44,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p_adopt = cloud_sub.add_parser("adopt", help="Back-register an already-running task or orphaned branch.")
     p_adopt.add_argument("--target", type=Path, default=Path("."))
-    p_adopt.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud"))
+    p_adopt.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud"))
     p_adopt.add_argument("--task-id", default=None)
     p_adopt.add_argument("--branch", default=None)
     p_adopt.add_argument("--label", default=None)

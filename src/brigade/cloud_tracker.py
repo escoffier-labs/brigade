@@ -18,11 +18,12 @@ STATUS_SCHEMA = "brigade.run.cloud.status.v1"
 SWEEP_SCHEMA = "brigade.run.cloud.sweep.v1"
 
 DEFAULT_STALE_READY_HOURS = 6
-CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/")
+CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/")
+TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "grokbot-cloud"})
 READY_STATES = frozenset({"ready", "completed", "succeeded", "applied"})
 FAILED_STATES = frozenset({"failed", "errored", "error", "cancelled", "canceled", "expired"})
 FINISHED_STATES = frozenset({"finished", "completed", "succeeded", "applied", "ready"})
-PENDING_STATES = frozenset({"pending", "running", "queued", "in_progress", "dispatching"})
+PENDING_STATES = frozenset({"pending", "claimed", "running", "queued", "in_progress", "dispatching"})
 
 CLASSIFICATIONS = (
     "pending",
@@ -138,8 +139,8 @@ def register(
     dispatched_at: str | None = None,
     source: str = "dispatch",
 ) -> dict[str, Any]:
-    if provider not in {"codex-cloud", "cursor-cloud"}:
-        raise ValueError("provider must be codex-cloud or cursor-cloud")
+    if provider not in TRACKER_PROVIDERS:
+        raise ValueError("provider must be codex-cloud, cursor-cloud, or grokbot-cloud")
     if not label.strip():
         raise ValueError("label must not be empty")
     if source == "dispatch" and not task_id:
@@ -271,7 +272,7 @@ def _classify_entry(
     branch_exists = bool(branch and branch in branches)
     raw_expected = entry.get("expected_artifact")
     expected = raw_expected if isinstance(raw_expected, dict) else {}
-    expects_branch = expected.get("kind") == "branch"
+    expects_branch = expected.get("kind") in {"branch", "draft-pr"}
 
     evidence: dict[str, Any] = {
         "registry": {"id": entry.get("id"), "source": entry.get("source"), "dispatched_at": entry.get("dispatched_at")},
@@ -340,9 +341,12 @@ def _orphan_branch_rows(
     registry_entries: list[dict[str, Any]],
     github: dict[str, Any],
     now: datetime,
+    known_branches: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    known_branches = {e.get("branch") for e in registry_entries if isinstance(e.get("branch"), str) and e.get("branch")}
-    known_branches |= {
+    registered_branches = {
+        e.get("branch") for e in registry_entries if isinstance(e.get("branch"), str) and e.get("branch")
+    }
+    registered_branches |= {
         e.get("expected_artifact", {}).get("pattern")
         for e in registry_entries
         if isinstance(e.get("expected_artifact"), dict)
@@ -350,13 +354,15 @@ def _orphan_branch_rows(
         and "/" in str(e.get("expected_artifact", {}).get("pattern"))
         and "*" not in str(e.get("expected_artifact", {}).get("pattern"))
     }
+    if known_branches:
+        registered_branches |= known_branches
     rows: list[dict[str, Any]] = []
     for name in sorted(_branch_names(github)):
         if not name.startswith(CLOUD_BRANCH_PREFIXES):
             continue
-        if name in known_branches:
+        if name in registered_branches:
             continue
-        provider = "cursor-cloud" if name.startswith("cursor/") else "codex-cloud"
+        provider = _provider_for_branch(name)
         rows.append(
             {
                 "id": f"orphan-branch:{name}",
@@ -375,11 +381,116 @@ def _orphan_branch_rows(
                     "provider": {"wired": False, "state": None, "task_id": None},
                     "github": {"branch": name, "branch_exists": True, "prs": _prs_for_branch(github, name)},
                 },
-                "pr": None,
+                "pr": _prs_for_branch(github, name)[0] if _prs_for_branch(github, name) else None,
                 "observed_at": _now_iso(now),
             }
         )
     return rows
+
+
+def _provider_for_branch(branch: str) -> str:
+    if branch.startswith("cursor/"):
+        return "cursor-cloud"
+    if branch.startswith("grokbot/"):
+        return "grokbot-cloud"
+    return "codex-cloud"
+
+
+def _grokbot_rows(
+    target: Path, *, github: dict[str, Any], now: datetime, stale_ready_hours: int
+) -> list[dict[str, Any]]:
+    """Project queue jobs into tracker rows without reading private envelopes."""
+    try:
+        from . import grokbot_jobs
+
+        queue_rows = grokbot_jobs.tracker_rows(target)
+    except Exception:  # noqa: BLE001 - tracker remains available when queue storage is unavailable
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for job in queue_rows:
+        job_id = job.get("job_id")
+        if not isinstance(job_id, str):
+            continue
+        raw_artifact = job.get("artifact")
+        artifact: dict[str, Any] = raw_artifact if isinstance(raw_artifact, dict) else {}
+        raw_completed = job.get("result_artifact")
+        completed: dict[str, Any] = raw_completed if isinstance(raw_completed, dict) else {}
+        branch = completed.get("branch") if isinstance(completed.get("branch"), str) else None
+        refs = _grokbot_artifact_refs(artifact=artifact, completed=completed, github=github, branch=branch)
+        augmented_github = github
+        if branch and refs.get("pr_url") and not _prs_for_branch(github, branch):
+            raw_prs = github.get("prs")
+            prs: list[Any] = list(raw_prs) if isinstance(raw_prs, list) else []
+            augmented_github = {
+                **github,
+                "prs": [
+                    *prs,
+                    {"head": branch, "state": "OPEN", "url": refs["pr_url"]},
+                ],
+            }
+        classification_row = _classify_entry(
+            {
+                "id": f"grokbot:{job_id}",
+                "provider": "grokbot-cloud",
+                "task_id": job_id,
+                "label": job.get("label"),
+                "branch": branch,
+                "dispatched_at": job.get("queued_at"),
+                "source": "grokbot-queue",
+                "expected_artifact": artifact,
+            },
+            provider_tasks={job_id: {"state": job.get("state"), "ready_at": job.get("updated_at")}},
+            github=augmented_github,
+            stale_ready_hours=stale_ready_hours,
+            now=now,
+            cursor_wired=False,
+        )
+        row: dict[str, Any] = {
+            "id": f"grokbot:{job_id}",
+            "provider": "grokbot-cloud",
+            "job_id": job_id,
+            "label": job.get("label"),
+            "task_hash": job.get("task_hash"),
+            "state": job.get("state"),
+            "classification": classification_row["classification"],
+            "artifact_refs": refs,
+            "source": "grokbot-queue",
+        }
+        for key in ("created_at", "updated_at", "queued_at", "claimed_at"):
+            if isinstance(job.get(key), str):
+                row[key] = job[key]
+        rows.append(row)
+    return rows
+
+
+def _grokbot_artifact_refs(
+    *, artifact: dict[str, Any], completed: dict[str, Any], github: dict[str, Any], branch: str | None
+) -> dict[str, Any]:
+    """Keep only artifact identifiers and GitHub PR metadata safe for operators."""
+    kind = artifact.get("kind") if isinstance(artifact.get("kind"), str) else None
+    refs: dict[str, Any] = {"kind": kind}
+    if branch:
+        refs["branch"] = branch
+    if kind == "draft-pr":
+        url = completed.get("url") if isinstance(completed.get("url"), str) else None
+        pr = _prs_for_branch(github, branch)[0] if branch and _prs_for_branch(github, branch) else None
+        if isinstance(pr, dict):
+            if isinstance(pr.get("url"), str):
+                url = pr["url"]
+            if isinstance(pr.get("isDraft"), bool):
+                refs["is_draft"] = pr["isDraft"]
+            if isinstance(pr.get("headRefOid"), str):
+                refs["head_sha"] = pr["headRefOid"]
+        if url:
+            refs["pr_url"] = url
+    elif kind == "branch" and isinstance(completed.get("commit"), str):
+        refs["head_sha"] = completed["commit"]
+    elif kind == "report":
+        for key in ("path", "sha256"):
+            if isinstance(completed.get(key), str):
+                refs[key] = completed[key]
+    return refs
 
 
 def status_payload(
@@ -409,7 +520,21 @@ def status_payload(
         )
         for entry in registry["entries"]
     ]
-    entries.extend(_orphan_branch_rows(registry_entries=registry["entries"], github=github, now=observed))
+    grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
+    entries.extend(grokbot_rows)
+    known_queue_branches = {
+        refs["branch"]
+        for row in grokbot_rows
+        if isinstance((refs := row.get("artifact_refs")), dict) and isinstance(refs.get("branch"), str)
+    }
+    entries.extend(
+        _orphan_branch_rows(
+            registry_entries=registry["entries"],
+            github=github,
+            now=observed,
+            known_branches=known_queue_branches,
+        )
+    )
 
     return {
         "schema": STATUS_SCHEMA,
@@ -423,6 +548,7 @@ def status_payload(
                 "authority": "best-effort" if cursor_wired else "unwired",
                 "detail": None if cursor_wired else "no API key; cursor cloud left unwired",
             },
+            "grokbot-cloud": {"wired": True, "authority": "local-queue"},
             "github": {"wired": True, "authority": "ground-truth"},
         },
         "entries": entries,
@@ -611,7 +737,17 @@ def observe_github(target: Path) -> dict[str, Any]:
 
     prs: list[dict[str, Any]] = []
     code, stdout, _ = _run_text(
-        ["gh", "pr", "list", "--state", "all", "--json", "number,state,headRefName", "--limit", "100"],
+        [
+            "gh",
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--json",
+            "number,state,headRefName,url,isDraft,headRefOid",
+            "--limit",
+            "100",
+        ],
         cwd=target,
     )
     if code == 0 and stdout.strip():
@@ -625,7 +761,16 @@ def observe_github(target: Path) -> dict[str, Any]:
                     continue
                 head = item.get("headRefName")
                 if isinstance(head, str) and head.startswith(CLOUD_BRANCH_PREFIXES):
-                    prs.append({"head": head, "state": item.get("state"), "number": item.get("number")})
+                    prs.append(
+                        {
+                            "head": head,
+                            "state": item.get("state"),
+                            "number": item.get("number"),
+                            "url": item.get("url"),
+                            "isDraft": item.get("isDraft"),
+                            "headRefOid": item.get("headRefOid"),
+                        }
+                    )
     return {"branches": branches, "prs": prs}
 
 
@@ -703,12 +848,48 @@ def center_activity_records(
                 },
                 "links": {
                     "status": "brigade run cloud status --json",
-                    "task_id": row.get("task_id"),
-                    "branch": row.get("branch"),
+                    "task_id": row.get("task_id") or row.get("job_id"),
+                    "branch": row.get("branch")
+                    or (
+                        (row.get("artifact_refs") or {}).get("branch")
+                        if isinstance(row.get("artifact_refs"), dict)
+                        else None
+                    ),
                 },
             }
         )
     return records
+
+
+def health(
+    target: Path,
+    *,
+    now: datetime | None = None,
+    github: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a bounded local queue health summary for operator consumers."""
+    snapshot = github if isinstance(github, dict) else observe_github(target)
+    payload = status_payload(target, now=now, provider_tasks={}, github=snapshot)
+    entries = [row for row in payload.get("entries", []) if row.get("provider") == "grokbot-cloud"]
+    classifications = {name: sum(1 for row in entries if row.get("classification") == name) for name in CLASSIFICATIONS}
+    attention = classifications["stale"] + classifications["needs-investigation"] + classifications["orphaned"]
+    top = next(
+        (row for row in entries if row.get("classification") in {"stale", "needs-investigation", "orphaned"}), None
+    )
+    return {
+        "job_count": len(entries),
+        "classification_counts": classifications,
+        "issue_count": attention,
+        "top_issue": (
+            {
+                "name": "grokbot_queue_attention",
+                "detail": f"{top.get('label') or top.get('job_id')}: {top.get('classification')}",
+                "job_id": top.get("job_id"),
+            }
+            if isinstance(top, dict)
+            else None
+        ),
+    }
 
 
 def set_stale_ready_hours(target: Path, hours: int) -> dict[str, Any]:

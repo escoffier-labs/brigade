@@ -58,8 +58,8 @@ def collect(target: Path, *, now: datetime | None = None) -> list[dict[str, Any]
 def _cloud_tracker_records(target: Path, now: datetime) -> list[dict[str, Any]]:
     """Feed the Cloud machine card from the local cloud dispatch registry (#890).
 
-    Live ``gh`` / ``codex cloud`` probes stay off the request path. Those can
-    hang for seconds; Center reads the local registry snapshot instead.
+    Codex Cloud probes stay off the request path. Center uses the bounded GitHub
+    snapshot to reconcile completed draft PR jobs after merge.
     """
     try:
         from .. import cloud_tracker
@@ -68,7 +68,7 @@ def _cloud_tracker_records(target: Path, now: datetime) -> list[dict[str, Any]]:
             target,
             now=now,
             provider_tasks={},
-            github={"branches": [], "prs": []},
+            github=cloud_tracker.observe_github(target),
             cursor_wired=cloud_tracker.cursor_cloud_wired(),
         )
     except Exception:

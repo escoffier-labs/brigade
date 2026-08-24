@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from .. import (
     center_cmd,
+    cloud_tracker,
     context_cmd,
     handoff_cmd,
     memory_cmd,
@@ -149,6 +150,7 @@ def _daily_center_status_payload(target: Path) -> dict[str, Any]:
         "notifications": notifications,
         "tool_catalog": {},
         "release_readiness": None,
+        "cloud_tracker": cloud_tracker.health(target),
     }
 
 
@@ -276,6 +278,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         "open_daily_action_count": (center.get("action_queue") or {}).get("open_count", 0)
         if isinstance(center.get("action_queue"), dict)
         else 0,
+        "grokbot_cloud": center.get("cloud_tracker") if isinstance(center.get("cloud_tracker"), dict) else {},
         "top_readiness_blocker": readiness.get("blockers", [None])[0] if readiness.get("blockers") else None,
         "pending_handoff_draft_count": (handoffs.get("counts") or {}).get("pending", 0)
         if isinstance(handoffs.get("counts"), dict)
