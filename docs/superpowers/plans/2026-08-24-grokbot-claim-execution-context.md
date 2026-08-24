@@ -213,11 +213,11 @@ git commit -m "feat: hand claimed context to Grok Bot workers"
 - Modify: `docs/technical-guide.md`
 - Modify: `docs/superpowers/plans/2026-08-24-grokbot-claim-execution-context.md`
 
-- [ ] In `docs/grokbot-mcp.md`, state that a successful worker claim returns the bounded validated envelope, while list, status, operator, and CLI surfaces stay redacted. Add the routine sequence: list, claim, validate role and repository, start, renew before expiry, complete or fail.
+- [x] In `docs/grokbot-mcp.md`, state that a successful worker claim returns the bounded validated envelope, while list, status, operator, and CLI surfaces stay redacted. Add the routine sequence: list, claim, validate role and repository, start, renew before expiry, complete or fail.
 
-- [ ] In `docs/technical-guide.md`, replace the blanket claim that all mutation commands are safe projections with the exact exception for authenticated worker MCP claim. Keep the CLI statement unchanged.
+- [x] In `docs/technical-guide.md`, replace the blanket claim that all mutation commands are safe projections with the exact exception for authenticated worker MCP claim. Keep the CLI statement unchanged.
 
-- [ ] Run Vale through Brigade:
+- [x] Run Vale through Brigade on the changed prose. The full-file command remains blocked by pre-existing `Slop.Semicolon` findings in `docs/technical-guide.md`. Receipt `20260824-223754-work-verify-635786` records the clean changed-prose check.
 
 ```bash
 brigade work verify run --target . --command "vale docs/grokbot-mcp.md docs/technical-guide.md docs/superpowers/specs/2026-08-24-grokbot-claim-execution-context-design.md docs/superpowers/plans/2026-08-24-grokbot-claim-execution-context.md" --capture brigade-work
@@ -231,7 +231,7 @@ brigade work verify run --target . --command "scripts/verify" --capture brigade-
 
 Expect lint, format, typing, snapshots, all tests, and the coverage threshold to pass.
 
-- [ ] Run `git diff --check` and the public-content guard. Confirm no private hostnames, addresses, account data, credentials, absolute home paths, or model-authorship prose appears in the branch diff.
+- [x] Run `git diff --check` and the public-content guard. Confirm no private hostnames, addresses, account data, credentials, absolute home paths, or model-authorship prose appears in the branch diff.
 
 - [ ] Tick every completed checkbox and commit the docs plus plan:
 

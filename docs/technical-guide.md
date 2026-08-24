@@ -124,7 +124,7 @@ Queue data lives below `.brigade/cloud/grokbot/` with private file permissions. 
 
 Jobs move through `queued`, `claimed`, `running`, `completed`, `failed`, `expired`, and `canceled`. A bot claims work with its own opaque bot and lease IDs plus a bounded lease duration. The same claim can be retried safely, and `renew` extends the current unexpired lease within the job deadline. `cancel` ends queued work immediately or records a cancellation request for a live lease. The lease holder uses `ack-cancel` to finish that cancellation. `expire` never requeues a job; it finalizes a job after its deadline or lease expires.
 
-Only safe projections are printed by `status` and mutation commands. They include job identity, state, timing, task hash, and artifact metadata, but never the envelope's `instructions` or `verification_commands`.
+Only safe projections are printed by `status` and mutation commands. They include job identity, state, timing, task hash, and artifact metadata, but never the envelope's `instructions` or `verification_commands`. The one exception is the authenticated worker MCP claim: after a successful role-matching claim, the worker receives the bounded validated envelope as its execution context so it can execute the task without the instructions being repeated in chat. The CLI `claim` command keeps returning the redacted projection.
 
 ```bash
 brigade run cloud grokbot enqueue \
