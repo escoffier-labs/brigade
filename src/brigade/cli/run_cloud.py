@@ -377,7 +377,7 @@ def _dispatch_grokbot_ops(args, target: Path) -> int:
             return 0 if result["ok"] else 1
 
         if command == "install-service":
-            config, _bearer = grokbot_ops.build_request_config(target, instance)
+            config = grokbot_ops.load_config(target, instance)
             if args.out is None:
                 sys.stdout.write(grokbot_ops.render_unit(config, python=sys.executable, exec_root=target))
                 return 0

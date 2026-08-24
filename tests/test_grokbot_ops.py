@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import sys
+import urllib.error
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -191,12 +194,118 @@ def test_canary_verifies_auth_rejection_and_exact_inventory(tmp_path: Path, monk
         raise AssertionError(url)
 
     monkeypatch.setattr(grokbot_ops, "_open_http", fake_open)
+    monkeypatch.setattr(grokbot_ops, "_tools_list", lambda *_args: adapter.tool_inventory())
     result = grokbot_ops.canary(tmp_path, "operator", timeout=5)
 
     assert result["ok"] is True
     assert set(result["tools"]) == set(grokbot_mcp.OPERATOR_TOOLS)
     assert result["health"] == {"ok": True, "service": "grokbot-mcp", "role": "operator"}
     assert result["auth_rejected_without_bearer"] is True
+
+
+def test_canary_accepts_anonymous_http_auth_challenge(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    assert _setup(tmp_path) == 0
+
+    monkeypatch.setattr(
+        grokbot_ops,
+        "_request_json",
+        lambda *_args, **_kwargs: {"ok": True, "service": "grokbot-mcp", "role": "operator"},
+    )
+    monkeypatch.setattr(grokbot_ops, "_anonymous_health_status", lambda *_args: 401, raising=False)
+    monkeypatch.setattr(
+        grokbot_ops,
+        "_tools_list",
+        lambda *_args: [{"name": name} for name in grokbot_mcp.OPERATOR_TOOLS],
+    )
+
+    assert grokbot_ops.canary(tmp_path, "operator")["ok"] is True
+
+
+def test_anonymous_health_status_preserves_http_auth_rejection(monkeypatch):
+    def rejected(*_args, **_kwargs):
+        raise urllib.error.HTTPError("http://example.test/health", 403, "forbidden", {}, None)
+
+    monkeypatch.setattr(grokbot_ops, "_open_http", rejected)
+    assert grokbot_ops._anonymous_health_status("http://example.test/health", 1) == 403
+
+
+def test_tools_list_uses_an_initialized_official_mcp_session(monkeypatch):
+    events: list[str] = []
+
+    class _HttpClient:
+        def __init__(self, **kwargs):
+            assert kwargs["headers"] == {"Authorization": f"Bearer {SECRET}"}
+            assert kwargs["trust_env"] is False
+            events.append("http-client")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Transport:
+        async def __aenter__(self):
+            events.append("transport")
+            return object(), object()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Session:
+        def __init__(self, *_streams):
+            self.initialized = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def initialize(self):
+            self.initialized = True
+            events.append("initialize")
+
+        async def list_tools(self):
+            assert self.initialized
+            events.append("list-tools")
+            return SimpleNamespace(tools=[SimpleNamespace(model_dump=lambda: {"name": "grokbot_queue_list"})])
+
+    monkeypatch.setattr(
+        grokbot_ops,
+        "_mcp_client_components",
+        lambda: (_Session, lambda *_args, **_kwargs: _Transport(), _HttpClient),
+        raising=False,
+    )
+
+    assert grokbot_ops._tools_list("http://example.test", SECRET, 1) == [{"name": "grokbot_queue_list"}]
+    assert events == ["http-client", "transport", "initialize", "list-tools"]
+
+
+def test_mcp_client_components_use_the_sdk_http_transport(monkeypatch):
+    class _ClientSession:
+        pass
+
+    class _AsyncClient:
+        pass
+
+    mcp = ModuleType("mcp")
+    mcp.__path__ = []  # type: ignore[attr-defined]
+    mcp.ClientSession = _ClientSession  # type: ignore[attr-defined]
+    client = ModuleType("mcp.client")
+    client.__path__ = []  # type: ignore[attr-defined]
+    streamable = ModuleType("mcp.client.streamable_http")
+    streamable.streamable_http_client = object()  # type: ignore[attr-defined]
+    httpx2 = ModuleType("httpx2")
+    httpx2.AsyncClient = _AsyncClient  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mcp", mcp)
+    monkeypatch.setitem(sys.modules, "mcp.client", client)
+    monkeypatch.setitem(sys.modules, "mcp.client.streamable_http", streamable)
+    monkeypatch.setitem(sys.modules, "httpx2", httpx2)
+
+    _, _, async_client = grokbot_ops._mcp_client_components()
+    assert async_client is _AsyncClient
 
 
 def test_canary_fails_on_wrong_inventory(tmp_path: Path, monkeypatch):
@@ -223,6 +332,8 @@ def test_canary_fails_on_wrong_inventory(tmp_path: Path, monkeypatch):
         return _Response()
 
     monkeypatch.setattr(grokbot_ops, "_open_http", fake_open)
+    monkeypatch.setattr(grokbot_ops, "_anonymous_health_status", lambda *_args: 401)
+    monkeypatch.setattr(grokbot_ops, "_tools_list", lambda *_args: [{"name": "not-the-right-tool"}])
     result = grokbot_ops.canary(tmp_path, "operator", timeout=5)
     assert result["ok"] is False
     assert "inventory" in result["reason"]
@@ -256,10 +367,12 @@ def test_render_unit_is_role_scoped_with_protected_token_reference_only(tmp_path
     )
     rendered = unit
     assert "brigade-grokbot-repository-scout.service" in rendered or "repository-scout" in rendered
-    assert "EnvironmentFile=" in rendered and str(token_file) in rendered
+    assert "EnvironmentFile=" not in rendered
+    assert "--bearer-file" in rendered and str(token_file) in rendered
     assert SECRET not in rendered
     assert "sudo" not in rendered.lower()
     assert "NoNewPrivileges=yes" in rendered
+    assert f"ReadWritePaths={tmp_path / '.brigade' / 'grokbot'}" in rendered
 
     env_unit = grokbot_ops.render_unit(
         {
@@ -275,6 +388,31 @@ def test_render_unit_is_role_scoped_with_protected_token_reference_only(tmp_path
     )
     assert "EnvironmentFile" not in env_unit
     assert "--bearer-env TEST_GROKBOT_BEARER" in env_unit
+
+
+def test_render_unit_quotes_space_and_quote_arguments_and_rejects_controls(tmp_path: Path):
+    token_file = tmp_path / "token with space.txt"
+    config = {
+        "schema": grokbot_ops.CONFIG_SCHEMA,
+        "instance": "operator",
+        "bind": "127.0.0.1:8766",
+        "allowed_hosts": ["mcp.example.test"],
+        "allowed_origins": ["https://console.example.test"],
+        "bearer": {"kind": "file", "path": str(token_file)},
+    }
+
+    rendered = grokbot_ops.render_unit(config, python="/opt/python with space", exec_root=tmp_path)
+    assert '"/opt/python with space"' in rendered
+    assert f'"{token_file}"' in rendered
+
+    config["bearer"] = {"kind": "file", "path": f"{token_file}\nExecStart=/bin/false"}
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_ops.render_unit(config, python="/usr/bin/python3", exec_root=tmp_path)
+
+    for expanded in ("/tmp/token%N", "/tmp/$TOKEN"):
+        config["bearer"] = {"kind": "file", "path": expanded}
+        with pytest.raises(grokbot_mcp.ConfigurationError):
+            grokbot_ops.render_unit(config, python="/usr/bin/python3", exec_root=tmp_path)
 
 
 def test_write_unit_refuses_unrelated_overwrites_and_honors_force(tmp_path: Path):
@@ -307,6 +445,7 @@ def test_write_unit_refuses_unrelated_overwrites_and_honors_force(tmp_path: Path
 def test_install_service_cli_prints_dry_run_by_default(tmp_path: Path, monkeypatch, capsys):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     assert _setup(tmp_path) == 0
+    monkeypatch.delenv("TEST_GROKBOT_BEARER")
 
     assert (
         cli.main(["run", "cloud", "grokbot", "install-service", "--target", str(tmp_path), "--instance", "operator"])
