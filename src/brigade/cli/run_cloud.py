@@ -110,6 +110,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     add_target(p_grokbot_status)
     p_grokbot_status.add_argument("--job-id", default=None)
 
+    p_grokbot_serve = grokbot_sub.add_parser("serve", help="Run the role-scoped Grok Bot MCP listener.")
+    p_grokbot_serve.add_argument("--target", type=Path, default=Path("."))
+    p_grokbot_serve.add_argument("--instance", required=True, choices=("operator", "repository-scout", "implementation-worker"))
+    p_grokbot_serve.add_argument("--bind", default="127.0.0.1:8766", help="Listener host:port. Defaults to loopback.")
+    p_grokbot_serve.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
+    p_grokbot_serve.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
+    secret_group = p_grokbot_serve.add_mutually_exclusive_group(required=True)
+    secret_group.add_argument("--bearer-file", type=Path, help="Protected file containing the listener bearer.")
+    secret_group.add_argument("--bearer-env", help="Environment variable name containing the listener bearer.")
+
     p.set_defaults(func=dispatch)
 
 
@@ -228,6 +238,27 @@ def _dispatch_grokbot(args, target: Path) -> int:
     from .. import grokbot_jobs
 
     command = args.grokbot_command
+    if command == "serve":
+        from .. import grokbot_mcp
+
+        try:
+            config = grokbot_mcp.build_listener_config(
+                target=target,
+                instance=args.instance,
+                bind=args.bind,
+                allowed_hosts=args.allow_host,
+                allowed_origins=args.allow_origin,
+                bearer_file=args.bearer_file,
+                bearer_env=args.bearer_env,
+            )
+            grokbot_mcp.run_listener(config)
+        except grokbot_mcp.OptionalDependencyError:
+            print("error: Grok Bot listener requires pip install brigade-cli[grokbot]", file=sys.stderr)
+            return 2
+        except grokbot_mcp.ConfigurationError:
+            print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
+            return 2
+        return 0
     try:
         if command == "enqueue":
             result = grokbot_jobs.enqueue(target, _read_json_object(args.spec, "--spec"), args.idempotency_key)
