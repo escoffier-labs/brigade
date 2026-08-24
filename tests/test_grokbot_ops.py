@@ -59,6 +59,7 @@ def test_setup_writes_role_scoped_config_without_secret_values(tmp_path: Path, m
     assert config["instance"] == "operator"
     assert config["bind"] == "127.0.0.1:8766"
     assert config["bearer"] == {"kind": "env", "name": "TEST_GROKBOT_BEARER"}
+    assert (tmp_path / grokbot_ops.QUEUE_STATE_DIR).is_dir()
 
 
 def test_setup_supports_all_roles_and_secret_file_references(tmp_path: Path):
@@ -372,7 +373,7 @@ def test_render_unit_is_role_scoped_with_protected_token_reference_only(tmp_path
     assert SECRET not in rendered
     assert "sudo" not in rendered.lower()
     assert "NoNewPrivileges=yes" in rendered
-    assert f"ReadWritePaths={tmp_path / '.brigade' / 'grokbot'}" in rendered
+    assert f"ReadWritePaths={tmp_path / '.brigade' / 'cloud' / 'grokbot'}" in rendered
 
     env_unit = grokbot_ops.render_unit(
         {
