@@ -821,6 +821,7 @@ def repo_claim(
             owner=decision.owner,
         )
     stop = threading.Event()
+    pending_orphan_release = threading.Event()
 
     def _renew_loop() -> None:
         warned_unavailable = False
@@ -838,13 +839,7 @@ def repo_claim(
                     target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds
                 )
                 if not outcome.granted and outcome.reason == "hub-unavailable":
-                    _schedule_orphan_release(
-                        target,
-                        node_id=node_id,
-                        holder=holder,
-                        conductor=conductor,
-                        ttl_seconds=ttl_seconds,
-                    )
+                    pending_orphan_release.set()
             if outcome.granted:
                 warned_unavailable = False
                 continue
@@ -873,3 +868,11 @@ def repo_claim(
         # guard above.
         heartbeat.join(timeout=2 * CLAIM_TIMEOUT_SECONDS + 1)
         release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
+        if pending_orphan_release.is_set():
+            _schedule_orphan_release(
+                target,
+                node_id=node_id,
+                holder=holder,
+                conductor=conductor,
+                ttl_seconds=ttl_seconds,
+            )

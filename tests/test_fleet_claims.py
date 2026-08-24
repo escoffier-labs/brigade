@@ -479,6 +479,60 @@ class TestClientClaims:
             time.sleep(0.02)
         assert fleet_client.fetch_claims(include_all=True) == [], "timed-out re-acquire left an orphaned claim"
 
+    def test_timed_out_heartbeat_reacquire_stays_held_until_exit(self, hub, monkeypatch):
+        """Late re-acquire cleanup cannot release a claim while its run is live."""
+        url, token, db = hub
+        self._env(monkeypatch, url, token)
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.01)
+        monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 0.15)
+        real_post = fleet_client._post_claim_blocking
+        real_renew = fleet_client.renew_claim
+        allow_missing = threading.Event()
+        reacquire_finished = threading.Event()
+        renew_succeeded = threading.Event()
+        acquire_calls = 0
+        renew_calls = 0
+
+        def delayed_reacquire(hub_url, tok, body, *, timeout):
+            nonlocal acquire_calls
+            if body["action"] == "acquire":
+                acquire_calls += 1
+                if acquire_calls == 2:
+                    time.sleep(0.1)
+                    result = real_post(hub_url, tok, body, timeout=timeout)
+                    reacquire_finished.set()
+                    return result
+            return real_post(hub_url, tok, body, timeout=timeout)
+
+        def controlled_renew(target, **kwargs):
+            nonlocal renew_calls
+            assert allow_missing.wait(5)
+            renew_calls += 1
+            if renew_calls == 1:
+                return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
+            assert reacquire_finished.wait(5)
+            result = real_renew(target, **kwargs)
+            if result.granted:
+                renew_succeeded.set()
+            return result
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", delayed_reacquire)
+        monkeypatch.setattr(fleet_client, "renew_claim", controlled_renew)
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60):
+            conn = fleet_hub.init_db(db)
+            try:
+                conn.execute("DELETE FROM claims")
+                conn.commit()
+            finally:
+                conn.close()
+            allow_missing.set()
+            assert renew_succeeded.wait(5), "heartbeat never renewed the late re-acquire"
+            time.sleep(0.25)
+            assert [c["target"] for c in fleet_client.fetch_claims()] == ["repo-a"]
+
+        assert fleet_client.fetch_claims(include_all=True) == []
+
     def test_release_with_renew_in_flight_never_resurrects(self, hub, monkeypatch):
         """A heartbeat renew that lands after release must not re-acquire the
         row: the released target stays free instead of leaking for a TTL."""
