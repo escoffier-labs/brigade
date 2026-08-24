@@ -4,7 +4,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from brigade import aboyeur, cli, doctor as doctor_mod, node, run_id, runguard, runs_cmd
+import pytest
+
+from brigade import aboyeur, cli, doctor as doctor_mod, fleet_client, node, run_id, runguard, runs_cmd
 from brigade.station import DoctorContext
 
 
@@ -44,6 +46,48 @@ def test_node_cli_text_form(tmp_path, monkeypatch, capsys):
     assert "short_id:" in out
     assert "hostname: testhost" in out
     assert "roles: (none)" in out
+
+
+def test_node_machine_defaults_to_the_home_identity_path(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(node.socket, "gethostname", lambda: "testhost.example")
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home" / ".brigade"))
+    assert cli.main(["node", "--machine", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    identity_path = tmp_path / "home" / ".brigade" / "node.toml"
+    assert identity_path.is_file()
+    assert not (tmp_path / ".brigade").exists()
+    assert fleet_client.resolve_node_id() == payload["node_id"]
+
+
+def test_node_machine_repeated_runs_are_stable(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(node.socket, "gethostname", lambda: "testhost.example")
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home" / ".brigade"))
+    assert cli.main(["node", "--machine", "--json"]) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert cli.main(["node", "--machine", "--json"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["node_id"] == first["node_id"]
+    assert second["short_id"] == first["short_id"]
+
+
+def test_node_machine_respects_a_brigade_home_override(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(node.socket, "gethostname", lambda: "testhost.example")
+    override = tmp_path / "custom-home"
+    monkeypatch.setenv("BRIGADE_HOME", str(override))
+    assert cli.main(["node", "--machine", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    identity_path = override / ".brigade" / "node.toml"
+    assert identity_path.is_file()
+    assert not (override / "node.toml").exists()
+    assert node.load_identity(override).node_id == payload["node_id"]
+
+
+@pytest.mark.parametrize("flag", ["--target", "-t"])
+def test_node_machine_rejects_target(tmp_path, flag):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["node", "--machine", flag, str(tmp_path)])
+    assert excinfo.value.code == 2
+    assert not (tmp_path / ".brigade").exists()
 
 
 def test_run_id_namespacing_round_trip():

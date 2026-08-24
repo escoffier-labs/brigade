@@ -249,9 +249,12 @@ def _claims_table_needs_migration(claims_columns: set[str]) -> bool:
 
 
 # Intra-process serialization for the claims migration, in addition to the
-# SQL-level BEGIN IMMEDIATE: init_db runs per request on a threading server,
-# and a first-touch storm is same-process thread contention, which a plain
-# Python lock resolves deterministically instead of via busy-timeout races.
+# SQL-level BEGIN IMMEDIATE. Schema work happens once at server startup
+# (``make_server`` → ``init_db``), so within one process this is not
+# per-request contention anymore, but ``init_db`` stays lock-guarded so a
+# first-touch storm of concurrent callers (other processes, or tests) is
+# same-process thread contention resolved deterministically instead of via
+# busy-timeout races.
 _MIGRATION_LOCKS: dict[str, threading.Lock] = {}
 _MIGRATION_LOCKS_GUARD = threading.Lock()
 
@@ -261,10 +264,8 @@ def _migration_lock(db_path: Path) -> threading.Lock:
         return _MIGRATION_LOCKS.setdefault(str(db_path), threading.Lock())
 
 
-# Backoff for the migration write lock. init_db runs per request, so a
-# first-touch storm (every request racing to migrate a fresh v2 database)
-# can push a waiter past the 5s busy timeout on a loaded host; each retry
-# first re-checks whether another connection already finished the job.
+# Backoff for the migration write lock. Each retry first re-checks whether
+# another connection already finished the job.
 _MIGRATION_LOCK_DELAYS: tuple[float | None, ...] = (0.05, 0.1, 0.2, 0.4, 0.8, None)
 
 
@@ -319,36 +320,73 @@ def _migrate_claims_table(conn: sqlite3.Connection) -> None:
         raise
 
 
-def init_db(db_path: Path) -> sqlite3.Connection:
-    """Open the hub database, creating the schema on first use.
-
-    WAL mode for concurrent readers; ``PRAGMA user_version`` records the schema
-    version. A database written by a newer hub is refused rather than
-    silently reinterpreted.
-    """
-    db_path = Path(db_path).expanduser()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+def _refuse_newer_schema(conn: sqlite3.Connection, db_path: Path) -> None:
+    """Raise ``FleetHubError`` when ``conn``'s database is from a newer hub."""
     current = conn.execute("PRAGMA user_version").fetchone()[0]
-    if current > SCHEMA_VERSION:
-        conn.close()
+    if not isinstance(current, int) or current > SCHEMA_VERSION:
         raise FleetHubError(
             f"fleet hub database {db_path} has schema version {current}; this brigade supports {SCHEMA_VERSION}"
         )
-    conn.execute(_SCHEMA)
-    if _claims_table_needs_migration(_claims_columns(conn)):
-        with _migration_lock(db_path):
-            # Re-check under the lock: the thread that held it first has
-            # usually done the work already.
-            if _claims_table_needs_migration(_claims_columns(conn)):
-                _migrate_claims_table(conn)
-    conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
-    # v3 -> v4 is one additive table; IF NOT EXISTS is the whole migration.
-    conn.execute(_NODES_SCHEMA)
-    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-    conn.commit()
+
+
+def open_db(db_path: Path) -> sqlite3.Connection:
+    """Open a read/write connection to an **existing** hub database without
+    touching its schema or persistence mode.
+
+    This is what request handlers use (#1161): schema creation and migration
+    happen exactly once at server startup (``init_db``), so a request can
+    never stall on DDL behind another caller's write lock, but every request
+    still opens a fresh connection, so ``lookup_node_token`` sees enrollments
+    and revocations the moment they commit. The open itself is side-effect
+    free: URI ``mode=rw`` never creates a missing database file, no
+    ``PRAGMA journal_mode`` is issued (WAL is set up once by startup's
+    ``init_db``, not per connection), and any setup or version error,
+    including a database written by a newer hub, closes the connection
+    before raising rather than leaking it.
+    """
+    db_path = Path(db_path).expanduser().resolve()
+    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=rw", timeout=10, uri=True)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        _refuse_newer_schema(conn, db_path)
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def init_db(db_path: Path) -> sqlite3.Connection:
+    """Open the hub database and create/migrate its schema.
+
+    Called once at server startup (``make_server``, before the socket serves
+    any request) and by tools and tests that want a migrated connection;
+    request handlers use the non-migrating ``open_db`` instead. This is also
+    the only place WAL mode is set (#1161): it persists in the database file,
+    so request connections inherit it without re-issuing the pragma.
+    """
+    db_path = Path(db_path).expanduser()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved = db_path.resolve()
+    conn = sqlite3.connect(str(resolved), timeout=10)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        _refuse_newer_schema(conn, resolved)
+        conn.execute(_SCHEMA)
+        if _claims_table_needs_migration(_claims_columns(conn)):
+            with _migration_lock(db_path):
+                # Re-check under the lock: the thread that held it first has
+                # usually done the work already.
+                if _claims_table_needs_migration(_claims_columns(conn)):
+                    _migrate_claims_table(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
+        # v3 -> v4 is one additive table; IF NOT EXISTS is the whole migration.
+        conn.execute(_NODES_SCHEMA)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.commit()
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -1064,7 +1102,9 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
                 )
                 return
             try:
-                conn = init_db(Path(db_path))
+                # Non-migrating connection (#1161): the schema exists because
+                # server startup created it; this open is read/write only.
+                conn = open_db(Path(db_path))
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -1104,7 +1144,7 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
                     return
                 include_all = parse_qs(query).get("all", [""])[0].lower() in ("1", "true", "yes")
                 try:
-                    conn = init_db(Path(db_path))
+                    conn = open_db(Path(db_path))
                 except (FleetHubError, sqlite3.Error) as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
                     return
@@ -1142,9 +1182,11 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
                 return
             # The database is opened before the body is read: a node token
             # is resolved against it, and an unauthenticated peer must not
-            # get the hub to read its (up to 8 MiB) body first.
+            # get the hub to read its (up to 8 MiB) body first. This is a
+            # non-migrating connection (#1161): the schema was created once
+            # at server startup.
             try:
-                conn = init_db(Path(db_path))
+                conn = open_db(Path(db_path))
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_json(500, {"error": f"hub database error: {exc}"})
                 return
@@ -1207,7 +1249,15 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
 def make_server(
     host: str, port: int, db_path: Path, token: str, *, allow_admin_writes: bool = False
 ) -> ThreadingHTTPServer:
-    """Build (but do not serve) the hub HTTPServer; used by tests."""
+    """Build (but do not serve) the hub HTTPServer; used by tests.
+
+    The database is created/migrated exactly once here, before the socket
+    exists, so no request can ever arrive first (#1161). Request handlers then
+    use non-migrating connections (``open_db``), keeping token lookup live per
+    request. Raises ``FleetHubError``/``sqlite3.Error`` on an unusable or
+    too-new database.
+    """
+    init_db(Path(db_path)).close()
     return ThreadingHTTPServer((host, port), make_handler(token, Path(db_path), allow_admin_writes=allow_admin_writes))
 
 
@@ -1222,7 +1272,13 @@ def run(
     except FleetHubError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    server = make_server(host, port, Path(db_path).expanduser(), token, allow_admin_writes=allow_admin_writes)
+    try:
+        server = make_server(host, port, Path(db_path).expanduser(), token, allow_admin_writes=allow_admin_writes)
+    except (FleetHubError, sqlite3.Error) as exc:
+        # Startup migration is the one place the hub touches the schema: if
+        # it cannot be done, refuse to serve rather than 500-ing every request.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     bound_host, bound_port = str(server.server_address[0]), int(server.server_address[1])
     mode = "admin writes allowed" if allow_admin_writes else "node tokens required for writes"
     print(f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()}; {mode})")

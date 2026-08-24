@@ -247,10 +247,10 @@ The response from `/events` reports `accepted: 1` for the first post. Reposting 
 
 ## 7. Enroll and configure each Brigade client
 
-Every machine needs its own node token. On the machine, print its node identity (created once per workspace by `brigade node`; the per-user fallback lives in `~/.brigade/node.toml`):
+Every machine needs its own node token. On the machine, print its machine identity (`brigade node --machine` creates it once under `BRIGADE_HOME`, `~/.brigade/node.toml` by default; this is the identity every event and claim is stamped with, never a workspace-local one):
 
 ```bash
-brigade node --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node_id"])'
+brigade node --machine --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node_id"])'
 ```
 
 From the operator machine that holds the admin token (`[fleet] token_file` in its own `~/.brigade/fleet.toml`, or `BRIGADE_FLEET_TOKEN`), enroll that identity. The token is printed once and never again; the hub keeps only its hash:
@@ -452,7 +452,7 @@ Keep the SQLite file during an application rollback. A hub refuses a database wi
 
 ### `POST /events` or `POST /claims` returns HTTP 403
 
-The token was accepted but may not act as the `node_id` in the body. Either the client sends the admin token (no `node_token_file` configured; the client also logged the shared-token `WARNING`) to a hub without `--allow-admin-writes`, or the node token installed on the machine was minted for a different `node_id` than the one `brigade node` reports there. Compare `brigade node --json` on the machine with `brigade fleet nodes list` on the operator machine, then re-enroll (section 7). Events produced in the meantime stay in the client spool and go out on the next `brigade fleet flush`.
+The token was accepted but may not act as the `node_id` in the body. Either the client sends the admin token (no `node_token_file` configured; the client also logged the shared-token `WARNING`) to a hub without `--allow-admin-writes`, or the node token installed on the machine was minted for a different `node_id` than the one `brigade node --machine --json` reports there. Compare `brigade node --machine --json` on the machine with `brigade fleet nodes list` on the operator machine, then re-enroll (section 7). Events produced in the meantime stay in the client spool and go out on the next `brigade fleet flush`.
 
 ### `GET /status` or `POST /events` returns HTTP 401
 

@@ -100,6 +100,16 @@ def _event_count(db, node: str) -> int:
         conn.close()
 
 
+def _plant_home_identity(home: Path, node_id: str) -> None:
+    """Write the per-user machine identity at ``<home>/.brigade/node.toml``."""
+    from brigade import node as node_mod
+
+    identity = node_mod.NodeIdentity(node_id=node_id, hostname="fleet-test", roles=(), platform="test")
+    path = node_mod.node_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(node_mod._format_node_toml(identity), encoding="utf-8")
+
+
 class TestHubNodeCredentials:
     def test_admin_writes_off_by_default(self, hub):
         url, db = hub
@@ -285,6 +295,9 @@ class TestClientNodeToken:
         self.home = tmp_path / "brigade-home"
         self.home.mkdir(parents=True)
         monkeypatch.setenv("BRIGADE_HOME", str(self.home))
+        # This machine is enrolled as NODE_A: its home identity matches its
+        # node token, so hub traffic is stamped with NODE_A.
+        _plant_home_identity(self.home, NODE_A)
         for name in ("BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_TOKEN", "BRIGADE_FLEET_NODE_TOKEN"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setattr(fleet_client, "_SHARED_TOKEN_WARNED", False)
@@ -316,17 +329,22 @@ class TestClientNodeToken:
         assert fleet_client.fetch_status(include_all=True)[0]["node_id"] == NODE_A
         assert fleet_client.fetch_nodes()[0]["node_id"] == NODE_A
 
-    def test_node_token_cannot_report_as_another_node(self, hub, caplog):
+    def test_payload_node_id_is_never_the_hub_facing_identity(self, hub, caplog):
+        """An event payload claiming another node is re-stamped with this
+        machine's identity before it is sent; the delivered row is ours."""
         url, db = hub
         self._config(url, node=_enroll(url, NODE_A))
         with caplog.at_level("WARNING", logger="brigade.fleet"):
-            assert fleet_client.report_event(_event(NODE_B)) is False
-        # A 403 is a credential problem the operator fixes: the spool is kept.
-        assert json.loads(fleet_client.spool_path(NODE_B).read_text().splitlines()[0])["node_id"] == NODE_B
+            assert fleet_client.report_event(_event(NODE_B)) is True
         assert _event_count(db, NODE_B) == 0
-        decision = fleet_client.acquire_claim("repo-a", node_id=NODE_B)
-        assert decision.granted is False and decision.reason == "hub-unavailable"
-        assert "does not match the caller's node token" in (decision.detail or "")
+        assert not (self.home / "fleet-spool").exists()
+        conn = sqlite3.connect(str(db))
+        try:
+            rows = [r[0] for r in conn.execute("SELECT node_id FROM events").fetchall()]
+        finally:
+            conn.close()
+        assert rows == [NODE_A]
+        assert not any("shared-token" in r.message for r in caplog.records)
 
     def test_shared_token_fallback_still_works_with_one_warning(self, legacy_hub, caplog):
         url, db = legacy_hub
@@ -483,3 +501,177 @@ class TestNodesCli:
             == 0
         )
         assert "admin writes allowed" in capsys.readouterr().out
+
+
+class TestServerStartupMigration:
+    """#1161: schema creation/migration happens exactly once at server
+    startup, before the socket can serve anything; request handlers open
+    non-migrating connections (``open_db``) so enrollments and revocations
+    commit-visible to one request are visible to the very next one."""
+
+    def _pre_holder_token_db(self, db: Path) -> None:
+        """An early-v2 database: a claims table predating holder tokens."""
+        db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("CREATE TABLE claims (target TEXT PRIMARY KEY, node_id TEXT, expires_at TEXT)")
+            conn.execute("PRAGMA user_version=2")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_startup_migrates_once_before_the_socket_exists(self, tmp_path, monkeypatch):
+        db = tmp_path / "hub" / "fleet.db"
+        self._pre_holder_token_db(db)
+        init_calls: list[Path] = []
+        real_init_db = fleet_hub.init_db
+
+        def counting_init(path):
+            init_calls.append(Path(path))
+            return real_init_db(path)
+
+        monkeypatch.setattr(fleet_hub, "init_db", counting_init)
+        server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN, allow_admin_writes=False)
+        try:
+            # make_server returned before any request could possibly arrive.
+            assert init_calls == [db]
+            conn = sqlite3.connect(str(db))
+            try:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+            finally:
+                conn.close()
+            assert version == fleet_hub.SCHEMA_VERSION
+            assert {"holder_token", "lock_token", "lock_acquired_at", "lock_run_dir"} <= columns
+        finally:
+            server.server_close()
+
+    def test_startup_migration_refuses_to_serve_an_unusable_database(self, tmp_path):
+        """Startup migration is the one place the hub touches the schema: if
+        it cannot be done, make_server fails before any socket exists."""
+        db = tmp_path / "hub" / "fleet.db"
+        self._pre_holder_token_db(db)
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(f"PRAGMA user_version={fleet_hub.SCHEMA_VERSION + 1}")
+            conn.commit()
+        finally:
+            conn.close()
+        with pytest.raises(fleet_hub.FleetHubError):
+            fleet_hub.make_server("127.0.0.1", 0, db, ADMIN, allow_admin_writes=False)
+
+    def test_handlers_open_the_database_without_migrating(self, tmp_path, monkeypatch):
+        db = tmp_path / "hub" / "fleet.db"
+        init_calls: list[str] = []
+        open_calls: list[str] = []
+        real_init_db, real_open_db = fleet_hub.init_db, fleet_hub.open_db
+
+        def counting_init(path):
+            init_calls.append(str(path))
+            return real_init_db(path)
+
+        def counting_open(path):
+            open_calls.append(str(path))
+            return real_open_db(path)
+
+        monkeypatch.setattr(fleet_hub, "init_db", counting_init)
+        monkeypatch.setattr(fleet_hub, "open_db", counting_open)
+        server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN, allow_admin_writes=False)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}"
+            opens_after_startup = len(open_calls)  # init_db itself opened once internally
+            assert init_calls == [str(db)]
+            assert _request(url, "/status", ADMIN)[0] == 200
+            assert _request(url, "/claims", ADMIN)[0] == 200
+            assert len(open_calls) >= opens_after_startup + 2  # each db-touching request opened fresh
+            assert init_calls == [str(db)]  # never again after startup
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_running_server_observes_enroll_and_revoke_immediately(self, tmp_path, monkeypatch):
+        db = tmp_path / "hub" / "fleet.db"
+        server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN, allow_admin_writes=False)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}"
+            # Enrolled after startup; the next claim request already sees the row.
+            token_a = _enroll(url, NODE_A)
+            monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+            monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token_a)
+            granted = fleet_client.acquire_claim("repo-a", node_id=NODE_A)
+            assert granted.granted is True and granted.claim is not None
+            assert granted.claim["owner_node"] == NODE_A
+            # Revoked mid-flight; the very next request is refused and the
+            # client maps it to the stable auth-failed outcome (#1161).
+            status, payload = _request(url, "/nodes", ADMIN, {"action": "revoke", "node_id": NODE_A})
+            assert status == 200 and payload["revoked"] is True
+            refused = fleet_client.acquire_claim("repo-b", node_id=NODE_A)
+            assert refused.granted is False and refused.reason == "auth-failed"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class TestOpenDbSideEffectFree:
+    """#1161: ``open_db`` is a plain read/write open of an existing hub
+    database: it never creates a file and never rewrites persistence mode;
+    schema creation (v4, WAL) stays with ``init_db`` at server startup."""
+
+    def test_missing_database_raises_and_creates_no_file(self, tmp_path):
+        db = tmp_path / "hub" / "fleet.db"
+        with pytest.raises(sqlite3.OperationalError):
+            fleet_hub.open_db(db)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_opening_an_existing_database_does_not_change_its_journal_mode(self, tmp_path):
+        db = tmp_path / "hub" / "fleet.db"
+        db.parent.mkdir(parents=True)
+        plain = sqlite3.connect(str(db))
+        try:
+            plain.execute("CREATE TABLE t (x)")
+            plain.commit()
+            before = plain.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            plain.close()
+        assert before != "wal"
+        opened = fleet_hub.open_db(db)
+        try:
+            after = opened.execute("PRAGMA journal_mode").fetchone()[0]
+            version = opened.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            opened.close()
+        assert after == before
+        assert version == 0  # no schema appeared behind the caller's back
+        assert sorted(p.name for p in db.parent.iterdir()) == [db.name]
+
+    def test_wal_database_stays_wal_across_open_db(self, tmp_path):
+        db = tmp_path / "hub" / "fleet.db"
+        first = fleet_hub.init_db(db)
+        try:
+            assert first.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        finally:
+            first.close()
+        reopened = fleet_hub.open_db(db)
+        try:
+            assert reopened.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        finally:
+            reopened.close()
+
+    def test_startup_creates_schema_v4_in_wal_mode(self, tmp_path):
+        db = tmp_path / "hub" / "fleet.db"
+        server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN, allow_admin_writes=False)
+        server.server_close()
+        conn = sqlite3.connect(str(db))
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+        assert mode == "wal"
+        assert version == fleet_hub.SCHEMA_VERSION == 4
+        assert {"events", "claims", "nodes"} <= tables

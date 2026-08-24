@@ -88,6 +88,16 @@ def _env(monkeypatch, url: str, token: str) -> None:
     monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
 
 
+def _plant_home_identity(home: Path, node_id: str) -> None:
+    """Write the per-user machine identity at ``<home>/.brigade/node.toml``."""
+    from brigade import node as node_mod
+
+    identity = node_mod.NodeIdentity(node_id=node_id, hostname="fleet-test", roles=(), platform="test")
+    path = node_mod.node_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(node_mod._format_node_toml(identity), encoding="utf-8")
+
+
 class TestHubScopes:
     def test_acquire_scope_node_supersedes_own_dead_lease_only(self, hub):
         url, token, _db = hub
@@ -729,6 +739,7 @@ class TestDispatchRecovery:
         from brigade import node as node_mod
 
         monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
+        _plant_home_identity(tmp_path / "home", NODE_A)
         ws = tmp_path / "ws"
         (ws / ".brigade").mkdir(parents=True)
         node_mod.ensure_identity(ws)
@@ -755,17 +766,17 @@ class TestDispatchRecovery:
         return abandoned
 
     def test_dead_owner_lock_supersedes_own_stale_claim_without_ttl_wait(self, hub, workspace, monkeypatch, caplog):
-        from brigade import aboyeur, node as node_mod
+        from brigade import aboyeur
 
         url, token, _db = hub
         _env(monkeypatch, url, token)
         ws, roster_path = workspace
-        identity = node_mod.load_identity(ws)
-        assert identity is not None
-        # The killed run's claim: this node, full default TTL, a token nobody
-        # has, taken under the lease its run.lock still records.
+        # The killed run's claim: this *machine* (claims are keyed by the home
+        # identity, #1161; the workspace's own node.toml stays local), full
+        # default TTL, a token nobody has, taken under the lease its run.lock
+        # still records.
         status, payload = _post(
-            url, token, _claim(node=identity.node_id, target="ws", holder="dead", conductor="chef", lock=_lease())
+            url, token, _claim(node=NODE_A, target="ws", holder="dead", conductor="chef", lock=_lease())
         )
         assert status == 200
         dead_claim = payload["claim"]
@@ -776,7 +787,7 @@ class TestDispatchRecovery:
         with caplog.at_level("WARNING", logger="brigade.fleet"):
             assert self._run(ws, roster_path) == 0
         assert time.monotonic() - started < dead_claim["ttl_seconds"] / 10
-        assert [(c["target"], c["owner_node"]) for c in held_during_run] == [("ws", identity.node_id)]
+        assert [(c["target"], c["owner_node"]) for c in held_during_run] == [("ws", NODE_A)]
         assert held_during_run[0]["acquired_at"] != dead_claim["acquired_at"]
         assert sum("superseded this node's unexpired claim" in r.message for r in caplog.records) == 1
         # The lease reconcile terminalized the dead run, and the run released its claim on exit.
@@ -850,22 +861,22 @@ class TestDispatchRecovery:
         assert _post(url, token, _claim("renew", node=NODE_A, target="api", holder="live-a"))[1]["renewed"] is True
 
     def test_own_stale_claim_without_dead_lock_is_refused_with_hint(self, hub, workspace, monkeypatch, capsys):
-        from brigade import aboyeur, node as node_mod
+        from brigade import aboyeur
 
         url, token, _db = hub
         _env(monkeypatch, url, token)
         ws, roster_path = workspace
-        identity = node_mod.load_identity(ws)
-        assert identity is not None
-        _post(url, token, _claim(node=identity.node_id, target="ws", holder="dead", lock=_lease()))
+        # The stale claim belongs to this *machine* (#1161: claims are keyed
+        # by the home identity, never the workspace-local node.toml).
+        _post(url, token, _claim(node=NODE_A, target="ws", holder="dead", lock=_lease()))
         dispatched = []
         monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
         assert self._run(ws, roster_path) == 2
         err = capsys.readouterr().err
-        assert f"claimed by node {identity.node_id}" in err
+        assert f"claimed by node {NODE_A}" in err
         assert "brigade fleet claims --release ws" in err and "--no-fleet-claim" in err
         assert dispatched == []
-        assert [c["owner_node"] for c in fleet_client.fetch_claims()] == [identity.node_id]
+        assert [c["owner_node"] for c in fleet_client.fetch_claims()] == [NODE_A]
 
     def test_dead_owner_lock_never_steals_another_nodes_claim(self, hub, workspace, monkeypatch, capsys):
         from brigade import aboyeur
@@ -898,6 +909,66 @@ class TestDispatchRecovery:
         assert [c["owner_node"] for c in fleet_client.fetch_claims()] == [NODE_B]
         skipped = [r.message for r in caplog.records if "--no-fleet-claim" in r.message]
         assert len(skipped) == 1 and "ws" in skipped[0]
+
+
+class TestRunCredentialRefusal:
+    """#1161 end to end: a heartbeat credential refusal while dispatch is
+    active aborts the run with the credential-failure code and records the
+    intended failed termination, not a user cancellation."""
+
+    @pytest.fixture()
+    def workspace(self, tmp_path, monkeypatch):
+        from brigade import node as node_mod
+
+        monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
+        _plant_home_identity(tmp_path / "home", NODE_A)
+        ws = tmp_path / "ws"
+        (ws / ".brigade").mkdir(parents=True)
+        node_mod.ensure_identity(ws)
+        roster_path = ws / "roster.toml"
+        roster_path.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+        return ws, roster_path
+
+    def test_midrun_refusal_aborts_dispatch_and_records_failed_termination(self, hub, workspace, monkeypatch, capsys):
+        from brigade import aboyeur, cli
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        ws, roster_path = workspace
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.02)
+        real_post = fleet_client._post_claim_blocking
+        dispatch_active = threading.Event()
+
+        def refuse_midrun_renew(hub_url, tok, body, *, timeout):
+            if body["action"] == "renew" and dispatch_active.is_set():
+                return 401, {"error": "node token revoked"}
+            return real_post(hub_url, tok, body, timeout=timeout)
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", refuse_midrun_renew)
+
+        def active_dispatch(*a, **kw):
+            # Dispatch is live: from here on the hub refuses this machine's
+            # token; the heartbeat callback must interrupt us like Ctrl-C.
+            dispatch_active.set()
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                time.sleep(0.05)
+            return 0  # pragma: no cover - the refusal must interrupt first
+
+        monkeypatch.setattr(aboyeur, "run", active_dispatch)
+        assert cli.main(["run", "do something", "--roster", str(roster_path), "--cwd", str(ws)]) == 2
+        err = capsys.readouterr().err
+        assert "fleet hub rejected this node's credentials" in err
+        assert "canceled by user" not in err
+        receipts = list((ws / ".brigade" / "runs").glob("*/run.json"))
+        assert len(receipts) == 1
+        receipt = json.loads(receipts[0].read_text())
+        assert receipt["status"] == "failed"
+        assert receipt["failure_phase"] == "dispatch"
+        assert receipt["failure"]["kind"] == "fleet-credentials-rejected"
+        assert receipt["finished_at"]
+        # The aborted run did not leave its claim behind.
+        assert fleet_client.fetch_claims() == []
 
 
 def test_detached_child_argv_forwards_no_fleet_claim(tmp_path):

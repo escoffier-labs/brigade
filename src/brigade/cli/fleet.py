@@ -72,7 +72,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         "add",
         help="Enroll a node on the hub and print its token once (the hub stores only a hash).",
     )
-    p_nodes_add.add_argument("node_id", help="The node identity (`brigade node` on that machine prints it).")
+    p_nodes_add.add_argument("node_id", help="The node identity (`brigade node --machine` on that machine prints it).")
     p_nodes_add.add_argument("--label", default=None, help="Free-text label, e.g. the hostname.")
     p_nodes_add.add_argument("--json", action="store_true", help="Emit JSON (includes the token) instead of text.")
     p_nodes_add.set_defaults(func=_dispatch_nodes_add)
@@ -342,8 +342,15 @@ def _print_claim_failure(decision, *, what: str) -> bool:
         return True
     if decision.reason == "no-identity":
         print(
-            f"error: no usable fleet node identity ({decision.detail}); run from a Brigade workspace "
-            "with .brigade/node.toml (see `brigade node`) or pass --node",
+            f"error: no usable fleet node identity ({decision.detail}); initialize this machine's "
+            "identity with `brigade node --machine`, or pass --node",
+            file=sys.stderr,
+        )
+        return True
+    if decision.reason == "auth-failed":
+        print(
+            f"error: fleet hub rejected this node's credentials ({decision.detail}); enroll this machine "
+            "with 'brigade fleet nodes add <node_id>' and set [fleet] node_token_file",
             file=sys.stderr,
         )
         return True

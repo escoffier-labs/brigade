@@ -52,11 +52,22 @@ working until each machine is enrolled. Empty environment values count as
 unset. When no hub is configured the client is a no-op: zero behavior
 change for existing users.
 
+Identity (#1161): everything this machine sends to the hub is stamped with
+its **home** identity, the ``node.toml`` under ``BRIGADE_HOME``, resolved
+by ``resolve_node_id``, which ignores where it is asked. A workspace's own
+``.brigade/node.toml`` stays local (per-checkout state), and an event
+payload's ``node_id`` can never override the machine: both would let one
+machine masquerade as a fleet of two. ``report_journal_event`` still derives
+``repo`` from the workspace that owns the journal.
+
 Phase 4 (issue #1125) adds hub-arbitrated cross-machine claims:
 ``acquire_claim`` / ``renew_claim`` / ``release_claim`` are one bounded
 request each, and ``repo_claim`` holds a claim (with a renew heartbeat) for
 the duration of a run. Hub down or unconfigured degrades to the local
-run.lock — a claim failure is never a new way for a run to fail.
+run.lock; a claim failure is never a new way for a run to fail. The one
+exception is a credential refusal: HTTP 401/403 are stable ``auth-failed``
+outcomes (never retried, no orphan-release fallback) and ``repo_claim``
+fails closed rather than running unprotected on bad credentials.
 """
 
 from __future__ import annotations
@@ -228,30 +239,32 @@ def find_workspace_for_path(start: Path) -> Path | None:
     return None
 
 
-def _home_identity_target() -> Path:
-    """Directory whose ``.brigade/node.toml`` is the per-user fallback identity.
+def home_identity_target() -> Path:
+    """Directory whose ``.brigade/node.toml`` is this machine's hub identity.
 
     ``node.node_path(target)`` appends ``.brigade/node.toml``, so the target
     for the default ``~/.brigade`` home is ``~`` (→ ``~/.brigade/node.toml``).
     A ``BRIGADE_HOME`` override that does not end in ``.brigade`` is used as
-    the target directly (→ ``$BRIGADE_HOME/.brigade/node.toml``).
+    the target directly (→ ``$BRIGADE_HOME/.brigade/node.toml``). This is the
+    same resolution ``resolve_node_id`` and ``brigade node --machine`` use.
     """
     home = brigade_home()
     return home.parent if home.name == ".brigade" else home
 
 
 def resolve_node_id(base_path: Path | None = None) -> str:
-    """Best-effort node id: nearest ancestor ``.brigade/node.toml``, then the
-    per-user fallback (see ``_home_identity_target``), else ``"unknown"``.
-    Never raises."""
+    """The machine's hub-facing node id: the identity at the per-user home
+    (see ``home_identity_target``), else ``"unknown"``. Never raises.
+
+    ``base_path`` is accepted for call-site compatibility and deliberately
+    ignored (#1161): the nearest workspace ``.brigade/node.toml`` is
+    workspace-local state. Two checkouts on one machine are one machine,
+    so it never becomes this machine's hub identity.
+    """
     from . import node as node_mod
 
-    start = base_path if base_path is not None else Path.cwd()
     try:
-        workspace = find_workspace_for_path(start)
-        identity = node_mod.load_identity(workspace) if workspace is not None else None
-        if identity is None:
-            identity = node_mod.load_identity(_home_identity_target())
+        identity = node_mod.load_identity(home_identity_target())
     except Exception:
         identity = None
     return identity.node_id if identity is not None else "unknown"
@@ -496,22 +509,29 @@ def report_event(
 ) -> bool:
     """Report one event to the hub. Returns True when delivered.
 
-    Best-effort by contract: no hub configured → False without side effects;
-    delivery failure → the event lands in the local spool and False returns.
-    When a spool already exists the new event is appended to it and the spool
-    is flushed in order (one request, short deadline) so the hub never sees
-    this node's events out of sequence. Exactly one HTTP request is made per
-    call, bounded by ``REPORT_TIMEOUT_SECONDS`` end to end.
+    The event is always stamped with this machine's identity
+    (``resolve_node_id``): a ``node_id`` already present in the payload, or
+    passed as the ``node_id`` keyword kept for source compatibility, is
+    ignored unconditionally and never sent (#1161). Best-effort by contract:
+    no hub configured → False without side effects; delivery failure → the
+    event lands in the local spool and False returns. When a spool already
+    exists the new event is appended to it and the spool is flushed in order
+    (one request, short deadline) so the hub never sees this node's events
+    out of sequence. Exactly one HTTP request is made per call, bounded by
+    ``REPORT_TIMEOUT_SECONDS`` end to end.
 
     ``Exception`` never escapes. ``KeyboardInterrupt``/``SystemExit`` are
     re-raised, but only after the event is durable in the spool.
+
+    ``base_path`` (e.g. the journal path) is accepted and ignored: identity
+    resolution never depends on where a request originated (#1161).
     """
     try:
         config = load_fleet_config()
         hub = config["hub_url"]
         if not hub:
             return False
-        resolved_node_id = node_id or str(event.get("node_id") or "") or resolve_node_id(base_path)
+        resolved_node_id = resolve_node_id()
         event = {**event, "node_id": resolved_node_id}
         token = config["token"]
         spool = spool_path(resolved_node_id)
@@ -562,9 +582,10 @@ def report_event(
 def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None = None) -> bool:
     """Denormalize a run_event.v1 envelope into a fleet event and report it.
 
-    Identity fields (node_id, repo) come from the workspace that owns the
-    journal so the hub view is a plain group-by. Never raises ``Exception``;
-    see ``report_event`` for the interrupt contract.
+    ``repo`` comes from the workspace that owns the journal so the hub view
+    is a plain group-by; ``node_id`` is always this machine's home identity
+    (#1161), never the journal workspace's local one. Never raises
+    ``Exception``; see ``report_event`` for the interrupt contract.
     """
     try:
         raw_payload = envelope.get("payload")
@@ -625,8 +646,11 @@ class ClaimDecision:
     released). ``reason`` explains a False: ``"held"`` (another owner holds
     the target; see ``owner``), ``"missing"`` (no live claim to renew or
     release), ``"no-hub"`` (no hub configured), ``"no-identity"`` (this node
-    has no usable identity to claim with), or ``"hub-unavailable"``
-    (network/hub failure — callers fall back to the local run lock).
+    has no usable identity to claim with), ``"auth-failed"`` (the hub
+    refused this node's credentials (HTTP 401/403), a stable outcome that
+    is never retried or fallen back from; see ``FleetClaimAuthError``), or
+    ``"hub-unavailable"`` (network/hub failure; callers fall back to the
+    local run lock).
     ``holder`` is the fencing token this operation used; renew and release
     must present the same token. ``superseded`` is the unexpired same-node
     claim a ``supersede_dead_owner`` acquire replaced (issue #1141); a
@@ -649,6 +673,17 @@ class FleetClaimHeldError(FleetClientError):
     def __init__(self, message: str, owner: dict[str, Any] | None = None):
         super().__init__(message)
         self.owner = owner
+
+
+class FleetClaimAuthError(FleetClaimHeldError):
+    """The hub refused a claim on credentials (HTTP 401/403): the token is
+    unknown, revoked, or not allowed to write.
+
+    Unlike transport failures this never degrades to the local run lock
+    (#1161): retrying cannot heal an enrollment problem and running
+    unprotected would pretend the hub had answered. ``repo_claim`` raises
+    this instead of yielding, so dispatch fails closed.
+    """
 
 
 def resolve_claim_target(base_path: Path | None = None) -> str:
@@ -680,11 +715,12 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code in (400, 403, 409):
+        if exc.code in (400, 401, 403, 409):
             # A held/expired refusal is an answer, not a transport failure;
             # a 400 carries the hub's validation message (e.g. an older hub
-            # that does not know a request field) and a 403 names the node
-            # the caller's token is bound to, both worth surfacing verbatim.
+            # that does not know a request field), a 403 names the node the
+            # caller's token is bound to, and a 401 says why (unknown or
+            # revoked token), all worth surfacing verbatim.
             try:
                 return exc.code, json.loads(exc.read().decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -772,6 +808,13 @@ def _claim_op(
     payload = payload if isinstance(payload, dict) else {}
     detail = payload.get("error") if isinstance(payload.get("error"), str) else None
     owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
+    if status in (401, 403):
+        # A stable credential answer (#1161): retrying cannot heal it and it
+        # must never be mistaken for a transport failure (which would fail
+        # open onto the local lock). Callers treat "auth-failed" as final.
+        return ClaimDecision(
+            granted=False, reason="auth-failed", detail=detail or f"hub returned HTTP {status}", holder=holder
+        )
     if status == 200 and payload.get(_CLAIM_OK_KEYS[action]) is True:
         claim = payload.get("claim") if isinstance(payload.get("claim"), dict) else None
         superseded = payload.get("superseded") if isinstance(payload.get("superseded"), dict) else None
@@ -967,6 +1010,7 @@ def repo_claim(
     ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
     lock_owner: Mapping[str, object] | None = None,
     supersede_dead_owner: Mapping[str, object] | None = None,
+    on_credential_failure: Callable[[str | None], None] | None = None,
 ) -> Iterator[ClaimDecision]:
     """Hold a hub-arbitrated claim on ``target`` for the duration of the block.
 
@@ -974,7 +1018,9 @@ def repo_claim(
     no-op; a node with no usable identity, or an unreachable hub, degrades to
     today's local run.lock behavior with a single log line — never a new
     failure mode. A target held by another owner raises
-    ``FleetClaimHeldError`` naming the owner and its expiry.
+    ``FleetClaimHeldError`` naming the owner and its expiry. An auth refusal
+    (HTTP 401/403) also raises ``FleetClaimAuthError``, failing closed
+    instead of running unprotected on credentials the hub rejected (#1161).
 
     Acquire mints a fencing token for this holder, so a sibling run sharing
     the node identity can never release or renew this claim. A lost acquire
@@ -984,6 +1030,14 @@ def repo_claim(
     target freed mid-request) is also retried once instead of failing
     closed. A granted claim is renewed on a daemon heartbeat (every ttl/3; a
     claim the hub lost is re-acquired) and released on exit, best-effort.
+
+    When that heartbeat's renew/re-acquire is refused on credentials (the
+    token was revoked mid-run), the heartbeat stops and ``on_credential_failure``
+    is called once from the heartbeat thread with the hub's detail when given
+    detail (#1161). The CLI passes a callback that aborts the active dispatch;
+    without one the credential refusal is logged loudly and the guarded block
+    keeps running under the local lock: library callers never get signals or
+    process-global behavior from this context manager.
 
     ``lock_owner`` is the ``run.lock`` owner payload of the lease this run
     holds; it is recorded on the claim row (and re-sent by the heartbeat's
@@ -1022,6 +1076,16 @@ def repo_claim(
         # committed the row (idempotent for this holder), and a 409 with no
         # owner means the target freed mid-request.
         decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
+    if not decision.granted and decision.reason == "auth-failed":
+        # Fail closed (#1161): bad credentials would turn "the hub refused"
+        # into "every node runs unprotected on its local lock". No retry,
+        # no orphan-release fallback; enrollment is an operator fix.
+        raise FleetClaimAuthError(
+            f"fleet hub rejected this node's credentials for {target!r} ({decision.detail}); enroll this "
+            "machine with 'brigade fleet nodes add <node_id>' and set [fleet] node_token_file in "
+            "~/.brigade/fleet.toml",
+            owner=decision.owner,
+        )
     if not decision.granted and decision.reason == "hub-unavailable":
         _LOG.warning("fleet hub unreachable (%s); falling back to the local run lock for %s", decision.detail, target)
         _schedule_orphan_release(target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds)
@@ -1089,6 +1153,24 @@ def repo_claim(
                     _LOG.warning("fleet claim heartbeat for %s: hub unreachable; retrying", target)
                     warned_unavailable = True
                 continue
+            if outcome.reason == "auth-failed":
+                # The token was revoked (or never valid) mid-run (#1161).
+                # Unlike other lost-ownership outcomes this must not be read
+                # as "continue on the local lock": the credential problem is
+                # the operator's to fix, so hand the news to the caller and
+                # stop heartbeating. Network failures keep retrying above.
+                _LOG.warning(
+                    "fleet claim heartbeat for %s: the hub rejected this node's credentials (%s); "
+                    "canceling the guarded run",
+                    target,
+                    outcome.detail,
+                )
+                if on_credential_failure is not None:
+                    try:
+                        on_credential_failure(outcome.detail)
+                    except Exception:
+                        _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
+                return
             _LOG.warning(
                 "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock",
                 target,
