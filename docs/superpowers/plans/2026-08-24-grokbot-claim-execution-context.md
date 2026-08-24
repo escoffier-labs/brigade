@@ -40,7 +40,7 @@ Verification: focused queue and adapter tests, MCP-extra tests, full `scripts/ve
 - Modify: `tests/test_grokbot_jobs.py`
 - Modify: `src/brigade/grokbot_jobs.py`
 
-- [ ] Add a failing test for the exact context and safe claim separation:
+- [x] Add a failing test for the exact context and safe claim separation:
 
 ```python
 def test_claim_execution_context_is_exact_and_safe_claim_stays_redacted(tmp_path: Path):
@@ -69,7 +69,7 @@ def test_claim_execution_context_is_exact_and_safe_claim_stays_redacted(tmp_path
     assert "execution_context" not in safe
 ```
 
-- [ ] Add a failing disclosure test:
+- [x] Add a failing disclosure test:
 
 ```python
 def test_claim_execution_context_rejects_conflicting_and_expired_leases(tmp_path: Path):
@@ -84,7 +84,7 @@ def test_claim_execution_context_rejects_conflicting_and_expired_leases(tmp_path
         )
 ```
 
-- [ ] Run RED through Brigade:
+- [x] Run RED through Brigade:
 
 ```bash
 brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_grokbot_jobs.py -k claim_execution_context" --capture brigade-work
@@ -92,7 +92,7 @@ brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_gro
 
 Expect collection or execution to fail because `claim_execution_context` does not exist.
 
-- [ ] Add `claim_execution_context()` and route both public operations through one `_claim_job()` helper. The helper validates inputs once, holds `_queue_lock()`, performs the existing transition unchanged, and formats the result before leaving the lock:
+- [x] Add `claim_execution_context()` and route both public operations through one `_claim_job()` helper. The helper validates inputs once, holds `_queue_lock()`, performs the existing transition unchanged, and formats the result before leaving the lock:
 
 ```python
 def claim_execution_context(
@@ -132,15 +132,15 @@ def _execution_context(record: dict[str, Any]) -> dict[str, Any]:
 
 `claim()` calls `_claim_job(..., include_context=False)`. Same-lease idempotency uses `_claim_result()` on the existing record. Do not change state rules, timestamps, lease bounds, or `_projection()`.
 
-- [ ] Run GREEN with the Task 1 focused command. Expect the new tests and existing claim tests to pass.
+- [x] Run GREEN with the Task 1 focused command. Expect the new tests and existing claim tests to pass.
 
-- [ ] Strengthen the existing CLI lifecycle assertion with:
+- [x] Strengthen the existing CLI lifecycle assertion with:
 
 ```python
 assert "execution_context" not in claimed
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/grokbot_jobs.py tests/test_grokbot_jobs.py

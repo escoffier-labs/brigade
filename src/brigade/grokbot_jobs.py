@@ -218,6 +218,31 @@ def claim(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Claim a queued job with one opaque bot lease."""
+    return _claim_job(target, job_id, bot_id, lease_id, lease_seconds, now, include_context=False)
+
+
+def claim_execution_context(
+    target: Path,
+    job_id: str,
+    bot_id: str,
+    lease_id: str,
+    lease_seconds: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Claim a queued job and return its validated worker context."""
+    return _claim_job(target, job_id, bot_id, lease_id, lease_seconds, now, include_context=True)
+
+
+def _claim_job(
+    target: Path,
+    job_id: str,
+    bot_id: str,
+    lease_id: str,
+    lease_seconds: int,
+    now: datetime | None,
+    *,
+    include_context: bool,
+) -> dict[str, Any]:
     job_id = _validate_job_id(job_id)
     bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
     lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
@@ -228,7 +253,7 @@ def claim(
         if record["state"] == "claimed":
             if record["bot_id"] == bot_id and record["lease_id"] == lease_id:
                 _require_live_lease(record, instant)
-                return _projection(record)
+                return _claim_result(record, include_context=include_context)
             raise GrokbotJobError("lease-conflict")
         if record["state"] != "queued":
             _reject_nonqueued_claim(record)
@@ -245,7 +270,7 @@ def claim(
             }
         )
         _commit_mutation(storage.jobs, record, timestamp)
-        return _projection(record)
+        return _claim_result(record, include_context=include_context)
 
 
 def renew(
@@ -903,6 +928,29 @@ def _projection(record: dict[str, Any]) -> dict[str, Any]:
         if key in record:
             projection[key] = record[key]
     return projection
+
+
+def _claim_result(record: dict[str, Any], *, include_context: bool) -> dict[str, Any]:
+    result = _projection(record)
+    if include_context:
+        result["execution_context"] = _execution_context(record)
+    return result
+
+
+def _execution_context(record: dict[str, Any]) -> dict[str, Any]:
+    spec = record["spec"]
+    assert isinstance(spec, dict)
+    return {
+        "label": spec["label"],
+        "role": spec["role"],
+        "repository": spec["repository"],
+        "base_ref": spec["base_ref"],
+        "ownership_paths": list(spec["ownership_paths"]),
+        "instructions": spec["instructions"],
+        "verification_commands": list(spec["verification_commands"]),
+        "artifact": dict(spec["artifact"]),
+        "timeout_seconds": record["timeout_seconds"],
+    }
 
 
 def _validate_spec(spec: object) -> dict[str, Any]:

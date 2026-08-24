@@ -309,6 +309,38 @@ def test_claim_is_idempotent_for_same_lease_and_rejects_another(tmp_path: Path):
         grokbot_jobs.claim(tmp_path, job_id, "bot-b", "lease-a", 60, now=NOW)
 
 
+def test_claim_execution_context_is_exact_and_safe_claim_stays_redacted(tmp_path: Path):
+    context_job = _enqueue(tmp_path, idempotency_key="request-context")
+    claimed = grokbot_jobs.claim_execution_context(tmp_path, context_job, "bot-a", "lease-a", 60, now=NOW)
+
+    assert claimed["execution_context"] == {
+        "label": "Add queue foundation",
+        "role": "implementation-worker",
+        "repository": "example/brigade",
+        "base_ref": "main",
+        "ownership_paths": ["src/brigade/grokbot_jobs.py", "tests/test_grokbot_jobs.py"],
+        "instructions": "Build the private queue module.",
+        "verification_commands": ["pytest -q tests/test_grokbot_jobs.py"],
+        "artifact": {"kind": "draft-pr"},
+        "timeout_seconds": 900,
+    }
+    assert grokbot_jobs.claim_execution_context(tmp_path, context_job, "bot-a", "lease-a", 60, now=NOW) == claimed
+
+    safe_job = _enqueue(tmp_path, idempotency_key="request-safe")
+    safe = grokbot_jobs.claim(tmp_path, safe_job, "bot-a", "lease-safe", 60, now=NOW)
+    assert "execution_context" not in safe
+
+
+def test_claim_execution_context_rejects_conflicting_and_expired_leases(tmp_path: Path):
+    job_id = _enqueue(tmp_path, idempotency_key="request-context-boundary")
+    grokbot_jobs.claim_execution_context(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-conflict$"):
+        grokbot_jobs.claim_execution_context(tmp_path, job_id, "bot-a", "lease-b", 60, now=NOW)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-expired$"):
+        grokbot_jobs.claim_execution_context(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW + timedelta(seconds=60))
+
+
 def test_renew_clamps_to_deadline_and_increments_revision(tmp_path: Path):
     job_id = _enqueue(tmp_path)
     grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 3600, now=NOW)
@@ -612,6 +644,7 @@ def test_cli_grokbot_lifecycle_commands_keep_private_content_out_of_output(tmp_p
     claimed = capsys.readouterr().out
     assert json.loads(claimed)["state"] == "claimed"
     assert "instructions" not in claimed and "verification_commands" not in claimed
+    assert "execution_context" not in claimed
 
     assert (
         _run_grokbot(
