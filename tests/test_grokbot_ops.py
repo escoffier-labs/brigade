@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import threading
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -256,6 +259,49 @@ def test_authenticated_health_requests_ignore_proxy_environment_and_refuse_redir
     assert opened == [("http://listener.test/health", f"Bearer {SECRET}", 7)]
 
 
+def test_authenticated_health_redirect_never_reaches_redirect_target():
+    target_requests: list[str | None] = []
+
+    class _TargetHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            target_requests.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), _TargetHandler)
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    target_thread.start()
+
+    class _RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_port}/redirect-target")
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    redirect = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+    redirect_thread = threading.Thread(target=redirect.serve_forever, daemon=True)
+    redirect_thread.start()
+    try:
+        assert (
+            grokbot_ops._request_json(f"http://127.0.0.1:{redirect.server_port}/health", SECRET, 1, method="GET")
+            is None
+        )
+        assert target_requests == []
+    finally:
+        redirect.shutdown()
+        redirect.server_close()
+        redirect_thread.join()
+        target.shutdown()
+        target.server_close()
+        target_thread.join()
+
+
 def test_tools_list_uses_an_initialized_official_mcp_session(monkeypatch):
     events: list[str] = []
 
@@ -466,6 +512,33 @@ def test_write_unit_refuses_unrelated_overwrites_and_honors_force(tmp_path: Path
         != "changed\n"
     )
     assert unrelated.read_text(encoding="utf-8") == "keep me\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX dirfd publication")
+def test_write_unit_no_force_refuses_competing_file_created_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config = {
+        "schema": grokbot_ops.CONFIG_SCHEMA,
+        "instance": "operator",
+        "bind": "127.0.0.1:8766",
+        "allowed_hosts": [],
+        "allowed_origins": [],
+        "bearer": {"kind": "env", "name": "TEST_GROKBOT_BEARER"},
+    }
+    out_dir = tmp_path / "units"
+    path = out_dir / grokbot_ops.unit_name("operator")
+    real_link = os.link
+
+    def competing_link(source: str, destination: str, **kwargs: object) -> None:
+        path.write_text("competing unit\n", encoding="utf-8")
+        real_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(grokbot_ops.os, "link", competing_link)
+
+    with pytest.raises(grokbot_ops.ServiceRenderError):
+        grokbot_ops.write_unit(config, out_dir, exec_root=tmp_path, force=False)
+    assert path.read_text(encoding="utf-8") == "competing unit\n"
 
 
 def test_config_operations_refuse_symlinked_config_file_and_directory(tmp_path: Path):

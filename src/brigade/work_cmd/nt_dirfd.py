@@ -297,7 +297,7 @@ def open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
         raise
 
 
-def replace_children(parent: int, source: str, destination: str) -> None:
+def replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
     """Rename ``source`` to ``destination`` relative to the held parent handle."""
     api = _require_api()
     validate_component(source)
@@ -313,7 +313,7 @@ def replace_children(parent: int, source: str, destination: str) -> None:
     )
     try:
         _reject_reparse(api, handle, expected_directory=False)
-        info, length = _rename_information(api, parent, destination, replace=True)
+        info, length = _rename_information(api, parent, destination, replace=replace)
         _nt_set_info(api, handle, info, length, _FileRenameInformation)
     finally:
         api.CloseHandle(handle)

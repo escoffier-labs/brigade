@@ -272,7 +272,13 @@ def write_unit(
     if existing is not None and not force:
         raise ServiceRenderError(f"refusing to overwrite existing unit: {path.name}")
     try:
-        _write_text_nofollow_atomic(path, rendered, mode=0o644, replace_symlink=force)
+        _write_text_nofollow_atomic(
+            path,
+            rendered,
+            mode=0o644,
+            replace_symlink=force,
+            replace=force or existing is not None,
+        )
     except OSError as exc:
         raise ServiceRenderError(f"refusing unsafe unit path: {path.name}") from exc
     return path
@@ -365,7 +371,9 @@ def _read_regular_text(path: Path) -> str:
         os.close(parent)
 
 
-def _write_text_nofollow_atomic(path: Path, data: str, *, mode: int, replace_symlink: bool = False) -> None:
+def _write_text_nofollow_atomic(
+    path: Path, data: str, *, mode: int, replace_symlink: bool = False, replace: bool = True
+) -> None:
     """Atomically publish a regular file without following its destination link."""
     parent = _open_parent_nofollow(path, create=True)
     temporary = f".{path.name}.{uuid.uuid4().hex}.tmp"
@@ -385,7 +393,7 @@ def _write_text_nofollow_atomic(path: Path, data: str, *, mode: int, replace_sym
             os.fsync(handle.fileno())
             if os.name == "posix":
                 os.fchmod(handle.fileno(), mode)
-        if os.name == "posix":
+        if os.name == "posix" and replace:
             try:
                 existing = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
             except FileNotFoundError:
@@ -396,12 +404,16 @@ def _write_text_nofollow_atomic(path: Path, data: str, *, mode: int, replace_sym
                 raise OSError("output is not a regular file")
             os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
             os.fsync(parent)
+        elif os.name == "posix":
+            os.link(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+            os.unlink(temporary, dir_fd=parent)
+            os.fsync(parent)
         else:
             from .work_cmd import nt_dirfd
 
-            if not replace_symlink and _path_is_symlink(path):
+            if replace and not replace_symlink and _path_is_symlink(path):
                 raise OSError("output is a reparse point")
-            nt_dirfd.replace_children(parent, temporary, path.name)
+            nt_dirfd.replace_children(parent, temporary, path.name, replace=replace)
     except BaseException:
         try:
             if os.name == "posix":
