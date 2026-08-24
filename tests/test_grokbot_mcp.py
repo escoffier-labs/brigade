@@ -131,6 +131,20 @@ def test_bearer_comparison_is_constant_time_and_header_shape_is_strict(tmp_path:
     assert adapter.authorized("Bearer not-a-real-tokeN") is False
     assert adapter.authorized("not-a-real-token") is False
     assert adapter.authorized("Basic not-a-real-token") is False
+    assert adapter.authorized("Bearer not-a-real-tok\N{SNOWMAN}") is False
+
+
+def test_non_ascii_configured_bearer_is_rejected(tmp_path: Path):
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_mcp.ListenerConfig(
+            instance="operator",
+            target=tmp_path,
+            bind_host="127.0.0.1",
+            bind_port=8766,
+            allowed_hosts=(),
+            allowed_origins=(),
+            bearer="not-a-real-tok\N{SNOWMAN}",
+        ).validate()
 
 
 def test_listener_configuration_defaults_to_loopback_and_requires_allowlists_for_real_hostnames(tmp_path: Path):
@@ -205,6 +219,37 @@ def test_streamable_http_app_enforces_bearer_origin_and_body_limit(tmp_path: Pat
             ).status_code
             == 403
         )
+
+
+def test_asgi_rejects_non_ascii_authorization_without_reaching_the_app(tmp_path: Path):
+    adapter = _adapter(tmp_path)
+
+    async def downstream(scope, receive, send):
+        raise AssertionError("unauthorized request reached downstream")
+
+    async def request() -> list[dict[str, object]]:
+        sent: list[dict[str, object]] = []
+
+        async def receive() -> dict[str, object]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: dict[str, object]) -> None:
+            sent.append(message)
+
+        await grokbot_mcp._GateASGI(downstream, grokbot_mcp.RequestGate(adapter.config), adapter)(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/health",
+                "headers": [(b"host", b"127.0.0.1:8766"), (b"authorization", b"Bearer not-a-real-tok\xff")],
+            },
+            receive,
+            send,
+        )
+        return sent
+
+    sent = asyncio.run(request())
+    assert sent[0]["status"] in {401, 403}
 
 
 def test_gate_bounded_reads_every_http_method_and_preserves_bodyless_requests(tmp_path: Path):

@@ -75,8 +75,9 @@ class ListenerConfig:
     def validate(self) -> None:
         if self.instance not in INSTANCES or not self.target.is_dir():
             raise ConfigurationError("invalid")
-        if not isinstance(self.bearer, str) or not self.bearer or len(self.bearer) > 4096:
+        if not isinstance(self.bearer, str):
             raise ConfigurationError("invalid")
+        _validate_bearer(self.bearer)
         if not 1 <= self.bind_port <= 65_535:
             raise ConfigurationError("invalid")
         if any(not _valid_host(host) for host in self.allowed_hosts):
@@ -128,7 +129,7 @@ def load_bearer(*, bearer_file: Path | None, bearer_env: str | None) -> str:
 
 
 def _validate_bearer(value: str) -> str:
-    if not value or len(value) > 4096 or "\x00" in value:
+    if not value or len(value) > 4096 or "\x00" in value or not value.isascii():
         raise ConfigurationError("invalid")
     return value
 
@@ -146,7 +147,10 @@ class GrokbotAdapter:
     def authorized(self, authorization: str | None) -> bool:
         if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
             return False
-        return hmac.compare_digest(authorization[7:], self.config.bearer)
+        bearer = authorization[7:]
+        if not bearer.isascii():
+            return False
+        return hmac.compare_digest(bearer, self.config.bearer)
 
     def health_payload(self) -> dict[str, object]:
         return {"ok": True, "service": "grokbot-mcp", "role": self.config.instance}
