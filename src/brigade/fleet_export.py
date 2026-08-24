@@ -19,11 +19,11 @@ fleet history/analytics. Configuration lives in the existing fleet config
 
 ``brigade fleet sink`` performs ONE import pass (operators schedule it with
 cron/systemd): the events and claims tables are exported through the same
-deterministic writers and fed to ``dolt table import -u`` as a subprocess, so
-re-running a pass updates rows in place instead of duplicating them. Dolt is
-invoked as a binary and is never a Python dependency. When the sink is
-disabled, or no ``dolt`` binary is present, the command says so and exits 0:
-a documented no-op, never a scheduled-job failure.
+deterministic writers. Events use ``dolt table import -u`` as an append-only
+log, while claims use ``dolt table import -r`` so released claims disappear
+from the current snapshot. Dolt is invoked as a binary and is never a Python
+dependency. When the sink is disabled, or no ``dolt`` binary is present, the
+command says so and exits 0: a documented no-op, never a scheduled-job failure.
 
 The hub's HTTP surface (``/status``, ``/claims``, dashboard) is untouched:
 the exporter reads the hub SQLite database read-only on the host that owns it.
@@ -99,6 +99,13 @@ class SinkConfig:
     db: str | None = None
 
 
+@dataclass
+class ExportStats:
+    """Counts export rows omitted for reasons that operators should see."""
+
+    unparseable_timestamps: int = 0
+
+
 def default_hub_db_path() -> Path:
     """Default hub database location, matching ``brigade fleet serve``."""
     return Path.home() / DEFAULT_HUB_DB_REL_PATH
@@ -142,6 +149,13 @@ def _epoch_to_iso(value: Any) -> Any:
     return value
 
 
+def _csv_value(value: Any) -> Any:
+    """Neutralize spreadsheet formulas without changing non-CSV exports."""
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + value
+    return value
+
+
 def connect_hub_readonly(db_path: Path) -> sqlite3.Connection:
     """Open the hub database strictly read-only; refuse to invent one."""
     db_path = Path(db_path).expanduser()
@@ -157,7 +171,11 @@ def connect_hub_readonly(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def iter_event_records(conn: sqlite3.Connection, since: datetime | None = None) -> Iterator[dict[str, Any]]:
+def iter_event_records(
+    conn: sqlite3.Connection,
+    since: datetime | None = None,
+    stats: ExportStats | None = None,
+) -> Iterator[dict[str, Any]]:
     """Yield every hub event in ``(node_id, run_id, sequence, digest)`` order.
 
     ``since`` filters on the event timestamp (events whose ``ts`` cannot be
@@ -169,7 +187,11 @@ def iter_event_records(conn: sqlite3.Connection, since: datetime | None = None) 
         record = dict(zip(EVENT_COLUMNS, row, strict=True))
         if since is not None:
             ts = _parse_ts(record.get("ts"))
-            if ts is None or ts < since:
+            if ts is None:
+                if stats is not None:
+                    stats.unparseable_timestamps += 1
+                continue
+            if ts < since:
                 continue
         yield record
 
@@ -194,7 +216,7 @@ def _write_records(handle: TextIO, records: Iterator[dict[str, Any]], *, columns
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
         for record in records:
-            writer.writerow(["" if record[column] is None else record[column] for column in columns])
+            writer.writerow(["" if record[column] is None else _csv_value(record[column]) for column in columns])
             count += 1
     elif fmt == "jsonl":
         for record in records:
@@ -212,17 +234,23 @@ def export_into(
     since: datetime | None = None,
     fmt: str = "jsonl",
     claims: bool = False,
+    stats: ExportStats | None = None,
 ) -> int:
     """Stream one table from the hub database into ``handle``; returns rows."""
     conn = connect_hub_readonly(db_path)
     try:
-        if claims:
-            records: Iterator[dict[str, Any]] = iter_claim_records(conn)
-            columns: tuple[str, ...] = CLAIM_COLUMNS
-        else:
-            records = iter_event_records(conn, since)
-            columns = EVENT_COLUMNS
-        return _write_records(handle, records, columns=columns, fmt=fmt)
+        try:
+            if claims:
+                records: Iterator[dict[str, Any]] = iter_claim_records(conn)
+                columns: tuple[str, ...] = CLAIM_COLUMNS
+            else:
+                records = iter_event_records(conn, since, stats)
+                columns = EVENT_COLUMNS
+            return _write_records(handle, records, columns=columns, fmt=fmt)
+        except sqlite3.Error as exc:
+            raise FleetExportError(f"could not query fleet hub database {db_path}: {exc}") from exc
+        except OSError as exc:
+            raise FleetExportError(f"could not write fleet export: {exc}") from exc
     finally:
         conn.close()
 
@@ -237,16 +265,29 @@ def dispatch_export(args: argparse.Namespace) -> int:
             print("note: --since applies to events; the claims snapshot is current state", file=sys.stderr)
         db_path = resolve_hub_db(getattr(args, "db", None))
         out_path = getattr(args, "out", None)
+        stats = ExportStats()
         if out_path is not None:
-            with Path(out_path).expanduser().open("w", newline="", encoding="utf-8") as handle:
-                count = export_into(handle, db_path=db_path, since=since, fmt=args.format, claims=claims)
+            try:
+                with Path(out_path).expanduser().open("w", newline="", encoding="utf-8") as handle:
+                    count = export_into(
+                        handle, db_path=db_path, since=since, fmt=args.format, claims=claims, stats=stats
+                    )
+            except OSError as exc:
+                raise FleetExportError(f"could not write fleet export to {out_path}: {exc}") from exc
         else:
-            count = export_into(sys.stdout, db_path=db_path, since=since, fmt=args.format, claims=claims)
+            reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
+            if not callable(reconfigure_stdout):
+                raise FleetExportError("stdout cannot be configured for UTF-8 with LF newlines; use --out")
+            reconfigure_stdout(encoding="utf-8", errors="strict", newline="\n")
+            count = export_into(sys.stdout, db_path=db_path, since=since, fmt=args.format, claims=claims, stats=stats)
     except FleetExportError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     what = "claim(s)" if claims else "event(s)"
-    print(f"exported {count} fleet {what} from {db_path} ({args.format})", file=sys.stderr)
+    summary = f"exported {count} fleet {what} from {db_path} ({args.format})"
+    if since is not None and not claims:
+        summary += f"; skipped {stats.unparseable_timestamps} event(s) with unparseable ts"
+    print(summary, file=sys.stderr)
     return 0
 
 
@@ -303,7 +344,7 @@ def _run_dolt(argv: list[str], *, dolt_binary: str, cwd: Path) -> tuple[bool, st
 
 
 def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
-    """One export + ``dolt table import -u`` pass; returns a process exit code."""
+    """Export events as a log and claims as a snapshot; return an exit code."""
     dolt_binary = shutil.which(config.dolt_binary)
     if dolt_binary is None:
         print(
@@ -317,30 +358,31 @@ def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
     except OSError as exc:
         print(f"error: could not create dolt directory {dolt_dir}: {exc}", file=sys.stderr)
         return 1
-    with tempfile.TemporaryDirectory(prefix="brigade-fleet-sink-") as tmp:
-        tmp_dir = Path(tmp)
-        events_csv = tmp_dir / f"{SINK_TABLE_EVENTS}.csv"
-        claims_csv = tmp_dir / f"{SINK_TABLE_CLAIMS}.csv"
-        try:
+    try:
+        with tempfile.TemporaryDirectory(prefix="brigade-fleet-sink-") as tmp:
+            tmp_dir = Path(tmp)
+            events_csv = tmp_dir / f"{SINK_TABLE_EVENTS}.csv"
+            claims_csv = tmp_dir / f"{SINK_TABLE_CLAIMS}.csv"
             with events_csv.open("w", newline="", encoding="utf-8") as handle:
                 event_count = export_into(handle, db_path=db_path, fmt="csv", claims=False)
             with claims_csv.open("w", newline="", encoding="utf-8") as handle:
                 claim_count = export_into(handle, db_path=db_path, fmt="csv", claims=True)
-        except FleetExportError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        steps: list[list[str]] = []
-        if not (dolt_dir / ".dolt").is_dir():
-            steps.append(["init"])
-        steps.append(["sql", "-q", _DOLT_SCHEMA_EVENTS])
-        steps.append(["table", "import", "-u", SINK_TABLE_EVENTS, str(events_csv)])
-        steps.append(["sql", "-q", _DOLT_SCHEMA_CLAIMS])
-        steps.append(["table", "import", "-u", SINK_TABLE_CLAIMS, str(claims_csv)])
-        for step in steps:
-            ok, message = _run_dolt(step, dolt_binary=dolt_binary, cwd=dolt_dir)
-            if not ok:
-                print(f"error: {message}", file=sys.stderr)
-                return 1
+            steps: list[list[str]] = []
+            if not (dolt_dir / ".dolt").is_dir():
+                steps.append(["init", "--name", "brigade", "--email", "brigade@localhost"])
+            steps.append(["sql", "-q", _DOLT_SCHEMA_EVENTS])
+            steps.append(["table", "import", "-u", SINK_TABLE_EVENTS, str(events_csv)])
+            steps.append(["sql", "-q", _DOLT_SCHEMA_CLAIMS])
+            steps.append(["table", "import", "-r", SINK_TABLE_CLAIMS, str(claims_csv)])
+            for step in steps:
+                ok, message = _run_dolt(step, dolt_binary=dolt_binary, cwd=dolt_dir)
+                if not ok:
+                    print(f"error: {message}", file=sys.stderr)
+                    return 1
+    except FleetExportError:
+        raise
+    except (sqlite3.Error, OSError) as exc:
+        raise FleetExportError(f"could not export fleet sink data: {exc}") from exc
     print(f"fleet sink: imported {event_count} event(s) and {claim_count} claim(s) into dolt database {dolt_dir}")
     return 0
 

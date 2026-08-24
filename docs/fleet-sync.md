@@ -136,7 +136,11 @@ phone over Tailscale:
 events in `(node_id, run_id, sequence, digest)` order. The columns have a fixed
 order, the event digest is included, and exporting the same database twice
 produces identical bytes. `--claims` exports the current claims snapshot in
-`target` order and omits the claim holder token.
+`target` order and omits the claim holder token. With `--since`, an event whose
+`ts` cannot be parsed is excluded and counted in the stderr summary. CSV cells
+that start with `=`, `+`, `-`, `@`, a tab, or a carriage return are prefixed
+with a single quote to prevent spreadsheet formula execution. JSONL values are
+unchanged.
 
 Export and sink work stay off the reporting path. Neither command participates
 in journal append, event delivery, claim arbitration, `/status`, `/claims`, or
@@ -159,12 +163,16 @@ db = "~/.brigade/fleet-hub.db"
 `db` optionally overrides the hub SQLite file. A command-line `--db` takes
 precedence over the configured `db` value.
 
-`brigade fleet sink [--db PATH]` exports deterministic CSV files and invokes
-`dolt table import -u` as a subprocess for `fleet_events` and `fleet_claims`.
-It has no Python Dolt dependency. If the sink is disabled, it exits 0 without
-reading the hub database. If the configured Dolt binary is absent, it prints a
-clear `documented no-op` message and exits 0, which keeps an optional scheduled
-job from failing on a host without Dolt.
+`brigade fleet sink [--db PATH]` exports deterministic CSV files. It runs
+`dolt table import -u` for `fleet_events`, which is an append-only log, and
+`dolt table import -r` for `fleet_claims`, which is a current-state snapshot.
+Replacing `fleet_claims` removes released claims from Dolt on the next pass.
+A fresh Dolt database is initialized with the local `brigade` identity, so no
+host-level Dolt identity is required. The sink has no Python Dolt dependency.
+If it is disabled, it exits 0 without reading the hub database. If the
+configured Dolt binary is absent, it prints a clear `documented no-op` message
+and exits 0, which keeps an optional scheduled job from failing on a host
+without Dolt.
 
 For example, this Dolt SQL reports each ISO week's terminal-run outcome rate
 and the percentage-point change from the prior week:

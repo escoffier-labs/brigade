@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
+import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -136,6 +140,18 @@ class TestExport:
         assert row[fleet_export.EVENT_COLUMNS.index("node_id")] == NODE_A
         assert len(lines) == 2
 
+    def test_csv_neutralizes_formula_like_values(self, tmp_path, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        event = _event()
+        event["repo"] = "=1+1"
+        _seed_events(db, event)
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--format", "csv"]) == 0
+        rows = list(csv.reader(io.StringIO(capsys.readouterr().out)))
+        assert rows[1][fleet_export.EVENT_COLUMNS.index("repo")] == "'=1+1"
+
     def test_since_filters_and_skips_unparseable_timestamps(self, tmp_path, capsys):
         from brigade import cli
 
@@ -149,8 +165,10 @@ class TestExport:
             ],
         )
         assert cli.main(["fleet", "export", "--db", str(db), "--since", "2026-08-10T00:00:00+00:00"]) == 0
-        rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        captured = capsys.readouterr()
+        rows = [json.loads(line) for line in captured.out.splitlines()]
         assert [r["run_id"] for r in rows] == ["new"]
+        assert "skipped 1 event(s) with unparseable ts" in captured.err
         assert cli.main(["fleet", "export", "--db", str(db)]) == 0
         rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
         assert sorted(r["run_id"] for r in rows) == ["bad", "new", "old"]
@@ -206,11 +224,63 @@ class TestExport:
         assert cli.main(["fleet", "export", "--db", str(db), "--out", str(out_file)]) == 0
         assert out_file.read_text(encoding="utf-8") == streamed
 
+    def test_stdout_bytes_ignore_wrapper_encoding_and_newline_translation(self, tmp_path, monkeypatch):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        event = _event()
+        event["repo"] = "snowman-☃"
+        _seed_events(db, event)
+
+        raw_stdout = io.BytesIO()
+        translated_stdout = io.TextIOWrapper(raw_stdout, encoding="cp1252", errors="strict", newline="\r\n")
+        monkeypatch.setattr(sys, "stdout", translated_stdout)
+        assert cli.main(["fleet", "export", "--db", str(db), "--format", "csv"]) == 0
+        translated_stdout.flush()
+        streamed = raw_stdout.getvalue()
+
+        out_file = tmp_path / "export.csv"
+        assert cli.main(["fleet", "export", "--db", str(db), "--format", "csv", "--out", str(out_file)]) == 0
+        assert streamed == out_file.read_bytes()
+        assert b"\r\n" not in streamed
+        assert "☃".encode() in streamed
+
     def test_missing_database_is_an_error_not_a_crash(self, tmp_path, capsys):
         from brigade import cli
 
         assert cli.main(["fleet", "export", "--db", str(tmp_path / "absent.db")]) == 1
         assert "no fleet hub database" in capsys.readouterr().err
+
+    def test_non_hub_database_query_error_is_operator_facing(self, tmp_path, capsys):
+        from brigade import cli
+
+        db = tmp_path / "not-a-hub.db"
+        sqlite3.connect(db).close()
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--claims"]) == 1
+        assert "could not query fleet hub database" in capsys.readouterr().err
+
+    def test_readonly_wal_initialization_error_is_operator_facing(self, tmp_path, monkeypatch, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event())
+
+        def readonly_cantinit(*args, **kwargs):
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+
+        monkeypatch.setattr(fleet_export.sqlite3, "connect", readonly_cantinit)
+        assert cli.main(["fleet", "export", "--db", str(db)]) == 1
+        assert "could not open fleet hub database" in capsys.readouterr().err
+
+    def test_missing_output_directory_is_operator_facing(self, tmp_path, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event())
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--out", str(tmp_path / "missing" / "out.jsonl")]) == 1
+        assert "could not write fleet export" in capsys.readouterr().err
 
 
 class TestSinkConfig:
@@ -259,7 +329,9 @@ class TestSink:
         assert "documented no-op" in capsys.readouterr().out
 
     @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
-    def test_pass_feeds_expected_argv_and_upsert_flag(self, home, fake_dolt, tmp_path, monkeypatch, capsys):
+    def test_pass_initializes_identity_upserts_events_and_replaces_claims(
+        self, home, fake_dolt, tmp_path, monkeypatch, capsys
+    ):
         from brigade import cli
 
         db = tmp_path / "hub.db"
@@ -280,15 +352,15 @@ class TestSink:
         assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
         assert "imported 3 event(s) and 1 claim(s)" in capsys.readouterr().out
         argv_lines = log.read_text(encoding="utf-8").splitlines()
-        assert argv_lines[0] == "init"
-        assert argv_lines[1:3] == ["sql", "-q"]
-        assert argv_lines[3] == fleet_export._DOLT_SCHEMA_EVENTS
-        assert argv_lines[4:8] == ["table", "import", "-u", "fleet_events"]
-        assert argv_lines[8].endswith("fleet_events.csv")
-        assert argv_lines[9:11] == ["sql", "-q"] and argv_lines[11] == fleet_export._DOLT_SCHEMA_CLAIMS
-        assert argv_lines[12:16] == ["table", "import", "-u", "fleet_claims"]
-        assert argv_lines[16].endswith("fleet_claims.csv")
-        assert len(argv_lines) == 17
+        assert argv_lines[:5] == ["init", "--name", "brigade", "--email", "brigade@localhost"]
+        assert argv_lines[5:7] == ["sql", "-q"]
+        assert argv_lines[7] == fleet_export._DOLT_SCHEMA_EVENTS
+        assert argv_lines[8:12] == ["table", "import", "-u", "fleet_events"]
+        assert argv_lines[12].endswith("fleet_events.csv")
+        assert argv_lines[13:15] == ["sql", "-q"] and argv_lines[15] == fleet_export._DOLT_SCHEMA_CLAIMS
+        assert argv_lines[16:20] == ["table", "import", "-r", "fleet_claims"]
+        assert argv_lines[20].endswith("fleet_claims.csv")
+        assert len(argv_lines) == 21
         events_csv = capture / "fleet_events.csv"
         claims_csv = capture / "fleet_claims.csv"
         assert events_csv.is_file() and claims_csv.is_file()
@@ -312,6 +384,20 @@ class TestSink:
         _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{tmp_path / "dolt-home"}"\n')
         assert cli.main(["fleet", "sink", "--db", str(db)]) == 1
         assert "failed" in capsys.readouterr().err
+
+    def test_raw_query_error_is_operator_facing(self, home, fake_dolt, tmp_path, monkeypatch, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event())
+        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{tmp_path / "dolt-home"}"\n')
+
+        def readonly_cantinit(*args, **kwargs):
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+
+        monkeypatch.setattr(fleet_export, "export_into", readonly_cantinit)
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 1
+        assert "could not export fleet sink data" in capsys.readouterr().err
 
     def test_repeat_passes_are_byte_identical_upserts(self, home, fake_dolt, tmp_path, monkeypatch):
         from brigade import cli
