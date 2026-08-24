@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON run contracts rewrite home-directory prefixes (`/home/<user>`, `/Users/<user>`) to `~` on every string that enters the list, show, latest, and watch payloads. Artifacts and human CLI output are unchanged. Refs #631. Refs #958.
 
 ### Fixed
+
+- Fleet claim heartbeats now defer holder-token-fenced orphan cleanup until
+  the run exits when a lost-row re-acquire exceeds its deadline, preventing
+  both a late claim leak and mid-run release of a live claim. Fixes #1142.
 - The v0.25.0 run-reader compatibility test now exercises JSON-object rejection, unknown-key tolerance, and `finished_at` terminality from input behavior instead of fixture-driven assertions, and builds its legacy snapshot from the writer's full emitted shape. Refs #654, #640.
 - Stop-hook tree fingerprints now exclude verify-run receipts, outcome ledger capture files, and inline MiseLedger indexing artifacts. A captured verification can close a session without treating its own evidence as uncovered work, while later source, configuration, and documentation edits still invalidate the receipt. Fixes #1132.
 - The blocked-phase cancellation CLI test now waits up to 30 seconds for the run receipt, subprocess, and lock before signaling, avoiding false startup failures on contended CI runners while retaining the cancellation ordering check. Fixes #1126.

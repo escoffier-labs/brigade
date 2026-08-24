@@ -730,6 +730,7 @@ def _claim_renew_interval(ttl_seconds: int) -> float:
 
 
 ORPHAN_RELEASE_RETRY_SECONDS = 30.0
+EXIT_ORPHAN_RELEASE_RETRIES = 2
 
 
 def _schedule_orphan_release(
@@ -821,6 +822,7 @@ def repo_claim(
             owner=decision.owner,
         )
     stop = threading.Event()
+    pending_orphan_release = threading.Event()
 
     def _renew_loop() -> None:
         warned_unavailable = False
@@ -834,6 +836,10 @@ def repo_claim(
                     return
                 # The hub lost or expired our row (e.g. hub restart from
                 # backup); take it back under the same fencing token.
+                # Record the possible orphan before starting the request so
+                # shutdown cannot miss it if the bounded heartbeat join ends
+                # while the re-acquire is still in flight.
+                pending_orphan_release.set()
                 outcome = acquire_claim(
                     target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds
                 )
@@ -863,5 +869,14 @@ def repo_claim(
         # The join is bounded (one renew plus one acquire round-trip); a
         # thread stuck longer than that is covered by the stop.is_set()
         # guard above.
-        heartbeat.join(timeout=2 * CLAIM_TIMEOUT_SECONDS + 1)
-        release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
+        heartbeat.join(timeout=2 * CLAIM_TIMEOUT_SECONDS + max(1.0, CLAIM_TIMEOUT_SECONDS))
+        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
+        if pending_orphan_release.is_set() and release_outcome.reason == "hub-unavailable":
+            # The CLI normally exits as soon as this context unwinds, so a
+            # daemon retry would die before its first request. Keep the retry
+            # budget inline and short: two additional calls, each already
+            # bounded by CLAIM_TIMEOUT_SECONDS.
+            for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
+                release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
+                if release_outcome.reason != "hub-unavailable":
+                    break
