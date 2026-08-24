@@ -85,6 +85,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--claims", action="store_true", help="Stream the current claims snapshot instead of the event history."
     )
     p_export.add_argument(
+        "--include-expired",
+        action="store_true",
+        help="Include expired claims and mark them expired (requires --claims).",
+    )
+    p_export.add_argument(
         "--db", type=Path, default=None, help="Hub SQLite database path (default ~/.brigade/fleet-hub.db)."
     )
     p_export.add_argument("--out", type=Path, default=None, help="Write to this file instead of stdout.")

@@ -16,6 +16,8 @@ fleet history/analytics. Configuration lives in the existing fleet config
     dolt_binary = "dolt"       # resolved on PATH (or an explicit path)
     dolt_dir = "~/.brigade/dolt"
     db = "~/.brigade/fleet-hub.db"  # hub database override
+    timeout_seconds = 120
+    events_incremental = true
 
 ``brigade fleet sink`` performs ONE import pass (operators schedule it with
 cron/systemd): the events and claims tables are exported through the same
@@ -45,7 +47,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 from . import toml_compat as tomllib
 from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
@@ -53,12 +55,22 @@ from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
 DEFAULT_HUB_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
 DEFAULT_DOLT_BINARY = "dolt"
 DEFAULT_DOLT_DIR = "~/.brigade/dolt"
-DOLT_TIMEOUT_SECONDS = 120.0
+DEFAULT_DOLT_TIMEOUT_SECONDS = 120.0
+EVENTS_WATERMARK_FILE = ".brigade-fleet-events-watermark"
 SINK_TABLE_EVENTS = "fleet_events"
 SINK_TABLE_CLAIMS = "fleet_claims"
 
 EVENT_COLUMNS = ("node_id", "run_id", "sequence", "digest", "repo", "seat", "harness", "state", "ts", "received_at")
-CLAIM_COLUMNS = ("target", "owner_node", "owner_conductor", "acquired_at", "renewed_at", "ttl_seconds", "expires_at")
+_CLAIM_DB_COLUMNS = (
+    "target",
+    "owner_node",
+    "owner_conductor",
+    "acquired_at",
+    "renewed_at",
+    "ttl_seconds",
+    "expires_at",
+)
+CLAIM_COLUMNS = (*_CLAIM_DB_COLUMNS, "expired")
 
 _DOLT_SCHEMA_EVENTS = (
     f"CREATE TABLE IF NOT EXISTS {SINK_TABLE_EVENTS} ("
@@ -82,7 +94,8 @@ _DOLT_SCHEMA_CLAIMS = (
     "acquired_at varchar(64) NOT NULL, "
     "renewed_at varchar(64) NOT NULL, "
     "ttl_seconds bigint NOT NULL, "
-    "expires_at varchar(64) NOT NULL)"
+    "expires_at varchar(64) NOT NULL, "
+    "expired boolean NOT NULL)"
 )
 
 
@@ -98,6 +111,8 @@ class SinkConfig:
     dolt_binary: str = DEFAULT_DOLT_BINARY
     dolt_dir: str = DEFAULT_DOLT_DIR
     db: str | None = None
+    timeout_seconds: float = DEFAULT_DOLT_TIMEOUT_SECONDS
+    events_incremental: bool = True
 
 
 @dataclass
@@ -105,6 +120,7 @@ class ExportStats:
     """Counts export rows omitted for reasons that operators should see."""
 
     unparseable_timestamps: int = 0
+    last_received_at: str | None = None
 
 
 def default_hub_db_path() -> Path:
@@ -180,6 +196,7 @@ def iter_event_records(
     since: datetime | None = None,
     since_received: datetime | None = None,
     stats: ExportStats | None = None,
+    since_received_exclusive: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Yield every hub event in ``(node_id, run_id, sequence, digest)`` order.
 
@@ -201,22 +218,39 @@ def iter_event_records(
                 if stats is not None:
                     stats.unparseable_timestamps += 1
                 continue
-            if ts < threshold:
+            if ts < threshold or (since_received_exclusive and since_received is not None and ts == threshold):
                 continue
+        received_at = record.get("received_at")
+        received_ts = _parse_ts(received_at)
+        if stats is not None and isinstance(received_at, str) and received_ts is not None:
+            previous_ts = _parse_ts(stats.last_received_at)
+            if previous_ts is None or received_ts > previous_ts:
+                stats.last_received_at = received_at
         yield record
 
 
-def iter_claim_records(conn: sqlite3.Connection) -> Iterator[dict[str, Any]]:
+def iter_claim_records(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    include_expired: bool = False,
+) -> Iterator[dict[str, Any]]:
     """Yield the current claims snapshot in ``target`` order.
 
     Mirrors the hub's ``GET /claims`` payload columns; ``expires_at`` becomes
     its UTC ISO-8601 form. ``holder_token`` is a fencing capability and is
     never selected, so it can never leak into an export.
     """
-    cursor = conn.execute(f"SELECT {', '.join(CLAIM_COLUMNS)} FROM claims ORDER BY target")
+    now_epoch = now.timestamp()
+    cursor = conn.execute(
+        f"SELECT {', '.join(_CLAIM_DB_COLUMNS)}, expires_at <= ? AS expired "
+        "FROM claims WHERE ? OR expires_at > ? ORDER BY target",
+        (now_epoch, include_expired, now_epoch),
+    )
     for row in cursor:
         record = dict(zip(CLAIM_COLUMNS, row, strict=True))
         record["expires_at"] = _epoch_to_iso(record.get("expires_at"))
+        record["expired"] = bool(record["expired"])
         yield record
 
 
@@ -255,18 +289,31 @@ def export_into(
     since_received: datetime | None = None,
     fmt: str = "jsonl",
     claims: bool = False,
+    include_expired: bool = False,
+    export_now: datetime | None = None,
     stats: ExportStats | None = None,
     spreadsheet_safe: bool = False,
+    since_received_exclusive: bool = False,
 ) -> int:
     """Stream one table from the hub database into ``handle``; returns rows."""
     conn = connect_hub_readonly(db_path)
     try:
         try:
             if claims:
-                records: Iterator[dict[str, Any]] = iter_claim_records(conn)
+                records: Iterator[dict[str, Any]] = iter_claim_records(
+                    conn,
+                    now=export_now or datetime.now(timezone.utc),
+                    include_expired=include_expired,
+                )
                 columns: tuple[str, ...] = CLAIM_COLUMNS
             else:
-                records = iter_event_records(conn, since, since_received, stats)
+                records = iter_event_records(
+                    conn,
+                    since,
+                    since_received,
+                    stats,
+                    since_received_exclusive,
+                )
                 columns = EVENT_COLUMNS
             return _write_records(
                 handle,
@@ -288,6 +335,7 @@ def export_into(
 def dispatch_export(args: argparse.Namespace) -> int:
     """Entry point for ``brigade fleet export``."""
     claims = bool(getattr(args, "claims", False))
+    include_expired = bool(getattr(args, "include_expired", False))
     since_raw = getattr(args, "since", None)
     since_received_raw = getattr(args, "since_received", None)
     try:
@@ -295,26 +343,49 @@ def dispatch_export(args: argparse.Namespace) -> int:
         since_received = parse_since(since_received_raw, option="--since-received")
         if since is not None and since_received is not None:
             raise FleetExportError("--since and --since-received cannot be used together")
+        if include_expired and not claims:
+            raise FleetExportError("--include-expired requires --claims")
         if (since is not None or since_received is not None) and claims:
             print("note: incremental filters apply to events; the claims snapshot is current state", file=sys.stderr)
         db_path = resolve_hub_db(getattr(args, "db", None))
         out_path = getattr(args, "out", None)
         stats = ExportStats()
         if out_path is not None:
+            destination = Path(out_path).expanduser()
+            temporary: Path | None = None
             try:
-                with Path(out_path).expanduser().open("w", newline="", encoding="utf-8") as handle:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    newline="",
+                    encoding="utf-8",
+                    dir=destination.parent,
+                    prefix=f".{destination.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temporary = Path(handle.name)
                     count = export_into(
-                        handle,
+                        cast(TextIO, handle),
                         db_path=db_path,
                         since=since,
                         since_received=since_received,
                         fmt=args.format,
                         claims=claims,
+                        include_expired=include_expired,
                         stats=stats,
                         spreadsheet_safe=args.format == "csv",
                     )
+                assert temporary is not None
+                os.replace(temporary, destination)
+                temporary = None
             except OSError as exc:
                 raise FleetExportError(f"could not write fleet export to {out_path}: {exc}") from exc
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink()
+                    except FileNotFoundError:
+                        pass
         else:
             try:
                 reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
@@ -328,6 +399,7 @@ def dispatch_export(args: argparse.Namespace) -> int:
                     since_received=since_received,
                     fmt=args.format,
                     claims=claims,
+                    include_expired=include_expired,
                     stats=stats,
                     spreadsheet_safe=args.format == "csv",
                 )
@@ -376,10 +448,26 @@ def load_sink_config() -> SinkConfig:
         dolt_binary=_string("dolt_binary", DEFAULT_DOLT_BINARY) or DEFAULT_DOLT_BINARY,
         dolt_dir=_string("dolt_dir", DEFAULT_DOLT_DIR) or DEFAULT_DOLT_DIR,
         db=_string("db", None),
+        timeout_seconds=(
+            float(section["timeout_seconds"])
+            if isinstance(section.get("timeout_seconds"), (int, float))
+            and not isinstance(section["timeout_seconds"], bool)
+            and section["timeout_seconds"] > 0
+            else DEFAULT_DOLT_TIMEOUT_SECONDS
+        ),
+        events_incremental=(
+            section["events_incremental"] if isinstance(section.get("events_incremental"), bool) else True
+        ),
     )
 
 
-def _run_dolt(argv: list[str], *, dolt_binary: str, cwd: Path) -> tuple[bool, str, str]:
+def _run_dolt(
+    argv: list[str],
+    *,
+    dolt_binary: str,
+    cwd: Path,
+    timeout_seconds: float,
+) -> tuple[bool, str, str]:
     """Run one dolt subprocess; return success, operator message, and stdout."""
     command = [dolt_binary, *argv]
     try:
@@ -388,11 +476,11 @@ def _run_dolt(argv: list[str], *, dolt_binary: str, cwd: Path) -> tuple[bool, st
             cwd=str(cwd),
             capture_output=True,
             text=True,
-            timeout=DOLT_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return False, f"dolt timed out after {int(DOLT_TIMEOUT_SECONDS)}s: {' '.join(command)}", ""
+        return False, f"dolt timed out after {timeout_seconds:g}s: {' '.join(command)}", ""
     except OSError as exc:
         return False, f"could not run dolt: {exc}", ""
     if proc.returncode != 0:
@@ -400,6 +488,46 @@ def _run_dolt(argv: list[str], *, dolt_binary: str, cwd: Path) -> tuple[bool, st
         message = detail[-1] if detail else f"exit code {proc.returncode}"
         return False, f"dolt {' '.join(argv[:2])} failed: {message}", ""
     return True, "", proc.stdout
+
+
+def _read_event_watermark(dolt_dir: Path) -> datetime | None:
+    """Return a valid event receipt watermark, else request a full export."""
+    try:
+        raw = (dolt_dir / EVENTS_WATERMARK_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        return parse_since(raw, option="fleet sink event watermark")
+    except FleetExportError:
+        return None
+
+
+def _write_event_watermark(dolt_dir: Path, received_at: str) -> None:
+    """Atomically persist the last committed event receipt timestamp."""
+    destination = dolt_dir / EVENTS_WATERMARK_FILE
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=dolt_dir,
+            prefix=f".{EVENTS_WATERMARK_FILE}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(received_at + "\n")
+        assert temporary is not None
+        os.replace(temporary, destination)
+        temporary = None
+    except OSError as exc:
+        raise FleetExportError(f"could not write fleet sink event watermark {destination}: {exc}") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
@@ -418,14 +546,32 @@ def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
         print(f"error: could not create dolt directory {dolt_dir}: {exc}", file=sys.stderr)
         return 1
     try:
+        export_now = datetime.now(timezone.utc)
+        event_stats = ExportStats()
+        watermark = _read_event_watermark(dolt_dir) if config.events_incremental else None
         with tempfile.TemporaryDirectory(prefix="brigade-fleet-sink-") as tmp:
             tmp_dir = Path(tmp)
             events_csv = tmp_dir / f"{SINK_TABLE_EVENTS}.csv"
             claims_csv = tmp_dir / f"{SINK_TABLE_CLAIMS}.csv"
             with events_csv.open("w", newline="", encoding="utf-8") as handle:
-                event_count = export_into(handle, db_path=db_path, fmt="csv", claims=False)
+                event_count = export_into(
+                    handle,
+                    db_path=db_path,
+                    since_received=watermark,
+                    fmt="csv",
+                    claims=False,
+                    stats=event_stats,
+                    since_received_exclusive=watermark is not None,
+                )
             with claims_csv.open("w", newline="", encoding="utf-8") as handle:
-                claim_count = export_into(handle, db_path=db_path, fmt="csv", claims=True)
+                claim_count = export_into(
+                    handle,
+                    db_path=db_path,
+                    fmt="csv",
+                    claims=True,
+                    include_expired=False,
+                    export_now=export_now,
+                )
             steps: list[list[str]] = []
             if not (dolt_dir / ".dolt").is_dir():
                 steps.append(["init", "--name", "brigade", "--email", "brigade@localhost"])
@@ -434,26 +580,43 @@ def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
             steps.append(["sql", "-q", _DOLT_SCHEMA_CLAIMS])
             steps.append(["table", "import", "-r", SINK_TABLE_CLAIMS, str(claims_csv)])
             for step in steps:
-                ok, message, _ = _run_dolt(step, dolt_binary=dolt_binary, cwd=dolt_dir)
+                ok, message, _ = _run_dolt(
+                    step,
+                    dolt_binary=dolt_binary,
+                    cwd=dolt_dir,
+                    timeout_seconds=config.timeout_seconds,
+                )
                 if not ok:
                     print(f"error: {message}", file=sys.stderr)
                     return 1
-            ok, message, status = _run_dolt(["status", "--porcelain"], dolt_binary=dolt_binary, cwd=dolt_dir)
+            ok, message, status = _run_dolt(
+                ["status", "--porcelain"],
+                dolt_binary=dolt_binary,
+                cwd=dolt_dir,
+                timeout_seconds=config.timeout_seconds,
+            )
             if not ok:
                 print(f"error: {message}", file=sys.stderr)
                 return 1
             committed = bool(status.strip())
             if committed:
-                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                timestamp = export_now.strftime("%Y-%m-%dT%H:%M:%SZ")
                 commit_steps = [
                     ["add", "-A"],
                     ["commit", "-m", f"{timestamp}: fleet events/claims"],
                 ]
                 for step in commit_steps:
-                    ok, message, _ = _run_dolt(step, dolt_binary=dolt_binary, cwd=dolt_dir)
+                    ok, message, _ = _run_dolt(
+                        step,
+                        dolt_binary=dolt_binary,
+                        cwd=dolt_dir,
+                        timeout_seconds=config.timeout_seconds,
+                    )
                     if not ok:
                         print(f"error: {message}", file=sys.stderr)
                         return 1
+                if config.events_incremental and event_stats.last_received_at is not None:
+                    _write_event_watermark(dolt_dir, event_stats.last_received_at)
     except FleetExportError:
         raise
     except (sqlite3.Error, OSError) as exc:

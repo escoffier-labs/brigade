@@ -65,6 +65,24 @@ def _seed_claim(db: Path, target: str = "repo-a", node: str = "node-a", holder: 
         conn.close()
 
 
+def _set_claim_expiry(db: Path, target: str, expires_at: float) -> None:
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("UPDATE claims SET expires_at = ? WHERE target = ?", (expires_at, target))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _set_received_at(db: Path, run_id: str, received_at: str) -> None:
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("UPDATE events SET received_at = ? WHERE run_id = ?", (received_at, run_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _write_config(home: Path, body: str) -> None:
     home.mkdir(parents=True, exist_ok=True)
     (home / "fleet.toml").write_text(body, encoding="utf-8")
@@ -233,17 +251,31 @@ class TestExport:
         assert cli.main(["fleet", "export", "--db", str(db)]) == 0
         assert capsys.readouterr().out == first
 
-    def test_claims_snapshot_exports_without_holder_token(self, tmp_path, capsys):
+    def test_claims_snapshot_excludes_expired_by_default_and_marks_included_rows(self, tmp_path, capsys):
         from brigade import cli
 
         db = tmp_path / "hub.db"
         _seed_claim(db)
+        _seed_claim(db, target="repo-expired", holder="holder-expired")
+        _set_claim_expiry(db, "repo-expired", 0)
+
         assert cli.main(["fleet", "export", "--db", str(db), "--claims"]) == 0
         out = capsys.readouterr().out
-        row = json.loads(out.splitlines()[0])
+        rows = [json.loads(line) for line in out.splitlines()]
+        assert [row["target"] for row in rows] == ["repo-a"]
+        row = rows[0]
         assert list(row) == sorted(fleet_export.CLAIM_COLUMNS)
         assert row["target"] == "repo-a" and row["owner_node"] == "node-a"
+        assert row["expired"] is False
         assert "expires_at" in row and "holder_token" not in out
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--claims", "--include-expired"]) == 0
+        included = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert [(row["target"], row["expired"]) for row in included] == [
+            ("repo-a", False),
+            ("repo-expired", True),
+        ]
+
         assert cli.main(["fleet", "export", "--db", str(db), "--claims", "--format", "csv"]) == 0
         lines = capsys.readouterr().out.splitlines()
         assert lines[0] == ",".join(fleet_export.CLAIM_COLUMNS)
@@ -345,6 +377,25 @@ class TestExport:
         assert cli.main(["fleet", "export", "--db", str(db), "--out", str(tmp_path / "missing" / "out.jsonl")]) == 1
         assert "could not write fleet export" in capsys.readouterr().err
 
+    def test_failed_export_leaves_preexisting_output_untouched(self, tmp_path, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event())
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("DROP TABLE claims")
+            conn.commit()
+        finally:
+            conn.close()
+        out_file = tmp_path / "claims.jsonl"
+        out_file.write_text("keep this content\n", encoding="utf-8")
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--claims", "--out", str(out_file)]) == 1
+        assert "could not query fleet hub database" in capsys.readouterr().err
+        assert out_file.read_text(encoding="utf-8") == "keep this content\n"
+        assert list(tmp_path.glob(f".{out_file.name}.*.tmp")) == []
+
 
 class TestSinkConfig:
     def test_defaults_to_disabled_without_config(self, home):
@@ -353,22 +404,45 @@ class TestSinkConfig:
         assert config.dolt_binary == "dolt"
         assert config.dolt_dir == "~/.brigade/dolt"
         assert config.db is None
+        assert config.timeout_seconds == 120
+        assert config.events_incremental is True
 
     def test_parses_nested_fleet_sink_section(self, home):
         _write_config(
             home,
             '[fleet]\nhub_url = "http://127.0.0.1:3774"\n\n[fleet.sink]\nenabled = true\n'
-            'dolt_binary = "/usr/local/bin/dolt"\ndolt_dir = "~/dolt-fleet"\ndb = "~/hub.db"\n',
+            'dolt_binary = "/usr/local/bin/dolt"\ndolt_dir = "~/dolt-fleet"\ndb = "~/hub.db"\n'
+            "timeout_seconds = 37.5\nevents_incremental = false\n",
         )
         config = fleet_export.load_sink_config()
         assert config.enabled is True
         assert config.dolt_binary == "/usr/local/bin/dolt"
         assert config.dolt_dir == "~/dolt-fleet"
         assert config.db == "~/hub.db"
+        assert config.timeout_seconds == 37.5
+        assert config.events_incremental is False
 
     def test_non_boolean_enabled_stays_off(self, home):
         _write_config(home, '[fleet.sink]\nenabled = "yes"\n')
         assert fleet_export.load_sink_config().enabled is False
+
+    def test_timeout_is_passed_to_dolt_subprocess(self, tmp_path, monkeypatch):
+        observed = {}
+
+        def fake_run(command, **kwargs):
+            observed.update(kwargs)
+            return fleet_export.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(fleet_export.subprocess, "run", fake_run)
+        ok, message, _ = fleet_export._run_dolt(
+            ["status", "--porcelain"],
+            dolt_binary="dolt",
+            cwd=tmp_path,
+            timeout_seconds=37.5,
+        )
+
+        assert ok is True and message == ""
+        assert observed["timeout"] == 37.5
 
 
 class TestSink:
@@ -404,6 +478,8 @@ class TestSink:
             [_event(run_id="r1", seq=1)],
         )
         _seed_claim(db)
+        _seed_claim(db, target="repo-expired", holder="holder-expired")
+        _set_claim_expiry(db, "repo-expired", 0)
         dolt_dir = tmp_path / "dolt-home"
         log = tmp_path / "dolt.log"
         capture = tmp_path / "capture"
@@ -436,6 +512,7 @@ class TestSink:
         assert [row.split(",")[2] for row in event_rows[1:]] == ["1", "2", "1"]
         claim_rows = claims_csv.read_text(encoding="utf-8").splitlines()
         assert claim_rows[1].startswith("repo-a,node-a")
+        assert len(claim_rows) == 2
 
     @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
     def test_sink_keeps_formula_like_values_raw_while_human_csv_guards_them(
@@ -526,13 +603,47 @@ class TestSink:
         monkeypatch.setenv(FAKE_DOLT_LOG_ENV, str(log))
         monkeypatch.setenv(FAKE_DOLT_CAPTURE_ENV, str(capture))
         monkeypatch.delenv(FAKE_DOLT_EXIT_ENV, raising=False)
-        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{dolt_dir}"\n')
+        _write_config(
+            home,
+            f'[fleet.sink]\nenabled = true\ndolt_dir = "{dolt_dir}"\nevents_incremental = false\n',
+        )
         assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
         first = (capture / "fleet_events.csv").read_bytes()
         assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
         second = (capture / "fleet_events.csv").read_bytes()
         assert first == second
         assert "-u" in log.read_text(encoding="utf-8").splitlines()
+
+    @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
+    def test_incremental_event_watermark_round_trip_and_invalid_fallback(self, home, fake_dolt, tmp_path, monkeypatch):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event(run_id="first"), _event(run_id="second", seq=2, digest="d2"))
+        _set_received_at(db, "first", "2026-08-23T12:00:00Z")
+        _set_received_at(db, "second", "2026-08-23T12:01:00Z")
+        dolt_dir = tmp_path / "dolt-home"
+        capture = tmp_path / "capture"
+        capture.mkdir()
+        monkeypatch.setenv(FAKE_DOLT_LOG_ENV, str(tmp_path / "dolt.log"))
+        monkeypatch.setenv(FAKE_DOLT_CAPTURE_ENV, str(capture))
+        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{dolt_dir}"\n')
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        watermark = dolt_dir / fleet_export.EVENTS_WATERMARK_FILE
+        assert watermark.read_text(encoding="utf-8") == "2026-08-23T12:01:00Z\n"
+
+        _seed_events(db, _event(run_id="third", seq=3, digest="d3"))
+        _set_received_at(db, "third", "2026-08-23T12:02:00Z")
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        rows = list(csv.DictReader(io.StringIO((capture / "fleet_events.csv").read_text(encoding="utf-8"))))
+        assert [row["run_id"] for row in rows] == ["third"]
+        assert watermark.read_text(encoding="utf-8") == "2026-08-23T12:02:00Z\n"
+
+        watermark.write_text("not-a-timestamp\n", encoding="utf-8")
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        rows = list(csv.DictReader(io.StringIO((capture / "fleet_events.csv").read_text(encoding="utf-8"))))
+        assert [row["run_id"] for row in rows] == ["first", "second", "third"]
 
 
 def test_export_and_sink_parser_callbacks_are_lazy_wrappers():
