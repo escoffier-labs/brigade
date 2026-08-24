@@ -70,14 +70,22 @@ def register(sub: argparse._SubParsersAction) -> None:
         metavar="TARGET",
         default=None,
         help=(
-            "Release the hub claim on TARGET (a claim left behind by a crashed run). "
-            "Refused unless this node holds it; see --force."
+            "Release the hub claim on TARGET (a claim left behind by a crashed run): a claim key as listed "
+            "by this command, or a workspace path (its claim key, node identity, and run lock are then read "
+            "from that workspace). Refused unless this node holds it and no run owner is alive on the "
+            "workspace's run lock; see --force."
         ),
+    )
+    p_claims.add_argument(
+        "--node",
+        metavar="NODE_ID",
+        default=None,
+        help="With --release: the owner node identity to release as (default: the workspace's, else this machine's).",
     )
     p_claims.add_argument(
         "--force",
         action="store_true",
-        help="With --release: release the claim even when another node holds it.",
+        help="With --release: release even when another node holds it or a run owner is alive on the local lock.",
     )
     p_claims.set_defaults(func=_dispatch_claims)
 
@@ -125,14 +133,45 @@ def _dispatch_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _release_claim(target: str, *, force: bool, as_json: bool) -> int:
-    """``brigade fleet claims --release`` (issue #1141): free a claim whose
-    holder token died with its run. Own-node claims only, unless ``force``."""
-    import json as _json
-
+def _release_workspace(raw_target: str) -> tuple[str, Path | None]:
+    """(claim key, workspace) for a ``--release`` argument: a workspace path
+    names its own claim key; a bare key maps to the cwd's workspace only
+    when that workspace's key is the same one."""
     from .. import fleet_client
 
-    node_id = fleet_client.resolve_node_id()
+    candidate = Path(raw_target).expanduser()
+    if candidate.is_dir():
+        try:
+            workspace = candidate.resolve()
+        except OSError:
+            workspace = candidate
+        return fleet_client.resolve_claim_target(workspace), workspace
+    cwd = Path.cwd()
+    if fleet_client.resolve_claim_target(cwd) == raw_target:
+        return raw_target, fleet_client.find_workspace_for_path(cwd) or cwd
+    return raw_target, None
+
+
+def _release_claim(raw_target: str, *, node_override: str | None, force: bool, as_json: bool) -> int:
+    """``brigade fleet claims --release`` (issue #1141): free a claim whose
+    holder token died with its run. Own-node claims only, and never while a
+    run owner is alive on the workspace's run lock, unless ``force``."""
+    import json as _json
+
+    from .. import fleet_client, runguard
+
+    target, workspace = _release_workspace(raw_target)
+    if node_override is not None and not fleet_client._node_id_is_claimable(node_override):
+        print(f"error: --node {node_override!r} is not a usable fleet node identity", file=sys.stderr)
+        return 1
+    node_id = node_override or fleet_client.resolve_node_id(workspace)
+    if workspace is not None and not force and runguard.inspect_run_lock_reconcile(workspace) == "live":
+        print(
+            f"error: a run owner is still alive on the run lock of {workspace}; refusing to release {target!r} "
+            "(pass --force to release it anyway)",
+            file=sys.stderr,
+        )
+        return 1
     decision = fleet_client.release_claim(target, node_id=node_id, force=force)
     if decision.reason == "no-hub":
         print("error: no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)", file=sys.stderr)
@@ -140,12 +179,15 @@ def _release_claim(target: str, *, force: bool, as_json: bool) -> int:
     if decision.reason == "no-identity":
         print(
             f"error: no usable fleet node identity ({decision.detail}); run from a Brigade workspace "
-            "with .brigade/node.toml (see `brigade node`)",
+            "with .brigade/node.toml (see `brigade node`) or pass --node",
             file=sys.stderr,
         )
         return 1
     if decision.reason == "hub-unavailable":
-        print(f"error: fleet hub claim release failed: {decision.detail}", file=sys.stderr)
+        detail = decision.detail or ""
+        if "'holder'" in detail or "'scope'" in detail:
+            detail += " (this fleet hub predates token-less release; upgrade it)"
+        print(f"error: fleet hub claim release failed: {detail}", file=sys.stderr)
         return 1
     if as_json:
         payload = {
@@ -183,11 +225,11 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
 
     from .. import fleet_client
 
-    if args.force and args.release is None:
-        print("error: --force requires --release <target>", file=sys.stderr)
+    if args.release is None and (args.force or args.node is not None):
+        print("error: --force and --node require --release <target>", file=sys.stderr)
         return 2
     if args.release is not None:
-        return _release_claim(args.release, force=args.force, as_json=args.json)
+        return _release_claim(args.release, node_override=args.node, force=args.force, as_json=args.json)
     try:
         claims = fleet_client.fetch_claims(include_all=args.all)
     except fleet_client.FleetClientError as exc:

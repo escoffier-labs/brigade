@@ -138,19 +138,32 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
 `brigade fleet claims`) are described in full in the CHANGELOG entry for
 #1125. Recovery from a crashed run (#1141):
 
+- Every claim row records the acquiring run's local `run.lock` lease
+  (`lock`: owner token, `acquired_at`, `run_dir`; never serialized; hub
+  schema v3, live rows survive the upgrade).
 - A run killed with SIGKILL leaves an unexpired hub claim under its own node
   whose holder token died with it. On the next `brigade run` in that repo,
   the Phase 1 lease reconcile frees `run.lock` for the dead owner, and
-  because it did, the hub acquire is sent with `scope: "node"`: the hub
-  replaces an unexpired claim owned by the *same* `node_id` (never another
-  node's) and the run logs one line naming the superseded claim. No TTL
-  wait. A same-node claim with no dead lock to vouch for it (a sibling run,
-  or a run already recovered with `brigade runs recover`) is still refused,
-  with the two ways out named in the error.
-- `brigade fleet claims --release <target> [--json]` frees a claim without
-  its holder token (`POST /claims` `release` with `scope: "node"`): the hub
-  deletes the row only if this node owns it; another node's claim is
-  refused with its owner named. `--force` (`scope: "force"`) releases it
-  anyway. Renew is never token-less.
+  because it did, the hub acquire is sent with `scope: "node"` and that dead
+  lease as `supersede`: the hub replaces only the exact row taken under that
+  lease (same `node_id`, same lease token, lease stamp not newer) and the
+  run logs one line naming the superseded claim. No TTL wait. A claim held
+  by another node, by a run in another same-name workspace, on a cloned
+  node identity, or without a recorded lease is never touched: the acquire
+  is refused with the two ways out named in the error, and so is a
+  same-node claim with no dead lock to vouch for it (a sibling run, or a run
+  already recovered with `brigade runs recover`).
+- `brigade fleet claims --release <target> [--node NODE_ID] [--force] [--json]`
+  frees a claim without its holder token (`POST /claims` `release` with
+  `scope: "node"`): the hub deletes the row only if the given node owns it;
+  another node's claim is refused with its owner named. `<target>` is a
+  claim key or a workspace path (its claim key, node identity, and run lock
+  are then used); a non-`--force` release is refused while a run owner is
+  alive on that workspace's `run.lock`. `--force` (`scope: "force"`)
+  releases it anyway. Renew is never token-less.
 - `brigade run --no-fleet-claim` skips the hub claim entirely and relies on
   the local run lock alone, logged once on the `brigade.fleet` logger.
+- Trust boundary: `node_id` and the leases are caller-asserted under the one
+  shared bearer token, so `scope` is an intent marker that keeps honest
+  clients from stealing each other's claims, not an authorization — the
+  bearer token already authorizes `force` and arbitrary claims.

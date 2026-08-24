@@ -3,7 +3,8 @@
 A SIGKILLed run leaves an unexpired hub claim under its own node with a
 holder token nobody has. Three ways out: ``brigade fleet claims --release``
 (own node, or ``--force``), a same-node supersede on acquire once the local
-lease reconcile has found the previous run dead, and ``brigade run
+lease reconcile has found the previous run dead — matched to the exact
+claim row that run took under its ``run.lock`` lease — and ``brigade run
 --no-fleet-claim``.
 """
 
@@ -12,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -25,6 +27,7 @@ from brigade import fleet_client, fleet_hub
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
 DEAD_PID = 99999999
+DEAD_LOCK_ACQUIRED_AT = "2026-08-01T00:00:00+00:00"
 
 
 @pytest.fixture()
@@ -53,8 +56,30 @@ def _post(url: str, token: str, body, path: str = "/claims") -> tuple[int, dict]
         return exc.code, json.loads(exc.read())
 
 
+def _get(url: str, path: str, token: str) -> tuple[int, dict]:
+    request = urllib.request.Request(url + path, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return response.status, json.loads(response.read())
+
+
 def _claim(action: str = "acquire", node: str = NODE_A, target: str = "repo-a", holder: str = "h1", **extra) -> dict:
     return {"action": action, "node_id": node, "target": target, "holder": holder, **extra}
+
+
+def _lease(token: str = "dead-owner", acquired_at: str = DEAD_LOCK_ACQUIRED_AT, **extra) -> dict:
+    """A hub-facing run.lock lease as the client sends it."""
+    return {"token": token, "acquired_at": acquired_at, **extra}
+
+
+def _owner(token: str = "dead-owner", acquired_at: str = DEAD_LOCK_ACQUIRED_AT, run_dir: str | None = None) -> dict:
+    """A runguard ``owner.json`` payload."""
+    return {
+        "schema": "brigade.run_lock.v1",
+        "owner_token": token,
+        "pid": DEAD_PID,
+        "run_dir": run_dir,
+        "acquired_at": acquired_at,
+    }
 
 
 def _env(monkeypatch, url: str, token: str) -> None:
@@ -63,14 +88,16 @@ def _env(monkeypatch, url: str, token: str) -> None:
 
 
 class TestHubScopes:
-    def test_acquire_scope_node_supersedes_own_dead_holder_only(self, hub):
+    def test_acquire_scope_node_supersedes_own_dead_lease_only(self, hub):
         url, token, _db = hub
-        assert _post(url, token, _claim(holder="dead", conductor="chef"))[1]["granted"] is True
+        assert _post(url, token, _claim(holder="dead", conductor="chef", lock=_lease("L1")))[1]["granted"] is True
         # Default (holder) scope: the unexpired same-node row still wins.
         status, payload = _post(url, token, _claim(holder="h2"))
         assert status == 409 and payload["granted"] is False
-        # Node scope from the same node takes it over under the new token.
-        status, payload = _post(url, token, _claim(holder="h2", scope="node", conductor="sous"))
+        # Node scope presenting the row's own (now dead) lease takes it over.
+        status, payload = _post(
+            url, token, _claim(holder="h2", scope="node", conductor="sous", lock=_lease("L2"), supersede=_lease("L1"))
+        )
         assert status == 200 and payload["granted"] is True
         assert payload["superseded"]["owner_node"] == NODE_A
         assert payload["superseded"]["owner_conductor"] == "chef"
@@ -79,11 +106,41 @@ class TestHubScopes:
         assert _post(url, token, _claim("renew", holder="dead"))[0] == 409
         assert _post(url, token, _claim("renew", holder="h2"))[1]["renewed"] is True
         # A node-scoped acquire from another node is still a plain 409.
-        status, payload = _post(url, token, _claim(node=NODE_B, holder="hb", scope="node"))
+        status, payload = _post(url, token, _claim(node=NODE_B, holder="hb", scope="node", supersede=_lease("L2")))
         assert status == 409 and payload["owner"]["owner_node"] == NODE_A
         # Idempotent retry for the new holder reports nothing superseded.
-        status, payload = _post(url, token, _claim(holder="h2", scope="node"))
+        status, payload = _post(
+            url, token, _claim(holder="h2", scope="node", lock=_lease("L2"), supersede=_lease("L1"))
+        )
         assert status == 200 and "superseded" not in payload
+
+    def test_acquire_scope_node_matches_the_exact_lease_row(self, hub):
+        """A dead lock in another directory (same basename, one node) or on a
+        cloned node identity is a different lease: it never replaces a live
+        run's claim, and lease columns are never serialized."""
+        url, token, _db = hub
+        live = _claim(holder="live", conductor="chef", lock=_lease("lease-a", "2026-08-01T00:00:00+00:00"))
+        assert _post(url, token, live)[1]["granted"] is True
+        status, payload = _post(url, token, _claim(holder="h2", scope="node", supersede=_lease("lease-b")))
+        assert status == 409 and payload["granted"] is False
+        assert "another lease" in payload["error"] and payload["owner"]["owner_node"] == NODE_A
+        assert _post(url, token, _claim("renew", holder="live"))[1]["renewed"] is True
+        # Same token, but the row was taken under a newer lease stamp: refused.
+        older = _lease("lease-a", "2026-07-31T23:59:59+00:00")
+        assert _post(url, token, _claim(holder="h2", scope="node", supersede=older))[0] == 409
+        assert _post(url, token, _claim("renew", holder="live"))[1]["renewed"] is True
+        # The exact lease supersedes.
+        exact = _lease("lease-a", "2026-08-01T00:00:00+00:00")
+        status, payload = _post(url, token, _claim(holder="h2", scope="node", supersede=exact))
+        assert status == 200 and payload["superseded"]["owner_conductor"] == "chef"
+        listed = _get(url, "/claims", token)[1]["claims"]
+        assert len(listed) == 1
+        assert not {"lock_token", "lock_acquired_at", "lock_run_dir", "holder_token"} & set(listed[0])
+        # A row acquired without a lease (a client outside run_lock) can never be superseded.
+        assert _post(url, token, _claim("release", holder="h2"))[1]["released"] is True
+        assert _post(url, token, _claim(holder="bare"))[1]["granted"] is True
+        assert _post(url, token, _claim(holder="h3", scope="node", supersede=_lease("lease-a")))[0] == 409
+        assert _post(url, token, _claim("renew", holder="bare"))[1]["renewed"] is True
 
     def test_release_scope_node_needs_no_token_but_same_owner(self, hub):
         url, token, _db = hub
@@ -110,12 +167,23 @@ class TestHubScopes:
         assert status == 200 and payload["released"] is True and payload["claim"]["owner_node"] == NODE_A
         assert _post(url, token, _claim(node=NODE_B, holder="hb"))[1]["granted"] is True
 
-    def test_scope_validation(self, hub):
+    def test_scope_and_lease_validation(self, hub):
         url, token, _db = hub
         assert _post(url, token, _claim(scope="force"))[0] == 400
         assert _post(url, token, _claim("renew", scope="node"))[0] == 400
         assert _post(url, token, _claim("release", scope="bogus"))[0] == 400
         assert _post(url, token, _claim(scope=1))[0] == 400
+        # A node-scoped acquire must present the reconciled dead lease.
+        assert _post(url, token, _claim(scope="node"))[0] == 400
+        assert _post(url, token, _claim(scope="node", supersede="L1"))[0] == 400
+        assert _post(url, token, _claim(scope="node", supersede={"acquired_at": "x"}))[0] == 400
+        assert _post(url, token, _claim(scope="node", supersede={"token": "L1", "acquired_at": 5}))[0] == 400
+        assert _post(url, token, _claim(scope="node", supersede=_lease("x" * 2000)))[0] == 400
+        # Leases belong to acquire only, and must be well-formed.
+        assert _post(url, token, _claim("renew", supersede=_lease()))[0] == 400
+        assert _post(url, token, _claim("release", lock=_lease()))[0] == 400
+        assert _post(url, token, _claim(lock={"token": ""}))[0] == 400
+        assert _post(url, token, _claim(lock={"token": "L1", "run_dir": 5}))[0] == 400
         # A holder-scoped release still needs its token.
         body = _claim("release")
         body.pop("holder")
@@ -124,6 +192,34 @@ class TestHubScopes:
         body = _claim("release", node="unknown", scope="force")
         body.pop("holder")
         assert _post(url, token, body)[0] == 400
+        assert _get(url, "/claims", token)[1]["claims"] == []
+
+    def test_v2_claim_rows_survive_the_lease_column_upgrade(self, tmp_path):
+        db = tmp_path / "hub.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, "
+            "holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, "
+            "ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO claims VALUES ('repo-a', ?, 'chef', 'h1', 'then', 'then', 900, ?)", (NODE_A, time.time() + 900)
+        )
+        conn.execute("PRAGMA user_version=2")
+        conn.commit()
+        conn.close()
+        conn = fleet_hub.init_db(db)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 3
+            assert [c["target"] for c in fleet_hub.list_claims(conn)] == ["repo-a"]
+            # No lease recorded: never supersedable, only released or expired.
+            status, _payload = fleet_hub.handle_claim(conn, _claim(holder="h2", scope="node", supersede=_lease("L1")))
+            assert status == 409
+            assert fleet_hub.handle_claim(conn, _claim("renew", holder="h1"))[1]["renewed"] is True
+            # Re-opening is idempotent.
+            assert fleet_hub.init_db(db).execute("PRAGMA user_version").fetchone()[0] == 3
+        finally:
+            conn.close()
 
 
 class TestClient:
@@ -131,6 +227,17 @@ class TestClient:
     def _home(self, tmp_path, monkeypatch):
         monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "brigade-home"))
         monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: NODE_A)
+
+    def test_lease_from_lock_owner(self):
+        assert fleet_client.lease_from_lock_owner(None) is None
+        assert fleet_client.lease_from_lock_owner({}) is None
+        assert fleet_client.lease_from_lock_owner({"owner_token": " ", "pid": 1}) is None
+        assert fleet_client.lease_from_lock_owner({"owner_token": " t ", "pid": 1, "run_dir": None}) == {"token": "t"}
+        assert fleet_client.lease_from_lock_owner(_owner("t", "when", "/r")) == {
+            "token": "t",
+            "acquired_at": "when",
+            "run_dir": "/r",
+        }
 
     def test_release_claim_without_token_by_node_and_force(self, hub, monkeypatch):
         url, token, _db = hub
@@ -147,19 +254,34 @@ class TestClient:
         assert fleet_client.release_claim("repo-a", node_id=NODE_B, force=True).granted is True
         assert fleet_client.fetch_claims() == []
 
-    def test_repo_claim_supersedes_dead_same_node_claim_and_logs_once(self, hub, monkeypatch, caplog):
+    def test_repo_claim_supersedes_dead_lease_and_logs_once(self, hub, monkeypatch, caplog):
         url, token, _db = hub
         _env(monkeypatch, url, token)
-        dead = fleet_client.acquire_claim("repo-a", node_id=NODE_A, conductor="chef").claim
+        dead = fleet_client.acquire_claim("repo-a", node_id=NODE_A, conductor="chef", lock_owner=_owner("dead")).claim
         assert dead is not None
         with caplog.at_level("WARNING", logger="brigade.fleet"):
-            with fleet_client.repo_claim("repo-a", conductor="sous", supersede_same_node=True) as decision:
+            with fleet_client.repo_claim(
+                "repo-a", conductor="sous", lock_owner=_owner("new"), supersede_dead_owner=_owner("dead")
+            ) as decision:
                 assert decision.granted is True
                 assert decision.superseded is not None and decision.superseded["owner_conductor"] == "chef"
-                held = fleet_client.fetch_claims()
-                assert [c["owner_conductor"] for c in held] == ["sous"]
+                assert [c["owner_conductor"] for c in fleet_client.fetch_claims()] == ["sous"]
         assert fleet_client.fetch_claims() == []
         assert sum("superseded this node's unexpired claim" in r.message for r in caplog.records) == 1
+
+    def test_repo_claim_supersede_needs_the_exact_dead_lease(self, hub, monkeypatch):
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        assert fleet_client.acquire_claim("repo-a", node_id=NODE_A, conductor="chef", lock_owner=_owner("a")).granted
+        # A different dead lease on the same node id (another directory, a cloned node).
+        with pytest.raises(fleet_client.FleetClaimHeldError, match="another lease"):
+            with fleet_client.repo_claim("repo-a", lock_owner=_owner("b"), supersede_dead_owner=_owner("dead-b")):
+                pass  # pragma: no cover - never entered
+        # An unattributable dead lock (no token) is no evidence at all.
+        with pytest.raises(fleet_client.FleetClaimHeldError):
+            with fleet_client.repo_claim("repo-a", supersede_dead_owner={"pid": DEAD_PID}):
+                pass  # pragma: no cover - never entered
+        assert [c["owner_conductor"] for c in fleet_client.fetch_claims()] == ["chef"]
 
     def test_repo_claim_without_supersede_names_the_way_out(self, hub, monkeypatch):
         url, token, _db = hub
@@ -181,9 +303,9 @@ class TestClient:
     def test_repo_claim_supersede_never_steals_another_node(self, hub, monkeypatch):
         url, token, _db = hub
         _env(monkeypatch, url, token)
-        assert fleet_client.acquire_claim("repo-a", node_id=NODE_B).granted is True
+        assert fleet_client.acquire_claim("repo-a", node_id=NODE_B, lock_owner=_owner("dead")).granted is True
         with pytest.raises(fleet_client.FleetClaimHeldError):
-            with fleet_client.repo_claim("repo-a", supersede_same_node=True):
+            with fleet_client.repo_claim("repo-a", supersede_dead_owner=_owner("dead")):
                 pass  # pragma: no cover - never entered
         assert [c["owner_node"] for c in fleet_client.fetch_claims()] == [NODE_B]
 
@@ -231,6 +353,56 @@ class TestReleaseCli:
         assert f"held by node {NODE_B}" in capsys.readouterr().out
         assert fleet_client.fetch_claims() == []
 
+    def test_release_node_override(self, hub, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        _post(url, token, _claim(node=NODE_B, holder="hb"))
+        assert cli.main(["fleet", "claims", "--release", "repo-a", "--node", "unknown"]) == 1
+        assert "not a usable fleet node identity" in capsys.readouterr().err
+        assert cli.main(["fleet", "claims", "--release", "repo-a", "--node", NODE_B, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["released"] is True and payload["node_id"] == NODE_B and payload["forced"] is False
+        assert fleet_client.fetch_claims() == []
+
+    def test_release_workspace_path_uses_its_key_identity_and_lock(self, hub, tmp_path, monkeypatch, capsys):
+        from brigade import cli, node as node_mod, runguard
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        ws = tmp_path / "api"
+        (ws / ".brigade").mkdir(parents=True)
+        identity = node_mod.ensure_identity(ws)
+        # The identity must come from the target workspace, not the cwd.
+        monkeypatch.setattr(
+            fleet_client, "resolve_node_id", lambda base_path=None: identity.node_id if base_path else NODE_A
+        )
+        _post(url, token, _claim(node=identity.node_id, target="api", holder="dead", conductor="chef"))
+        lock = runguard.lock_path(ws)
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        # A live run owner on that workspace's lock: refused without --force.
+        assert cli.main(["fleet", "claims", "--release", str(ws)]) == 1
+        err = capsys.readouterr().err
+        assert "run owner is still alive" in err and "--force" in err
+        assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
+        # A bare key that is the cwd's own workspace key is guarded the same way.
+        monkeypatch.chdir(ws)
+        assert cli.main(["fleet", "claims", "--release", "api"]) == 1
+        assert "run owner is still alive" in capsys.readouterr().err
+        # Dead owner: released, as the workspace's own identity.
+        (lock / "pid").write_text(f"{DEAD_PID}\n")
+        assert cli.main(["fleet", "claims", "--release", str(ws)]) == 0
+        out = capsys.readouterr().out
+        assert "released claim on 'api'" in out and identity.node_id in out
+        assert fleet_client.fetch_claims() == []
+        # --force overrides a live lock.
+        _post(url, token, _claim(node=identity.node_id, target="api", holder="dead2"))
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        assert cli.main(["fleet", "claims", "--release", str(ws), "--force"]) == 0
+        assert fleet_client.fetch_claims() == []
+
     def test_release_missing_misuse_and_no_hub(self, hub, tmp_path, monkeypatch, capsys):
         from brigade import cli
 
@@ -241,7 +413,9 @@ class TestReleaseCli:
         assert cli.main(["fleet", "claims", "--release", "repo-a", "--json"]) == 0
         assert json.loads(capsys.readouterr().out)["released"] is False
         assert cli.main(["fleet", "claims", "--force"]) == 2
-        assert "--force requires --release" in capsys.readouterr().err
+        assert "require --release" in capsys.readouterr().err
+        assert cli.main(["fleet", "claims", "--node", NODE_B]) == 2
+        assert "require --release" in capsys.readouterr().err
         monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "unknown")
         assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 1
         assert "no usable fleet node identity" in capsys.readouterr().err
@@ -252,6 +426,20 @@ class TestReleaseCli:
         monkeypatch.delenv("BRIGADE_FLEET_HUB_URL", raising=False)
         assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 1
         assert "no fleet hub configured" in capsys.readouterr().err
+
+    def test_release_against_an_older_hub_names_the_skew(self, hub, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        monkeypatch.setattr(
+            fleet_client,
+            "_post_claim_blocking",
+            lambda *a, **kw: (400, {"error": "claim field 'holder' must be a non-empty string"}),
+        )
+        assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 1
+        err = capsys.readouterr().err
+        assert "claim field 'holder'" in err and "predates token-less release" in err
 
 
 class TestDispatchRecovery:
@@ -274,7 +462,7 @@ class TestDispatchRecovery:
 
         return cli.main(["run", "do something", "--roster", str(roster_path), "--cwd", str(ws), *extra])
 
-    def _plant_dead_run_lock(self, ws: Path) -> Path:
+    def _plant_dead_run_lock(self, ws: Path, owner: dict | None = None) -> Path:
         """A run.lock whose owner pid is gone and whose run never finished."""
         from brigade import runguard
 
@@ -284,17 +472,7 @@ class TestDispatchRecovery:
         lock = runguard.lock_path(ws)
         lock.mkdir(parents=True)
         (lock / "pid").write_text(f"{DEAD_PID}\n")
-        (lock / "owner.json").write_text(
-            json.dumps(
-                {
-                    "schema": "brigade.run_lock.v1",
-                    "owner_token": "dead-owner",
-                    "pid": DEAD_PID,
-                    "run_dir": str(abandoned.resolve()),
-                    "acquired_at": "2026-08-01T00:00:00+00:00",
-                }
-            )
-        )
+        (lock / "owner.json").write_text(json.dumps(owner or _owner(run_dir=str(abandoned.resolve()))))
         return abandoned
 
     def test_dead_owner_lock_supersedes_own_stale_claim_without_ttl_wait(self, hub, workspace, monkeypatch, caplog):
@@ -305,8 +483,11 @@ class TestDispatchRecovery:
         ws, roster_path = workspace
         identity = node_mod.load_identity(ws)
         assert identity is not None
-        # The killed run's claim: this node, full default TTL, a token nobody has.
-        status, payload = _post(url, token, _claim(node=identity.node_id, target="ws", holder="dead", conductor="chef"))
+        # The killed run's claim: this node, full default TTL, a token nobody
+        # has, taken under the lease its run.lock still records.
+        status, payload = _post(
+            url, token, _claim(node=identity.node_id, target="ws", holder="dead", conductor="chef", lock=_lease())
+        )
         assert status == 200
         dead_claim = payload["claim"]
         abandoned = self._plant_dead_run_lock(ws)
@@ -323,6 +504,72 @@ class TestDispatchRecovery:
         assert json.loads((abandoned / "run.json").read_text())["status"] == "failed"
         assert fleet_client.fetch_claims() == []
 
+    def test_run_records_its_lease_so_its_own_crash_can_be_superseded(self, hub, workspace, monkeypatch, caplog):
+        """End to end: the row a real run takes carries its run.lock lease, so
+        after that run is SIGKILLed the next run's reconcile supersedes it."""
+        from brigade import aboyeur, runguard
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        ws, roster_path = workspace
+        captured: dict = {}
+
+        def first_run(*a, **kw):
+            captured["owner"] = runguard.read_lock_owner(runguard.lock_path(ws))
+            return 0
+
+        monkeypatch.setattr(aboyeur, "run", first_run)
+        real_release = fleet_client.release_claim
+        # SIGKILL stand-in: the run never gets to release its claim.
+        monkeypatch.setattr(
+            fleet_client,
+            "release_claim",
+            lambda *a, **kw: fleet_client.ClaimDecision(granted=False, reason="hub-unavailable"),
+        )
+        assert self._run(ws, roster_path) == 0
+        monkeypatch.setattr(fleet_client, "release_claim", real_release)
+        assert len(fleet_client.fetch_claims()) == 1
+        owner = captured["owner"]
+        assert owner is not None and owner["owner_token"] and owner["run_dir"]
+        # The crashed run's lock, exactly as SIGKILL leaves it.
+        lock = runguard.lock_path(ws)
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{DEAD_PID}\n")
+        (lock / "owner.json").write_text(json.dumps({**owner, "pid": DEAD_PID}))
+        monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: 0)
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            assert self._run(ws, roster_path) == 0
+        assert sum("superseded this node's unexpired claim" in r.message for r in caplog.records) == 1
+        assert fleet_client.fetch_claims() == []
+
+    def test_dead_lock_elsewhere_never_supersedes_a_live_run(self, hub, tmp_path, monkeypatch, capsys):
+        """Two workspaces with one basename on one node, or two machines with
+        a cloned node.toml: same node_id, same claim key. ws-a's live run
+        holds 'api' under its lease; ws-b reconciles its own dead lock. The
+        supersede presents ws-b's dead lease, which is not the row's: refused,
+        and ws-a's run is undisturbed."""
+        from brigade import aboyeur
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: NODE_A)
+        ws_b = tmp_path / "b" / "api"
+        (ws_b / ".brigade").mkdir(parents=True)
+        roster_path = ws_b / "roster.toml"
+        roster_path.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+        live = _claim(node=NODE_A, target="api", holder="live-a", conductor="chef", lock=_lease("lease-a"))
+        assert _post(url, token, live)[0] == 200
+        self._plant_dead_run_lock(ws_b, _owner("dead-in-b"))
+        dispatched = []
+        monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
+        assert self._run(ws_b, roster_path) == 2
+        err = capsys.readouterr().err
+        assert f"claimed by node {NODE_A}" in err and "brigade fleet claims --release api" in err
+        assert dispatched == []
+        assert [c["owner_conductor"] for c in fleet_client.fetch_claims()] == ["chef"]
+        assert _post(url, token, _claim("renew", node=NODE_A, target="api", holder="live-a"))[1]["renewed"] is True
+
     def test_own_stale_claim_without_dead_lock_is_refused_with_hint(self, hub, workspace, monkeypatch, capsys):
         from brigade import aboyeur, node as node_mod
 
@@ -331,7 +578,7 @@ class TestDispatchRecovery:
         ws, roster_path = workspace
         identity = node_mod.load_identity(ws)
         assert identity is not None
-        _post(url, token, _claim(node=identity.node_id, target="ws", holder="dead"))
+        _post(url, token, _claim(node=identity.node_id, target="ws", holder="dead", lock=_lease()))
         dispatched = []
         monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
         assert self._run(ws, roster_path) == 2
@@ -347,7 +594,7 @@ class TestDispatchRecovery:
         url, token, _db = hub
         _env(monkeypatch, url, token)
         ws, roster_path = workspace
-        _post(url, token, _claim(node=NODE_B, target="ws", holder="hb"))
+        _post(url, token, _claim(node=NODE_B, target="ws", holder="hb", lock=_lease()))
         self._plant_dead_run_lock(ws)
         dispatched = []
         monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
@@ -412,7 +659,7 @@ def test_detached_child_argv_forwards_no_fleet_claim(tmp_path):
     assert "--no-fleet-claim" not in argv
 
 
-def test_run_lock_reports_reconciled_dead_owner(tmp_path):
+def test_run_lock_reports_reconciled_dead_owner_and_its_own_lease(tmp_path):
     from brigade import runguard
 
     repo = tmp_path / "repo"
@@ -423,15 +670,19 @@ def test_run_lock_reports_reconciled_dead_owner(tmp_path):
     lock = runguard.lock_path(repo)
     lock.mkdir(parents=True)
     (lock / "pid").write_text(f"{DEAD_PID}\n")
-    (lock / "owner.json").write_text(
-        json.dumps(
-            {"schema": "brigade.run_lock.v1", "owner_token": "dead-owner", "pid": DEAD_PID, "run_dir": str(abandoned)}
-        )
-    )
+    (lock / "owner.json").write_text(json.dumps(_owner(run_dir=str(abandoned))))
     seen: list = []
-    with runguard.run_lock(repo, run_dir=tmp_path / "new-run", on_reconcile=seen.append):
+    with runguard.run_lock(repo, run_dir=tmp_path / "new-run", on_reconcile=seen.append) as path:
         assert len(seen) == 1
+        mine = runguard.read_lock_owner(path)
+        assert mine is not None and mine["pid"] == os.getpid() and mine["owner_token"] != "dead-owner"
+        assert fleet_client.lease_from_lock_owner(mine) == {
+            "token": mine["owner_token"],
+            "acquired_at": mine["acquired_at"],
+            "run_dir": str((tmp_path / "new-run").resolve()),
+        }
     assert seen[0] is not None and seen[0]["owner_token"] == "dead-owner" and seen[0]["pid"] == DEAD_PID
+    assert runguard.read_lock_owner(path) is None
     # A free lock and a live owner never report a reconcile.
     seen.clear()
     with runguard.run_lock(repo, on_reconcile=seen.append):

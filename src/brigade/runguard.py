@@ -195,6 +195,13 @@ def _lock_owner_payload(*, owner_token: str, run_dir: Path | None) -> dict[str, 
     }
 
 
+def read_lock_owner(path: Path) -> dict[str, object] | None:
+    """Published owner metadata (``owner.json``) of the lock directory at
+    ``path`` — the ``run_lock`` yield — or ``None`` when unreadable. The
+    ``owner_token`` is this lease's identity for the fleet hub (issue #1141)."""
+    return _read_lock_owner(path)
+
+
 def _read_lock_owner(path: Path) -> dict[str, object] | None:
     try:
         payload = json.loads((path / "owner.json").read_text())

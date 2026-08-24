@@ -515,7 +515,7 @@ def dispatch(args) -> int:
             # The local lease's verdict on the previous run at this lock
             # (issue #1141): each dead owner it reconciled on the way in.
             reconciled_dead_owners: list[dict[str, object] | None] = []
-            lifecycle.enter_context(
+            lock_path = lifecycle.enter_context(
                 runguard.run_lock(
                     run_cwd,
                     run_dir=output_dir,
@@ -528,10 +528,12 @@ def dispatch(args) -> int:
             # (or releases) the hub claim — a queued sibling can neither run
             # unclaimed nor delete the winner's claim. No hub, no node
             # identity, or an unreachable hub falls back to the local
-            # run.lock taken above. When the lease reconcile just found the
-            # previous run on this node dead, its unexpired hub claim (same
-            # node, same target, a token that died with it) is superseded
-            # instead of locking this node out for the residual TTL.
+            # run.lock taken above. The claim row records this run's lock
+            # lease; when the lease reconcile just found the previous run at
+            # this lock dead, the claim that run took under that exact lease
+            # (same node, same target, a token that died with it) is
+            # superseded instead of locking this node out for the residual
+            # TTL — a claim under any other lease is never touched.
             claim_target = fleet_client.resolve_claim_target(run_cwd)
             if args.no_fleet_claim:
                 _FLEET_LOG.warning(
@@ -539,12 +541,17 @@ def dispatch(args) -> int:
                     claim_target,
                 )
             else:
+                dead_owner = next(
+                    (owner for owner in reversed(reconciled_dead_owners) if owner and owner.get("owner_token")),
+                    None,
+                )
                 lifecycle.enter_context(
                     fleet_client.repo_claim(
                         claim_target,
                         base_path=run_cwd,
                         conductor=lifecycle_seat,
-                        supersede_same_node=bool(reconciled_dead_owners),
+                        lock_owner=runguard.read_lock_owner(lock_path),
+                        supersede_dead_owner=dead_owner,
                     )
                 )
             if args.worktree:
