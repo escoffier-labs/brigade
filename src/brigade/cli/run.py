@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import sys
 import time
@@ -15,6 +16,9 @@ from typing import Any, Callable, Iterator, Mapping
 _DETACH_START_TIMEOUT_SECONDS = 30.0
 _DETACH_POLL_INTERVAL_SECONDS = 0.05
 _UNBOUNDED_RUN_LOCK_WAIT = math.inf
+# Same logger the fleet client uses for its own claim fallbacks, so the
+# --no-fleet-claim line lands next to them.
+_FLEET_LOG = logging.getLogger("brigade.fleet")
 
 
 @contextmanager
@@ -171,6 +175,15 @@ def register(sub: argparse._SubParsersAction) -> None:
             "A bare --wait waits until the lock is available with no fixed ceiling; "
             "pass SECONDS to bound the wait. Use --wait=0 to fail fast even when "
             ".brigade/config.json sets run_lock_wait_seconds."
+        ),
+    )
+    p_run.add_argument(
+        "--no-fleet-claim",
+        action="store_true",
+        help=(
+            "Skip the fleet hub repo claim and rely on the local run lock alone (logged once). "
+            "Escape hatch when a claim left by a crashed run blocks this repo; "
+            "see also `brigade fleet claims --release`."
         ),
     )
     p_run.add_argument(
@@ -499,11 +512,15 @@ def dispatch(args) -> int:
                         "output_warnings": output_warnings,
                     },
                 )
-            lifecycle.enter_context(
+            # The local lease's verdict on the previous run at this lock
+            # (issue #1141): each dead owner it reconciled on the way in.
+            reconciled_dead_owners: list[dict[str, object] | None] = []
+            lock_path = lifecycle.enter_context(
                 runguard.run_lock(
                     run_cwd,
                     run_dir=output_dir,
                     wait_seconds=_resolved_run_lock_wait_seconds(args, run_cwd),
+                    on_reconcile=reconciled_dead_owners.append,
                 )
             )
             # Hub-arbitrated cross-machine claim (issue #1125), taken after
@@ -511,14 +528,32 @@ def dispatch(args) -> int:
             # (or releases) the hub claim — a queued sibling can neither run
             # unclaimed nor delete the winner's claim. No hub, no node
             # identity, or an unreachable hub falls back to the local
-            # run.lock taken above.
-            lifecycle.enter_context(
-                fleet_client.repo_claim(
-                    fleet_client.resolve_claim_target(run_cwd),
-                    base_path=run_cwd,
-                    conductor=lifecycle_seat,
+            # run.lock taken above. The claim row records this run's lock
+            # lease; when the lease reconcile just found the previous run at
+            # this lock dead, the claim that run took under that exact lease
+            # (same node, same target, a token that died with it) is
+            # superseded instead of locking this node out for the residual
+            # TTL — a claim under any other lease is never touched.
+            claim_target = fleet_client.resolve_claim_target(run_cwd)
+            if args.no_fleet_claim:
+                _FLEET_LOG.warning(
+                    "fleet claim skipped for %s (--no-fleet-claim); relying on the local run lock alone",
+                    claim_target,
                 )
-            )
+            else:
+                dead_owner = next(
+                    (owner for owner in reversed(reconciled_dead_owners) if owner and owner.get("owner_token")),
+                    None,
+                )
+                lifecycle.enter_context(
+                    fleet_client.repo_claim(
+                        claim_target,
+                        base_path=run_cwd,
+                        conductor=lifecycle_seat,
+                        lock_owner=runguard.read_lock_owner(lock_path),
+                        supersede_dead_owner=dead_owner,
+                    )
+                )
             if args.worktree:
                 worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
                 effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
@@ -913,6 +948,8 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--no-code-graph")
     if args.no_evidence:
         argv.append("--no-evidence")
+    if getattr(args, "no_fleet_claim", False):
+        argv.append("--no-fleet-claim")
     if args.sandbox is not None:
         argv.extend(["--sandbox", args.sandbox])
     if args.codex_transport is not None:

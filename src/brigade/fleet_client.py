@@ -61,7 +61,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -581,7 +581,9 @@ class ClaimDecision:
     has no usable identity to claim with), or ``"hub-unavailable"``
     (network/hub failure — callers fall back to the local run lock).
     ``holder`` is the fencing token this operation used; renew and release
-    must present the same token.
+    must present the same token. ``superseded`` is the unexpired same-node
+    claim a ``supersede_dead_owner`` acquire replaced (issue #1141); a
+    token-less release reports the deleted row in ``claim``.
     """
 
     granted: bool
@@ -590,6 +592,8 @@ class ClaimDecision:
     owner: dict[str, Any] | None = None
     detail: str | None = None
     holder: str | None = None
+    superseded: dict[str, Any] | None = None
+    lock_run_dir: str | None = None
 
 
 class FleetClaimHeldError(FleetClientError):
@@ -629,31 +633,61 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code == 409:
-            # A held/expired refusal is an answer, not a transport failure.
+        if exc.code in (400, 409):
+            # A held/expired refusal is an answer, not a transport failure;
+            # a 400 carries the hub's validation message (e.g. an older hub
+            # that does not know a request field), worth surfacing verbatim.
             try:
-                return 409, json.loads(exc.read().decode("utf-8"))
+                return exc.code, json.loads(exc.read().decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                return 409, {}
+                return exc.code, {}
         raise
 
 
-_CLAIM_OK_KEYS = {"acquire": "granted", "renew": "renewed", "release": "released"}
+def lease_from_lock_owner(owner: Mapping[str, object] | None) -> dict[str, str] | None:
+    """The hub-facing lease of a ``run.lock`` owner payload (``runguard``):
+    ``{"token", "acquired_at"?, "run_dir"?}``, or ``None`` when the payload
+    carries no owner token (an unattributable lock proves nothing)."""
+    if not isinstance(owner, Mapping):
+        return None
+    token = owner.get("owner_token")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    lease = {"token": token.strip()}
+    for key in ("acquired_at", "run_dir"):
+        value = owner.get(key)
+        if isinstance(value, str) and value.strip():
+            lease[key] = value.strip()
+    return lease
+
+
+_CLAIM_OK_KEYS = {"acquire": "granted", "renew": "renewed", "release": "released", "inspect": "inspected"}
 
 
 def _claim_op(
     action: str,
     target: str,
     *,
-    holder: str,
+    holder: str | None,
     node_id: str | None = None,
     conductor: str | None = None,
     ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
     hub_url: str | None = None,
     token: str | None = None,
     base_path: Path | None = None,
+    scope: str = "holder",
+    lock: Mapping[str, str] | None = None,
+    supersede: Mapping[str, str] | None = None,
+    acquired_at: str | None = None,
 ) -> ClaimDecision:
-    """One claim request; never raises for network or hub failures."""
+    """One claim request; never raises for network or hub failures.
+
+    ``scope`` is the hub's request scope (``holder`` / ``node`` / ``force``,
+    see ``fleet_hub``); ``holder`` may be ``None`` only for a token-less
+    (``node`` / ``force``) release. ``lock`` is this run's local lease,
+    recorded on the row at acquire; ``supersede`` is the dead lease a
+    node-scoped acquire presents (see ``lease_from_lock_owner``).
+    """
     try:
         config = load_fleet_config()
         hub = hub_url or config["hub_url"]
@@ -666,9 +700,18 @@ def _claim_op(
             "action": action,
             "target": target,
             "node_id": resolved_node,
-            "holder": holder,
             "ttl_seconds": int(ttl_seconds),
         }
+        if holder is not None:
+            body["holder"] = holder
+        if scope != "holder":
+            body["scope"] = scope
+        if lock is not None:
+            body["lock"] = dict(lock)
+        if supersede is not None:
+            body["supersede"] = dict(supersede)
+        if acquired_at is not None:
+            body["acquired_at"] = acquired_at
         if conductor:
             body["conductor"] = conductor
         tok = token or config["token"]
@@ -683,7 +726,11 @@ def _claim_op(
     owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
     if status == 200 and payload.get(_CLAIM_OK_KEYS[action]) is True:
         claim = payload.get("claim") if isinstance(payload.get("claim"), dict) else None
-        return ClaimDecision(granted=True, reason="ok", claim=claim, holder=holder)
+        superseded = payload.get("superseded") if isinstance(payload.get("superseded"), dict) else None
+        run_dir = payload.get("lock_run_dir") if isinstance(payload.get("lock_run_dir"), str) else None
+        return ClaimDecision(
+            granted=True, reason="ok", claim=claim, holder=holder, superseded=superseded, lock_run_dir=run_dir
+        )
     if status in (200, 409):
         return ClaimDecision(
             granted=False, reason="held" if owner is not None else "missing", owner=owner, detail=detail, holder=holder
@@ -693,19 +740,69 @@ def _claim_op(
     )
 
 
-def acquire_claim(target: str, *, holder: str | None = None, **kwargs: Any) -> ClaimDecision:
+def acquire_claim(
+    target: str,
+    *,
+    holder: str | None = None,
+    lock_owner: Mapping[str, object] | None = None,
+    supersede_dead_owner: Mapping[str, object] | None = None,
+    **kwargs: Any,
+) -> ClaimDecision:
     """Acquire ``target``; a fresh fencing token is minted unless ``holder``
-    is passed (pass the same token to retry a lost response idempotently)."""
-    return _claim_op("acquire", target, holder=holder or uuid4().hex, **kwargs)
+    is passed (pass the same token to retry a lost response idempotently).
+
+    ``lock_owner`` is this run's ``run.lock`` owner payload; its lease is
+    recorded on the claim row so a later same-node supersede can match this
+    exact row. ``supersede_dead_owner`` is the owner payload of the dead
+    lock the local lease reconcile just released (issue #1141): the acquire
+    then also takes over an unexpired claim held by this node under that
+    exact lease — never another node's, never a row taken under a different
+    or newer lease — and the replaced row is returned as
+    ``ClaimDecision.superseded``. An owner payload without a token (an
+    unattributable lock) supersedes nothing.
+    """
+    supersede = lease_from_lock_owner(supersede_dead_owner)
+    return _claim_op(
+        "acquire",
+        target,
+        holder=holder or uuid4().hex,
+        scope="node" if supersede is not None else "holder",
+        lock=lease_from_lock_owner(lock_owner),
+        supersede=supersede,
+        **kwargs,
+    )
 
 
 def renew_claim(target: str, *, holder: str, **kwargs: Any) -> ClaimDecision:
     return _claim_op("renew", target, holder=holder, **kwargs)
 
 
-def release_claim(target: str, *, holder: str, **kwargs: Any) -> ClaimDecision:
+def release_claim(
+    target: str, *, holder: str | None = None, force: bool = False, acquired_at: str | None = None, **kwargs: Any
+) -> ClaimDecision:
+    """Release ``target``.
+
+    With ``holder`` the release is fenced to that token (the run's own
+    release). Without one it is an operator release (issue #1141): the hub
+    deletes the row only if this node owns it (``reason="held"`` names the
+    real owner otherwise), or with ``force`` whoever owns it. A non-force
+    operator release must pass the ``acquired_at`` of the claim it
+    inspected — the hub refuses an unfenced node-scoped delete — so the
+    delete hits that exact row (a claim re-acquired since is refused as
+    ``held``). The deleted row comes back as ``ClaimDecision.claim``.
+    """
     kwargs.pop("ttl_seconds", None)
-    return _claim_op("release", target, holder=holder, **kwargs)
+    scope = "force" if force else ("holder" if holder is not None else "node")
+    return _claim_op("release", target, holder=holder, scope=scope, acquired_at=acquired_at, **kwargs)
+
+
+def inspect_claim(target: str, **kwargs: Any) -> ClaimDecision:
+    """The current claim on ``target`` (``claim`` is ``None`` when free).
+    When this node owns it, ``lock_run_dir`` is the run directory recorded
+    at acquire, so an operator release can first check that run's lock is
+    dead (issue #1141). Never raises; ``reason`` explains a failure."""
+    kwargs.pop("ttl_seconds", None)
+    return _claim_op("inspect", target, holder=None, **kwargs)
 
 
 def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
@@ -763,6 +860,8 @@ def repo_claim(
     base_path: Path | None = None,
     conductor: str | None = None,
     ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
+    lock_owner: Mapping[str, object] | None = None,
+    supersede_dead_owner: Mapping[str, object] | None = None,
 ) -> Iterator[ClaimDecision]:
     """Hold a hub-arbitrated claim on ``target`` for the duration of the block.
 
@@ -780,6 +879,17 @@ def repo_claim(
     target freed mid-request) is also retried once instead of failing
     closed. A granted claim is renewed on a daemon heartbeat (every ttl/3; a
     claim the hub lost is re-acquired) and released on exit, best-effort.
+
+    ``lock_owner`` is the ``run.lock`` owner payload of the lease this run
+    holds; it is recorded on the claim row (and re-sent by the heartbeat's
+    re-acquire). ``supersede_dead_owner`` (issue #1141) is for the caller
+    whose acquire of that lease reconciled a dead previous owner: a
+    SIGKILLed run leaves an unexpired hub claim under this node with a
+    token nobody has, and without this the node is locked out of its own
+    repo for the residual TTL. The acquire then replaces the claim taken
+    under exactly that dead lease (never another node's, never a claim a
+    run in another directory or under a newer lease holds) and logs the
+    supersede once. The heartbeat's re-acquire never supersedes.
     """
     try:
         hub_configured = bool(load_fleet_config()["hub_url"])
@@ -794,12 +904,19 @@ def repo_claim(
         yield ClaimDecision(granted=False, reason="no-identity", detail=node_id)
         return
     holder = uuid4().hex
-    decision = acquire_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
+    acquire_kwargs: dict[str, Any] = {
+        "holder": holder,
+        "node_id": node_id,
+        "conductor": conductor,
+        "ttl_seconds": ttl_seconds,
+        "lock_owner": lock_owner,
+    }
+    decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
     if not decision.granted and decision.reason in ("hub-unavailable", "missing"):
         # One retry with the same fencing token: a lost response may have
         # committed the row (idempotent for this holder), and a 409 with no
         # owner means the target freed mid-request.
-        decision = acquire_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
+        decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
     if not decision.granted and decision.reason == "hub-unavailable":
         _LOG.warning("fleet hub unreachable (%s); falling back to the local run lock for %s", decision.detail, target)
         _schedule_orphan_release(target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds)
@@ -816,10 +933,27 @@ def repo_claim(
         owner = decision.owner or {}
         held_by = owner.get("owner_node") or "another node"
         until = owner.get("expires_at") or "its TTL expires"
+        if held_by == node_id:
+            # Our own node, a token we do not have: a sibling run, or a
+            # crashed one whose lease this run did not reconcile. Name the
+            # documented ways out (issue #1141) instead of "wait for TTL".
+            hint = (
+                "this node already holds it under another lease (a sibling run, a same-name workspace, or a "
+                f"crashed run this run did not reconcile); free it with `brigade fleet claims --release {target}` "
+                "or run with --no-fleet-claim"
+            )
+        else:
+            hint = "another machine or conductor is working this repo (wait for release or TTL expiry)"
         raise FleetClaimHeldError(
-            f"repo {target!r} is claimed by node {held_by} until {until}; "
-            "another machine or conductor is working this repo (wait for release or TTL expiry)",
-            owner=decision.owner,
+            f"repo {target!r} is claimed by node {held_by} until {until}; {hint}", owner=decision.owner
+        )
+    if decision.superseded is not None:
+        _LOG.warning(
+            "fleet claim on %s superseded this node's unexpired claim (conductor %s, acquired %s): "
+            "the local lease reconcile found that run dead",
+            target,
+            decision.superseded.get("owner_conductor") or "-",
+            decision.superseded.get("acquired_at") or "-",
         )
     stop = threading.Event()
     pending_orphan_release = threading.Event()
@@ -835,14 +969,13 @@ def repo_claim(
                     # claim for a full TTL that nothing ever frees.
                     return
                 # The hub lost or expired our row (e.g. hub restart from
-                # backup); take it back under the same fencing token.
-                # Record the possible orphan before starting the request so
-                # shutdown cannot miss it if the bounded heartbeat join ends
-                # while the re-acquire is still in flight.
+                # backup); take it back under the same fencing token and
+                # lease, never superseding. Record the possible orphan
+                # before starting the request so shutdown cannot miss it if
+                # the bounded heartbeat join ends while the re-acquire is
+                # still in flight.
                 pending_orphan_release.set()
-                outcome = acquire_claim(
-                    target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds
-                )
+                outcome = acquire_claim(target, **acquire_kwargs)
             if outcome.granted:
                 warned_unavailable = False
                 continue

@@ -234,7 +234,7 @@ class TestHubClaims:
         conn.close()
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 2
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 3
             assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
         finally:
             conn.close()

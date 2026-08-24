@@ -43,7 +43,7 @@ status of each phase.
 | 1. Machine identity, namespaced run ids, lease reaper | #1122 | shipped (#1129) |
 | 2. Fleet hub (`brigade fleet serve`), event POST, store-and-forward, `brigade fleet status` | #1123 | **built, hub CT pending** — code, tests, and CLI are in; the hogwarts CT that hosts `brigade fleet serve` is not provisioned yet |
 | 3. Web dashboard served by the hub | #1124 | shipped |
-| 4. Server-arbitrated claims with TTL | #1125 | not started |
+| 4. Server-arbitrated claims with TTL | #1125 | shipped (#1140); crash self-lockout recovery #1141 |
 | 5. Export and Dolt sink for versioned history (optional) | #1127 | built |
 | 6. Cross-repo campaigns on the hub | #1128 | not started |
 
@@ -241,3 +241,50 @@ ORDER BY iso_week;
 
 Run the hub under a process supervisor on the CT, e.g.
 `brigade fleet serve --host "$(tailscale ip -4)" --token-file /etc/brigade/fleet-token`.
+
+## Phase 4 surface (claims)
+
+Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
+`brigade fleet claims`) are described in full in the CHANGELOG entry for
+#1125. Recovery from a crashed run (#1141):
+
+- Every claim row records the acquiring run's local `run.lock` lease
+  (`lock`: owner token, `acquired_at`, `run_dir`; never serialized; hub
+  schema v3, live rows survive the upgrade).
+- A run killed with SIGKILL leaves an unexpired hub claim under its own node
+  whose holder token died with it. On the next `brigade run` in that repo,
+  the Phase 1 lease reconcile frees `run.lock` for the dead owner, and
+  because it did, the hub acquire is sent with `scope: "node"` and that dead
+  lease as `supersede`: the hub replaces only the exact row taken under that
+  lease (same `node_id`, same lease token, lease stamp not newer) and the
+  run logs one line naming the superseded claim. No TTL wait. A claim held
+  by another node, by a run in another same-name workspace, on a cloned
+  node identity, or without a recorded lease is never touched: the acquire
+  is refused with the two ways out named in the error, and so is a
+  same-node claim with no dead lock to vouch for it (a sibling run, or a run
+  already recovered with `brigade runs recover`).
+- `brigade fleet claims --release <key> [--path] [--node NODE_ID] [--force] [--json]`
+  frees a claim without its holder token (`POST /claims` `release` with
+  `scope: "node"`): the hub deletes the row only if the given node owns it;
+  another node's claim is refused with its owner named. `<key>` is always a
+  claim key; with `--path` it is the workspace directory itself (a directory
+  inside a workspace is refused, never resolved upward). Without `--force`,
+  both modes run the same proof that the run which took the claim is dead:
+  `POST /claims` `inspect` returns the recorded run directory to the owner
+  node only, the CLI maps it to a workspace on this machine (`run.json`
+  `lock_workspace` / `cwd`, or the `.brigade/runs/<id>` layout; with
+  `--path` it must be the workspace given) and refuses while that
+  `run.lock` has a live owner or is malformed, or when it cannot resolve
+  the run at all, or when the probe finds no claim owned by this node.
+  The release then carries the inspected row's `acquired_at` — the hub
+  refuses a token-less node-scoped delete without it — and deletes only
+  that exact row (one write transaction), so a claim re-acquired in
+  between is refused with the current row. `--node` other than this machine's identity needs
+  `--force`; `--force` (`scope: "force"`) skips the proof and the JSON
+  receipt's `forced` reflects the flag. Renew is never token-less.
+- `brigade run --no-fleet-claim` skips the hub claim entirely and relies on
+  the local run lock alone, logged once on the `brigade.fleet` logger.
+- Trust boundary: `node_id` and the leases are caller-asserted under the one
+  shared bearer token, so `scope` is an intent marker that keeps honest
+  clients from stealing each other's claims, not an authorization — the
+  bearer token already authorizes `force` and arbitrary claims.

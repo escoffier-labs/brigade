@@ -195,6 +195,19 @@ def _lock_owner_payload(*, owner_token: str, run_dir: Path | None) -> dict[str, 
     }
 
 
+def read_lock_owner(path: Path | str | None) -> dict[str, object] | None:
+    """Published owner metadata (``owner.json``) of the lock directory at
+    ``path`` — the ``run_lock`` yield — or ``None`` when absent, unreadable,
+    or not a path (a stubbed lock). The ``owner_token`` is this lease's
+    identity for the fleet hub (issue #1141)."""
+    if path is None:
+        return None
+    try:
+        return _read_lock_owner(Path(path))
+    except TypeError:
+        return None
+
+
 def _read_lock_owner(path: Path) -> dict[str, object] | None:
     try:
         payload = json.loads((path / "owner.json").read_text())
@@ -1039,9 +1052,17 @@ def _wait_to_acquire_lock(
     run_dir: Path | None = None,
     wait_seconds: float,
     poll_interval: float,
+    on_reconcile: Callable[[dict[str, object] | None], None] | None = None,
 ) -> _LockOwnership:
+    def _acquire() -> _LockOwnership:
+        # Forward the callback only when set: the acquire seam is
+        # monkeypatched by tests with fakes that predate it.
+        if on_reconcile is None:
+            return _acquire_lock(path, run_dir=run_dir)
+        return _acquire_lock(path, run_dir=run_dir, on_reconcile=on_reconcile)
+
     if wait_seconds == 0:
-        return _acquire_lock(path, run_dir=run_dir)
+        return _acquire()
 
     queue_dir = _wait_queue_dir(path)
     ticket = _enroll_wait_ticket(queue_dir)
@@ -1053,7 +1074,7 @@ def _wait_to_acquire_lock(
             immediately_retryable = False
             if _is_wait_queue_head(ticket, queue_dir):
                 try:
-                    return _acquire_lock(path, run_dir=run_dir)
+                    return _acquire()
                 except RunLockError as exc:
                     if _wait_retry_after_acquire_error(path):
                         immediately_retryable = True
@@ -1082,7 +1103,21 @@ def _wait_to_acquire_lock(
         _leave_wait_ticket(ticket, queue_dir)
 
 
-def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
+def _acquire_lock(
+    path: Path,
+    *,
+    run_dir: Path | None = None,
+    on_reconcile: Callable[[dict[str, object] | None], None] | None = None,
+) -> _LockOwnership:
+    """Publish the lock, reconciling a dead-owner lock on the way in.
+
+    ``on_reconcile`` is called (with the dead owner's lock metadata, or
+    ``None`` when it was unattributable) each time this acquire released a
+    lock whose owner process is gone — the local lease's verdict that the
+    previous run on this node is dead, which callers may use to supersede
+    that run's other leases (issue #1141). It is never called for a live
+    owner or for a lock this acquire could not reconcile.
+    """
     for _ in range(8):
         try:
             ownership = _publish_lock(path, run_dir=run_dir)
@@ -1098,12 +1133,15 @@ def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
                 ) from None
             claimed, owner = stale
             _invoke_before_terminalize(path, claimed, owner, None)
+            if on_reconcile is not None:
+                on_reconcile(owner)
             continue
         pending = _stale_claims(path)
         if not pending:
             return ownership
         _release_lock(path, ownership)
-        _recover_pending_claims(path)
+        if _recover_pending_claims(path) and on_reconcile is not None:
+            on_reconcile(None)
     raise RunLockError(f"could not acquire run lock: {path}")
 
 
@@ -1137,7 +1175,13 @@ def run_lock(
     run_dir: Path | None = None,
     wait_seconds: float = 0.0,
     poll_interval: float = 0.1,
+    on_reconcile: Callable[[dict[str, object] | None], None] | None = None,
 ):
+    """Hold the workspace run lock for the block; yields the lock path.
+
+    ``on_reconcile`` is invoked when acquiring released a dead-owner lock
+    (see ``_acquire_lock``), before the block runs.
+    """
     if wait_seconds < 0 or (not math.isinf(wait_seconds) and not math.isfinite(wait_seconds)):
         raise ValueError("run lock wait_seconds must be zero, positive, or unbounded")
     if poll_interval <= 0:
@@ -1149,6 +1193,7 @@ def run_lock(
         run_dir=run_dir,
         wait_seconds=wait_seconds,
         poll_interval=poll_interval,
+        on_reconcile=on_reconcile,
     )
     retain_lock = False
     try:
