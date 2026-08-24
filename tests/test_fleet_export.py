@@ -61,9 +61,8 @@ def _seed_claim(db: Path, target: str = "repo-a", node: str = "node-a", holder: 
 
 
 def _write_config(home: Path, body: str) -> None:
-    config_dir = home / ".brigade"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "fleet.toml").write_text(body, encoding="utf-8")
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "fleet.toml").write_text(body, encoding="utf-8")
 
 
 @pytest.fixture()
@@ -91,7 +90,7 @@ def fake_dolt(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     os.chmod(script, 0o755)
-    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("PATH", str(bin_dir), prepend=os.pathsep)
     return bin_dir
 
 
@@ -107,9 +106,11 @@ class TestExport:
         )
         argv = ["fleet", "export", "--db", str(db)]
         assert cli.main(argv) == 0
-        first = capsys.readouterr().out
+        first_capture = capsys.readouterr()
+        first = first_capture.out
         assert cli.main(argv) == 0
-        assert capsys.readouterr().out == first
+        second_capture = capsys.readouterr()
+        assert second_capture.out == first
         rows = [json.loads(line) for line in first.splitlines()]
         assert [(r["node_id"], r["run_id"], r["sequence"]) for r in rows] == [
             (NODE_A, "r1", 1),
@@ -119,7 +120,8 @@ class TestExport:
         assert all(row["digest"] for row in rows)
         assert all(list(row) == sorted(row) for row in rows)
         assert all("received_at" in row for row in rows)
-        assert "exported 3 fleet event(s)" in capsys.readouterr().err
+        assert "exported 3 fleet event(s)" in first_capture.err
+        assert second_capture.err == first_capture.err
 
     def test_csv_has_stable_header_and_digest_column(self, tmp_path, capsys):
         from brigade import cli
@@ -232,7 +234,7 @@ class TestSinkConfig:
         assert config.db == "~/hub.db"
 
     def test_non_boolean_enabled_stays_off(self, home):
-        _write_config(home, "[fleet.sink]\nenabled = \"yes\"\n")
+        _write_config(home, '[fleet.sink]\nenabled = "yes"\n')
         assert fleet_export.load_sink_config().enabled is False
 
 
@@ -283,7 +285,7 @@ class TestSink:
         assert argv_lines[3] == fleet_export._DOLT_SCHEMA_EVENTS
         assert argv_lines[4:8] == ["table", "import", "-u", "fleet_events"]
         assert argv_lines[8].endswith("fleet_events.csv")
-        assert argv_lines[9:12] == ["sql", "-q"] and argv_lines[11] == fleet_export._DOLT_SCHEMA_CLAIMS
+        assert argv_lines[9:11] == ["sql", "-q"] and argv_lines[11] == fleet_export._DOLT_SCHEMA_CLAIMS
         assert argv_lines[12:16] == ["table", "import", "-u", "fleet_claims"]
         assert argv_lines[16].endswith("fleet_claims.csv")
         assert len(argv_lines) == 17

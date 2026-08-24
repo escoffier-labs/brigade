@@ -44,7 +44,7 @@ status of each phase.
 | 2. Fleet hub (`brigade fleet serve`), event POST, store-and-forward, `brigade fleet status` | #1123 | **built, hub CT pending** — code, tests, and CLI are in; the hogwarts CT that hosts `brigade fleet serve` is not provisioned yet |
 | 3. Web dashboard served by the hub | #1124 | shipped |
 | 4. Server-arbitrated claims with TTL | #1125 | not started |
-| 5. Dolt sink for versioned history (optional) | #1127 | not started |
+| 5. Export and Dolt sink for versioned history (optional) | #1127 | built |
 | 6. Cross-repo campaigns on the hub | #1128 | not started |
 
 ## Phase 2 surface
@@ -128,6 +128,71 @@ phone over Tailscale:
 - No token, cookie value, or claim holder token is ever rendered; the
   response carries the same CSP / no-store / no-referrer headers as
   `brigade center serve`.
+
+## Export and optional Dolt sink
+
+`brigade fleet export --since <timestamp> --format jsonl|csv [--claims]
+[--db PATH] [--out PATH]` reads the hub database in read-only mode and streams
+events in `(node_id, run_id, sequence, digest)` order. The columns have a fixed
+order, the event digest is included, and exporting the same database twice
+produces identical bytes. `--claims` exports the current claims snapshot in
+`target` order and omits the claim holder token.
+
+Export and sink work stay off the reporting path. Neither command participates
+in journal append, event delivery, claim arbitration, `/status`, `/claims`, or
+dashboard requests. Run them manually or from a scheduler on the host that can
+read the hub SQLite file.
+
+The Dolt sink is disabled by default. Configure one import pass in the existing
+`~/.brigade/fleet.toml` file:
+
+```toml
+[fleet.sink]
+enabled = true
+dolt_binary = "dolt"
+dolt_dir = "~/.brigade/dolt"
+db = "~/.brigade/fleet-hub.db"
+```
+
+`enabled` must be the Boolean `true`. `dolt_binary` may name a binary on
+`PATH` or an explicit path. `dolt_dir` is the destination Dolt database, and
+`db` optionally overrides the hub SQLite file. A command-line `--db` takes
+precedence over the configured `db` value.
+
+`brigade fleet sink [--db PATH]` exports deterministic CSV files and invokes
+`dolt table import -u` as a subprocess for `fleet_events` and `fleet_claims`.
+It has no Python Dolt dependency. If the sink is disabled, it exits 0 without
+reading the hub database. If the configured Dolt binary is absent, it prints a
+clear `documented no-op` message and exits 0, which keeps an optional scheduled
+job from failing on a host without Dolt.
+
+For example, this Dolt SQL reports each ISO week's terminal-run outcome rate
+and the percentage-point change from the prior week:
+
+```sql
+WITH weekly AS (
+  SELECT
+    DATE_FORMAT(ts, '%x-%v') AS iso_week,
+    SUM(state = 'run.completed') /
+      NULLIF(SUM(state IN ('run.completed', 'run.failed', 'run.interrupted')), 0)
+      AS outcome_rate
+  FROM fleet_events
+  WHERE state IN ('run.completed', 'run.failed', 'run.interrupted')
+  GROUP BY iso_week
+), compared AS (
+  SELECT
+    iso_week,
+    outcome_rate,
+    LAG(outcome_rate) OVER (ORDER BY iso_week) AS prior_rate
+  FROM weekly
+)
+SELECT
+  iso_week,
+  ROUND(outcome_rate * 100, 1) AS outcome_rate_pct,
+  ROUND((outcome_rate - prior_rate) * 100, 1) AS weekly_diff_pct_points
+FROM compared
+ORDER BY iso_week;
+```
 
 Run the hub under a process supervisor on the CT, e.g.
 `brigade fleet serve --host "$(tailscale ip -4)" --token-file /etc/brigade/fleet-token`.

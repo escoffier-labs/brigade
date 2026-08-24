@@ -188,9 +188,7 @@ def iter_claim_records(conn: sqlite3.Connection) -> Iterator[dict[str, Any]]:
         yield record
 
 
-def _write_records(
-    handle: TextIO, records: Iterator[dict[str, Any]], *, columns: tuple[str, ...], fmt: str
-) -> int:
+def _write_records(handle: TextIO, records: Iterator[dict[str, Any]], *, columns: tuple[str, ...], fmt: str) -> int:
     count = 0
     if fmt == "csv":
         writer = csv.writer(handle, lineterminator="\n")
