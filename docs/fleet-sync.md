@@ -163,6 +163,8 @@ stderr summary. Human-facing CSV cells that start with `=`, `+`, `-`, `@`, a
 tab, or a carriage return are prefixed with a single quote to prevent
 spreadsheet formula execution. JSONL values are unchanged. A named `--out`
 file is replaced only after the complete export succeeds.
+The replacement uses the process's normal file-creation mode, so re-exporting
+does not replace a group/world-readable file with the private temp-file mode.
 
 Export and sink work stay off the reporting path. Neither command participates
 in journal append, event delivery, claim arbitration, `/status`, `/claims`, or
@@ -189,7 +191,8 @@ precedence over the configured `db` value. `timeout_seconds` bounds each Dolt
 subprocess. With `events_incremental = true`, the sink stores the last exported
 `received_at` value in `.brigade-fleet-events-watermark` inside `dolt_dir` and
 exports only events received after it on the next pass. The watermark is
-replaced atomically after a successful commit. A missing or invalid watermark
+replaced atomically after successful table imports, even when the Dolt working
+set is unchanged and no commit is needed. A missing or invalid watermark
 causes a full event export. Set `events_incremental = false` to export the full
 event log on every pass.
 
@@ -197,8 +200,10 @@ event log on every pass.
 `dolt table import -u` for `fleet_events`, which is an append log, and `dolt
 table import -r` for `fleet_claims`, which is a live snapshot. The claims
 snapshot excludes expired rows. Replacing it removes released or expired claims
-from Dolt on the next pass. The sink CSV keeps source values unchanged. After
-both imports, the sink checks `dolt status --porcelain`. A changed working set
+from Dolt on the next pass. The sink CSV writes SQL NULL as Dolt's `\N` import
+marker and Boolean claim expiry as `0` or `1`; JSONL continues to use `null` and
+JSON Booleans. After both imports, the sink reports unparseable incremental
+`received_at` values on stderr and checks `dolt status --porcelain`. A changed working set
 is staged with `dolt add -A` and committed with the UTC export time followed by
 `fleet events/claims`. That same time is the expiry cutoff for the claims
 snapshot. An unchanged pass skips the add and commit commands.
