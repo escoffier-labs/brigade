@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import urllib.error
+import urllib.request
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -52,6 +53,7 @@ def test_setup_writes_role_scoped_config_without_secret_values(tmp_path: Path, m
 
     path = grokbot_ops.config_path(tmp_path, "operator")
     assert path.is_file()
+    assert path.stat().st_mode & 0o777 == 0o600
     rendered = json.dumps(json.loads(path.read_text(encoding="utf-8")))
     assert SECRET not in rendered
     assert "TEST_GROKBOT_BEARER" in rendered
@@ -229,6 +231,29 @@ def test_anonymous_health_status_preserves_http_auth_rejection(monkeypatch):
 
     monkeypatch.setattr(grokbot_ops, "_open_http", rejected)
     assert grokbot_ops._anonymous_health_status("http://example.test/health", 1) == 403
+
+
+def test_authenticated_health_requests_ignore_proxy_environment_and_refuse_redirects(monkeypatch):
+    opened: list[tuple[str, str | None, int]] = []
+
+    class _Opener:
+        def open(self, request, timeout):
+            opened.append((request.full_url, request.get_header("Authorization"), timeout))
+            raise urllib.error.HTTPError(request.full_url, 302, "found", {}, None)
+
+    def build_opener(*handlers):
+        proxy_handler = next(handler for handler in handlers if isinstance(handler, urllib.request.ProxyHandler))
+        redirect_handler = next(handler for handler in handlers if isinstance(handler, grokbot_ops._NoRedirect))
+        assert proxy_handler.proxies == {}
+        assert redirect_handler.redirect_request(None, None, 302, "found", {}, "http://outside.test") is None
+        return _Opener()
+
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.test:8080")
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: pytest.fail("urlopen must not be used"))
+
+    assert grokbot_ops._request_json("http://listener.test/health", SECRET, 7, method="GET") is None
+    assert opened == [("http://listener.test/health", f"Bearer {SECRET}", 7)]
 
 
 def test_tools_list_uses_an_initialized_official_mcp_session(monkeypatch):
@@ -441,6 +466,112 @@ def test_write_unit_refuses_unrelated_overwrites_and_honors_force(tmp_path: Path
         != "changed\n"
     )
     assert unrelated.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_config_operations_refuse_symlinked_config_file_and_directory(tmp_path: Path):
+    config = {
+        "schema": grokbot_ops.CONFIG_SCHEMA,
+        "instance": "operator",
+        "bind": "127.0.0.1:8766",
+        "allowed_hosts": [],
+        "allowed_origins": [],
+        "bearer": {"kind": "env", "name": "TEST_GROKBOT_BEARER"},
+    }
+    config_dir = tmp_path / grokbot_ops.CONFIG_DIR
+    config_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("keep me\n", encoding="utf-8")
+    path = grokbot_ops.config_path(tmp_path, "operator")
+    path.symlink_to(outside)
+
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_ops.save_config(
+            tmp_path,
+            instance="operator",
+            bind="127.0.0.1:8766",
+            allowed_hosts=[],
+            allowed_origins=[],
+            bearer_env="TEST_GROKBOT_BEARER",
+            bearer_file=None,
+        )
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_ops.load_config(tmp_path, "operator")
+    assert outside.read_text(encoding="utf-8") == "keep me\n"
+
+    path.unlink()
+    config_dir.rmdir()
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    config_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_ops.save_config(
+            tmp_path,
+            instance="operator",
+            bind="127.0.0.1:8766",
+            allowed_hosts=[],
+            allowed_origins=[],
+            bearer_env="TEST_GROKBOT_BEARER",
+            bearer_file=None,
+        )
+    with pytest.raises(grokbot_mcp.ConfigurationError):
+        grokbot_ops.load_config(tmp_path, "operator")
+    assert list(outside_dir.iterdir()) == []
+    assert config["instance"] == "operator"
+
+
+def test_write_unit_refuses_symlinked_paths_and_force_replaces_only_the_link(tmp_path: Path):
+    config = {
+        "schema": grokbot_ops.CONFIG_SCHEMA,
+        "instance": "operator",
+        "bind": "127.0.0.1:8766",
+        "allowed_hosts": [],
+        "allowed_origins": [],
+        "bearer": {"kind": "env", "name": "TEST_GROKBOT_BEARER"},
+    }
+    out_dir = tmp_path / "units"
+    out_dir.mkdir()
+    target = tmp_path / "unrelated.service"
+    target.write_text("keep me\n", encoding="utf-8")
+    unit = out_dir / grokbot_ops.unit_name("operator")
+    unit.symlink_to(target)
+
+    with pytest.raises(grokbot_ops.ServiceRenderError):
+        grokbot_ops.write_unit(config, out_dir, exec_root=tmp_path)
+    assert unit.is_symlink()
+    assert target.read_text(encoding="utf-8") == "keep me\n"
+
+    written = grokbot_ops.write_unit(config, out_dir, exec_root=tmp_path, force=True)
+    assert written == unit and not unit.is_symlink()
+    assert target.read_text(encoding="utf-8") == "keep me\n"
+    assert unit.read_text(encoding="utf-8").startswith("# Generated by brigade")
+
+    unit.unlink()
+    out_dir.rmdir()
+    outside_dir = tmp_path / "outside-units"
+    outside_dir.mkdir()
+    out_dir.symlink_to(outside_dir, target_is_directory=True)
+    with pytest.raises(grokbot_ops.ServiceRenderError):
+        grokbot_ops.write_unit(config, out_dir, exec_root=tmp_path, force=True)
+    assert list(outside_dir.iterdir()) == []
+
+
+def test_write_unit_keeps_identical_content_and_mode_without_rewriting(tmp_path: Path):
+    config = {
+        "schema": grokbot_ops.CONFIG_SCHEMA,
+        "instance": "operator",
+        "bind": "127.0.0.1:8766",
+        "allowed_hosts": [],
+        "allowed_origins": [],
+        "bearer": {"kind": "env", "name": "TEST_GROKBOT_BEARER"},
+    }
+    path = grokbot_ops.write_unit(config, tmp_path / "units", exec_root=tmp_path)
+    before = path.stat()
+
+    assert grokbot_ops.write_unit(config, tmp_path / "units", exec_root=tmp_path) == path
+    after = path.stat()
+    assert after.st_mode & 0o777 == 0o644
+    assert after.st_mtime_ns == before.st_mtime_ns
 
 
 def test_install_service_cli_prints_dry_run_by_default(tmp_path: Path, monkeypatch, capsys):

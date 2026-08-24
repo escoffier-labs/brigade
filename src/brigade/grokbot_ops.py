@@ -6,7 +6,9 @@ import asyncio
 import json
 import os
 import re
+import stat
 import sys
+import uuid
 import urllib.error
 import urllib.request
 import unicodedata
@@ -26,6 +28,13 @@ _SYSTEMD_UNQUOTED_ARG_RE = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
 
 class ServiceRenderError(RuntimeError):
     """Unit rendering or installation was refused."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Turn every redirect response into a bounded request failure."""
+
+    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
 
 
 def unit_name(instance: str) -> str:
@@ -70,16 +79,17 @@ def save_config(
     _validate_config(payload)
     grokbot_jobs.status(target)
     path = config_path(target, instance)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    path.chmod(0o600)
+    try:
+        _write_text_nofollow_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n", mode=0o600)
+    except OSError as exc:
+        raise grokbot_mcp.ConfigurationError("invalid") from exc
     return payload
 
 
 def load_config(target: Path, instance: str) -> dict[str, Any]:
     path = config_path(target, instance)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(_read_regular_text(path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise grokbot_mcp.ConfigurationError("invalid") from exc
     if not isinstance(payload, dict) or payload.get("schema") != CONFIG_SCHEMA:
@@ -248,13 +258,165 @@ def write_unit(
 ) -> Path:
     """Render one role-scoped unit; never overwrites anything without force."""
     rendered = render_unit(config, python=python or sys.executable, exec_root=exec_root)
-    out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / unit_name(config["instance"])
-    if path.exists() and not force and path.read_text(encoding="utf-8") != rendered:
+    try:
+        existing = _read_regular_text(path)
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        if not force or not _path_is_symlink(path):
+            raise ServiceRenderError(f"refusing unsafe unit path: {path.name}") from exc
+        existing = None
+    if existing == rendered:
+        return path
+    if existing is not None and not force:
         raise ServiceRenderError(f"refusing to overwrite existing unit: {path.name}")
-    path.write_text(rendered, encoding="utf-8")
-    path.chmod(0o644)
+    try:
+        _write_text_nofollow_atomic(path, rendered, mode=0o644, replace_symlink=force)
+    except OSError as exc:
+        raise ServiceRenderError(f"refusing unsafe unit path: {path.name}") from exc
     return path
+
+
+def _path_is_symlink(path: Path) -> bool:
+    """Return whether a final path component is a link or Windows reparse point."""
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return False
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_point)
+
+
+def _open_parent_nofollow(path: Path, *, create: bool) -> int:
+    """Hold ``path.parent`` while rejecting every POSIX symlink component."""
+    parent = path.parent.absolute()
+    if os.name != "posix" or not getattr(os, "O_NOFOLLOW", 0):
+        return _open_windows_parent_nofollow(parent, create=create)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(parent.anchor, flags)
+    try:
+        for component in parent.parts[1:]:
+            if component in {"", ".", ".."}:
+                raise OSError("unsafe output directory")
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o755, dir_fd=descriptor)
+                child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_windows_parent_nofollow(parent: Path, *, create: bool) -> int:
+    """Hold a Windows parent directory through the reparse-point-safe adapter."""
+    if sys.platform != "win32":
+        raise OSError("no-follow directory operations are unavailable")
+    from .work_cmd import nt_dirfd
+
+    anchor = Path(parent.anchor)
+    descriptor = nt_dirfd.open_root_directory(anchor, writable=create)
+    try:
+        for component in parent.relative_to(anchor).parts:
+            try:
+                child = nt_dirfd.open_child_directory(descriptor, component, writable=create)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                nt_dirfd.mkdir_child(descriptor, component)
+                child = nt_dirfd.open_child_directory(descriptor, component, writable=create)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_regular_text(path: Path) -> str:
+    """Read one regular file without traversing a symlink or reparse point."""
+    parent = _open_parent_nofollow(path, create=False)
+    descriptor = -1
+    try:
+        if os.name == "posix":
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent,
+            )
+        else:
+            from .work_cmd import nt_dirfd
+
+            descriptor = nt_dirfd.open_file(parent, path.name, os.O_RDONLY)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("output is not a regular file")
+        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as handle:
+            return handle.read()
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def _write_text_nofollow_atomic(path: Path, data: str, *, mode: int, replace_symlink: bool = False) -> None:
+    """Atomically publish a regular file without following its destination link."""
+    parent = _open_parent_nofollow(path, create=True)
+    temporary = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    descriptor = -1
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        if os.name == "posix":
+            descriptor = os.open(temporary, flags | os.O_NOFOLLOW, mode, dir_fd=parent)
+        else:
+            from .work_cmd import nt_dirfd
+
+            descriptor = nt_dirfd.open_file(parent, temporary, flags, mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            if os.name == "posix":
+                os.fchmod(handle.fileno(), mode)
+        if os.name == "posix":
+            try:
+                existing = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and stat.S_ISLNK(existing.st_mode) and not replace_symlink:
+                raise OSError("output is a symlink")
+            if existing is not None and not (stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode)):
+                raise OSError("output is not a regular file")
+            os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+        else:
+            from .work_cmd import nt_dirfd
+
+            if not replace_symlink and _path_is_symlink(path):
+                raise OSError("output is a reparse point")
+            nt_dirfd.replace_children(parent, temporary, path.name)
+    except BaseException:
+        try:
+            if os.name == "posix":
+                os.unlink(temporary, dir_fd=parent)
+            else:
+                from .work_cmd import nt_dirfd
+
+                nt_dirfd.unlink_child(parent, temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        os.close(parent)
 
 
 def _base_url(config: dict[str, Any]) -> str:
@@ -285,7 +447,8 @@ def _anonymous_health_status(url: str, timeout: int) -> int | None:
 
 
 def _open_http(request: urllib.request.Request, timeout: int) -> Any:
-    return urllib.request.urlopen(request, timeout=timeout)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    return opener.open(request, timeout=timeout)
 
 
 def _request_json(url: str, bearer: str | None, timeout: int, *, method: str) -> dict[str, Any] | None:
