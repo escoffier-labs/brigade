@@ -154,7 +154,7 @@ git commit -m "feat: return bounded Grok Bot claim context"
 - Modify: `tests/test_grokbot_mcp.py`
 - Modify: `src/brigade/grokbot_mcp.py`
 
-- [ ] Extend `test_workers_only_list_claim_and_read_their_configured_role` with the failing exact-context assertion:
+- [x] Extend `test_workers_only_list_claim_and_read_their_configured_role` with the failing exact-context assertion:
 
 ```python
 assert claimed["execution_context"] == _spec("implementation-worker")
@@ -162,13 +162,13 @@ assert "PRIVATE_INSTRUCTIONS_MUST_NOT_LEAK" not in json.dumps(listed)
 assert "execution_context" not in worker.call_tool("grokbot_queue_status", {"job_id": implementation})
 ```
 
-- [ ] After the existing cross-role rejection, assert the scout job is still queued:
+- [x] After the existing cross-role rejection, assert the scout job is still queued:
 
 ```python
 assert grokbot_jobs.get_job(tmp_path, scout)["state"] == "queued"
 ```
 
-- [ ] Run RED through Brigade:
+- [x] Run RED through Brigade:
 
 ```bash
 brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_grokbot_mcp.py -k workers_only_list_claim" --capture brigade-work
@@ -176,7 +176,7 @@ brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_gro
 
 Expect failure because the worker claim has no `execution_context`.
 
-- [ ] Change only the worker claim call in `GrokbotAdapter._call()`:
+- [x] Change only the worker claim call in `GrokbotAdapter._call()`:
 
 ```python
 return grokbot_jobs.claim_execution_context(
@@ -188,9 +188,9 @@ return grokbot_jobs.claim_execution_context(
 )
 ```
 
-- [ ] Run GREEN with the Task 2 focused command.
+- [x] Run GREEN with the Task 2 focused command.
 
-- [ ] Run the complete focused contract with the MCP extra present:
+- [x] Run the complete focused contract with the MCP extra present:
 
 ```bash
 brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_grokbot_jobs.py tests/test_grokbot_mcp.py" --capture brigade-work
@@ -198,7 +198,7 @@ brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_gro
 
 Expect no skips from missing `mcp.server` and every test to pass.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/grokbot_mcp.py tests/test_grokbot_mcp.py

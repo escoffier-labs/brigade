@@ -95,9 +95,13 @@ def test_workers_only_list_claim_and_read_their_configured_role(tmp_path: Path):
     assert unauthorized.value.public_error() == {
         "error": {"code": "invalid_request", "message": "Tool input failed validation"}
     }
+    assert grokbot_jobs.get_job(tmp_path, scout)["state"] == "queued"
 
     claimed = worker.call_tool("grokbot_queue_claim", {"job_id": implementation, "lease_id": "lease-a"})
     assert claimed["state"] == "claimed"
+    assert claimed["execution_context"] == _spec("implementation-worker")
+    assert "PRIVATE_INSTRUCTIONS_MUST_NOT_LEAK" not in json.dumps(listed)
+    assert "execution_context" not in worker.call_tool("grokbot_queue_status", {"job_id": implementation})
     assert grokbot_jobs.get_job(tmp_path, implementation)["role"] == "implementation-worker"
 
 

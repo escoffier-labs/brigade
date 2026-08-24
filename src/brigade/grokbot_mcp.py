@@ -183,7 +183,7 @@ class GrokbotAdapter:
             return operation(self.config.target, job_id)
         if name == "grokbot_queue_claim":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
-            return grokbot_jobs.claim(
+            return grokbot_jobs.claim_execution_context(
                 self.config.target, job["job_id"], self.config.bot_id, _lease_id(arguments), LEASE_SECONDS
             )
         if name == "grokbot_queue_renew":
