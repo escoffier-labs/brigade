@@ -158,16 +158,19 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   `scope: "node"`): the hub deletes the row only if the given node owns it;
   another node's claim is refused with its owner named. `<key>` is always a
   claim key; with `--path` it is the workspace directory itself (a directory
-  inside a workspace is refused, never resolved upward). Without `--force`
-  the CLI first proves the run that took the claim is dead: `POST /claims`
-  `inspect` returns the recorded run directory to the owner node only, the
-  CLI maps it to a workspace on this machine (`run.json` `lock_workspace` /
-  `cwd`, or the `.brigade/runs/<id>` layout) and refuses while that
-  `run.lock` has a live owner, or when it cannot resolve the run at all.
-  `--node` other than this machine's identity needs `--force`; `--force`
-  (`scope: "force"`) releases regardless and the JSON receipt says so. The
-  hub reads and deletes in one write transaction, so the receipt is the row
-  it removed. Renew is never token-less.
+  inside a workspace is refused, never resolved upward). Without `--force`,
+  both modes run the same proof that the run which took the claim is dead:
+  `POST /claims` `inspect` returns the recorded run directory to the owner
+  node only, the CLI maps it to a workspace on this machine (`run.json`
+  `lock_workspace` / `cwd`, or the `.brigade/runs/<id>` layout; with
+  `--path` it must be the workspace given) and refuses while that
+  `run.lock` has a live owner or is malformed, or when it cannot resolve
+  the run at all. The release then carries the inspected row's
+  `acquired_at`, and the hub deletes only that exact row (one write
+  transaction), so a claim re-acquired in between is refused with the
+  current row. `--node` other than this machine's identity needs
+  `--force`; `--force` (`scope: "force"`) skips the proof and the JSON
+  receipt's `forced` reflects the flag. Renew is never token-less.
 - `brigade run --no-fleet-claim` skips the hub claim entirely and relies on
   the local run lock alone, logged once on the `brigade.fleet` logger.
 - Trust boundary: `node_id` and the leases are caller-asserted under the one

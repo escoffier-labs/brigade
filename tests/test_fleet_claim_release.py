@@ -216,6 +216,36 @@ class TestHubScopes:
         assert status == 200 and payload["claim"]["owner_node"] == NODE_A
         assert _post(url, token, release) == (200, {"released": False})
 
+    def test_token_less_release_is_fenced_to_the_inspected_row(self, hub):
+        url, token, _db = hub
+        assert _post(url, token, _claim(holder="dead"))[1]["granted"] is True
+        inspect = _claim("inspect")
+        inspect.pop("holder")
+        inspected = _post(url, token, inspect)[1]["claim"]
+        # A new run on the same node re-acquires between inspect and release.
+        assert _post(url, token, _claim("release", holder="dead"))[1]["released"] is True
+        time.sleep(0.002)
+        assert _post(url, token, _claim(holder="fresh", conductor="new-run"))[1]["granted"] is True
+        release = _claim("release", scope="node", acquired_at=inspected["acquired_at"])
+        release.pop("holder")
+        status, payload = _post(url, token, release)
+        assert status == 409 and payload["released"] is False
+        assert "re-acquired" in payload["error"] and payload["owner"]["owner_conductor"] == "new-run"
+        assert _post(url, token, _claim("renew", holder="fresh"))[1]["renewed"] is True
+        # The current row's acquired_at releases it; force is fenced too when given.
+        current = _post(url, token, inspect)[1]["claim"]["acquired_at"]
+        assert current != inspected["acquired_at"]
+        release["acquired_at"] = current
+        assert _post(url, token, release)[1]["released"] is True
+        assert _post(url, token, _claim(holder="again"))[1]["granted"] is True
+        forced = _claim("release", node=NODE_B, scope="force", acquired_at=inspected["acquired_at"])
+        forced.pop("holder")
+        assert _post(url, token, forced)[0] == 409
+        assert _post(url, token, _claim("renew", holder="again"))[1]["renewed"] is True
+        # acquired_at belongs to release only, and must be a string.
+        assert _post(url, token, _claim(acquired_at="x"))[0] == 400
+        assert _post(url, token, _claim("release", scope="node", acquired_at=5))[0] == 400
+
     def test_v2_claim_rows_survive_the_lease_column_upgrade(self, tmp_path):
         db = tmp_path / "hub.db"
         conn = sqlite3.connect(str(db))
@@ -240,6 +270,46 @@ class TestHubScopes:
             assert fleet_hub.handle_claim(conn, _claim("renew", holder="h1"))[1]["renewed"] is True
             # Re-opening is idempotent.
             assert fleet_hub.init_db(db).execute("PRAGMA user_version").fetchone()[0] == 3
+        finally:
+            conn.close()
+
+    def test_lease_column_upgrade_is_safe_under_concurrent_init(self, tmp_path):
+        """init_db runs per request on a threading server: many first-touch
+        connections against a v2 database (one lease column already present,
+        as a half-finished upgrade would leave it) must all succeed."""
+        db = tmp_path / "hub.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, "
+            "holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, "
+            "ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT)"
+        )
+        conn.execute("INSERT INTO claims VALUES ('repo-a', ?, NULL, 'h1', 't', 't', 900, ?, NULL)", (NODE_A, 4e9))
+        conn.execute("PRAGMA user_version=2")
+        conn.commit()
+        conn.close()
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(8)
+
+        def open_db() -> None:
+            try:
+                barrier.wait(timeout=5)
+                c = fleet_hub.init_db(db)
+                c.close()
+            except BaseException as exc:  # noqa: BLE001 - collected for the assertion
+                errors.append(exc)
+
+        threads = [threading.Thread(target=open_db) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert errors == []
+        conn = fleet_hub.init_db(db)
+        try:
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()]
+            assert columns.count("lock_token") == 1 and "lock_acquired_at" in columns and "lock_run_dir" in columns
+            assert [c["target"] for c in fleet_hub.list_claims(conn)] == ["repo-a"]
         finally:
             conn.close()
 
@@ -289,6 +359,13 @@ class TestClient:
         assert fleet_client.acquire_claim("repo-a", node_id=NODE_A).granted is True
         assert fleet_client.release_claim("repo-a", node_id=NODE_B, force=True).granted is True
         assert fleet_client.fetch_claims() == []
+        # Fenced to the inspected row.
+        assert fleet_client.acquire_claim("repo-a", node_id=NODE_A).granted is True
+        stale = fleet_client.release_claim("repo-a", node_id=NODE_A, acquired_at="1999-01-01T00:00:00+00:00")
+        assert (stale.granted, stale.reason) == (False, "held") and stale.owner is not None
+        current = fleet_client.inspect_claim("repo-a", node_id=NODE_A).claim
+        assert current is not None
+        assert fleet_client.release_claim("repo-a", node_id=NODE_A, acquired_at=current["acquired_at"]).granted
 
     def test_repo_claim_supersedes_dead_lease_and_logs_once(self, hub, monkeypatch, caplog):
         url, token, _db = hub
@@ -465,55 +542,110 @@ class TestReleaseCli:
         _post(url, token, _claim(target="api", holder="bare"))
         assert cli.main(["fleet", "claims", "--release", "api"]) == 1
         err = capsys.readouterr().err
-        assert "cannot verify" in err and "records no run directory" in err and "--path" in err
+        assert "cannot verify" in err and "records no run directory" in err and "--force" in err
         assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
         # A run directory that is not on this machine: same refusal.
         _post(url, token, _claim("release", target="api", holder="bare"))
         _post(url, token, _claim(target="api", holder="elsewhere", lock=_lease(run_dir="/nonexistent/.brigade/runs/x")))
         assert cli.main(["fleet", "claims", "--release", "api"]) == 1
-        assert "is not on this machine" in capsys.readouterr().err
+        assert "does not exist on this machine" in capsys.readouterr().err
         assert cli.main(["fleet", "claims", "--release", "api", "--force", "--json"]) == 0
         assert json.loads(capsys.readouterr().out)["forced"] is True
         assert fleet_client.fetch_claims() == []
 
-    def test_release_path_uses_the_workspace_itself(self, hub, tmp_path, monkeypatch, capsys):
-        from brigade import cli, node as node_mod, runguard
+    def test_release_path_proves_the_claim_belongs_to_that_workspace(self, hub, tmp_path, monkeypatch, capsys):
+        """A live run in ws-a holds 'api'. From any other directory named
+        'api' (even an empty one), `--release <dir> --path` must not delete
+        it: the proof runs on the claim's RECORDED run directory."""
+        from brigade import cli, runguard
 
         url, token, _db = hub
         _env(monkeypatch, url, token)
-        ws = tmp_path / "api"
-        (ws / ".brigade").mkdir(parents=True)
+        ws_a, run_dir = self._dead_run(tmp_path / "work")
+        lock = runguard.lock_path(ws_a)
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        _post(url, token, _claim(target="api", holder="live", conductor="chef", lock=_lease(run_dir=str(run_dir))))
+        ws_b = tmp_path / "tmp" / "api"
+        ws_b.mkdir(parents=True)
+        assert cli.main(["fleet", "claims", "--release", str(ws_b), "--path"]) == 1
+        err = capsys.readouterr().err
+        assert "was taken by a run in" in err and str(ws_a) in err and "--force" in err
+        assert _post(url, token, _claim("renew", target="api", holder="live"))[1]["renewed"] is True
+        # Even with ws-a's run dead, another directory is not that workspace.
+        (lock / "pid").write_text(f"{DEAD_PID}\n")
+        assert cli.main(["fleet", "claims", "--release", str(ws_b), "--path"]) == 1
+        assert "was taken by a run in" in capsys.readouterr().err
+        assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
+        # The right workspace: alive → refused, malformed lock → refused, dead → released.
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        assert cli.main(["fleet", "claims", "--release", str(ws_a), "--path"]) == 1
+        assert "run owner is still alive" in capsys.readouterr().err
+        import shutil
+
+        shutil.rmtree(lock)
+        lock.write_text("not a lock directory")
+        assert cli.main(["fleet", "claims", "--release", str(ws_a), "--path"]) == 1
+        assert "malformed" in capsys.readouterr().err
+        assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
+        lock.unlink()
+        assert cli.main(["fleet", "claims", "--release", str(ws_a), "--path", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["released"] is True and payload["forced"] is False and payload["target"] == "api"
+        assert fleet_client.fetch_claims() == []
+        # --force skips the proof (and says so in the receipt).
+        _post(url, token, _claim(target="api", holder="live2", lock=_lease(run_dir=str(run_dir))))
+        lock.mkdir()
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        assert cli.main(["fleet", "claims", "--release", str(ws_b), "--path", "--force", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["forced"] is True
+        assert fleet_client.fetch_claims() == []
+
+    def test_release_path_uses_the_workspace_itself(self, hub, tmp_path, monkeypatch, capsys):
+        from brigade import cli, node as node_mod
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        ws, run_dir = self._dead_run(tmp_path)
         identity = node_mod.ensure_identity(ws)
         # The identity must come from the target workspace, not the cwd.
         monkeypatch.setattr(
             fleet_client, "resolve_node_id", lambda base_path=None: identity.node_id if base_path else NODE_A
         )
-        _post(url, token, _claim(node=identity.node_id, target="api", holder="dead", conductor="chef"))
-        lock = runguard.lock_path(ws)
-        lock.mkdir(parents=True)
-        (lock / "pid").write_text(f"{os.getpid()}\n")
-        # A live run owner on that workspace's lock: refused without --force.
-        assert cli.main(["fleet", "claims", "--release", str(ws), "--path"]) == 1
-        err = capsys.readouterr().err
-        assert "run owner is still alive" in err and "--force" in err
-        assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
+        _post(url, token, _claim(node=identity.node_id, target="api", holder="dead", lock=_lease(run_dir=str(run_dir))))
         # A directory inside the workspace is refused, never resolved upward.
         (ws / "pkg").mkdir()
         assert cli.main(["fleet", "claims", "--release", str(ws / "pkg"), "--path"]) == 1
         assert "is inside the workspace" in capsys.readouterr().err
         assert cli.main(["fleet", "claims", "--release", str(tmp_path / "missing"), "--path"]) == 1
         assert "not a directory" in capsys.readouterr().err
-        # Dead owner: released, as the workspace's own identity.
-        (lock / "pid").write_text(f"{DEAD_PID}\n")
+        assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
         assert cli.main(["fleet", "claims", "--release", str(ws), "--path"]) == 0
         out = capsys.readouterr().out
         assert "released claim on 'api'" in out and identity.node_id in out
         assert fleet_client.fetch_claims() == []
-        # --force overrides a live lock.
-        _post(url, token, _claim(node=identity.node_id, target="api", holder="dead2"))
-        (lock / "pid").write_text(f"{os.getpid()}\n")
-        assert cli.main(["fleet", "claims", "--release", str(ws), "--path", "--force"]) == 0
-        assert fleet_client.fetch_claims() == []
+
+    def test_release_refuses_a_claim_re_acquired_after_inspect(self, hub, tmp_path, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token, _db = hub
+        _env(monkeypatch, url, token)
+        _ws, run_dir = self._dead_run(tmp_path)
+        _post(url, token, _claim(target="api", holder="dead", lock=_lease(run_dir=str(run_dir))))
+        real_inspect = fleet_client.inspect_claim
+
+        def inspect_then_new_run(target, **kwargs):
+            probe = real_inspect(target, **kwargs)
+            # A new run on this node takes the target between inspect and release.
+            _post(url, token, _claim("release", target="api", holder="dead"))
+            time.sleep(0.002)
+            _post(url, token, _claim(target="api", holder="fresh", conductor="new-run"))
+            return probe
+
+        monkeypatch.setattr(fleet_client, "inspect_claim", inspect_then_new_run)
+        assert cli.main(["fleet", "claims", "--release", "api"]) == 1
+        assert "re-acquired since it was inspected" in capsys.readouterr().err
+        assert [c["owner_conductor"] for c in fleet_client.fetch_claims()] == ["new-run"]
 
     def test_release_missing_misuse_and_no_hub(self, hub, tmp_path, monkeypatch, capsys):
         from brigade import cli

@@ -678,6 +678,7 @@ def _claim_op(
     scope: str = "holder",
     lock: Mapping[str, str] | None = None,
     supersede: Mapping[str, str] | None = None,
+    acquired_at: str | None = None,
 ) -> ClaimDecision:
     """One claim request; never raises for network or hub failures.
 
@@ -709,6 +710,8 @@ def _claim_op(
             body["lock"] = dict(lock)
         if supersede is not None:
             body["supersede"] = dict(supersede)
+        if acquired_at is not None:
+            body["acquired_at"] = acquired_at
         if conductor:
             body["conductor"] = conductor
         tok = token or config["token"]
@@ -774,18 +777,22 @@ def renew_claim(target: str, *, holder: str, **kwargs: Any) -> ClaimDecision:
     return _claim_op("renew", target, holder=holder, **kwargs)
 
 
-def release_claim(target: str, *, holder: str | None = None, force: bool = False, **kwargs: Any) -> ClaimDecision:
+def release_claim(
+    target: str, *, holder: str | None = None, force: bool = False, acquired_at: str | None = None, **kwargs: Any
+) -> ClaimDecision:
     """Release ``target``.
 
     With ``holder`` the release is fenced to that token (the run's own
     release). Without one it is an operator release (issue #1141): the hub
     deletes the row only if this node owns it (``reason="held"`` names the
-    real owner otherwise), or with ``force`` whoever owns it. The deleted
-    row comes back as ``ClaimDecision.claim``.
+    real owner otherwise), or with ``force`` whoever owns it. Pass the
+    ``acquired_at`` of the claim you inspected to fence the delete to that
+    exact row (a claim re-acquired since is refused as ``held``). The
+    deleted row comes back as ``ClaimDecision.claim``.
     """
     kwargs.pop("ttl_seconds", None)
     scope = "force" if force else ("holder" if holder is not None else "node")
-    return _claim_op("release", target, holder=holder, scope=scope, **kwargs)
+    return _claim_op("release", target, holder=holder, scope=scope, acquired_at=acquired_at, **kwargs)
 
 
 def inspect_claim(target: str, **kwargs: Any) -> ClaimDecision:
