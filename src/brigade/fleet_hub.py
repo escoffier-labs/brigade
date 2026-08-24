@@ -74,6 +74,8 @@ import re
 import secrets
 import sqlite3
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -179,6 +181,10 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _claims_columns(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+
+
 def _claims_table_needs_migration(claims_columns: set[str]) -> bool:
     """True when the claims table is absent, pre-holder-token, or missing a
     lease column — i.e. any state where DDL beyond IF NOT EXISTS may run."""
@@ -187,6 +193,77 @@ def _claims_table_needs_migration(claims_columns: set[str]) -> bool:
     if "holder_token" not in claims_columns:
         return True
     return any(column not in claims_columns for column in _CLAIMS_LEASE_COLUMNS)
+
+
+# Intra-process serialization for the claims migration, in addition to the
+# SQL-level BEGIN IMMEDIATE: init_db runs per request on a threading server,
+# and a first-touch storm is same-process thread contention, which a plain
+# Python lock resolves deterministically instead of via busy-timeout races.
+_MIGRATION_LOCKS: dict[str, threading.Lock] = {}
+_MIGRATION_LOCKS_GUARD = threading.Lock()
+
+
+def _migration_lock(db_path: Path) -> threading.Lock:
+    with _MIGRATION_LOCKS_GUARD:
+        return _MIGRATION_LOCKS.setdefault(str(db_path), threading.Lock())
+
+
+# Backoff for the migration write lock. init_db runs per request, so a
+# first-touch storm (every request racing to migrate a fresh v2 database)
+# can push a waiter past the 5s busy timeout on a loaded host; each retry
+# first re-checks whether another connection already finished the job.
+_MIGRATION_LOCK_DELAYS: tuple[float | None, ...] = (0.05, 0.1, 0.2, 0.4, 0.8, None)
+
+
+def _migrate_claims_table(conn: sqlite3.Connection) -> None:
+    """Create/upgrade the claims table under one write lock.
+
+    Serialized twice: same-process callers queue on ``_migration_lock`` (a
+    first-touch storm on a threading server is thread contention), and the
+    DDL itself runs under BEGIN IMMEDIATE with a bounded locked-database
+    backoff so a separate process cannot race it either. A caller that
+    loses either race treats "someone else migrated" as success. The
+    steady state (nothing to migrate) never calls this, so ordinary
+    requests take no write lock.
+    """
+    for delay in _MIGRATION_LOCK_DELAYS:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            if not _claims_table_needs_migration(_claims_columns(conn)):
+                return
+            if delay is None:
+                raise
+            time.sleep(delay)
+            continue
+        break
+    try:
+        claims_columns = _claims_columns(conn)
+        # Claims are ephemeral TTL state: a pre-holder-token claims table
+        # (early v2 builds) is dropped and recreated rather than migrated.
+        if claims_columns and "holder_token" not in claims_columns:
+            conn.execute("DROP TABLE claims")
+            claims_columns = set()
+        conn.execute(_CLAIMS_SCHEMA)
+        # v2 -> v3: the lease columns are nullable, so live claims survive
+        # the upgrade (they can never be superseded, only released/expired).
+        if claims_columns:
+            for column in _CLAIMS_LEASE_COLUMNS:
+                if column in claims_columns:
+                    continue
+                try:
+                    conn.execute(f"ALTER TABLE claims ADD COLUMN {column} TEXT")
+                except sqlite3.OperationalError as exc:
+                    # A column another connection added is the outcome we
+                    # wanted, not an error.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:
@@ -208,34 +285,12 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             f"fleet hub database {db_path} has schema version {current}; this brigade supports {SCHEMA_VERSION}"
         )
     conn.execute(_SCHEMA)
-    claims_columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
-    if _claims_table_needs_migration(claims_columns):
-        # The re-check + migration run under one write lock: init_db runs
-        # per request on a threading server, so two requests against a
-        # fresh v2 database must not both try to add the same column. The
-        # steady state (nothing to migrate) never takes the lock.
-        conn.execute("BEGIN IMMEDIATE")
-        claims_columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
-        # Claims are ephemeral TTL state: a pre-holder-token claims table
-        # (early v2 builds) is dropped and recreated rather than migrated.
-        if claims_columns and "holder_token" not in claims_columns:
-            conn.execute("DROP TABLE claims")
-            claims_columns = set()
-        conn.execute(_CLAIMS_SCHEMA)
-        # v2 -> v3: the lease columns are nullable, so live claims survive
-        # the upgrade (they can never be superseded, only released/expired).
-        if claims_columns:
-            for column in _CLAIMS_LEASE_COLUMNS:
-                if column in claims_columns:
-                    continue
-                try:
-                    conn.execute(f"ALTER TABLE claims ADD COLUMN {column} TEXT")
-                except sqlite3.OperationalError as exc:
-                    # Belt and braces under the lock: a column another
-                    # connection added is the outcome we wanted.
-                    if "duplicate column" not in str(exc).lower():
-                        raise
-        conn.commit()
+    if _claims_table_needs_migration(_claims_columns(conn)):
+        with _migration_lock(db_path):
+            # Re-check under the lock: the thread that held it first has
+            # usually done the work already.
+            if _claims_table_needs_migration(_claims_columns(conn)):
+                _migrate_claims_table(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     conn.commit()
