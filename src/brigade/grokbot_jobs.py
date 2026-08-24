@@ -173,6 +173,42 @@ def status(target: Path, job_id: str | None = None) -> dict[str, Any]:
         return {"jobs": jobs}
 
 
+def tracker_rows(target: Path) -> list[dict[str, Any]]:
+    """Return the bounded queue fields that the cloud tracker may project.
+
+    This deliberately differs from the queue CLI projection. The tracker needs
+    completion artifact references to reconcile draft PRs, but it never needs
+    the private envelope, lease holder, or verification commands.
+    """
+    root = Path(target).expanduser() / ".brigade" / "cloud" / "grokbot"
+    if not root.exists():
+        return []
+    with _storage_paths(target) as storage:
+        rows: list[dict[str, Any]] = []
+        for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
+            record = _read_json_file(storage.jobs, name)
+            if record is None:
+                raise GrokbotJobError("corrupt-storage")
+            valid = _validate_record(record)
+            spec = valid["spec"]
+            assert isinstance(spec, dict)
+            row: dict[str, Any] = {
+                "job_id": valid["job_id"],
+                "label": spec["label"],
+                "task_hash": valid["task_hash"],
+                "state": valid["state"],
+                "created_at": valid["created_at"],
+                "updated_at": valid["updated_at"],
+                "queued_at": valid["queued_at"],
+                "artifact": spec["artifact"],
+            }
+            for key in ("claimed_at", "result_artifact"):
+                if key in valid:
+                    row[key] = valid[key]
+            rows.append(row)
+        return rows
+
+
 def claim(
     target: Path,
     job_id: str,

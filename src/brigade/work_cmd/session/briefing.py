@@ -675,7 +675,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 continue
             print(
                 f"  - {row.get('label')} provider={row.get('provider')} "
-                f"task={row.get('task_id')} branch={row.get('branch')}"
+                f"task={row.get('task_id') or row.get('job_id')} "
+                f"branch={row.get('branch') or ((row.get('artifact_refs') or {}).get('branch') if isinstance(row.get('artifact_refs'), dict) else None)}"
             )
 
     print(f"next_source: {payload['next_source']}")

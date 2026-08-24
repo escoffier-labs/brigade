@@ -42,6 +42,7 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
     daily_health = daily_cmd.health(target)
     security_health = security_cmd.health(target)
     readiness = center_cmd._readiness_payload(target)
+    cloud_health = center_cmd.status_payload(target).get("cloud_tracker")
     notification_health = notifications_cmd.health(target)
     content_guard_health = scrub.hook_status(target)
     dogfood_ready = dogfood_cmd.config_path(target).exists() and codex_path is not None
@@ -126,6 +127,7 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
             "latest_plan": daily_health.get("latest_plan"),
             "latest_run": daily_health.get("latest_run"),
         },
+        "grokbot_cloud": cloud_health if isinstance(cloud_health, dict) else {},
         "security": {
             "issue_count": security_health.get("issue_count"),
             "top_issue": security_health.get("top_issue"),

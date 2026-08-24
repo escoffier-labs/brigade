@@ -846,7 +846,7 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
 
 
 def status_payload(target: Path) -> dict[str, Any]:
-    from .. import daily_cmd
+    from .. import cloud_tracker, daily_cmd
 
     target = target.expanduser().resolve()
     active = work_cmd._active_session_info(target)
@@ -882,6 +882,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         "operator_report": report_health(target),
         "action_queue": actions_health(target),
         "daily_driver": daily_cmd.health(target),
+        "cloud_tracker": cloud_tracker.health(target),
         "phase_ledger": phases_cmd.health(target),
         "review_queue_count": len(_reviews(target)),
     }

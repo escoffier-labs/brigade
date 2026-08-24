@@ -86,6 +86,21 @@ after the journal write completes and the lock is released):
   sequence. `brigade fleet flush` drains it explicitly.
 - `brigade fleet status [--all] [--json]`.
 
+## Phase 4 claims
+
+The claim key is the bare workspace directory name, matching the `repo` key
+on fleet events. Unrelated repositories with the same directory basename
+therefore arbitrate against each other. Separate worktrees of one repository
+have different directory names and do not arbitrate against each other when
+each resolves its own workspace identity. If they instead resolve the
+per-user `~/.brigade/node.toml` fallback, every such worktree under the home
+directory uses the home directory name and arbitrates on that shared key.
+
+Claims are best-effort protection layered over the local run lock. If the hub
+rejects the configured token with HTTP 401, the client logs one WARNING and
+continues under the local lock alone, just as it does when the hub is
+unreachable.
+
 ## Phase 3 surface
 
 Hub-served Fleet dashboard (`src/brigade/fleet_dashboard.py`, routed by

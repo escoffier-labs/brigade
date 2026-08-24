@@ -1,6 +1,7 @@
 import json
+from datetime import datetime, timezone
 
-from brigade import center_cmd, cli
+from brigade import center_cmd, cli, grokbot_jobs
 
 
 def _write_command_inventory(path):
@@ -75,6 +76,33 @@ def test_center_readiness_blockers_and_imports(tmp_path, capsys):
     assert cli.main(["center", "readiness", "import-issues", "--target", str(tmp_path), "--json"]) == 0
     imported = json.loads(capsys.readouterr().out)
     assert imported["imported"] >= 1
+
+
+def test_center_readiness_surfaces_failed_grokbot_job_without_private_instructions(tmp_path):
+    now = datetime.now(timezone.utc)
+    job_id = grokbot_jobs.enqueue(
+        tmp_path,
+        {
+            "label": "Readiness Grok Bot job",
+            "role": "implementation-worker",
+            "repository": "example/brigade",
+            "base_ref": "main",
+            "ownership_paths": ["src/brigade/cloud_tracker.py"],
+            "instructions": "PRIVATE READINESS INSTRUCTIONS TOKEN=do-not-display",
+            "verification_commands": ["pytest -q tests/test_center_readiness_cmd.py"],
+            "artifact": {"kind": "draft-pr"},
+            "timeout_seconds": 900,
+        },
+        "readiness-grokbot-job",
+        now=now,
+    )["job_id"]
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 600, now=now)
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=now)
+
+    readiness = center_cmd._readiness_payload(tmp_path)
+    finding = next(item for item in readiness["findings"] if item["subsystem"] == "cloud_tracker")
+    assert finding["name"] == "grokbot_queue_attention"
+    assert "PRIVATE READINESS INSTRUCTIONS" not in json.dumps(readiness)
 
 
 def test_center_readiness_waiver_allows_reviewed_closeout(tmp_path, capsys):
