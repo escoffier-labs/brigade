@@ -196,7 +196,8 @@ def test_health_output_is_minimal_and_never_includes_config_or_queue_data(tmp_pa
 
 
 def test_streamable_http_app_enforces_bearer_origin_and_body_limit(tmp_path: Path):
-    from starlette.testclient import TestClient
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
+    TestClient = pytest.importorskip("starlette.testclient", reason="requires the grokbot extra").TestClient
 
     with TestClient(grokbot_mcp.build_app(_adapter(tmp_path).config), base_url="http://127.0.0.1:8766") as client:
         assert client.get("/health").status_code == 401
@@ -311,7 +312,8 @@ def test_gate_bounded_reads_every_http_method_and_preserves_bodyless_requests(tm
 
 
 def test_loopback_canary_path_keeps_sdk_loopback_hosts_with_a_public_allowlist(tmp_path: Path):
-    from starlette.testclient import TestClient
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
+    TestClient = pytest.importorskip("starlette.testclient", reason="requires the grokbot extra").TestClient
 
     config = grokbot_mcp.ListenerConfig(
         target=tmp_path,
@@ -357,7 +359,8 @@ def test_loopback_canary_path_keeps_sdk_loopback_hosts_with_a_public_allowlist(t
 
 
 def test_mcp_asgi_rejects_extra_and_malformed_raw_tool_arguments(tmp_path: Path):
-    from starlette.testclient import TestClient
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
+    TestClient = pytest.importorskip("starlette.testclient", reason="requires the grokbot extra").TestClient
 
     headers = {"authorization": "Bearer not-a-real-token", "content-type": "application/json"}
     invalid_calls = (
