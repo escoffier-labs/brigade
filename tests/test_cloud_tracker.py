@@ -318,6 +318,13 @@ def test_grokbot_queue_projects_safe_rows_and_reconciles_claimed_and_draft_pr(tm
         "is_draft": True,
         "head_sha": "a" * 40,
     }
+    matching_branch_rows = [
+        entry
+        for entry in completed_status["entries"]
+        if entry.get("artifact_refs", {}).get("branch") == "grokbot/tracker-safe-job"
+        or entry.get("branch") == "grokbot/tracker-safe-job"
+    ]
+    assert [entry["id"] for entry in matching_branch_rows] == [f"grokbot:{completed}"]
     assert set(row) <= {
         "id",
         "provider",
@@ -334,6 +341,27 @@ def test_grokbot_queue_projects_safe_rows_and_reconciles_claimed_and_draft_pr(tm
         "claimed_at",
     }
     assert completed_status["sources"]["grokbot-cloud"] == {"wired": True, "authority": "local-queue"}
+
+
+def test_grokbot_merged_draft_pr_lands_without_queue_attention(tmp_path: Path):
+    completed = _completed_grokbot_job(tmp_path, now=NOW - timedelta(hours=30))
+    github = {
+        "branches": [],
+        "prs": [
+            {
+                "head": "grokbot/tracker-safe-job",
+                "state": "MERGED",
+                "url": "https://github.com/example/brigade/pull/123",
+                "isDraft": True,
+                "headRefOid": "b" * 40,
+            }
+        ],
+    }
+
+    status = cloud_tracker.status_payload(tmp_path, now=NOW, provider_tasks={}, github=github)
+    row = next(entry for entry in status["entries"] if entry.get("job_id") == completed)
+    assert row["classification"] == "landed"
+    assert cloud_tracker.health(tmp_path, now=NOW, github=github)["issue_count"] == 0
 
 
 def test_grokbot_branch_is_orphaned_and_cloud_sweep_keeps_safe_references(tmp_path: Path):

@@ -341,9 +341,12 @@ def _orphan_branch_rows(
     registry_entries: list[dict[str, Any]],
     github: dict[str, Any],
     now: datetime,
+    known_branches: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    known_branches = {e.get("branch") for e in registry_entries if isinstance(e.get("branch"), str) and e.get("branch")}
-    known_branches |= {
+    registered_branches = {
+        e.get("branch") for e in registry_entries if isinstance(e.get("branch"), str) and e.get("branch")
+    }
+    registered_branches |= {
         e.get("expected_artifact", {}).get("pattern")
         for e in registry_entries
         if isinstance(e.get("expected_artifact"), dict)
@@ -351,11 +354,13 @@ def _orphan_branch_rows(
         and "/" in str(e.get("expected_artifact", {}).get("pattern"))
         and "*" not in str(e.get("expected_artifact", {}).get("pattern"))
     }
+    if known_branches:
+        registered_branches |= known_branches
     rows: list[dict[str, Any]] = []
     for name in sorted(_branch_names(github)):
         if not name.startswith(CLOUD_BRANCH_PREFIXES):
             continue
-        if name in known_branches:
+        if name in registered_branches:
             continue
         provider = _provider_for_branch(name)
         rows.append(
@@ -515,8 +520,21 @@ def status_payload(
         )
         for entry in registry["entries"]
     ]
-    entries.extend(_grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours))
-    entries.extend(_orphan_branch_rows(registry_entries=registry["entries"], github=github, now=observed))
+    grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
+    entries.extend(grokbot_rows)
+    known_queue_branches = {
+        refs["branch"]
+        for row in grokbot_rows
+        if isinstance((refs := row.get("artifact_refs")), dict) and isinstance(refs.get("branch"), str)
+    }
+    entries.extend(
+        _orphan_branch_rows(
+            registry_entries=registry["entries"],
+            github=github,
+            now=observed,
+            known_branches=known_queue_branches,
+        )
+    )
 
     return {
         "schema": STATUS_SCHEMA,
@@ -843,9 +861,15 @@ def center_activity_records(
     return records
 
 
-def health(target: Path, *, now: datetime | None = None) -> dict[str, Any]:
+def health(
+    target: Path,
+    *,
+    now: datetime | None = None,
+    github: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return a bounded local queue health summary for operator consumers."""
-    payload = status_payload(target, now=now, provider_tasks={}, github={"branches": [], "prs": []})
+    snapshot = github if isinstance(github, dict) else observe_github(target)
+    payload = status_payload(target, now=now, provider_tasks={}, github=snapshot)
     entries = [row for row in payload.get("entries", []) if row.get("provider") == "grokbot-cloud"]
     classifications = {name: sum(1 for row in entries if row.get("classification") == name) for name in CLASSIFICATIONS}
     attention = classifications["stale"] + classifications["needs-investigation"] + classifications["orphaned"]

@@ -112,6 +112,64 @@ def test_center_activity_projects_grokbot_queue_without_private_instructions(tmp
     assert "PRIVATE CENTER INSTRUCTIONS" not in json.dumps(records)
 
 
+def test_center_activity_marks_merged_grokbot_draft_pr_succeeded(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    job_id = grokbot_jobs.enqueue(
+        tmp_path,
+        {
+            "label": "Merged Grok Bot tracker",
+            "role": "implementation-worker",
+            "repository": "example/brigade",
+            "base_ref": "main",
+            "ownership_paths": ["src/brigade/cloud_tracker.py"],
+            "instructions": "PRIVATE MERGED INSTRUCTIONS",
+            "verification_commands": ["pytest -q tests/test_center_agent_activity.py"],
+            "artifact": {"kind": "draft-pr"},
+            "timeout_seconds": 900,
+        },
+        "merged-grokbot-tracker",
+        now=now,
+    )["job_id"]
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 600, now=now)
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=now)
+    grokbot_jobs.transition(
+        tmp_path,
+        job_id,
+        "bot-a",
+        "lease-a",
+        "completed",
+        now=now,
+        artifact={
+            "kind": "draft-pr",
+            "branch": "grokbot/merged-grokbot-tracker",
+            "url": "https://github.com/example/brigade/pull/456",
+        },
+    )
+    monkeypatch.setattr(
+        "brigade.cloud_tracker.observe_github",
+        lambda _: {
+            "branches": [],
+            "prs": [
+                {
+                    "head": "grokbot/merged-grokbot-tracker",
+                    "state": "MERGED",
+                    "url": "https://github.com/example/brigade/pull/456",
+                    "isDraft": True,
+                    "headRefOid": "c" * 40,
+                }
+            ],
+        },
+    )
+    home = tmp_path / "empty-home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+
+    records = activity_records.collect(tmp_path, now=now + timedelta(hours=30))
+    row = next(record for record in records if record["links"].get("task_id") == job_id)
+    assert row["classification"] == "landed"
+    assert row["state"] == "succeeded"
+
+
 def test_session_discovery_bounds_directory_walks(tmp_path, monkeypatch):
     root = tmp_path / "sessions"
     for index in range(300):
