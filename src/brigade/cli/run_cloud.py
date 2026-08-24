@@ -110,6 +110,48 @@ def register(sub: argparse._SubParsersAction) -> None:
     add_target(p_grokbot_status)
     p_grokbot_status.add_argument("--job-id", default=None)
 
+    p_grokbot_serve = grokbot_sub.add_parser("serve", help="Run the role-scoped Grok Bot MCP listener.")
+    p_grokbot_serve.add_argument("--target", type=Path, default=Path("."))
+    p_grokbot_serve.add_argument(
+        "--instance", required=True, choices=("operator", "repository-scout", "implementation-worker")
+    )
+    p_grokbot_serve.add_argument("--bind", default="127.0.0.1:8766", help="Listener host:port. Defaults to loopback.")
+    p_grokbot_serve.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
+    p_grokbot_serve.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
+    secret_group = p_grokbot_serve.add_mutually_exclusive_group(required=True)
+    secret_group.add_argument("--bearer-file", type=Path, help="Protected file containing the listener bearer.")
+    secret_group.add_argument("--bearer-env", help="Environment variable name containing the listener bearer.")
+
+    def add_instance(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--target", type=Path, default=Path("."))
+        command.add_argument(
+            "--instance", required=True, choices=("operator", "repository-scout", "implementation-worker")
+        )
+        command.add_argument("--json", action="store_true")
+
+    p_setup = grokbot_sub.add_parser("setup", help="Write non-secret role-scoped listener configuration.")
+    add_target(p_setup)
+    p_setup.add_argument("--instance", required=True, choices=("operator", "repository-scout", "implementation-worker"))
+    p_setup.add_argument("--bind", default="127.0.0.1:8766", help="Listener host:port. Defaults to loopback.")
+    p_setup.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
+    p_setup.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
+    setup_secret = p_setup.add_mutually_exclusive_group(required=True)
+    setup_secret.add_argument("--bearer-file", type=Path, help="Path of a protected bearer file (reference only).")
+    setup_secret.add_argument("--bearer-env", help="Name of the environment variable holding the bearer.")
+
+    p_doctor = grokbot_sub.add_parser(
+        "doctor", help="Sanitized dependency/config/permission/queue/endpoint diagnostics."
+    )
+    add_instance(p_doctor)
+
+    p_canary = grokbot_sub.add_parser("canary", help="Bounded non-mutating authentication and inventory check.")
+    add_instance(p_canary)
+
+    p_install = grokbot_sub.add_parser("install-service", help="Render or install a role-scoped systemd unit.")
+    add_instance(p_install)
+    p_install.add_argument("--out", type=Path, default=None, help="Directory to render the unit into.")
+    p_install.add_argument("--force", action="store_true", help="Allow overwriting this role's own unit file.")
+
     p.set_defaults(func=dispatch)
 
 
@@ -225,9 +267,32 @@ def dispatch(args) -> int:
 
 def _dispatch_grokbot(args, target: Path) -> int:
     """Dispatch local queue operations without loading envelopes into CLI arguments."""
-    from .. import grokbot_jobs
+    from .. import grokbot_jobs, grokbot_mcp
 
     command = args.grokbot_command
+    if command in {"setup", "doctor", "canary", "install-service"}:
+        return _dispatch_grokbot_ops(args, target)
+    if command == "serve":
+        from .. import grokbot_mcp
+
+        try:
+            config = grokbot_mcp.build_listener_config(
+                target=target,
+                instance=args.instance,
+                bind=args.bind,
+                allowed_hosts=args.allow_host,
+                allowed_origins=args.allow_origin,
+                bearer_file=args.bearer_file,
+                bearer_env=args.bearer_env,
+            )
+            grokbot_mcp.run_listener(config)
+        except grokbot_mcp.OptionalDependencyError:
+            print("error: Grok Bot listener requires pip install brigade-cli[grokbot]", file=sys.stderr)
+            return 2
+        except grokbot_mcp.ConfigurationError:
+            print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
+            return 2
+        return 0
     try:
         if command == "enqueue":
             result = grokbot_jobs.enqueue(target, _read_json_object(args.spec, "--spec"), args.idempotency_key)
@@ -271,6 +336,65 @@ def _dispatch_grokbot(args, target: Path) -> int:
         return 0
     _print_grokbot_result(result)
     return 0
+
+
+def _dispatch_grokbot_ops(args, target: Path) -> int:
+    """Setup, doctor, canary, and install-service for the Grok Bot listener."""
+    from .. import grokbot_mcp, grokbot_ops
+
+    instance = args.instance
+    command = args.grokbot_command
+    try:
+        if command == "setup":
+            grokbot_ops.save_config(
+                target,
+                instance=instance,
+                bind=args.bind,
+                allowed_hosts=args.allow_host,
+                allowed_origins=args.allow_origin,
+                bearer_env=args.bearer_env,
+                bearer_file=args.bearer_file,
+            )
+            print(f"grokbot config saved: role={instance}")
+            return 0
+
+        if command == "doctor":
+            checks = grokbot_ops.doctor(target, instance)
+            failed = False
+            for check in checks:
+                print(f"{check['check']}: {check['status']}")
+                failed = failed or check["status"] != "ok"
+            return 1 if failed else 0
+
+        if command == "canary":
+            result = grokbot_ops.canary(target, instance)
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(f"canary: {'ok' if result['ok'] else 'fail'}")
+                if not result["ok"]:
+                    print(f"reason: {result.get('reason', 'unknown')}")
+            return 0 if result["ok"] else 1
+
+        if command == "install-service":
+            config = grokbot_ops.load_config(target, instance)
+            if args.out is None:
+                sys.stdout.write(grokbot_ops.render_unit(config, python=sys.executable, exec_root=target))
+                return 0
+            path = grokbot_ops.write_unit(config, Path(args.out), exec_root=target, force=args.force)
+            print(f"unit written: {path.name}")
+            return 0
+    except grokbot_mcp.ConfigurationError:
+        print("error: Grok Bot configuration is invalid", file=sys.stderr)
+        return 2
+    except grokbot_ops.ServiceRenderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError) as exc:
+        print("error: Grok Bot operation failed", file=sys.stderr)
+        del exc
+        return 2
+    return 2
 
 
 def _read_json_object(path: Path, option: str) -> dict:

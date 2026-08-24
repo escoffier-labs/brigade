@@ -58,6 +58,17 @@ def test_nt_dirfd_api_binder_does_not_nameerror() -> None:
     assert ctypes.sizeof(info) > 0
 
 
+def test_nt_dirfd_rename_information_honors_replace_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(nt_dirfd, "_handle_from_fd", lambda _fd: 17)
+    api = nt_dirfd._bind_api_namespace()
+
+    replace_info, _replace_length = nt_dirfd._rename_information(api, 3, "inbox.jsonl", replace=True)
+    no_replace_info, _no_replace_length = nt_dirfd._rename_information(api, 3, "inbox.jsonl", replace=False)
+
+    assert bool(replace_info._obj.ReplaceIfExists) is True
+    assert bool(no_replace_info._obj.ReplaceIfExists) is False
+
+
 def test_nt_dirfd_directory_access_is_traversal_without_delete() -> None:
     """Intermediate/parent directory opens must not request DELETE (Win11 ACCESS_DENIED)."""
     traverse = nt_dirfd._DIRECTORY_TRAVERSE_ACCESS
