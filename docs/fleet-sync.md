@@ -44,7 +44,7 @@ status of each phase.
 | 2. Fleet hub (`brigade fleet serve`), event POST, store-and-forward, `brigade fleet status` | #1123 | **built, hub CT pending** — code, tests, and CLI are in; the hogwarts CT that hosts `brigade fleet serve` is not provisioned yet |
 | 3. Web dashboard served by the hub | #1124 | shipped |
 | 4. Server-arbitrated claims with TTL | #1125 | shipped (#1140); crash self-lockout recovery #1141 |
-| 5. Dolt sink for versioned history (optional) | #1127 | not started |
+| 5. Export and Dolt sink for versioned history (optional) | #1127 | built |
 | 6. Cross-repo campaigns on the hub | #1128 | not started |
 
 ## Phase 2 surface
@@ -143,6 +143,101 @@ phone over Tailscale:
 - No token, cookie value, or claim holder token is ever rendered; the
   response carries the same CSP / no-store / no-referrer headers as
   `brigade center serve`.
+
+## Export and optional Dolt sink
+
+`brigade fleet export [--since <event-timestamp> | --since-received
+<hub-timestamp>] --format jsonl|csv [--claims [--include-expired]] [--db PATH]
+[--out PATH]` reads
+the hub database in read-only mode and streams events in `(node_id, run_id,
+sequence, digest)` order. The columns have a fixed order, the event digest is
+included, and exporting the same database twice produces identical bytes.
+`--claims` exports the live claims snapshot in `target` order, omits the claim
+holder token, and includes an explicit `expired` column. Expired rows are
+excluded unless the human export also passes `--include-expired`. `--since`
+filters on the event's `ts`. `--since-received` filters on the hub's
+`received_at` value. Incremental archives should use `--since-received` because
+a spooled event may reach the hub days after its event timestamp. An event whose
+selected filter timestamp cannot be parsed is excluded and counted in the
+stderr summary. Human-facing CSV cells that start with `=`, `+`, `-`, `@`, a
+tab, or a carriage return are prefixed with a single quote to prevent
+spreadsheet formula execution. JSONL values are unchanged. A named `--out`
+file is replaced only after the complete export succeeds.
+
+Export and sink work stay off the reporting path. Neither command participates
+in journal append, event delivery, claim arbitration, `/status`, `/claims`, or
+dashboard requests. Run them manually or from a scheduler on the host that can
+read the hub SQLite file.
+
+The Dolt sink is disabled by default. Configure one import pass in the existing
+`~/.brigade/fleet.toml` file:
+
+```toml
+[fleet.sink]
+enabled = true
+dolt_binary = "dolt"
+dolt_dir = "~/.brigade/dolt"
+db = "~/.brigade/fleet-hub.db"
+timeout_seconds = 120
+events_incremental = true
+```
+
+`enabled` must be the Boolean `true`. `dolt_binary` may name a binary on
+`PATH` or an explicit path. `dolt_dir` is the destination Dolt database, and
+`db` optionally overrides the hub SQLite file. A command-line `--db` takes
+precedence over the configured `db` value. `timeout_seconds` bounds each Dolt
+subprocess. With `events_incremental = true`, the sink stores the last exported
+`received_at` value in `.brigade-fleet-events-watermark` inside `dolt_dir` and
+exports only events received after it on the next pass. The watermark is
+replaced atomically after a successful commit. A missing or invalid watermark
+causes a full event export. Set `events_incremental = false` to export the full
+event log on every pass.
+
+`brigade fleet sink [--db PATH]` exports deterministic CSV files. It runs
+`dolt table import -u` for `fleet_events`, which is an append log, and `dolt
+table import -r` for `fleet_claims`, which is a live snapshot. The claims
+snapshot excludes expired rows. Replacing it removes released or expired claims
+from Dolt on the next pass. The sink CSV keeps source values unchanged. After
+both imports, the sink checks `dolt status --porcelain`. A changed working set
+is staged with `dolt add -A` and committed with the UTC export time followed by
+`fleet events/claims`. That same time is the expiry cutoff for the claims
+snapshot. An unchanged pass skips the add and commit commands.
+A fresh Dolt database is initialized with the local `brigade` identity, so no
+host-level Dolt identity is required. The sink has no Python Dolt dependency.
+If it is disabled, it exits 0 without reading the hub database. If the
+configured Dolt binary is absent, it prints a clear `documented no-op` message
+and exits 0, which keeps an optional scheduled job from failing on a host
+without Dolt.
+
+For example, this Dolt SQL reports each ISO week's terminal-run outcome rate
+and the percentage-point change from the prior week. `ts` is stored as an
+ISO-8601 string with a trailing `Z`. go-mysql-server may not parse that value
+directly in `DATE_FORMAT`, so the query strips the suffix before casting:
+
+```sql
+WITH weekly AS (
+  SELECT
+    DATE_FORMAT(CAST(SUBSTRING(ts, 1, 19) AS DATETIME), '%x-%v') AS iso_week,
+    SUM(state = 'run.completed') /
+      NULLIF(SUM(state IN ('run.completed', 'run.failed', 'run.interrupted')), 0)
+      AS outcome_rate
+  FROM fleet_events
+  WHERE state IN ('run.completed', 'run.failed', 'run.interrupted')
+  GROUP BY iso_week
+), compared AS (
+  SELECT
+    iso_week,
+    outcome_rate,
+    LAG(outcome_rate) OVER (ORDER BY iso_week) AS prior_rate
+  FROM weekly
+)
+SELECT
+  iso_week,
+  ROUND(outcome_rate * 100, 1) AS outcome_rate_pct,
+  ROUND((outcome_rate - prior_rate) * 100, 1) AS weekly_diff_pct_points
+FROM compared
+ORDER BY iso_week;
+```
 
 Run the hub under a process supervisor on the CT, e.g.
 `brigade fleet serve --host "$(tailscale ip -4)" --token-file /etc/brigade/fleet-token`.
