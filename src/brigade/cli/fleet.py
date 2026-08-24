@@ -245,39 +245,65 @@ def _release_claim(raw_target: str, *, as_path: bool, node_override: str | None,
         probe = fleet_client.inspect_claim(target, node_id=node_id)
         if _print_claim_failure(probe, what="lookup"):
             return 1
-        if probe.claim is not None and probe.claim.get("owner_node") == node_id:
-            run_workspace, why = _workspace_from_run_dir(probe.lock_run_dir)
-            if run_workspace is None:
+        if probe.claim is None or probe.claim.get("owner_node") != node_id:
+            # Nothing this node verifiably owns: an unfenced delete here
+            # could hit a row a fresh run acquires between this probe and
+            # the release. Refuse; only --force deletes unverified.
+            if as_json:
+                receipt = {
+                    "target": target,
+                    "released": False,
+                    "forced": False,
+                    "node_id": node_id,
+                    "claim": None,
+                    "owner": probe.claim,
+                }
+                print(_json.dumps(receipt, indent=2, sort_keys=True))
+            if probe.claim is None:
                 print(
-                    f"error: cannot verify that the run holding {target!r} is dead ({why}); "
-                    "pass --force to release it anyway",
+                    f"error: no claim owned by this node ({node_id}) on {target!r}; "
+                    "use --force to delete another owner's or an unverifiable row",
                     file=sys.stderr,
                 )
-                return 1
-            if workspace is not None and run_workspace != workspace:
+            else:
                 print(
-                    f"error: the claim on {target!r} was taken by a run in {run_workspace}, not {workspace}; "
-                    f"release it from that workspace (--release {run_workspace} --path) or pass --force",
+                    f"error: claim on {target!r} is held by node {probe.claim.get('owner_node') or '-'}, not "
+                    f"this node ({node_id}); pass --force to release it anyway",
                     file=sys.stderr,
                 )
-                return 1
-            verdict = runguard.inspect_run_lock_reconcile(run_workspace)
-            if verdict == "live":
-                print(
-                    f"error: a run owner is still alive on the run lock of {run_workspace}; refusing to "
-                    f"release {target!r} (pass --force to release it anyway)",
-                    file=sys.stderr,
-                )
-                return 1
-            if verdict == "invalid":
-                print(
-                    f"error: the run lock of {run_workspace} is malformed, so liveness cannot be verified; "
-                    f"refusing to release {target!r} (pass --force to release it anyway)",
-                    file=sys.stderr,
-                )
-                return 1
-            acquired_at = probe.claim.get("acquired_at")
-            inspected_acquired_at = acquired_at if isinstance(acquired_at, str) else None
+            return 1
+        run_workspace, why = _workspace_from_run_dir(probe.lock_run_dir)
+        if run_workspace is None:
+            print(
+                f"error: cannot verify that the run holding {target!r} is dead ({why}); "
+                "pass --force to release it anyway",
+                file=sys.stderr,
+            )
+            return 1
+        if workspace is not None and run_workspace != workspace:
+            print(
+                f"error: the claim on {target!r} was taken by a run in {run_workspace}, not {workspace}; "
+                f"release it from that workspace (--release {run_workspace} --path) or pass --force",
+                file=sys.stderr,
+            )
+            return 1
+        verdict = runguard.inspect_run_lock_reconcile(run_workspace)
+        if verdict == "live":
+            print(
+                f"error: a run owner is still alive on the run lock of {run_workspace}; refusing to "
+                f"release {target!r} (pass --force to release it anyway)",
+                file=sys.stderr,
+            )
+            return 1
+        if verdict == "invalid":
+            print(
+                f"error: the run lock of {run_workspace} is malformed, so liveness cannot be verified; "
+                f"refusing to release {target!r} (pass --force to release it anyway)",
+                file=sys.stderr,
+            )
+            return 1
+        acquired_at = probe.claim.get("acquired_at")
+        inspected_acquired_at = acquired_at if isinstance(acquired_at, str) else None
     decision = fleet_client.release_claim(target, node_id=node_id, force=force, acquired_at=inspected_acquired_at)
     if _print_claim_failure(decision, what="release"):
         return 1

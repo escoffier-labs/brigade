@@ -142,15 +142,22 @@ class TestHubScopes:
         assert _post(url, token, _claim(holder="h3", scope="node", supersede=_lease("lease-a")))[0] == 409
         assert _post(url, token, _claim("renew", holder="bare"))[1]["renewed"] is True
 
-    def test_release_scope_node_needs_no_token_but_same_owner(self, hub):
+    def test_release_scope_node_needs_no_token_but_same_owner_and_a_fence(self, hub):
         url, token, _db = hub
-        assert _post(url, token, _claim(holder="dead", conductor="chef"))[1]["granted"] is True
-        body = _claim("release", node=NODE_B, scope="node")
+        granted = _post(url, token, _claim(holder="dead", conductor="chef"))[1]
+        assert granted["granted"] is True
+        fence = granted["claim"]["acquired_at"]
+        # Unfenced node-scope delete is malformed, not match-anything.
+        unfenced = _claim("release", scope="node")
+        unfenced.pop("holder")
+        status, payload = _post(url, token, unfenced)
+        assert status == 400 and "acquired_at" in payload["error"]
+        body = _claim("release", node=NODE_B, scope="node", acquired_at=fence)
         body.pop("holder")
         status, payload = _post(url, token, body)
         assert status == 409 and payload["released"] is False
         assert payload["owner"]["owner_node"] == NODE_A and NODE_B in payload["error"]
-        body = _claim("release", scope="node")
+        body = _claim("release", scope="node", acquired_at=fence)
         body.pop("holder")
         status, payload = _post(url, token, body)
         assert status == 200 and payload["released"] is True
@@ -210,7 +217,7 @@ class TestHubScopes:
         assert "lock_run_dir" not in payload
         assert _post(url, token, _claim("inspect", scope="node"))[0] == 400
         # The receipt of a token-less release is the row it deleted.
-        release = _claim("release", scope="node")
+        release = _claim("release", scope="node", acquired_at=payload["claim"]["acquired_at"])
         release.pop("holder")
         status, payload = _post(url, token, release)
         assert status == 200 and payload["claim"]["owner_node"] == NODE_A
@@ -245,6 +252,9 @@ class TestHubScopes:
         # acquired_at belongs to release only, and must be a string.
         assert _post(url, token, _claim(acquired_at="x"))[0] == 400
         assert _post(url, token, _claim("release", scope="node", acquired_at=5))[0] == 400
+        no_fence = _claim("release", scope="node")
+        no_fence.pop("holder")
+        assert _post(url, token, no_fence)[0] == 400
 
     def test_v2_claim_rows_survive_the_lease_column_upgrade(self, tmp_path):
         db = tmp_path / "hub.db"
@@ -348,14 +358,20 @@ class TestClient:
     def test_release_claim_without_token_by_node_and_force(self, hub, monkeypatch):
         url, token, _db = hub
         _env(monkeypatch, url, token)
-        assert fleet_client.acquire_claim("repo-a", node_id=NODE_A).granted is True
-        refused = fleet_client.release_claim("repo-a", node_id=NODE_B)
+        won = fleet_client.acquire_claim("repo-a", node_id=NODE_A)
+        assert won.granted is True and won.claim is not None
+        fence = won.claim["acquired_at"]
+        # An unfenced non-force operator release is refused by the hub.
+        unfenced = fleet_client.release_claim("repo-a", node_id=NODE_A)
+        assert unfenced.granted is False and unfenced.reason == "hub-unavailable"
+        assert unfenced.detail is not None and "acquired_at" in unfenced.detail
+        refused = fleet_client.release_claim("repo-a", node_id=NODE_B, acquired_at=fence)
         assert (refused.granted, refused.reason) == (False, "held")
         assert refused.owner is not None and refused.owner["owner_node"] == NODE_A
-        released = fleet_client.release_claim("repo-a", node_id=NODE_A)
+        released = fleet_client.release_claim("repo-a", node_id=NODE_A, acquired_at=fence)
         assert released.granted is True and released.claim is not None
         assert released.claim["owner_node"] == NODE_A
-        assert fleet_client.release_claim("repo-a", node_id=NODE_A).reason == "missing"
+        assert fleet_client.release_claim("repo-a", node_id=NODE_A, acquired_at=fence).reason == "missing"
         assert fleet_client.acquire_claim("repo-a", node_id=NODE_A).granted is True
         assert fleet_client.release_claim("repo-a", node_id=NODE_B, force=True).granted is True
         assert fleet_client.fetch_claims() == []
@@ -407,7 +423,7 @@ class TestClient:
         assert f"claimed by node {NODE_A}" in message
         assert "brigade fleet claims --release repo-a" in message and "--no-fleet-claim" in message
         # Another node's claim keeps the cross-machine wording.
-        fleet_client.release_claim("repo-a", node_id=NODE_A)
+        assert fleet_client.release_claim("repo-a", node_id=NODE_A, force=True).granted is True
         assert fleet_client.acquire_claim("repo-a", node_id=NODE_B).granted is True
         with pytest.raises(fleet_client.FleetClaimHeldError, match="another machine or conductor"):
             with fleet_client.repo_claim("repo-a"):
@@ -462,9 +478,16 @@ class TestReleaseCli:
         url, token, _db = hub
         _env(monkeypatch, url, token)
         _post(url, token, _claim(node=NODE_B, holder="hb"))
+        # The refusal happens at the probe: no release request is ever sent.
+        real_release = fleet_client.release_claim
+        released_calls: list = []
+        monkeypatch.setattr(
+            fleet_client, "release_claim", lambda *a, **kw: released_calls.append(1) or real_release(*a, **kw)
+        )
         assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 1
         err = capsys.readouterr().err
         assert f"held by node {NODE_B}" in err and "--force" in err
+        assert released_calls == []
         assert [c["owner_node"] for c in fleet_client.fetch_claims()] == [NODE_B]
         assert cli.main(["fleet", "claims", "--release", "repo-a", "--json"]) == 1
         captured = capsys.readouterr()
@@ -645,17 +668,27 @@ class TestReleaseCli:
         monkeypatch.setattr(fleet_client, "inspect_claim", inspect_then_new_run)
         assert cli.main(["fleet", "claims", "--release", "api"]) == 1
         assert "re-acquired since it was inspected" in capsys.readouterr().err
+        # 409, nothing deleted: the fresh run's claim survives and renews.
         assert [c["owner_conductor"] for c in fleet_client.fetch_claims()] == ["new-run"]
+        assert _post(url, token, _claim("renew", target="api", holder="fresh"))[1]["renewed"] is True
 
     def test_release_missing_misuse_and_no_hub(self, hub, tmp_path, monkeypatch, capsys):
         from brigade import cli
 
         url, token, _db = hub
         _env(monkeypatch, url, token)
-        assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 0
+        # Probe found nothing this node owns: refused without --force (a
+        # fresh run could acquire the key between the probe and the delete).
+        assert cli.main(["fleet", "claims", "--release", "repo-a"]) == 1
+        err = capsys.readouterr().err
+        assert "no claim owned by this node" in err and "--force" in err
+        assert cli.main(["fleet", "claims", "--release", "repo-a", "--json"]) == 1
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert payload["released"] is False and payload["owner"] is None
+        assert "no claim owned by this node" in captured.err
+        assert cli.main(["fleet", "claims", "--release", "repo-a", "--force"]) == 0
         assert "no active claim on 'repo-a'" in capsys.readouterr().out
-        assert cli.main(["fleet", "claims", "--release", "repo-a", "--json"]) == 0
-        assert json.loads(capsys.readouterr().out)["released"] is False
         for flag in (["--force"], ["--path"], ["--node", NODE_B]):
             assert cli.main(["fleet", "claims", *flag]) == 2
             assert "require --release" in capsys.readouterr().err

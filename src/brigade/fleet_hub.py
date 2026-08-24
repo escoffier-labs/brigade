@@ -179,6 +179,16 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _claims_table_needs_migration(claims_columns: set[str]) -> bool:
+    """True when the claims table is absent, pre-holder-token, or missing a
+    lease column — i.e. any state where DDL beyond IF NOT EXISTS may run."""
+    if not claims_columns:
+        return True
+    if "holder_token" not in claims_columns:
+        return True
+    return any(column not in claims_columns for column in _CLAIMS_LEASE_COLUMNS)
+
+
 def init_db(db_path: Path) -> sqlite3.Connection:
     """Open the hub database, creating the schema on first use.
 
@@ -198,31 +208,34 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             f"fleet hub database {db_path} has schema version {current}; this brigade supports {SCHEMA_VERSION}"
         )
     conn.execute(_SCHEMA)
-    # The claims table check + migration run under one write lock: init_db
-    # runs per request on a threading server, so two requests against a
-    # fresh v2 database must not both try to add the same column.
-    conn.execute("BEGIN IMMEDIATE")
-    # Claims are ephemeral TTL state: a pre-holder-token claims table (early
-    # v2 builds) is dropped and recreated rather than migrated.
     claims_columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
-    if claims_columns and "holder_token" not in claims_columns:
-        conn.execute("DROP TABLE claims")
-        claims_columns = set()
-    conn.execute(_CLAIMS_SCHEMA)
-    # v2 -> v3: the lease columns are nullable, so live claims survive the
-    # upgrade (they simply can never be superseded, only released/expired).
-    if claims_columns:
-        for column in _CLAIMS_LEASE_COLUMNS:
-            if column in claims_columns:
-                continue
-            try:
-                conn.execute(f"ALTER TABLE claims ADD COLUMN {column} TEXT")
-            except sqlite3.OperationalError as exc:
-                # Belt and braces under the lock: a column another connection
-                # added is the outcome we wanted, not an error.
-                if "duplicate column" not in str(exc).lower():
-                    raise
-    conn.commit()
+    if _claims_table_needs_migration(claims_columns):
+        # The re-check + migration run under one write lock: init_db runs
+        # per request on a threading server, so two requests against a
+        # fresh v2 database must not both try to add the same column. The
+        # steady state (nothing to migrate) never takes the lock.
+        conn.execute("BEGIN IMMEDIATE")
+        claims_columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+        # Claims are ephemeral TTL state: a pre-holder-token claims table
+        # (early v2 builds) is dropped and recreated rather than migrated.
+        if claims_columns and "holder_token" not in claims_columns:
+            conn.execute("DROP TABLE claims")
+            claims_columns = set()
+        conn.execute(_CLAIMS_SCHEMA)
+        # v2 -> v3: the lease columns are nullable, so live claims survive
+        # the upgrade (they can never be superseded, only released/expired).
+        if claims_columns:
+            for column in _CLAIMS_LEASE_COLUMNS:
+                if column in claims_columns:
+                    continue
+                try:
+                    conn.execute(f"ALTER TABLE claims ADD COLUMN {column} TEXT")
+                except sqlite3.OperationalError as exc:
+                    # Belt and braces under the lock: a column another
+                    # connection added is the outcome we wanted.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+        conn.commit()
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     conn.commit()
@@ -404,6 +417,12 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
         if not isinstance(acquired_at, str) or not acquired_at.strip() or len(acquired_at) > LEASE_FIELD_MAX_CHARS:
             raise FleetHubError("claim field 'acquired_at' must be a non-empty string")
     request["acquired_at"] = acquired_at.strip() if isinstance(acquired_at, str) else None
+    if action == "release" and scope == "node" and request["acquired_at"] is None:
+        # A token-less node-scoped delete without its fencing value would
+        # match whatever row currently holds the target — including one a
+        # fresh run acquired after the caller looked. Only "force" may
+        # delete unfenced.
+        raise FleetHubError("claim field 'acquired_at' is required for a token-less node-scoped release")
     lock = raw.get("lock")
     if lock is not None and action != "acquire":
         raise FleetHubError("claim field 'lock' is only valid for acquire")
@@ -491,10 +510,11 @@ def handle_claim(conn: sqlite3.Connection, raw: Any) -> tuple[int, dict[str, Any
     under a different lease on the same node is refused with 409. Release
     widens to delete the caller's node's row without a token; ``scope:
     "force"`` (release only) deletes the row whoever owns it. A token-less
-    release reports the deleted row as ``claim``, and may carry the
-    ``acquired_at`` of the row the caller inspected: the delete is then
-    fenced to that exact row, so a claim re-acquired between the caller's
-    inspect and its release is never deleted (409 with the current row).
+    release reports the deleted row as ``claim``. A node-scoped release
+    must carry the ``acquired_at`` of the row the caller inspected (400
+    without it): the delete is fenced to that exact row, so a claim
+    re-acquired between the caller's inspect and its release is never
+    deleted (409 with the current row). Only ``force`` deletes unfenced.
     """
     request = _validate_claim_request(raw)
     target = request["target"]

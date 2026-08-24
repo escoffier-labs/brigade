@@ -785,10 +785,11 @@ def release_claim(
     With ``holder`` the release is fenced to that token (the run's own
     release). Without one it is an operator release (issue #1141): the hub
     deletes the row only if this node owns it (``reason="held"`` names the
-    real owner otherwise), or with ``force`` whoever owns it. Pass the
-    ``acquired_at`` of the claim you inspected to fence the delete to that
-    exact row (a claim re-acquired since is refused as ``held``). The
-    deleted row comes back as ``ClaimDecision.claim``.
+    real owner otherwise), or with ``force`` whoever owns it. A non-force
+    operator release must pass the ``acquired_at`` of the claim it
+    inspected — the hub refuses an unfenced node-scoped delete — so the
+    delete hits that exact row (a claim re-acquired since is refused as
+    ``held``). The deleted row comes back as ``ClaimDecision.claim``.
     """
     kwargs.pop("ttl_seconds", None)
     scope = "force" if force else ("holder" if holder is not None else "node")

@@ -180,10 +180,11 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   `lock_workspace` / `cwd`, or the `.brigade/runs/<id>` layout; with
   `--path` it must be the workspace given) and refuses while that
   `run.lock` has a live owner or is malformed, or when it cannot resolve
-  the run at all. The release then carries the inspected row's
-  `acquired_at`, and the hub deletes only that exact row (one write
-  transaction), so a claim re-acquired in between is refused with the
-  current row. `--node` other than this machine's identity needs
+  the run at all, or when the probe finds no claim owned by this node.
+  The release then carries the inspected row's `acquired_at` — the hub
+  refuses a token-less node-scoped delete without it — and deletes only
+  that exact row (one write transaction), so a claim re-acquired in
+  between is refused with the current row. `--node` other than this machine's identity needs
   `--force`; `--force` (`scope: "force"`) skips the proof and the JSON
   receipt's `forced` reflects the flag. Renew is never token-less.
 - `brigade run --no-fleet-claim` skips the hub claim entirely and relies on
