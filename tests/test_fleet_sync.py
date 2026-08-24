@@ -37,7 +37,8 @@ def _event(
 def hub(tmp_path):
     db = tmp_path / "hub" / "fleet.db"
     token = "test-token-12345"
-    server = fleet_hub.make_server("127.0.0.1", 0, db, token)
+    # Legacy shared-token mode (pre-#1150): the one token posts as any node.
+    server = fleet_hub.make_server("127.0.0.1", 0, db, token, allow_admin_writes=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", token, db
@@ -464,7 +465,13 @@ class TestCli:
             )
             == 0
         )
-        assert captured == {"host": "127.0.0.1", "port": 4000, "db_path": db, "token_file": token_file}
+        assert captured == {
+            "host": "127.0.0.1",
+            "port": 4000,
+            "db_path": db,
+            "token_file": token_file,
+            "allow_admin_writes": False,
+        }
 
     def test_status_json_and_table(self, hub, monkeypatch, capsys):
         from brigade import cli
@@ -850,7 +857,7 @@ class TestHubHardening:
 
         url, token, _db = hub
 
-        def broken(conn, raw):
+        def broken(conn, raw, **kwargs):
             raise sqlite3.OperationalError("database is locked")
 
         monkeypatch.setattr(fleet_hub, "store_events", broken)

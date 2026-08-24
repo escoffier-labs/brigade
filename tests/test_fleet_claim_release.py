@@ -34,7 +34,8 @@ DEAD_LOCK_ACQUIRED_AT = "2026-08-01T00:00:00+00:00"
 def hub(tmp_path):
     db = tmp_path / "hub" / "fleet.db"
     token = "test-token-12345"
-    server = fleet_hub.make_server("127.0.0.1", 0, db, token)
+    # Legacy shared-token mode (pre-#1150): the one token posts as any node.
+    server = fleet_hub.make_server("127.0.0.1", 0, db, token, allow_admin_writes=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", token, db
@@ -272,14 +273,14 @@ class TestHubScopes:
         conn.close()
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 3
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 4
             assert [c["target"] for c in fleet_hub.list_claims(conn)] == ["repo-a"]
             # No lease recorded: never supersedable, only released or expired.
             status, _payload = fleet_hub.handle_claim(conn, _claim(holder="h2", scope="node", supersede=_lease("L1")))
             assert status == 409
             assert fleet_hub.handle_claim(conn, _claim("renew", holder="h1"))[1]["renewed"] is True
             # Re-opening is idempotent.
-            assert fleet_hub.init_db(db).execute("PRAGMA user_version").fetchone()[0] == 3
+            assert fleet_hub.init_db(db).execute("PRAGMA user_version").fetchone()[0] == 4
         finally:
             conn.close()
 

@@ -37,12 +37,20 @@ Configuration (never stores secrets): ``~/.brigade/fleet.toml``::
 
     [fleet]
     hub_url = "http://<tailscale-ip>:3774"
-    token_file = "/path/to/token"
+    node_token_file = "/path/to/node-token"   # this machine's identity
+    token_file = "/path/to/admin-token"       # optional: control plane only
 
-``BRIGADE_FLEET_HUB_URL`` overrides ``hub_url``; the token comes from
-``BRIGADE_FLEET_TOKEN`` or the ``token_file`` contents. Empty environment
-values count as unset. When no hub is configured the client is a no-op:
-zero behavior change for existing users.
+``BRIGADE_FLEET_HUB_URL`` overrides ``hub_url``. Events and claims are sent
+with the **node token** (issue #1150: the hub derives ``node_id`` from it),
+from ``BRIGADE_FLEET_NODE_TOKEN`` or the ``node_token_file`` contents. The
+**admin token** (``BRIGADE_FLEET_TOKEN`` / ``token_file``) is for
+``brigade fleet nodes`` and reads. When no node token is configured the
+client falls back to the admin token for everything — the deprecated
+shared-token mode, which the hub accepts only with ``--allow-admin-writes``
+— and logs one WARNING per process saying so, so existing deployments keep
+working until each machine is enrolled. Empty environment values count as
+unset. When no hub is configured the client is a no-op: zero behavior
+change for existing users.
 
 Phase 4 (issue #1125) adds hub-arbitrated cross-machine claims:
 ``acquire_claim`` / ``renew_claim`` / ``release_claim`` are one bounded
@@ -89,11 +97,22 @@ DEFAULT_CLAIM_TTL_SECONDS = 900
 # One acquire is retried once, so a configured-but-blackholed hub costs at
 # most 2 x this per `brigade run` before falling open on the local lock.
 CLAIM_TIMEOUT_SECONDS = 2.5
-# 4xx statuses that are transient or operator-fixable: keep the spool.
-_RETRYABLE_4XX = frozenset({401, 408, 429})
+# 4xx statuses that are transient or operator-fixable: keep the spool. 403
+# is a credential mismatch (a node token that is not this node's, or the
+# admin token on a hub without --allow-admin-writes), fixed by config.
+_RETRYABLE_4XX = frozenset({401, 403, 408, 429})
 
 _LOG = logging.getLogger("brigade.fleet")
 _SPOOL_PROCESS_LOCK = threading.Lock()
+# The deprecated shared-token fallback is warned about once per process,
+# not once per journal append.
+_SHARED_TOKEN_WARNED = False
+_SHARED_TOKEN_WARNING = (
+    "fleet: no node token configured; sending events and claims with the shared fleet token "
+    "(deprecated shared-token mode, which the hub accepts only with --allow-admin-writes). "
+    "Enroll this machine with 'brigade fleet nodes add <node_id>' and set [fleet] node_token_file "
+    "in ~/.brigade/fleet.toml"
+)
 
 
 class FleetClientError(RuntimeError):
@@ -112,26 +131,54 @@ def brigade_home() -> Path:
     return Path.home() / ".brigade"
 
 
+def load_fleet_settings() -> dict[str, str]:
+    """Return {"hub_url", "admin_token", "node_token"}; values may be empty.
+
+    Precedence: ``BRIGADE_FLEET_HUB_URL`` over ``[fleet] hub_url``;
+    ``BRIGADE_FLEET_TOKEN`` over the contents of ``[fleet] token_file``
+    (the admin token); ``BRIGADE_FLEET_NODE_TOKEN`` over the contents of
+    ``[fleet] node_token_file`` (this machine's node token). An empty or
+    whitespace-only environment value is treated as unset. The file is
+    consulted for whichever value the environment did not set. No fallback
+    between the two token kinds happens here (see ``load_fleet_config``).
+    """
+    hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip()
+    admin_token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
+    node_token = os.environ.get("BRIGADE_FLEET_NODE_TOKEN", "").strip()
+    if not (hub_url and admin_token and node_token):
+        section = _read_fleet_section(brigade_home() / FLEET_CONFIG_REL_PATH.name)
+        if not hub_url and isinstance(section.get("hub_url"), str):
+            hub_url = section["hub_url"].strip()
+        if not admin_token:
+            token_file = section.get("token_file")
+            if isinstance(token_file, str) and token_file.strip():
+                admin_token = _read_token_file(token_file)
+        if not node_token:
+            node_token_file = section.get("node_token_file")
+            if isinstance(node_token_file, str) and node_token_file.strip():
+                node_token = _read_token_file(node_token_file)
+    return {"hub_url": hub_url, "admin_token": admin_token, "node_token": node_token}
+
+
 def load_fleet_config() -> dict[str, str]:
     """Return {"hub_url": ..., "token": ...}; values may be absent (empty).
 
-    Precedence: ``BRIGADE_FLEET_HUB_URL`` over ``[fleet] hub_url``;
-    ``BRIGADE_FLEET_TOKEN`` over the contents of ``[fleet] token_file``. An
-    empty or whitespace-only environment value is treated as unset. The file
-    is always consulted for whichever value the environment did not set.
+    ``token`` is the credential this machine sends as itself: its node token
+    (``BRIGADE_FLEET_NODE_TOKEN`` / ``[fleet] node_token_file``), or, when
+    none is configured, the shared admin token (``BRIGADE_FLEET_TOKEN`` /
+    ``[fleet] token_file``) — the deprecated shared-token mode, logged as
+    one WARNING per process when a hub is configured. See
+    ``load_fleet_settings`` for precedence.
     """
-    hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip()
-    token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
-    if hub_url and token:
-        return {"hub_url": hub_url, "token": token}
-    section = _read_fleet_section(brigade_home() / FLEET_CONFIG_REL_PATH.name)
-    if not hub_url and isinstance(section.get("hub_url"), str):
-        hub_url = section["hub_url"].strip()
-    if not token:
-        token_file = section.get("token_file")
-        if isinstance(token_file, str) and token_file.strip():
-            token = _read_token_file(token_file)
-    return {"hub_url": hub_url, "token": token}
+    global _SHARED_TOKEN_WARNED
+    settings = load_fleet_settings()
+    token = settings["node_token"]
+    if not token and settings["admin_token"]:
+        token = settings["admin_token"]
+        if settings["hub_url"] and not _SHARED_TOKEN_WARNED:
+            _SHARED_TOKEN_WARNED = True
+            _LOG.warning(_SHARED_TOKEN_WARNING)
+    return {"hub_url": settings["hub_url"], "token": token}
 
 
 def _read_token_file(raw_path: str) -> str:
@@ -633,10 +680,11 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code in (400, 409):
+        if exc.code in (400, 403, 409):
             # A held/expired refusal is an answer, not a transport failure;
             # a 400 carries the hub's validation message (e.g. an older hub
-            # that does not know a request field), worth surfacing verbatim.
+            # that does not know a request field) and a 403 names the node
+            # the caller's token is bound to, both worth surfacing verbatim.
             try:
                 return exc.code, json.loads(exc.read().decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -820,6 +868,63 @@ def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> li
         raise FleetClientError(f"fleet hub claims failed: {exc}") from exc
     claims = payload.get("claims") if isinstance(payload, dict) else None
     return list(claims) if isinstance(claims, list) else []
+
+
+# --- per-node credentials (issue #1150): admin-token control plane ----------
+
+
+def _admin_request(path: str, body: dict[str, Any] | None, *, what: str) -> dict[str, Any]:
+    """One ``/nodes`` request with the admin token; raises ``FleetClientError``
+    with the hub's message on any refusal (the token itself never appears)."""
+    settings = load_fleet_settings()
+    hub = settings["hub_url"]
+    if not hub:
+        raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    admin_token = settings["admin_token"]
+    if not admin_token:
+        raise FleetClientError(
+            "no fleet admin token configured (~/.brigade/fleet.toml [fleet] token_file or BRIGADE_FLEET_TOKEN)"
+        )
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        hub.rstrip("/") + path, data=data, headers=headers, method="POST" if data else "GET"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            refusal = json.loads(exc.read().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            refusal = {}
+        detail = refusal.get("error") if isinstance(refusal, dict) and isinstance(refusal.get("error"), str) else ""
+        raise FleetClientError(f"fleet hub {what} failed: HTTP {exc.code}{': ' + detail if detail else ''}") from exc
+    except Exception as exc:
+        raise FleetClientError(f"fleet hub {what} failed: {exc}") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def add_node(node_id: str, *, label: str | None = None) -> dict[str, Any]:
+    """Enroll ``node_id`` on the hub (admin token); the payload carries the
+    node's token exactly once — the hub never returns it again."""
+    body: dict[str, Any] = {"action": "add", "node_id": node_id}
+    if label:
+        body["label"] = label
+    return _admin_request("/nodes", body, what="node enroll")
+
+
+def revoke_node(node_id: str) -> dict[str, Any]:
+    """Revoke ``node_id``'s token on the hub (admin token)."""
+    return _admin_request("/nodes", {"action": "revoke", "node_id": node_id}, what="node revoke")
+
+
+def fetch_nodes() -> list[dict[str, Any]]:
+    """GET /nodes from the hub (admin token); raises FleetClientError when refused or unreachable."""
+    nodes = _admin_request("/nodes", None, what="nodes").get("nodes")
+    return list(nodes) if isinstance(nodes, list) else []
 
 
 def _claim_renew_interval(ttl_seconds: int) -> float:

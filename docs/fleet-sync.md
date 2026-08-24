@@ -22,17 +22,55 @@ status of each phase.
   unreachable the event is spooled locally and flushed in order on reconnect;
   the hub dedupes on `(node_id, run_id, sequence, digest)` so replays are
   idempotent.
-- Hub address and token file live in `~/.brigade/fleet.toml`
-  (`[fleet] hub_url = ..., token_file = ...`); `BRIGADE_FLEET_HUB_URL` and
-  `BRIGADE_FLEET_TOKEN` override. The token is a dedicated fleet secret and is
+- Hub address and token files live in `~/.brigade/fleet.toml`
+  (`[fleet] hub_url = ..., node_token_file = ..., token_file = ...`);
+  `BRIGADE_FLEET_HUB_URL`, `BRIGADE_FLEET_NODE_TOKEN`, and
+  `BRIGADE_FLEET_TOKEN` override. Tokens are dedicated fleet secrets and are
   never written into a Brigade config value.
+
+## Trust model
+
+Two kinds of bearer token (#1150), both compared in constant time, neither
+ever logged or rendered:
+
+- **A node token is the node's identity.** `brigade fleet nodes add <node_id>`
+  mints one per machine; the hub stores only its SHA-256 (`nodes` table:
+  `node_id`, `token_sha256`, `label`, `created_at`, `revoked_at`; schema
+  v4) and prints the plaintext exactly once. `POST /events` and
+  `POST /claims` derive the caller's `node_id` from the token and answer
+  403 when a body `node_id` differs — a fleet member can post events and
+  acquire, renew, release, supersede, or inspect claims only as itself. A
+  revoked token answers 401; `nodes add` again rotates it. Node tokens may
+  also read `/status` and `/claims`, so `brigade fleet status` and
+  `brigade fleet claims` work on every machine.
+- **The admin token is the control plane.** The one shared bearer from
+  before (`BRIGADE_FLEET_TOKEN` / `--token-file` on the hub, `token_file`
+  on a client) manages `/nodes`, reads `/status` and `/claims`, and enrols
+  the dashboard cookie. It may post events or claims under *any* `node_id`
+  only when the hub runs with `brigade fleet serve --allow-admin-writes`
+  (off by default), which is the explicit switch for a fleet that is still
+  on the shared token. A client with `token_file` but no `node_token_file`
+  falls back to sending the admin token as its own credential and logs one
+  WARNING per process naming the deprecated shared-token mode; a 403 from a
+  hub without the flag keeps the event in the spool (like a 401) until the
+  machine is enrolled.
+- **Scope and owner fields are honest-client intent, not authorization.**
+  `node_id` is now bound to the credential, but `lock`, `supersede`,
+  `holder`, `conductor`, and `scope` remain caller-asserted: `scope`
+  keeps honest clients from stealing each other's claims (a same-basename
+  workspace, a cloned node identity), and any enrolled node may still
+  `force`-release a claim — attributed to its own `node_id`, which is the
+  difference from before. Everything else on the hub (Tailscale-only bind,
+  plain HTTP on the encrypted tailnet, dashboard cookie derived from the
+  admin token) is unchanged.
 
 ## Decisions (closed)
 
 | Question | Decision |
 | --- | --- |
 | Hub host | hogwarts, dedicated LXC CT (isolated from the working box) |
-| Token source | dedicated secret via `BRIGADE_FLEET_TOKEN` env or a `token_file` path; never a config value |
+| Token source | dedicated secrets via env (`BRIGADE_FLEET_TOKEN`, `BRIGADE_FLEET_NODE_TOKEN`) or file paths (`token_file`, `node_token_file`); never a config value |
+| Caller identity | per-node credentials (#1150): the hub binds `node_id` to the node token; the shared bearer is the admin token |
 | Git-ref journal backup per machine | no; local journal + hub is enough |
 | Dependencies | stdlib only (`http.server`, `sqlite3`, `urllib`) |
 
@@ -52,16 +90,25 @@ status of each phase.
 Hub (`src/brigade/fleet_hub.py`):
 
 - `GET /health` — no auth, liveness.
-- `POST /events` — bearer auth; one event object or an array (max 1000);
-  a batch with any invalid event is rejected whole; responds
-  `{"accepted": n, "duplicate": m}`.
-- `GET /status` — bearer auth; latest event per `(node_id, run_id)` for runs
-  whose latest state is not terminal (`run.completed`, `run.failed`,
-  `run.interrupted`); `?all=1` includes terminal runs.
-- SQLite in WAL mode, `PRAGMA user_version` = schema version; a database from a
-  newer hub is refused rather than reinterpreted.
-- `brigade fleet serve --host <ip> [--port 3774] [--db PATH] [--token-file PATH]`;
+- `POST /events` — node token (or the admin token with
+  `--allow-admin-writes`); one event object or an array (max 1000), every
+  event carrying the caller's `node_id` (403 otherwise); a batch with any
+  invalid event is rejected whole; responds `{"accepted": n, "duplicate": m}`.
+- `GET /status` — admin or node token; latest event per `(node_id, run_id)`
+  for runs whose latest state is not terminal (`run.completed`,
+  `run.failed`, `run.interrupted`); `?all=1` includes terminal runs.
+- `GET /nodes`, `POST /nodes` — admin token only; list enrolled nodes,
+  `{"action": "add", "node_id", "label"?}` (the token is in that response
+  and nowhere else; an enrolled, unrevoked node answers 409),
+  `{"action": "revoke", "node_id"}`.
+- SQLite in WAL mode, `PRAGMA user_version` = schema version (v4 adds the
+  `nodes` table in place); a database from a newer hub is refused rather
+  than reinterpreted.
+- `brigade fleet serve --host <ip> [--port 3774] [--db PATH] [--token-file PATH] [--allow-admin-writes]`;
   `--host` is required so the hub never binds all interfaces by accident.
+- `brigade fleet nodes add <node_id> [--label L] [--json]`, `nodes list
+  [--json]`, `nodes revoke <node_id> [--json]` — the control plane, using
+  the admin token from `[fleet] token_file` / `BRIGADE_FLEET_TOKEN`.
 
 Client (`src/brigade/fleet_client.py`, hooked from `run_journal.append_event`
 after the journal write completes and the lock is released):
@@ -78,9 +125,11 @@ after the journal write completes and the lock is released):
   each other's events. Partial flushes rewrite via temp file + `os.replace`;
   a flush that delivers nothing leaves the file untouched.
 - The spool is capped at 16 MiB (oldest events dropped, logged on the
-  `brigade.fleet` logger). A non-retryable 4xx (anything but 401/408/429)
-  drops that batch as poison instead of retrying forever; 401, 5xx, and
-  network failures keep the spool.
+  `brigade.fleet` logger). A non-retryable 4xx (anything but
+  401/403/408/429) drops that batch as poison instead of retrying forever;
+  401, 403 (a credential bound to another node, or the admin token on a
+  hub without `--allow-admin-writes`), 5xx, and network failures keep the
+  spool.
 - When a spool exists, new events are appended to it and the spool is flushed
   in order (100 per request) so the hub never sees a node's events out of
   sequence. `brigade fleet flush` drains it explicitly.
@@ -97,9 +146,9 @@ per-user `~/.brigade/node.toml` fallback, every such worktree under the home
 directory uses the home directory name and arbitrates on that shared key.
 
 Claims are best-effort protection layered over the local run lock. If the hub
-rejects the configured token with HTTP 401, the client logs one WARNING and
-continues under the local lock alone, just as it does when the hub is
-unreachable.
+rejects the configured token with HTTP 401 or 403, the client logs one WARNING
+(carrying the hub's message) and continues under the local lock alone, just as
+it does when the hub is unreachable.
 
 ## Phase 3 surface
 
@@ -284,7 +333,10 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   receipt's `forced` reflects the flag. Renew is never token-less.
 - `brigade run --no-fleet-claim` skips the hub claim entirely and relies on
   the local run lock alone, logged once on the `brigade.fleet` logger.
-- Trust boundary: `node_id` and the leases are caller-asserted under the one
-  shared bearer token, so `scope` is an intent marker that keeps honest
-  clients from stealing each other's claims, not an authorization — the
-  bearer token already authorizes `force` and arbitrary claims.
+- Trust boundary: `node_id` is bound to the caller's node token (#1150; see
+  *Trust model* above), so `--node` for another machine's identity is a 403
+  from the hub unless the caller is the admin token on a hub started with
+  `--allow-admin-writes`. The leases and `scope` remain caller-asserted
+  intent that keeps honest clients from stealing each other's claims, not
+  an authorization — any enrolled node may still `--force`, attributed to
+  its own `node_id`.

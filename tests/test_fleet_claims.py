@@ -22,7 +22,8 @@ NODE_B = "22222222-2222-4222-8222-222222222222"
 def hub(tmp_path):
     db = tmp_path / "hub" / "fleet.db"
     token = "test-token-12345"
-    server = fleet_hub.make_server("127.0.0.1", 0, db, token)
+    # Legacy shared-token mode (pre-#1150): the one token posts as any node.
+    server = fleet_hub.make_server("127.0.0.1", 0, db, token, allow_admin_writes=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", token, db
@@ -234,7 +235,7 @@ class TestHubClaims:
         conn.close()
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 3
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 4
             assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
         finally:
             conn.close()
