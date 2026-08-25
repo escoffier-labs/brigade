@@ -484,6 +484,32 @@ def dispatch(args) -> int:
     # interrupt into an accurate credential-failure message instead of
     # "run canceled by user".
     fleet_credential_failure: list[str] = []
+    # Set when the fleet heartbeat reports lost ownership (#1157): without
+    # this the interrupt would be remembered as "canceled by user".
+    fleet_claim_loss: list[str] = []
+
+    def abort_on_fleet_claim_lost(reason: str | None) -> None:
+        """Heartbeat-thread callback (#1157): another owner now holds the
+        claim this run was granted. Record the claim-loss failure first (the
+        first terminal receipt wins), then interrupt the main thread."""
+        detail = reason or "held by another node"
+        print(
+            f"error: fleet claim on {claim_target!r} was lost ({detail}); canceling the active run",
+            file=sys.stderr,
+        )
+        fleet_claim_loss.append(detail)
+        if output_dir is not None and (output_dir / "run.json").is_file():
+            try:
+                aboyeur_mod.record_run_termination(
+                    output_dir,
+                    status="failed",
+                    failure_phase="dispatch",
+                    failure_kind="fleet-claim-lost",
+                    detail=f"fleet claim on {claim_target} was lost ({detail}); run canceled",
+                    seat=lifecycle_seat,
+                )
+            except Exception:
+                pass  # the printed error stands; never mask the interrupt
 
     def abort_on_fleet_credential_failure(detail: str | None) -> None:
         """Heartbeat-thread callback (#1161): the hub rejected this machine's
@@ -589,6 +615,7 @@ def dispatch(args) -> int:
                         lock_owner=runguard.read_lock_owner(lock_path),
                         supersede_dead_owner=dead_owner,
                         on_credential_failure=abort_on_fleet_credential_failure,
+                        on_claim_lost=abort_on_fleet_claim_lost,
                     )
                 )
             if args.worktree:
@@ -764,6 +791,11 @@ def dispatch(args) -> int:
             # The interrupt came from the fleet heartbeat's credential-failure
             # callback (#1161), which already printed and recorded the reason.
             print("error: run canceled: fleet hub rejected this node's credentials", file=sys.stderr)
+            rc = 2
+        elif fleet_claim_loss:
+            # The interrupt came from the fleet heartbeat's claim-lost
+            # callback (#1157), which already printed and recorded the reason.
+            print("error: run canceled: fleet claim lost to another owner", file=sys.stderr)
             rc = 2
         else:
             print("error: run canceled by user", file=sys.stderr)

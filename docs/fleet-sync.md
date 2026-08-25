@@ -136,10 +136,14 @@ after the journal write completes and the lock is released):
 - Hub traffic never uses a proxy (#1154): the client's opener is built with
   an empty `ProxyHandler`, so `HTTP_PROXY`/`HTTPS_PROXY` can neither receive
   the bearer token nor blackhole tailnet requests. Prefer HTTPS via Tailscale
-  Serve where possible.
+  Serve where possible. Redirects are followed only within the same origin;
+  a cross-origin 302 is refused instead of replaying the Authorization
+  header to another host (#1157).
 - The spool is private (#1154): the spool directory is created 0700, spool,
-  lock, and temp files are created 0600, opens are no-follow (`O_NOFOLLOW`
-  where available) and refuse non-regular files, and atomic rewrites use
+  lock, and temp files are created 0600 (existing files forced back to 0600
+  on every open), opens are no-follow (`O_NOFOLLOW`
+  where available) and refuse non-regular files and symlinked spool
+  directories, and atomic rewrites use
   exclusive, unpredictable temp names in the spool directory.
 - `brigade fleet status [--all] [--json]`.
 
@@ -206,16 +210,25 @@ learns another owner holds the claim (a renew answered 409 held-by-another),
 the run is aborted — with no callback the main thread is interrupted through
 the same path as Ctrl-C and the loss is logged once — so two machines never
 keep working one repo unarbitrated. `repo_claim` accepts `on_claim_lost` to
-react differently, and `BRIGADE_FLEET_CLAIM_LOSS=continue` (or
+react differently — the abort still follows the notification even when the
+callback raises or returns without stopping the run (#1157) — and
+`BRIGADE_FLEET_CLAIM_LOSS=continue` (or
 `claim_loss_policy="continue"`) is the documented opt-out for solo machines,
-restoring the old log-and-continue behavior.
+restoring the old log-and-continue behavior. `brigade run` records a mid-run
+claim-loss abort as a failed run with failure kind `fleet-claim-lost`, never
+as "canceled by user".
 
 Orphan cleanup (#1157): a lost acquire response schedules a background
 release that attempts **immediately**, then backs off, so a short-lived run
-still frees the row before process exit kills its daemon threads. At exit,
+still frees the row before process exit kills its daemon threads. A
+"missing" answer inside one outstanding-request uncertainty window is
+retried rather than accepted as definitive, since the abandoned acquire can
+still commit its row afterwards. At exit,
 when a heartbeat re-acquire may have committed an orphan row, the release is
 retried inline not only while the hub answers "unavailable" but also after a
-definitive "missing" (the straggler may commit right after), and exhaustion
+definitive "missing" (the straggler may commit right after), each retry is
+spaced across one request deadline so back-to-back retries cannot all
+complete before the straggler lands, and exhaustion
 of those retries is logged as a WARNING naming the residual TTL exposure.
 
 ## Export and optional Dolt sink

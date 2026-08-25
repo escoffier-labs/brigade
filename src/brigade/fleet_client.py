@@ -82,6 +82,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -279,7 +280,27 @@ def resolve_node_id(base_path: Path | None = None) -> str:
 # must not be handed to HTTP_PROXY/HTTPS_PROXY before it reaches the (plain
 # HTTP, tailnet-bound) hub. An explicit empty ProxyHandler disables all
 # proxy resolution for these requests regardless of environment.
-_HUB_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+#
+# Redirects are restricted to the origin the request already targets (#1157):
+# urllib's default redirect handler replays Authorization (the bearer token)
+# on every hop, so a cross-origin 302 from a compromised hub or an
+# on-path responder would leak it. Cross-origin redirects are refused (the
+# resulting HTTPError surfaces as an ordinary transport failure).
+
+
+class _HubRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url)
+        new = urllib.parse.urlsplit(newurl)
+        if (old.scheme.lower(), old.netloc.lower()) != (new.scheme.lower(), new.netloc.lower()):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_HUB_OPENER = urllib.request.build_opener(
+    _HubRedirectHandler(),
+    urllib.request.ProxyHandler({}),
+)
 
 
 def _hub_open(request: urllib.request.Request, *, timeout: float):
@@ -359,11 +380,15 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 def _ensure_private_dir(path: Path) -> None:
     """Create ``path`` (and parents) and force the spool directory to 0700,
     so umask or an inherited permissive mode cannot expose event metadata."""
+    if path.is_symlink():
+        # A symlinked spool directory would redirect every write below it
+        # (#1157); refuse instead of following attacker-chosen parents.
+        raise FleetClientError(f"fleet spool directory {path} is a symlink")
     path.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(path, 0o700)
-    except OSError:  # pragma: no cover - Windows/POSIX-only modes
-        pass
+    except OSError as exc:  # pragma: no cover - Windows/POSIX-only modes
+        _LOG.warning("fleet spool directory %s could not be forced to 0700: %s", path, exc)
 
 
 def _open_private(path: Path, flags: int) -> int:
@@ -377,6 +402,15 @@ def _open_private(path: Path, flags: int) -> int:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise FleetClientError(f"fleet spool {path} is not a regular file")
+        # The creation mode only applies to a fresh file: an existing spool
+        # file left permissive (umask change, manual chmod) keeps its mode
+        # (#1157), so force it on every open.
+        _fchmod = getattr(os, "fchmod", None)
+        if _fchmod is not None:
+            try:
+                _fchmod(fd, 0o600)
+            except OSError as exc:
+                _LOG.warning("fleet spool %s could not be forced to 0600: %s", path, exc)
     except Exception:
         os.close(fd)
         raise
@@ -1043,6 +1077,10 @@ def _claim_renew_interval(ttl_seconds: int) -> float:
 
 ORPHAN_RELEASE_RETRY_SECONDS = 30.0
 EXIT_ORPHAN_RELEASE_RETRIES = 2
+# A timed-out acquire can still be in flight when cleanup starts (#1157): a
+# "missing" answer inside this window may precede the abandoned request's
+# commit, so it is retried instead of accepted as definitive.
+ORPHAN_RELEASE_UNCERTAINTY_SECONDS = 2 * CLAIM_TIMEOUT_SECONDS + 1.0
 
 # What happens when the heartbeat learns another owner holds the claim
 # (#1152): "abort" (default) interrupts the run's dispatch so two machines
@@ -1074,12 +1112,20 @@ def _schedule_orphan_release(
     """
 
     def _loop() -> None:
-        deadline = time.monotonic() + ttl_seconds
+        started = time.monotonic()
+        deadline = started + ttl_seconds
         while time.monotonic() < deadline:
             outcome = release_claim(target, node_id=node_id, holder=holder, conductor=conductor)
-            if outcome.reason != "hub-unavailable":
-                return
-            time.sleep(min(ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
+            if outcome.reason == "hub-unavailable":
+                time.sleep(min(ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
+                continue
+            if outcome.reason == "missing" and time.monotonic() - started < ORPHAN_RELEASE_UNCERTAINTY_SECONDS:
+                # Not definitive yet (#1157): the acquire whose response we
+                # lost may still commit its row after this "missing". Keep
+                # retrying until the uncertainty window closes.
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
+            return
 
     threading.Thread(target=_loop, name="brigade-fleet-claim-orphan-release", daemon=True).start()
 
@@ -1293,12 +1339,15 @@ def repo_claim(
                 CLAIM_LOSS_ENV,
             )
             if on_claim_lost is not None:
+                # Notifying is best-effort, but the fail-closed abort is not
+                # (#1157): a callback that raises — or returns without
+                # stopping the run — must never suppress the interrupt, or a
+                # lost claim would degrade back to silent parallel work.
                 try:
                     on_claim_lost(outcome.reason)
                 except Exception:
-                    _LOG.warning("fleet claim-lost callback raised; the run keeps unwinding", exc_info=True)
-            else:
-                _thread.interrupt_main()
+                    _LOG.warning("fleet claim-lost callback raised; interrupting anyway", exc_info=True)
+            _thread.interrupt_main()
             return
 
     heartbeat = threading.Thread(target=_renew_loop, name="brigade-fleet-claim-renew", daemon=True)
@@ -1323,6 +1372,12 @@ def repo_claim(
             # flight and commit its row right after this release was told
             # the claim is gone, which would leak it for the full TTL.
             for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
+                # Space each retry across one outstanding-request timeout
+                # (#1157): back-to-back retries can all complete before an
+                # abandoned re-acquire commits its row; sleeping one request
+                # deadline first gives that late commit time to land where
+                # this release can still delete it.
+                time.sleep(CLAIM_TIMEOUT_SECONDS)
                 release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
                 if release_outcome.reason not in ("hub-unavailable", "missing"):
                     break
