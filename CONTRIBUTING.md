@@ -117,6 +117,12 @@ brigade guard scan README.md --policy src/brigade/guard/policies/public-repo.jso
 ./scripts/verify
 ```
 
+While iterating, `./scripts/verify-fast` runs the same gates with the pytest phase parallelized through pytest-xdist (roughly 4 minutes instead of 50 on a 24-core machine). The canonical gate stays serial `./scripts/verify`; a handful of timing-sensitive tests flake under CPU contention, so re-run any parallel-only failure serially before acting on it. `JOBS=8 ./scripts/verify-fast` caps the worker count on smaller machines.
+
+```bash
+JOBS=auto ./scripts/verify-fast
+```
+
 To smoke-test an install end-to-end the same way CI does:
 
 ```bash
