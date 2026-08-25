@@ -2552,7 +2552,7 @@ def _fleet_copy_keys(target: Path) -> list[tuple[str, str]]:
     for harness in sorted(_install_targets(target)):
         if harness == "hermes":
             continue
-        probe = _install_dir(target, harness, "__brigade_probe__")
+        probe, _probe_escapes = _evaluate_install_dir(target, harness, "__brigade_probe__")
         root = probe.parent
         if root.is_dir():
             for path in sorted(item for item in root.iterdir() if item.is_dir()):

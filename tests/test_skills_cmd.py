@@ -1232,6 +1232,23 @@ def test_skills_fleet_status_survives_installed_copy_swapped_for_external_symlin
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_skills_fleet_status_reports_copies_under_external_skills_root(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    shared = tmp_path / "shared-skills"
+    _write_skill(shared, name="root-linked-example")
+    (workspace / ".claude").mkdir()
+    (workspace / ".claude" / "skills").symlink_to(shared, target_is_directory=True)
+
+    assert skills_cmd.fleet_status(target=workspace) == 0
+    assert "root-linked-example [claude] external" in capsys.readouterr().out
+
+    payload = skills_cmd._fleet_status_payload(workspace)
+    row = next(item for item in payload["copies"] if item["skill_id"] == "root-linked-example")
+    assert row["status"] == "external"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
 def test_install_dir_still_rejects_external_symlink_target(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
