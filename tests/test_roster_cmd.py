@@ -635,14 +635,14 @@ def test_roster_doctor_endpoint_agent_skips_pin_check(tmp_target, capsys):
 def test_roster_init_review_model_adds_pinned_reviewer_seat(tmp_path):
     # Structural review independence (issue #125): the reviewer seat runs a
     # different model than the coder it checks.
-    rc = roster_cmd.init(tmp_path, review_model="gpt-5.3-codex-spark")
+    rc = roster_cmd.init(tmp_path, review_model="gpt-5.6-terra")
     assert rc == 0
     text = (tmp_path / ".brigade" / "roster.toml").read_text()
     assert "[agents.reviewer]" in text
-    assert 'model = "gpt-5.3-codex-spark"' in text
+    assert 'model = "gpt-5.6-terra"' in text
     # the generated roster stays loadable
     loaded = roster.load_roster(tmp_path / ".brigade" / "roster.toml")
-    assert loaded.agents["reviewer"].model == "gpt-5.3-codex-spark"
+    assert loaded.agents["reviewer"].model == "gpt-5.6-terra"
     assert loaded.agents["reviewer"].cli == "codex"
 
 
