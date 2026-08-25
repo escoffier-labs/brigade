@@ -160,7 +160,7 @@ Expected: all launcher tests pass.
 - Modify: `tests/test_ci_workflow.py`
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] Add workflow tests that assert the exact design contract:
+- [x] Add workflow tests that assert the exact design contract:
 
 ```python
 def test_ci_workflow_cancels_superseded_runs_for_the_same_pr_or_ref():
@@ -210,24 +210,24 @@ def test_ci_workflow_caches_pip_for_jobs_that_install_dev_extras():
         assert "cache-dependency-path: pyproject.toml" in section
 ```
 
-- [ ] Run RED: `brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_ci_workflow.py"]' --capture brigade-work --no-reuse`.
+- [x] Run RED: `brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_ci_workflow.py"]' --capture brigade-work --no-reuse`.
 
 Expected: the four new workflow tests fail against the serial job.
 
-- [ ] Add top-level workflow concurrency exactly as specified in `docs/superpowers/specs/2026-08-25-ci-test-sharding-design.md`.
-- [ ] Add setup-python pip caching to `lint`, `component-manifest-provenance`, and `repo-metadata`.
-- [ ] Replace `test` with `test-shards`: a false-fail-fast matrix over Python `["3.10", "3.11", "3.12"]` and shard `[0, 1, 2, 3]`; install dev extras; invoke the launcher; set `COVERAGE_FILE=.coverage.<python>.<shard>`; add coverage flags only on Python 3.12; upload each Python 3.12 data file with `actions/upload-artifact@v4`, hidden files enabled, and missing files treated as errors.
-- [ ] Add `coverage`, dependent on `test-shards`: checkout, Python 3.12 with pip cache, install dev extras, download `coverage-*` via `actions/download-artifact@v5` into `.coverage-data` with merged artifacts, run `python -m coverage combine .coverage-data`, then `python -m coverage report --fail-under=78`.
-- [ ] Add `test`, named `test (${{ matrix.python }})`, as a three-version compatibility matrix. Use `needs: [test-shards, coverage]` and `if: ${{ always() }}`. Its only step must exit 1 unless both `needs.test-shards.result` and `needs.coverage.result` equal `success`.
+- [x] Add top-level workflow concurrency exactly as specified in `docs/superpowers/specs/2026-08-25-ci-test-sharding-design.md`.
+- [x] Add setup-python pip caching to `lint`, `component-manifest-provenance`, and `repo-metadata`.
+- [x] Replace `test` with `test-shards`: a false-fail-fast matrix over Python `["3.10", "3.11", "3.12"]` and shard `[0, 1, 2, 3]`; install dev extras; invoke the launcher; set `COVERAGE_FILE=.coverage.<python>.<shard>`; add coverage flags only on Python 3.12; upload each Python 3.12 data file with `actions/upload-artifact@v4`, hidden files enabled, and missing files treated as errors.
+- [x] Add `coverage`, dependent on `test-shards`: checkout, Python 3.12 with pip cache, install dev extras, download `coverage-*` via `actions/download-artifact@v5` into `.coverage-data` with merged artifacts, run `python -m coverage combine .coverage-data`, then `python -m coverage report --fail-under=78`.
+- [x] Add `test`, named `test (${{ matrix.python }})`, as a three-version compatibility matrix. Use `needs: [test-shards, coverage]` and `if: ${{ always() }}`. Its only step must exit 1 unless both `needs.test-shards.result` and `needs.coverage.result` equal `success`.
 
-- [ ] Run GREEN: `brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_ci_pytest_shard.py","tests/test_ci_workflow.py"]' --capture brigade-work --no-reuse`.
+- [x] Run GREEN: `brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_ci_pytest_shard.py","tests/test_ci_workflow.py"]' --capture brigade-work --no-reuse`.
 
 Expected: repository checks and both focused test files pass.
 
-- [ ] Run `brigade work verify run --target . --argv-json '["actionlint",".github/workflows/ci.yml"]' --capture brigade-work --no-reuse`.
+- [x] Run `brigade work verify run --target . --argv-json '["actionlint",".github/workflows/ci.yml"]' --capture brigade-work --no-reuse`.
 
 Expected: exit 0 with no diagnostics.
 
-- [ ] Run each shard from 0 through 3 against the two focused test files through separate Brigade verification commands. Expected: all exit 0, and their selected counts sum to the unsharded collected count.
+- [x] Run each shard from 0 through 3 against the two focused test files through separate Brigade verification commands. Expected: all exit 0, and their selected counts sum to the unsharded collected count.
 
-- [ ] Tick every checkbox, run `git diff --check`, inspect the diff, and commit with `git commit -m "ci: shard Python test matrix"`.
+- [x] Tick every checkbox, run `git diff --check`, inspect the diff, and commit with `git commit -m "ci: shard Python test matrix"`.
