@@ -1,16 +1,17 @@
 #!/bin/bash
-# Single verification entrypoint. CI and AGENTS.md both defer to this file,
-# so the gate lives in exactly one place. Mirrors .github/workflows/ci.yml:
+# Full local coverage gate for pull requests, merges, releases, and
+# verification-infrastructure changes. CI keeps a separate workflow.
 # ruff lint, ruff format, mypy, version sync, pytest with coverage.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-git_common_dir=$(git rev-parse --git-common-dir)
-verify_lock_path=${BRIGADE_VERIFY_LOCK_PATH:-"$git_common_dir/brigade-full-verify.lock"}
-exec 9>"$verify_lock_path"
-if ! flock -n 9; then
-  echo "full verification already running for this checkout; run ./scripts/verify-focused <pytest-selector>... or wait for the active Brigade receipt" >&2
-  exit 75
+if [ -z "${BRIGADE_VERIFY_LOCK_HELD:-}" ]; then
+  if [ -n "${BRIGADE_VERIFY_LOCK_PYTHON:-}" ]; then
+    lock_python=$BRIGADE_VERIFY_LOCK_PYTHON
+  else
+    lock_python=${PY:-.venv/bin}/python
+  fi
+  exec "$lock_python" scripts/verify_lock.py "$@"
 fi
 
 PY=${PY:-.venv/bin}

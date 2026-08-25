@@ -1,7 +1,7 @@
 import ast
 import os
-import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -84,7 +84,7 @@ def test_verify_focused_forwards_only_selected_tests(tmp_path, monkeypatch):
     assert log_path.read_text().splitlines()[-1] == f"pytest\t-q\t{selectors[0]}\t{selectors[1]}"
 
 
-@pytest.mark.skipif(os.name == "nt" or shutil.which("flock") is None, reason="requires flock")
+@pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
 def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, monkeypatch):
     import fcntl
 
@@ -94,6 +94,7 @@ def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, 
     monkeypatch.setenv("PY", str(tool_dir))
     monkeypatch.setenv("VERIFY_LOG", str(log_path))
     monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PYTHON", sys.executable)
     with lock_path.open("w") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         completed = subprocess.run(
@@ -109,6 +110,44 @@ def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, 
     assert "full verification already running" in completed.stderr
     assert "./scripts/verify-focused" in completed.stderr
     assert not log_path.exists() or log_path.read_text() == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Bash verification entrypoint")
+def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
+    tool_dir, log_path = _fake_tool_dir(tmp_path)
+    flock_dir = tmp_path / "flock-bin"
+    flock_dir.mkdir()
+    flock_log = tmp_path / "flock.log"
+    flock_shim = flock_dir / "flock"
+    flock_shim.write_text(f'#!/bin/sh\nprintf invoked >> "{flock_log}"\nexit 1\n')
+    flock_shim.chmod(0o755)
+    lock_path = tmp_path / "full.lock"
+    monkeypatch.setenv("PY", str(tool_dir))
+    monkeypatch.setenv("VERIFY_LOG", str(log_path))
+    monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PYTHON", sys.executable)
+    env = os.environ.copy()
+    env["PATH"] = f"{flock_dir}{os.pathsep}{env.get('PATH', '')}"
+    completed = subprocess.run(
+        [str(ROOT / "scripts/verify")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        timeout=15,
+    )
+    assert completed.returncode == 0
+    assert log_path.read_text().splitlines() == [
+        "ruff\tcheck\t.",
+        "ruff\tformat\t--check\t.",
+        "mypy",
+        "python\tscripts/version_sync.py\t--check",
+        "python\tscripts/managed_snapshot.py\t--check",
+        "python\tscripts/template_profile_snapshot.py\t--check",
+        "pytest\t-q\t--cov=brigade\t--cov-report=term\t--cov-fail-under=78",
+    ]
+    assert not flock_log.exists()
 
 
 def test_agents_md_requires_focused_development_and_reserved_full_gate():

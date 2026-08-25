@@ -2,17 +2,18 @@
 
 **Goal:** Replace repeated 37 to 55 minute development gates with focused, receipt-backed checks while preserving one complete coverage gate for integration and CI.
 
-**Architecture:** A new Bash entrypoint runs the existing fast repository checks and only caller-selected pytest targets. The existing full entrypoint keeps every check but takes a nonblocking lock in the shared Git directory, so linked worktrees cannot saturate the machine with duplicate full suites. `AGENTS.md` assigns each entrypoint to a distinct lifecycle stage.
+**Architecture:** A new Bash entrypoint runs the existing fast repository checks and only caller-selected pytest targets. The existing full entrypoint keeps every check but takes a nonblocking POSIX lock in the shared Git directory through `scripts/verify_lock.py` (`fcntl.flock`), so linked worktrees cannot saturate the machine with duplicate full suites. `AGENTS.md` assigns each entrypoint to a distinct lifecycle stage.
 
-**Key tech:** Bash, `flock`, pytest, Brigade verification receipts.
+**Key tech:** Bash, Python 3 `fcntl`, pytest, Brigade verification receipts.
 
 Execute the checkboxes in order. Keep the test red before implementation, then commit the completed slice.
 
 ## File map
 
-- `tests/test_verify_script.py`: executable contract tests for focused arguments, required selectors, lock contention, and agent instructions.
+- `tests/test_verify_script.py`: executable contract tests for focused arguments, required selectors, lock contention, flock-shim independence, and agent instructions.
 - `scripts/verify-focused`: focused development gate.
-- `scripts/verify`: full integration gate with a shared nonblocking lock.
+- `scripts/verify_lock.py`: portable POSIX lock helper used by the full gate.
+- `scripts/verify`: full integration gate; invokes the helper when `BRIGADE_VERIFY_LOCK_HELD` is absent.
 - `AGENTS.md`: lifecycle rules for focused and full verification.
 
 ### Task 1: Pin and implement the tiered gate
@@ -86,13 +87,14 @@ def test_verify_focused_forwards_only_selected_tests(tmp_path, monkeypatch):
 - [x] Add the full-gate contention test:
 
 ```python
-@pytest.mark.skipif(os.name == "nt" or shutil.which("flock") is None, reason="requires flock")
+@pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
 def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, monkeypatch):
     import fcntl
 
     lock_path = tmp_path / "full.lock"
     lock_path.touch()
     monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PYTHON", sys.executable)
     with lock_path.open("w") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         completed = subprocess.run(
@@ -140,15 +142,16 @@ PY=${PY:-.venv/bin}
 "$PY/pytest" -q "$@"
 ```
 
-- [x] Add the lock before tool execution in `scripts/verify`:
+- [x] Add the lock before tool execution in `scripts/verify` by execing `scripts/verify_lock.py` when `BRIGADE_VERIFY_LOCK_HELD` is absent. The helper opens the lock file 0600, takes `fcntl.flock(LOCK_EX|LOCK_NB)`, exits 75 on contention, marks the descriptor inheritable, sets `BRIGADE_VERIFY_LOCK_HELD=1`, and `os.execvpe`s `scripts/verify`:
 
 ```bash
-git_common_dir=$(git rev-parse --git-common-dir)
-verify_lock_path=${BRIGADE_VERIFY_LOCK_PATH:-"$git_common_dir/brigade-full-verify.lock"}
-exec 9>"$verify_lock_path"
-if ! flock -n 9; then
-  echo "full verification already running for this checkout; run ./scripts/verify-focused <pytest-selector>... or wait for the active Brigade receipt" >&2
-  exit 75
+if [ -z "${BRIGADE_VERIFY_LOCK_HELD:-}" ]; then
+  if [ -n "${BRIGADE_VERIFY_LOCK_PYTHON:-}" ]; then
+    lock_python=$BRIGADE_VERIFY_LOCK_PYTHON
+  else
+    lock_python=${PY:-.venv/bin}/python
+  fi
+  exec "$lock_python" scripts/verify_lock.py "$@"
 fi
 ```
 
