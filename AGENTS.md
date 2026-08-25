@@ -26,8 +26,11 @@ Reserve the full coverage gate for pull requests, merges, releases, and
 verification-infrastructure changes. Run it once through Brigade:
 
 ```bash
-brigade work verify run --target . --argv-json '["./scripts/verify"]' --capture brigade-work
+brigade work verify run --target . --argv-json '["./scripts/verify"]' --timeout 3600 --capture brigade-work
 ```
+
+`--timeout 3600` bounds the known-long integration gate and is not permission
+to retry status 75.
 
 Do not pass `--no-reuse` for a full gate. Status 75 means another full
 verification is already running for this checkout. It must not be retried

@@ -2,7 +2,7 @@
 
 **Goal:** Replace repeated 37 to 55 minute development gates with focused, receipt-backed checks while preserving one complete coverage gate for integration and CI.
 
-**Architecture:** A new Bash entrypoint runs the existing fast repository checks and only caller-selected pytest targets. The existing full entrypoint keeps every check but takes a nonblocking POSIX lock in the shared Git directory through `scripts/verify_lock.py` (`fcntl.flock`), so linked worktrees cannot saturate the machine with duplicate full suites. `AGENTS.md` assigns each entrypoint to a distinct lifecycle stage.
+**Architecture:** A new Bash entrypoint runs the existing fast repository checks and only caller-selected pytest targets. The existing full entrypoint keeps every check but takes a nonblocking POSIX lock in the shared Git directory through `scripts/verify_lock.py` (`fcntl.flock`), so linked worktrees cannot saturate the machine with duplicate full suites. `AGENTS.md` assigns each entrypoint to a distinct lifecycle stage. The documented full Brigade command pins `--timeout 3600` so the known-long integration gate is not killed by the 900-second verifier default. A verifier timeout (command exceeded `--timeout`) is distinct from lock contention (status 75).
 
 **Key tech:** Bash, Python 3 `fcntl`, pytest, Brigade verification receipts.
 
@@ -110,7 +110,7 @@ def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, 
     assert "./scripts/verify-focused" in completed.stderr
 ```
 
-- [x] Add an `AGENTS.md` contract test that requires both entrypoints, Brigade wrapping, full-gate lifecycle wording, and the warning not to use `--no-reuse`.
+- [x] Add an `AGENTS.md` contract test that requires both entrypoints, Brigade wrapping, full-gate lifecycle wording, the warning not to use `--no-reuse`, and `--timeout 3600` on the documented full Brigade command.
 
 - [x] Run RED through Brigade:
 
@@ -155,7 +155,7 @@ if [ -z "${BRIGADE_VERIFY_LOCK_HELD:-}" ]; then
 fi
 ```
 
-- [x] Revise `AGENTS.md` so development slices use `verify-focused` through `brigade work verify run`, while pull requests, merges, releases, and verification-infrastructure changes use the full gate once. State that agents must not pass `--no-reuse` for the full gate and must not retry status 75 with a larger timeout.
+- [x] Revise `AGENTS.md` so development slices use `verify-focused` through `brigade work verify run`, while pull requests, merges, releases, and verification-infrastructure changes use the full gate once with `--timeout 3600`. State that 3600 bounds the known-long integration gate and is not permission to retry status 75. State that agents must not pass `--no-reuse` for the full gate and must not retry status 75 with a larger timeout. A verifier timeout is a command-duration failure; status 75 is lock contention.
 
 - [x] Run GREEN through Brigade:
 
@@ -179,3 +179,33 @@ Expected: lint, format, mypy, sync checks, and `tests/test_verify_script.py` pas
 git add AGENTS.md scripts/verify scripts/verify-focused tests/test_verify_script.py docs/superpowers/plans/2026-08-25-verification-gate-runtime.md
 git commit -m "fix: split development and integration verification gates"
 ```
+
+### Task 2: Pin the PR full-gate verifier timeout
+
+**Files:**
+- Modify: `tests/test_verify_script.py`
+- Modify: `AGENTS.md`
+- Modify: `docs/superpowers/specs/2026-08-25-verification-gate-runtime-design.md`
+- Modify: `docs/superpowers/plans/2026-08-25-verification-gate-runtime.md`
+
+Do not edit scripts, CI, `proc.py`, or unrelated files. Do not commit. Do not change development focused commands.
+
+- [x] Strengthen `test_agents_md_requires_focused_development_and_reserved_full_gate` so the documented full Brigade command must include `--timeout 3600`, while still forbidding `--no-reuse` and retaining the status-75 no-retry rule.
+- [x] Run RED through Brigade:
+
+```bash
+brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_verify_script.py"]' --capture brigade-work
+```
+
+Expected: `test_agents_md_requires_focused_development_and_reserved_full_gate` fails because `AGENTS.md` still documents the full command without `--timeout 3600`.
+
+- [x] Update the full-gate command in `AGENTS.md` to `brigade work verify run --target . --argv-json '["./scripts/verify"]' --timeout 3600 --capture brigade-work`. Add one adjacent sentence that 3600 bounds the known-long integration gate and is not permission to retry status 75.
+- [x] Update the design and this plan so `--timeout 3600` is pinned and a verifier timeout (command exceeded `--timeout`) is distinct from lock contention (status 75).
+- [x] Run GREEN through Brigade:
+
+```bash
+brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_verify_script.py"]' --capture brigade-work
+brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_verify_script.py"]' --capture brigade-work
+```
+
+Expected: `tests/test_verify_script.py` and the focused gate pass. Do not commit.

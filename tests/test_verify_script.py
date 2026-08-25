@@ -238,6 +238,9 @@ def test_agents_md_requires_focused_development_and_reserved_full_gate():
         "brigade work verify run --target . --argv-json "
         '\'["./scripts/verify-focused","<pytest-selector>"]\' --capture brigade-work'
     ) in text
+    assert (
+        "brigade work verify run --target . --argv-json '[\"./scripts/verify\"]' --timeout 3600 --capture brigade-work"
+    ) in text
     assert "./scripts/verify-focused" in text
     assert "./scripts/verify" in text
     assert "pull requests" in text
