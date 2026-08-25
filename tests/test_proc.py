@@ -555,6 +555,29 @@ def test_run_caps_combined_output_and_sets_overflow_flag():
     assert "combined output exceeded" in result.stderr
 
 
+def test_collect_does_not_poll_overflow_at_fixed_interval(monkeypatch):
+    """Short children must wake on completion, not sleep a fixed 50ms overflow poll.
+
+    Regression from da18c3df: ``_collect_process_output`` waited on
+    ``collector.overflow`` with ``timeout=min(0.05, remaining)``, so every
+    trivial child paid ~one poll interval even when it had already exited.
+    """
+
+    observed_timeouts: list[float | None] = []
+    real_wait = threading.Event.wait
+
+    def tracking_wait(self, timeout=None):
+        observed_timeouts.append(timeout)
+        return real_wait(self, timeout)
+
+    monkeypatch.setattr(threading.Event, "wait", tracking_wait)
+
+    result = proc.run([sys.executable, "-c", "pass"], timeout=10.0)
+
+    assert result.code == 0
+    assert all(t is None or t > 0.05 for t in observed_timeouts), observed_timeouts
+
+
 def test_large_stdin_does_not_block_timeout_or_overflow_monitor():
     """Stdin must be written concurrently so a child filling stdout cannot deadlock past timeout."""
 
