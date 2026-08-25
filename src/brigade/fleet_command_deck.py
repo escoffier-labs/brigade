@@ -344,9 +344,7 @@ def build_view(
 ) -> DeckView:
     del now
     claims_by_target = {claim.target: claim for claim in claims}
-    display_claims = {
-        target: _display_claim(claim, enrolled_labels) for target, claim in claims_by_target.items()
-    }
+    display_claims = {target: _display_claim(claim, enrolled_labels) for target, claim in claims_by_target.items()}
     collision_targets = {
         target for target in {run.repo for run in live_runs} if collides(target, live_runs, claims_by_target)
     }
