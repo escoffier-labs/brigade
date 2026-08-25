@@ -30,14 +30,14 @@ brigade work verify run --target . --argv-json '["./scripts/verify"]' --capture 
 ```
 
 Do not pass `--no-reuse` for a full gate. Status 75 means another full
-verification is already running for this checkout; it must not be retried
+verification is already running for this checkout. It must not be retried
 with a larger timeout. Use `./scripts/verify-focused` or wait for the active
 Brigade receipt.
 
 CI-only jobs still cover work that is slower, platform-oriented, or depends on
 extra checkout/install context: `content-guard`, `repo-metadata`,
 `install-from-source`, `quickstart-smoke`, and `windows-native-acceptance`.
-The local `./scripts/verify` gate is the full coverage gate; do not treat it
+The local `./scripts/verify` gate is the full coverage gate. Do not treat it
 as a replacement for those CI-only release and public-repo checks.
 
 Setup, if `.venv/` is missing:
@@ -54,7 +54,7 @@ Format: trigger, then the rule, then what to do instead.
   `brigade work verify run` with `./scripts/verify-focused` and the relevant
   pytest selector. Reserve `./scripts/verify` for pull requests, merges,
   releases, and verification-infrastructure changes. If you cannot run the
-  focused gate, do not guess; report the exact command and error that blocked
+  focused gate, do not guess. Report the exact command and error that blocked
   you. Status 75 from the full gate must not be retried with a larger timeout.
 - A test fails after your change: never weaken, skip, or delete the test to
   make it pass. Fix the code. If you believe the test itself is wrong, say so

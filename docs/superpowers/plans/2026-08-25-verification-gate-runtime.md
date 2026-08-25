@@ -23,7 +23,7 @@ Execute the checkboxes in order. Keep the test red before implementation, then c
 - Modify: `scripts/verify`
 - Modify: `AGENTS.md`
 
-- [ ] Add imports and a fake-tool helper to `tests/test_verify_script.py`:
+- [x] Add imports and a fake-tool helper to `tests/test_verify_script.py`:
 
 ```python
 import os
@@ -49,7 +49,7 @@ printf '\n' >> "$VERIFY_LOG"
     return tool_dir, log_path
 ```
 
-- [ ] Add the focused-gate tests:
+- [x] Add the focused-gate tests:
 
 ```python
 @pytest.mark.skipif(os.name == "nt", reason="Bash verification entrypoint")
@@ -83,7 +83,7 @@ def test_verify_focused_forwards_only_selected_tests(tmp_path, monkeypatch):
     assert log_path.read_text().splitlines()[-1] == f"pytest\t-q\t{selectors[0]}\t{selectors[1]}"
 ```
 
-- [ ] Add the full-gate contention test:
+- [x] Add the full-gate contention test:
 
 ```python
 @pytest.mark.skipif(os.name == "nt" or shutil.which("flock") is None, reason="requires flock")
@@ -108,9 +108,9 @@ def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, 
     assert "./scripts/verify-focused" in completed.stderr
 ```
 
-- [ ] Add an `AGENTS.md` contract test that requires both entrypoints, Brigade wrapping, full-gate lifecycle wording, and the warning not to use `--no-reuse`.
+- [x] Add an `AGENTS.md` contract test that requires both entrypoints, Brigade wrapping, full-gate lifecycle wording, and the warning not to use `--no-reuse`.
 
-- [ ] Run RED through Brigade:
+- [x] Run RED through Brigade:
 
 ```bash
 brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_verify_script.py"]' --capture brigade-work --no-reuse
@@ -118,7 +118,7 @@ brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/
 
 Expected: failures because `scripts/verify-focused` does not exist, `scripts/verify` does not lock, and `AGENTS.md` still requires the full gate for every completed change.
 
-- [ ] Create executable `scripts/verify-focused`:
+- [x] Create executable `scripts/verify-focused`:
 
 ```bash
 #!/bin/bash
@@ -140,7 +140,7 @@ PY=${PY:-.venv/bin}
 "$PY/pytest" -q "$@"
 ```
 
-- [ ] Add the lock before tool execution in `scripts/verify`:
+- [x] Add the lock before tool execution in `scripts/verify`:
 
 ```bash
 git_common_dir=$(git rev-parse --git-common-dir)
@@ -152,9 +152,9 @@ if ! flock -n 9; then
 fi
 ```
 
-- [ ] Revise `AGENTS.md` so development slices use `verify-focused` through `brigade work verify run`, while pull requests, merges, releases, and verification-infrastructure changes use the full gate once. State that agents must not pass `--no-reuse` for the full gate and must not retry status 75 with a larger timeout.
+- [x] Revise `AGENTS.md` so development slices use `verify-focused` through `brigade work verify run`, while pull requests, merges, releases, and verification-infrastructure changes use the full gate once. State that agents must not pass `--no-reuse` for the full gate and must not retry status 75 with a larger timeout.
 
-- [ ] Run GREEN through Brigade:
+- [x] Run GREEN through Brigade:
 
 ```bash
 brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_verify_script.py"]' --capture brigade-work --no-reuse
@@ -162,7 +162,7 @@ brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/
 
 Expected: all tests in `tests/test_verify_script.py` pass.
 
-- [ ] Run the user-facing focused entrypoint through Brigade:
+- [x] Run the user-facing focused entrypoint through Brigade:
 
 ```bash
 brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_verify_script.py"]' --capture brigade-work --no-reuse
@@ -170,7 +170,7 @@ brigade work verify run --target . --argv-json '["./scripts/verify-focused","tes
 
 Expected: lint, format, mypy, sync checks, and `tests/test_verify_script.py` pass without launching the full suite.
 
-- [ ] Inspect `git diff`, run `git diff --check`, and commit:
+- [x] Inspect `git diff`, run `git diff --check`, and commit:
 
 ```bash
 git add AGENTS.md scripts/verify scripts/verify-focused tests/test_verify_script.py docs/superpowers/plans/2026-08-25-verification-gate-runtime.md
