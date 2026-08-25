@@ -740,14 +740,15 @@ def test_closeout_commands_and_acceptance_summary(tmp_path, capsys):
         "cards": [
             {
                 "card_id": "card-one",
-                "card_file": "memory/cards/card-one.md",
+                "file": "memory/cards/card-one.md",
                 "issue_type": "stale",
+                "safe_summary": "One stale memory card",
                 "source_fingerprint": "memory-fp-one",
             }
         ],
     }
     _write_json(tmp_path / "memory" / "cards" / "decay" / "refresh-queue.json", queue)
-    # A nonempty unresolved queue must not be closed as reviewed (#closeout-guard).
+    # A nonempty unresolved queue must not be closed as reviewed (issue #1191).
     assert memory_cmd.closeout(target=tmp_path, reason="reviewed", json_output=True) == 1
     blocked = json.loads(capsys.readouterr().out)
     assert blocked["status"] == "blocked"

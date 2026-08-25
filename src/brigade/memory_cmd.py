@@ -1675,25 +1675,30 @@ def _latest_closeout(target: Path) -> dict[str, Any] | None:
 def _closeout_quiet_set(closeout: dict[str, Any] | None) -> tuple[set[str], str | None]:
     """Return (fingerprints to quiet, reason the receipt was ignored).
 
-    Before 15d54523, closeouts could write status=reviewed with unresolved
-    candidates still in the queue. Such legacy receipts are not honored:
+    Closeouts could historically write status=reviewed with unresolved
+    candidates still in the queue (#1191). Such receipts are not honored:
     only a reviewed closeout with no candidates/fingerprints, or a deferred
-    closeout with a nonblank reason, may quiet matching queue fingerprints.
+    closeout with a nonblank string reason, may quiet matching queue
+    fingerprints. Malformed receipts are ignored with a reported reason.
     """
     if not isinstance(closeout, dict):
         return set(), None
+    raw_fingerprints = closeout.get("source_fingerprints")
+    if not isinstance(raw_fingerprints, list) or any(
+        not isinstance(item, str) or not item.strip() for item in raw_fingerprints
+    ):
+        return set(), "closeout receipt has malformed source_fingerprints; not quieting queue fingerprints"
+    fingerprints = set(raw_fingerprints)
     status = str(closeout.get("status") or "")
-    fingerprints = {
-        item for item in (closeout.get("source_fingerprints") or []) if isinstance(item, str) and item.strip()
-    }
     try:
         candidate_count = int(closeout.get("candidate_count") or 0)
     except (TypeError, ValueError):
         candidate_count = 0
     if status == "deferred":
-        if str(closeout.get("reason") or "").strip():
+        reason_value = closeout.get("reason")
+        if isinstance(reason_value, str) and reason_value.strip():
             return fingerprints, None
-        return set(), "deferred closeout has a blank reason; not quieting queue fingerprints"
+        return set(), "deferred closeout has a blank or non-string reason; not quieting queue fingerprints"
     if status == "reviewed" and candidate_count == 0 and not fingerprints:
         return set(), None
     if status == "reviewed":
@@ -1714,11 +1719,36 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
         return 2
     try:
         config = _config_or_default(target)
-        queue = _load_json_file(_queue_path(target, config))
+        queue_path = _queue_path(target, config)
+        queue = _load_json_file(queue_path)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"error: cannot read memory-care queue: {exc}", file=sys.stderr)
         return 2
-    cards_value = queue.get("cards") if isinstance(queue, dict) else None
+    if not isinstance(queue, dict):
+        message = f"error: memory-care queue is missing or not a JSON object at {queue_path}; closeout refused"
+        if json_output:
+            print(json.dumps({"status": "blocked", "error": message, "candidate_count": 0}, indent=2, sort_keys=True))
+        else:
+            print(message, file=sys.stderr)
+        return 1
+    validation_errors = _validate_queue(queue, path=queue_path)
+    if validation_errors:
+        summary = "; ".join(validation_errors[:5])
+        message = f"error: memory-care queue failed validation; closeout refused. {summary}"
+        cards_value = queue.get("cards")
+        candidate_count = len(cards_value) if isinstance(cards_value, list) else 0
+        if json_output:
+            print(
+                json.dumps(
+                    {"status": "blocked", "error": message, "candidate_count": candidate_count},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(message, file=sys.stderr)
+        return 1
+    cards_value = queue.get("cards")
     cards = cards_value if isinstance(cards_value, list) else []
     reason_text = (reason or "").strip()
     if defer and not reason_text:

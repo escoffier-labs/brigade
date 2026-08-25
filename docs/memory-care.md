@@ -89,12 +89,13 @@ Queue entries include card identity, issue type, severity, priority, safe summar
 `brigade memory care closeout` records review completion, but it cannot convert a partial or failed care chain into `reviewed`:
 
 - With a nonempty refresh queue and no `--defer`, closeout refuses (exit 1), writes nothing, and reports the unresolved candidate count. JSON mode emits a `status: blocked` payload; human mode prints the error to stderr.
+- Closeout also refuses (exit 1, nothing written) when the refresh queue file is absent or fails validation; it never treats a missing or malformed queue as empty.
 - `--defer` is the explicit escape hatch for unresolved work and requires a nonblank `--reason`; blank reasons are refused so automation cannot silently suppress work.
 - An empty queue may close `reviewed`.
 
-Deferred and reviewed closeouts both record the queue's source fingerprints so `memory care status` can tell open from quieted issues.
+Only deferred closeouts record the queue's source fingerprints, so `memory care status` can tell open from quieted issues. Reviewed closeouts record an empty fingerprint list.
 
-Closeout receipts written before the #closeout-guard could carry `status: reviewed` with unresolved candidates still in the queue. `memory care status` ignores those legacy receipts instead of quieting their fingerprints: only a `reviewed` closeout with zero candidates and no fingerprints, or a `deferred` closeout with a nonblank reason, quiets matching queue entries. When the latest receipt is ignored, status JSON reports why in `latest_closeout_ignored_reason`.
+Receipts with malformed fields are ignored rather than honored: only a `reviewed` closeout with zero candidates and no fingerprints, or a `deferred` closeout with well-formed fingerprints and a nonblank string reason, quiets matching queue entries (#1191). When the latest receipt is ignored, status JSON reports why in `latest_closeout_ignored_reason`.
 
 ## Boundary
 
