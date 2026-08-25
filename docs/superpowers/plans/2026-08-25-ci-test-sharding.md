@@ -24,7 +24,7 @@ Execute the checkboxes in order. Keep the first focused run red, then commit the
 - Create: `scripts/ci_pytest_shard.py`
 - Create: `tests/test_ci_pytest_shard.py`
 
-- [ ] Write `tests/test_ci_pytest_shard.py` with four tests:
+- [x] Write `tests/test_ci_pytest_shard.py` with four tests:
 
 ```python
 from types import SimpleNamespace
@@ -76,11 +76,11 @@ def test_empty_shard_is_successful_after_nonempty_collection():
     assert session.exitstatus == pytest.ExitCode.OK
 ```
 
-- [ ] Run RED: `brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_ci_pytest_shard.py"]' --capture brigade-work --no-reuse`.
+- [x] Run RED: `brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_ci_pytest_shard.py"]' --capture brigade-work --no-reuse`.
 
 Expected: collection fails because `scripts/ci_pytest_shard.py` does not exist.
 
-- [ ] Add `!/scripts/ci_pytest_shard.py` to `.gitignore`. Create `scripts/ci_pytest_shard.py` with:
+- [x] Add `!/scripts/ci_pytest_shard.py` to `.gitignore`. Create `scripts/ci_pytest_shard.py` with:
 
 ```python
 #!/usr/bin/env python3
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] Run GREEN: `brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_ci_pytest_shard.py"]' --capture brigade-work --no-reuse`.
+- [x] Run GREEN: `brigade work verify run --target . --argv-json '[".venv/bin/pytest","-q","tests/test_ci_pytest_shard.py"]' --capture brigade-work --no-reuse`.
 
 Expected: all launcher tests pass.
 
@@ -231,4 +231,3 @@ Expected: exit 0 with no diagnostics.
 - [ ] Run each shard from 0 through 3 against the two focused test files through separate Brigade verification commands. Expected: all exit 0, and their selected counts sum to the unsharded collected count.
 
 - [ ] Tick every checkbox, run `git diff --check`, inspect the diff, and commit with `git commit -m "ci: shard Python test matrix"`.
-
