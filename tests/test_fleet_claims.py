@@ -77,6 +77,30 @@ def _plant_home_identity(home: Path, node_id: str) -> None:
     path.write_text(node_mod._format_node_toml(identity), encoding="utf-8")
 
 
+def _bound_find_workspace_to_tmp(monkeypatch, tmp_path: Path) -> None:
+    """Keep real discovery, but never climb past the pytest sandbox.
+
+    With ``TMPDIR`` under a host home that has ``~/.brigade/node.toml``,
+    ``find_workspace_for_path`` otherwise returns that host workspace.
+    """
+    real = fleet_client.find_workspace_for_path
+    try:
+        bound = tmp_path.resolve()
+    except OSError:
+        bound = tmp_path
+
+    def find_workspace_for_path(start: Path) -> Path | None:
+        found = real(start)
+        if found is None:
+            return None
+        try:
+            return found if found.resolve().is_relative_to(bound) else None
+        except OSError:
+            return None
+
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", find_workspace_for_path)
+
+
 class TestMachineIdentity:
     """Hub-facing claim identity is the per-user home identity (#1161): the
     nearest workspace ``.brigade/node.toml`` stays local and is never sent."""
@@ -804,9 +828,10 @@ class TestClientClaims:
             assert fleet_client.fetch_claims(include_all=True) == [], "released claim was resurrected"
             time.sleep(0.02)
 
-    def test_resolve_claim_target_uses_workspace_name(self, tmp_path):
+    def test_resolve_claim_target_uses_workspace_name(self, tmp_path, monkeypatch):
         from brigade import node as node_mod
 
+        _bound_find_workspace_to_tmp(monkeypatch, tmp_path)
         workspace = tmp_path / "ws"
         nested = workspace / "src" / "deep"
         nested.mkdir(parents=True)

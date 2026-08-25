@@ -98,6 +98,30 @@ def _plant_home_identity(home: Path, node_id: str) -> None:
     path.write_text(node_mod._format_node_toml(identity), encoding="utf-8")
 
 
+def _bound_find_workspace_to_tmp(monkeypatch, tmp_path: Path) -> None:
+    """Keep real discovery, but never climb past the pytest sandbox.
+
+    With ``TMPDIR`` under a host home that has ``~/.brigade/node.toml``,
+    ``find_workspace_for_path`` otherwise returns that host workspace.
+    """
+    real = fleet_client.find_workspace_for_path
+    try:
+        bound = tmp_path.resolve()
+    except OSError:
+        bound = tmp_path
+
+    def find_workspace_for_path(start: Path) -> Path | None:
+        found = real(start)
+        if found is None:
+            return None
+        try:
+            return found if found.resolve().is_relative_to(bound) else None
+        except OSError:
+            return None
+
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", find_workspace_for_path)
+
+
 class TestHubScopes:
     def test_acquire_scope_node_supersedes_own_dead_lease_only(self, hub):
         url, token, _db = hub
@@ -595,6 +619,7 @@ class TestReleaseCli:
 
         url, token, _db = hub
         _env(monkeypatch, url, token)
+        _bound_find_workspace_to_tmp(monkeypatch, tmp_path)
         ws_a, run_dir = self._dead_run(tmp_path / "work")
         lock = runguard.lock_path(ws_a)
         lock.mkdir(parents=True)
