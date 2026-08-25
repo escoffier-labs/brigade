@@ -50,6 +50,10 @@ brigade run cloud grokbot canary --target . --instance implementation-worker
 
 The implementation-worker listener has the same worker operations, constrained to implementation-worker jobs.
 
+A successful worker claim returns the bounded validated envelope (label, role, repository, base ref, owned paths, instructions, verification commands, artifact kind, and timeout) as the worker's execution context. List, status, operator, and CLI surfaces stay redacted: they never include the envelope's `instructions` or `verification_commands`.
+
+The routine sequence for a worker is: list, claim, validate role and repository, start, renew before expiry, then complete or fail.
+
 `doctor` reports sanitized dependency, configuration, permissions, queue, and endpoint checks. It returns nonzero after setup until the listener starts because the endpoint check cannot connect. Run it again after the listener starts. A canary needs the listener already running.
 
 ## Cloudflare boundary
