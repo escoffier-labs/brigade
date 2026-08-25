@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -319,6 +320,90 @@ def test_apply_stops_on_unexpected_queue_error_with_generic_reason(tmp_path: Pat
     assert exc.value.reason == "queue-error"
     assert exc.value.index == 1
     assert len(_job_files(tmp_path)) == 1
+
+
+def test_apply_uses_one_in_memory_snapshot_when_the_manifest_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manifest = _write_manifest(
+        tmp_path / "feed.json",
+        _manifest(_entry("task-a", _spec(label="First")), _entry("task-b", _spec(label="Second"))),
+    )
+    opened = {"n": 0, "flags": 0}
+    real_open = grokbot_feed.os.open
+
+    def open_and_replace(path, flags, *args, **kwargs):
+        handle = real_open(path, flags, *args, **kwargs)
+        if kwargs.get("dir_fd") is not None:
+            return handle
+        try:
+            opened_path = Path(os.fspath(path)).resolve()
+        except OSError:
+            return handle
+        if opened_path != manifest.resolve():
+            return handle
+        opened["n"] += 1
+        opened["flags"] = flags
+        replacement = tmp_path / "feed.replaced.json"
+        _write_manifest(replacement, _manifest(_entry("task-z", _spec(label="Replaced"))))
+        os.replace(replacement, manifest)
+        return handle
+
+    monkeypatch.setattr(grokbot_feed.os, "open", open_and_replace)
+
+    result = grokbot_feed.apply(tmp_path, manifest, limit=1)
+
+    assert opened["n"] == 1
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        assert opened["flags"] & nofollow
+    assert result["valid"] == 2
+    assert result["created"] == 1
+    assert result["jobs"][0]["idempotent"] is False
+    record = json.loads(_job_files(tmp_path)[0].read_text(encoding="utf-8"))
+    assert record["spec"]["label"] == "First"
+    _assert_redacted(result)
+
+
+def test_preflight_rejects_unsafe_idempotency_storage_without_leaking_paths(tmp_path: Path):
+    grokbot_jobs.enqueue(tmp_path, _spec(label="First"), "task-a")
+    before = {path.name for path in _job_files(tmp_path)}
+    record = next((_queue_root(tmp_path) / "idempotency").glob("*.json"))
+    destination = tmp_path / "outside.json"
+    destination.write_text("{}", encoding="utf-8")
+    record.unlink()
+    record.symlink_to(destination)
+    manifest = _write_manifest(tmp_path / "feed.json", _manifest(_entry("task-a", _spec(label="First"))))
+
+    with pytest.raises(grokbot_feed.FeedError) as exc:
+        grokbot_feed.preflight(tmp_path, manifest)
+
+    assert exc.value.reason == "unsafe-storage"
+    assert str(record) not in str(exc.value)
+    assert str(destination) not in str(exc.value)
+    assert str(tmp_path) not in str(exc.value)
+    assert {path.name for path in _job_files(tmp_path)} == before
+
+
+def test_apply_translates_oserror_from_enqueue_to_queue_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manifest = _write_manifest(
+        tmp_path / "feed.json",
+        _manifest(_entry("task-a", _spec(label="First")), _entry("task-b", _spec(label="Second"))),
+    )
+
+    def boom(target: Path, spec: dict, idempotency_key: str, now=None):
+        raise OSError(13, "Permission denied", str(tmp_path / "secret-queue.json"))
+
+    monkeypatch.setattr(grokbot_jobs, "enqueue", boom)
+
+    with pytest.raises(grokbot_feed.FeedError) as exc:
+        grokbot_feed.apply(tmp_path, manifest, limit=1)
+
+    assert exc.value.reason == "queue-error"
+    assert exc.value.index == 0
+    assert "secret-queue.json" not in str(exc.value)
+    assert "Permission denied" not in str(exc.value)
+    assert not _queue_root(tmp_path).exists()
 
 
 def _run_feed(target: Path, *command: str) -> int:

@@ -37,26 +37,14 @@ def preflight(target: Path, manifest: Path, limit: int = DEFAULT_LIMIT) -> dict[
     """Validate a feed manifest without creating or mutating queue state."""
     limit = _validate_limit(limit)
     payload = load_manifest(manifest)
-    known = 0
-    for index, entry in enumerate(payload["entries"]):
-        try:
-            key = grokbot_jobs._validate_idempotency_key(entry["idempotency_key"])
-            spec = grokbot_jobs._validate_spec(entry["spec"])
-        except grokbot_jobs.GrokbotJobError as exc:
-            raise FeedError(exc.reason, index=index) from exc
-        existing = _existing_idempotency(target, key)
-        if existing is None:
-            continue
-        if existing["task_hash"] != grokbot_jobs._task_hash(spec):
-            raise FeedError("idempotency-conflict", index=index)
-        known += 1
-    return {"valid": len(payload["entries"]), "known": known, "limit": limit}
+    return _preview(target, payload, limit)
 
 
 def apply(target: Path, manifest: Path, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
     """Enqueue unknown feed entries after a complete preflight succeeds."""
-    preview = preflight(target, manifest, limit=limit)
+    limit = _validate_limit(limit)
     payload = load_manifest(manifest)
+    preview = _preview(target, payload, limit)
     jobs: list[dict[str, Any]] = []
     created = 0
     skipped = 0
@@ -67,7 +55,9 @@ def apply(target: Path, manifest: Path, limit: int = DEFAULT_LIMIT) -> dict[str,
             spec = grokbot_jobs._validate_spec(entry["spec"])
             key = grokbot_jobs._validate_idempotency_key(entry["idempotency_key"])
             handle = grokbot_jobs.enqueue(target, spec, key)
-        except grokbot_jobs.GrokbotJobError as exc:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
             raise FeedError("queue-error", index=index) from exc
         jobs.append(
             {
@@ -92,10 +82,9 @@ def apply(target: Path, manifest: Path, limit: int = DEFAULT_LIMIT) -> dict[str,
 
 def load_manifest(path: Path) -> dict[str, Any]:
     """Load a private feed file after checking ownership and permissions."""
-    _assert_safe_manifest(path)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(_read_manifest_snapshot(path))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise FeedError("malformed-manifest") from exc
     if not isinstance(payload, dict):
         raise FeedError("malformed-manifest")
@@ -126,6 +115,23 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _preview(target: Path, payload: dict[str, Any], limit: int) -> dict[str, Any]:
+    known = 0
+    for index, entry in enumerate(payload["entries"]):
+        try:
+            key = grokbot_jobs._validate_idempotency_key(entry["idempotency_key"])
+            spec = grokbot_jobs._validate_spec(entry["spec"])
+        except grokbot_jobs.GrokbotJobError as exc:
+            raise FeedError(exc.reason, index=index) from exc
+        existing = _existing_idempotency(target, key)
+        if existing is None:
+            continue
+        if existing["task_hash"] != grokbot_jobs._task_hash(spec):
+            raise FeedError("idempotency-conflict", index=index)
+        known += 1
+    return {"valid": len(payload["entries"]), "known": known, "limit": limit}
+
+
 def _validate_limit(limit: object) -> int:
     if type(limit) is not int or not MIN_LIMIT <= limit <= MAX_LIMIT:
         raise FeedError("invalid-limit")
@@ -138,34 +144,83 @@ def _bounded_label(value: object) -> str:
     return value
 
 
-def _assert_safe_manifest(path: Path) -> None:
+def _read_manifest_snapshot(path: Path) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    else:
+        try:
+            info = Path(path).lstat()
+        except OSError as exc:
+            raise FeedError("unsafe-manifest") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise FeedError("unsafe-manifest")
+    descriptor: int | None = None
     try:
-        info = path.lstat()
-    except FileNotFoundError as exc:
+        descriptor = os.open(os.fspath(path), flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise FeedError("unsafe-manifest")
+        owner_uid = getattr(os, "getuid", None)
+        if owner_uid is not None and info.st_uid != owner_uid():
+            raise FeedError("unsafe-manifest")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise FeedError("unsafe-manifest")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except FeedError:
+        raise
+    except OSError as exc:
         raise FeedError("unsafe-manifest") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise FeedError("unsafe-manifest")
-    owner_uid = getattr(os, "getuid", None)
-    if owner_uid is not None and info.st_uid != owner_uid():
-        raise FeedError("unsafe-manifest")
-    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise FeedError("unsafe-manifest")
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                raise FeedError("unsafe-manifest") from exc
 
 
 def _existing_idempotency(target: Path, key: str) -> dict[str, Any] | None:
-    digest = grokbot_jobs._idempotency_key_hash(key).removeprefix("sha256:")
-    path = Path(target).expanduser() / ".brigade" / "cloud" / "grokbot" / "idempotency" / f"{digest}.json"
+    name = f"{grokbot_jobs._idempotency_key_hash(key).removeprefix('sha256:')}.json"
+    descriptor: int | None = None
     try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return None
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise FeedError("corrupt-storage")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise FeedError("corrupt-storage") from exc
-    try:
+        if os.name != "posix":
+            directory = grokbot_jobs._Directory(
+                Path(target).expanduser() / ".brigade" / "cloud" / "grokbot" / "idempotency",
+                None,
+            )
+        else:
+            descriptor = grokbot_jobs._open_directory_path(Path(target).expanduser().absolute())
+            for component in (".brigade", "cloud", "grokbot", "idempotency"):
+                try:
+                    child = grokbot_jobs.os.open(component, grokbot_jobs._directory_flags(), dir_fd=descriptor)
+                except FileNotFoundError:
+                    return None
+                previous = descriptor
+                descriptor = child
+                grokbot_jobs.os.close(previous)
+                grokbot_jobs._assert_directory_descriptor(descriptor)
+            directory = grokbot_jobs._Directory(
+                Path(target) / ".brigade" / "cloud" / "grokbot" / "idempotency",
+                descriptor,
+            )
+        payload = grokbot_jobs._read_json_file(directory, name, missing_ok=True)
+        if payload is None:
+            return None
         return grokbot_jobs._validate_idempotency_record(payload)
     except grokbot_jobs.GrokbotJobError as exc:
         raise FeedError(exc.reason) from exc
+    except OSError as exc:
+        raise FeedError("unsafe-storage") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                raise FeedError("unsafe-storage") from exc
