@@ -123,7 +123,8 @@ def _g5_same_uid_store_rewrite(tmp_path: Path) -> tuple[object, Path]:
     item = ledger._make_import("g5 forged identity", kind="task", source="handoff-ingest")
     receipt_path = _write_g5_receipt(tmp_path, item)
     ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
-    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+    if ledger._authority_store_binding_is_verifier_signed(tmp_path):
+        assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
 
     payload = json.loads(receipt_path.read_text(encoding="utf-8"))
     payload["attacker_marker"] = "same-uid-store-rewrite"
@@ -339,10 +340,14 @@ def test_g5_same_uid_store_write_forged_identity_fails_with_external_key_hmac(tm
     assert not authority_key.key_is_inside_tree(authority_key.key_path(), tmp_path)
 
 
-def test_g5_forged_binding_is_accepted_when_hmac_verification_is_reverted(
+def test_g5_forged_binding_is_refused_even_when_hmac_verification_is_bypassed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Revert-check: without HMAC unwrap, the same same-uid write verifies."""
+    """Revert-check: legacy migration still refuses the same same-uid write.
+
+    Even if envelope unwrapping is bypassed, the store bytes must be a signed
+    envelope for the legacy import path to trust receipt and proof bindings.
+    """
 
     def _passthrough(
         path: Path,
@@ -360,8 +365,7 @@ def test_g5_forged_binding_is_accepted_when_hmac_verification_is_reverted(
     _enable_external_key_isolation(tmp_path)
     monkeypatch.setattr(ledger, "_unwrap_authority_envelope", _passthrough)
     identity, _store = _g5_same_uid_store_rewrite(tmp_path)
-    assert identity is not None
-    assert identity[0] == "handoff-ingest"
+    assert identity is None
 
 
 def test_generate_key_refuses_workspace_brigade_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -392,8 +396,8 @@ def test_workspace_root_key_override_is_refused_and_cannot_verify_forgery(
     assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
 
 
-def test_feature_on_rejects_forgery_that_feature_off_accepts(tmp_path: Path) -> None:
-    """The security.toml flag controls HMAC verify, not just doctor output."""
+def test_legacy_migration_requires_signed_store_with_hmac_off_and_on(tmp_path: Path) -> None:
+    """Legacy migration refuses scanner-reproducible bindings unless the store is signed."""
 
     off = tmp_path / "off"
     on = tmp_path / "on"
@@ -401,7 +405,7 @@ def test_feature_on_rejects_forgery_that_feature_off_accepts(tmp_path: Path) -> 
     on.mkdir()
 
     identity_off, store_off = _g5_same_uid_store_rewrite(off)
-    assert identity_off is not None
+    assert identity_off is None
     off_raw = json.loads(store_off.read_text(encoding="utf-8"))
     assert off_raw.get("envelope_version") != 1
 
@@ -619,7 +623,9 @@ def test_authority_downgrade_persists_unsigned_store_without_recreating_marker(
     assert json.loads(path.read_text(encoding="utf-8")).get("envelope_version") != 1
     assert not authority_marker.marker_exists(tmp_path)
     identity, _store = _g5_same_uid_store_rewrite(tmp_path)
-    assert identity is not None
+    # An unsigned post-downgrade store is scanner-reproducible and forgeable;
+    # legacy migration must refuse it (#881).
+    assert identity is None
     audit = authority_marker.audit_path().read_text(encoding="utf-8")
     line = json.loads(audit.strip().splitlines()[-1])
     assert line["action"] == "authority-downgrade"
@@ -817,7 +823,39 @@ def test_fresh_unsigned_target_has_no_marker(tmp_path: Path) -> None:
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw.get("envelope_version") != 1
     identity, _store = _g5_same_uid_store_rewrite(tmp_path)
-    assert identity is not None
+    # A fresh unsigned store is forgeable by a same-uid writer; legacy
+    # migration must refuse its receipt and proof bindings (#881).
+    assert identity is None
+
+
+def test_forged_post_run_receipt_is_rejected_by_legacy_import(tmp_path: Path) -> None:
+    """#881 regression: scanner-reproducible receipt bytes bound only by an
+    unsigned authority record must not grant a legacy import identity."""
+
+    _bind_workspace(tmp_path, external_key=False)
+    item = ledger._make_import("forged post-run receipt", kind="task", source="handoff-ingest")
+    receipt_path = _write_g5_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+
+    # Same-uid attacker rewrites the receipt after the run exits and re-binds
+    # the unsigned store to the new bytes.
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload["attacker_marker"] = "post-run-forgery"
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+    info = receipt_path.stat()
+    binding = {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+    }
+    store = _store_path(tmp_path)
+    current = json.loads(store.read_text(encoding="utf-8"))
+    files = current.setdefault("files", {})
+    files[".brigade/scanners/runs/chosen-run/receipt.json"] = binding
+    store.write_text(json.dumps(current), encoding="utf-8")
+
+    assert ledger._authority_store_binding_is_verifier_signed(tmp_path) is False
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
 
 
 def test_workspace_relative_marker_plant_is_ignored(tmp_path: Path) -> None:

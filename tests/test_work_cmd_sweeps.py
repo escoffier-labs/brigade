@@ -18,6 +18,20 @@ from tests.work_cmd_test_helpers import (
 
 def _write_scanner_import_proof(tmp_path: Path, items: list[dict[str, object]], *, scanner: dict[str, object]) -> None:
     """Bind legacy scanner rows to the external receipt that produced them."""
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                'isolation = "external-key"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     run_id = "legacy-repo-scan-proof"
     for item in items:
         metadata = item.setdefault("metadata", {})

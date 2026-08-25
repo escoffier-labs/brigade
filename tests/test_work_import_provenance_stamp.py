@@ -12,8 +12,27 @@ from typing import Any
 import pytest
 
 from brigade import provenance
+from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import constants, helpers, ledger
 from tests.support import PRIVATE_FILE_MODE
+
+
+def _enable_external_key_isolation(target: Path) -> None:
+    """Require a verifier-signed authority store before any bindings are written."""
+    config = target / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                f'isolation = "{AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 def _read_imports_in_child(target: str) -> None:
@@ -216,6 +235,7 @@ def test_legacy_identity_rejects_in_place_receipt_overwrite_and_attacker_sidecar
 
 
 def test_legacy_identity_rejects_in_place_change_of_bound_successful_receipt(tmp_path: Path) -> None:
+    _enable_external_key_isolation(tmp_path)
     item = ledger._make_import("bound receipt overwrite", kind="task", source="handoff-ingest")
     path = _write_builtin_scanner_receipt(tmp_path, item)
     ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
@@ -356,6 +376,7 @@ def test_receipt_binding_write_failure_restores_receipt_proof_inbox_and_bindings
 def test_file_authority_reanchors_with_directory_after_workspace_rename(tmp_path: Path) -> None:
     original = tmp_path / "original-workspace"
     original.mkdir()
+    _enable_external_key_isolation(original)
     item = ledger._make_import("rename-survives", kind="task", source="handoff-ingest")
     _write_builtin_scanner_receipt(original, item)
     ledger._write_persisted_import_proofs(original, [item], operation_id="0" * 32)
@@ -512,6 +533,7 @@ def test_scanner_child_cannot_rewrite_authority_store_via_inherited_env(tmp_path
     from brigade import component_paths
     from brigade.work_cmd import scanners as scanners_mod
 
+    _enable_external_key_isolation(tmp_path)
     item = ledger._make_import("env-scrub probe", kind="task", source="handoff-ingest")
     receipt_path = _write_builtin_scanner_receipt(tmp_path, item)
     ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
@@ -1292,6 +1314,7 @@ def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_vali
 
 @pytest.mark.parametrize("status", ["pending", "dismissed"])
 def test_untrusted_identity_migration_is_scoped_to_trusted_legacy_source(tmp_path: Path, status: str):
+    _enable_external_key_isolation(tmp_path)
     record = {
         "text": "Legacy source-normalized import",
         "kind": "task",

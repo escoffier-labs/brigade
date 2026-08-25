@@ -3258,6 +3258,25 @@ def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | No
     )
 
 
+def _authority_store_binding_is_verifier_signed(target: Path | None) -> bool:
+    """Return whether the external authority record is a verifier-signed HMAC envelope.
+
+    Receipt and proof file identities recorded in an unsigned store are
+    scanner-reproducible bytes that a same-uid attacker can re-bind after the
+    run exits. Legacy migration may only trust bindings whose authority record
+    itself carries a verified HMAC envelope.
+    """
+    if target is None:
+        return False
+    try:
+        _path, payload = _read_external_directory_authority(target)
+        raw = _directory_authority_store_path(target).read_bytes()
+        envelope = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return payload is not None and isinstance(envelope, dict) and envelope.get("envelope_version") == 1
+
+
 def _legacy_import_source_content_identity(
     item: dict[str, Any], *, target: Path | None = None
 ) -> tuple[str, str, str] | None:
@@ -3265,6 +3284,8 @@ def _legacy_import_source_content_identity(
     if not _has_locally_stamped_import_proof(item, target=target) or not _has_persisted_import_proof(
         item, target=target
     ):
+        return None
+    if not _authority_store_binding_is_verifier_signed(target):
         return None
     source = item["source"]
     content_identity = _import_content_identity(item)
