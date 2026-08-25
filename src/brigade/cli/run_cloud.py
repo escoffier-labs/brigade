@@ -72,6 +72,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_enqueue.add_argument("--spec", type=Path, required=True, help="Path to the private task envelope JSON file.")
     p_enqueue.add_argument("--idempotency-key", required=True)
 
+    p_feed = grokbot_sub.add_parser("feed", help="Validate or enqueue an approved Grok Bot feed manifest.")
+    add_target(p_feed)
+    p_feed.add_argument("--manifest", type=Path, required=True, help="Path to the approved private feed manifest.")
+    p_feed.add_argument("--limit", type=int, default=1, help="Maximum newly created jobs (1-10). Defaults to 1.")
+    p_feed.add_argument("--apply", action="store_true", help="Enqueue after validation. Default is validate only.")
+
     for name, help_text in (("claim", "Claim a queued job."), ("renew", "Renew a current job lease.")):
         command = grokbot_sub.add_parser(name, help=help_text)
         add_target(command)
@@ -272,6 +278,8 @@ def _dispatch_grokbot(args, target: Path) -> int:
     command = args.grokbot_command
     if command in {"setup", "doctor", "canary", "install-service"}:
         return _dispatch_grokbot_ops(args, target)
+    if command == "feed":
+        return _dispatch_grokbot_feed(args, target)
     if command == "serve":
         from .. import grokbot_mcp
 
@@ -336,6 +344,40 @@ def _dispatch_grokbot(args, target: Path) -> int:
         return 0
     _print_grokbot_result(result)
     return 0
+
+
+def _dispatch_grokbot_feed(args, target: Path) -> int:
+    """Validate or apply an approved feed without printing private task context."""
+    from .. import grokbot_feed
+
+    try:
+        if args.apply:
+            result = grokbot_feed.apply(target, args.manifest, limit=args.limit)
+        else:
+            result = grokbot_feed.preflight(target, args.manifest, limit=args.limit)
+    except grokbot_feed.FeedError as exc:
+        if exc.reason == "queue-error" and exc.index is not None:
+            print(f"error: queue-error index={exc.index}", file=sys.stderr)
+        else:
+            print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    _print_feed_result(result)
+    return 0
+
+
+def _print_feed_result(result: dict) -> None:
+    """Render feed counts and safe job handles only."""
+    parts = [f"valid={result['valid']}", f"known={result['known']}", f"limit={result['limit']}"]
+    if "created" in result:
+        parts.insert(2, f"created={result['created']}")
+        parts.insert(3, f"skipped={result['skipped']}")
+    print("grokbot feed: " + " ".join(parts))
+    for job in result.get("jobs", []):
+        print(f"job {job['job_id']} state={job['state']}")
 
 
 def _dispatch_grokbot_ops(args, target: Path) -> int:
