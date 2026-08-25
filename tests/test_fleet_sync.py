@@ -660,8 +660,14 @@ class TestSpoolHardening:
             fleet_client.os, "replace", lambda a, b: replaced.append((str(a), str(b))) or real_replace(a, b)
         )
         assert fleet_client.flush_spool(_event()["node_id"], max_batches=1) == 1
-        assert replaced == [(str(spool) + ".tmp", str(spool))]
-        assert not (spool.parent / (spool.name + ".tmp")).exists()
+        # #1154: the rewrite goes through an exclusive, unpredictable temp
+        # file in the spool directory — never the predictable ".tmp" path.
+        assert len(replaced) == 1
+        src = Path(replaced[0][0])
+        assert src.parent == spool.parent and src.name != spool.name + ".tmp"
+        assert replaced[0][1] == str(spool)
+        assert not src.exists()
+        assert not list(spool.parent.glob("*.tmp"))
         assert [json.loads(line)["sequence"] for line in spool.read_text().splitlines()] == [2, 3]
 
     def test_concurrent_append_and_flush_lose_nothing(self, hub, monkeypatch):
