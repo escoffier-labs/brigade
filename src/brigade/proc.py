@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import errno
 import json
 import ntpath
@@ -18,6 +19,10 @@ from typing import Any, List, Optional
 
 _STREAM_ENCODING = "utf-8"
 MAX_CAPTURE_BYTES = 1_048_576
+# Trusted metadata enumeration (git path listings) scales with repository
+# contents, not model or tool output, so it gets its own larger streaming
+# budget instead of the generic child-output cap.
+MAX_DELIMITED_BYTES = MAX_CAPTURE_BYTES * 16
 _READ_CHUNK_BYTES = 4096
 _UNSUPPORTED_WINDOWS_SUFFIXES: dict[str, str] = {
     ".ps1": "PowerShell script",
@@ -322,6 +327,70 @@ class ByteBudget:
             if n > remaining:
                 self.overflowed = True
             return taken
+
+
+@dataclass(frozen=True)
+class DelimitedResult:
+    """Streaming delimiter-split child output for trusted metadata queries.
+
+    Unlike ``Result``, items are decoded and split incrementally under a
+    dedicated byte budget (``MAX_DELIMITED_BYTES``), so a large but finite
+    listing succeeds without touching the generic ``MAX_CAPTURE_BYTES`` cap.
+    """
+
+    code: int
+    items: list[str]
+    stderr: str
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
+    truncated: bool = False
+    timed_out: bool = False
+    stderr_truncated: bool = False
+
+
+class _DelimitedSplitter:
+    """Incrementally decode UTF-8 text and split fields on one delimiter.
+
+    Retains only completed fields plus the current partial field, so memory
+    stays bounded by the byte budget rather than by raw child output.
+    """
+
+    def __init__(self, delimiter: bytes, max_bytes: int) -> None:
+        if len(delimiter) != 1:
+            raise ValueError("delimiter must be exactly one byte")
+        self._delimiter_char = delimiter.decode("ascii")
+        self._max_bytes = max_bytes
+        self._decoder = codecs.getincrementaldecoder(_STREAM_ENCODING)("replace")
+        self._pending = ""
+        self.items: list[str] = []
+        self.bytes_seen = 0
+        self.overflowed = False
+
+    def feed(self, chunk: bytes) -> bool:
+        """Consume chunk; return False once the budget is exhausted."""
+
+        if self.overflowed or not chunk:
+            return not self.overflowed
+        room = self._max_bytes - self.bytes_seen
+        if len(chunk) > room:
+            chunk = chunk[:room] if room > 0 else b""
+            self.overflowed = True
+        if not chunk:
+            return False
+        self.bytes_seen += len(chunk)
+        text = self._decoder.decode(chunk)
+        parts = (self._pending + text).split(self._delimiter_char)
+        self._pending = parts.pop()
+        self.items.extend(parts)
+        return True
+
+    def finish(self) -> None:
+        """Flush the decoder; keep any final field lacking a trailing delimiter."""
+
+        tail = self._pending + self._decoder.decode(b"", final=True)
+        self._pending = ""
+        if tail:
+            self.items.append(tail)
 
 
 def _process_group_kwargs() -> dict[str, Any]:
@@ -681,3 +750,162 @@ def run(
                     stream.close()
                 except OSError:
                     pass
+
+
+def run_delimited(
+    args: List[str],
+    *,
+    delimiter: bytes = b"\x00",
+    timeout: float = 30.0,
+    env: Optional[dict] = None,
+    cwd: Optional[Path] = None,
+    max_bytes: Optional[int] = None,
+) -> DelimitedResult:
+    """Stream a delimiter-separated child listing under a dedicated budget.
+
+    For trusted metadata enumeration (git path listings) whose output scales
+    with repository contents, not with model or tool output. Output is decoded
+    and split incrementally, so memory stays bounded by ``max_bytes`` plus one
+    partial field instead of by the whole child stream. The generic
+    ``MAX_CAPTURE_BYTES`` cap used for untrusted command output is untouched.
+    ``max_bytes`` bounds raw stream bytes: retained fields are Python strings,
+    so a listing of degenerately tiny fields amplifies heap use by a constant
+    factor over the budget.
+    """
+
+    budget = MAX_DELIMITED_BYTES if max_bytes is None else max_bytes
+    splitter = _DelimitedSplitter(delimiter=delimiter, max_bytes=budget)
+    stderr_budget = ByteBudget()
+    stderr_buf = bytearray()
+
+    try:
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            cwd=cwd,
+            shell=False,
+            **_process_group_kwargs(),
+        )
+    except OSError as exc:
+        code, message = _launch_failure(args, exc)
+        return DelimitedResult(code=code, items=[], stderr=message)
+
+    overflow = threading.Event()
+
+    def read_stdout() -> None:
+        assert process.stdout is not None
+        try:
+            while True:
+                chunk = process.stdout.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if not splitter.feed(chunk):
+                    overflow.set()
+                    break
+        except OSError:
+            pass
+
+    def drain_stderr() -> None:
+        assert process.stderr is not None
+        try:
+            while True:
+                chunk = process.stderr.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                # Once the budget trips, keep draining so the child cannot
+                # block on a full stderr pipe; excess bytes are discarded and
+                # flagged via stderr_budget.overflowed.
+                if stderr_budget.try_add(len(chunk)):
+                    stderr_buf.extend(chunk)
+        except OSError:
+            pass
+
+    threads = [
+        threading.Thread(target=read_stdout, daemon=True),
+        threading.Thread(target=drain_stderr, daemon=True),
+    ]
+    for reader in threads:
+        reader.start()
+
+    timed_out = False
+    deadline = time.monotonic() + max(timeout, 0.0)
+    stopped = False
+    try:
+        while True:
+            if splitter.overflowed:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            process_exited = process.poll() is not None
+            if process_exited and not _readers_alive(threads):
+                break
+            overflow.wait(timeout=min(0.05, remaining))
+
+        if timed_out or splitter.overflowed or process.poll() is None:
+            _stop_child(process, None)
+            stopped = True
+
+        _join_readers(threads, _TIMED_OUT_DRAIN_SECONDS)
+        if _readers_alive(threads):
+            if not stopped:
+                _stop_child(process, None)
+                stopped = True
+            _join_readers(threads, _TIMED_OUT_DRAIN_SECONDS)
+
+        if process.poll() is None:
+            if not stopped:
+                _stop_child(process, None)
+                stopped = True
+            try:
+                process.wait(timeout=_TIMED_OUT_DRAIN_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+    except BaseException:
+        if not stopped:
+            _stop_child(process, None)
+        _join_readers(threads, _TIMED_OUT_DRAIN_SECONDS)
+        raise
+    finally:
+        for stream_name in ("stdout", "stderr", "stdin"):
+            stream = getattr(process, stream_name, None)
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    truncated = splitter.overflowed
+    if not truncated and not timed_out:
+        splitter.finish()
+    code = process.returncode
+    if timed_out:
+        code = 124
+    elif code is None:
+        code = -1
+
+    err_text, _err_error = _decode_stream(bytes(stderr_buf), stream="stderr")
+    extras: list[str] = []
+    if truncated:
+        extras.append(f"streaming output exceeded {budget} byte delimiter-split limit")
+    if timed_out:
+        extras.append(f"timeout after {timeout}s")
+    if stderr_budget.overflowed:
+        extras.append(f"stderr capture exceeded {stderr_budget.max_bytes} byte limit")
+    if extras:
+        err_text = (err_text + "\n" if err_text else "") + "\n".join(extras)
+
+    return DelimitedResult(
+        code=code,
+        items=splitter.items,
+        stderr=err_text,
+        stdout_bytes=splitter.bytes_seen,
+        stderr_bytes=len(stderr_buf),
+        truncated=truncated,
+        timed_out=timed_out,
+        stderr_truncated=stderr_budget.overflowed,
+    )
