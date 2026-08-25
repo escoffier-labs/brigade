@@ -360,3 +360,53 @@ def test_direct_worker_fallback_prints_requested_and_effective(monkeypatch, tmp_
     assert "requested worker coder; effective seat coder-fallback [auth-required]" in stderr
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["health"]["fallbacks_selected"] == 1
+
+
+def test_direct_worker_run_ignores_unhealthy_orchestrator(monkeypatch, tmp_path, capsys):
+    """#1174: a pinned worker must not abort on an orchestrator it never uses."""
+    dispatch_calls = []
+    monkeypatch.setattr(
+        aboyeur,
+        "dispatch",
+        lambda assignments, roster, **kwargs: (
+            dispatch_calls.append([assignment.worker for assignment in assignments]),
+            [aboyeur.WorkerResult(worker="coder", task="build feature", text="done", ok=True)],
+        )[1],
+    )
+    monkeypatch.setattr(
+        aboyeur,
+        "_run_orchestrator",
+        lambda *args, **kwargs: agents.AgentResult(text="final answer", ok=True),
+    )
+    # Distinct CLIs so the codex seat-health cache cannot carry chef's failure
+    # over to the coder seat.
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan and synthesize"),
+            "coder": Agent("coder", "codex", "write code"),
+        },
+        max_workers=1,
+    )
+    _install_probe(monkeypatch, PerSeatFakeAdapter(unhealthy=frozenset({"chef"})))
+    output_dir = tmp_path / "run-direct-ignores-orchestrator"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            roster,
+            worker="coder",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    stderr = capsys.readouterr().err
+    assert "error:" not in stderr
+    assert dispatch_calls == [["coder"]]
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "ok"
+    for decision in run_meta.get("seat_routing", []):
+        assert decision["requested_seat"] != "chef"

@@ -3689,14 +3689,25 @@ def resolve_orchestrator_health_routing(
     results: tuple[seat_health.SeatHealthResult, ...] | None,
     *,
     pinned_seats: frozenset[str] = frozenset(),
+    worker_seat: str | None = None,
 ) -> OrchestratorHealthRoutingDecision:
-    """Route unhealthy orchestrator and worker seats to declared fallbacks."""
+    """Route unhealthy orchestrator and worker seats to declared fallbacks.
+
+    ``worker_seat`` marks a direct-worker run (``--worker``): only the selected
+    worker and its declared fallbacks are health-gated, so an unused
+    orchestrator can neither reroute nor abort the run.
+    """
     if results is None:
         return OrchestratorHealthRoutingDecision(roster=roster)
 
     referenced = {name for agent in roster.agents.values() for name in agent.fallback}
     # Roots are the orchestrator plus seats not referenced as fallbacks by any other role.
     roots = [name for name in roster.agents if name == roster.orchestrator or name not in referenced]
+    direct_worker = worker_seat is not None
+    if direct_worker and worker_seat in roster.agents:
+        # A pinned worker never dispatches through the orchestrator, so only the
+        # worker seat chain is health-gated.
+        roots = [worker_seat]
     effective_agents = dict(roster.agents)
     effective_orchestrator = roster.orchestrator
     decisions: list[dict[str, object]] = []
@@ -3764,6 +3775,8 @@ def resolve_orchestrator_health_routing(
         seat_routing=tuple(decisions),
     )
     receipt: dict[str, object] = {"schema": "brigade.seat_routing.v1", "decisions": decisions}
+    if direct_worker:
+        receipt["run_mode"] = "direct-worker"
     orchestrator_decision = next(
         (decision for decision in decisions if decision["requested_seat"] == roster.orchestrator), None
     )
@@ -3824,6 +3837,7 @@ def _write_run_seat_health_receipt(
     cwd: Path | None = None,
     probe: seat_health.SeatHealthProbe | None = None,
     require_hard_isolation: bool = False,
+    sandbox: str | None = None,
 ) -> tuple[seat_health.SeatHealthResult, ...] | None:
     """Probe declared seats and write seat-health.json beside run.json.
 
@@ -3841,6 +3855,7 @@ def _write_run_seat_health_receipt(
             workspace=cwd,
             allow_model_smoke=False,
             require_hard_isolation=require_hard_isolation,
+            sandbox=sandbox,
         )
     except Exception as exc:
         probe_failed = True
@@ -3902,6 +3917,9 @@ def run(
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
+    # The command-line sandbox override is part of the effective isolation input,
+    # so seat-health preflight must judge it rather than the static declaration.
+    effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
     durable_enrollment_expected = False
 
     # What the roster/flag asked for vs what dispatch actually ran. `used` stays
@@ -4152,17 +4170,24 @@ def run(
             cwd=cwd,
             probe=active_health_probe,
             require_hard_isolation=read_only,
+            sandbox=effective_sandbox,
         )
         routing = resolve_orchestrator_health_routing(
             roster,
             health_results,
             pinned_seats=frozenset({worker}) if worker is not None else frozenset(),
+            worker_seat=worker,
         )
         roster = routing.roster
         health_summary_payload = seat_health_policy.seat_health_summary(
             health_results,
             routing_decisions=roster.seat_routing,
         )
+        # Record the effective sandbox the preflight judged. The run receipt's
+        # field inventory is closed, so the override lives under the preserved
+        # health payload rather than as a new top-level run.json key.
+        if isinstance(health_summary_payload, dict):
+            health_summary_payload["effective_sandbox"] = effective_sandbox
         if routing.warning is not None:
             print(routing.warning, file=sys.stderr)
         if worker is not None and roster.seat_routing:

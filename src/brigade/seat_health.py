@@ -201,6 +201,7 @@ class SeatHealthProbe:
         workspace: Path | None = None,
         allow_model_smoke: bool = True,
         require_hard_isolation: bool = False,
+        sandbox: str | None = None,
     ) -> SeatHealthResult:
         """Probe one seat.  The caller decides whether to serialize the result."""
         started = self._clock()
@@ -219,6 +220,7 @@ class SeatHealthProbe:
                 PER_SEAT_TIMEOUT_SECONDS,
                 allow_model_smoke,
                 require_hard_isolation=require_hard_isolation,
+                sandbox=sandbox,
             )
             cached_checks = (*retained, isolation)
             return _result(
@@ -252,6 +254,7 @@ class SeatHealthProbe:
                     budget,
                     allow_model_smoke,
                     require_hard_isolation=require_hard_isolation,
+                    sandbox=sandbox,
                 )
             )
         result = _result(
@@ -276,6 +279,7 @@ class SeatHealthProbe:
         workspace: Path | None = None,
         allow_model_smoke: bool = True,
         require_hard_isolation: bool = False,
+        sandbox: str | None = None,
     ) -> tuple[SeatHealthResult, ...]:
         """Probe every requested root and every declared fallback in parallel."""
         names = _seat_chain_names(roster)
@@ -291,6 +295,7 @@ class SeatHealthProbe:
                     workspace=workspace,
                     allow_model_smoke=allow_model_smoke,
                     require_hard_isolation=require_hard_isolation,
+                    sandbox=sandbox,
                 ): name
                 for name in names
             }
@@ -369,6 +374,7 @@ class SeatHealthProbe:
         allow_model_smoke: bool,
         *,
         require_hard_isolation: bool = False,
+        sandbox: str | None = None,
     ) -> SeatHealthCheck:
         started = self._clock()
         try:
@@ -385,6 +391,7 @@ class SeatHealthProbe:
                     timeout_seconds,
                     allow_model_smoke,
                     require_hard_isolation=require_hard_isolation,
+                    sandbox=sandbox,
                 )
         except TimeoutError:
             return _timeout_check(name, self._clock() - started)
@@ -402,6 +409,7 @@ class SeatHealthProbe:
         allow_model_smoke: bool,
         *,
         require_hard_isolation: bool = False,
+        sandbox: str | None = None,
     ) -> SeatHealthCheck:
         if name == "declaration":
             return SeatHealthCheck(name, "passed", "roster declaration validated")
@@ -438,10 +446,11 @@ class SeatHealthProbe:
         if name == "model-reachability":
             return self._model_check(seat, roster, workspace, timeout_seconds, allow_model_smoke)
         if name == "isolation-compatibility":
+            effective_sandbox = sandbox if sandbox is not None else roster.sandbox
             enforcement = (
                 "endpoint"
                 if seat.cli is None
-                else agents.read_only_enforcement(seat.cli, sandbox=roster.sandbox, transport=seat.transport)
+                else agents.read_only_enforcement(seat.cli, sandbox=effective_sandbox, transport=seat.transport)
             )
             if enforcement == "hard":
                 return SeatHealthCheck(name, "passed", "declared read-only enforcement is hard")
