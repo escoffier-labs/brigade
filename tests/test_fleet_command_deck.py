@@ -224,7 +224,10 @@ def test_headers_secrets_and_responsive_css(tmp_path):
         assert status == 200 and headers["cache-control"] == "no-store"
         assert "frame-ancestors 'none'" in headers["content-security-policy"]
         assert all(secret not in body for secret in (TOKEN, HOLDER_TOKEN, _login_cookie(hub).split("=", 1)[1]))
-        assert "@media (max-width: 700px)" in body and "grid-template-columns: 1fr" in body
+        assert "overflow-wrap: anywhere" in body
+        assert "table-layout: fixed" in body
+        assert "@media (max-width: 700px)" in body
+        assert ".stations { grid-template-columns: 1fr; }" in body
 
 
 def test_invalid_config_refused_at_make_server(tmp_path):
@@ -278,6 +281,15 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
 
 def test_collision_markers_and_observers_and_expired_claims(tmp_path):
     with _start_hub(tmp_path, CONFIG) as (hub, _db):
+        for node_id, label in ((NODE_A, "Rocinante"), (NODE_B, "Shadowfax")):
+            status, _headers, text = _request(
+                hub,
+                "POST",
+                "/nodes",
+                headers=_bearer(),
+                body={"action": "add", "node_id": node_id, "label": label},
+            )
+            assert status == 200, text
         _seed_run(hub, NODE_A, "ca", "run.created", repo="shared")
         _seed_run(hub, NODE_B, "cb", "run.created", repo="shared")
         _seed_claim(hub, "shared", node=NODE_A)
@@ -287,7 +299,9 @@ def test_collision_markers_and_observers_and_expired_claims(tmp_path):
         _status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
         assert deck_body.count("! collision") >= 1
         assert "collision" in deck_body.split('id="rail"')[1].split("</section>")[0]
-        assert "shared" in deck_body.split('id="rail"')[1].split("</section>")[0]
+        rail = deck_body.split('id="rail"')[1].split("</section>")[0]
+        assert "shared" in rail and "held by Rocinante" in rail
+        assert f"held by {NODE_A}" not in rail
         _status, _headers, repos_body = _request(hub, "GET", "/deck/repos", headers=_bearer())
         first_row = repos_body.split("<tbody>")[1].split("<tr>")[1]
         assert "! collision" in first_row and "shared" in first_row

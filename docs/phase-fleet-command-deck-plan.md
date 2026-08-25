@@ -222,7 +222,7 @@ Inside `make_server`, call `fleet_command_deck.load_config(deck_config_path)` wh
 - [x] Add coverage for invalid config refusal at `make_server`, fixed station order, enrollment label fallback, capacity and over marker, terminal-only timeline, observers excluded from totals, bounded timeline, collision marker in tile/rail/repo-first row, escaped hostile labels, no secrets for bearer and cookie on both deck routes, and no-config zero-station hint. Seed claims through `/claims`. Assert expired claims are absent.
 
 - [x] Run green: `pytest -q tests/test_fleet_command_deck.py tests/test_fleet_dashboard.py tests/test_fleet_sync.py tests/test_fleet_nodes.py`. Expect all selected tests passed.
-- [ ] Commit: `git add src/brigade/fleet_hub.py src/brigade/cli/fleet.py tests/test_fleet_command_deck.py && git commit -m "feat: serve fleet command deck"`.
+- [x] Commit: `git add src/brigade/fleet_hub.py src/brigade/cli/fleet.py tests/test_fleet_command_deck.py && git commit -m "feat: serve fleet command deck"`.
 
 ### Task 3: responsive assertions, verification, and private CT operations
 
@@ -231,7 +231,7 @@ Inside `make_server`, call `fleet_command_deck.load_config(deck_config_path)` wh
 - Modify: `src/brigade/fleet_command_deck.py`
 - Modify: `tests/test_fleet_command_deck.py`
 
-- [ ] Add the final red assertion to the HTML test:
+- [x] Add the final red assertion to the HTML test:
 
 ```python
 assert "overflow-wrap: anywhere" in body
@@ -240,9 +240,9 @@ assert "@media (max-width: 700px)" in body
 assert ".stations { grid-template-columns: 1fr; }" in body
 ```
 
-- [ ] Run red: `pytest -q tests/test_fleet_command_deck.py -k responsive`. Expect `AssertionError` until all four CSS guarantees are present.
-- [ ] Add these literal rules to the one shared stylesheet used by `render_deck` and `render_repos`: `box-sizing: border-box`, `.deck { max-width: 100%; overflow-wrap: anywhere; }`, `.stations { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }`, `.tile { min-width: 0; }`, `table { width: 100%; table-layout: fixed; }`, and `@media (max-width: 700px) { .stations { grid-template-columns: 1fr; } .tile { width: 100%; } }`. Do not introduce static assets, JavaScript fetches, dependencies, schema edits, or runbook edits.
-- [ ] Run green through Brigade: `brigade work verify run --target . --command "pytest -q tests/test_fleet_command_deck.py tests/test_fleet_dashboard.py tests/test_fleet_sync.py tests/test_fleet_nodes.py" --capture brigade-work`. Expect exit 0 and a recorded passed receipt.
+- [x] Run red: `pytest -q tests/test_fleet_command_deck.py -k responsive`. Expect `AssertionError` until all four CSS guarantees are present.
+- [x] Add these literal rules to the one shared stylesheet used by `render_deck` and `render_repos`: `box-sizing: border-box`, `.deck { max-width: 100%; overflow-wrap: anywhere; }`, `.stations { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }`, `.tile { min-width: 0; }`, `table { width: 100%; table-layout: fixed; }`, and `@media (max-width: 700px) { .stations { grid-template-columns: 1fr; } .tile { width: 100%; } }`. Do not introduce static assets, JavaScript fetches, dependencies, schema edits, or runbook edits.
+- [x] Run green through Brigade: `brigade work verify run --target . --command "pytest -q tests/test_fleet_command_deck.py tests/test_fleet_dashboard.py tests/test_fleet_sync.py tests/test_fleet_nodes.py" --capture brigade-work`. Expect exit 0 and a recorded passed receipt.
 - [ ] Run the completion gate through Brigade with a 3600-second command timeout: `brigade work verify run --target . --command "timeout 3600 ./scripts/verify" --capture brigade-work`. Expect exit 0 and `verification passed`.
 - [ ] Commit: `git add src/brigade/fleet_command_deck.py tests/test_fleet_command_deck.py && git commit -m "test: cover command deck responsive layout"`.
 
