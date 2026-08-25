@@ -1684,6 +1684,35 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
         return 2
     cards_value = queue.get("cards") if isinstance(queue, dict) else None
     cards = cards_value if isinstance(cards_value, list) else []
+    reason_text = (reason or "").strip()
+    if defer and not reason_text:
+        message = "error: deferred memory-care closeout requires a nonblank --reason"
+        if json_output:
+            print(
+                json.dumps(
+                    {"status": "blocked", "error": message, "candidate_count": len(cards)}, indent=2, sort_keys=True
+                )
+            )
+        else:
+            print(message, file=sys.stderr)
+        return 1
+    if not defer and cards:
+        message = (
+            f"error: memory-care refresh queue has {len(cards)} unresolved candidate(s); "
+            "closeout cannot mark them reviewed. Use --defer with a nonblank --reason to "
+            "defer explicitly, or resolve the queue first."
+        )
+        if json_output:
+            print(
+                json.dumps(
+                    {"status": "blocked", "error": message, "candidate_count": len(cards)},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(message, file=sys.stderr)
+        return 1
     fingerprints = [
         str(card.get("source_fingerprint"))
         for card in cards
@@ -1694,7 +1723,7 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
         "closeout_id": closeout_id,
         "created_at": _utc_iso(),
         "status": "deferred" if defer else "reviewed",
-        "reason": reason or "",
+        "reason": reason_text,
         "candidate_count": len(cards),
         "source_fingerprints": fingerprints,
         "safe_summary": f"{len(cards)} memory-care candidate(s) {'deferred' if defer else 'reviewed'}",
