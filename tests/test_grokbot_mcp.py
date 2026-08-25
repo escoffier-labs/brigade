@@ -638,9 +638,9 @@ def test_workers_cannot_retrieve_reports_and_operator_can(tmp_path: Path):
     assert retrieved["text"] == report
     assert retrieved["sha256"] == digest
     assert report not in json.dumps(operator.call_tool("grokbot_queue_status", {"job_id": job_id}))
-GENERIC_CLAIM_ERROR = {
-    "error": {"code": "invalid_request", "message": "Tool input failed validation"}
-}
+
+
+GENERIC_CLAIM_ERROR = {"error": {"code": "invalid_request", "message": "Tool input failed validation"}}
 
 
 @pytest.mark.parametrize(
