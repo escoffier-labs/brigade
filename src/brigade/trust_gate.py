@@ -253,6 +253,15 @@ def admit_consumer(record: Mapping[str, Any] | None, *, entitlement: str) -> Con
         env, status = resolve_pending_injection(text, env)
         status = status.strip().lower() if isinstance(status, str) else "error"
     label = _label_from_env(env) or trust_label_of(record)
+    # A present redaction record must be an explicit completed clean scan of
+    # the current policy before the item may be admitted as scanned-clean.
+    # Missing records keep legacy-row behavior; malformed, error, redacted, or
+    # other-version records fail the clean-verdict gate.
+    record_claimed_clean = True
+    if isinstance(env.get("redaction"), Mapping):
+        from . import evidence_redaction
+
+        record_claimed_clean = evidence_redaction.ingest_verdict_is_clean(env.get("redaction"))
     if injection_blocks_content(status):
         return ConsumerAdmission(
             label=label,
@@ -287,16 +296,22 @@ def admit_consumer(record: Mapping[str, Any] | None, *, entitlement: str) -> Con
             envelope=env,
             reason=integrity,
         )
-    if entitlement == "brief" and allows(label, "brief") and status == "clean":
+    if entitlement == "brief" and allows(label, "brief") and status == "clean" and record_claimed_clean:
         return ConsumerAdmission(label=label, allowed=True, body_mode="full", injection_status=status, envelope=env)
-    if entitlement in {"brief", "brief_wrapped"} and allows(label, "brief_wrapped") and status == "clean":
+    if (
+        entitlement in {"brief", "brief_wrapped"}
+        and allows(label, "brief_wrapped")
+        and status == "clean"
+        and record_claimed_clean
+    ):
         return ConsumerAdmission(label=label, allowed=True, body_mode="wrapped", injection_status=status, envelope=env)
-    if allows(label, entitlement):
+    if allows(label, entitlement) and record_claimed_clean:
         return ConsumerAdmission(label=label, allowed=True, body_mode="full", injection_status=status, envelope=env)
     if (
         entitlement in {"cite", "promote", "context"}
         and label in {"untrusted", "reviewed", "verified"}
         and status == "clean"
+        and record_claimed_clean
     ):
         # Default work-import and research paths stay usable after a clean scan.
         # Higher labels inherit those surfaces so trust upgrades never revoke them.

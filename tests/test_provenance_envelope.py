@@ -550,3 +550,34 @@ def test_validate_accepts_envelope_under_4096_compact_bytes():
     compact = len(json.dumps(env, separators=(",", ":"), sort_keys=True).encode("utf-8"))
     assert compact < 4096
     assert provenance.validate_envelope(env) == []
+
+
+def test_admit_consumer_present_non_clean_redaction_record_blocks_scanned_clean_grants():
+    from brigade import evidence_redaction, trust_gate
+
+    text = "benign untrusted body"
+    record = _stamped_record(text, label="untrusted", injection="clean")
+    env = record["provenance"]
+
+    def verdict_record(status: str) -> dict:
+        return evidence_redaction.RedactionVerdict(
+            policy_version=evidence_redaction.POLICY_VERSION,
+            origin="workspace",
+            status=status,
+            count=0,
+            detectors=(),
+            persisted_text=text if status == "clean" else evidence_redaction.FAILED_PLACEHOLDER,
+        ).record()
+
+    env["redaction"] = verdict_record("error")
+    for entitlement in ("brief", "cite", "promote", "context"):
+        admission = trust_gate.admit_consumer(record, entitlement=entitlement)
+        assert admission.allowed is False
+        assert admission.body_mode == "omit"
+    assert trust_gate.promotion_blocker(record) == "trust label untrusted lacks promote"
+
+    # An explicit completed clean scan of the current policy keeps admission.
+    env["redaction"] = verdict_record("clean")
+    admission = trust_gate.admit_consumer(record, entitlement="promote")
+    assert admission.allowed is True
+    assert admission.body_mode == "full"

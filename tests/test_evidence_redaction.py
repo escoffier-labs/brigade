@@ -220,7 +220,7 @@ def test_receipt_index_redacts_before_persist() -> None:
     text, record, failed = receipts_cmd._receipt_redact(f"Brigade run demo. Task: {_secret_text()}.")
     assert failed is False
     assert FAKE_SECRET not in text
-    assert record["origin"] == "agent-session"
+    assert record["origin"] == "workspace"
     assert record["status"] == "redacted"
     assert record["count"] >= 1
     assert FAKE_SECRET not in json.dumps(record)
@@ -416,3 +416,22 @@ def test_stamp_finding_keeps_multiline_summary_out_of_evidence() -> None:
     assert isinstance(stamped.provenance, dict)
     assert stamped.provenance["redaction"]["status"] == "redacted"
     assert "email" in stamped.provenance["redaction"]["detectors"]
+
+
+def test_home_path_detector_redacts_user_paths_under_scope_origins() -> None:
+    text = "logs copied from /home/example-user/work/repo and /Users/example-user/docs"
+    verdict = evidence_redaction.apply_origin_redaction(text, origin="agent-session")
+    assert verdict.status == "redacted"
+    assert "/home/example-user" not in verdict.persisted_text
+    assert "/Users/example-user" not in verdict.persisted_text
+    assert "home-path" in verdict.detectors
+    web = evidence_redaction.apply_origin_redaction(text, origin="external-web")
+    assert "/home/example-user" not in web.persisted_text
+    assert "home-path" in web.detectors
+
+
+def test_receipt_redact_uses_workspace_origin_not_hardcoded_session() -> None:
+    text, record, failed = receipts_cmd._receipt_redact(f"Brigade run demo. Task: {_secret_text()}.")
+    assert failed is False
+    assert FAKE_SECRET not in text
+    assert record["origin"] == receipts_cmd.RECEIPT_ORIGIN == "workspace"

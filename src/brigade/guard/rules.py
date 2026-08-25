@@ -100,6 +100,16 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         flags=re.IGNORECASE | re.MULTILINE,
     ),
     Rule(
+        id="home-path",
+        category="pii",
+        # Matches absolute paths under conventional home roots including the
+        # username segment and any subpath. The username leaks personal data,
+        # so the whole path is redacted.
+        pattern=r"(?<![\w.-])/(?:home|Users)/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._@+-]+)*",
+        replacement="<PRIVATE_HOME_PATH>",
+        description="Filesystem path under a user home directory.",
+    ),
+    Rule(
         id="email",
         category="pii",
         # (?!:\S) keeps SSH/scp remotes like git@github.com:owner/repo.git from
