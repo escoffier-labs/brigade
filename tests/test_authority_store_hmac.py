@@ -869,6 +869,61 @@ def test_authority_signedness_comes_from_one_verified_read(tmp_path: Path, monke
     assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
 
 
+def test_store_swap_between_validators_cannot_combine_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#881 round 2: every validator must consume one authenticated snapshot.
+
+    A same-uid writer alternates a saved valid signed envelope that binds
+    only the receipt with another saved valid signed envelope that binds
+    only the sidecar. The receipt validator and the sidecar validator each
+    re-read the store independently, so the race lets each check pass
+    against a different snapshot even though no single authenticated state
+    ever contained both bindings. The predicate must reject.
+    """
+
+    _bind_workspace(tmp_path)
+    item = ledger._make_import("snapshot combine probe", kind="task", source="handoff-ingest")
+    _write_g5_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+
+    store = _store_path(tmp_path)
+    full_record = dict(json.loads(store.read_text(encoding="utf-8"))["record"])
+    files = dict(full_record.get("files") or {})
+    proof_scope = f".brigade/work/imports/proofs/{ledger._import_proof_name(item['id'])}"
+    receipt_file_scope = ".brigade/scanners/runs/chosen-run/receipt.json"
+    assert proof_scope in files and receipt_file_scope in files
+
+    # Envelope A (validly signed): binds the receipt artifacts, not the sidecar.
+    receipt_only_record = dict(full_record)
+    receipt_only_record["files"] = {k: v for k, v in files.items() if k != proof_scope}
+    # Envelope B (validly signed): binds the sidecar, not the receipt artifacts.
+    sidecar_only_record = dict(full_record)
+    sidecar_only_record["files"] = {k: v for k, v in files.items() if k != receipt_file_scope}
+
+    # Disk starts on envelope A. Alone it cannot authenticate: the sidecar
+    # binding is missing.
+    ledger._write_external_directory_authority(store, receipt_only_record, workspace=tmp_path)
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is False
+    assert ledger._authenticated_legacy_import_proof(item, target=tmp_path) is False
+
+    # Simulate the concurrent writer: the store bytes flip to envelope B
+    # exactly between artifact validation and the final predicate, so the
+    # receipt check is anchored to snapshot A while the sidecar check and
+    # the final signedness read anchor to snapshot B.
+    real_sidecar_check = ledger._has_persisted_import_proof
+
+    def swap_store_then_check(row: dict, *, target: Path | None = None, **kwargs: object) -> bool:
+        ledger._write_external_directory_authority(store, sidecar_only_record, workspace=tmp_path)
+        return real_sidecar_check(row, target=target, **kwargs)
+
+    monkeypatch.setattr(ledger, "_has_persisted_import_proof", swap_store_then_check)
+
+    assert ledger._authenticated_legacy_import_proof(item, target=tmp_path) is False
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
 def test_forged_post_run_receipt_is_rejected_by_legacy_import(tmp_path: Path) -> None:
     """#881 regression: scanner-reproducible receipt bytes bound only by an
     unsigned authority record must not grant a legacy import identity."""

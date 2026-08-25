@@ -2585,10 +2585,31 @@ def _record_verifier_owned_directory(
     )
 
 
+def _validate_record_bound_directory(record: Mapping[str, Any], *, components: tuple[str, ...], directory: int) -> None:
+    """Validate a directory binding against an already-read verified record."""
+    directories = record.get("directories")
+    if not isinstance(directories, dict) or directories.get(
+        _directory_authority_scope(components)
+    ) != _directory_identity(directory):
+        raise OSError("external directory authority record does not match directory")
+
+
 def _validate_verifier_owned_directory(
-    target: Path, *, components: tuple[str, ...], directory: int, workspace: dict[str, int] | None = None
+    target: Path,
+    *,
+    components: tuple[str, ...],
+    directory: int,
+    workspace: dict[str, int] | None = None,
+    record: Mapping[str, Any] | None = None,
 ) -> None:
-    """Require that a directory still matches its verifier-owned external record."""
+    """Require that a directory still matches its verifier-owned external record.
+
+    ``record`` consumes an already-read verified snapshot; the authority
+    store is never reopened on that path.
+    """
+    if record is not None:
+        _validate_record_bound_directory(record, components=components, directory=directory)
+        return
     _validate_external_directory_authority(
         target,
         components,
@@ -2701,9 +2722,25 @@ def _record_verifier_owned_file(
 
 
 def _validate_verifier_owned_file(
-    target: Path, *, components: tuple[str, ...], descriptor: int, data: bytes, workspace: dict[str, int] | None = None
+    target: Path,
+    *,
+    components: tuple[str, ...],
+    descriptor: int,
+    data: bytes,
+    workspace: dict[str, int] | None = None,
+    record: Mapping[str, Any] | None = None,
 ) -> None:
-    """Require that a file still matches its verifier-owned identity and content."""
+    """Require that a file still matches its verifier-owned identity and content.
+
+    ``record`` consumes an already-read verified snapshot; the authority
+    store is never reopened on that path.
+    """
+    if record is not None:
+        files = record.get("files")
+        scope = _directory_authority_scope(components)
+        if not isinstance(files, dict) or files.get(scope) != _file_identity(descriptor, data):
+            raise OSError("external file authority record does not match file")
+        return
     bound_workspace = _external_workspace_directory_identity(target) if workspace is None else workspace
     _require_workspace_directory_identity(target, bound_workspace)
     _path, payload = _read_external_directory_authority(target)
@@ -2819,8 +2856,20 @@ def _open_legacy_scanner_runs_directory(target: Path) -> int:
             os.close(descriptor)
 
 
-def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...], anchor_name: str, create: bool) -> int:
-    """Open an externally bound directory through no-follow descriptors."""
+def _open_verifier_owned_directory(
+    target: Path,
+    *,
+    components: tuple[str, ...],
+    anchor_name: str,
+    create: bool,
+    record: Mapping[str, Any] | None = None,
+) -> int:
+    """Open an externally bound directory through no-follow descriptors.
+
+    ``record`` validates every binding against one already-read verified
+    snapshot instead of the live store: no validation re-read, no recording,
+    and no reanchoring happens on that path.
+    """
     if not _dirfd_available():
         raise OSError("descriptor-relative directory authority operations are unavailable")
     descriptor = _open_directory_nofollow(target.expanduser().resolve())
@@ -2859,8 +2908,13 @@ def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...],
             child = _dirfd_open_dir(parent, name)
             created = True
         try:
-            _validate_external_directory_authority(target, components, child, workspace=workspace)
+            if record is None:
+                _validate_external_directory_authority(target, components, child, workspace=workspace)
+            else:
+                _validate_record_bound_directory(record, components=components, directory=child)
         except OSError:
+            if record is not None:
+                raise
             if created:
                 _record_external_directory_authority(target, components, child, workspace=workspace)
             elif _reanchor_external_directory_authority(target, components, child, workspace=workspace):
@@ -2886,13 +2940,14 @@ def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...],
         raise
 
 
-def _open_import_proof_directory(target: Path, *, create: bool) -> int:
+def _open_import_proof_directory(target: Path, *, create: bool, record: Mapping[str, Any] | None = None) -> int:
     """Open the verifier-owned proof directory through no-follow descriptors."""
     return _open_verifier_owned_directory(
         target,
         components=(".brigade", "work", "imports", "proofs"),
         anchor_name=".proofs.authority.json",
         create=create,
+        record=record,
     )
 
 
@@ -3028,15 +3083,21 @@ def _remove_persisted_import_proofs(target: Path, items: list[dict[str, Any]]) -
         os.close(parent)
 
 
-def _has_persisted_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
-    """Verify the external local-import proof without trusting row-controlled paths."""
+def _has_persisted_import_proof(
+    item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
+) -> bool:
+    """Verify the external local-import proof without trusting row-controlled paths.
+
+    ``record`` validates the proof-directory and sidecar bindings against one
+    already-read verified snapshot; the authority store is never reopened.
+    """
     if target is None:
         return False
     name = _import_proof_name(item.get("id"))
     if name is None:
         return False
     try:
-        parent = _open_import_proof_directory(target, create=False)
+        parent = _open_import_proof_directory(target, create=False, record=record)
     except OSError:
         return False
     try:
@@ -3069,6 +3130,7 @@ def _has_persisted_import_proof(item: dict[str, Any], *, target: Path | None = N
                 components=(".brigade", "work", "imports", "proofs", name),
                 descriptor=descriptor,
                 data=data,
+                record=record,
             )
             payload = json.loads(data)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -3122,8 +3184,14 @@ def _has_local_import_envelope(item: dict[str, Any], *, importer_source: str) ->
     )
 
 
-def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, Any] | None:
-    """Read one local scanner receipt through no-follow descriptor traversal."""
+def _read_local_scanner_receipt(
+    target: Path, scanner_run_id: str, *, record: Mapping[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """Read one local scanner receipt through no-follow descriptor traversal.
+
+    ``record`` validates every binding against one already-read verified
+    snapshot instead of reopening the authority store.
+    """
     if (
         os.name != "posix"
         or not getattr(os, "O_NOFOLLOW", 0)
@@ -3144,6 +3212,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             components=(".brigade", "scanners", "runs"),
             anchor_name=".runs.authority.json",
             create=False,
+            record=record,
         )
         current = os.open(scanner_run_id, directory_flags, dir_fd=root)
         opened_run = os.fstat(current)
@@ -3158,6 +3227,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             target,
             components=(".brigade", "scanners", "runs", scanner_run_id),
             directory=current,
+            record=record,
         )
         receipt_descriptor = os.open(
             "receipt.json",
@@ -3188,6 +3258,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             target,
             components=(".brigade", "scanners", "runs", scanner_run_id),
             directory=current,
+            record=record,
         )
         data = b"".join(chunks)
         _validate_verifier_owned_file(
@@ -3195,6 +3266,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             components=(".brigade", "scanners", "runs", scanner_run_id, "receipt.json"),
             descriptor=receipt_descriptor,
             data=data,
+            record=record,
         )
         payload = json.loads(data)
         if not isinstance(payload, dict) or payload.get("run_id") != scanner_run_id:
@@ -3211,8 +3283,14 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             os.close(root)
 
 
-def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
-    """Return whether a verifier-owned scanner receipt binds this exact row."""
+def _has_locally_stamped_import_proof(
+    item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
+) -> bool:
+    """Return whether a verifier-owned scanner receipt binds this exact row.
+
+    ``record`` validates the receipt bindings against one already-read
+    verified snapshot; the authority store is never reopened.
+    """
     if target is None:
         return False
     source = item.get("source")
@@ -3225,7 +3303,7 @@ def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | No
         return False
     if not _has_local_import_envelope(item, importer_source=source):
         return False
-    receipt = _read_local_scanner_receipt(target, scanner_run_id)
+    receipt = _read_local_scanner_receipt(target, scanner_run_id, record=record)
     if (
         receipt is None
         or receipt.get("run_id") != scanner_run_id
@@ -3300,6 +3378,46 @@ def _read_verified_authority_snapshot(target: Path | None) -> dict[str, Any] | N
     return record if isinstance(record, dict) else None
 
 
+def _acquire_authenticated_authority_snapshot(target: Path | None) -> dict[str, Any] | None:
+    """Reanchor relocated directories once, then read exactly one signed record.
+
+    The authority store may legitimately be missing right after a workspace
+    rename until a bound directory open copies the previous workspace's
+    record, so the reanchoring opens run before this single verified read.
+    Callers must pass the returned record into every downstream validator:
+    reopening the store mid-validation lets a concurrent same-uid writer
+    combine evidence that never existed in one authenticated snapshot.
+    """
+    if target is None:
+        return None
+    try:
+        workspace = _workspace_directory_identity(target)
+    except OSError:
+        return None
+    for components, anchor_name in (
+        ((".brigade", "scanners", "runs"), ".runs.authority.json"),
+        ((".brigade", "work", "imports", "proofs"), ".proofs.authority.json"),
+    ):
+        try:
+            descriptor = _open_verifier_owned_directory(
+                target, components=components, anchor_name=anchor_name, create=False
+            )
+        except OSError:
+            continue
+        os.close(descriptor)
+    record = _read_verified_authority_snapshot(target)
+    if record is None:
+        return None
+    if (
+        record.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+        or record.get("target") != str(target.expanduser().resolve())
+        or record.get("workspace") != workspace
+        or not isinstance(record.get("directories"), dict)
+    ):
+        return None
+    return record
+
+
 def _authority_store_binding_is_verifier_signed(target: Path | None) -> bool:
     """Return whether the external authority record is a verifier-signed HMAC envelope.
 
@@ -3311,25 +3429,33 @@ def _authority_store_binding_is_verifier_signed(target: Path | None) -> bool:
     return _read_verified_authority_snapshot(target) is not None
 
 
-def _authenticated_legacy_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
+def _authenticated_legacy_import_proof(
+    item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
+) -> bool:
     """Shared authenticated-legacy predicate: receipt, sidecar, and signed store.
 
     Every legacy identity path must require a verifier-owned scanner receipt,
     a persisted proof sidecar, and a signed authority record from one
-    verified snapshot before trusting scanner-reproducible bindings.
+    verified snapshot before trusting scanner-reproducible bindings. With
+    ``record`` unset the single snapshot is acquired here after one
+    reanchor pass; callers holding a snapshot must pass it back so the
+    receipt, directory, and sidecar validators all consume that same record
+    instead of independently reopening the store.
     """
-    if not _has_locally_stamped_import_proof(item, target=target):
+    if record is None:
+        record = _acquire_authenticated_authority_snapshot(target)
+    if target is None or record is None:
         return False
-    if not _has_persisted_import_proof(item, target=target):
+    if not _has_locally_stamped_import_proof(item, target=target, record=record):
         return False
-    return _read_verified_authority_snapshot(target) is not None
+    return _has_persisted_import_proof(item, target=target, record=record)
 
 
 def _legacy_import_source_content_identity(
-    item: dict[str, Any], *, target: Path | None = None
+    item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
 ) -> tuple[str, str, str] | None:
     """Return a legacy identity only when local provenance establishes its source."""
-    if not _authenticated_legacy_import_proof(item, target=target):
+    if not _authenticated_legacy_import_proof(item, target=target, record=record):
         return None
     source = item["source"]
     content_identity = _import_content_identity(item)
@@ -4196,6 +4322,10 @@ def _append_import_records(
     existing_imports: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     imports = existing_imports if existing_imports is not None else _read_imports(target)
+    # One authenticated view of authority state for the whole append: the
+    # snapshot is acquired once (after a reanchor pass) and consumed by
+    # every proof validator below, which never reopen the store (#881).
+    authority_record = _acquire_authenticated_authority_snapshot(target)
     existing = {
         _import_record_key(item)
         for item in imports
@@ -4209,7 +4339,7 @@ def _append_import_records(
         identity = _import_source_identity(item)
         if identity is not None:
             existing_by_source[identity] = item
-        legacy_identity = _legacy_import_source_content_identity(item, target=target)
+        legacy_identity = _legacy_import_source_content_identity(item, target=target, record=authority_record)
         if legacy_identity is not None and not _has_canonical_untrusted_import_identity(item):
             legacy_by_source_content[legacy_identity] = item
     imported: list[dict[str, Any]] = []
@@ -4222,16 +4352,21 @@ def _append_import_records(
         if identity is not None and identity in existing_by_source:
             existing_item = existing_by_source[identity]
             # Every proof used to suppress an incoming import must be backed
-            # by a signed authority record; unsigned sidecar or receipt
-            # bindings are scanner-reproducible and forgeable (#881).
-            authority_is_signed = _read_verified_authority_snapshot(target) is not None
-            canonical_existing_proof = _has_persisted_import_proof(existing_item, target=target) and authority_is_signed
+            # by the one signed authority record acquired above; unsigned
+            # sidecar or receipt bindings are scanner-reproducible and
+            # forgeable (#881), and the validators consume that single
+            # snapshot instead of reopening the store mid-validation.
+            canonical_existing_proof = authority_record is not None and _has_persisted_import_proof(
+                existing_item, target=target, record=authority_record
+            )
             canonical_existing_row = _has_canonical_untrusted_import_identity(existing_item)
             canonical_incoming_row = _has_canonical_untrusted_import_identity(record)
             canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row
-            existing_migration_proof = _authenticated_legacy_import_proof(
-                existing_item, target=target
-            ) and _import_content_identity(existing_item) == _import_content_identity(record)
+            existing_migration_proof = (
+                authority_record is not None
+                and _authenticated_legacy_import_proof(existing_item, target=target, record=authority_record)
+                and _import_content_identity(existing_item) == _import_content_identity(record)
+            )
             if canonical_existing_row and canonical_incoming_row and not canonical_existing_proof:
                 pass
             elif canonical_migration and not existing_migration_proof:

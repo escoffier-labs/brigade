@@ -2646,6 +2646,76 @@ def test_unsigned_canonical_dedupe_cannot_suppress_incoming(tmp_path: Path):
     assert rejected == []
 
 
+def test_canonical_dedupe_after_rename_without_preopening_authority(tmp_path: Path):
+    """#881 round 2: relocation must reanchor before signedness is decided.
+
+    After a workspace rename the authority-store path for the new location
+    does not exist yet. Signedness evaluated before the proof-directory
+    open triggers reanchoring stays false, so a genuine canonical duplicate
+    is re-imported instead of suppressed. The fix reanchors before the
+    snapshot read; this test never pre-opens any authority directory.
+    """
+
+    original = tmp_path / "original-workspace"
+    original.mkdir()
+    _enable_external_key_isolation(original)
+    (original / ".brigade").mkdir(exist_ok=True)
+    descriptor = os.open(original / ".brigade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        ledger._record_external_directory_authority(
+            original,
+            (".brigade",),
+            descriptor,
+            workspace=ledger._workspace_directory_identity(original),
+        )
+    finally:
+        os.close(descriptor)
+
+    text = "relocated dedupe probe"
+    canonical_hash = ledger._untrusted_import_canonical_hash({"text": text, "kind": "task"})
+    existing = ledger._make_import(
+        text,
+        kind="task",
+        source="learning-loop",
+        metadata={
+            "source_item_key": f"learning-loop:{canonical_hash}",
+            "source_fingerprint": canonical_hash,
+        },
+    )
+    ledger._write_persisted_import_proofs(original, [existing], operation_id="0" * 32)
+    incoming = ledger._sanitize_untrusted_import_record(
+        {"text": text, "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        original,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+    )
+    assert imported == []
+    assert len(skipped) == 1
+    assert dismissed == []
+    assert rejected == []
+
+    relocated = tmp_path / "relocated-workspace"
+    original.rename(relocated)
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        relocated,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+    )
+    assert imported == []
+    assert len(skipped) == 1
+    assert dismissed == []
+    assert rejected == []
+
+
 def test_work_backfill_quarantines_injection_hits(tmp_path: Path):
     ledger._write_imports(
         tmp_path,
