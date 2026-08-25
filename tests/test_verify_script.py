@@ -2,6 +2,7 @@ import ast
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,86 @@ def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
         "pytest\t-q\t--cov=brigade\t--cov-report=term\t--cov-fail-under=78",
     ]
     assert not flock_log.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
+def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeypatch):
+    holder_root = tmp_path / "holder"
+    second_root = tmp_path / "second"
+    holder_root.mkdir()
+    second_root.mkdir()
+    holder_dir, holder_log = _fake_tool_dir(holder_root)
+    second_dir, second_log = _fake_tool_dir(second_root)
+    ready_marker = tmp_path / "ready"
+    release_marker = tmp_path / "release"
+    lock_path = tmp_path / "full.lock"
+    (holder_dir / "ruff").write_text(
+        """#!/bin/sh
+printf '%s' "$(basename "$0")" >> "$VERIFY_LOG"
+for arg in "$@"; do printf '\\t%s' "$arg" >> "$VERIFY_LOG"; done
+printf '\\n' >> "$VERIFY_LOG"
+: > "$VERIFY_READY_MARKER"
+while [ ! -f "$VERIFY_RELEASE_MARKER" ]; do
+  sleep 0.05
+done
+"""
+    )
+    (holder_dir / "ruff").chmod(0o755)
+    monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PYTHON", sys.executable)
+    holder_env = os.environ.copy()
+    holder_env["PY"] = str(holder_dir)
+    holder_env["VERIFY_LOG"] = str(holder_log)
+    holder_env["VERIFY_READY_MARKER"] = str(ready_marker)
+    holder_env["VERIFY_RELEASE_MARKER"] = str(release_marker)
+    second_env = os.environ.copy()
+    second_env["PY"] = str(second_dir)
+    second_env["VERIFY_LOG"] = str(second_log)
+    verify = ROOT / "scripts/verify"
+    holder = subprocess.Popen(
+        [str(verify)],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=holder_env,
+    )
+    try:
+        deadline = time.monotonic() + 10.0
+        while not ready_marker.exists():
+            if holder.poll() is not None:
+                _stdout, stderr = holder.communicate()
+                raise AssertionError(f"holder exited {holder.returncode} before ready marker: {stderr}")
+            if time.monotonic() >= deadline:
+                holder.terminate()
+                _stdout, stderr = holder.communicate(timeout=5)
+                raise AssertionError(f"holder did not write ready marker: {stderr}")
+            time.sleep(0.05)
+        completed = subprocess.run(
+            [str(verify)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=second_env,
+            timeout=15,
+        )
+        assert completed.returncode == 75
+        assert "full verification already running" in completed.stderr
+        assert "./scripts/verify-focused" in completed.stderr
+        assert not second_log.exists() or second_log.read_text() == ""
+    finally:
+        release_marker.touch()
+        try:
+            holder.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            holder.terminate()
+            try:
+                holder.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                holder.wait(timeout=5)
+    assert holder.returncode == 0
 
 
 def test_agents_md_requires_focused_development_and_reserved_full_gate():
