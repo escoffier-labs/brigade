@@ -133,22 +133,15 @@ after the journal write completes and the lock is released):
 - When a spool exists, new events are appended to it and the spool is flushed
   in order (100 per request) so the hub never sees a node's events out of
   sequence. `brigade fleet flush` drains it explicitly.
+- Hub traffic never uses a proxy (#1154): the client's opener is built with
+  an empty `ProxyHandler`, so `HTTP_PROXY`/`HTTPS_PROXY` can neither receive
+  the bearer token nor blackhole tailnet requests. Prefer HTTPS via Tailscale
+  Serve where possible.
+- The spool is private (#1154): the spool directory is created 0700, spool,
+  lock, and temp files are created 0600, opens are no-follow (`O_NOFOLLOW`
+  where available) and refuse non-regular files, and atomic rewrites use
+  exclusive, unpredictable temp names in the spool directory.
 - `brigade fleet status [--all] [--json]`.
-
-## Phase 4 claims
-
-The claim key is the bare workspace directory name, matching the `repo` key
-on fleet events. Unrelated repositories with the same directory basename
-therefore arbitrate against each other. Separate worktrees of one repository
-have different directory names and do not arbitrate against each other when
-each resolves its own workspace identity. If they instead resolve the
-per-user `~/.brigade/node.toml` fallback, every such worktree under the home
-directory uses the home directory name and arbitrates on that shared key.
-
-Claims are best-effort protection layered over the local run lock. If the hub
-rejects the configured token with HTTP 401 or 403, the client logs one WARNING
-(carrying the hub's message) and continues under the local lock alone, just as
-it does when the hub is unreachable.
 
 ## Phase 3 surface
 
@@ -192,6 +185,38 @@ phone over Tailscale:
 - No token, cookie value, or claim holder token is ever rendered; the
   response carries the same CSP / no-store / no-referrer headers as
   `brigade center serve`.
+
+## Phase 4 claims
+
+The claim key is the bare workspace directory name, matching the `repo` key
+on fleet events. Unrelated repositories with the same directory basename
+therefore arbitrate against each other. Separate worktrees of one repository
+have different directory names and do not arbitrate against each other when
+each resolves its own workspace identity. If they instead resolve the
+per-user `~/.brigade/node.toml` fallback, every such worktree under the home
+directory uses the home directory name and arbitrates on that shared key.
+
+Claims are best-effort protection layered over the local run lock. If the hub
+rejects the configured token with HTTP 401 or 403, the client logs one WARNING
+(carrying the hub's message) and continues under the local lock alone, just as
+it does when the hub is unreachable.
+
+Lost ownership fails closed by default (#1152): when the mid-run heartbeat
+learns another owner holds the claim (a renew answered 409 held-by-another),
+the run is aborted — with no callback the main thread is interrupted through
+the same path as Ctrl-C and the loss is logged once — so two machines never
+keep working one repo unarbitrated. `repo_claim` accepts `on_claim_lost` to
+react differently, and `BRIGADE_FLEET_CLAIM_LOSS=continue` (or
+`claim_loss_policy="continue"`) is the documented opt-out for solo machines,
+restoring the old log-and-continue behavior.
+
+Orphan cleanup (#1157): a lost acquire response schedules a background
+release that attempts **immediately**, then backs off, so a short-lived run
+still frees the row before process exit kills its daemon threads. At exit,
+when a heartbeat re-acquire may have committed an orphan row, the release is
+retried inline not only while the hub answers "unavailable" but also after a
+definitive "missing" (the straggler may commit right after), and exhaustion
+of those retries is logged as a WARNING naming the residual TTL exposure.
 
 ## Export and optional Dolt sink
 
