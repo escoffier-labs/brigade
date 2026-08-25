@@ -94,6 +94,8 @@ Queue entries include card identity, issue type, severity, priority, safe summar
 
 Deferred and reviewed closeouts both record the queue's source fingerprints so `memory care status` can tell open from quieted issues.
 
+Closeout receipts written before the #closeout-guard could carry `status: reviewed` with unresolved candidates still in the queue. `memory care status` ignores those legacy receipts instead of quieting their fingerprints: only a `reviewed` closeout with zero candidates and no fingerprints, or a `deferred` closeout with a nonblank reason, quiets matching queue entries. When the latest receipt is ignored, status JSON reports why in `latest_closeout_ignored_reason`.
+
 ## Boundary
 
 Memory care does not run a scheduler, mutate canonical memory, perform remote sync, or promote imports automatically. Card edits stay explicit: routine scan and plan commands never write card files. Only `brigade memory care backfill --apply` may add derived frontmatter, with a receipt. Refreshes stay explicit through reviewed work tasks or the existing Memory Handoff flow. Scheduling those care commands is the operator's job: see the [execution model](execution-model.md). Opt-in `brigade care install` can install target-namespaced systemd user timers on Linux or launchd agents on macOS without Brigade owning a daemon.

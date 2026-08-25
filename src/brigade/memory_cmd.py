@@ -1170,7 +1170,7 @@ def health(target: Path) -> dict[str, Any]:
     if queue_payload is None:
         checks.append({"status": "warn", "name": "memory_care_queue", "detail": f"missing at {queue_path}"})
     closeout = _latest_closeout(target)
-    closed = set(closeout.get("source_fingerprints", [])) if isinstance(closeout, dict) else set()
+    closed, closeout_ignored_reason = _closeout_quiet_set(closeout)
     top_issue = None
     queue_count = 0
     if isinstance(queue_payload, dict) and isinstance(queue_payload.get("cards"), list) and queue_payload["cards"]:
@@ -1271,6 +1271,7 @@ def health(target: Path) -> dict[str, Any]:
         },
         "archive_candidates": archive_candidates,
         "latest_closeout": closeout,
+        "latest_closeout_ignored_reason": closeout_ignored_reason,
         "search_recall": search_recall_status(target),
     }
 
@@ -1669,6 +1670,41 @@ def _latest_closeout(target: Path) -> dict[str, Any] | None:
             payloads.append(payload)
     payloads.sort(key=lambda item: str(item.get("created_at") or item.get("closeout_id") or ""), reverse=True)
     return payloads[0] if payloads else None
+
+
+def _closeout_quiet_set(closeout: dict[str, Any] | None) -> tuple[set[str], str | None]:
+    """Return (fingerprints to quiet, reason the receipt was ignored).
+
+    Before 15d54523, closeouts could write status=reviewed with unresolved
+    candidates still in the queue. Such legacy receipts are not honored:
+    only a reviewed closeout with no candidates/fingerprints, or a deferred
+    closeout with a nonblank reason, may quiet matching queue fingerprints.
+    """
+    if not isinstance(closeout, dict):
+        return set(), None
+    status = str(closeout.get("status") or "")
+    fingerprints = {
+        item for item in (closeout.get("source_fingerprints") or []) if isinstance(item, str) and item.strip()
+    }
+    try:
+        candidate_count = int(closeout.get("candidate_count") or 0)
+    except (TypeError, ValueError):
+        candidate_count = 0
+    if status == "deferred":
+        if str(closeout.get("reason") or "").strip():
+            return fingerprints, None
+        return set(), "deferred closeout has a blank reason; not quieting queue fingerprints"
+    if status == "reviewed" and candidate_count == 0 and not fingerprints:
+        return set(), None
+    if status == "reviewed":
+        return (
+            set(),
+            (
+                "legacy reviewed closeout carries "
+                f"{candidate_count} candidate(s) and {len(fingerprints)} fingerprint(s); not quieting"
+            ),
+        )
+    return set(), None
 
 
 def closeout(*, target: Path, reason: str | None = None, defer: bool = False, json_output: bool = False) -> int:

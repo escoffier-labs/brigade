@@ -1266,6 +1266,69 @@ def test_memory_care_status_archive_candidates_include_age_reviewed_and_evidence
     assert candidate["approval_required"] is True
 
 
+def _write_memory_care_closeout(tmp_path, closeout_id, payload):
+    root = tmp_path / ".brigade" / "memory-care" / "closeouts" / closeout_id
+    root.mkdir(parents=True)
+    (root / "closeout.json").write_text(json.dumps(payload))
+
+
+def test_memory_care_health_ignores_legacy_reviewed_closeout_with_candidates(tmp_path):
+    queue_path = tmp_path / ".brigade" / "memory-care" / "decay" / "refresh-queue.json"
+    queue_path.parent.mkdir(parents=True)
+    queue_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cards": [
+                    {
+                        "card_id": "card-one",
+                        "card_file": "memory/cards/card-one.md",
+                        "issue_type": "stale",
+                        "source_fingerprint": "memory-fp-one",
+                    }
+                ],
+            }
+        )
+    )
+    _write_memory_care_closeout(
+        tmp_path,
+        "legacy-closeout",
+        {
+            "closeout_id": "legacy-closeout",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "status": "reviewed",
+            "reason": "",
+            "candidate_count": 3,
+            "source_fingerprints": ["memory-fp-one"],
+            "safe_summary": "3 memory-care candidate(s) reviewed",
+        },
+    )
+
+    payload = memory_cmd.health(tmp_path)
+    assert payload["queue_count"] == 1
+    assert payload["latest_closeout_ignored_reason"]
+    assert any(check["name"] == "memory_care_open_issues" and check["status"] == "warn" for check in payload["checks"])
+
+    # An explicit deferred closeout with a nonblank reason still quiets the match.
+    _write_memory_care_closeout(
+        tmp_path,
+        "deferred-closeout",
+        {
+            "closeout_id": "deferred-closeout",
+            "created_at": "2026-02-01T00:00:00+00:00",
+            "status": "deferred",
+            "reason": "waiting on card owner",
+            "candidate_count": 1,
+            "source_fingerprints": ["memory-fp-one"],
+            "safe_summary": "1 memory-care candidate(s) deferred",
+        },
+    )
+    payload = memory_cmd.health(tmp_path)
+    assert payload["queue_count"] == 0
+    assert payload["latest_closeout_ignored_reason"] is None
+    assert any(check["name"] == "memory_care_open_issues" and check["status"] == "ok" for check in payload["checks"])
+
+
 def test_memory_care_status_archive_candidates_are_read_only(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     _write_archive_candidate_care_config(tmp_path, stale_after_days=30)
