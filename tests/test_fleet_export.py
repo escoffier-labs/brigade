@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from brigade import fleet_export, fleet_hub
+from tests.support import assert_private_mode
 
 FAKE_DOLT_LOG_ENV = "BRIGADE_TEST_DOLT_LOG"
 FAKE_DOLT_CAPTURE_ENV = "BRIGADE_TEST_DOLT_CAPTURE"
@@ -292,6 +293,21 @@ class TestExport:
         assert cli.main(["fleet", "export", "--db", str(db), "--out", str(out_file)]) == 0
         assert out_file.read_text(encoding="utf-8") == streamed
 
+    def test_out_file_uses_default_creation_mode_when_replacing_existing_file(self, tmp_path, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event())
+        out_file = tmp_path / "export.jsonl"
+        out_file.write_text("old\n", encoding="utf-8")
+        os.chmod(out_file, 0o644)
+        previous_umask = os.umask(0o022)
+        try:
+            assert cli.main(["fleet", "export", "--db", str(db), "--out", str(out_file)]) == 0
+            assert_private_mode(out_file, 0o644)
+        finally:
+            os.umask(previous_umask)
+
     def test_stdout_bytes_ignore_wrapper_encoding_and_newline_translation(self, tmp_path, monkeypatch):
         from brigade import cli
 
@@ -512,7 +528,34 @@ class TestSink:
         assert [row.split(",")[2] for row in event_rows[1:]] == ["1", "2", "1"]
         claim_rows = claims_csv.read_text(encoding="utf-8").splitlines()
         assert claim_rows[1].startswith("repo-a,node-a")
+        parsed_claims = list(csv.DictReader(io.StringIO(claims_csv.read_text(encoding="utf-8"))))
+        assert parsed_claims[0]["expired"] == "0"
         assert len(claim_rows) == 2
+
+    @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
+    def test_sink_csv_uses_dolt_null_marker_while_jsonl_keeps_null(
+        self, home, fake_dolt, tmp_path, monkeypatch, capsys
+    ):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        event = _event()
+        event["repo"] = None
+        _seed_events(db, event)
+        dolt_dir = tmp_path / "dolt-home"
+        capture = tmp_path / "capture"
+        capture.mkdir()
+        monkeypatch.setenv(FAKE_DOLT_LOG_ENV, str(tmp_path / "dolt.log"))
+        monkeypatch.setenv(FAKE_DOLT_CAPTURE_ENV, str(capture))
+        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{dolt_dir}"\n')
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        sink_rows = list(csv.DictReader(io.StringIO((capture / "fleet_events.csv").read_text(encoding="utf-8"))))
+        assert sink_rows[0]["repo"] == r"\N"
+
+        capsys.readouterr()
+        assert cli.main(["fleet", "export", "--db", str(db)]) == 0
+        assert json.loads(capsys.readouterr().out)["repo"] is None
 
     @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
     def test_sink_keeps_formula_like_values_raw_while_human_csv_guards_them(
@@ -542,11 +585,14 @@ class TestSink:
         assert export_rows[1][fleet_export.EVENT_COLUMNS.index("seat")] == "'-worker"
 
     @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
-    def test_sink_skips_add_and_commit_when_working_set_is_unchanged(self, home, fake_dolt, tmp_path, monkeypatch):
+    def test_sink_skips_commit_but_advances_watermark_when_working_set_is_unchanged(
+        self, home, fake_dolt, tmp_path, monkeypatch
+    ):
         from brigade import cli
 
         db = tmp_path / "hub.db"
         _seed_events(db, _event())
+        _set_received_at(db, "r1", "2026-08-23T12:00:00Z")
         dolt_dir = tmp_path / "dolt-home"
         log = tmp_path / "dolt.log"
         capture = tmp_path / "capture"
@@ -561,6 +607,31 @@ class TestSink:
         assert argv_lines[-2:] == ["status", "--porcelain"]
         assert "add" not in argv_lines
         assert "commit" not in argv_lines
+        watermark = dolt_dir / fleet_export.EVENTS_WATERMARK_FILE
+        assert watermark.read_text(encoding="utf-8") == "2026-08-23T12:00:00Z\n"
+
+    @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
+    def test_sink_reports_unparseable_incremental_timestamps_on_stderr(
+        self, home, fake_dolt, tmp_path, monkeypatch, capsys
+    ):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event(run_id="good"), _event(run_id="bad", seq=2, digest="d2"))
+        _set_received_at(db, "good", "2026-08-23T12:00:00Z")
+        _set_received_at(db, "bad", "not-a-timestamp")
+        dolt_dir = tmp_path / "dolt-home"
+        dolt_dir.mkdir()
+        (dolt_dir / fleet_export.EVENTS_WATERMARK_FILE).write_text("2026-08-23T11:00:00Z\n", encoding="utf-8")
+        capture = tmp_path / "capture"
+        capture.mkdir()
+        monkeypatch.setenv(FAKE_DOLT_LOG_ENV, str(tmp_path / "dolt.log"))
+        monkeypatch.setenv(FAKE_DOLT_CAPTURE_ENV, str(capture))
+        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{dolt_dir}"\n')
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        captured = capsys.readouterr()
+        assert "skipped 1 event(s) with unparseable received_at" in captured.err
 
     def test_dolt_failure_reports_error_and_exits_nonzero(self, home, fake_dolt, tmp_path, monkeypatch, capsys):
         from brigade import cli

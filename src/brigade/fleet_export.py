@@ -173,6 +173,15 @@ def _csv_value(value: Any) -> Any:
     return value
 
 
+def _sink_csv_value(value: Any) -> Any:
+    """Render values as literals accepted by Dolt's CSV table importer."""
+    if value is None:
+        return r"\N"
+    if isinstance(value, bool):
+        return int(value)
+    return value
+
+
 def connect_hub_readonly(db_path: Path) -> sqlite3.Connection:
     """Open the hub database strictly read-only; refuse to invent one."""
     db_path = Path(db_path).expanduser()
@@ -261,13 +270,17 @@ def _write_records(
     columns: tuple[str, ...],
     fmt: str,
     spreadsheet_safe: bool = False,
+    sink_csv: bool = False,
 ) -> int:
     count = 0
     if fmt == "csv":
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
         for record in records:
-            values = ["" if record[column] is None else record[column] for column in columns]
+            if sink_csv:
+                values = [_sink_csv_value(record[column]) for column in columns]
+            else:
+                values = ["" if record[column] is None else record[column] for column in columns]
             if spreadsheet_safe:
                 values = [_csv_value(value) for value in values]
             writer.writerow(values)
@@ -294,6 +307,7 @@ def export_into(
     stats: ExportStats | None = None,
     spreadsheet_safe: bool = False,
     since_received_exclusive: bool = False,
+    sink_csv: bool = False,
 ) -> int:
     """Stream one table from the hub database into ``handle``; returns rows."""
     conn = connect_hub_readonly(db_path)
@@ -321,6 +335,7 @@ def export_into(
                 columns=columns,
                 fmt=fmt,
                 spreadsheet_safe=spreadsheet_safe,
+                sink_csv=sink_csv,
             )
         except sqlite3.Error as exc:
             raise FleetExportError(f"could not query fleet hub database {db_path}: {exc}") from exc
@@ -376,6 +391,9 @@ def dispatch_export(args: argparse.Namespace) -> int:
                         spreadsheet_safe=args.format == "csv",
                     )
                 assert temporary is not None
+                current_umask = os.umask(0)
+                os.umask(current_umask)
+                os.chmod(temporary, 0o666 & ~current_umask)
                 os.replace(temporary, destination)
                 temporary = None
             except OSError as exc:
@@ -562,6 +580,7 @@ def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
                     claims=False,
                     stats=event_stats,
                     since_received_exclusive=watermark is not None,
+                    sink_csv=True,
                 )
             with claims_csv.open("w", newline="", encoding="utf-8") as handle:
                 claim_count = export_into(
@@ -571,6 +590,7 @@ def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
                     claims=True,
                     include_expired=False,
                     export_now=export_now,
+                    sink_csv=True,
                 )
             steps: list[list[str]] = []
             if not (dolt_dir / ".dolt").is_dir():
@@ -589,6 +609,8 @@ def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
                 if not ok:
                     print(f"error: {message}", file=sys.stderr)
                     return 1
+            if config.events_incremental and event_stats.last_received_at is not None:
+                _write_event_watermark(dolt_dir, event_stats.last_received_at)
             ok, message, status = _run_dolt(
                 ["status", "--porcelain"],
                 dolt_binary=dolt_binary,
@@ -615,13 +637,16 @@ def run_sink_pass(*, db_path: Path, config: SinkConfig) -> int:
                     if not ok:
                         print(f"error: {message}", file=sys.stderr)
                         return 1
-                if config.events_incremental and event_stats.last_received_at is not None:
-                    _write_event_watermark(dolt_dir, event_stats.last_received_at)
     except FleetExportError:
         raise
     except (sqlite3.Error, OSError) as exc:
         raise FleetExportError(f"could not export fleet sink data: {exc}") from exc
     commit_status = "committed changes" if committed else "no working-set changes to commit"
+    if watermark is not None:
+        print(
+            f"fleet sink: skipped {event_stats.unparseable_timestamps} event(s) with unparseable received_at",
+            file=sys.stderr,
+        )
     print(
         f"fleet sink: imported {event_count} event(s) and {claim_count} claim(s) into dolt database {dolt_dir}; "
         f"{commit_status}"
