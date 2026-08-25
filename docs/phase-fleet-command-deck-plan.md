@@ -24,7 +24,7 @@ Add the read-only, server-rendered Command Deck at `/deck` and `/deck/repos` wit
 - Create: `src/brigade/fleet_command_deck.py`
 - Create: `tests/test_fleet_command_deck.py`
 
-- [ ] Write the failing pure and SQLite tests first. Use fake IDs only and one `now` value.
+- [x] Write the failing pure and SQLite tests first. Use fake IDs only and one `now` value.
 
 ```python
 def test_load_config_validates_and_strips_controls(tmp_path):
@@ -51,9 +51,9 @@ def test_capped_queries_select_latest_then_limit(conn):
     assert all(row.state not in deck.TERMINAL_STATES for row in deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800))
 ```
 
-- [ ] Run red: `pytest -q tests/test_fleet_command_deck.py -k 'load_config or bucket or capped_queries'`. Expect collection failure: `ModuleNotFoundError: No module named 'brigade.fleet_command_deck'`.
+- [x] Run red: `pytest -q tests/test_fleet_command_deck.py -k 'load_config or bucket or capped_queries'`. Expect collection failure: `ModuleNotFoundError: No module named 'brigade.fleet_command_deck'`.
 
-- [ ] Implement `fleet_command_deck.py` with only stdlib imports (`html`, `json`, `re`, `sqlite3`, dataclasses, datetime, pathlib, typing). It must not import `fleet_hub`.
+- [x] Implement `fleet_command_deck.py` with only stdlib imports (`html`, `json`, `re`, `sqlite3`, dataclasses, datetime, pathlib, typing). It must not import `fleet_hub`.
 
 ```python
 class DeckConfigError(ValueError):
@@ -96,7 +96,7 @@ def load_config(path: Path) -> DeckConfig:
 
 Add `_station(raw: object) -> StationConfig` and `_bounded_int(raw: Mapping[str, object], key: str, default: int, low: int, high: int) -> int`. `_station` rejects non-dicts, validates `node_id` with `CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")`, rejects `unknown`, strips a supplied `name` with `re.sub(r"[\x00-\x1f\x7f-\x9f]", "", value).strip()`, and requires its supplied value to be 1..64 characters. An absent `name` becomes `""` so enrollment-label fallback is possible. Require `type(capacity) is int` in 1..64. `_bounded_int` uses its default only for a missing key and otherwise requires `type(value) is int` in the stated inclusive range. Each rejection raises `DeckConfigError` with the field name.
 
-- [ ] Add these exact constants and pure shapes. They make all render input immutable after construction.
+- [x] Add these exact constants and pure shapes. They make all render input immutable after construction.
 
 ```python
 TERMINAL_STATES = frozenset({"run.completed", "run.failed", "run.interrupted"})
@@ -129,9 +129,9 @@ class Claim:
 
 `collides(target: str, live_runs: Sequence[LiveRun], claims: Mapping[str, Claim]) -> bool`
 
-- [ ] Implement bounded reads exactly. The latest-row CTE partitions by `(node_id, run_id)` ordered `sequence DESC, received_at DESC, digest DESC`. Only after `rn = 1` exclude exact terminal states. Use `ORDER BY` bucket rank, `ts DESC`, node, run and `LIMIT 200`. Fetch starts only for selected `(node_id, run_id)` keys in chunks of at most 400 pairs. Fetch terminal outcomes as latest rows ordered `ts DESC LIMIT ?`. Failures use exact `state = 'run.failed'`, `ts >= cutoff`, newest first, `LIMIT 10`. Restrict last-heard aggregation to configured IDs. Observers are unconfigured observed IDs ordered by `MAX(received_at) DESC LIMIT 8`. Do not claim issue #1146 is solved.
+- [x] Implement bounded reads exactly. The latest-row CTE partitions by `(node_id, run_id)` ordered `sequence DESC, received_at DESC, digest DESC`. Only after `rn = 1` exclude exact terminal states. Use `ORDER BY` bucket rank, `ts DESC`, node, run and `LIMIT 200`. Fetch starts only for selected `(node_id, run_id)` keys in chunks of at most 400 pairs. Fetch terminal outcomes as latest rows ordered `ts DESC LIMIT ?`. Failures use exact `state = 'run.failed'`, `ts >= cutoff`, newest first, `LIMIT 10`. Restrict last-heard aggregation to configured IDs. Observers are unconfigured observed IDs ordered by `MAX(received_at) DESC LIMIT 8`. Do not claim issue #1146 is solved.
 
-- [ ] Implement projections and renderers with these public entry points. Escape every inserted value with `html.escape(value, quote=True)`, strip controls from config names and enrollment labels before escaping, and never include token, cookie, authorization, or holder fields.
+- [x] Implement projections and renderers with these public entry points. Escape every inserted value with `html.escape(value, quote=True)`, strip controls from config names and enrollment labels before escaping, and never include token, cookie, authorization, or holder fields.
 
 ```python
 `build_view(config: DeckConfig, *, live_runs: Sequence[LiveRun], claims: Sequence[Claim], enrolled_labels: Mapping[str, str], last_heard: Mapping[str, str], outcomes: Sequence[LiveRun], failed_outcomes: Sequence[LiveRun], observers: Sequence[tuple[str, str]], now: datetime) -> DeckView`
@@ -143,7 +143,7 @@ class Claim:
 
 `build_view` preserves `config.stations` order, renders a grey `not enrolled` station when an ID is absent from enrolled labels, counts only configured stations, assigns tiles by station, excludes exact terminal tiles, sorts tiles by `BUCKET_RANK`, and builds collision-first repo rows from the union of active claim targets and live repos. Its rail order is live failed, live awaiting approval, live stale, then collisions, followed by terminal failures. `render_deck` emits a nonce-bearing style and elapsed-only script, refresh meta tag, `main`, labelled station/rail/timeline sections, native `details`, both navigation links, classic-board links, zero-station hint, and the required empty strings. `render_repos` emits the same document shell and collision-first table.
 
-- [ ] Run green: `pytest -q tests/test_fleet_command_deck.py -k 'load_config or bucket or capped_queries'`. Expect `3 passed`.
+- [x] Run green: `pytest -q tests/test_fleet_command_deck.py -k 'load_config or bucket or capped_queries'`. Expect `3 passed`.
 - [ ] Commit: `git add src/brigade/fleet_command_deck.py tests/test_fleet_command_deck.py && git commit -m "feat: add fleet command deck projections"`.
 
 ### Task 2: startup-frozen config, authenticated routes, and integrations
