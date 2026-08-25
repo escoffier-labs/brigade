@@ -144,7 +144,7 @@ class Claim:
 `build_view` preserves `config.stations` order, renders a grey `not enrolled` station when an ID is absent from enrolled labels, counts only configured stations, assigns tiles by station, excludes exact terminal tiles, sorts tiles by `BUCKET_RANK`, and builds collision-first repo rows from the union of active claim targets and live repos. Its rail order is live failed, live awaiting approval, live stale, then collisions, followed by terminal failures. `render_deck` emits a nonce-bearing style and elapsed-only script, refresh meta tag, `main`, labelled station/rail/timeline sections, native `details`, both navigation links, classic-board links, zero-station hint, and the required empty strings. `render_repos` emits the same document shell and collision-first table.
 
 - [x] Run green: `pytest -q tests/test_fleet_command_deck.py -k 'load_config or bucket or capped_queries'`. Expect `3 passed`.
-- [ ] Commit: `git add src/brigade/fleet_command_deck.py tests/test_fleet_command_deck.py && git commit -m "feat: add fleet command deck projections"`.
+- [x] Commit: `git add src/brigade/fleet_command_deck.py tests/test_fleet_command_deck.py && git commit -m "feat: add fleet command deck projections"`.
 
 ### Task 2: startup-frozen config, authenticated routes, and integrations
 
@@ -154,7 +154,7 @@ class Claim:
 - Modify: `src/brigade/cli/fleet.py`
 - Modify: `tests/test_fleet_command_deck.py`
 
-- [ ] Add one test helper, and use it for every test configuration. Each caller writes the selected JSON before entering this manager. Do not mutate a config file while a server is running.
+- [x] Add one test helper, and use it for every test configuration. Each caller writes the selected JSON before entering this manager. Do not mutate a config file while a server is running.
 
 ```python
 @contextmanager
@@ -173,7 +173,7 @@ def _start_hub(tmp_path, config: dict | None):
         server.shutdown(); server.server_close(); thread.join(timeout=5)
 ```
 
-- [ ] Add and run these failing HTTP, security, secret, config, CLI, and legacy tests. Each call of the `_start_hub` context manager receives a distinct `dict` and therefore creates a separately started server.
+- [x] Add and run these failing HTTP, security, secret, config, CLI, and legacy tests. Each call of the `_start_hub` context manager receives a distinct `dict` and therefore creates a separately started server.
 
 ```python
 def test_deck_requires_bearer_or_cookie(tmp_path):
@@ -199,9 +199,9 @@ def test_headers_secrets_and_responsive_css(tmp_path):
         assert "@media (max-width: 700px)" in body and "grid-template-columns: 1fr" in body
 ```
 
-- [ ] Run red: `pytest -q tests/test_fleet_command_deck.py -k 'deck_requires or loaded_once or headers_secrets'`. Expect failures because `make_server()` lacks `deck_config_path` and `/deck` is not routed.
+- [x] Run red: `pytest -q tests/test_fleet_command_deck.py -k 'deck_requires or loaded_once or headers_secrets'`. Expect failures because `make_server()` lacks `deck_config_path` and `/deck` is not routed.
 
-- [ ] In `fleet_hub.py`, add `from . import fleet_command_deck` beside the dashboard import. Extend exactly these signatures and capture immutable config in the handler closure:
+- [x] In `fleet_hub.py`, add `from . import fleet_command_deck` beside the dashboard import. Extend exactly these signatures and capture immutable config in the handler closure:
 
 ```python
 `make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False, deck_config: fleet_command_deck.DeckConfig | None = None) -> type[BaseHTTPRequestHandler]`
@@ -213,15 +213,15 @@ def test_headers_secrets_and_responsive_css(tmp_path):
 
 Inside `make_server`, call `fleet_command_deck.load_config(deck_config_path)` when path is present, else create `DeckConfig()`, before binding the socket. Pass that object to `make_handler`. Never reread the path. In `run`, include `fleet_command_deck.DeckConfigError` in the startup `except`, print its existing error form, and return 2.
 
-- [ ] Add `_login_cookie(hub, path: str = "/")` in the test file so it sends `GET f"{path}?token={TOKEN}"`, then use it to cover `/deck` enrollment and cookie-only rendering.
+- [x] Add `_login_cookie(hub, path: str = "/")` in the test file so it sends `GET f"{path}?token={TOKEN}"`, then use it to cover `/deck` enrollment and cookie-only rendering.
 
-- [ ] Add `_serve_deck(path, query)` adjacent to `_serve_dashboard`. Copy the legacy `?token=` enrollment, redirect, bearer-or-cookie authorization, and `_send_html` path byte-for-byte except that it accepts only `/deck` and `/deck/repos, opens a request-local database connection, invokes the deck capped helpers plus `list_claims()` and `list_nodes()`, then renders `render_deck` or `render_repos`. Pass only unrevoked rows from `list_nodes()` into the enrollment-label mapping. Ignore all non-token deck query parameters instead of reflecting them. Route `/health`, then exact deck paths, then legacy `/` and `/view/*`. Leave every legacy route unchanged. Do not add POST handling.
+- [x] Add `_serve_deck(path, query)` adjacent to `_serve_dashboard`. Copy the legacy `?token=` enrollment, redirect, bearer-or-cookie authorization, and `_send_html` path byte-for-byte except that it accepts only `/deck` and `/deck/repos, opens a request-local database connection, invokes the deck capped helpers plus `list_claims()` and `list_nodes()`, then renders `render_deck` or `render_repos`. Pass only unrevoked rows from `list_nodes()` into the enrollment-label mapping. Ignore all non-token deck query parameters instead of reflecting them. Route `/health`, then exact deck paths, then legacy `/` and `/view/*`. Leave every legacy route unchanged. Do not add POST handling.
 
-- [ ] In `cli/fleet.py`, import `os` and `Mapping`, add `p_serve.add_argument("--deck-config", type=Path, default=None, help="Command Deck JSON config (else BRIGADE_FLEET_DECK_CONFIG).")`, and dispatch `deck_config_path=fleet_command_deck.resolve_config_path(args.deck_config, os.environ)`. Add CLI tests asserting flag precedence, nonempty environment fallback, blank environment fallback to `None`, and forwarding to `fleet_hub.run`.
+- [x] In `cli/fleet.py`, import `os` and `Mapping`, add `p_serve.add_argument("--deck-config", type=Path, default=None, help="Command Deck JSON config (else BRIGADE_FLEET_DECK_CONFIG).")`, and dispatch `deck_config_path=fleet_command_deck.resolve_config_path(args.deck_config, os.environ)`. Add CLI tests asserting flag precedence, nonempty environment fallback, blank environment fallback to `None`, and forwarding to `fleet_hub.run`.
 
-- [ ] Add coverage for invalid config refusal at `make_server`, fixed station order, enrollment label fallback, capacity and over marker, terminal-only timeline, observers excluded from totals, bounded timeline, collision marker in tile/rail/repo-first row, escaped hostile labels, no secrets for bearer and cookie on both deck routes, and no-config zero-station hint. Seed claims through `/claims`. Assert expired claims are absent.
+- [x] Add coverage for invalid config refusal at `make_server`, fixed station order, enrollment label fallback, capacity and over marker, terminal-only timeline, observers excluded from totals, bounded timeline, collision marker in tile/rail/repo-first row, escaped hostile labels, no secrets for bearer and cookie on both deck routes, and no-config zero-station hint. Seed claims through `/claims`. Assert expired claims are absent.
 
-- [ ] Run green: `pytest -q tests/test_fleet_command_deck.py tests/test_fleet_dashboard.py tests/test_fleet_sync.py tests/test_fleet_nodes.py`. Expect all selected tests passed.
+- [x] Run green: `pytest -q tests/test_fleet_command_deck.py tests/test_fleet_dashboard.py tests/test_fleet_sync.py tests/test_fleet_nodes.py`. Expect all selected tests passed.
 - [ ] Commit: `git add src/brigade/fleet_hub.py src/brigade/cli/fleet.py tests/test_fleet_command_deck.py && git commit -m "feat: serve fleet command deck"`.
 
 ### Task 3: responsive assertions, verification, and private CT operations

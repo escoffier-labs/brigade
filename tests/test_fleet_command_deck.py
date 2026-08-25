@@ -4,9 +4,15 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+import http.client
+import threading
+import time
+from contextlib import contextmanager
+
 import pytest
 
 from brigade import fleet_command_deck as deck
+from brigade import fleet_hub
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -112,3 +118,227 @@ def test_capped_queries_select_latest_then_limit(conn):
     assert all(
         row.state not in deck.TERMINAL_STATES for row in deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800)
     )
+
+
+# --- HTTP integration: hub-served Command Deck (task 2) ----------------------
+
+TOKEN = "test-token-12345"
+HOLDER_TOKEN = "secret-holder-token-zz"
+NODE_C = "33333333-3333-4333-8333-333333333333"
+
+CONFIG = {
+    "stations": [
+        {"node_id": NODE_A, "name": "Alpha", "capacity": 4},
+        {"node_id": NODE_B, "capacity": 2},
+    ]
+}
+
+
+@contextmanager
+def _start_hub(tmp_path, config: dict | None):
+    db = tmp_path / "hub" / "fleet.db"
+    config_path = None
+    if config is not None:
+        config_path = tmp_path / "deck.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+    server = fleet_hub.make_server(
+        "127.0.0.1", 0, db, TOKEN, allow_admin_writes=True, deck_config_path=config_path
+    )  # content-guard: allow loopback-ipv4
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield ("127.0.0.1", server.server_address[1]), db  # content-guard: allow loopback-ipv4
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _request(hub, method: str, path: str, *, headers: dict | None = None, body=None):
+    host, port = hub
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    data = json.dumps(body).encode() if body is not None else None
+    conn.request(method, path, body=data, headers=headers or {})
+    response = conn.getresponse()
+    text = response.read().decode("utf-8")
+    result = (response.status, {k.lower(): v for k, v in response.getheaders()}, text)
+    conn.close()
+    return result
+
+
+def _bearer(extra: dict | None = None) -> dict:
+    return {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json", **(extra or {})}
+
+
+def _login_cookie(hub, path: str = "/") -> str:
+    status, headers, _text = _request(hub, "GET", f"{path}?token={TOKEN}")
+    assert status == 303
+    return headers["set-cookie"].split(";")[0]
+
+
+def _seed_run(hub, node: str, run_id: str, state: str, *, repo: str, ts: str | None = None) -> None:
+    event = {
+        "node_id": node,
+        "run_id": run_id,
+        "repo": repo,
+        "seat": "worker",
+        "harness": "claude",
+        "state": state,
+        "ts": ts or datetime.now(timezone.utc).isoformat(),
+        "sequence": 1,
+        "digest": f"d-{node[:4]}-{run_id}",
+    }
+    status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=[event])
+    assert status == 200, text
+
+
+def _seed_claim(hub, target: str, *, node: str = NODE_B, ttl: int = 900) -> None:
+    claim = {"action": "acquire", "target": target, "node_id": node, "holder": HOLDER_TOKEN, "ttl_seconds": ttl}
+    status, _headers, text = _request(hub, "POST", "/claims", headers=_bearer(), body=claim)
+    assert status == 200, text
+
+
+def test_deck_requires_bearer_or_cookie(tmp_path):
+    with _start_hub(tmp_path, CONFIG) as (hub, _db):
+        assert _request(hub, "GET", "/deck")[0] == 401
+        assert _request(hub, "GET", "/deck/repos", headers=_bearer())[0] == 200
+        cookie = _login_cookie(hub, "/deck")
+        assert _request(hub, "GET", "/deck", headers={"Cookie": cookie})[0] == 200
+        assert _request(hub, "GET", "/status", headers={"Cookie": cookie})[0] == 401
+
+
+def test_config_is_loaded_once_and_routes_keep_legacy_pages(tmp_path):
+    with _start_hub(tmp_path, CONFIG) as (hub, _db):
+        assert "Alpha" in _request(hub, "GET", "/deck", headers=_bearer())[2]
+        for path, title in (
+            ("/", "Fleet: Machines"),
+            ("/view/machines", "Fleet: Machines"),
+            ("/view/repos", "Fleet: Repos"),
+        ):
+            assert title in _request(hub, "GET", path, headers=_bearer())[2]
+
+
+def test_headers_secrets_and_responsive_css(tmp_path):
+    with _start_hub(tmp_path, CONFIG) as (hub, _db):
+        status, headers, body = _request(hub, "GET", "/deck", headers=_bearer())
+        assert status == 200 and headers["cache-control"] == "no-store"
+        assert "frame-ancestors 'none'" in headers["content-security-policy"]
+        assert all(secret not in body for secret in (TOKEN, HOLDER_TOKEN, _login_cookie(hub).split("=", 1)[1]))
+        assert "@media (max-width: 700px)" in body and "grid-template-columns: 1fr" in body
+
+
+def test_invalid_config_refused_at_make_server(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"stations": []}), encoding="utf-8")
+    db = tmp_path / "hub" / "fleet.db"
+    with pytest.raises(deck.DeckConfigError):
+        fleet_hub.make_server("127.0.0.1", 0, db, TOKEN, allow_admin_writes=True, deck_config_path=bad)
+    assert not db.exists()
+
+
+def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
+    config = {
+        "stations": [
+            {"node_id": NODE_B, "capacity": 1},
+            {"node_id": NODE_A, "name": "Alpha", "capacity": 2},
+        ],
+        "outcome_window": 2,
+    }
+    with _start_hub(tmp_path, config) as (hub, _db):
+        status, _headers, text = _request(
+            hub,
+            "POST",
+            "/nodes",
+            headers=_bearer(),
+            body={"action": "add", "node_id": NODE_B, "label": "BravoBox"},
+        )
+        assert status == 200, text
+        status, _headers, text = _request(
+            hub, "POST", "/nodes", headers=_bearer(), body={"action": "add", "node_id": NODE_A}
+        )
+        assert status == 200, text
+        _seed_run(hub, NODE_A, "ra", "run.created", repo="repo-a")
+        _seed_run(hub, NODE_B, "rb", "run.created", repo="repo-b")
+        for index in range(3):
+            _seed_run(hub, NODE_A, f"done-{index}", "run.completed", repo="repo-a")
+        _seed_claim(hub, "repo-b", node=NODE_B)
+        _status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
+        # Fixed station order follows the config, not events.
+        assert body.index(NODE_B[:12]) < body.index("Alpha")
+        # Unnamed station falls back to the enrolled label then node id prefix.
+        heading = f'title="{NODE_B}"'
+        assert heading in body and "BravoBox" in body
+        assert "not enrolled" not in body
+        # Capacity and busy counts.
+        assert "1/1 busy" in body and "1/2 busy" in body
+        # Terminal-only timeline, bounded by outcome_window.
+        assert "Recent outcomes" in body
+        assert body.count("run.completed") <= 2
+
+
+def test_collision_markers_and_observers_and_expired_claims(tmp_path):
+    with _start_hub(tmp_path, CONFIG) as (hub, _db):
+        _seed_run(hub, NODE_A, "ca", "run.created", repo="shared")
+        _seed_run(hub, NODE_B, "cb", "run.created", repo="shared")
+        _seed_claim(hub, "shared", node=NODE_A)
+        _seed_claim(hub, "gone", node=NODE_A, ttl=1)
+        _seed_run(hub, NODE_C, "obs", "run.created", repo="observer-repo")
+        time.sleep(1.5)
+        _status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
+        assert deck_body.count("! collision") >= 1
+        assert "collision" in deck_body.split('id="rail"')[1].split("</section>")[0]
+        assert "shared" in deck_body.split('id="rail"')[1].split("</section>")[0]
+        _status, _headers, repos_body = _request(hub, "GET", "/deck/repos", headers=_bearer())
+        first_row = repos_body.split("<tbody>")[1].split("<tr>")[1]
+        assert "! collision" in first_row and "shared" in first_row
+        # Expired claims are absent.
+        assert "gone" not in repos_body
+        # Observers are excluded from station totals.
+        assert "observer-repo" not in deck_body.split('id="rail"')[1]
+        assert "Other observers" in deck_body and NODE_C[:12] in deck_body
+
+
+def test_hostile_labels_are_escaped_and_no_config_hint(tmp_path):
+    hostile = {
+        "stations": [
+            {
+                "node_id": NODE_A,
+                "name": '<script>alert("x")</script>',
+                "capacity": 3,
+            }
+        ]
+    }
+    with _start_hub(tmp_path, hostile) as (hub, _db):
+        _status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
+        assert "<script>" not in body
+        assert "&lt;script&gt;" in body
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"stations": [{"node_id": NODE_A, "name": "Solo", "capacity": 1}]}), encoding="utf-8")
+    with _start_hub(tmp_path / "no-config", None) as (hub, _db):
+        _status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
+        assert "No stations configured" in body
+
+
+class TestDeckCli:
+    def test_flag_precedence_env_fallback_and_forwarding(self, tmp_path, monkeypatch):
+        from brigade import cli
+
+        captured: dict = {}
+        monkeypatch.setattr(fleet_hub, "run", lambda **kw: captured.update(kw) or 0)
+        flag = tmp_path / "flag.json"
+        env = tmp_path / "env.json"
+        monkeypatch.setenv("BRIGADE_FLEET_DECK_CONFIG", str(env))
+        argv = ["fleet", "serve", "--host", "127.0.0.1", "--db", str(tmp_path / "x.db"), "--deck-config", str(flag)]
+        assert cli.main(argv) == 0
+        assert captured["deck_config_path"] == flag
+        monkeypatch.delenv("BRIGADE_FLEET_DECK_CONFIG")
+        argv.pop()
+        argv.pop()
+        assert cli.main(argv) == 0
+        assert captured["deck_config_path"] is None
+        monkeypatch.setenv("BRIGADE_FLEET_DECK_CONFIG", str(env))
+        assert cli.main(argv) == 0
+        assert captured["deck_config_path"] == env
+        monkeypatch.setenv("BRIGADE_FLEET_DECK_CONFIG", "   ")
+        assert cli.main(argv) == 0
+        assert captured["deck_config_path"] is None

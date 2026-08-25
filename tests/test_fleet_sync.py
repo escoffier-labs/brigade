@@ -549,6 +549,7 @@ class TestCli:
             "db_path": db,
             "token_file": token_file,
             "allow_admin_writes": False,
+            "deck_config_path": None,
         }
 
     def test_status_json_and_table(self, hub, monkeypatch, capsys):

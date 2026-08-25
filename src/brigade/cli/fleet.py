@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 DEFAULT_PORT = 3774
 DEFAULT_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
@@ -59,6 +61,12 @@ def register(sub: argparse._SubParsersAction) -> None:
             "Let the admin token POST events and claims under any node_id (the pre-node-token shared-token "
             "mode). Off by default: writes need a node token from `brigade fleet nodes add`."
         ),
+    )
+    p_serve.add_argument(
+        "--deck-config",
+        type=Path,
+        default=None,
+        help="Command Deck JSON config (else BRIGADE_FLEET_DECK_CONFIG).",
     )
     p_serve.set_defaults(func=_dispatch_serve)
 
@@ -171,8 +179,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_sink.set_defaults(func=_dispatch_sink)
 
 
-def _dispatch_serve(args: argparse.Namespace) -> int:
-    from .. import fleet_hub
+def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | None = None) -> int:
+    from .. import fleet_command_deck, fleet_hub
 
     db_path = args.db if args.db is not None else (Path.home() / DEFAULT_DB_REL_PATH)
     return fleet_hub.run(
@@ -181,6 +189,9 @@ def _dispatch_serve(args: argparse.Namespace) -> int:
         db_path=db_path,
         token_file=args.token_file,
         allow_admin_writes=bool(args.allow_admin_writes),
+        deck_config_path=fleet_command_deck.resolve_config_path(
+            args.deck_config, os.environ if environ is None else environ
+        ),
     )
 
 

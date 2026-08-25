@@ -109,7 +109,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
-from . import fleet_dashboard
+from . import fleet_command_deck, fleet_dashboard
 
 SCHEMA_VERSION = 4
 DEFAULT_PORT = 3774
@@ -969,13 +969,22 @@ def _load_token(args: argparse.Namespace) -> str:
     raise FleetHubError("no fleet hub token: set BRIGADE_FLEET_TOKEN or pass --token-file")
 
 
-def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    token: str,
+    db_path: Path,
+    *,
+    allow_admin_writes: bool = False,
+    deck_config: fleet_command_deck.DeckConfig | None = None,
+) -> type[BaseHTTPRequestHandler]:
     """Request handler bound to the admin ``token`` and the hub database.
 
     ``allow_admin_writes`` lets the admin token ``POST /events`` and
     ``POST /claims`` under any ``node_id`` (the pre-#1150 shared-token
     behaviour); off by default so a migration is an explicit choice.
+    ``deck_config`` is the startup-frozen Command Deck configuration: it is
+    captured immutably in the handler closure and never re-read from disk.
     """
+    frozen_deck = deck_config if deck_config is not None else fleet_command_deck.DeckConfig()
 
     class _Handler(BaseHTTPRequestHandler):
         server_version = "brigade-fleet-hub/1"
@@ -1130,10 +1139,101 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
             )
             self._send_html(200, page, nonce=nonce)
 
+        def _serve_deck(self, path: str, query: str) -> None:
+            """Command Deck HTML (/deck, /deck/repos): the same enrollment,
+            redirect, bearer-or-cookie authorization, and security headers as
+            ``_serve_dashboard``; non-token query parameters are ignored,
+            never reflected. Renders from the startup-frozen deck config."""
+            plain = "text/plain; charset=utf-8"
+            if path == "/deck":
+                render = fleet_command_deck.render_deck
+            elif path == "/deck/repos":
+                render = fleet_command_deck.render_repos
+            else:
+                self._send_html(404, "Not found.\n", content_type=plain)
+                return
+            params = parse_qs(query, keep_blank_values=False)
+            presented = params.pop("token", [""])[0]
+            if presented:
+                if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
+                    self._send_html(401, "Unauthorized.\n", content_type=plain)
+                    return
+                cookie = (
+                    f"{DASHBOARD_COOKIE}={dashboard_cookie_value(token)}; Path=/; HttpOnly; "
+                    f"SameSite=Strict; Max-Age={DASHBOARD_COOKIE_MAX_AGE}"
+                )
+                self._send_html(303, "", content_type=plain, extra_headers={"Location": path, "Set-Cookie": cookie})
+                return
+            if not (self._authorized() or self._cookie_authorized()):
+                self._send_html(
+                    401,
+                    "Unauthorized: send the fleet bearer token, or open this page once with "
+                    "?token=<fleet token> to set the read-only dashboard cookie.\n",
+                    content_type=plain,
+                )
+                return
+            try:
+                conn = open_db(Path(db_path))
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            try:
+                now = datetime.now(timezone.utc)
+                live_runs = fleet_command_deck.fetch_live_runs(
+                    conn, now=now, stale_after_seconds=frozen_deck.stale_after_seconds
+                )
+                claims: list[fleet_command_deck.Claim] = []
+                for row in list_claims(conn):
+                    expires = datetime.fromisoformat(str(row["expires_at"]))
+                    ttl_remaining = max(0, int((expires - now).total_seconds()))
+                    claims.append(
+                        fleet_command_deck.Claim(
+                            target=str(row["target"]),
+                            owner_node=str(row["owner_node"]),
+                            owner_conductor=str(row["owner_conductor"] or ""),
+                            ttl_remaining=ttl_remaining,
+                        )
+                    )
+                outcomes = fleet_command_deck.fetch_outcomes(conn, outcome_window=frozen_deck.outcome_window)
+                failed_outcomes = fleet_command_deck.fetch_failed_outcomes(
+                    conn, now=now, lookback_seconds=frozen_deck.failed_lookback_seconds
+                )
+                # Only unrevoked enrollments feed the label/enrolled mapping.
+                enrolled_labels = {
+                    node["node_id"]: str(node["label"] or "")
+                    for node in list_nodes(conn)
+                    if node.get("revoked_at") is None
+                }
+                station_ids = [station.node_id for station in frozen_deck.stations]
+                last_heard = fleet_command_deck.fetch_last_heard(conn, station_ids)
+                observers = fleet_command_deck.fetch_observers(conn, frozenset(station_ids))
+            except sqlite3.Error as exc:
+                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
+                return
+            finally:
+                conn.close()
+            view = fleet_command_deck.build_view(
+                frozen_deck,
+                live_runs=live_runs,
+                claims=claims,
+                enrolled_labels=enrolled_labels,
+                last_heard=last_heard,
+                outcomes=outcomes,
+                failed_outcomes=failed_outcomes,
+                observers=observers,
+                now=now,
+            )
+            nonce = secrets.token_urlsafe(16)
+            page = render(view, nonce=nonce, now=now)
+            self._send_html(200, page, nonce=nonce)
+
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             path, _, query = self.path.partition("?")
             if path == "/health":
                 self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
+                return
+            if path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
+                self._serve_deck(path, query)
                 return
             if path == "/" or path.startswith(_DASHBOARD_PREFIX):
                 self._serve_dashboard(path, query)
@@ -1247,7 +1347,13 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
 
 
 def make_server(
-    host: str, port: int, db_path: Path, token: str, *, allow_admin_writes: bool = False
+    host: str,
+    port: int,
+    db_path: Path,
+    token: str,
+    *,
+    allow_admin_writes: bool = False,
+    deck_config_path: Path | None = None,
 ) -> ThreadingHTTPServer:
     """Build (but do not serve) the hub HTTPServer; used by tests.
 
@@ -1255,14 +1361,29 @@ def make_server(
     exists, so no request can ever arrive first (#1161). Request handlers then
     use non-migrating connections (``open_db``), keeping token lookup live per
     request. Raises ``FleetHubError``/``sqlite3.Error`` on an unusable or
-    too-new database.
+    too-new database. ``deck_config_path`` is loaded exactly once, before the
+    socket is bound; an invalid file raises ``DeckConfigError`` without
+    creating anything.
     """
+    if deck_config_path is not None:
+        deck_config = fleet_command_deck.load_config(Path(deck_config_path))
+    else:
+        deck_config = fleet_command_deck.DeckConfig()
     init_db(Path(db_path)).close()
-    return ThreadingHTTPServer((host, port), make_handler(token, Path(db_path), allow_admin_writes=allow_admin_writes))
+    return ThreadingHTTPServer(
+        (host, port),
+        make_handler(token, Path(db_path), allow_admin_writes=allow_admin_writes, deck_config=deck_config),
+    )
 
 
 def run(
-    *, host: str | None, port: int, db_path: Path, token_file: Path | None, allow_admin_writes: bool = False
+    *,
+    host: str | None,
+    port: int,
+    db_path: Path,
+    token_file: Path | None,
+    allow_admin_writes: bool = False,
+    deck_config_path: Path | None = None,
 ) -> int:
     if not host:
         print("error: --host is required (the hub never binds all interfaces by default)", file=sys.stderr)
@@ -1273,8 +1394,15 @@ def run(
         print(f"error: {exc}", file=sys.stderr)
         return 2
     try:
-        server = make_server(host, port, Path(db_path).expanduser(), token, allow_admin_writes=allow_admin_writes)
-    except (FleetHubError, sqlite3.Error) as exc:
+        server = make_server(
+            host,
+            port,
+            Path(db_path).expanduser(),
+            token,
+            allow_admin_writes=allow_admin_writes,
+            deck_config_path=deck_config_path,
+        )
+    except (FleetHubError, sqlite3.Error, fleet_command_deck.DeckConfigError) as exc:
         # Startup migration is the one place the hub touches the schema: if
         # it cannot be done, refuse to serve rather than 500-ing every request.
         print(f"error: {exc}", file=sys.stderr)
