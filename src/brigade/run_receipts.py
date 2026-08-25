@@ -79,6 +79,8 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
                 entry["failure"] = failure.payload()
         if result.transport_warning is not None:
             entry["transport_warning"] = dict(result.transport_warning)
+        if result.output_truncated:
+            entry["output_truncated"] = True
         if result.thread_id is not None:
             entry["thread_id"] = result.thread_id
             entry["status"] = result.status

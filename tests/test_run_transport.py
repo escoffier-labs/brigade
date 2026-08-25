@@ -282,6 +282,78 @@ def test_finish_truncates_worker_text_before_envelope_emit(monkeypatch, tmp_path
     assert len((worker.stdout or "").encode("utf-8")) <= proc.MAX_CAPTURE_BYTES
 
 
+def test_over_cap_worker_result_preserved_without_poisoning_seat(monkeypatch, tmp_path):
+    """#1144: an over-cap app-server stream keeps its bounded result and never quarantines the seat."""
+    from brigade.seat_health_policy import SeatQuarantineState
+
+    quarantine_state = SeatQuarantineState()
+    results, prompts = _dispatch(
+        monkeypatch,
+        tmp_path,
+        [Assignment(worker="coder", task="implement it")],
+        {
+            "coder": [
+                agents.AgentResult(
+                    text="final structured answer",
+                    ok=False,
+                    detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"[:200],
+                    failure_phase="harness",
+                    failure_kind="output-limit",
+                    status="failed",
+                    transport="codex-app-server",
+                )
+            ]
+        },
+        quarantine_state=quarantine_state,
+    )
+    worker = results[0]
+    assert worker.ok is True
+    assert worker.text == "final structured answer"
+    assert worker.output_truncated is True
+    assert "byte limit" in worker.detail
+    assert prompts == ["implement it"]
+    assert not quarantine_state.is_quarantined("coder")
+
+    from brigade.run_receipts import worker_payload_one
+
+    payload = worker_payload_one(worker)
+    assert payload["ok"] is True
+    assert payload["output_truncated"] is True
+    assert payload["text"] == "final structured answer"
+
+
+def test_over_cap_worker_result_without_text_fails_once_without_retry_or_quarantine(monkeypatch, tmp_path):
+    """#1144: an over-cap salvage with no text is a typed failure, not a retry/quarantine trigger."""
+    from brigade.seat_health_policy import SeatQuarantineState
+
+    quarantine_state = SeatQuarantineState()
+    results, prompts = _dispatch(
+        monkeypatch,
+        tmp_path,
+        [Assignment(worker="coder", task="implement it")],
+        {
+            "coder": [
+                agents.AgentResult(
+                    text="",
+                    ok=False,
+                    detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"[:200],
+                    failure_phase="harness",
+                    failure_kind="output-limit",
+                    status="failed",
+                    transport="codex-app-server",
+                )
+            ]
+        },
+        quarantine_state=quarantine_state,
+    )
+    worker = results[0]
+    assert worker.ok is False
+    assert worker.failure_kind == "output-limit"
+    assert worker.output_truncated is True
+    assert prompts == ["implement it"]
+    assert not quarantine_state.is_quarantined("coder")
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
 def test_worker_output_overflow_kills_group_and_caps_all_artifacts(tmp_path, monkeypatch):
     from brigade.run_receipts import worker_payload, write_agent_logs, write_worker_logs
