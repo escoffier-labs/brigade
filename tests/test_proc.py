@@ -662,6 +662,7 @@ def test_run_delimited_truncation_boundary_is_exact_and_excludes_partial_field()
     assert one_short.truncated is True
     assert one_short.items == ["a" * 10]
     assert one_short.stdout_bytes == len(payload) - 1
+    assert one_short.code == 0
 
 
 def test_run_delimited_reports_timeout_with_code_124():
