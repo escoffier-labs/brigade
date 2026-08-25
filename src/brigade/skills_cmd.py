@@ -738,16 +738,29 @@ def lint(
     return 0 if payload["valid"] else 1
 
 
-def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
+def _evaluate_install_dir(workspace: Path, harness: str, skill_id: str) -> tuple[Path, bool]:
+    """Return ``(projected_install_dir, escapes_workspace)`` without raising.
+
+    Read-only callers (fleet status) use this to describe a copy that resolves
+    outside the workspace instead of treating it as a writable destination.
+    """
     if harness == "hermes":
         # Real Hermes reads skills from its own data dir (auto-discovered as a
         # local skill), not the repo. Install there so it actually takes effect.
-        return _hermes_skills_root() / _slug(skill_id)
+        return _hermes_skills_root() / _slug(skill_id), False
     adapter = _adapter_map(workspace)[harness]
     install_dir = workspace / str(adapter["install_path"]).format(skill_id=skill_id)
     workspace_resolved = workspace.resolve()
     resolved = install_dir.resolve()
-    if ".." in install_dir.parts or resolved == workspace_resolved or not resolved.is_relative_to(workspace_resolved):
+    escapes = (
+        ".." in install_dir.parts or resolved == workspace_resolved or not resolved.is_relative_to(workspace_resolved)
+    )
+    return install_dir, escapes
+
+
+def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
+    install_dir, escapes = _evaluate_install_dir(workspace, harness, skill_id)
+    if escapes:
         raise ValueError(f"skill install path escapes workspace: {install_dir}")
     return install_dir
 
@@ -2546,7 +2559,8 @@ def _fleet_copy_keys(target: Path) -> list[tuple[str, str]]:
                 if _skill_md_path(path).is_file():
                     keys.add((_slug(path.name), harness))
         for skill_id in skill_ids:
-            if _install_dir(target, harness, skill_id).exists():
+            install_dir, escapes = _evaluate_install_dir(target, harness, skill_id)
+            if not escapes and install_dir.exists():
                 keys.add((skill_id, harness))
     return sorted(keys)
 
@@ -2615,6 +2629,28 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
     receipts = _fleet_receipts(target)
     for skill_id, harness in _fleet_copy_keys(target):
         receipt = receipts.get((skill_id, harness), {})
+        install_dir, escapes = _evaluate_install_dir(target, harness, skill_id)
+        if escapes:
+            copies.append(
+                {
+                    "skill_id": skill_id,
+                    "harness": harness,
+                    "installed_path": str(install_dir),
+                    "status": "external",
+                    "drift": {
+                        "overall": "unknown",
+                        "source": "unknown",
+                        "render": "unknown",
+                        "local_edit": "unknown",
+                        "receipt_known": False,
+                        "content_changed": False,
+                    },
+                    "source": receipt.get("source") if isinstance(receipt.get("source"), dict) else None,
+                    "supported": None,
+                    "update_command": None,
+                }
+            )
+            continue
         selector = _fleet_source_selector(skill_id, receipt)
         lint_payload = _lint_payload(target, selector) if selector is not None else {"valid": False}
         if not lint_payload.get("valid"):
@@ -2622,7 +2658,7 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
                 {
                     "skill_id": skill_id,
                     "harness": harness,
-                    "installed_path": str(_install_dir(target, harness, skill_id)),
+                    "installed_path": str(install_dir),
                     "status": "unknown",
                     "drift": {
                         "overall": "unknown",
@@ -2644,7 +2680,7 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
         supported = metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else []
         source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
         supported_state = harness in supported or not supported
-        installed_dir = _install_dir(target, harness, skill_id)
+        installed_dir = install_dir
         rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, harness)
         drift = _drift_payload(
             target=target,
@@ -2702,7 +2738,7 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
     copies.sort(key=lambda row: (str(row["skill_id"]), str(row["harness"])))
     counts = {
         state: sum(row["status"] == state for row in copies)
-        for state in ("current", "stale", "missing", "unsupported", "unknown")
+        for state in ("current", "stale", "missing", "unsupported", "unknown", "external")
     }
     return {
         "schema_version": 1,
@@ -2713,6 +2749,7 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
         "missing_count": counts["missing"],
         "unsupported_count": counts["unsupported"],
         "unknown_count": counts["unknown"],
+        "external_count": counts["external"],
         "copies": copies,
         "stale": [row for row in copies if row["status"] in {"stale", "missing"}],
     }
@@ -2728,7 +2765,8 @@ def fleet_status(*, target: Path, json_output: bool = False) -> int:
     print(
         f"checked={payload['checked_count']} current={payload['current_count']} "
         f"stale={payload['stale_count']} missing={payload['missing_count']} "
-        f"unsupported={payload['unsupported_count']} unknown={payload['unknown_count']}"
+        f"unsupported={payload['unsupported_count']} unknown={payload['unknown_count']} "
+        f"external={payload['external_count']}"
     )
     for row in (item for item in payload["copies"] if item["status"] != "current"):
         support = " supported=false" if row.get("supported") is False else ""

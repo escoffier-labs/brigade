@@ -1185,6 +1185,66 @@ def test_skills_fleet_does_not_repair_missing_copy_with_legacy_receipt(tmp_path)
     assert row["update_command"] is None
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_skills_fleet_status_reports_external_symlinked_skill(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    _write_skill(outside, name="external-example")
+    skills_root = workspace / ".claude" / "skills"
+    skills_root.mkdir(parents=True)
+    (skills_root / "external-example").symlink_to(outside / "external-example", target_is_directory=True)
+
+    payload = skills_cmd._fleet_status_payload(workspace)
+    row = next(item for item in payload["copies"] if item["skill_id"] == "external-example")
+
+    assert row["harness"] == "claude"
+    assert row["status"] == "external"
+    assert row["installed_path"] == str(skills_root / "external-example")
+    assert row["drift"]["receipt_known"] is False
+    assert row["update_command"] is None
+    assert payload["checked_count"] == 1
+    assert payload["external_count"] == 1
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_skills_fleet_status_survives_installed_copy_swapped_for_external_symlink(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    assert skills_cmd.install(workspace=workspace, skill="brigade-work", harness="cursor", json_output=True) == 0
+    capsys.readouterr()
+    installed = workspace / ".cursor" / "skills" / "brigade-work"
+    shutil.rmtree(installed)
+    installed.symlink_to(outside, target_is_directory=True)
+
+    assert skills_cmd.fleet_status(target=workspace) == 0
+    out = capsys.readouterr().out
+    assert "external=1" in out
+    assert "brigade-work [cursor] external" in out
+
+    payload = skills_cmd._fleet_status_payload(workspace)
+    row = next(item for item in payload["copies"] if item["skill_id"] == "brigade-work")
+    assert row["status"] == "external"
+    assert row["source"] is not None
+    assert row["source"]["kind"] == "brigade-bundle"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_install_dir_still_rejects_external_symlink_target(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = workspace / ".claude" / "skills" / "example"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="escapes workspace"):
+        skills_cmd._install_dir(workspace, "claude", "example")
+
+
 def test_skills_fleet_does_not_guess_source_for_malformed_v2_receipt(tmp_path, capsys):
     assert skills_cmd.install(workspace=tmp_path, skill="brigade-work", harness="cursor", json_output=True) == 0
     capsys.readouterr()
