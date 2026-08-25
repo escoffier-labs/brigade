@@ -89,6 +89,7 @@ def test_verify_focused_forwards_only_selected_tests(tmp_path, monkeypatch):
 def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, monkeypatch):
     import fcntl
 
+    monkeypatch.delenv("BRIGADE_VERIFY_LOCK_HELD", raising=False)
     tool_dir, log_path = _fake_tool_dir(tmp_path)
     lock_path = tmp_path / "full.lock"
     lock_path.touch()
@@ -115,6 +116,7 @@ def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, 
 
 @pytest.mark.skipif(os.name == "nt", reason="Bash verification entrypoint")
 def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
+    monkeypatch.delenv("BRIGADE_VERIFY_LOCK_HELD", raising=False)
     tool_dir, log_path = _fake_tool_dir(tmp_path)
     flock_dir = tmp_path / "flock-bin"
     flock_dir.mkdir()
@@ -153,6 +155,7 @@ def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
 def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeypatch):
+    monkeypatch.delenv("BRIGADE_VERIFY_LOCK_HELD", raising=False)
     holder_root = tmp_path / "holder"
     second_root = tmp_path / "second"
     holder_root.mkdir()
