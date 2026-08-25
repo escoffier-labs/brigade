@@ -72,10 +72,13 @@ fails closed rather than running unprotected on bad credentials.
 
 from __future__ import annotations
 
+import _thread
 import json
 import logging
 import os
 import re
+import stat
+import tempfile
 import threading
 import time
 import urllib.error
@@ -272,6 +275,16 @@ def resolve_node_id(base_path: Path | None = None) -> str:
 
 # --- transport ---------------------------------------------------------------
 
+# Hub traffic never goes through a configured proxy (#1154): the bearer token
+# must not be handed to HTTP_PROXY/HTTPS_PROXY before it reaches the (plain
+# HTTP, tailnet-bound) hub. An explicit empty ProxyHandler disables all
+# proxy resolution for these requests regardless of environment.
+_HUB_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _hub_open(request: urllib.request.Request, *, timeout: float):
+    return _HUB_OPENER.open(request, timeout=timeout)
+
 
 def _post_events_blocking(hub_url: str, token: str, body: Any, *, timeout: float) -> None:
     request = urllib.request.Request(
@@ -281,7 +294,7 @@ def _post_events_blocking(hub_url: str, token: str, body: Any, *, timeout: float
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _hub_open(request, timeout=timeout) as response:
             if response.status != 200:
                 raise FleetClientError(f"hub returned HTTP {response.status}")
     except urllib.error.HTTPError as exc:
@@ -333,6 +346,43 @@ def spool_path(node_id: str) -> Path:
     return brigade_home() / SPOOL_DIRNAME / f"{safe_node_id}.jsonl"
 
 
+# Spool files are private (#1154): refuse a symlinked path where the OS can
+# tell us (O_NOFOLLOW is POSIX-only; Windows opens through the link target
+# but its per-user homes are not world-writable in the same way).
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# Regular-file opens ignore O_NONBLOCK, but it makes an open on a FIFO or
+# device fail fast instead of blocking the journal writer forever.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
+def _ensure_private_dir(path: Path) -> None:
+    """Create ``path`` (and parents) and force the spool directory to 0700,
+    so umask or an inherited permissive mode cannot expose event metadata."""
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:  # pragma: no cover - Windows/POSIX-only modes
+        pass
+
+
+def _open_private(path: Path, flags: int) -> int:
+    """Open a spool file no-follow and 0600, refusing non-regular files.
+
+    A symlink at the spool path raises OSError (O_NOFOLLOW) instead of
+    following it; anything that is not a regular file after the open (a
+    FIFO a local attacker swapped in) is closed and refused.
+    """
+    fd = os.open(str(path), flags | _O_NOFOLLOW | _O_CLOEXEC | _O_NONBLOCK, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise FleetClientError(f"fleet spool {path} is not a regular file")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
 @contextmanager
 def _spool_lock(path: Path) -> Iterator[None]:
     """Cross-process + cross-thread guard for one node's spool.
@@ -341,10 +391,10 @@ def _spool_lock(path: Path) -> Iterator[None]:
     (``fcntl.flock`` on an adjacent lock file) with an ``msvcrt.locking``
     branch so the same guarantee holds on Windows.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(path.parent)
     lock_path = path.with_name(path.name + ".lock")
     with _SPOOL_PROCESS_LOCK:
-        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | _O_NOFOLLOW | _O_CLOEXEC, 0o600)
         locked = False
         try:
             if fcntl is not None:
@@ -377,8 +427,10 @@ def _encode(event: dict[str, Any]) -> str:
 def _read_spool(path: Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+        fd = _open_private(path, os.O_RDONLY)
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, FleetClientError):
         return events
     for line in text.splitlines():
         line = line.strip()
@@ -394,16 +446,26 @@ def _read_spool(path: Path) -> list[dict[str, Any]]:
 
 
 def _write_spool_atomic(path: Path, events: list[dict[str, Any]]) -> None:
-    """Replace the spool contents atomically; remove it when empty."""
+    """Replace the spool contents atomically; remove it when empty.
+
+    The temp file is created exclusive with an unpredictable name in the
+    spool directory (#1154), never a predictable ``.tmp`` path a local
+    process could pre-create or symlink to.
+    """
     if not events:
         path.unlink(missing_ok=True)
         return
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        handle.write("\n".join(_encode(e) for e in events) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(_encode(e) for e in events) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _spool_append_locked(path: Path, event: dict[str, Any]) -> None:
@@ -433,8 +495,13 @@ def _spool_append_locked(path: Path, event: dict[str, Any]) -> None:
         _LOG.warning("fleet spool %s exceeded %d bytes; dropped %d oldest event(s)", path, MAX_SPOOL_BYTES, dropped)
         _write_spool_atomic(path, kept)
         return
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
+    try:
+        fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(line)
+    except FleetClientError:
+        _LOG.warning("fleet spool %s refused: not a regular file", path)
+        return
 
 
 def _flush_locked(
@@ -617,7 +684,7 @@ def fetch_status(*, hub_url: str | None = None, include_all: bool = False) -> li
     url = hub.rstrip("/") + ("/status?all=1" if include_all else "/status")
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
     try:
-        with urllib.request.urlopen(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
         raise FleetClientError(f"fleet hub status failed: {exc}") from exc
@@ -712,7 +779,7 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _hub_open(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code in (400, 401, 403, 409):
@@ -905,7 +972,7 @@ def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> li
     url = hub.rstrip("/") + ("/claims?all=1" if include_all else "/claims")
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
     try:
-        with urllib.request.urlopen(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
         raise FleetClientError(f"fleet hub claims failed: {exc}") from exc
@@ -936,7 +1003,7 @@ def _admin_request(path: str, body: dict[str, Any] | None, *, what: str) -> dict
         hub.rstrip("/") + path, data=data, headers=headers, method="POST" if data else "GET"
     )
     try:
-        with urllib.request.urlopen(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
@@ -977,6 +1044,20 @@ def _claim_renew_interval(ttl_seconds: int) -> float:
 ORPHAN_RELEASE_RETRY_SECONDS = 30.0
 EXIT_ORPHAN_RELEASE_RETRIES = 2
 
+# What happens when the heartbeat learns another owner holds the claim
+# (#1152): "abort" (default) interrupts the run's dispatch so two machines
+# never keep working one repo unarbitrated; "continue" is the documented
+# opt-out for solo machines, via BRIGADE_FLEET_CLAIM_LOSS=continue.
+CLAIM_LOSS_POLICIES = ("abort", "continue")
+CLAIM_LOSS_ENV = "BRIGADE_FLEET_CLAIM_LOSS"
+
+
+def _claim_loss_policy(explicit: str | None = None) -> str:
+    if explicit in CLAIM_LOSS_POLICIES:
+        return explicit
+    value = os.environ.get(CLAIM_LOSS_ENV, "").strip().lower()
+    return value if value in CLAIM_LOSS_POLICIES else "abort"
+
 
 def _schedule_orphan_release(
     target: str, *, node_id: str, holder: str, conductor: str | None, ttl_seconds: int
@@ -987,16 +1068,18 @@ def _schedule_orphan_release(
     alone it would block every other machine for the full TTL. A daemon
     thread retries ``release`` until the hub gives any definitive answer
     (released, already gone, or held by someone else) or the TTL window
-    passes and expiry makes the point moot.
+    passes and expiry makes the point moot. The first attempt happens
+    immediately (#1157): a short-lived ``brigade run`` that lost its acquire
+    response must release before process exit kills this daemon thread.
     """
 
     def _loop() -> None:
         deadline = time.monotonic() + ttl_seconds
         while time.monotonic() < deadline:
-            time.sleep(min(ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
             outcome = release_claim(target, node_id=node_id, holder=holder, conductor=conductor)
             if outcome.reason != "hub-unavailable":
                 return
+            time.sleep(min(ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
 
     threading.Thread(target=_loop, name="brigade-fleet-claim-orphan-release", daemon=True).start()
 
@@ -1011,6 +1094,8 @@ def repo_claim(
     lock_owner: Mapping[str, object] | None = None,
     supersede_dead_owner: Mapping[str, object] | None = None,
     on_credential_failure: Callable[[str | None], None] | None = None,
+    on_claim_lost: Callable[[str | None], None] | None = None,
+    claim_loss_policy: str | None = None,
 ) -> Iterator[ClaimDecision]:
     """Hold a hub-arbitrated claim on ``target`` for the duration of the block.
 
@@ -1038,6 +1123,16 @@ def repo_claim(
     without one the credential refusal is logged loudly and the guarded block
     keeps running under the local lock: library callers never get signals or
     process-global behavior from this context manager.
+
+    Lost ownership (#1152) fails closed by default: when the heartbeat learns
+    another owner holds the claim (a renew answered 409 held-by-another, or
+    the re-acquire refused as ``held``), it logs once and aborts — with no
+    ``on_claim_lost`` callback the main thread is interrupted through the
+    same path as Ctrl-C, unwinding the active dispatch so two machines never
+    keep working one repo unarbitrated. Pass ``on_claim_lost`` to react
+    yourself, or set ``claim_loss_policy="continue"`` / the environment
+    variable ``BRIGADE_FLEET_CLAIM_LOSS=continue`` as the documented opt-out
+    for solo machines, restoring the old log-and-continue behavior.
 
     ``lock_owner`` is the ``run.lock`` owner payload of the lease this run
     holds; it is recorded on the claim row (and re-sent by the heartbeat's
@@ -1171,11 +1266,39 @@ def repo_claim(
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
+            if _claim_loss_policy(claim_loss_policy) == "continue":
+                # Documented opt-out (#1152) for solo machines: the old
+                # log-and-keep-going behavior, still loud.
+                _LOG.warning(
+                    "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock",
+                    target,
+                    outcome.reason,
+                )
+                return
+            if outcome.reason != "held":
+                # No live claim anywhere (e.g. the re-acquire raced a
+                # concurrent release): nothing to arbitrate, so this keeps
+                # the old log-and-stop behavior rather than interrupting.
+                _LOG.warning(
+                    "fleet claim heartbeat for %s lost the claim (%s); continuing on the local run lock",
+                    target,
+                    outcome.reason,
+                )
+                return
             _LOG.warning(
-                "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock",
+                "fleet claim heartbeat for %s lost ownership (%s); another owner holds the claim — "
+                "aborting the guarded run (opt out with %s=continue)",
                 target,
                 outcome.reason,
+                CLAIM_LOSS_ENV,
             )
+            if on_claim_lost is not None:
+                try:
+                    on_claim_lost(outcome.reason)
+                except Exception:
+                    _LOG.warning("fleet claim-lost callback raised; the run keeps unwinding", exc_info=True)
+            else:
+                _thread.interrupt_main()
             return
 
     heartbeat = threading.Thread(target=_renew_loop, name="brigade-fleet-claim-renew", daemon=True)
@@ -1191,12 +1314,22 @@ def repo_claim(
         # guard above.
         heartbeat.join(timeout=2 * CLAIM_TIMEOUT_SECONDS + max(1.0, CLAIM_TIMEOUT_SECONDS))
         release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-        if pending_orphan_release.is_set() and release_outcome.reason == "hub-unavailable":
+        if pending_orphan_release.is_set() and release_outcome.reason in ("hub-unavailable", "missing"):
             # The CLI normally exits as soon as this context unwinds, so a
             # daemon retry would die before its first request. Keep the retry
             # budget inline and short: two additional calls, each already
-            # bounded by CLAIM_TIMEOUT_SECONDS.
+            # bounded by CLAIM_TIMEOUT_SECONDS. A definitive "missing" is
+            # retried too (#1157): an abandoned re-acquire may still be in
+            # flight and commit its row right after this release was told
+            # the claim is gone, which would leak it for the full TTL.
             for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
                 release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-                if release_outcome.reason != "hub-unavailable":
+                if release_outcome.reason not in ("hub-unavailable", "missing"):
                     break
+            if release_outcome.reason in ("hub-unavailable", "missing"):
+                _LOG.warning(
+                    "fleet claim on %s: exit cleanup could not confirm the orphaned claim's release "
+                    "(last answer: %s); the row lives until its TTL expires",
+                    target,
+                    release_outcome.reason,
+                )
