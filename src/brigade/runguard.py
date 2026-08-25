@@ -40,6 +40,17 @@ _NONTERMINAL_RUN_STATUSES = frozenset(
 # explicit `brigade runs recover`.
 STALE_LOCK_RECONCILE_MAX_AGE = timedelta(hours=24)
 
+# Untracked-path enumeration streams under its own budget (see _untracked_files)
+# instead of the generic 1 MiB child-output cap, so big worktrees keep pre-run
+# ground truth (issue #1165).
+_UNTRACKED_ENUM_BUDGET_BYTES = proc.MAX_DELIMITED_BYTES
+_UNTRACKED_ENUM_TIMEOUT_SECONDS = 120.0
+
+# Receipt copies of a snapshot summarize path sets beyond this many entries so
+# run.json and pre-run-snapshot.json stay bounded; totals make the truncation
+# explicit. Comparison logic uses the in-memory snapshot, never the receipt.
+SNAPSHOT_RECEIPT_PATH_CAP = 200
+
 
 class _RunLockClock:
     monotonic = staticmethod(_monotonic)
@@ -1356,20 +1367,31 @@ def capture_pre_run_snapshot(cwd: Path | None) -> PreRunSnapshot | None:
 
 
 def snapshot_payload(snapshot: PreRunSnapshot | None) -> dict[str, object] | None:
+    """Receipt copy of a snapshot, summarizing large path sets.
+
+    Paths and fingerprints beyond SNAPSHOT_RECEIPT_PATH_CAP are summarized via
+    ``*_total`` counts so run.json and pre-run-snapshot.json stay bounded on
+    big worktrees. Worker-change attribution always uses the in-memory
+    snapshot, never this receipt.
+    """
     if snapshot is None:
         return None
+    tracked_shown = list(snapshot.tracked_dirty)[:SNAPSHOT_RECEIPT_PATH_CAP]
+    untracked_shown = list(snapshot.untracked)[:SNAPSHOT_RECEIPT_PATH_CAP]
     return {
         "schema": "brigade.pre_run_snapshot.v1",
         "branch": snapshot.branch,
         "head": snapshot.head,
-        "tracked_dirty_files": list(snapshot.tracked_dirty_paths),
+        "tracked_dirty_files": [path for path, _fingerprint in tracked_shown],
         # Content-sensitive fingerprints per path so the persisted snapshot can
         # audit and reproduce the worker-change comparison: a reviewer can re-run
         # the baseline-vs-final fingerprint diff without recapturing the tree.
         # Only one-way digests are stored; raw file contents are never persisted.
-        "tracked_dirty_fingerprints": dict(snapshot.tracked_dirty),
-        "untracked_files": list(snapshot.untracked_paths),
-        "untracked_fingerprints": dict(snapshot.untracked),
+        "tracked_dirty_fingerprints": dict(tracked_shown),
+        "untracked_files": [path for path, _fingerprint in untracked_shown],
+        "untracked_fingerprints": dict(untracked_shown),
+        "tracked_dirty_files_total": len(snapshot.tracked_dirty),
+        "untracked_files_total": len(snapshot.untracked),
     }
 
 
@@ -1486,12 +1508,34 @@ def _tracked_diff(cwd: Path) -> tuple[str, int]:
     return result.stdout, count
 
 
-def _untracked_files(cwd: Path) -> list[str]:
-    result = _git(cwd, "ls-files", "--others", "--exclude-standard")
+def _untracked_files(cwd: Path, *, max_bytes: int | None = None) -> list[str]:
+    """List untracked paths via NUL-delimited streaming enumeration.
+
+    Untracked-path listings are trusted git metadata whose size scales with
+    repository contents, so they stream through proc.run_delimited under a
+    dedicated budget instead of the generic 1 MiB child-output cap. A large
+    worktree keeps its pre-run ground truth instead of failing the run before
+    dispatch (issue #1165). Unrelated commands keep the generic cap.
+    """
+    result = proc.run_delimited(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=cwd,
+        timeout=_UNTRACKED_ENUM_TIMEOUT_SECONDS,
+        max_bytes=max_bytes,
+    )
+    if result.timed_out:
+        raise RunGuardError(
+            f"failed to list untracked files: git ls-files timed out after {_UNTRACKED_ENUM_TIMEOUT_SECONDS}s"
+        )
+    if result.truncated:
+        budget = _UNTRACKED_ENUM_BUDGET_BYTES if max_bytes is None else max_bytes
+        raise RunGuardError(
+            f"failed to list untracked files: untracked-path list exceeded {budget} byte enumeration limit"
+        )
     if result.code != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
+        detail = result.stderr.strip() or "git ls-files failed"
         raise RunGuardError(f"failed to list untracked files: {detail}")
-    return sorted(line for line in result.stdout.splitlines() if line.strip())
+    return sorted(item for item in result.items if item)
 
 
 def _untracked_diff(cwd: Path, relpath: str) -> str:

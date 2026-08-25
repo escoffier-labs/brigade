@@ -600,3 +600,119 @@ def test_bound_text_pair_stays_at_or_below_cap():
     overshot = ("A" * (proc.MAX_CAPTURE_BYTES - 1)) + "\ufffd"
     stdout, stderr = proc.bound_text_pair(overshot, "E", proc.MAX_CAPTURE_BYTES)
     assert len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")) <= proc.MAX_CAPTURE_BYTES
+
+
+def test_run_delimited_splits_nul_fields():
+    result = proc.run_delimited([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'a\\x00bb\\x00ccc\\x00')"])
+
+    assert result.code == 0
+    assert result.items == ["a", "bb", "ccc"]
+    assert result.truncated is False
+    assert result.timed_out is False
+
+
+def test_run_delimited_keeps_final_field_without_trailing_delimiter():
+    result = proc.run_delimited([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x\\x00y')"])
+
+    assert result.code == 0
+    assert result.items == ["x", "y"]
+
+
+def test_run_delimited_decodes_multibyte_char_across_read_chunks():
+    # A UTF-8 sequence straddling the internal read-chunk boundary must decode
+    # as one character, not as replacement garbage from per-chunk decoding.
+    payload = b"a" * 4095 + "é".encode() + b"\x00z"
+    result = proc.run_delimited([sys.executable, "-c", f"import sys; sys.stdout.buffer.write({payload!r})"])
+
+    assert result.code == 0
+    assert result.items == ["a" * 4095 + "é", "z"]
+
+
+def test_run_delimited_stops_child_over_budget_and_flags_truncation():
+    result = proc.run_delimited(
+        [sys.executable, "-c", "import sys,time; sys.stdout.buffer.write(b'x'*100000); time.sleep(5)"],
+        max_bytes=1024,
+    )
+
+    assert result.truncated is True
+    assert result.stdout_bytes <= 1024
+    assert result.code != 0
+    assert "streaming output exceeded 1024 byte delimiter-split limit" in result.stderr
+
+
+def test_run_delimited_truncation_boundary_is_exact_and_excludes_partial_field():
+    payload = b"a" * 10 + b"\x00" + b"b" * 10 + b"\x00"
+
+    complete = proc.run_delimited(
+        [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({payload!r})"],
+        max_bytes=len(payload),
+    )
+    assert complete.truncated is False
+    assert complete.items == ["a" * 10, "b" * 10]
+    assert complete.stdout_bytes == len(payload)
+
+    one_short = proc.run_delimited(
+        [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({payload!r})"],
+        max_bytes=len(payload) - 1,
+    )
+    # The final field lacks its trailing NUL inside the budget, so only
+    # complete fields are retained and the raw byte count stops at the cap.
+    # The child already exited successfully here, so its exit code stands
+    # (same as proc.run overflow); callers must check truncated first.
+    assert one_short.truncated is True
+    assert one_short.items == ["a" * 10]
+    assert one_short.stdout_bytes == len(payload) - 1
+
+
+def test_run_delimited_reports_timeout_with_code_124():
+    result = proc.run_delimited([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.3)
+
+    assert result.timed_out is True
+    assert result.code == 124
+    assert "timeout after 0.3s" in result.stderr
+
+
+def test_run_delimited_rejects_non_single_byte_delimiter():
+    with pytest.raises(ValueError, match="delimiter must be exactly one byte"):
+        proc.run_delimited(["true"], delimiter=b"")
+
+
+def test_run_delimited_reports_missing_command():
+    result = proc.run_delimited(["definitely-not-a-real-binary-xyz"])
+
+    assert result.code == 127
+    assert result.items == []
+    assert "command not found" in result.stderr
+
+
+def test_generic_capture_cap_still_applies_to_plain_run():
+    # The delimited streaming budget is separate: unrelated commands keep the
+    # generic MAX_CAPTURE_BYTES cap (issue #1165 acceptance).
+    result = proc.run([sys.executable, "-c", "import sys; sys.stdout.write('x' * (2 * 1024 * 1024))"])
+
+    assert result.output_limit_exceeded is True
+
+
+def test_run_delimited_flags_stderr_over_capture_limit():
+    result = proc.run_delimited(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.write('e' * (2 * 1024 * 1024)); sys.stderr.flush()",
+        ],
+    )
+
+    assert result.code == 0
+    assert result.stderr_truncated is True
+    assert result.stderr_bytes <= proc.MAX_CAPTURE_BYTES
+    assert f"stderr capture exceeded {proc.MAX_CAPTURE_BYTES} byte limit" in result.stderr
+
+
+def test_run_delimited_stderr_under_limit_is_not_truncated():
+    result = proc.run_delimited(
+        [sys.executable, "-c", "import sys; sys.stderr.write('warn\\n')"],
+    )
+
+    assert result.code == 0
+    assert result.stderr_truncated is False
+    assert result.stderr == "warn\n"
