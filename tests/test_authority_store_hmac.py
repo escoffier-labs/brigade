@@ -828,6 +828,47 @@ def test_fresh_unsigned_target_has_no_marker(tmp_path: Path) -> None:
     assert identity is None
 
 
+def test_authority_signedness_comes_from_one_verified_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#881: signedness and the verified record must come from the same payload.
+
+    A concurrent same-uid writer swaps the store bytes after the helper's
+    first (verified) read; a second read that only checks envelope_version
+    must not bless the swapped-in envelope.
+    """
+
+    _bind_workspace(tmp_path)
+    item = ledger._make_import("single-read swap probe", kind="task", source="handoff-ingest")
+    _write_g5_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._authority_store_binding_is_verifier_signed(tmp_path) is True
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+
+    store = _store_path(tmp_path)
+    legit_envelope = json.loads(store.read_text(encoding="utf-8"))
+    legit_record = dict(legit_envelope["record"])
+
+    # Same-uid writer replaces the store with an enveloped payload whose MAC
+    # cannot verify and whose receipt binding points at attacker bytes.
+    forged = json.loads(store.read_text(encoding="utf-8"))
+    forged["record"] = dict(forged["record"])
+    forged["record"]["files"] = dict(forged["record"].get("files") or {})
+    forged["record"]["files"][".brigade/scanners/runs/chosen-run/receipt.json"] = {
+        "device": 9,
+        "inode": 9,
+        "sha256": "e" * 64,
+    }
+    store.write_text(json.dumps(forged, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+    # Simulate the race: the helper's first read saw the pre-swap verified record.
+    def _stale_first_read(target: Path) -> tuple[Path, dict]:
+        return store, legit_record
+
+    monkeypatch.setattr(ledger, "_read_external_directory_authority", _stale_first_read)
+
+    assert ledger._authority_store_binding_is_verifier_signed(tmp_path) is False
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
 def test_forged_post_run_receipt_is_rejected_by_legacy_import(tmp_path: Path) -> None:
     """#881 regression: scanner-reproducible receipt bytes bound only by an
     unsigned authority record must not grant a legacy import identity."""

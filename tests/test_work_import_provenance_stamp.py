@@ -2576,6 +2576,76 @@ def test_work_backfill_strips_well_formed_verified_claim(tmp_path: Path):
     assert env["attribution"] == "inferred"
 
 
+def test_alternate_legacy_identity_path_requires_authenticated_proof(tmp_path: Path):
+    """#881: a receipt-stamped row without sidecar or signed store must not
+    suppress an incoming canonical record through the matching source key."""
+    text = "alternate legacy identity probe"
+    canonical_hash = ledger._untrusted_import_canonical_hash({"text": text, "kind": "task"})
+    existing = ledger._make_import(
+        text,
+        kind="task",
+        source="handoff-ingest",
+        metadata={"source_item_id": f"handoff-ingest:{canonical_hash}", "source_fingerprint": canonical_hash},
+    )
+    _write_builtin_scanner_receipt(tmp_path, existing)
+    incoming = ledger._sanitize_untrusted_import_record(
+        {"text": text, "kind": "task", "source": "handoff-ingest", "metadata": {}},
+        importer_source="handoff-ingest",
+    )
+    assert ledger._has_canonical_untrusted_import_identity(incoming)
+    assert not ledger._has_canonical_untrusted_import_identity(existing)
+    assert ledger._legacy_import_source_content_identity(existing, target=tmp_path) is None
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="handoff-ingest",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+
+def test_unsigned_canonical_dedupe_cannot_suppress_incoming(tmp_path: Path):
+    """#881: unsigned sidecar bindings must not suppress a genuine incoming record."""
+
+    text = "unsigned dedupe probe"
+    canonical_hash = ledger._untrusted_import_canonical_hash({"text": text, "kind": "task"})
+    existing = ledger._make_import(
+        text,
+        kind="task",
+        source="learning-loop",
+        metadata={
+            "source_item_key": f"learning-loop:{canonical_hash}",
+            "source_fingerprint": canonical_hash,
+        },
+    )
+    ledger._write_persisted_import_proofs(tmp_path, [existing], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(existing, target=tmp_path)
+    assert not ledger._authority_store_binding_is_verifier_signed(tmp_path)
+    incoming = ledger._sanitize_untrusted_import_record(
+        {"text": text, "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+
 def test_work_backfill_quarantines_injection_hits(tmp_path: Path):
     ledger._write_imports(
         tmp_path,

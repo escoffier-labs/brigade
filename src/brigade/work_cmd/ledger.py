@@ -3258,6 +3258,48 @@ def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | No
     )
 
 
+def _read_verified_authority_snapshot(target: Path | None) -> dict[str, Any] | None:
+    """Read the authority store once and return its record only from a signed payload.
+
+    Signedness and the verified record come from a single read of the same
+    bytes: the raw payload must carry an HMAC envelope and that exact
+    envelope must verify. A concurrent same-uid writer cannot swap bytes
+    between a verified read and an envelope_version re-check.
+    """
+    if target is None:
+        return None
+    path = _directory_authority_store_path(target)
+    try:
+        descriptor = _open_file_nofollow(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError:
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            return None
+        raw = os.read(descriptor, 1024 * 1024)
+    finally:
+        os.close(descriptor)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("envelope_version") != 1
+        or not isinstance(payload.get("record"), dict)
+    ):
+        return None
+    try:
+        record = _unwrap_authority_envelope(path, payload, workspace=target)
+    except OSError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
 def _authority_store_binding_is_verifier_signed(target: Path | None) -> bool:
     """Return whether the external authority record is a verifier-signed HMAC envelope.
 
@@ -3266,26 +3308,28 @@ def _authority_store_binding_is_verifier_signed(target: Path | None) -> bool:
     run exits. Legacy migration may only trust bindings whose authority record
     itself carries a verified HMAC envelope.
     """
-    if target is None:
+    return _read_verified_authority_snapshot(target) is not None
+
+
+def _authenticated_legacy_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
+    """Shared authenticated-legacy predicate: receipt, sidecar, and signed store.
+
+    Every legacy identity path must require a verifier-owned scanner receipt,
+    a persisted proof sidecar, and a signed authority record from one
+    verified snapshot before trusting scanner-reproducible bindings.
+    """
+    if not _has_locally_stamped_import_proof(item, target=target):
         return False
-    try:
-        _path, payload = _read_external_directory_authority(target)
-        raw = _directory_authority_store_path(target).read_bytes()
-        envelope = json.loads(raw)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    if not _has_persisted_import_proof(item, target=target):
         return False
-    return payload is not None and isinstance(envelope, dict) and envelope.get("envelope_version") == 1
+    return _read_verified_authority_snapshot(target) is not None
 
 
 def _legacy_import_source_content_identity(
     item: dict[str, Any], *, target: Path | None = None
 ) -> tuple[str, str, str] | None:
     """Return a legacy identity only when local provenance establishes its source."""
-    if not _has_locally_stamped_import_proof(item, target=target) or not _has_persisted_import_proof(
-        item, target=target
-    ):
-        return None
-    if not _authority_store_binding_is_verifier_signed(target):
+    if not _authenticated_legacy_import_proof(item, target=target):
         return None
     source = item["source"]
     content_identity = _import_content_identity(item)
@@ -4177,11 +4221,15 @@ def _append_import_records(
         identity = _import_source_identity(record)
         if identity is not None and identity in existing_by_source:
             existing_item = existing_by_source[identity]
-            canonical_existing_proof = _has_persisted_import_proof(existing_item, target=target)
+            # Every proof used to suppress an incoming import must be backed
+            # by a signed authority record; unsigned sidecar or receipt
+            # bindings are scanner-reproducible and forgeable (#881).
+            authority_is_signed = _read_verified_authority_snapshot(target) is not None
+            canonical_existing_proof = _has_persisted_import_proof(existing_item, target=target) and authority_is_signed
             canonical_existing_row = _has_canonical_untrusted_import_identity(existing_item)
             canonical_incoming_row = _has_canonical_untrusted_import_identity(record)
             canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row
-            existing_migration_proof = _has_locally_stamped_import_proof(
+            existing_migration_proof = _authenticated_legacy_import_proof(
                 existing_item, target=target
             ) and _import_content_identity(existing_item) == _import_content_identity(record)
             if canonical_existing_row and canonical_incoming_row and not canonical_existing_proof:
