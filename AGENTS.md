@@ -11,19 +11,33 @@ developing Brigade itself; the contributor policy lives in `CONTRIBUTING.md`.
 
 ## Definition of Done
 
+Development slices use the focused gate through Brigade:
+
 ```bash
-./scripts/verify
+brigade work verify run --target . --argv-json '["./scripts/verify-focused","<pytest-selector>"]' --capture brigade-work
 ```
 
-It runs the same gates CI blocks on: ruff lint, ruff format check, the
-version-sync check, mypy, and the full pytest suite with the coverage floor.
-Report the actual result, paste any failure verbatim, and never claim success
-you did not observe.
+`./scripts/verify-focused` runs ruff lint, ruff format check, the version-sync
+check, managed snapshot, template-profile snapshot, mypy, and only the named
+pytest selectors. Report the actual result, paste any failure verbatim, and
+never claim success you did not observe.
+
+Reserve the full coverage gate for pull requests, merges, releases, and
+verification-infrastructure changes. Run it once through Brigade:
+
+```bash
+brigade work verify run --target . --argv-json '["./scripts/verify"]' --capture brigade-work
+```
+
+Do not pass `--no-reuse` for a full gate. Status 75 means another full
+verification is already running for this checkout; it must not be retried
+with a larger timeout. Use `./scripts/verify-focused` or wait for the active
+Brigade receipt.
 
 CI-only jobs still cover work that is slower, platform-oriented, or depends on
 extra checkout/install context: `content-guard`, `repo-metadata`,
 `install-from-source`, `quickstart-smoke`, and `windows-native-acceptance`.
-The local `./scripts/verify` gate is the fast completion gate; do not treat it
+The local `./scripts/verify` gate is the full coverage gate; do not treat it
 as a replacement for those CI-only release and public-repo checks.
 
 Setup, if `.venv/` is missing:
@@ -36,9 +50,12 @@ python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
 
 Format: trigger, then the rule, then what to do instead.
 
-- About to report a code change as complete: run `./scripts/verify` first. If
-  you cannot run it, do not guess; report the exact command and error that
-  blocked you.
+- About to report a code change as complete: run focused verification through
+  `brigade work verify run` with `./scripts/verify-focused` and the relevant
+  pytest selector. Reserve `./scripts/verify` for pull requests, merges,
+  releases, and verification-infrastructure changes. If you cannot run the
+  focused gate, do not guess; report the exact command and error that blocked
+  you. Status 75 from the full gate must not be retried with a larger timeout.
 - A test fails after your change: never weaken, skip, or delete the test to
   make it pass. Fix the code. If you believe the test itself is wrong, say so
   explicitly and get agreement before touching it.
@@ -105,13 +122,13 @@ See AGENTS.md Definition of Done and CONTRIBUTING.md. Day-to-day:
 
 - Lint/type/sync gate pieces: `ruff check .`, `ruff format --check .`, `mypy`,
   `python scripts/version_sync.py --check`, `python scripts/managed_snapshot.py --check`
-  (or the combined `./scripts/verify`, which also runs coverage pytest)
+  (or `./scripts/verify-focused <pytest-selector>` for a development slice)
 - Tests: `pytest -q` (full suite; expect a long run, ~30+ minutes)
 - Fast full gate while iterating: `./scripts/verify-fast` (same checks, pytest
   parallelized via pytest-xdist, ~4 minutes). A few timing-sensitive tests flake
   under parallel CPU load; re-run any parallel-only failure serially before
-  acting on it. The completion gate for reporting work done stays serial
-  `./scripts/verify`.
+  acting on it. Reserve the serial `./scripts/verify` completion gate for pull
+  requests, merges, releases, and verification-infrastructure changes.
 - End-to-end smoke (same shape as CI `install-from-source`):
 
 ```bash

@@ -5,6 +5,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+git_common_dir=$(git rev-parse --git-common-dir)
+verify_lock_path=${BRIGADE_VERIFY_LOCK_PATH:-"$git_common_dir/brigade-full-verify.lock"}
+exec 9>"$verify_lock_path"
+if ! flock -n 9; then
+  echo "full verification already running for this checkout; run ./scripts/verify-focused <pytest-selector>... or wait for the active Brigade receipt" >&2
+  exit 75
+fi
+
 PY=${PY:-.venv/bin}
 "$PY/ruff" check .
 "$PY/ruff" format --check .
