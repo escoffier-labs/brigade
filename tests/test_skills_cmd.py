@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import stat as stat_module
 import sys
 from pathlib import Path
 
@@ -1532,6 +1533,196 @@ def test_missing_state_root_creation_refuses_swapped_ancestor(tmp_path, monkeypa
     monkeypatch.undo()
     assert not (evil / ".brigade").exists()
     assert (tmp_path / "ws-original" / ".brigade").is_dir()
+
+
+def _workspace_with_rollback_snapshot(tmp_path: Path) -> tuple[Path, Path]:
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    source = _write_skill(tmp_path / "source")
+    installed = workspace / ".claude" / "skills" / "security-review" / "SKILL.md"
+    assert skills_cmd.install(workspace=workspace, skill=str(source), harness="claude", json_output=True) == 0
+    (source / "SKILL.md").write_text("# B\n")
+    assert (
+        skills_cmd.install(workspace=workspace, skill=str(source), harness="claude", force=True, json_output=True) == 0
+    )
+    return workspace, installed
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_rollback_copy_refuses_symlinked_rollback_component(tmp_path, capsys):
+    workspace, installed = _workspace_with_rollback_snapshot(tmp_path)
+    receipt_path = workspace / ".brigade" / "skills" / "installs" / "security-review-claude.json"
+    stamp = Path(json.loads(receipt_path.read_text())["rollback_snapshot"]).name
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim_tree = outside / "victim-tree"
+    victim_tree.mkdir()
+    (victim_tree / "SECRET.md").write_text("external secret\n")
+    planted = outside / stamp
+    planted.mkdir()
+    (planted / "SKILL.md").write_text("# attacker content\n")
+    rollback_component = workspace / ".brigade" / "skills" / "rollback" / "security-review" / "claude"
+    shutil.move(str(rollback_component), str(tmp_path / "real-rollback-component"))
+    rollback_component.symlink_to(outside, target_is_directory=True)
+
+    rc = skills_cmd.rollback(workspace=workspace, skill="security-review", harness="claude")
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "state root" in captured.err or "state path" in captured.err
+    # the symlink must never redirect the copy or the deletion
+    assert (victim_tree / "SECRET.md").read_text() == "external secret\n"
+    assert sorted(path.name for path in outside.iterdir()) == sorted(["victim-tree", stamp])
+    # refusal happens before the installed copy is touched
+    assert installed.read_text() == "# B\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_rollback_receipt_writes_refuse_symlinked_installs_component(tmp_path, capsys):
+    workspace, installed = _workspace_with_rollback_snapshot(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim_receipt = outside / "victim-receipt.json"
+    victim_receipt.write_text("keep me\n")
+    installs = workspace / ".brigade" / "skills" / "installs"
+    shutil.move(str(installs), str(tmp_path / "real-installs"))
+    installs.symlink_to(outside, target_is_directory=True)
+
+    rc = skills_cmd.rollback(workspace=workspace, skill="security-review", harness="claude")
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "state root" in captured.err or "state path" in captured.err
+    assert sorted(path.name for path in outside.iterdir()) == ["victim-receipt.json"]
+    assert victim_receipt.read_text() == "keep me\n"
+    # refusal happens before the installed copy is removed
+    assert installed.read_text() == "# B\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_inbox_add_refuses_symlinked_inbox_component(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep\n")
+    inbox = workspace / ".brigade" / "skills" / "inbox"
+    inbox.symlink_to(outside, target_is_directory=True)
+    source = _write_skill(tmp_path / "source")
+
+    rc = skills_cmd.inbox_add(target=workspace, source=source, summary="review me")
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "state root" in captured.err or "state path" in captured.err
+    assert [path.name for path in outside.iterdir()] == ["keep.txt"]
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_inbox_force_replace_refuses_symlinked_inbox_component(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    capsys.readouterr()
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.inbox_add(target=workspace, source=source, summary="first", json_output=True) == 0
+    proposal_id = json.loads(capsys.readouterr().out)["proposal_id"]
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    matching = outside / proposal_id
+    matching.mkdir()
+    (matching / "proposal.json").write_text("victim proposal\n")
+    inbox = workspace / ".brigade" / "skills" / "inbox"
+    shutil.move(str(inbox), str(tmp_path / "real-inbox"))
+    inbox.symlink_to(outside, target_is_directory=True)
+
+    rc = skills_cmd.inbox_add(target=workspace, source=source, summary="second", force=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "state root" in captured.err or "state path" in captured.err
+    # the forced replace must never delete the matching external subtree
+    assert (matching / "proposal.json").read_text() == "victim proposal\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="platform cannot create hardlinks")
+def test_import_refuses_hardlinked_source_file(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    source = _write_skill(tmp_path / "source", name="hardlinked-skill")
+    os.link(source / "SKILL.md", tmp_path / "alias.md")
+
+    with pytest.raises(skills_cmd.SkillsStatePathError, match="hardlink"):
+        skills_cmd._collect_source_tree(source)
+
+    rc = skills_cmd.import_skill(target=workspace, source=source)
+
+    assert rc == 2
+    assert "hardlink" in capsys.readouterr().err
+    assert not (workspace / ".brigade" / "skills" / "registry" / "hardlinked-skill").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_collect_source_tree_refuses_entry_swapped_to_symlink(tmp_path, monkeypatch):
+    source = _write_skill(tmp_path / "source")
+    secret = tmp_path / "secret.md"
+    secret.write_text("outside secret\n")
+    swapped = source / "CHANGELOG.md"
+    swapped.unlink()
+    swapped.symlink_to(secret)
+
+    real_lstat = os.lstat
+
+    def lying_lstat(name, *, dir_fd=None):
+        st = real_lstat(name, dir_fd=dir_fd) if dir_fd is not None else real_lstat(name)
+        if name == "CHANGELOG.md":
+            # Pretend the entry passed the regular-file check so only the
+            # O_NOFOLLOW open can catch that it is really a symlink.
+            st = os.stat_result(
+                (
+                    stat_module.S_IFREG | stat_module.S_IMODE(st.st_mode),
+                    st.st_ino,
+                    st.st_dev,
+                    1,
+                    st.st_uid,
+                    st.st_gid,
+                    st.st_size,
+                    st.st_atime,
+                    st.st_mtime,
+                    st.st_ctime,
+                )
+            )
+        return st
+
+    monkeypatch.setattr(os, "lstat", lying_lstat)
+
+    with pytest.raises(skills_cmd.SkillsStatePathError, match="changed while being read"):
+        skills_cmd._collect_source_tree(source)
+
+    monkeypatch.undo()
+    assert secret.read_text() == "outside secret\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_remove_tree_error_path_raises_typed_error_not_name_error(tmp_path):
+    workspace = tmp_path / "ws"
+    (workspace / ".brigade" / "skills" / "installs").mkdir(parents=True)
+    long_name = "n" * 400
+
+    with skills_cmd._held_state_root(workspace) as anchor:
+        with pytest.raises(skills_cmd.SkillsStatePathError, match="not removable safely"):
+            skills_cmd._remove_tree_in_anchor(anchor, "skills", "installs", long_name)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_unlink_error_path_raises_typed_error_not_name_error(tmp_path):
+    workspace = tmp_path / "ws"
+    (workspace / ".brigade" / "skills" / "installs").mkdir(parents=True)
+    long_name = "n" * 400
+
+    with skills_cmd._held_state_root(workspace) as anchor:
+        with pytest.raises(skills_cmd.SkillsStatePathError, match="could not be removed safely"):
+            skills_cmd._unlink_in_anchor(anchor, "skills", "installs", long_name)
 
 
 def test_skills_fleet_does_not_guess_source_for_malformed_v2_receipt(tmp_path, capsys):

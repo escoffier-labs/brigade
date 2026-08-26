@@ -428,13 +428,6 @@ def _source_skill_dir(source: Path) -> tuple[Path | None, str | None]:
     return source_dir, None
 
 
-def _copy_skill_source(source_dir: Path, dest: Path) -> None:
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_dir, dest)
-
-
 def _registry_import_payload(
     *,
     target: Path,
@@ -806,6 +799,7 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _DIR_OPEN_FLAGS = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _CLOEXEC
+_FILE_READ_FLAGS = os.O_RDONLY | _O_NOFOLLOW | _CLOEXEC
 _HAS_DESCRIPTOR_ANCHOR = bool(_O_DIRECTORY) and bool(_O_NOFOLLOW) and os.open in os.supports_dir_fd
 
 
@@ -1187,7 +1181,9 @@ def _remove_tree_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
         except FileNotFoundError:
             return
         except OSError as exc:
-            raise SkillsStatePathError(f"skills state path is not removable safely: {parent / relative[-1]}") from exc
+            raise SkillsStatePathError(
+                f"skills state path is not removable safely: {(anchor.workspace / '.brigade').joinpath(*relative)}"
+            ) from exc
         if stat_module.S_ISDIR(st.st_mode):
             child_fd = os.open(relative[-1], _DIR_OPEN_FLAGS, dir_fd=parent_fd)
             try:
@@ -1220,43 +1216,225 @@ def _unlink_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
             pass
         except OSError as exc:
             raise SkillsStatePathError(
-                f"skills state file could not be removed safely: {parent / relative[-1]}"
+                f"skills state file could not be removed safely: {(anchor.workspace / '.brigade').joinpath(*relative)}"
             ) from exc
     finally:
         for fd in reversed(opened):
             os.close(fd)
 
 
-def _collect_source_tree(source_dir: Path) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
-    """Collect plain subdirectories and file contents from *source_dir*, skipping symlinks."""
+def _read_regular_file_via_fd(name: str, dir_fd: int, display: Path, label: str) -> bytes:
+    """Read one regular file through an ``O_NOFOLLOW`` descriptor below *dir_fd*."""
+    try:
+        fd = os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        raise SkillsStatePathError(f"{label} file changed while being read: {display}") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat_module.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            raise SkillsStatePathError(f"{label} file must be a plain single-link file: {display}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _collect_fd_tree(
+    dir_fd: int, prefix: tuple[str, ...], display: Path, label: str
+) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
+    """Walk an open directory descriptor, skipping symlinks and refusing hardlinks.
+
+    Every entry gets exactly one ``lstat`` against the held directory
+    descriptor; directories are re-opened with ``O_DIRECTORY|O_NOFOLLOW`` and
+    files are read through ``O_NOFOLLOW`` descriptors validated by ``fstat``,
+    so an entry swapped to a symlink between check and use cannot redirect a
+    read outside the walked tree.
+    """
     dirs: list[tuple[str, ...]] = []
     files: dict[tuple[str, ...], bytes] = {}
-
-    def walk(current: Path, prefix: tuple[str, ...]) -> None:
-        for entry in sorted(current.iterdir(), key=lambda item: item.name):
-            if entry.is_symlink():
-                continue
-            if entry.is_dir():
-                parts = (*prefix, entry.name)
-                dirs.append(parts)
-                walk(entry, parts)
-            elif entry.is_file():
-                files[(*prefix, entry.name)] = entry.read_bytes()
-
-    walk(source_dir, ())
+    try:
+        names = sorted(os.listdir(dir_fd))
+    except OSError as exc:
+        raise SkillsStatePathError(f"{label} directory could not be listed safely: {display}") from exc
+    for name in names:
+        entry_display = display / name
+        try:
+            st = os.lstat(name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            raise SkillsStatePathError(f"{label} entry changed while being read: {entry_display}") from None
+        except OSError as exc:
+            raise SkillsStatePathError(f"{label} entry could not be inspected safely: {entry_display}") from exc
+        mode = st.st_mode
+        if stat_module.S_ISLNK(mode):
+            continue
+        if stat_module.S_ISDIR(mode):
+            parts = (*prefix, name)
+            dirs.append(parts)
+            try:
+                child_fd = os.open(name, _DIR_OPEN_FLAGS, dir_fd=dir_fd)
+            except OSError as exc:
+                raise SkillsStatePathError(f"{label} directory changed while being walked: {entry_display}") from exc
+            try:
+                sub_dirs, sub_files = _collect_fd_tree(child_fd, parts, entry_display, label)
+            finally:
+                os.close(child_fd)
+            dirs.extend(sub_dirs)
+            files.update(sub_files)
+        elif stat_module.S_ISREG(mode):
+            if st.st_nlink > 1:
+                raise SkillsStatePathError(f"{label} file must not be a hardlink: {entry_display}")
+            files[(*prefix, name)] = _read_regular_file_via_fd(name, dir_fd, entry_display, label)
+        # every other entry kind is skipped, matching the previous is_file() filter
     return dirs, files
 
 
-def _copy_tree_into_anchor(source_dir: Path, anchor: _StateRootAnchor, *relative: str) -> None:
-    """Copy a source directory into the anchored state root.
+def _collect_source_tree(source_dir: Path) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
+    """Collect plain subdirectories and file contents from *source_dir*, skipping symlinks.
+
+    The tree is walked through held directory descriptors (see
+    ``_collect_fd_tree``), so separate check-then-use lookups cannot race;
+    regular files carrying more than one link (hardlinks) are refused.
+    """
+    if not _HAS_DESCRIPTOR_ANCHOR:
+        dirs: list[tuple[str, ...]] = []
+        files: dict[tuple[str, ...], bytes] = {}
+
+        def walk(current: Path, prefix: tuple[str, ...]) -> None:
+            for entry in sorted(current.iterdir(), key=lambda item: item.name):
+                if entry.is_symlink():
+                    continue
+                st = entry.lstat()
+                if stat_module.S_ISDIR(st.st_mode):
+                    parts = (*prefix, entry.name)
+                    dirs.append(parts)
+                    walk(entry, parts)
+                elif stat_module.S_ISREG(st.st_mode):
+                    if st.st_nlink > 1:
+                        raise SkillsStatePathError(f"skills source file must not be a hardlink: {entry}")
+                    files[(*prefix, entry.name)] = entry.read_bytes()
+
+        walk(source_dir, ())
+        return dirs, files
+    try:
+        root_fd = os.open(source_dir, _DIR_OPEN_FLAGS)
+    except OSError as exc:
+        raise SkillsStatePathError(f"skills source must be a plain readable directory: {source_dir}") from exc
+    try:
+        return _collect_fd_tree(root_fd, (), source_dir, "skills source")
+    finally:
+        os.close(root_fd)
+
+
+def _read_state_file_bytes(anchor: _StateRootAnchor, *relative: str) -> bytes | None:
+    """Read one regular file under the anchored state root without following symlinks.
+
+    Returns ``None`` when the file is missing; a symlinked tail is refused.
+    """
+    if not _HAS_DESCRIPTOR_ANCHOR:
+        parent = _fallback_prepare_parent(anchor, *relative[:-1], create=False)
+        if parent is None:
+            return None
+        target = parent / relative[-1]
+        if target.is_symlink() or _is_reparse_point(target):
+            raise SkillsStatePathError(
+                f"skills state file must not be a symlink or reparse point: {(anchor.workspace / '.brigade').joinpath(*relative)}"
+            )
+        if not target.is_file():
+            return None
+        return target.read_bytes()
+    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
+    if parent_fd is None:
+        return None
+    try:
+        try:
+            file_fd = os.open(relative[-1], _FILE_READ_FLAGS, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise SkillsStatePathError(
+                f"skills state file could not be read safely: {(anchor.workspace / '.brigade').joinpath(*relative)}"
+            ) from exc
+        try:
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(file_fd, 1 << 16)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(file_fd)
+        return b"".join(chunks)
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+
+def _state_entry_kind(anchor: _StateRootAnchor, *relative: str) -> str:
+    """Classify one path under the anchored state root as ``missing``, ``dir``, or ``other``.
+
+    A symlinked component anywhere along the path is refused instead of followed.
+    """
+    if not _HAS_DESCRIPTOR_ANCHOR:
+        parent = _fallback_prepare_parent(anchor, *relative[:-1], create=False)
+        if parent is None:
+            return "missing"
+        target = parent / relative[-1]
+        if target.is_symlink() or _is_reparse_point(target):
+            raise SkillsStatePathError(
+                f"skills state path must not contain symlinks or reparse points: {(anchor.workspace / '.brigade').joinpath(*relative)}"
+            )
+        if not target.exists():
+            return "missing"
+        return "dir" if target.is_dir() else "other"
+    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
+    if parent_fd is None:
+        return "missing"
+    try:
+        try:
+            st = os.stat(relative[-1], dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return "missing"
+        except OSError as exc:
+            raise SkillsStatePathError(
+                f"skills state path is not usable: {(anchor.workspace / '.brigade').joinpath(*relative)}"
+            ) from exc
+        if stat_module.S_ISLNK(st.st_mode):
+            raise SkillsStatePathError(
+                f"skills state path must not be a symlink: {(anchor.workspace / '.brigade').joinpath(*relative)}"
+            )
+        return "dir" if stat_module.S_ISDIR(st.st_mode) else "other"
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+
+def _read_tree_from_anchor(
+    anchor: _StateRootAnchor, *relative: str
+) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
+    """Read a plain directory subtree out of the anchored state root via descriptors."""
+    dir_fd, opened = _anchor_open_chain(anchor, *relative)
+    try:
+        return _collect_fd_tree(dir_fd, (), (anchor.workspace / ".brigade").joinpath(*relative), "skills state")
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+
+def _write_collected_tree_into_anchor(
+    dirs: list[tuple[str, ...]], files: dict[tuple[str, ...], bytes], anchor: _StateRootAnchor, *relative: str
+) -> None:
+    """Write a previously collected directory tree into the anchored state root.
 
     Destination components are created and opened with ``O_NOFOLLOW`` relative
     to the held descriptor, so a planted symlink anywhere below the state root
-    refuses the copy instead of redirecting it. Source symlinks are skipped,
-    never followed out of the source tree. An existing destination is removed
-    first, matching the previous copytree-over behaviour.
+    refuses the write instead of redirecting it. An existing destination is
+    removed first, matching the previous copytree-over behaviour.
     """
-    dirs, files = _collect_source_tree(source_dir)
     if not _HAS_DESCRIPTOR_ANCHOR:
         parent = _fallback_prepare_parent(anchor, *relative[:-1])
         dest = parent / relative[-1]
@@ -1315,6 +1493,17 @@ def _copy_tree_into_anchor(source_dir: Path, anchor: _StateRootAnchor, *relative
     finally:
         for fd in reversed(opened):
             os.close(fd)
+
+
+def _copy_tree_into_anchor(source_dir: Path, anchor: _StateRootAnchor, *relative: str) -> None:
+    """Copy a source directory into the anchored state root.
+
+    Source symlinks are skipped, never followed out of the source tree; the
+    destination half of the copy is performed by
+    ``_write_collected_tree_into_anchor`` against the held descriptor.
+    """
+    dirs, files = _collect_source_tree(source_dir)
+    _write_collected_tree_into_anchor(dirs, files, anchor, *relative)
 
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
@@ -2324,56 +2513,88 @@ def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = F
     if harness not in _install_targets(workspace):
         print(f"error: unknown skill install target: {harness}", file=sys.stderr)
         return 2
-    root = _rollback_root(workspace, skill_id, harness)
-    dest = _install_dir(workspace, harness, skill_id)
-    canonical_receipt_path = _installs_root(workspace) / f"{skill_id}-{harness}.json"
-    current_receipt = _read_json(canonical_receipt_path) if canonical_receipt_path.is_file() else {}
-    if not _valid_receipt_contract(current_receipt, skill_id=skill_id, harness=harness):
-        print(f"error: invalid rollback receipt for {skill_id} on {harness}", file=sys.stderr)
-        return 1
-    snapshot_value = current_receipt.get("rollback_snapshot")
-    if not isinstance(snapshot_value, str) or not snapshot_value:
-        print(f"error: no receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
-        return 1
-    snapshot = Path(snapshot_value).expanduser().resolve()
-    root_resolved = root.resolve()
+    receipt_name = f"{skill_id}-{harness}.json"
+    rollback_receipt_name = f"{skill_id}-{harness}-rollback.json"
+    rollback_receipt_path = workspace / ".brigade" / "skills" / "installs" / rollback_receipt_name
     try:
-        relative_snapshot = snapshot.relative_to(root_resolved)
-    except ValueError:
-        relative_snapshot = Path()
-    if len(relative_snapshot.parts) != 1 or not snapshot.is_dir():
-        print(f"error: invalid receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
-        return 1
-    previous_receipt_value = current_receipt.get("previous_receipt")
-    if previous_receipt_value is not None and (
-        not isinstance(previous_receipt_value, dict)
-        or not _valid_receipt_contract(previous_receipt_value, skill_id=skill_id, harness=harness)
-    ):
-        print(f"error: invalid previous rollback receipt for {skill_id} on {harness}", file=sys.stderr)
-        return 1
-    previous_receipt = previous_receipt_value or {}
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(snapshot, dest)
-    payload = {
-        "workspace": str(workspace),
-        "skill_id": skill_id,
-        "target": harness,
-        "snapshot": str(snapshot),
-        "installed_dir": str(dest),
-        "rolled_back_at": _now(),
-        "restored_receipt": bool(previous_receipt),
-        "snapshot_consumed": True,
-    }
-    if previous_receipt:
-        _write_json(canonical_receipt_path, previous_receipt)
-    elif canonical_receipt_path.is_file():
-        canonical_receipt_path.unlink()
-    receipt_path = workspace / ".brigade" / "skills" / "installs" / f"{skill_id}-{harness}-rollback.json"
-    _write_json(receipt_path, payload)
-    shutil.rmtree(snapshot)
-    payload["receipt_path"] = str(receipt_path)
+        with _held_state_root(workspace) as state_anchor:
+            # Refuse redirected installs and rollback components before any
+            # receipt is read or anything is copied, written, or deleted.
+            _require_plain_state_dirs(state_anchor, "skills", "installs")
+            receipt_bytes = _read_state_file_bytes(state_anchor, "skills", "installs", receipt_name)
+            current_receipt: dict[str, Any] = {}
+            if receipt_bytes is not None:
+                try:
+                    parsed = json.loads(receipt_bytes.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    current_receipt = parsed
+            if not _valid_receipt_contract(current_receipt, skill_id=skill_id, harness=harness):
+                print(f"error: invalid rollback receipt for {skill_id} on {harness}", file=sys.stderr)
+                return 1
+            snapshot_value = current_receipt.get("rollback_snapshot")
+            if not isinstance(snapshot_value, str) or not snapshot_value:
+                print(f"error: no receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
+                return 1
+            rollback_base = _rollback_root(workspace, skill_id, harness)
+            try:
+                relative_snapshot = Path(snapshot_value).relative_to(rollback_base)
+            except ValueError:
+                relative_snapshot = Path()
+            if len(relative_snapshot.parts) != 1 or relative_snapshot.parts[0] in {"", ".", ".."}:
+                print(f"error: invalid receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
+                return 1
+            previous_receipt_value = current_receipt.get("previous_receipt")
+            if previous_receipt_value is not None and (
+                not isinstance(previous_receipt_value, dict)
+                or not _valid_receipt_contract(previous_receipt_value, skill_id=skill_id, harness=harness)
+            ):
+                print(f"error: invalid previous rollback receipt for {skill_id} on {harness}", file=sys.stderr)
+                return 1
+            previous_receipt = previous_receipt_value or {}
+            # The snapshot must be a plain directory directly under the held
+            # rollback component; symlinked components refuse the whole rollback.
+            snapshot_rel = ("skills", "rollback", skill_id, harness, relative_snapshot.parts[0])
+            if _state_entry_kind(state_anchor, *snapshot_rel) != "dir":
+                print(f"error: invalid receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
+                return 1
+            dest = _install_dir(workspace, harness, skill_id)
+            install_rel = str(_adapter_map(workspace)[harness]["install_path"]).format(skill_id=skill_id)
+            under_state_root = install_rel.startswith(".brigade/")
+            state_parts = tuple(part for part in install_rel.split("/") if part)[1:]
+            dirs, files = _read_tree_from_anchor(state_anchor, *snapshot_rel)
+            payload = {
+                "workspace": str(workspace),
+                "skill_id": skill_id,
+                "target": harness,
+                "snapshot": snapshot_value,
+                "installed_dir": str(dest),
+                "rolled_back_at": _now(),
+                "restored_receipt": bool(previous_receipt),
+                "snapshot_consumed": True,
+            }
+            if under_state_root:
+                _remove_tree_in_anchor(state_anchor, *state_parts)
+                _write_collected_tree_into_anchor(dirs, files, state_anchor, *state_parts)
+            else:
+                if dest.exists():
+                    shutil.rmtree(dest)
+                dest.mkdir(parents=True, exist_ok=True)
+                for parts in dirs:
+                    (dest.joinpath(*parts)).mkdir(parents=True, exist_ok=True)
+                for parts, data in files.items():
+                    (dest.joinpath(*parts)).write_bytes(data)
+            if previous_receipt:
+                _write_state_file(state_anchor, "skills", "installs", receipt_name, data=_json_bytes(previous_receipt))
+            else:
+                _unlink_in_anchor(state_anchor, "skills", "installs", receipt_name)
+            _write_state_file(state_anchor, "skills", "installs", rollback_receipt_name, data=_json_bytes(payload))
+            _remove_tree_in_anchor(state_anchor, *snapshot_rel)
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    payload["receipt_path"] = str(rollback_receipt_path)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -3651,26 +3872,38 @@ def inbox_add(
     resolved_skill_id = _slug(skill_id or str(metadata.get("id") or source_dir.name))
     created = _now()
     proposal_id = f"{created[:19].replace(':', '').replace('-', '')}-{resolved_skill_id}"
-    proposal_dir = _proposal_path(target, proposal_id)
-    if proposal_dir.exists() and not force:
-        print(f"error: skill proposal already exists: {proposal_dir}", file=sys.stderr)
-        return 2
+    proposal_rel = ("skills", "inbox", _slug(proposal_id))
+    proposal_dir = target / ".brigade" / "skills" / "inbox" / _slug(proposal_id)
     skill_dest = _proposal_skill_path(proposal_dir)
-    _copy_skill_source(source_dir, skill_dest)
-    lint_payload = _lint_payload(target, str(skill_dest))
-    proposal = {
-        "proposal_id": proposal_dir.name,
-        "skill_id": resolved_skill_id,
-        "status": "pending",
-        "summary": summary or "",
-        "source": str(source.expanduser().resolve()),
-        "created_at": created,
-        "path": str(proposal_dir),
-        "skill_path": str(skill_dest),
-        "fingerprint": _fingerprint(skill_dest),
-        "lint": lint_payload,
-    }
-    _write_json(_proposal_meta_path(proposal_dir), proposal)
+    try:
+        with _held_state_root(target) as state_anchor:
+            # Refuse a redirected inbox before anything is copied, replaced,
+            # or deleted; a symlinked component never reaches the disk outside.
+            _require_plain_state_dirs(state_anchor, "skills", "inbox")
+            existing = _state_entry_kind(state_anchor, *proposal_rel)
+            if existing == "dir" and not force:
+                print(f"error: skill proposal already exists: {proposal_dir}", file=sys.stderr)
+                return 2
+            if force and existing != "missing":
+                _remove_tree_in_anchor(state_anchor, *proposal_rel)
+            _copy_tree_into_anchor(source_dir, state_anchor, *proposal_rel, "skill")
+            lint_payload = _lint_payload(target, str(skill_dest))
+            proposal = {
+                "proposal_id": proposal_dir.name,
+                "skill_id": resolved_skill_id,
+                "status": "pending",
+                "summary": summary or "",
+                "source": str(source.expanduser().resolve()),
+                "created_at": created,
+                "path": str(proposal_dir),
+                "skill_path": str(skill_dest),
+                "fingerprint": _fingerprint(skill_dest),
+                "lint": lint_payload,
+            }
+            _write_state_file(state_anchor, *proposal_rel, "proposal.json", data=_json_bytes(proposal))
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if json_output:
         print(json.dumps(proposal, indent=2, sort_keys=True))
         return 0 if lint_payload["valid"] else 1
