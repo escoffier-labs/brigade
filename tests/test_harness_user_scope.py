@@ -106,6 +106,54 @@ def test_sync_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
     assert not (home / ".codex").exists()
 
 
+def test_sync_dry_run_reports_pending_until_applied(tmp_path, monkeypatch, capsys):
+    """Issue #1170: a conflict-free dry run with planned writes is not "current"."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    base = _sync_base(workspace)
+
+    assert cli.main(base + ["--json"]) == 0
+    planned = json.loads(capsys.readouterr().out)["results"][0]
+    assert planned["status"] == "pending"
+    assert planned["ready"] is True
+    assert planned["receipt_state"] == "missing"
+    assert any(item["action"] in {"create", "update", "remove"} for item in planned["items"])
+    assert not (home / ".codex").exists()
+
+    assert cli.main(base + ["--write", "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(base + ["--json"]) == 0
+    applied = json.loads(capsys.readouterr().out)["results"][0]
+    assert applied["status"] == "current"
+    assert applied["receipt_state"] == "present"
+    assert all(item["action"] not in {"create", "update", "remove"} for item in applied["items"])
+
+
+def test_uninstall_dry_run_reports_pending_before_apply(tmp_path, monkeypatch, capsys):
+    """Issue #1170 dry-run parity for uninstall: planned removals are not "current"."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 0
+    capsys.readouterr()
+    before = {path: path.read_bytes() for path in sorted((home / ".codex").rglob("*")) if path.is_file()}
+
+    assert cli.main(_uninstall_base(workspace) + ["--json"]) == 0
+    planned = json.loads(capsys.readouterr().out)["results"][0]
+    assert planned["status"] == "pending"
+    assert planned["ready"] is True
+    after = {path: path.read_bytes() for path in sorted((home / ".codex").rglob("*")) if path.is_file()}
+    assert after == before
+
+    assert cli.main(_uninstall_base(workspace) + ["--write", "--json"]) == 0
+    applied = json.loads(capsys.readouterr().out)["results"][0]
+    assert applied["status"] == "updated"
+
+
 def test_sync_write_then_resync_is_idempotent(tmp_path, monkeypatch, capsys):
     from brigade import cli
 
