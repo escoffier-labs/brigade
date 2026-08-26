@@ -712,7 +712,9 @@ class ClaimDecision:
     is never retried or fallen back from; see ``FleetClaimAuthError``),
     ``"stale-generation"`` (the hub refused this acquire/renew because a
     later release tombstoned this holder or generation; terminal — do not
-    retry or re-acquire), or ``"hub-unavailable"`` (network/hub failure;
+    retry or re-acquire), ``"storage-full"`` (the hub refused a new durable
+    fence rather than evict an existing one; terminal — do not treat as
+    missing or re-acquire), or ``"hub-unavailable"`` (network/hub failure;
     callers fall back to the local run lock).
     ``holder`` is the fencing token this operation used; renew and release
     must present the same token. ``superseded`` is the unexpired same-node
@@ -901,6 +903,8 @@ def _claim_op(
         )
     if payload.get("reason") == "stale-generation":
         return ClaimDecision(granted=False, reason="stale-generation", owner=owner, detail=detail, holder=holder)
+    if payload.get("reason") == "storage-full":
+        return ClaimDecision(granted=False, reason="storage-full", owner=owner, detail=detail, holder=holder)
     if status in (200, 409):
         return ClaimDecision(
             granted=False, reason="held" if owner is not None else "missing", owner=owner, detail=detail, holder=holder
@@ -1263,10 +1267,11 @@ def repo_claim(
                 generation=generation,
                 lock_owner=lock_owner,
             )
-            if not outcome.granted and outcome.reason == "stale-generation":
+            if not outcome.granted and outcome.reason in {"stale-generation", "storage-full"}:
                 _LOG.warning(
-                    "fleet claim heartbeat for %s saw a stale generation; not re-acquiring",
+                    "fleet claim heartbeat for %s saw a %s; not re-acquiring",
                     target,
+                    outcome.reason,
                 )
                 return
             if not outcome.granted and outcome.reason == "missing":
@@ -1283,10 +1288,11 @@ def repo_claim(
                 # still in flight.
                 pending_orphan_release.set()
                 outcome = acquire_claim(target, **acquire_kwargs)
-                if not outcome.granted and outcome.reason == "stale-generation":
+                if not outcome.granted and outcome.reason in {"stale-generation", "storage-full"}:
                     _LOG.warning(
-                        "fleet claim heartbeat for %s saw a stale generation; not re-acquiring",
+                        "fleet claim heartbeat for %s saw a %s; not re-acquiring",
                         target,
+                        outcome.reason,
                     )
                     return
             if outcome.granted:

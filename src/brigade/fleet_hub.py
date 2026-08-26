@@ -68,10 +68,11 @@ Endpoints:
   durable per-target generation floor (schema v5) so a late acquire or
   renew whose generation, holder, or lease stamp is stale is refused with
   ``reason: "stale-generation"`` instead of resurrecting the row (issue
-  #1189). The floor outlives claim TTL. Holder tombstones are capped per
-  target and node so no-row release spam cannot grow the database without
-  bound; the newest tombstones — including an in-flight acquire's fence —
-  are kept. Schema v4 databases migrate forward to v5.
+  #1189). The floor outlives claim TTL. Holder tombstones and live claims
+  share a durable fence budget; a new no-row fence that would exceed the
+  per-(target, node) or global cap is refused instead of evicting an
+  existing fence a delayed initial acquire could still match. Schema v4
+  databases migrate forward to v5.
   Trust boundary: ``node_id`` is bound to the node token that presents it,
   so a member can only act as itself; ``lock``, ``supersede`` and ``scope``
   remain caller-asserted intent that keeps *honest* clients from stealing
@@ -123,10 +124,13 @@ from . import fleet_dashboard
 SCHEMA_VERSION = 5
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
-# Newest holder tombstones kept per (target, node). The in-flight no-row
-# release fence is the newest row, so it survives the cap; older spam is
-# dropped. The generation floor is stored separately and is not capped.
+# No-row release fences kept per (target, node). Overflow fails closed
+# rather than evicting a fence a delayed generation-less acquire can match.
+# Real releases may exceed this per-node cap; the global durable budget
+# still applies. The generation floor is stored separately.
 CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE = 16
+CLAIM_DURABLE_FENCE_LIMIT = 1024
+CLAIM_TARGET_MAX_CHARS = 256
 
 # Dashboard cookie (issue #1124): a derived, read-only capability, not the token.
 DASHBOARD_COOKIE = "brigade_fleet_view"
@@ -233,7 +237,7 @@ CREATE TABLE IF NOT EXISTS claims (
 """
 # Release tombstones (issue #1189 / schema v5): survive the claim DELETE so
 # a late acquire/renew cannot recreate the row. One row per released holder
-# on a node. Capped per (target, node); not expired with claim TTL.
+# on a node. Not expired with claim TTL; new rows fail closed at the cap.
 _TOMBSTONES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS claim_tombstones (
     target TEXT NOT NULL,
@@ -677,6 +681,10 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
             raise FleetHubError(f"claim field {field!r} must be a non-empty string")
         if field == "target":
             _reject_controls(value, field, kind="claim")
+            if len(value.strip()) > CLAIM_TARGET_MAX_CHARS:
+                raise FleetHubError(
+                    f"claim field 'target' must be at most {CLAIM_TARGET_MAX_CHARS} characters"
+                )
         request[field] = value.strip()
     for field in ("node_id", "holder"):
         if request[field] is None:
@@ -795,12 +803,28 @@ def _raise_generation_floor(conn: sqlite3.Connection, target: str, generation: i
     )
 
 
-def _prune_target_node_tombstones(conn: sqlite3.Connection, target: str, node: str) -> None:
-    conn.execute(
-        "DELETE FROM claim_tombstones WHERE rowid IN ("
-        "SELECT rowid FROM claim_tombstones WHERE target = ? AND owner_node = ? "
-        "ORDER BY released_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
-        (target, node, CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE),
+def _durable_fence_count(conn: sqlite3.Connection) -> int:
+    tombstones = conn.execute("SELECT COUNT(*) FROM claim_tombstones").fetchone()[0]
+    claims = conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+    return int(tombstones) + int(claims)
+
+
+def _tombstone_row_exists(conn: sqlite3.Connection, target: str, holder: str, node: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM claim_tombstones WHERE target = ? AND holder_token = ? AND owner_node = ?",
+            (target, holder, node),
+        ).fetchone()
+        is not None
+    )
+
+
+def _target_node_tombstone_count(conn: sqlite3.Connection, target: str, node: str) -> int:
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM claim_tombstones WHERE target = ? AND owner_node = ?",
+            (target, node),
+        ).fetchone()[0]
     )
 
 
@@ -868,6 +892,16 @@ def _stale_generation_payload(action: str, target: str) -> dict[str, Any]:
     }
 
 
+def _storage_full_payload(action: str, target: str) -> dict[str, Any]:
+    key = "granted" if action == "acquire" else "released"
+    return {
+        key: False,
+        "error": f"fleet hub durable claim fence limit reached for {target!r}",
+        "reason": "storage-full",
+        "owner": None,
+    }
+
+
 def _request_lease_stamp(request: dict[str, Any]) -> str | None:
     lock = request.get("lock")
     if not isinstance(lock, dict):
@@ -930,7 +964,16 @@ def _write_claim_tombstone(
     ttl: int,
     now: float,
     now_iso: str,
-) -> None:
+    replacing_claim: bool,
+) -> bool:
+    """Write or refresh a fence. ``False`` when a *new* row would exceed a
+    cap: the caller must not evict an existing fence to make room."""
+    if not _tombstone_row_exists(conn, target, holder, node):
+        if _durable_fence_count(conn) >= CLAIM_DURABLE_FENCE_LIMIT:
+            return False
+        per_node = _target_node_tombstone_count(conn, target, node)
+        if not replacing_claim and per_node >= CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE:
+            return False
     conn.execute(
         "INSERT INTO claim_tombstones "
         "(target, holder_token, owner_node, generation, lease_stamp, released_at, expires_at) "
@@ -943,7 +986,7 @@ def _write_claim_tombstone(
         (target, holder, node, generation, lease_stamp, now_iso, now + ttl),
     )
     _raise_generation_floor(conn, target, generation)
-    _prune_target_node_tombstones(conn, target, node)
+    return True
 
 
 def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None) -> tuple[int, dict[str, Any]]:
@@ -987,8 +1030,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
     whose holder matches a tombstone, or whose lock ``acquired_at`` matches
     the released lease is refused with ``reason: "stale-generation"``. The
     floor outlives claim TTL. A holder-scoped release that finds no row
-    still plants a tombstone (newest kept when the per-node cap is hit) so
-    an in-flight acquire for that holder cannot land after the release.
+    still plants a tombstone so an in-flight acquire for that holder cannot
+    land after the release. A new fence that would exceed the per-node or
+    global durable cap answers ``reason: "storage-full"`` instead of
+    evicting an existing fence.
     """
     request = _validate_claim_request(raw)
     if caller_node is not None and request["node_id"] != caller_node:
@@ -1033,6 +1078,9 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         ):
             conn.commit()
             return 409, _stale_generation_payload("acquire", target)
+        if prior is None and _durable_fence_count(conn) >= CLAIM_DURABLE_FENCE_LIMIT:
+            conn.commit()
+            return 409, _storage_full_payload("acquire", target)
         lock = request["lock"] or {"token": None, "acquired_at": None, "run_dir": None}
         supersede = request["supersede"] or {"token": None, "acquired_at": None}
         next_generation = _next_claim_generation(prior, tombstones, floor, now)
@@ -1174,7 +1222,7 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             (target, holder, node),
         )
         if cursor.rowcount == 1:
-            _write_claim_tombstone(
+            if not _write_claim_tombstone(
                 conn,
                 target=target,
                 generation=_as_generation(prior[11]) if prior is not None else 1,
@@ -1184,7 +1232,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
                 ttl=int(prior[9]) if prior is not None else ttl,
                 now=now,
                 now_iso=now_iso,
-            )
+                replacing_claim=True,
+            ):
+                conn.rollback()
+                return 409, _storage_full_payload("release", target)
             conn.commit()
             return 200, {"released": True}
         if prior is not None:
@@ -1194,7 +1245,7 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
                 "error": f"target {target!r} is held by {prior[1]}",
                 "owner": _claim_payload(prior),
             }
-        _write_claim_tombstone(
+        if not _write_claim_tombstone(
             conn,
             target=target,
             generation=1,
@@ -1204,7 +1255,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             ttl=ttl,
             now=now,
             now_iso=now_iso,
-        )
+            replacing_claim=False,
+        ):
+            conn.rollback()
+            return 409, _storage_full_payload("release", target)
         conn.commit()
         return 200, {"released": False}
     # Token-less release (issue #1141): the caller's own node's row, or with
@@ -1221,7 +1275,7 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         (target, int(scope == "force"), node, expected_acquired_at, expected_acquired_at),
     )
     if cursor.rowcount == 1 and prior is not None:
-        _write_claim_tombstone(
+        if not _write_claim_tombstone(
             conn,
             target=target,
             generation=_as_generation(prior[11]),
@@ -1231,7 +1285,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             ttl=int(prior[9]),
             now=now,
             now_iso=now_iso,
-        )
+            replacing_claim=True,
+        ):
+            conn.rollback()
+            return 409, _storage_full_payload("release", target)
     conn.commit()
     if cursor.rowcount == 1:
         released: dict[str, Any] = {"released": True}

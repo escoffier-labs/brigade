@@ -420,6 +420,7 @@ class TestHubClaims:
             {**_claim(), "action": "steal"},
             {**_claim(), "action": None},
             {**_claim(), "target": " "},
+            {**_claim(), "target": "a" * (fleet_hub.CLAIM_TARGET_MAX_CHARS + 1)},
             {"action": "acquire", "target": "repo-a", "holder": "h1"},
             {"action": "acquire", "target": "repo-a", "node_id": NODE_A},
             {**_claim(), "ttl_seconds": 0},
@@ -631,14 +632,31 @@ class TestHubClaims:
         with pytest.raises(fleet_hub.FleetHubError, match="schema version"):
             fleet_hub.open_db(db)
 
+    def test_delayed_initial_acquire_stays_fenced_after_newer_no_row_releases(self, hub):
+        """Generation-less delayed acquire must not land after 16 newer
+        no-row fences on the same target and node would have evicted
+        holder ``stalled``."""
+        url, token, _db = hub
+        assert _post(url, token, _claim("release", holder="stalled"))[1]["released"] is False
+        for i in range(fleet_hub.CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE):
+            _post(url, token, _claim("release", holder=f"newer{i:02d}"))
+        status, payload = _post(url, token, _claim(holder="stalled"))
+        assert status == 409 and payload["reason"] == "stale-generation"
+        assert payload["granted"] is False
+        assert _get(url, "/claims", token)[1]["claims"] == []
+        status, payload = _post(url, token, _claim(holder="h-fresh"))
+        assert status == 200 and payload["granted"] is True
+
     def test_tombstones_are_bounded_per_target_node(self, hub):
-        """No-row release spam cannot grow tombstones without limit; the
-        newest in-flight holder fence is kept."""
+        """No-row release spam cannot grow tombstones without limit; existing
+        fences are kept (fail closed) instead of evicted."""
         url, token, db = hub
         limit = fleet_hub.CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE
+        statuses: list[tuple[int, dict, str]] = []
         for i in range(limit + 8):
             holder = f"h{i:02d}"
-            assert _post(url, token, _claim("release", holder=holder, target="repo-a"))[1]["released"] is False
+            status, payload = _post(url, token, _claim("release", holder=holder, target="repo-a"))
+            statuses.append((status, payload, holder))
         conn = fleet_hub.init_db(db)
         try:
             count = conn.execute(
@@ -648,11 +666,42 @@ class TestHubClaims:
         finally:
             conn.close()
         assert count == limit
-        last = f"h{limit + 7:02d}"
-        status, payload = _post(url, token, _claim(holder=last, target="repo-a"))
+        assert statuses[0][0] == 200 and statuses[0][1]["released"] is False
+        assert statuses[limit][0] == 409 and statuses[limit][1]["reason"] == "storage-full"
+        status, payload = _post(url, token, _claim(holder="h00", target="repo-a"))
         assert status == 409 and payload["reason"] == "stale-generation"
         status, payload = _post(url, token, _claim(holder="h-fresh", target="repo-a"))
         assert status == 200 and payload["granted"] is True
+
+    def test_no_row_releases_cannot_grow_durable_state_across_targets(self, tmp_path):
+        """Holder-scoped no-row releases over distinct targets fail closed
+        at the durable fence budget instead of writing unbounded floors."""
+        db = tmp_path / "hub.db"
+        conn = fleet_hub.init_db(db)
+        try:
+            limit = fleet_hub.CLAIM_DURABLE_FENCE_LIMIT
+            planted = 0
+            overflow = 0
+            for i in range(limit + 8):
+                status, payload = fleet_hub.handle_claim(conn, _claim("release", target=f"t{i:04d}", holder="h1"))
+                if status == 200 and payload.get("released") is False:
+                    planted += 1
+                elif status == 409 and payload.get("reason") == "storage-full":
+                    overflow += 1
+                else:
+                    raise AssertionError((status, payload))
+            tombs = conn.execute("SELECT COUNT(*) FROM claim_tombstones").fetchone()[0]
+            floors = conn.execute("SELECT COUNT(*) FROM claim_generation_floors").fetchone()[0]
+            assert tombs == limit
+            assert floors == limit
+            assert planted == limit
+            assert overflow == 8
+            status, payload = fleet_hub.handle_claim(conn, _claim(target="t0000", holder="h1"))
+            assert status == 409 and payload["reason"] == "stale-generation"
+            status, payload = fleet_hub.handle_claim(conn, _claim(target="fresh-target", holder="h-fresh"))
+            assert status == 409 and payload["reason"] == "storage-full"
+        finally:
+            conn.close()
 
     def test_pre_holder_token_claims_table_is_recreated(self, tmp_path):
         db = tmp_path / "early-v2.db"
@@ -730,6 +779,25 @@ class TestClientClaims:
         late = fleet_client.acquire_claim("repo-a", node_id=NODE_A, holder=holder, ttl_seconds=60, generation=1)
         assert late.granted is False and late.reason == "stale-generation"
         assert fleet_client.fetch_claims(include_all=True) == []
+
+    def test_client_delayed_acquire_after_tombstone_cap_is_stale(self, hub, monkeypatch):
+        url, token, _db = hub
+        self._env(monkeypatch, url, token)
+        assert fleet_client.release_claim("repo-a", node_id=NODE_A, holder="stalled").reason == "missing"
+        for i in range(fleet_hub.CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE):
+            fleet_client.release_claim("repo-a", node_id=NODE_A, holder=f"newer{i:02d}")
+        late = fleet_client.acquire_claim("repo-a", node_id=NODE_A, holder="stalled")
+        assert late.granted is False and late.reason == "stale-generation"
+        assert fleet_client.fetch_claims(include_all=True) == []
+
+    def test_client_storage_full_is_not_missing(self, hub, monkeypatch):
+        url, token, _db = hub
+        self._env(monkeypatch, url, token)
+        limit = fleet_hub.CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE
+        for i in range(limit):
+            assert fleet_client.release_claim("repo-a", node_id=NODE_A, holder=f"h{i:02d}").reason == "missing"
+        overflow = fleet_client.release_claim("repo-a", node_id=NODE_A, holder="h-overflow")
+        assert overflow.granted is False and overflow.reason == "storage-full"
 
     def test_no_hub_and_unreachable_hub_reasons(self, monkeypatch):
         decision = fleet_client.acquire_claim("repo-a", node_id=NODE_A)

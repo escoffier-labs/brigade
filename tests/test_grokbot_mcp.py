@@ -303,7 +303,7 @@ def test_same_lease_id_on_different_jobs_cannot_share_or_release_fleet_claims(tm
 def test_known_fleet_refusal_does_not_claim_or_emit(tmp_path: Path, monkeypatch):
     job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
     adapter = _adapter(tmp_path)
-    for reason in ("held", "auth-failed", "invalid", "missing"):
+    for reason in ("held", "auth-failed", "invalid", "missing", "stale-generation", "storage-full"):
         calls: list[tuple[str, dict[str, object]]] = []
 
         def refuse(target, *, _reason=reason, **kwargs):
@@ -504,7 +504,7 @@ def test_fleet_outage_then_missing_renew_allows_best_effort_acquire(tmp_path: Pa
 
 
 def test_fleet_outage_then_missing_renew_refuses_known_acquire_refusal(tmp_path: Path, monkeypatch):
-    for reason in ("held", "auth-failed", "invalid", "missing"):
+    for reason in ("held", "auth-failed", "invalid", "missing", "stale-generation", "storage-full"):
         job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), f"{reason}-refuse")["job_id"]
         adapter = _adapter(tmp_path)
         events: list[dict[str, object]] = []

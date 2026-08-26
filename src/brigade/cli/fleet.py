@@ -412,6 +412,13 @@ def _print_claim_failure(decision, *, what: str) -> bool:
             file=sys.stderr,
         )
         return True
+    if decision.reason == "storage-full":
+        print(
+            f"error: fleet claim {what} refused: durable fence limit reached"
+            + (f" ({decision.detail})" if decision.detail else ""),
+            file=sys.stderr,
+        )
+        return True
     return False
 
 
