@@ -230,6 +230,20 @@ class FleetHubConflict(FleetHubError):
     """The request conflicts with current hub state (HTTP 409)."""
 
 
+class FleetHubUnprocessable(FleetHubError):
+    """A field failed semantic validation (HTTP 422), e.g. control characters."""
+
+
+def _contains_controls(value: str) -> bool:
+    """True when ``value`` contains a C0 or C1 control character (including DEL)."""
+    return any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value)
+
+
+def _reject_controls(value: str, field: str, *, kind: str) -> None:
+    if _contains_controls(value):
+        raise FleetHubUnprocessable(f"{kind} field {field!r} must not contain control characters")
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -399,11 +413,14 @@ def _validate_event(raw: Any) -> dict[str, Any]:
         if kind is str:
             if not isinstance(value, str) or not value.strip():
                 raise FleetHubError(f"event field {field!r} must be a non-empty string")
+            _reject_controls(value, field, kind="event")
         elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise FleetHubError(f"event field {field!r} must be a non-negative integer")
         event[field] = value
     for field in OPTIONAL_STR_FIELDS:
         value = raw.get(field)
+        if isinstance(value, str):
+            _reject_controls(value, field, kind="event")
         event[field] = value if isinstance(value, str) and value.strip() else None
     return event
 
@@ -553,6 +570,8 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
             continue
         if not isinstance(value, str) or not value.strip():
             raise FleetHubError(f"claim field {field!r} must be a non-empty string")
+        if field == "target":
+            _reject_controls(value, field, kind="claim")
         request[field] = value.strip()
     for field in ("node_id", "holder"):
         if request[field] is None:
@@ -563,6 +582,8 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
                 "([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')"
             )
     conductor = raw.get("conductor")
+    if isinstance(conductor, str):
+        _reject_controls(conductor, "conductor", kind="claim")
     request["conductor"] = conductor.strip() if isinstance(conductor, str) and conductor.strip() else None
     ttl = raw.get("ttl_seconds", DEFAULT_CLAIM_TTL_SECONDS)
     if not isinstance(ttl, int) or isinstance(ttl, bool) or not CLAIM_TTL_MIN_SECONDS <= ttl <= CLAIM_TTL_MAX_SECONDS:
@@ -979,6 +1000,7 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
 
     class _Handler(BaseHTTPRequestHandler):
         server_version = "brigade-fleet-hub/1"
+        sys_version = ""
         # Idle-socket guard: a peer that connects and never sends a request
         # line cannot pin a handler thread forever (pre-auth).
         timeout = 30
@@ -1232,6 +1254,9 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
                     status, body_payload = handle_node_request(conn, parsed)
             except FleetHubForbidden as exc:
                 self._send_json(403, {"error": str(exc)})
+                return
+            except FleetHubUnprocessable as exc:
+                self._send_json(422, {"error": str(exc)})
                 return
             except FleetHubError as exc:
                 self._send_json(400, {"error": str(exc)})

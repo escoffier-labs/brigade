@@ -366,6 +366,32 @@ class TestHubClaims:
         assert _post(url, token, _claim(holder="unknown"))[0] == 400
         assert _post(url, token, _claim(holder="h 1"))[0] == 400
 
+    def test_control_characters_rejected_at_claim_ingestion(self, hub, tmp_path):
+        url, token, _db = hub
+        for field, value in (
+            ("target", "repo\x1b[31m"),
+            ("target", "repo\x07"),
+            ("target", "repo\x9b"),
+            ("conductor", "cond\x1b[31m"),
+            ("conductor", "cond\x80"),
+            ("conductor", "cond\x7f"),
+        ):
+            status, payload = _post(url, token, _claim(**{field: value}))
+            assert status == 422, (field, value)
+            assert "control" in payload["error"]
+        assert _get(url, "/claims", token)[1]["claims"] == []
+        # Existing identity / length caps stay 400; clean display fields still ingest.
+        status, payload = _post(url, token, _claim(node="x" * 200))
+        assert status == 400 and "node_id" in payload["error"]
+        assert _post(url, token, _claim(target="repo-clean", conductor="cond-1"))[0] == 200
+        conn = fleet_hub.init_db(tmp_path / "direct.db")
+        try:
+            with pytest.raises(fleet_hub.FleetHubUnprocessable):
+                fleet_hub.handle_claim(conn, _claim(target="repo\x1b"))
+            assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+        finally:
+            conn.close()
+
     def test_claims_listing_filters_expired_unless_all(self, hub, clock):
         url, token, _db = hub
         _post(url, token, _claim(target="repo-a", ttl_seconds=100))
@@ -833,6 +859,43 @@ class TestFleetClaimsCli:
         out = capsys.readouterr().out
         assert "repo-a" in out and NODE_A[:12] in out and "cond-1" in out
         assert out.splitlines()[0].split()[0] == "target"
+
+    def test_claims_table_renders_legacy_nonprintables_inert(self, hub, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "INSERT INTO claims "
+                "(target, owner_node, owner_conductor, holder_token, acquired_at, renewed_at, "
+                "ttl_seconds, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "repo\x1b[31mred",
+                    NODE_A,
+                    "cond\x9b",
+                    "h1",
+                    "2026-08-23T12:00:00+00:00",
+                    "2026-08-23T12:00:00+00:00",
+                    900,
+                    4_000_000_000.0,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        assert cli.main(["fleet", "claims", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["claims"][0]["target"] == "repo\x1b[31mred"
+        assert payload["claims"][0]["owner_conductor"] == "cond\x9b"
+        assert cli.main(["fleet", "claims"]) == 0
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "\x9b" not in out
+        assert "\\x1b[31mred" in out
+        assert "\\x9b" in out
 
     def test_claims_empty_and_no_hub(self, hub, tmp_path, monkeypatch, capsys):
         from brigade import cli

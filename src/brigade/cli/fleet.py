@@ -11,6 +11,14 @@ DEFAULT_PORT = 3774
 DEFAULT_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
 
 
+def _safe_table_cell(value: object) -> str:
+    """Render a table cell so stored non-printables cannot drive the terminal."""
+    text = str(value)
+    if text.isprintable():
+        return text
+    return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in text)
+
+
 def _format_age(ts: object, *, now: datetime | None = None) -> str:
     """Human-readable age of an ISO-8601 timestamp ("42s", "3m", "2h", "5d")."""
     if not isinstance(ts, str) or not ts:
@@ -224,10 +232,10 @@ def _dispatch_nodes_list(args: argparse.Namespace) -> int:
         revoked = node.get("revoked_at")
         rows.append(
             [
-                str(node.get("node_id") or "-"),
-                str(node.get("label") or "-"),
-                _format_age(node.get("created_at")),
-                f"revoked {_format_age(revoked)} ago" if revoked else "active",
+                _safe_table_cell(str(node.get("node_id") or "-")),
+                _safe_table_cell(str(node.get("label") or "-")),
+                _safe_table_cell(_format_age(node.get("created_at"))),
+                _safe_table_cell(f"revoked {_format_age(revoked)} ago" if revoked else "active"),
             ]
         )
     widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
@@ -289,12 +297,12 @@ def _dispatch_status(args: argparse.Namespace) -> int:
         seat = "/".join(filter(None, [run_row.get("seat"), run_row.get("harness")])) or "-"
         rows.append(
             [
-                str(run_row.get("node_id") or "-")[:12],
-                str(run_row.get("repo") or "-"),
-                str(run_row.get("run_id") or "-"),
-                seat,
-                str(run_row.get("state") or "-"),
-                _format_age(run_row.get("ts")),
+                _safe_table_cell(str(run_row.get("node_id") or "-"))[:12],
+                _safe_table_cell(str(run_row.get("repo") or "-")),
+                _safe_table_cell(str(run_row.get("run_id") or "-")),
+                _safe_table_cell(seat),
+                _safe_table_cell(str(run_row.get("state") or "-")),
+                _safe_table_cell(_format_age(run_row.get("ts"))),
             ]
         )
     widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
@@ -541,11 +549,11 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
             expires += " (expired)"
         rows.append(
             [
-                str(claim.get("target") or "-"),
-                str(claim.get("owner_node") or "-")[:12],
-                str(claim.get("owner_conductor") or "-"),
-                _format_age(claim.get("acquired_at")),
-                expires,
+                _safe_table_cell(str(claim.get("target") or "-")),
+                _safe_table_cell(str(claim.get("owner_node") or "-"))[:12],
+                _safe_table_cell(str(claim.get("owner_conductor") or "-")),
+                _safe_table_cell(_format_age(claim.get("acquired_at"))),
+                _safe_table_cell(expires),
             ]
         )
     widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
