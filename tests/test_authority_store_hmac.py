@@ -123,7 +123,8 @@ def _g5_same_uid_store_rewrite(tmp_path: Path) -> tuple[object, Path]:
     item = ledger._make_import("g5 forged identity", kind="task", source="handoff-ingest")
     receipt_path = _write_g5_receipt(tmp_path, item)
     ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
-    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+    if ledger._authority_store_binding_is_verifier_signed(tmp_path):
+        assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
 
     payload = json.loads(receipt_path.read_text(encoding="utf-8"))
     payload["attacker_marker"] = "same-uid-store-rewrite"
@@ -339,10 +340,14 @@ def test_g5_same_uid_store_write_forged_identity_fails_with_external_key_hmac(tm
     assert not authority_key.key_is_inside_tree(authority_key.key_path(), tmp_path)
 
 
-def test_g5_forged_binding_is_accepted_when_hmac_verification_is_reverted(
+def test_g5_forged_binding_is_refused_even_when_hmac_verification_is_bypassed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Revert-check: without HMAC unwrap, the same same-uid write verifies."""
+    """Revert-check: legacy migration still refuses the same same-uid write.
+
+    Even if envelope unwrapping is bypassed, the store bytes must be a signed
+    envelope for the legacy import path to trust receipt and proof bindings.
+    """
 
     def _passthrough(
         path: Path,
@@ -360,8 +365,7 @@ def test_g5_forged_binding_is_accepted_when_hmac_verification_is_reverted(
     _enable_external_key_isolation(tmp_path)
     monkeypatch.setattr(ledger, "_unwrap_authority_envelope", _passthrough)
     identity, _store = _g5_same_uid_store_rewrite(tmp_path)
-    assert identity is not None
-    assert identity[0] == "handoff-ingest"
+    assert identity is None
 
 
 def test_generate_key_refuses_workspace_brigade_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -392,8 +396,8 @@ def test_workspace_root_key_override_is_refused_and_cannot_verify_forgery(
     assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
 
 
-def test_feature_on_rejects_forgery_that_feature_off_accepts(tmp_path: Path) -> None:
-    """The security.toml flag controls HMAC verify, not just doctor output."""
+def test_legacy_migration_requires_signed_store_with_hmac_off_and_on(tmp_path: Path) -> None:
+    """Legacy migration refuses scanner-reproducible bindings unless the store is signed."""
 
     off = tmp_path / "off"
     on = tmp_path / "on"
@@ -401,7 +405,7 @@ def test_feature_on_rejects_forgery_that_feature_off_accepts(tmp_path: Path) -> 
     on.mkdir()
 
     identity_off, store_off = _g5_same_uid_store_rewrite(off)
-    assert identity_off is not None
+    assert identity_off is None
     off_raw = json.loads(store_off.read_text(encoding="utf-8"))
     assert off_raw.get("envelope_version") != 1
 
@@ -619,7 +623,9 @@ def test_authority_downgrade_persists_unsigned_store_without_recreating_marker(
     assert json.loads(path.read_text(encoding="utf-8")).get("envelope_version") != 1
     assert not authority_marker.marker_exists(tmp_path)
     identity, _store = _g5_same_uid_store_rewrite(tmp_path)
-    assert identity is not None
+    # An unsigned post-downgrade store is scanner-reproducible and forgeable;
+    # legacy migration must refuse it (#881).
+    assert identity is None
     audit = authority_marker.audit_path().read_text(encoding="utf-8")
     line = json.loads(audit.strip().splitlines()[-1])
     assert line["action"] == "authority-downgrade"
@@ -817,7 +823,568 @@ def test_fresh_unsigned_target_has_no_marker(tmp_path: Path) -> None:
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw.get("envelope_version") != 1
     identity, _store = _g5_same_uid_store_rewrite(tmp_path)
-    assert identity is not None
+    # A fresh unsigned store is forgeable by a same-uid writer; legacy
+    # migration must refuse its receipt and proof bindings (#881).
+    assert identity is None
+
+
+def test_authority_signedness_comes_from_one_verified_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#881: signedness and the verified record must come from the same payload.
+
+    A concurrent same-uid writer swaps the store bytes after the helper's
+    first (verified) read; a second read that only checks envelope_version
+    must not bless the swapped-in envelope.
+    """
+
+    _bind_workspace(tmp_path)
+    item = ledger._make_import("single-read swap probe", kind="task", source="handoff-ingest")
+    _write_g5_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._authority_store_binding_is_verifier_signed(tmp_path) is True
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+
+    store = _store_path(tmp_path)
+    legit_envelope = json.loads(store.read_text(encoding="utf-8"))
+    legit_record = dict(legit_envelope["record"])
+
+    # Same-uid writer replaces the store with an enveloped payload whose MAC
+    # cannot verify and whose receipt binding points at attacker bytes.
+    forged = json.loads(store.read_text(encoding="utf-8"))
+    forged["record"] = dict(forged["record"])
+    forged["record"]["files"] = dict(forged["record"].get("files") or {})
+    forged["record"]["files"][".brigade/scanners/runs/chosen-run/receipt.json"] = {
+        "device": 9,
+        "inode": 9,
+        "sha256": "e" * 64,
+    }
+    store.write_text(json.dumps(forged, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+    # Simulate the race: the helper's first read saw the pre-swap verified record.
+    def _stale_first_read(target: Path) -> tuple[Path, dict]:
+        return store, legit_record
+
+    monkeypatch.setattr(ledger, "_read_external_directory_authority", _stale_first_read)
+
+    assert ledger._authority_store_binding_is_verifier_signed(tmp_path) is False
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def test_store_swap_between_validators_cannot_combine_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#881 round 2: every validator must consume one authenticated snapshot.
+
+    A same-uid writer alternates a saved valid signed envelope that binds
+    only the receipt with another saved valid signed envelope that binds
+    only the sidecar. The receipt validator and the sidecar validator each
+    re-read the store independently, so the race lets each check pass
+    against a different snapshot even though no single authenticated state
+    ever contained both bindings. The predicate must reject.
+    """
+
+    _bind_workspace(tmp_path)
+    item = ledger._make_import("snapshot combine probe", kind="task", source="handoff-ingest")
+    _write_g5_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is not None
+
+    store = _store_path(tmp_path)
+    full_record = dict(json.loads(store.read_text(encoding="utf-8"))["record"])
+    files = dict(full_record.get("files") or {})
+    proof_scope = f".brigade/work/imports/proofs/{ledger._import_proof_name(item['id'])}"
+    receipt_file_scope = ".brigade/scanners/runs/chosen-run/receipt.json"
+    assert proof_scope in files and receipt_file_scope in files
+
+    # Envelope A (validly signed): binds the receipt artifacts, not the sidecar.
+    receipt_only_record = dict(full_record)
+    receipt_only_record["files"] = {k: v for k, v in files.items() if k != proof_scope}
+    # Envelope B (validly signed): binds the sidecar, not the receipt artifacts.
+    sidecar_only_record = dict(full_record)
+    sidecar_only_record["files"] = {k: v for k, v in files.items() if k != receipt_file_scope}
+
+    # Disk starts on envelope A. Alone it cannot authenticate: the sidecar
+    # binding is missing.
+    ledger._write_external_directory_authority(store, receipt_only_record, workspace=tmp_path)
+    assert ledger._has_persisted_import_proof(item, target=tmp_path) is False
+    assert ledger._authenticated_legacy_import_proof(item, target=tmp_path) is False
+
+    # Simulate the concurrent writer: the store bytes flip to envelope B
+    # exactly between artifact validation and the final predicate, so the
+    # receipt check is anchored to snapshot A while the sidecar check and
+    # the final signedness read anchor to snapshot B.
+    real_sidecar_check = ledger._has_persisted_import_proof
+
+    def swap_store_then_check(row: dict, *, target: Path | None = None, **kwargs: object) -> bool:
+        ledger._write_external_directory_authority(store, sidecar_only_record, workspace=tmp_path)
+        return real_sidecar_check(row, target=target, **kwargs)
+
+    monkeypatch.setattr(ledger, "_has_persisted_import_proof", swap_store_then_check)
+
+    assert ledger._authenticated_legacy_import_proof(item, target=tmp_path) is False
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
+
+
+def _isolation_posture_marker_path(tmp_path: Path) -> Path:
+    return authority_marker.isolation_marker_path(authority_marker.target_fingerprint(tmp_path))
+
+
+def _canonical_duplicate_row(text: str, source: str = "learning-loop") -> tuple[dict, dict]:
+    """Return one existing canonical import row plus its sanitized duplicate."""
+
+    canonical_hash = ledger._untrusted_import_canonical_hash({"text": text, "kind": "task"})
+    existing = ledger._make_import(
+        text,
+        kind="task",
+        source=source,
+        metadata={
+            "source_item_key": f"{source}:{canonical_hash}",
+            "source_fingerprint": canonical_hash,
+        },
+    )
+    incoming = ledger._sanitize_untrusted_import_record(
+        {"text": text, "kind": "task", "source": source, "metadata": {}},
+        importer_source=source,
+    )
+    return existing, incoming
+
+
+@pytest.mark.parametrize("store_state", ["valid", "missing", "malformed", "rotating"])
+def test_unsigned_dedupe_refused_in_external_key_isolated_workspace(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    store_state: str,
+) -> None:
+    """#881 posture split: with ``authority_store.isolation = "external-key"``
+    canonical dedupe suppression keeps requiring the verified authority
+    snapshot across every store state — intact, missing, malformed, or mid
+    rotation. A canonical duplicate whose persisted sidecar is missing is
+    re-imported instead of suppressed, the recordless persisted-proof
+    validator is never consulted, and no unsigned downgrade warning is logged
+    for an isolated workspace."""
+
+    _bind_workspace(tmp_path)
+    text = "isolated unsigned dedupe probe"
+    existing, incoming = _canonical_duplicate_row(text)
+    ledger._write_persisted_import_proofs(tmp_path, [existing], operation_id="0" * 32)
+    proof_name = ledger._import_proof_name(existing["id"])
+    assert proof_name is not None
+    (tmp_path / ".brigade" / "work" / "imports" / "proofs" / proof_name).unlink()
+
+    store = _store_path(tmp_path)
+    if store_state == "missing":
+        store.unlink()
+    elif store_state == "malformed":
+        store.write_text("{ this is not json", encoding="utf-8")
+    elif store_state == "rotating":
+        authority_key.generate_key(force=True, workspace=tmp_path)
+
+    if store_state == "valid":
+        assert ledger._authority_store_binding_is_verifier_signed(tmp_path)
+    else:
+        assert not ledger._authority_store_binding_is_verifier_signed(tmp_path)
+
+    recordless_calls: list[bool] = []
+    real_validator = ledger._has_persisted_import_proof
+
+    def spy_validator(item: dict, *, target=None, record=None):
+        if record is None:
+            recordless_calls.append(True)
+        return real_validator(item, target=target, record=record)
+
+    monkeypatch.setattr(ledger, "_has_persisted_import_proof", spy_validator)
+
+    # Damaged-store states stop full publication (fail closed until
+    # rebind-authority), so only the dedupe decision is exercised there.
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+        dry_run=store_state != "valid",
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert recordless_calls == []
+    assert "downgraded" not in capsys.readouterr().err
+
+
+def test_external_key_enablement_records_posture_marker_outside_workspace(tmp_path: Path) -> None:
+    """#881 round 3: observing genuine ``external-key`` isolation persists a
+    per-target posture marker outside the workspace beside the other
+    user-level authority state, so the repo-writable flag is never the only
+    surviving record of the isolation decision."""
+
+    _bind_workspace(tmp_path)
+    marker = _isolation_posture_marker_path(tmp_path)
+    assert marker.is_file()
+    assert not marker.is_symlink()
+    try:
+        marker.relative_to(tmp_path.resolve())
+    except ValueError:
+        pass
+    else:
+        pytest.fail("isolation posture marker must live outside the workspace")
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert payload["target_fingerprint"] == authority_marker.target_fingerprint(tmp_path)
+
+
+def test_unsigned_dedupe_refused_when_posture_marker_survives_config_flip(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#881 round 3 attack: a same-uid scanner flips the repo-writable
+    isolation selector to ``off`` while the signed snapshot is unavailable.
+    The persisted posture marker must keep the unsigned dedupe fallback
+    refused so attacker-controlled sidecars cannot suppress a canonical
+    import."""
+
+    _bind_workspace(tmp_path)
+    text = "posture flip dedupe probe"
+    existing, incoming = _canonical_duplicate_row(text)
+    ledger._write_persisted_import_proofs(tmp_path, [existing], operation_id="0" * 32)
+    assert _isolation_posture_marker_path(tmp_path).is_file()
+
+    _disable_external_key_isolation(tmp_path)
+    _store_path(tmp_path).unlink()
+    assert not ledger._authority_store_binding_is_verifier_signed(tmp_path)
+    assert ledger._unsigned_dedupe_proof_for_non_isolated_workspace(tmp_path) is False
+
+    # dry_run isolates the dedupe decision: publishing new proofs for a
+    # bound workspace whose store was deleted fails closed elsewhere.
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+        dry_run=True,
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert "downgraded" not in capsys.readouterr().err
+
+
+def test_unsigned_dedupe_refused_when_posture_marker_and_config_corrupted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#881 round 3 attack variant: invalid config normalizes to ``off``, so a
+    same-uid scanner can malform ``security.toml`` to select the unsigned
+    path. With the posture marker present the fallback stays refused."""
+
+    _bind_workspace(tmp_path)
+    text = "posture corruption dedupe probe"
+    existing, incoming = _canonical_duplicate_row(text)
+    ledger._write_persisted_import_proofs(tmp_path, [existing], operation_id="0" * 32)
+    assert _isolation_posture_marker_path(tmp_path).is_file()
+
+    (tmp_path / ".brigade" / "security.toml").write_text("[[[ not valid toml ===", encoding="utf-8")
+    _store_path(tmp_path).unlink()
+    assert not ledger._authority_store_binding_is_verifier_signed(tmp_path)
+    assert ledger._unsigned_dedupe_proof_for_non_isolated_workspace(tmp_path) is False
+
+    # dry_run isolates the dedupe decision: publishing new proofs for a
+    # bound workspace whose store was deleted fails closed elsewhere.
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+        dry_run=True,
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert "downgraded" not in capsys.readouterr().err
+
+
+def test_unsigned_dedupe_allowed_without_marker_when_isolation_genuinely_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#881 round 3: with no posture marker and a healthy config that genuinely
+    reads ``off``, the unsigned dedupe downgrade stays allowed and warns once
+    per process."""
+
+    _disable_external_key_isolation(tmp_path)
+    (tmp_path / ".brigade").mkdir(exist_ok=True)
+    monkeypatch.setattr(ledger, "_UNSIGNED_DEDUPE_DOWNGRADE_WARNED", False)
+
+    assert ledger._unsigned_dedupe_proof_for_non_isolated_workspace(tmp_path) is True
+    first_err = capsys.readouterr().err
+    assert "downgraded" in first_err
+
+    assert ledger._unsigned_dedupe_proof_for_non_isolated_workspace(tmp_path) is True
+    second_err = capsys.readouterr().err
+    assert len([line for line in (first_err + second_err).splitlines() if "downgraded" in line]) == 1
+
+
+def _replace_isolation_marker_root_with_file() -> Path:
+    """Swap the user-level isolation-marker directory for an unreadable file."""
+
+    root = authority_marker.isolation_marker_root()
+    backup = root.with_name(f".{root.name}.backup")
+    os.rename(root, backup)
+    root.write_text("not a directory", encoding="utf-8")
+    return root
+
+
+def test_unsigned_dedupe_refused_when_isolation_marker_root_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#881 round 4 attack: a same-uid writer replaces the user-level
+    isolation-marker directory with an unreadable stand-in. The read path used
+    to classify every read error as "marker absent" and admit the unsigned
+    dedupe fallback; tri-state status must treat an unreadable marker store as
+    unknown (present-like) so forged unsigned evidence cannot suppress a
+    canonical import after a config flip plus signed-store replacement."""
+
+    _bind_workspace(tmp_path)
+    text = "unreadable marker root dedupe probe"
+    existing, incoming = _canonical_duplicate_row(text)
+    ledger._write_persisted_import_proofs(tmp_path, [existing], operation_id="0" * 32)
+
+    _replace_isolation_marker_root_with_file()
+
+    _disable_external_key_isolation(tmp_path)
+    _store_path(tmp_path).unlink()
+    assert not ledger._authority_store_binding_is_verifier_signed(tmp_path)
+    assert ledger._unsigned_dedupe_proof_for_non_isolated_workspace(tmp_path) is False
+
+    # dry_run isolates the dedupe decision: publishing new proofs for a
+    # bound workspace whose store was deleted fails closed elsewhere.
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+        dry_run=True,
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert "downgraded" not in capsys.readouterr().err
+
+
+def test_external_key_observation_fails_closed_when_posture_persistence_fails(tmp_path: Path) -> None:
+    """#881 round 4: observing genuine ``external-key`` isolation must fail
+    closed when the posture marker cannot be persisted outside the workspace,
+    instead of swallowing the persistence error and proceeding without durable
+    posture. The unsigned-dedupe predicate refuses on that failure too."""
+
+    from brigade.security_cmd.config import authority_store_isolation_state
+
+    _enable_external_key_isolation(tmp_path)
+    (tmp_path / ".brigade").mkdir(exist_ok=True)
+    authority_marker.isolation_marker_root().write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(OSError):
+        authority_store_isolation_state(tmp_path)
+    assert ledger._unsigned_dedupe_proof_for_non_isolated_workspace(tmp_path) is False
+
+
+def test_rename_without_preopening_carries_posture_and_refuses_unsigned_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#881 round 4 attack: posture markers were keyed by path fingerprint
+    only, so renaming a governed workspace orphaned its marker; before the
+    renamed workspace re-observed external-key mode an attacker could flip its
+    config off and plant raw authority. The authenticated reanchor must carry
+    and verify the posture onto the new path before unsigned state is
+    evaluated, bound to the stable workspace identity the signed record
+    already carries, and the carried posture must keep the unsigned dedupe
+    fallback refused for the moved workspace."""
+
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    identity_before_rename = ledger._workspace_directory_identity(alpha)
+    _bind_workspace(alpha)
+    assert _isolation_posture_marker_path(alpha).is_file()
+
+    text = "rename posture carry probe"
+    existing, incoming = _canonical_duplicate_row(text)
+    ledger._write_persisted_import_proofs(alpha, [existing], operation_id="0" * 32)
+
+    os.rename(alpha, beta)
+    _disable_external_key_isolation(beta)
+
+    # First open after the rename: acquisition runs the authenticated reanchor
+    # pass, which must transfer and verify the posture before any unsigned
+    # evaluation inside this same append.
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        beta,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+        dry_run=True,
+    )
+    assert dismissed == []
+    assert rejected == []
+
+    carried_marker = _isolation_posture_marker_path(beta)
+    assert carried_marker.is_file()
+    payload = json.loads(carried_marker.read_text(encoding="utf-8"))
+    assert payload["workspace_identity"] == dict(identity_before_rename)
+
+    # With the signed stores removed afterwards, refusal must persist through
+    # the identity-bound posture alone.
+    ledger._directory_authority_store_path(alpha).unlink(missing_ok=True)
+    _store_path(beta).unlink(missing_ok=True)
+    assert not ledger._authority_store_binding_is_verifier_signed(beta)
+    monkeypatch.setattr(ledger, "_UNSIGNED_DEDUPE_DOWNGRADE_WARNED", False)
+    assert ledger._unsigned_dedupe_proof_for_non_isolated_workspace(beta) is False
+    assert "downgraded" not in capsys.readouterr().err
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        beta,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+        dry_run=True,
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+
+def test_stale_posture_marker_does_not_govern_unrelated_workspace_at_old_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#881 round 4: a stale path-keyed posture marker left behind by a moved
+    workspace must neither govern an unrelated workspace created at the old
+    path nor be silently dropped for the moved one."""
+
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    _bind_workspace(alpha)
+    stale_marker = _isolation_posture_marker_path(alpha)
+    assert stale_marker.is_file()
+
+    os.rename(alpha, beta)
+    alpha.mkdir()
+    _disable_external_key_isolation(alpha)
+    _disable_external_key_isolation(beta)
+    (alpha / ".brigade").mkdir(exist_ok=True)
+
+    monkeypatch.setattr(ledger, "_UNSIGNED_DEDUPE_DOWNGRADE_WARNED", False)
+    # The unrelated workspace at the recycled path is not governed by the
+    # stale marker: the unsigned downgrade stays allowed and warned.
+    assert ledger._unsigned_dedupe_proof_for_non_isolated_workspace(alpha) is True
+    assert "downgraded" in capsys.readouterr().err
+
+    # The moved workspace stays governed: its posture is found through the
+    # stable workspace identity even though the marker file is keyed to the
+    # old path fingerprint.
+    assert ledger._unsigned_dedupe_proof_for_non_isolated_workspace(beta) is False
+
+
+@pytest.mark.parametrize("store_state", ["intact", "removed"])
+def test_append_consumes_exactly_one_authority_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store_state: str
+) -> None:
+    """#881 round 4: when the append-level acquisition legitimately returned
+    none, the legacy helper treated ``record=None`` as unset and reopened the
+    authority state, so one append could consume more than one snapshot."""
+
+    acquisitions: list[Path | None] = []
+    real_acquire = ledger._acquire_authenticated_authority_snapshot
+
+    def spy_acquire(target):
+        acquisitions.append(target)
+        return real_acquire(target)
+
+    monkeypatch.setattr(ledger, "_acquire_authenticated_authority_snapshot", spy_acquire)
+
+    _bind_workspace(tmp_path)
+    text = f"single snapshot probe {store_state}"
+    existing, incoming = _canonical_duplicate_row(text)
+    ledger._write_persisted_import_proofs(tmp_path, [existing], operation_id="0" * 32)
+    if store_state == "removed":
+        _disable_external_key_isolation(tmp_path)
+        _store_path(tmp_path).unlink()
+
+    ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+        dry_run=True,
+    )
+
+    assert len(acquisitions) == 1
+
+
+def test_authority_downgrade_clears_isolation_posture_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#881 round 3: the explicit confirmed downgrade command is the only path
+    that clears the isolation posture marker; it removes both sticky markers
+    under audit and flips isolation off."""
+
+    _bind_workspace(tmp_path)
+    signed_marker = authority_marker.signed_marker_path(authority_marker.target_fingerprint(tmp_path))
+    posture_marker = _isolation_posture_marker_path(tmp_path)
+    assert signed_marker.is_file()
+    assert posture_marker.is_file()
+
+    from brigade.security_cmd.commands import authority_downgrade
+
+    monkeypatch.setattr("sys.stdin", type("_NonTty", (), {"isatty": lambda self: False})())
+    from brigade.security_cmd.config import authority_store_isolation_state
+
+    assert authority_downgrade(target=tmp_path, confirm=True) == 0
+
+    assert not signed_marker.exists()
+    assert not posture_marker.exists()
+    mode, healthy = authority_store_isolation_state(tmp_path)
+    assert mode == "off"
+    assert healthy is True
+
+
+def test_forged_post_run_receipt_is_rejected_by_legacy_import(tmp_path: Path) -> None:
+    """#881 regression: scanner-reproducible receipt bytes bound only by an
+    unsigned authority record must not grant a legacy import identity."""
+
+    _bind_workspace(tmp_path, external_key=False)
+    item = ledger._make_import("forged post-run receipt", kind="task", source="handoff-ingest")
+    receipt_path = _write_g5_receipt(tmp_path, item)
+    ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
+
+    # Same-uid attacker rewrites the receipt after the run exits and re-binds
+    # the unsigned store to the new bytes.
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload["attacker_marker"] = "post-run-forgery"
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+    info = receipt_path.stat()
+    binding = {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+    }
+    store = _store_path(tmp_path)
+    current = json.loads(store.read_text(encoding="utf-8"))
+    files = current.setdefault("files", {})
+    files[".brigade/scanners/runs/chosen-run/receipt.json"] = binding
+    store.write_text(json.dumps(current), encoding="utf-8")
+
+    assert ledger._authority_store_binding_is_verifier_signed(tmp_path) is False
+    assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
 
 
 def test_workspace_relative_marker_plant_is_ignored(tmp_path: Path) -> None:
