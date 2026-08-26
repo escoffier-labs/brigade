@@ -1299,17 +1299,31 @@ func cmdImportStationTrail(args []string, out, errw io.Writer) int {
 		cmd := exec.CommandContext(ctx, "stationtrail", cmdArgs...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
-		b, err := cmd.Output()
+		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			if ctx.Err() == context.DeadlineExceeded {
-				return fatalf(errw, "import stationtrail: timed out after %s", externalScannerTimeout)
-			}
+			return fatalf(errw, "import stationtrail: %s", err)
+		}
+		if err := cmd.Start(); err != nil {
 			if wrap := toolpath.WrapExecErr("stationtrail", toolpath.HintStationTrail, err); wrap != err {
+				return fatalf(errw, "import stationtrail: %s", wrap)
+			}
+			return fatalf(errw, "import stationtrail: %s", err)
+		}
+		b, readErr := readAllBounded(stdout, maxScannerSubcommandOutput)
+		waitErr := cmd.Wait()
+		if ctx.Err() == context.DeadlineExceeded {
+			return fatalf(errw, "import stationtrail: timed out after %s", externalScannerTimeout)
+		}
+		if readErr != nil {
+			return fatalf(errw, "import stationtrail: %s", readErr)
+		}
+		if waitErr != nil {
+			if wrap := toolpath.WrapExecErr("stationtrail", toolpath.HintStationTrail, waitErr); wrap != waitErr {
 				return fatalf(errw, "import stationtrail: %s", wrap)
 			}
 			msg := strings.TrimSpace(stderr.String())
 			if msg == "" {
-				msg = err.Error()
+				msg = waitErr.Error()
 			}
 			return fatalf(errw, "import stationtrail: %s", msg)
 		}
@@ -1346,39 +1360,168 @@ type stationTrailCapabilities struct {
 	Sources []string `json:"sources"`
 }
 
-// stationTrailCaps queries the stationtrail binary's capabilities. ok is false
-// when the binary is too old to support the command (we then proceed without a
-// compatibility guarantee rather than blocking). Missing-binary is handled by
-// toolpath.Require at the import entrypoints before this is consulted.
-func stationTrailCaps() (stationTrailCapabilities, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func emptyStationTrailCaps(caps stationTrailCapabilities) bool {
+	return caps.Tool == "" && caps.Version == "" && caps.Schema == "" && len(caps.Sources) == 0
+}
+
+// stationTrailProbeStatus distinguishes a scanner we positively identified
+// from one that merely failed to answer (#1204). Only a positively identified
+// legacy version is tolerated; timeouts, nonzero exits, oversized output,
+// malformed JSON, and empty payloads all block the import.
+type stationTrailProbeStatus int
+
+const (
+	stationTrailProbeOK stationTrailProbeStatus = iota
+	stationTrailProbeLegacyIdentified
+	stationTrailProbeFailed
+)
+
+type stationTrailProbe struct {
+	Caps   stationTrailCapabilities
+	Status stationTrailProbeStatus
+	Err    error
+}
+
+// stationTrailProbeTimeout bounds each capabilities/version subprocess.
+var stationTrailProbeTimeout = 10 * time.Second
+
+// stationTrailCapsMaxOutput bounds how much of a capabilities or version
+// response is buffered (#1205).
+const stationTrailCapsMaxOutput int64 = 64 << 10
+
+// stationTrailLegacyCommandMarkers are stderr/stdout fingerprints of a
+// stationtrail build that predates the capabilities subcommand. A failure
+// matching one of these, plus a parseable --version, is the only tolerated
+// probe failure.
+var stationTrailLegacyCommandMarkers = []string{
+	"unknown command",
+	"unrecognized command",
+	"unknown flag",
+	"flag provided but not defined",
+}
+
+type stationTrailCommandError struct {
+	Stdout string
+	Stderr string
+}
+
+func (e *stationTrailCommandError) Error() string {
+	msg := strings.TrimSpace(e.Stderr)
+	if msg == "" {
+		msg = strings.TrimSpace(e.Stdout)
+	}
+	if msg == "" {
+		return "stationtrail exited nonzero"
+	}
+	return msg
+}
+
+// runStationTrailBounded runs a stationtrail subcommand with a timeout and a
+// hard output cap. A deadline, read-limit, start, or wait failure is returned
+// as an error; a nonzero exit is returned as *stationTrailCommandError so the
+// caller can inspect the scanner's own output.
+func runStationTrailBounded(args []string, timeout time.Duration, maxOutput int64) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "stationtrail", "capabilities", "--json").Output()
+	cmd := exec.CommandContext(ctx, "stationtrail", args...)
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return stationTrailCapabilities{}, false
+		return nil, err
 	}
-	var caps stationTrailCapabilities
-	if err := json.Unmarshal(out, &caps); err != nil {
-		return stationTrailCapabilities{}, false
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
 	}
-	return caps, true
+	out, readErr := readAllBounded(stdout, maxOutput)
+	waitErr := cmd.Wait()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("stationtrail %s timed out after %s", strings.Join(args, " "), timeout)
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	if waitErr != nil {
+		return out, &stationTrailCommandError{Stdout: string(out), Stderr: stderr.String()}
+	}
+	return out, nil
 }
 
-// checkStationTrailCompat fails fast on an incompatible stationtrail binary: a
-// mismatched adapter schema or a source the binary does not produce. An older
-// binary without the capabilities command is tolerated.
+func looksLikeLegacyStationTrail(output string) bool {
+	folded := strings.ToLower(output)
+	for _, marker := range stationTrailLegacyCommandMarkers {
+		if strings.Contains(folded, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+var stationTrailVersionPattern = regexp.MustCompile(`^v?[0-9]+(?:\.[0-9]+){1,3}`)
+
+// stationTrailReportedVersion asks the binary its version and returns it only
+// when the answer parses as a version string.
+func stationTrailReportedVersion() (string, bool) {
+	out, err := runStationTrailBounded([]string{"--version"}, stationTrailProbeTimeout, stationTrailCapsMaxOutput)
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "stationtrail")
+		line = strings.TrimSpace(line)
+		if m := stationTrailVersionPattern.FindString(line); m != "" {
+			return m, true
+		}
+	}
+	return "", false
+}
+
+// stationTrailCaps probes the stationtrail binary's capabilities. It never
+// collapses an unidentified failure into "old compatible scanner": only a
+// positively identified legacy version comes back with LegacyIdentified
+// (#1204). Missing-binary is handled by toolpath.Require at the import
+// entrypoints before this is consulted.
+func stationTrailCaps() stationTrailProbe {
+	raw, err := runStationTrailBounded([]string{"capabilities", "--json"}, stationTrailProbeTimeout, stationTrailCapsMaxOutput)
+	if err == nil {
+		var caps stationTrailCapabilities
+		if err := json.Unmarshal(raw, &caps); err != nil || emptyStationTrailCaps(caps) {
+			return stationTrailProbe{Status: stationTrailProbeFailed, Err: errors.New("capabilities output is not a recognizable capabilities document")}
+		}
+		return stationTrailProbe{Caps: caps, Status: stationTrailProbeOK}
+	}
+	var cmdErr *stationTrailCommandError
+	if errors.As(err, &cmdErr) && looksLikeLegacyStationTrail(cmdErr.Stdout + "\n" + cmdErr.Stderr) {
+		if version, ok := stationTrailReportedVersion(); ok {
+			return stationTrailProbe{
+				Caps:   stationTrailCapabilities{Version: version},
+				Status: stationTrailProbeLegacyIdentified,
+			}
+		}
+	}
+	return stationTrailProbe{Status: stationTrailProbeFailed, Err: err}
+}
+
+// checkStationTrailCompat fails fast on an incompatible stationtrail binary:
+// a mismatched adapter schema, an unsupported source, or any capability-probe
+// failure that is not a positively identified legacy version.
 func checkStationTrailCompat(sourceKind string) error {
-	caps, ok := stationTrailCaps()
-	return evalStationTrailCompat(caps, ok, sourceKind)
+	return evalStationTrailCompat(stationTrailCaps(), sourceKind)
 }
 
-// evalStationTrailCompat is the pure compatibility decision. ok=false (old
-// binary without capabilities) is tolerated; a schema mismatch or unsupported
-// source is a hard error.
-func evalStationTrailCompat(caps stationTrailCapabilities, ok bool, sourceKind string) error {
-	if !ok {
+// evalStationTrailCompat is the pure compatibility decision. A positively
+// identified legacy binary is tolerated without a compatibility guarantee;
+// every other probe failure, a schema mismatch, or an unsupported source is a
+// hard error (#1204).
+func evalStationTrailCompat(probe stationTrailProbe, sourceKind string) error {
+	switch probe.Status {
+	case stationTrailProbeLegacyIdentified:
 		return nil
+	case stationTrailProbeFailed:
+		return fmt.Errorf("stationtrail capabilities check failed (%v); refusing to import without a compatibility guarantee", probe.Err)
 	}
+	caps := probe.Caps
 	if caps.Schema != "" && caps.Schema != adapter.SchemaV1 {
 		return fmt.Errorf("stationtrail %s emits schema %q but this miseledger expects %q; upgrade the older of the two", caps.Version, caps.Schema, adapter.SchemaV1)
 	}
@@ -1445,8 +1588,10 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 		return ingest.AdapterResult{}, stationTrailSummary{}, errors.New(msg)
 	}
 	var summary stationTrailSummary
-	if b, err := os.ReadFile(summaryPath); err == nil {
-		_ = json.Unmarshal(b, &summary)
+	if b, err := readFileBounded(summaryPath, maxScannerSummaryBytes); err != nil {
+		return ingest.AdapterResult{}, stationTrailSummary{}, fmt.Errorf("read stationtrail summary: %w", err)
+	} else if err := json.Unmarshal(b, &summary); err != nil {
+		return ingest.AdapterResult{}, stationTrailSummary{}, fmt.Errorf("parse stationtrail summary: %w", err)
 	}
 	result.Warnings = append(summary.Warnings, result.Warnings...)
 	if len(summary.Files) > 0 {
@@ -2208,7 +2353,7 @@ func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := applySearchIntegrity(db, results); err != nil {
+	if err := applySearchIntegrityWithVerifiedSnippets(db, results, opts.Query); err != nil {
 		return nil, err
 	}
 	return results, nil
@@ -2796,6 +2941,11 @@ func saveEvidenceBundle(bundle map[string]any) error {
 	if err != nil {
 		return err
 	}
+	// #1201: bind the cached bundle to its canonical reference before it is
+	// written so a later `evidence show` can detect edited item ids or flags.
+	if err := sealEvidenceBundle(bundle); err != nil {
+		return err
+	}
 	if err := security.EnsurePrivateDir(filepath.Dir(path)); err != nil {
 		return err
 	}
@@ -2814,12 +2964,16 @@ func loadEvidenceBundle(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err := os.ReadFile(path)
+	b, err := readFileBounded(path, maxEvidenceBundleBytes)
 	if err != nil {
 		return nil, err
 	}
 	var bundle map[string]any
 	if err := json.Unmarshal(b, &bundle); err != nil {
+		return nil, err
+	}
+	// #1201: reject cached bundles whose reference is not authenticated.
+	if err := verifyEvidenceBundleAuth(bundle); err != nil {
 		return nil, err
 	}
 	return bundle, nil
