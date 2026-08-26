@@ -68,6 +68,11 @@ run.lock; a claim failure is never a new way for a run to fail. The one
 exception is a credential refusal: HTTP 401/403 are stable ``auth-failed``
 outcomes (never retried, no orphan-release fallback) and ``repo_claim``
 fails closed rather than running unprotected on bad credentials.
+
+Known liveness gaps, tracked in escoffier-labs/brigade#1219: a node whose claim
+renewals are selectively blocked keeps retrying without a local lease-expiry
+deadline, and a worker blocked in a silent child wait may outlive a lost claim
+until the queued KeyboardInterrupt is delivered.
 """
 
 from __future__ import annotations
