@@ -502,7 +502,14 @@ class TestReleaseCli:
         out = capsys.readouterr().out
         assert "released claim on 'repo-a'" in out and NODE_A in out and "chef" in out
         assert fleet_client.fetch_claims() == []
-        _post(url, token, _claim(holder="dead2", lock=_lease(run_dir=str(run_dir))))
+        _post(
+            url,
+            token,
+            _claim(
+                holder="dead2",
+                lock=_lease(token="dead-owner-2", acquired_at="2026-08-26T12:00:00+00:00", run_dir=str(run_dir)),
+            ),
+        )
         assert cli.main(["fleet", "claims", "--release", "repo-a", "--json"]) == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["released"] is True and payload["forced"] is False
@@ -607,7 +614,19 @@ class TestReleaseCli:
         assert [c["target"] for c in fleet_client.fetch_claims()] == ["api"]
         # A run directory that is not on this machine: same refusal.
         _post(url, token, _claim("release", target="api", holder="bare"))
-        _post(url, token, _claim(target="api", holder="elsewhere", lock=_lease(run_dir="/nonexistent/.brigade/runs/x")))
+        _post(
+            url,
+            token,
+            _claim(
+                target="api",
+                holder="elsewhere",
+                lock=_lease(
+                    token="elsewhere-owner",
+                    acquired_at="2026-08-26T12:00:00+00:00",
+                    run_dir="/nonexistent/.brigade/runs/x",
+                ),
+            ),
+        )
         assert cli.main(["fleet", "claims", "--release", "api"]) == 1
         assert "does not exist on this machine" in capsys.readouterr().err
         assert cli.main(["fleet", "claims", "--release", "api", "--force", "--json"]) == 0
@@ -656,7 +675,15 @@ class TestReleaseCli:
         assert payload["released"] is True and payload["forced"] is False and payload["target"] == "api"
         assert fleet_client.fetch_claims() == []
         # --force skips the proof (and says so in the receipt).
-        _post(url, token, _claim(target="api", holder="live2", lock=_lease(run_dir=str(run_dir))))
+        _post(
+            url,
+            token,
+            _claim(
+                target="api",
+                holder="live2",
+                lock=_lease(token="live-owner-2", acquired_at="2026-08-26T12:00:00+00:00", run_dir=str(run_dir)),
+            ),
+        )
         lock.mkdir()
         (lock / "pid").write_text(f"{os.getpid()}\n")
         assert cli.main(["fleet", "claims", "--release", str(ws_b), "--path", "--force", "--json"]) == 0

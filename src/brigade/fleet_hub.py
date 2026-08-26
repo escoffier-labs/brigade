@@ -842,7 +842,7 @@ def _is_stale_against_tombstones(
         return True
     if holder is not None and any(row[2] == holder and row[3] == node for row in live):
         return True
-    if lease_stamp and any(row[3] == node and row[4] and lease_stamp <= row[4] for row in live):
+    if lease_stamp and any(row[3] == node and row[4] == lease_stamp for row in live):
         return True
     return False
 
@@ -861,8 +861,7 @@ def _row_lease_stamp(row: tuple[Any, ...]) -> str | None:
     lock_acquired_at = row[14] if len(row) > 14 else None
     if isinstance(lock_acquired_at, str) and lock_acquired_at.strip():
         return lock_acquired_at.strip()
-    acquired_at = row[7]
-    return acquired_at.strip() if isinstance(acquired_at, str) and acquired_at.strip() else None
+    return None
 
 
 def _write_claim_tombstone(
