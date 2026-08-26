@@ -144,15 +144,18 @@ def test_terminal_suffix_states_never_appear_in_live_reads_or_outcomes(conn):
     ]
     assert all(run.bucket == "failed" for run in failed)
     outcomes = deck.fetch_outcomes(conn, outcome_window=20)
+    # Every terminal suffix reaches outcomes except the internal milestones,
+    # which are terminal for the event stream but noise for an operator.
     assert sorted(run.state for run in outcomes) == [
         "engine.timeout",
-        "run.dispatch.completed",
         "run.dispatch.failed",
         "run.dispatch.interrupted",
         "run.timed_out",
         "worker.canceled",
         "worker.cancelled",
     ]
+    assert "run.dispatch.completed" in deck.INTERNAL_OUTCOME_STATES
+    assert all(run.state not in deck.INTERNAL_OUTCOME_STATES for run in outcomes)
     for state in states:
         assert deck.is_terminal_state(state)
     assert not deck.is_terminal_state("run.unfailed")
@@ -228,6 +231,33 @@ def test_fetch_live_runs_drops_old_nonterminal_latest_rows(conn):
     _insert(conn, NODE_A, "fresh", 1, "run.started", ts=_ts(30), repo="repo-new")
     runs = deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800)
     assert [run.run_id for run in runs] == ["fresh"]
+
+
+def test_outcomes_hide_internal_milestones_and_keep_distinct_run_ids(conn):
+    _insert(conn, NODE_A, "dispatch.alpha", 1, "run.dispatch.completed", repo="repo-a")
+    _insert(conn, NODE_A, "dispatch.beta", 1, "run.synthesis.completed", repo="repo-b")
+    _insert(conn, NODE_A, "external.alpha", 1, "run.completed", repo="repo-a")
+    _insert(conn, NODE_A, "external.beta", 1, "provider.completed", repo="repo-b")
+
+    assert [(run.run_id, run.state) for run in deck.fetch_outcomes(conn, outcome_window=10)] == [
+        ("external.alpha", "run.completed"),
+        ("external.beta", "provider.completed"),
+    ]
+
+
+def test_failed_attention_keeps_newest_per_node_repo_and_suppresses_active_retries(conn):
+    _insert(conn, NODE_A, "dispatch.old", 1, "run.dispatch.failed", ts=_ts(300), repo="retrying")
+    _insert(conn, NODE_A, "dispatch.active", 1, "run.dispatch.observed", ts=_ts(30), repo="retrying")
+    _insert(conn, NODE_A, "failure.old", 1, "run.dispatch.failed", ts=_ts(240), repo="same-repo")
+    _insert(conn, NODE_A, "failure.new", 1, "run.dispatch.failed", ts=_ts(60), repo="same-repo")
+    _insert(conn, NODE_A, "prefix.alpha", 1, "run.dispatch.failed", ts=_ts(90), repo="repo-a")
+    _insert(conn, NODE_A, "prefix.beta", 1, "run.dispatch.failed", ts=_ts(120), repo="repo-b")
+
+    assert [(run.run_id, run.repo) for run in deck.fetch_failed_outcomes(conn, now=NOW, lookback_seconds=86400)] == [
+        ("failure.new", "same-repo"),
+        ("prefix.alpha", "repo-a"),
+        ("prefix.beta", "repo-b"),
+    ]
 
 
 # --- HTTP integration: hub-served Command Deck (task 2) ----------------------
@@ -317,15 +347,24 @@ def test_deck_requires_bearer_or_cookie(tmp_path):
         assert _request(hub, "GET", "/status", headers={"Cookie": cookie})[0] == 401
 
 
-def test_config_is_loaded_once_and_routes_keep_legacy_pages(tmp_path):
+def test_command_deck_is_root_and_legacy_boards_stay_under_view(tmp_path):
     with _start_hub(tmp_path, CONFIG) as (hub, _db):
-        assert "Alpha" in _request(hub, "GET", "/deck", headers=_bearer())[2]
+        root = _request(hub, "GET", "/", headers=_bearer())[2]
+        alias = _request(hub, "GET", "/deck", headers=_bearer())[2]
+        assert "Command Deck" in root and "Alpha" in root
+        assert "Command Deck" in alias and "Alpha" in alias
+        assert 'href="/view/machines"' in root and 'href="/view/repos"' in root
+        # Root is the deck itself, so href="/" is the valid self-link here; what
+        # must not exist is a legacy board served from root.
+        assert '<a href="/">deck</a>' in root
+        assert 'href="/machines"' not in root and 'href="/repos"' not in root
         for path, title in (
-            ("/", "Fleet: Machines"),
             ("/view/machines", "Fleet: Machines"),
             ("/view/repos", "Fleet: Repos"),
         ):
-            assert title in _request(hub, "GET", path, headers=_bearer())[2]
+            page = _request(hub, "GET", path, headers=_bearer())[2]
+            assert title in page
+            assert 'href="/"' not in page
 
 
 def test_headers_secrets_and_responsive_css(tmp_path):
@@ -441,6 +480,55 @@ def test_hostile_labels_are_escaped_and_no_config_hint(tmp_path):
     with _start_hub(tmp_path / "no-config", None) as (hub, _db):
         _status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
         assert "No stations configured" in body
+
+
+def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(tmp_path):
+    with _start_hub(tmp_path, CONFIG) as (hub, db_path):
+        conn = fleet_hub.open_db(db_path)
+        try:
+            status, admitted = fleet_hub.handle_cloud(
+                conn,
+                {
+                    "action": "admit",
+                    "provider": "cursor-cloud",
+                    "lease_id": "lease-cursor",
+                    "node_id": NODE_A,
+                    "holder": HOLDER_TOKEN,
+                    "repo": '<repo & "one">',
+                    "label": '<task & "one">',
+                    "prompt_hash": "a" * 64,
+                },
+                config=deck.load_config(tmp_path / "deck.json"),
+            )
+            assert status == 200 and admitted["admitted"] is True
+            status, bound = fleet_hub.handle_cloud(
+                conn,
+                {
+                    "action": "bind",
+                    "lease_id": "lease-cursor",
+                    "node_id": NODE_A,
+                    "holder": HOLDER_TOKEN,
+                    "provider_task_id": '<task-id & "one">',
+                    "artifact_ref": "https://example.invalid/task/1",
+                },
+                config=deck.load_config(tmp_path / "deck.json"),
+            )
+            assert status == 200 and bound["bound"] is True
+        finally:
+            conn.close()
+
+        _seed_run(hub, NODE_A, "physical", "run.created", repo="physical-repo")
+        status, headers, body = _request(hub, "GET", "/", headers=_bearer())
+        assert status == 200 and "frame-ancestors 'none'" in headers["content-security-policy"]
+        assert "Cloud workers" in body
+        assert "<h3>cursor</h3>" in body and ">1/3<" in body
+        assert "closed" in body
+        assert "<h3>codex</h3>" in body and ">0/2<" in body and "No active leases." in body
+        assert "1/4 busy" in body
+        assert "&lt;task &amp; &quot;one&quot;&gt;" in body
+        assert "&lt;repo &amp; &quot;one&quot;&gt;" in body
+        assert "&lt;task-id &amp; &quot;one&quot;&gt;" in body
+        assert HOLDER_TOKEN not in body and "a" * 64 not in body
 
 
 class TestDeckCli:

@@ -81,14 +81,14 @@ def _seed(hub) -> None:
 
 
 def _login_cookie(hub) -> str:
-    status, headers, _text = _request(hub, "GET", f"/?token={TOKEN}")
+    status, headers, _text = _request(hub, "GET", f"/view/machines?token={TOKEN}")
     assert status == 303
     return headers["set-cookie"].split(";")[0]
 
 
 class TestDashboardAuth:
     def test_requires_bearer_or_cookie(self, hub):
-        for path in ("/", "/view/machines", "/view/repos"):
+        for path in ("/view/machines", "/view/repos"):
             status, headers, text = _request(hub, "GET", path)
             assert status == 401, path
             assert "set-cookie" not in headers
@@ -99,7 +99,7 @@ class TestDashboardAuth:
         assert status == 401
 
     def test_bearer_renders_html_with_security_headers(self, hub):
-        status, headers, text = _request(hub, "GET", "/", headers=_bearer())
+        status, headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert status == 200
         assert headers["content-type"].startswith("text/html")
         assert "nonce-" in headers["content-security-policy"]
@@ -132,13 +132,13 @@ class TestDashboardAuth:
         assert TOKEN not in text
 
     def test_wrong_token_query_sets_no_cookie(self, hub):
-        status, headers, _text = _request(hub, "GET", "/?token=wrong")
+        status, headers, _text = _request(hub, "GET", "/view/machines?token=wrong")
         assert status == 401
         assert "set-cookie" not in headers
 
     def test_cookie_grants_dashboard_only(self, hub):
         cookie = _login_cookie(hub)
-        status, _headers, text = _request(hub, "GET", "/", headers={"Cookie": cookie})
+        status, _headers, text = _request(hub, "GET", "/view/machines", headers={"Cookie": cookie})
         assert status == 200
         assert "Fleet: Machines" in text
         status, _headers, _text = _request(hub, "GET", "/view/repos", headers={"Cookie": cookie})
@@ -160,7 +160,7 @@ class TestDashboardAuth:
 class TestBoards:
     def test_machine_board_renders_seeded_events_and_claims(self, hub):
         _seed(hub)
-        status, _headers, text = _request(hub, "GET", "/", headers=_bearer())
+        status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert status == 200
         assert f'data-node="{NODE_A}"' in text
         assert f'data-node="{NODE_B}"' in text
@@ -179,7 +179,7 @@ class TestBoards:
 
     def test_include_finished_shows_terminal_runs(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?all=1", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
         assert "runcharlie" in text
         assert "succeeded" in text
 
@@ -203,7 +203,7 @@ class TestBoards:
         assert "idle" in repo_c and "succeeded" in repo_c
 
     def test_empty_hub_renders(self, hub):
-        _status, _headers, text = _request(hub, "GET", "/", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert "No fleet events recorded yet." in text
         _status, _headers, text = _request(hub, "GET", "/view/repos", headers=_bearer())
         assert "No repos match." in text
@@ -212,13 +212,13 @@ class TestBoards:
 class TestSortAndFilter:
     def test_node_filter(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?node=1111", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?node=1111", headers=_bearer())
         assert "runalpha" in text and "runbravo" not in text
         assert f'data-node="{NODE_B}"' not in text
 
     def test_attention_only(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?attention=1", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?attention=1", headers=_bearer())
         assert "runbravo" in text and "runalpha" not in text
         _status, _headers, text = _request(hub, "GET", "/view/repos?attention=1", headers=_bearer())
         assert "repo-b" in text and "repo-c" not in text
@@ -226,11 +226,11 @@ class TestSortAndFilter:
 
     def test_state_and_seat_filters(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?state=paused", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?state=paused", headers=_bearer())
         assert "runbravo" in text and "runalpha" not in text
-        _status, _headers, text = _request(hub, "GET", "/?state=running", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?state=running", headers=_bearer())
         assert "runalpha" in text and "runbravo" not in text
-        _status, _headers, text = _request(hub, "GET", "/?seat=codex", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?seat=codex", headers=_bearer())
         assert "runbravo" in text and "runalpha" not in text
 
     def test_repo_filter_on_repo_board(self, hub):
@@ -241,9 +241,9 @@ class TestSortAndFilter:
     def test_sort_orders_cards(self, hub):
         _seed(hub)
         # Default attention sort: the machine with an awaiting-approval run comes first.
-        _status, _headers, text = _request(hub, "GET", "/", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert text.index(f'data-node="{NODE_B}"') < text.index(f'data-node="{NODE_A}"')
-        _status, _headers, text = _request(hub, "GET", "/?sort=node", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?sort=node", headers=_bearer())
         assert text.index(f'data-node="{NODE_A}"') < text.index(f'data-node="{NODE_B}"')
         assert '<option value="node" selected>' in text
 
@@ -261,8 +261,11 @@ class TestSortAndFilter:
 
     def test_filters_round_trip_in_links_and_form(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?sort=age&node=1111&attention=1", headers=_bearer())
+        _status, _headers, text = _request(
+            hub, "GET", "/view/machines?sort=age&node=1111&attention=1", headers=_bearer()
+        )
         assert 'href="/view/repos?sort=age&amp;node=1111&amp;attention=1"' in text
+        assert 'href="/view/machines?sort=age&amp;node=1111&amp;attention=1"' in text
         assert 'name="node" value="1111"' in text
         assert 'name="attention" value="1" checked' in text
 
@@ -272,7 +275,7 @@ class TestNoSecretsInHtml:
         _seed(hub)
         cookie = _login_cookie(hub)
         cookie_value = cookie.split("=", 1)[1]
-        for path in ("/", "/view/machines", "/view/repos", "/?all=1&sort=node"):
+        for path in ("/view/machines", "/view/repos", "/view/machines?all=1&sort=node"):
             for headers in (_bearer(), {"Cookie": cookie}):
                 status, _headers, text = _request(hub, "GET", path, headers=headers)
                 assert status == 200
@@ -283,7 +286,7 @@ class TestNoSecretsInHtml:
 
     def test_filter_values_are_escaped(self, hub):
         _seed(hub)
-        _status, _headers, text = _request(hub, "GET", "/?node=%3Cscript%3Ex", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines?node=%3Cscript%3Ex", headers=_bearer())
         assert "<script>x" not in text
         assert "&lt;script&gt;x" in text
 

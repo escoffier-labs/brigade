@@ -37,7 +37,10 @@ FAILURE_STATE_SUFFIXES = (
     ".timeout",
 )
 ACTIVE_LIMIT, OBSERVER_LIMIT, RAIL_FAILURE_LIMIT = 200, 8, 10
+CLOUD_PROVIDER_LIMIT, CLOUD_LEASE_LIMIT = 8, 16
+CLOUD_TEXT_LIMIT = 256
 BUCKET_RANK = {"failed": 0, "awaiting approval": 1, "stale": 2, "running": 3, "queued": 4}
+INTERNAL_OUTCOME_STATES = frozenset({"run.dispatch.completed", "run.synthesis.completed"})
 
 _START_CHUNK = 400
 _UTC = timezone.utc
@@ -151,12 +154,35 @@ class RepoRow:
 
 
 @dataclass(frozen=True)
+class CloudLease:
+    """The active cloud-lease fields safe to project into the Command Deck."""
+
+    provider_task_id: str
+    repo: str
+    label: str
+    state: str
+    artifact_ref: str
+
+
+@dataclass(frozen=True)
+class CloudWorker:
+    """One bounded provider card, separate from physical station capacity."""
+
+    provider: str
+    used: int
+    limit: int
+    circuit_state: str
+    leases: tuple[CloudLease, ...]
+
+
+@dataclass(frozen=True)
 class DeckView:
     stations: tuple[StationView, ...]
     rail: tuple[RailEntry, ...]
     repos: tuple[RepoRow, ...]
     outcomes: tuple[LiveRun, ...]
     observers: tuple[tuple[str, str], ...]
+    cloud_workers: tuple[CloudWorker, ...] = ()
 
 
 def resolve_config_path(flag_value: str | Path | None, environ: Mapping[str, str]) -> Path | None:
@@ -280,10 +306,16 @@ _TERMINAL_PLACEHOLDERS = ",".join("?" for _ in TERMINAL_STATES)
 _NOT_TERMINAL_SQL = f"state NOT IN ({_TERMINAL_PLACEHOLDERS})" + "".join(
     f" AND state NOT LIKE '%{suffix}'" for suffix in TERMINAL_STATE_SUFFIXES
 )
-_IS_TERMINAL_SQL = f"({f'state IN ({_TERMINAL_PLACEHOLDERS})'})" + "".join(
-    f" OR state LIKE '%{suffix}'" for suffix in TERMINAL_STATE_SUFFIXES
+# Self-parenthesized: callers append further AND predicates, and an unwrapped
+# OR chain would bind them to the final LIKE term only.
+_IS_TERMINAL_SQL = (
+    f"(state IN ({_TERMINAL_PLACEHOLDERS})"
+    + "".join(f" OR state LIKE '%{suffix}'" for suffix in TERMINAL_STATE_SUFFIXES)
+    + ")"
 )
 _FAILURE_MATCH_SQL = " OR ".join(f"state LIKE '%{suffix}'" for suffix in FAILURE_STATE_SUFFIXES)
+_INTERNAL_OUTCOME_PARAMS = tuple(sorted(INTERNAL_OUTCOME_STATES))
+_INTERNAL_OUTCOME_PLACEHOLDERS = ",".join("?" for _ in _INTERNAL_OUTCOME_PARAMS)
 
 
 def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seconds: int) -> list[LiveRun]:
@@ -338,9 +370,11 @@ def fetch_started_at(conn: sqlite3.Connection, keys: Sequence[tuple[str, str]]) 
 
 
 def fetch_outcomes(conn: sqlite3.Connection, *, outcome_window: int) -> list[LiveRun]:
+    """Terminal rows an operator should read, minus Brigade's internal milestones."""
     rows = conn.execute(
-        f"{_LATEST_ROWS} AND {_IS_TERMINAL_SQL} ORDER BY ts DESC LIMIT ?",
-        (*TERMINAL_STATES, int(outcome_window)),
+        f"{_LATEST_ROWS} AND {_IS_TERMINAL_SQL}"
+        f" AND state NOT IN ({_INTERNAL_OUTCOME_PLACEHOLDERS}) ORDER BY ts DESC LIMIT ?",
+        (*TERMINAL_STATES, *_INTERNAL_OUTCOME_PARAMS, int(outcome_window)),
     ).fetchall()
     return [_live_run_from_row(row) for row in rows]
 
@@ -348,10 +382,76 @@ def fetch_outcomes(conn: sqlite3.Connection, *, outcome_window: int) -> list[Liv
 def fetch_failed_outcomes(conn: sqlite3.Connection, *, now: datetime, lookback_seconds: int) -> list[LiveRun]:
     cutoff = datetime.fromtimestamp(now.timestamp() - lookback_seconds, tz=now.tzinfo or _UTC).isoformat()
     rows = conn.execute(
-        f"{_LATEST_ROWS} AND ({_FAILURE_MATCH_SQL}) AND ts >= ? ORDER BY ts DESC LIMIT {RAIL_FAILURE_LIMIT}",
-        (cutoff,),
+        "WITH latest AS (" + _LATEST_ROWS + "), failures AS ("
+        "SELECT node_id, run_id, repo, seat, harness, state, ts, ROW_NUMBER() OVER ("
+        "PARTITION BY node_id, COALESCE(repo, '') ORDER BY ts DESC, run_id DESC"
+        ") AS attention_rank FROM latest "
+        f"WHERE ({_FAILURE_MATCH_SQL}) AND ts >= ?"
+        "), active AS ("
+        "SELECT node_id, repo, ts FROM latest "
+        f"WHERE {_NOT_TERMINAL_SQL}"
+        ") SELECT node_id, run_id, repo, seat, harness, state, ts FROM failures AS failure "
+        "WHERE attention_rank = 1 AND NOT EXISTS ("
+        "SELECT 1 FROM active WHERE active.node_id = failure.node_id "
+        "AND COALESCE(active.repo, '') = COALESCE(failure.repo, '') AND active.ts > failure.ts"
+        f") ORDER BY ts DESC, run_id DESC LIMIT {RAIL_FAILURE_LIMIT}",
+        (cutoff, *TERMINAL_STATES),
     ).fetchall()
     return [_live_run_from_row(row, bucket="failed") for row in rows]
+
+
+def cloud_workers_from_snapshot(snapshot: Mapping[str, object]) -> tuple[CloudWorker, ...]:
+    """Build bounded, safe cloud cards from the hub's request-local snapshot."""
+    policy = snapshot.get("policy")
+    if not isinstance(policy, Mapping):
+        return ()
+    provider_rows = policy.get("providers")
+    lease_rows = snapshot.get("leases")
+    if not isinstance(provider_rows, Sequence) or isinstance(provider_rows, (str, bytes)):
+        return ()
+    if not isinstance(lease_rows, Sequence) or isinstance(lease_rows, (str, bytes)):
+        lease_rows = ()
+    leases_by_provider: dict[str, list[CloudLease]] = {}
+    for raw in lease_rows:
+        if not isinstance(raw, Mapping) or raw.get("released_at") is not None or raw.get("expired") is True:
+            continue
+        provider = _safe_display_text(raw.get("provider"))
+        if not provider:
+            continue
+        leases_by_provider.setdefault(provider, []).append(
+            CloudLease(
+                provider_task_id=_safe_display_text(raw.get("provider_task_id")),
+                repo=_safe_display_text(raw.get("repo")),
+                label=_safe_display_text(raw.get("label")),
+                state=_safe_display_text(raw.get("state")),
+                artifact_ref=_safe_display_text(raw.get("artifact_ref")),
+            )
+        )
+    workers: list[CloudWorker] = []
+    for raw in provider_rows:
+        if not isinstance(raw, Mapping):
+            continue
+        provider = _safe_display_text(raw.get("provider"))
+        if not provider:
+            continue
+        used = raw.get("used")
+        limit = raw.get("limit")
+        if type(used) is not int or type(limit) is not int or used < 0 or limit < 0:
+            continue
+        workers.append(
+            CloudWorker(
+                provider=provider,
+                used=used,
+                limit=limit,
+                circuit_state=_safe_display_text(raw.get("circuit_state")) or "unknown",
+                leases=tuple(leases_by_provider.get(provider, ())[:CLOUD_LEASE_LIMIT]),
+            )
+        )
+    return tuple(sorted(workers, key=lambda worker: worker.provider)[:CLOUD_PROVIDER_LIMIT])
+
+
+def _safe_display_text(value: object) -> str:
+    return _strip_controls(value)[:CLOUD_TEXT_LIMIT] if isinstance(value, str) else ""
 
 
 def fetch_last_heard(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, str]:
@@ -433,6 +533,7 @@ def build_view(
     failed_outcomes: Sequence[LiveRun],
     observers: Sequence[tuple[str, str]],
     now: datetime,
+    cloud_workers: Sequence[CloudWorker] = (),
 ) -> DeckView:
     del now
     active_runs = tuple(run for run in live_runs if not is_terminal_state(run.state) and run.bucket != "stale")
@@ -504,6 +605,7 @@ def build_view(
         repos=repos,
         outcomes=tuple(outcomes),
         observers=tuple(observers),
+        cloud_workers=tuple(cloud_workers[:CLOUD_PROVIDER_LIMIT]),
     )
 
 
@@ -578,6 +680,13 @@ nav a:hover, nav a:focus-visible { border-color: var(--signal); color: var(--ink
 .claim, .collision { margin: 9px 0 0; font-size: 12px; }
 .collision { color: var(--signal); font-weight: 800; }
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 12px; margin-top: 12px; }
+.cloud-workers { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+.cloud-worker-card { min-width: 0; padding: 12px; border: 1px solid var(--line-quiet); background: var(--surface); }
+.cloud-worker-card > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.cloud-capacity { margin: 0; color: var(--signal); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cloud-state { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.cloud-lease-list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.cloud-lease-list li { padding-top: 7px; border-top: 1px solid var(--line-quiet); color: var(--muted); font-size: 12px; }
 .panel, .repo-panel { padding: 12px; }
 .panel > header, .repo-panel > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .panel-count { margin: 0; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -634,7 +743,7 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
         '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck</h1>',
         f'<p class="verdict">{_esc(verdict)}</p></div><p class="header-meta">'
         f"{total_busy}/{total_capacity} slots busy<br>{_esc(_stamp(now))}</p></header>",
-        '<nav aria-label="Command Deck"><a href="/deck/repos">repos</a> <a href="/">classic boards</a></nav>',
+        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/view/machines">machines board</a></nav>',
     ]
     if not view.stations:
         parts.append(
@@ -655,6 +764,17 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime) -> str:
                 f'{station.busy}/{station.station.capacity} busy</p></header><div class="run-stack">{tiles_html}</div></section>'
             )
         parts.append('<section class="stations" aria-label="Fleet stations">' + "".join(station_cards) + "</section>")
+    cloud_cards = "".join(_cloud_worker_html(worker) for worker in view.cloud_workers)
+    parts.append(
+        '<section class="panel" aria-labelledby="cloud-workers"><header><h2 id="cloud-workers">Cloud workers</h2>'
+        f'<p class="panel-count">{len(view.cloud_workers)} provider(s)</p></header>'
+        + (
+            f'<div class="cloud-workers">{cloud_cards}</div>'
+            if cloud_cards
+            else '<p class="empty">No cloud providers configured.</p>'
+        )
+        + "</section>"
+    )
     rail_items = "".join(
         f'<li><span class="attention-kind">{_esc(entry.kind)}</span> &middot; {_esc(entry.repo)} &middot; '
         f'{_esc(entry.node_id[:12])} &middot; <span title="{_esc(entry.run_id or entry.node_id)}">'
@@ -711,7 +831,7 @@ def render_repos(view: DeckView, *, nonce: str, now: datetime) -> str:
         '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
         "<h1>Command Deck &middot; Repos</h1></div>"
         f'<p class="header-meta">{_esc(_stamp(now))}</p></header>'
-        '<nav aria-label="Command Deck"><a href="/deck">deck</a> <a href="/">classic boards</a></nav>'
+        '<nav aria-label="Command Deck"><a href="/">deck</a> <a href="/view/machines">machines board</a></nav>'
         '<section class="repo-panel" aria-label="Repository coordination">'
         + table
         + '</section><footer><a href="/view/machines">machines board</a> <a href="/view/repos">repos board</a></footer></main>'
@@ -739,6 +859,29 @@ def _tile_html(tile: Tile) -> str:
         f'<dt>run</dt><dd class="run-id" title="{_esc(tile.run.run_id)}">{_esc(tile.run.run_id[:12])}</dd></dl>'
         + claim_html
         + collision_html
+        + "</article>"
+    )
+
+
+def _cloud_worker_html(worker: CloudWorker) -> str:
+    lease_items = "".join(
+        "<li>"
+        f"<strong>{_esc(lease.label or lease.provider_task_id or 'active lease')}</strong><br>"
+        f"{_esc(lease.repo)} &middot; {_esc(lease.state)}"
+        + (f'<br><span title="task id">{_esc(lease.provider_task_id)}</span>' if lease.provider_task_id else "")
+        + (f'<br><span title="artifact">{_esc(lease.artifact_ref)}</span>' if lease.artifact_ref else "")
+        + "</li>"
+        for lease in worker.leases
+    )
+    return (
+        '<article class="cloud-worker-card"><header>'
+        f'<h3>{_esc(worker.provider)}</h3><p class="cloud-capacity">{worker.used}/{worker.limit}</p>'
+        f'</header><p class="cloud-state">circuit: {_esc(worker.circuit_state)}</p>'
+        + (
+            f'<ul class="cloud-lease-list">{lease_items}</ul>'
+            if lease_items
+            else '<p class="empty">No active leases.</p>'
+        )
         + "</article>"
     )
 

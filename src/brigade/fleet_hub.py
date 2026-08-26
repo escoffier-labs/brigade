@@ -71,8 +71,8 @@ Endpoints:
   attributed to its own ``node_id``.
 - ``GET /claims`` — admin or node token; active claims (``?all=1`` includes
   expired).
-- ``GET /`` and ``GET /view/{machines,repos}`` — the server-rendered Fleet
-  dashboard (issue #1124 phase 3; see ``fleet_dashboard``). Same bearer auth,
+- ``GET /`` and ``GET /deck`` — the server-rendered Command Deck, with the
+  legacy Fleet dashboard retained at ``/view/{machines,repos}``. Same bearer auth,
   or the ``brigade_fleet_view`` cookie: opening the page once with
   ``?token=<fleet token>`` from a phone sets an HttpOnly, SameSite=Strict
   cookie and 303-redirects to the same URL without the token. The cookie
@@ -111,7 +111,7 @@ from urllib.parse import parse_qs, urlencode
 
 from . import fleet_command_deck, fleet_dashboard
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -274,6 +274,12 @@ _MODEL_POLICY_SAFE_FIELDS = frozenset({"provider", "model", "seat", "enabled", "
 _MODEL_POLICY_REQUEST_FIELDS = frozenset({"action", "provider", "model", "seat", "enabled", "limit", "notes"})
 CLOUD_ACTIONS = frozenset({"admit", "bind", "renew", "release", "policy"})
 CLOUD_PROVIDER_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+CLOUD_PROVIDER_ALIASES = {
+    "cursor-cloud": "cursor",
+    "codex-cloud": "codex",
+    "claude-cloud": "claude",
+    "grokbot-cloud": "grok-bot",
+}
 CLOUD_LEASE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MODEL_POLICY_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 CLOUD_TTL_MIN_SECONDS = 1
@@ -468,10 +474,12 @@ def init_db(db_path: Path) -> sqlite3.Connection:
                     _migrate_claims_table(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
         # v3 -> v4 is one additive table; v5-v8 add cloud lease and policy
-        # tables only, so existing event, claim, and node rows survive.
+        # tables only, and v9 canonicalizes provider aliases. Existing event,
+        # claim, node, and active lease rows survive.
         conn.execute(_NODES_SCHEMA)
         conn.execute(_CLOUD_LEASES_SCHEMA)
         conn.execute(_CLOUD_PROVIDER_STATE_SCHEMA)
+        _canonicalize_cloud_provider_rows(conn)
         with _migration_lock(db_path):
             if _model_policy_table_needs_recreation(conn):
                 # Correct the unpublished v8 schema: seat is the authoritative key,
@@ -974,7 +982,18 @@ def _cloud_provider(raw: Any) -> str:
     provider = _safe_cloud_text(raw, "provider", required=True, limit=64)
     if provider is None or not CLOUD_PROVIDER_PATTERN.match(provider):
         raise FleetHubError("cloud field 'provider' must use lowercase letters, digits, and hyphens")
-    return provider
+    return CLOUD_PROVIDER_ALIASES.get(provider, provider)
+
+
+def _canonicalize_cloud_provider_rows(conn: sqlite3.Connection) -> None:
+    """Collapse old provider aliases before requests can compare admission rows."""
+    for alias, canonical in CLOUD_PROVIDER_ALIASES.items():
+        conn.execute("UPDATE cloud_leases SET provider = ? WHERE provider = ?", (canonical, alias))
+        existing = conn.execute("SELECT 1 FROM cloud_provider_state WHERE provider = ?", (canonical,)).fetchone()
+        if existing is None:
+            conn.execute("UPDATE cloud_provider_state SET provider = ? WHERE provider = ?", (canonical, alias))
+        else:
+            conn.execute("DELETE FROM cloud_provider_state WHERE provider = ?", (alias,))
 
 
 def _cloud_lease_id(raw: Any) -> str:
@@ -1670,15 +1689,23 @@ def make_handler(
                 started_at=started_at,
                 nonce=nonce,
             )
+            # The legacy board used ``/`` as its machines route. Root now
+            # belongs to the Command Deck, so keep every legacy navigation
+            # target and filter form under its explicit /view/machines route.
+            page = (
+                page.replace('href="/?', 'href="/view/machines?')
+                .replace('href="/"', 'href="/view/machines"')
+                .replace('action="/"', 'action="/view/machines"')
+            )
             self._send_html(200, page, nonce=nonce)
 
         def _serve_deck(self, path: str, query: str) -> None:
-            """Command Deck HTML (/deck, /deck/repos): the same enrollment,
+            """Command Deck HTML (/, /deck, /deck/repos): the same enrollment,
             redirect, bearer-or-cookie authorization, and security headers as
             ``_serve_dashboard``; non-token query parameters are ignored,
             never reflected. Renders from the startup-frozen deck config."""
             plain = "text/plain; charset=utf-8"
-            if path == "/deck":
+            if path in ("/", "/deck"):
                 render = fleet_command_deck.render_deck
             elif path == "/deck/repos":
                 render = fleet_command_deck.render_repos
@@ -1731,6 +1758,7 @@ def make_handler(
                 failed_outcomes = fleet_command_deck.fetch_failed_outcomes(
                     conn, now=now, lookback_seconds=frozen_deck.failed_lookback_seconds
                 )
+                cloud_workers = fleet_command_deck.cloud_workers_from_snapshot(cloud_snapshot(conn, frozen_deck))
                 # Only unrevoked enrollments feed the label/enrolled mapping.
                 enrolled_labels = {
                     node["node_id"]: str(node["label"] or "")
@@ -1755,6 +1783,7 @@ def make_handler(
                 failed_outcomes=failed_outcomes,
                 observers=observers,
                 now=now,
+                cloud_workers=cloud_workers,
             )
             nonce = secrets.token_urlsafe(16)
             page = render(view, nonce=nonce, now=now)
@@ -1765,10 +1794,10 @@ def make_handler(
             if path == "/health":
                 self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
                 return
-            if path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
+            if path == "/" or path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
                 self._serve_deck(path, query)
                 return
-            if path == "/" or path.startswith(_DASHBOARD_PREFIX):
+            if path.startswith(_DASHBOARD_PREFIX):
                 self._serve_dashboard(path, query)
                 return
             if path in ("/status", "/claims", "/nodes", "/cloud", "/models"):

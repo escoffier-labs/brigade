@@ -138,6 +138,34 @@ def test_cloud_lease_is_idempotent_fenced_expiring_and_sanitized(conn, monkeypat
     assert fleet_hub.list_cloud_leases(conn, include_all=True)[0]["expired"] is True
 
 
+@pytest.mark.parametrize(
+    ("raw_provider", "canonical"),
+    [
+        ("cursor-cloud", "cursor"),
+        ("codex-cloud", "codex"),
+        ("claude-cloud", "claude"),
+        ("grokbot-cloud", "grok-bot"),
+        ("jules", "jules"),
+    ],
+)
+def test_cloud_provider_aliases_are_stored_and_compared_canonically(conn, raw_provider, canonical):
+    config = deck.DeckConfig()
+    status, payload = fleet_hub.handle_cloud(
+        conn,
+        {"action": "policy", "provider": raw_provider, "enabled": True, "limit": 1},
+        config=config,
+    )
+    assert status == 200 and payload["policy"]["provider"] == canonical
+    assert conn.execute("SELECT provider FROM cloud_provider_state").fetchone()[0] == canonical
+
+    if canonical == "cursor":
+        status, admitted = fleet_hub.handle_cloud(
+            conn, _admit(raw_provider, lease_id="canonical-lease"), caller_node=NODE_A, config=config
+        )
+        assert status == 200 and admitted["lease"]["provider"] == "cursor"
+        assert fleet_hub.cloud_snapshot(conn, config)["leases"][0]["provider"] == "cursor"
+
+
 def test_node_cannot_mutate_policy_or_another_nodes_lease(conn):
     config = deck.DeckConfig()
     with pytest.raises(fleet_hub.FleetHubForbidden):
@@ -181,7 +209,7 @@ def test_v4_migration_preserves_existing_rows(tmp_path):
     try:
         assert migrated.execute("SELECT run_id FROM events").fetchone()[0] == "run-a"
         assert migrated.execute("SELECT COUNT(*) FROM cloud_leases").fetchone()[0] == 0
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 8
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 9
     finally:
         migrated.close()
 
