@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import grokbot_scout_feed
+from brigade import cli, grokbot_scout_feed
 
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
@@ -426,4 +426,89 @@ def test_preflight_rejects_malformed_gh_output_without_queue_state(
     with pytest.raises(grokbot_scout_feed.ScoutFeedError, match="^malformed-gh-output$"):
         grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
 
+    _assert_no_queue_state(tmp_path)
+
+
+def _run_scout_feed(target: Path, policy: Path, *command: str) -> int:
+    return cli.main(
+        [
+            "run",
+            "cloud",
+            "grokbot",
+            "scout-feed",
+            "--target",
+            str(target),
+            "--policy",
+            str(policy),
+            *command,
+        ]
+    )
+
+
+def test_cli_scout_feed_preview_json_discovers_without_creating_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+
+    assert _run_scout_feed(tmp_path, policy, "--json") == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "created": 0,
+        "created_today": 0,
+        "daily_limit": 3,
+        "issue_number": 7,
+        "reason": "ready",
+        "repository": "example/brigade",
+    }
+    _assert_no_queue_state(tmp_path)
+
+
+def test_cli_scout_feed_apply_json_creates_one_queued_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+
+    assert _run_scout_feed(tmp_path, policy, "--apply", "--json") == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+    assert payload["reason"] == "created"
+    assert payload["issue_number"] == 7
+    assert payload["handle"]["state"] == "queued"
+    assert len(list((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("*.json"))) == 1
+
+
+def test_cli_scout_feed_text_reports_no_work_without_private_policy_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    policy = _write_policy(
+        tmp_path / "policy.json",
+        _policy(ownership_paths=["PRIVATE_PATH"], verification_commands=["PRIVATE_COMMAND"]),
+    )
+    _gh_numbers(monkeypatch, [])
+
+    assert _run_scout_feed(tmp_path, policy) == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "grokbot scout-feed: created=0 reason=no-approved-issues"
+    assert captured.err == ""
+    assert "PRIVATE_" not in captured.out
+    _assert_no_queue_state(tmp_path)
+
+
+def test_cli_scout_feed_reports_only_stable_malformed_policy_error(tmp_path: Path, capsys):
+    policy = _write_policy(tmp_path / "policy.json", {"schema": "brigade.grokbot.scout-feed.v1"})
+
+    assert _run_scout_feed(tmp_path, policy) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: malformed-policy\n"
+    _assert_no_queue_state(tmp_path)
+
+
+def test_cli_scout_feed_reports_only_stable_missing_gh_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    monkeypatch.setattr(grokbot_scout_feed.shutil, "which", lambda name: None)
+
+    assert _run_scout_feed(tmp_path, policy) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: gh-unavailable\n"
     _assert_no_queue_state(tmp_path)
