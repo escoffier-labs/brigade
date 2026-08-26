@@ -3708,3 +3708,211 @@ def test_scanner_read_receipt_accepts_run_directory_path(tmp_path: Path) -> None
     receipt = scanners_mod._scanner_read_receipt(run_dir)
     assert receipt is not None
     assert receipt["run_id"] == run_id
+
+
+def _write_scanner_config(tmp_path: Path, scanner_id: str, command: str, *, timeout: int = 30) -> None:
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "{scanner_id}"
+source = "{scanner_id}"
+command = "{command}"
+cadence = "daily@02:00"
+enabled = true
+timeout = {timeout}
+output_path = ".brigade/scanner-output.json"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+
+def test_scanner_run_bounded_output_reaps_child_and_records_typed_failure(tmp_path):
+    """#1197: unbounded scanner output must trip a typed failure, not exhaust memory."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "loud.py"
+    script.write_text("import sys\nsys.stdout.write('x' * 4194304)\n")
+    _write_scanner_config(tmp_path, "loud-scan", f"{sys.executable} {script}", timeout=60)
+
+    payload, _rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="loud-scan", force=True)
+    receipt = payload["runs"][0]
+
+    assert receipt["status"] == "failed"
+    assert receipt.get("output_limit_exceeded") is True
+    assert "capture limit" in str(receipt.get("error"))
+    assert receipt["exit_code"] != 0
+
+
+def test_scanner_run_does_not_wait_for_descendant_holding_pipes(tmp_path):
+    """#1197: a grandchild holding the output pipes must not outlive the run timeout."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "pipe_holder.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "sys.exit(0)\n"
+    )
+    _write_scanner_config(tmp_path, "pipe-holder", f"{sys.executable} {script}", timeout=20)
+
+    payload, _rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="pipe-holder", force=True)
+    receipt = payload["runs"][0]
+
+    assert receipt["status"] == "completed"
+    assert float(receipt["duration_seconds"]) < 15
+
+
+def test_scanner_inbox_read_enforces_total_byte_limit(tmp_path, monkeypatch):
+    """#1198: inbox reads must reject oversized files with a typed failure."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 64)
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"x" * 128)
+
+    with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+        scanners_mod._scanner_inbox_bytes(tmp_path)
+
+
+def test_scanner_stamp_rejects_oversized_inbox_with_typed_failure(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 64)
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"x" * 128)
+    scanner = {"id": "bounded", "source": "bounded"}
+    run = _verified_builtin_scanner_run(scanner)
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner=scanner,
+        run=run,
+        before_ids=set(),
+        before_imports=[],
+        before_raw=b"",
+    )
+
+    assert stamped == []
+    assert run["self_import"]["created"] == 0
+    assert run["self_import"]["rejection_reasons"] == {"provenance_stamp_failed": 1}
+
+
+def test_scanner_inbox_imports_enforce_per_record_byte_limit(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_RECORD_LIMIT_BYTES", 32)
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(json.dumps({"id": "r1", "text": "y" * 128}).encode() + b"\n")
+
+    with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+        scanners_mod._scanner_inbox_imports(tmp_path)
+
+
+def test_scanner_jsonl_ingestion_enforces_total_and_per_record_limits(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    path = imports / "output.jsonl"
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 64)
+    path.write_bytes(b'{"text":"' + b"z" * 256 + b'"}\n')
+    with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+        scanners_mod._scanner_read_import_jsonl(
+            tmp_path,
+            {"id": "ingest", "source": "ingest", "import_path": "imports/output.jsonl"},
+        )
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_RECORD_LIMIT_BYTES", 16)
+    path.write_bytes(json.dumps({"id": "r1", "text": "w" * 64}).encode() + b"\n")
+    with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+        scanners_mod._scanner_read_import_jsonl(
+            tmp_path,
+            {"id": "ingest", "source": "ingest", "import_path": "imports/output.jsonl"},
+        )
+
+
+def test_scanner_rollback_snapshot_is_bounded(tmp_path, monkeypatch):
+    """#1198: rollback snapshots of run artifacts must be bounded."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_SNAPSHOT_LIMIT_BYTES", 16)
+    authority = scanners_mod._open_scanner_run_directory(tmp_path, "snapshot-run")
+    try:
+        run_dir = helpers._scanner_runs_root(tmp_path) / "snapshot-run"
+        (run_dir / "stdout.log").write_bytes(b"a" * 64)
+        with pytest.raises(scanners_mod.ScannerSnapshotLimitExceeded):
+            scanners_mod._write_scanner_run_file(authority, "stdout.log", b"replacement")
+    finally:
+        os.close(authority.directory)
+        os.close(authority.root)
+
+
+def test_failed_scanner_run_restores_pre_run_inbox_and_rejects_new_rows(tmp_path):
+    """#1199: a failed run must not leave eligible rows behind in the inbox."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    sneaky = ledger._make_import("Sneaky pending finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+    inbox = helpers._imports_path(tmp_path)
+    before_raw = inbox.read_bytes()
+    inbox.write_bytes(before_raw + json.dumps(sneaky, sort_keys=True).encode() + b"\n")
+
+    scanner = {"id": "handoff-ingest", "source": "handoff-ingest"}
+    run = {"run_id": "failed-run", "status": "failed", "exit_code": 3}
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner=scanner,
+        run=run,
+        before_ids={before_row["id"]},
+        before_imports=[before_row],
+        before_raw=before_raw,
+    )
+
+    assert stamped == []
+    assert inbox.read_bytes() == before_raw
+    assert run["self_import"]["created"] == 0
+    assert run["self_import"]["rejection_reasons"] == {"run_not_completed": 1}
+
+
+def test_failed_scanner_run_leaves_no_eligible_work_end_to_end(tmp_path):
+    """#1199 end to end: scanner appends a pending row then exits nonzero."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "sneaky.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "root = Path.cwd()\n"
+        "inbox = root / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record = {'id': 'sneaky-1', 'kind': 'task', 'source': 'sneaky-scan',\n"
+        "          'text': 'Eligible sneaky row', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "sys.exit(3)\n"
+    )
+    _write_scanner_config(tmp_path, "sneaky-scan", f"{sys.executable} {script}", timeout=30)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="sneaky-scan", force=True)
+    receipt = payload["runs"][0]
+
+    assert rc == 1
+    assert receipt["status"] == "failed"
+    inbox = helpers._imports_path(tmp_path)
+    if inbox.exists():
+        rows = [row for row in inbox.read_text().splitlines() if row.strip()]
+        assert all(json.loads(row).get("id") != "sneaky-1" for row in rows)
+    counts = scanners_mod._scanner_import_counts(tmp_path)
+    assert counts["total"] == 0
+    assert receipt["self_import"]["created"] == 0
+    assert receipt["self_import"]["rejection_reasons"] == {"run_not_completed": 1}

@@ -528,6 +528,7 @@ def _collect_process_output(
 
     timed_out = False
     deadline = time.monotonic() + max(timeout, 0.0)
+    exited_at: float | None = None
     try:
         while True:
             if collector.overflowed:
@@ -536,9 +537,16 @@ def _collect_process_output(
             if remaining <= 0:
                 timed_out = True
                 break
-            process_exited = process.poll() is not None
-            if process_exited and not _readers_alive(threads):
-                break
+            if process.poll() is not None:
+                if exited_at is None:
+                    exited_at = time.monotonic()
+                if not _readers_alive(threads):
+                    break
+                # The direct child is gone but a descendant still holds an
+                # output pipe open. Drain briefly, then reap the whole group
+                # instead of blocking until the timeout.
+                if time.monotonic() - exited_at >= _TIMED_OUT_DRAIN_SECONDS:
+                    break
             collector.overflow.wait(timeout=min(0.05, remaining))
     except BaseException:
         _stop_child(process, process_registry)

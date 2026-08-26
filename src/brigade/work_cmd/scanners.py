@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 from collections import Counter
@@ -18,10 +17,26 @@ from typing import Any
 from uuid import uuid4
 
 from .. import dogfood_cmd
+from .. import proc as proc_mod
 from ..install import apply_gitignore
 from . import constants, helpers, ledger as ledger_mod, config as config_mod
 
 from . import sweeps as sweeps_mod
+
+
+class ScannerInputLimitExceeded(OSError):
+    """Typed failure when scanner input exceeds a configured byte limit."""
+
+
+class ScannerSnapshotLimitExceeded(OSError):
+    """Typed failure when a rollback snapshot of a run artifact is oversized."""
+
+
+# Total byte budget for one inbox or scanner JSONL read, and for any single
+# record inside it, so parsing never scales past what the verifier retains.
+_SCANNER_INPUT_TOTAL_LIMIT_BYTES = proc_mod.MAX_CAPTURE_BYTES * 4
+_SCANNER_RECORD_LIMIT_BYTES = 256 * 1024
+_SCANNER_SNAPSHOT_LIMIT_BYTES = proc_mod.MAX_CAPTURE_BYTES * 4
 
 
 class _ScannerRunProof:
@@ -439,10 +454,16 @@ def _write_scanner_run_file(
             pass
         else:
             _validate_scanner_run_file(authority.directory, name, existing)
-            chunks: list[bytes] = []
+            snapshot_chunks: list[bytes] = []
+            snapshot_total = 0
             while chunk := os.read(existing, 1024 * 1024):
-                chunks.append(chunk)
-            previous_raw = b"".join(chunks)
+                snapshot_total += len(chunk)
+                if snapshot_total > _SCANNER_SNAPSHOT_LIMIT_BYTES:
+                    raise ScannerSnapshotLimitExceeded(
+                        f"scanner run artifact exceeds {_SCANNER_SNAPSHOT_LIMIT_BYTES} byte snapshot limit"
+                    )
+                snapshot_chunks.append(chunk)
+            previous_raw = b"".join(snapshot_chunks)
             previous_exists = True
         descriptor = ledger_mod._dirfd_open_file(
             authority.directory,
@@ -461,6 +482,16 @@ def _write_scanner_run_file(
         ledger_mod._dirfd_fsync(authority.directory)
         if after_publish is not None:
             after_publish(descriptor)
+    except ScannerSnapshotLimitExceeded:
+        # The pre-existing artifact was never snapshotted, so rollback must not
+        # touch it; release the descriptors and surface the typed failure.
+        if existing != -1:
+            os.close(existing)
+            existing = -1
+        if descriptor != -1:
+            os.close(descriptor)
+            descriptor = -1
+        raise
     except BaseException:
         try:
             ledger_mod._dirfd_unlink(authority.directory, temporary_name)
@@ -1261,10 +1292,30 @@ def _scanner_inbox_bytes(target: Path) -> bytes:
     try:
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            return handle.read()
+            chunks: list[bytes] = []
+            total = 0
+            while chunk := handle.read(1024 * 1024):
+                total += len(chunk)
+                if total > _SCANNER_INPUT_TOTAL_LIMIT_BYTES:
+                    raise ScannerInputLimitExceeded(
+                        f"scanner inbox exceeds {_SCANNER_INPUT_TOTAL_LIMIT_BYTES} byte read limit"
+                    )
+                chunks.append(chunk)
+            return b"".join(chunks)
     finally:
         if descriptor != -1:
             os.close(descriptor)
+
+
+def _bounded_jsonl_rows(raw: bytes) -> list[bytes]:
+    """Split JSONL rows and reject any single record over the byte limit."""
+    rows = _raw_jsonl_rows(raw)
+    for row in rows:
+        if len(row) > _SCANNER_RECORD_LIMIT_BYTES:
+            raise ScannerInputLimitExceeded(
+                f"scanner record exceeds {_SCANNER_RECORD_LIMIT_BYTES} byte per-record limit"
+            )
+    return rows
 
 
 def _append_scanner_inbox_bytes(target: Path, data: bytes) -> None:
@@ -1305,7 +1356,9 @@ def _restore_scanner_inbox_snapshot_direct(target: Path, data: bytes, exists: bo
 
 
 def _scanner_inbox_imports(target: Path) -> list[dict[str, Any]]:
-    return [item for raw in _raw_jsonl_rows(_scanner_inbox_bytes(target)) if (item := _raw_row_object(raw)) is not None]
+    return [
+        item for raw in _bounded_jsonl_rows(_scanner_inbox_bytes(target)) if (item := _raw_row_object(raw)) is not None
+    ]
 
 
 def _scanner_import_counts(target: Path) -> dict[str, Any]:
@@ -1415,6 +1468,36 @@ def _scanner_stamp_new_imports(
     before_rows = _raw_jsonl_rows(before_raw)
     after_rows = _raw_jsonl_rows(imports_raw)
     remaining_before = Counter(before_rows)
+    exit_code = run.get("exit_code")
+    run_failed = (
+        run.get("status") == "failed"
+        or bool(run.get("timed_out"))
+        or (isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0)
+    )
+    if run_failed:
+        # A failed run carries no proof: restore the pre-run inbox so rows the
+        # scanner appended can never become eligible work.
+        unmatched = 0
+        for raw in after_rows:
+            if remaining_before[raw]:
+                remaining_before[raw] -= 1
+            else:
+                unmatched += 1
+        try:
+            _restore_scanner_inbox_snapshot_direct(target, before_raw, exists=True)
+        except OSError:
+            run["self_import"] = {
+                "created": 0,
+                "rejected": unmatched + 1,
+                "rejection_reasons": {"provenance_stamp_failed": unmatched + 1},
+            }
+            return []
+        run["self_import"] = {
+            "created": 0,
+            "rejected": unmatched,
+            "rejection_reasons": {"run_not_completed": unmatched},
+        }
+        return []
     before_by_id: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for index, raw in enumerate(before_rows):
         item = _raw_row_object(raw)
@@ -1706,15 +1789,23 @@ def _scanner_read_import_jsonl(target: Path, scanner: dict[str, Any]) -> tuple[l
         _validate_scanner_import_leaf(parent, relative.parts[-1], descriptor)
         _validate_scanner_import_directories(anchor, directories)
         before = os.fstat(descriptor)
-        chunks: list[bytes] = []
+        raw_chunks: list[bytes] = []
+        raw_total = 0
         while chunk := os.read(descriptor, 1024 * 1024):
-            chunks.append(chunk)
+            raw_total += len(chunk)
+            if raw_total > _SCANNER_INPUT_TOTAL_LIMIT_BYTES:
+                raise ScannerInputLimitExceeded(
+                    f"scanner import file exceeds {_SCANNER_INPUT_TOTAL_LIMIT_BYTES} byte read limit"
+                )
+            raw_chunks.append(chunk)
         after = os.fstat(descriptor)
         _validate_scanner_import_leaf(parent, relative.parts[-1], descriptor)
         _validate_scanner_import_directories(anchor, directories)
         if _scanner_import_identity(before) != _scanner_import_identity(after):
             raise OSError("scanner import file changed while reading")
-        return ledger_mod._parse_import_jsonl(b"".join(chunks).decode())
+        raw_joined = b"".join(raw_chunks)
+        _bounded_jsonl_rows(raw_joined)
+        return ledger_mod._parse_import_jsonl(raw_joined.decode())
     finally:
         if descriptor != -1:
             os.close(descriptor)
@@ -1832,62 +1923,54 @@ def _scanner_run_one(
             _write_scanner_run_receipt(receipt)
             return receipt
         _prebind_child_visible_directories(target)
-        try:
-            with _scanner_child_environment_sandbox(target) as child_env:
-                run_kwargs: dict[str, Any] = {
-                    "cwd": cwd,
-                    "text": True,
-                    "capture_output": True,
-                    "timeout": float(scanner.get("timeout") or 300),
-                    "shell": False,
-                    "env": child_env,
-                }
-                if isolated:
-                    from .. import scanner_isolation
+        with _scanner_child_environment_sandbox(target) as child_env:
+            if isolated:
+                from .. import scanner_isolation
 
-                    status = scanner_isolation.probe_isolation()
-                    if not status.available:
-                        raise OSError(f"isolated scanners unavailable: {status.reason}")
-                    sandbox = Path(child_env["HOME"])
-                    covers = scanner_isolation.prepare_isolation_covers(sandbox)
-                    argv = scanner_isolation.isolated_argv(argv, covers)
-                completed_process = subprocess.run(argv, **run_kwargs)
-            stdout = completed_process.stdout or ""
-            stderr = completed_process.stderr or ""
-            _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
-            _write_scanner_run_file(authority, "stderr.log", stderr.encode("utf-8"))
-            completed = helpers._now()
-            receipt.update(
-                {
-                    "status": "completed" if completed_process.returncode == 0 else "failed",
-                    "completed_at": completed.isoformat(),
-                    "duration_seconds": (completed - started).total_seconds(),
-                    "exit_code": completed_process.returncode,
-                    "timed_out": False,
-                    "stdout_summary": _scanner_run_summary(stdout),
-                    "stderr_summary": _scanner_run_summary(stderr),
-                    "output_after": _scanner_output_snapshot(output_path),
-                }
+                status = scanner_isolation.probe_isolation()
+                if not status.available:
+                    raise OSError(f"isolated scanners unavailable: {status.reason}")
+                sandbox = Path(child_env["HOME"])
+                covers = scanner_isolation.prepare_isolation_covers(sandbox)
+                argv = scanner_isolation.isolated_argv(argv, covers)
+            timeout_seconds = float(scanner.get("timeout") or 300)
+            # Bounded streaming capture in its own process group: output is
+            # capped, and overflow or timeout reaps the whole group so a
+            # descendant holding the pipes cannot outlive the run.
+            result = proc_mod.run(
+                argv,
+                timeout=timeout_seconds,
+                env=child_env,
+                cwd=cwd,
             )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
-            _write_scanner_run_file(authority, "stderr.log", stderr.encode("utf-8"))
-            completed = helpers._now()
-            receipt.update(
-                {
-                    "status": "failed",
-                    "completed_at": completed.isoformat(),
-                    "duration_seconds": (completed - started).total_seconds(),
-                    "exit_code": None,
-                    "timed_out": True,
-                    "error": f"scanner timed out after {scanner.get('timeout')} seconds",
-                    "stdout_summary": _scanner_run_summary(stdout),
-                    "stderr_summary": _scanner_run_summary(stderr),
-                    "output_after": _scanner_output_snapshot(output_path),
-                }
+        stdout = result.stdout
+        stderr = result.stderr
+        _write_scanner_run_file(authority, "stdout.log", stdout.encode("utf-8"))
+        _write_scanner_run_file(authority, "stderr.log", stderr.encode("utf-8"))
+        completed = helpers._now()
+        timed_out = not result.output_limit_exceeded and result.code == 124
+        error = None
+        if result.output_limit_exceeded:
+            error = (
+                f"scanner output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte capture limit; "
+                "scanner process group terminated"
             )
+        elif timed_out:
+            error = f"scanner timed out after {scanner.get('timeout')} seconds"
+        receipt.update(
+            {
+                "status": "completed" if (result.code == 0 and not result.output_limit_exceeded) else "failed",
+                "completed_at": completed.isoformat(),
+                "duration_seconds": (completed - started).total_seconds(),
+                "exit_code": None if result.output_limit_exceeded else result.code,
+                "timed_out": timed_out,
+                "output_limit_exceeded": result.output_limit_exceeded,
+                "error": error,
+                "stdout_summary": _scanner_run_summary(stdout),
+                "stderr_summary": _scanner_run_summary(stderr),
+                "output_after": _scanner_output_snapshot(output_path),
+            }
+        )
         _write_scanner_run_receipt(receipt)
         return receipt
     except BaseException:
