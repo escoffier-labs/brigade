@@ -335,11 +335,14 @@ func TestApplySearchIntegrityBatchesMultipleResults(t *testing.T) {
 		{ID: missingID, Snippet: "keep-missing"},
 		{ID: okID, Snippet: "keep-dup"},
 	}
-	if err := applySearchIntegrity(db, results); err != nil {
+	// #1202 contract change: eligible snippets are rebuilt from the verified
+	// item text, so the caller-supplied placeholder snippet is replaced for
+	// eligible hits and dropped for ineligible ones.
+	if err := applySearchIntegrityWithVerifiedSnippets(db, results, ""); err != nil {
 		t.Fatal(err)
 	}
-	if results[0].IntegrityMismatch || results[0].Snippet != "keep-ok" {
-		t.Fatalf("matching hit changed: %#v", results[0])
+	if results[0].IntegrityMismatch || results[0].Snippet != "UNIQUE_BATCH_APPLY ok body" {
+		t.Fatalf("matching hit did not rebuild its verified snippet: %#v", results[0])
 	}
 	if results[0].Origin != "workspace" || results[0].TrustLabel != "untrusted" {
 		t.Fatalf("matching envelope fields = %#v", results[0])
@@ -353,8 +356,8 @@ func TestApplySearchIntegrityBatchesMultipleResults(t *testing.T) {
 	if results[2].IntegrityMismatch || results[2].Snippet != "keep-missing" || results[2].Origin != "" {
 		t.Fatalf("missing id should be left unchanged: %#v", results[2])
 	}
-	if results[3].IntegrityMismatch || results[3].Snippet != "keep-dup" {
-		t.Fatalf("duplicate matching hit changed: %#v", results[3])
+	if results[3].IntegrityMismatch || results[3].Snippet != "UNIQUE_BATCH_APPLY ok body" {
+		t.Fatalf("duplicate matching hit did not rebuild its verified snippet: %#v", results[3])
 	}
 	assertItemNotDeleted(t, okID)
 	assertItemNotDeleted(t, badID)

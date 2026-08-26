@@ -1446,7 +1446,9 @@ def _segment_is_verifier(segment: list[str], *, depth: int = 0) -> bool:
     if command == "pre-commit" and names[1:2] == ["run"]:
         return True
     normalized = tokens[0].replace("\\", "/")
-    return normalized.endswith("/scripts/verify") or normalized == "scripts/verify"
+    return normalized in {"scripts/verify", "scripts/verify-focused"} or normalized.endswith(
+        ("/scripts/verify", "/scripts/verify-focused")
+    )
 
 
 def _is_raw_verification_text(command: str, *, depth: int) -> bool:

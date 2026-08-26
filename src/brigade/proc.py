@@ -645,6 +645,8 @@ class _BoundedCollector:
         self.stderr_bytes = 0
         self.overflowed = False
         self.overflow = threading.Event()
+        # Wakes the collector loop on overflow, reader exit, or process exit.
+        self.wake = threading.Event()
 
     def feed(self, stream: str, data: bytes) -> bool:
         """Retain bytes under the combined cap. Return False after overflow."""
@@ -658,6 +660,7 @@ class _BoundedCollector:
             if remaining <= 0:
                 self.overflowed = True
                 self.overflow.set()
+                self.wake.set()
                 return False
             accepted = data[:remaining]
             self._buffers[stream].extend(accepted)
@@ -668,6 +671,7 @@ class _BoundedCollector:
             if len(data) > remaining:
                 self.overflowed = True
                 self.overflow.set()
+                self.wake.set()
                 return False
             return True
 
@@ -722,6 +726,14 @@ def _readers_alive(threads: list[threading.Thread]) -> bool:
     return any(reader.is_alive() for reader in threads)
 
 
+def _collection_complete(
+    process: subprocess.Popen[bytes],
+    threads: list[threading.Thread],
+    collector: _BoundedCollector,
+) -> bool:
+    return collector.overflowed or (process.poll() is not None and not _readers_alive(threads))
+
+
 def _collect_process_output(
     process: subprocess.Popen[bytes],
     *,
@@ -742,6 +754,8 @@ def _collect_process_output(
                     break
         except OSError:
             pass
+        finally:
+            collector.wake.set()
 
     threads: list[threading.Thread] = []
     for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
@@ -755,6 +769,15 @@ def _collect_process_output(
     if process.stdin is not None:
         stdin_thread = threading.Thread(target=_write_stdin, args=(process, stdin), daemon=True)
         stdin_thread.start()
+
+    def watch_process() -> None:
+        try:
+            process.wait()
+        finally:
+            collector.wake.set()
+
+    process_watcher = threading.Thread(target=watch_process, daemon=True)
+    process_watcher.start()
 
     timed_out = False
     incomplete_group = False
@@ -774,24 +797,30 @@ def _collect_process_output(
     exited_at: float | None = None
     try:
         while True:
-            if collector.overflowed:
+            if _collection_complete(process, threads, collector):
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
                 break
+            wait_for = remaining
             if process.poll() is not None:
                 if exited_at is None:
                     exited_at = time.monotonic()
-                if not _readers_alive(threads):
-                    break
                 # The direct child is gone but a descendant still holds an
                 # output pipe open. Drain briefly, then reap the whole group
                 # instead of blocking until the timeout.
-                if time.monotonic() - exited_at >= _TIMED_OUT_DRAIN_SECONDS:
+                drain_left = _TIMED_OUT_DRAIN_SECONDS - (time.monotonic() - exited_at)
+                if drain_left <= 0:
                     incomplete_group = True
                     break
-            collector.overflow.wait(timeout=min(0.05, remaining))
+                wait_for = min(wait_for, drain_left)
+            # Clear-check-wait: avoid missing a wake that arrives between the
+            # completeness check above and the blocking wait below.
+            collector.wake.clear()
+            if _collection_complete(process, threads, collector):
+                break
+            collector.wake.wait(timeout=wait_for)
     except BaseException:
         try:
             _stop_child(process, process_registry, child_job)

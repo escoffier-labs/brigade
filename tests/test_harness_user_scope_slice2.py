@@ -63,6 +63,8 @@ def _use_home(monkeypatch, tmp_path: Path) -> Path:
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("HOME", str(home))
+    # Harness CLI calls must not spawn the detached update-notify cache writer.
+    monkeypatch.setenv("BRIGADE_NO_UPDATE_CHECK", "1")
     return home
 
 

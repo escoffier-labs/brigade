@@ -475,6 +475,8 @@ class AgentResult:
     request_id: str | None = None
     acpx_version: str | None = None
     safe_events: tuple[dict[str, object], ...] = ()
+    # #1200: app-server only; True when turn/completed for this turn was observed.
+    turn_completed: bool = False
     failure_phase: str | None = None
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
@@ -1431,6 +1433,7 @@ def run_codex_appserver(
             transport="codex-app-server",
             requested_model=model,
             reasoning=reasoning,
+            turn_completed=getattr(turn, "completed_observed", False),
         )
     if not turn.ok:
         return AgentResult(

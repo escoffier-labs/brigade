@@ -392,7 +392,9 @@ func TestImportStationTrailWrapper(t *testing.T) {
 	stationtrailDir := t.TempDir()
 	fixture := repoPath(t, "testdata/adapters/agent-session.fixture.jsonl")
 	script := filepath.Join(stationtrailDir, "stationtrail")
-	body := "#!/bin/sh\nsummary=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--summary-out' ]; then shift; summary=\"$1\"; fi\n  shift || true\ndone\nif [ -n \"$summary\" ]; then\n  printf '{\"source\":\"codex\",\"records\":2,\"warnings\":[],\"files\":[{\"path\":\"fixture.jsonl\",\"size\":1,\"mtime\":\"2026-06-03T00:00:00Z\",\"content_hash\":\"sha256:test\",\"records_generated\":2,\"warnings\":0}]}' > \"$summary\"\nfi\ncat " + shellQuote(fixture) + "\n"
+	// #1204: a modern scanner answers `capabilities --json`; the compat gate
+	// blocks wrappers that cannot positively identify themselves.
+	body := "#!/bin/sh\nif [ \"$1\" = \"capabilities\" ]; then\n  printf '{\"tool\":\"stationtrail\",\"version\":\"0.9.0\",\"schema\":\"miseledger.adapter.v1\",\"sources\":[\"codex\"]}'\n  exit 0\nfi\nsummary=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--summary-out' ]; then shift; summary=\"$1\"; fi\n  shift || true\ndone\nif [ -n \"$summary\" ]; then\n  printf '{\"source\":\"codex\",\"records\":2,\"warnings\":[],\"files\":[{\"path\":\"fixture.jsonl\",\"size\":1,\"mtime\":\"2026-06-03T00:00:00Z\",\"content_hash\":\"sha256:test\",\"records_generated\":2,\"warnings\":0}]}' > \"$summary\"\nfi\ncat " + shellQuote(fixture) + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -414,6 +416,10 @@ func TestImportStationTrailWrapperForSupportedSources(t *testing.T) {
 	stationtrailDir := t.TempDir()
 	script := filepath.Join(stationtrailDir, "stationtrail")
 	body := `#!/bin/sh
+if [ "$1" = "capabilities" ]; then
+  printf '{"tool":"stationtrail","version":"0.9.0","schema":"miseledger.adapter.v1","sources":["codex","claude","openclaw","opencode","hermes"]}'
+  exit 0
+fi
 source="$1"
 summary=''
 while [ "$#" -gt 0 ]; do
@@ -2684,23 +2690,28 @@ func TestEvidenceBundleIDPreservesLegacyBytesAndAddsStructuredReference(t *testi
 }
 
 func TestEvalStationTrailCompat(t *testing.T) {
-	good := stationTrailCapabilities{Version: "0.1.5", Schema: "miseledger.adapter.v1", Sources: []string{"codex", "claude", "openclaw", "opencode", "hermes"}}
+	good := stationTrailProbe{Caps: stationTrailCapabilities{Version: "0.1.5", Schema: "miseledger.adapter.v1", Sources: []string{"codex", "claude", "openclaw", "opencode", "hermes"}}, Status: stationTrailProbeOK}
+	// #1204 contract change: only a positively identified legacy version is
+	// tolerated. An unidentified failed probe blocks instead of masquerading
+	// as an old compatible scanner.
+	legacy := stationTrailProbe{Caps: stationTrailCapabilities{Version: "0.1.2"}, Status: stationTrailProbeLegacyIdentified}
+	failed := stationTrailProbe{Status: stationTrailProbeFailed, Err: errors.New("capabilities output is not a recognizable capabilities document")}
 	cases := []struct {
 		name    string
-		caps    stationTrailCapabilities
-		ok      bool
+		probe   stationTrailProbe
 		source  string
 		wantErr bool
 	}{
-		{"old binary tolerated", stationTrailCapabilities{}, false, "codex", false},
-		{"compatible", good, true, "codex", false},
-		{"opencode compatible", good, true, "opencode", false},
-		{"schema mismatch", stationTrailCapabilities{Version: "9", Schema: "other.v2", Sources: []string{"codex"}}, true, "codex", true},
-		{"unsupported source", good, true, "aicrawl", true},
+		{"positively identified legacy tolerated", legacy, "codex", false},
+		{"compatible", good, "codex", false},
+		{"opencode compatible", good, "opencode", false},
+		{"schema mismatch", stationTrailProbe{Caps: stationTrailCapabilities{Version: "9", Schema: "other.v2", Sources: []string{"codex"}}, Status: stationTrailProbeOK}, "codex", true},
+		{"unsupported source", good, "aicrawl", true},
+		{"failed probe blocks", failed, "codex", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := evalStationTrailCompat(tc.caps, tc.ok, tc.source)
+			err := evalStationTrailCompat(tc.probe, tc.source)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -2811,7 +2822,8 @@ func TestMissingExternalToolPresentBinaryUnchanged(t *testing.T) {
 	binDir := t.TempDir()
 	fixture := repoPath(t, "testdata/adapters/agent-session.fixture.jsonl")
 	script := filepath.Join(binDir, "stationtrail")
-	body := "#!/bin/sh\nsummary=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--summary-out' ]; then shift; summary=\"$1\"; fi\n  shift || true\ndone\nif [ -n \"$summary\" ]; then\n  printf '{\"source\":\"codex\",\"records\":2,\"warnings\":[],\"files\":[]}' > \"$summary\"\nfi\ncat " + shellQuote(fixture) + "\n"
+	// #1204: the wrapper identifies itself via capabilities like a modern scanner.
+	body := "#!/bin/sh\nif [ \"$1\" = \"capabilities\" ]; then\n  printf '{\"tool\":\"stationtrail\",\"version\":\"0.9.0\",\"schema\":\"miseledger.adapter.v1\",\"sources\":[\"codex\"]}'\n  exit 0\nfi\nsummary=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--summary-out' ]; then shift; summary=\"$1\"; fi\n  shift || true\ndone\nif [ -n \"$summary\" ]; then\n  printf '{\"source\":\"codex\",\"records\":2,\"warnings\":[],\"files\":[]}' > \"$summary\"\nfi\ncat " + shellQuote(fixture) + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
