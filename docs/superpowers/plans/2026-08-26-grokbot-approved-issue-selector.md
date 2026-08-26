@@ -2,7 +2,7 @@
 
 **Goal:** Keep the existing Grok Bot Repository Scout supplied with explicitly labeled GitHub issues while preserving local queue authority, one-job execution, and a fixed UTC daily cap.
 
-**Architecture:** Add one `grokbot_scout_feed` module beside the existing manifest feed. It validates an owner-only policy, asks `gh issue list` for numbers only, checks the private queue without creating it during preview, and builds one fixed read-only envelope. `run_cloud` exposes the operation as `scout-feed`. The existing queue, MCP adapter, Fleet Hub publication, and Implementation Worker stay unchanged.
+**Architecture:** Add one `grokbot_scout_feed` module beside the existing manifest feed. It validates an owner-only policy, asks `gh issue list` for numbers only, checks the private queue without creating it during preview, and builds one fixed read-only envelope. `run_cloud` exposes the operation as `scout-feed`. A queue admission helper performs the active-work, UTC daily-cap, idempotency, and creation checks under one lock. The MCP adapter, Fleet Hub publication, and Implementation Worker stay unchanged.
 
 **Key technology:** Python standard library, `gh` CLI, pytest, the existing Grok Bot JSON queue, Brigade verification receipts.
 
@@ -261,7 +261,7 @@ def _queue_snapshot(target: Path) -> list[dict[str, object]]:
 
 Count same-day jobs by parsing `created_at` as an aware datetime, converting to UTC, and comparing `.date()` to `now.astimezone(timezone.utc).date()`. Count all Repository Scout states, including expired and failed attempts.
 
-- [x] For each sorted issue number, build the stable key `grokbot-scout:<repository-sha256-prefix>:issue-<number>`, using the first 24 lowercase hex characters of the repository string's SHA-256, and use `grokbot_feed._existing_idempotency()` to skip known work. `preflight()` returns the selected issue without writing. `apply()` repeats the full selection immediately before calling `grokbot_jobs.enqueue()` and returns only safe counts, reason, issue number, and handle. Both public functions accept `now: datetime | None = None`. The default is an aware current UTC timestamp.
+- [x] For each sorted issue number, build a fixed 64-character SHA-256 idempotency key from the repository and the issue number's canonical positive-integer bytes, and use `grokbot_feed._existing_idempotency()` to skip known work. `preflight()` returns the selected issue without writing. `apply()` repeats admission through `grokbot_jobs.enqueue_repository_scout()`, which holds one queue lock across the active-work, UTC daily-cap, idempotency, and creation checks. Results return only safe counts, reason, issue number, and handle. Both public functions accept `now: datetime | None = None`. The default is an aware current UTC timestamp.
 
 - [x] Run GREEN with the Task 2 command, then the whole new test file. Expect every test to pass.
 

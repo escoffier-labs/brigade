@@ -52,7 +52,8 @@ def _assert_no_queue_state(target: Path) -> None:
 
 
 def _scout_key(repository: str, issue_number: int) -> str:
-    return f"grokbot-scout:{sha256(repository.encode()).hexdigest()[:24]}:issue-{issue_number}"
+    issue_bytes = issue_number.to_bytes((issue_number.bit_length() + 7) // 8, "big")
+    return sha256(repository.encode() + b"\x00" + issue_bytes).hexdigest()
 
 
 def _scout_spec(repository: str = "example/brigade") -> dict[str, object]:
@@ -97,7 +98,6 @@ def test_preflight_discovers_sorted_unique_numbers_without_creating_queue(
     assert result == {
         "created": 0,
         "reason": "ready",
-        "repository": "example/brigade",
         "issue_number": 7,
         "daily_limit": 3,
         "created_today": 0,
@@ -167,7 +167,6 @@ def test_apply_enqueues_one_fixed_read_only_repository_scout_and_redacts_results
     assert result == {
         "created": 1,
         "reason": "created",
-        "repository": "example/brigade",
         "issue_number": 7,
         "daily_limit": 3,
         "created_today": 0,
@@ -206,7 +205,6 @@ def test_preflight_and_apply_do_no_work_when_a_scout_is_active(tmp_path: Path, m
     assert preview == {
         "created": 0,
         "reason": "active-scout",
-        "repository": "example/brigade",
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 1,
@@ -236,7 +234,6 @@ def test_preflight_and_apply_enforce_the_utc_daily_limit_including_failed_and_ex
     assert preview == {
         "created": 0,
         "reason": "daily-limit-reached",
-        "repository": "example/brigade",
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 3,
@@ -261,7 +258,6 @@ def test_preflight_and_apply_skip_all_known_issues_without_writing(tmp_path: Pat
     assert preview == {
         "created": 0,
         "reason": "all-known",
-        "repository": "example/brigade",
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 0,
@@ -279,7 +275,6 @@ def test_preflight_and_apply_report_no_approved_issues_without_queue_state(
     assert grokbot_scout_feed.preflight(tmp_path, policy, now=NOW) == {
         "created": 0,
         "reason": "no-approved-issues",
-        "repository": "example/brigade",
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 0,
@@ -287,7 +282,6 @@ def test_preflight_and_apply_report_no_approved_issues_without_queue_state(
     assert grokbot_scout_feed.apply(tmp_path, policy, now=NOW) == {
         "created": 0,
         "reason": "no-approved-issues",
-        "repository": "example/brigade",
         "issue_number": None,
         "daily_limit": 3,
         "created_today": 0,
@@ -344,7 +338,7 @@ def test_preflight_rejects_every_invalid_policy_field_without_queue_state(
     _assert_no_queue_state(tmp_path)
 
 
-@pytest.mark.parametrize("mode", [0o660, 0o602])
+@pytest.mark.parametrize("mode", [0o640, 0o644, 0o660, 0o602])
 def test_preflight_rejects_writable_policy_without_queue_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
 ):
@@ -355,6 +349,45 @@ def test_preflight_rejects_writable_policy_without_queue_state(
         grokbot_scout_feed.preflight(tmp_path, policy, now=NOW)
 
     _assert_no_queue_state(tmp_path)
+
+
+def test_scout_key_is_a_fixed_sha256_digest_for_an_extremely_large_issue_number():
+    issue_number = 10**10000
+    issue_bytes = issue_number.to_bytes((issue_number.bit_length() + 7) // 8, "big")
+    key = grokbot_scout_feed._scout_key("example/brigade", issue_number)
+
+    assert len(key) == 64
+    assert key == sha256(b"example/brigade\x00" + issue_bytes).hexdigest()
+    assert key.islower()
+
+
+@pytest.mark.parametrize("function", [grokbot_scout_feed.preflight, grokbot_scout_feed.apply])
+def test_public_selector_boundary_translates_queue_storage_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, function
+):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(
+        grokbot_scout_feed,
+        "_queue_snapshot",
+        lambda target: (_ for _ in ()).throw(grokbot_scout_feed.grokbot_jobs.GrokbotJobError("private-storage")),
+    )
+
+    with pytest.raises(grokbot_scout_feed.ScoutFeedError, match="^queue-error$"):
+        function(tmp_path, policy, now=NOW)
+
+
+def test_apply_translates_enqueue_errors_at_the_public_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(
+        grokbot_scout_feed.grokbot_jobs,
+        "enqueue_repository_scout",
+        lambda *args, **kwargs: (_ for _ in ()).throw(grokbot_scout_feed.grokbot_jobs.GrokbotJobError("private-queue")),
+    )
+
+    with pytest.raises(grokbot_scout_feed.ScoutFeedError, match="^queue-error$"):
+        grokbot_scout_feed.apply(tmp_path, policy, now=NOW)
 
 
 def test_preflight_rejects_symlinked_policy_without_queue_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -458,7 +491,6 @@ def test_cli_scout_feed_preview_json_discovers_without_creating_queue(
         "daily_limit": 3,
         "issue_number": 7,
         "reason": "ready",
-        "repository": "example/brigade",
     }
     _assert_no_queue_state(tmp_path)
 
@@ -512,3 +544,19 @@ def test_cli_scout_feed_reports_only_stable_missing_gh_error(tmp_path: Path, mon
     assert captured.out == ""
     assert captured.err == "error: gh-unavailable\n"
     _assert_no_queue_state(tmp_path)
+
+
+def test_cli_scout_feed_redacts_queue_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    policy = _write_policy(tmp_path / "policy.json", _policy())
+    _gh_numbers(monkeypatch, [7])
+    monkeypatch.setattr(
+        grokbot_scout_feed.grokbot_jobs,
+        "enqueue_repository_scout",
+        lambda *args, **kwargs: (_ for _ in ()).throw(grokbot_scout_feed.grokbot_jobs.GrokbotJobError("PRIVATE_QUEUE")),
+    )
+
+    assert _run_scout_feed(tmp_path, policy, "--apply") == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: queue-error\n"
+    assert "PRIVATE" not in captured.err

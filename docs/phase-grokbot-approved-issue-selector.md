@@ -51,7 +51,8 @@ The selector runs `gh issue list` without a shell and requests only issue
 numbers. The repository and approval label come from the validated policy. It
 sorts returned issue numbers in ascending order.
 
-Before enqueue, the selector checks the local Grok Bot queue:
+Preview checks a read-only queue snapshot. Apply repeats admission atomically
+under the Grok Bot queue lock:
 
 1. If a Repository Scout job is `queued`, `claimed`, `running`, or
    `cancel-requested`, return a no-work success.
@@ -61,11 +62,11 @@ Before enqueue, the selector checks the local Grok Bot queue:
 4. Select the first remaining issue and enqueue one job. One invocation cannot
    create more than one job.
 
-The idempotency key is
-`grokbot-scout:<repository-sha256-prefix>:issue-<number>`, where the prefix is
-the first 24 lowercase hex characters of the repository string's SHA-256.
-This keeps the key within Brigade's 128-character bound for every valid
-repository. A completed, failed, expired, or canceled issue job stays known.
+The idempotency key is the 64-character lowercase SHA-256 digest of the
+repository, a separator byte, and the issue number's canonical positive-integer
+bytes. This keeps the key within Brigade's 128-character bound for every valid
+repository and issue number. A completed, failed, expired, or canceled issue
+job stays known.
 Re-running an issue requires a new operator-approved policy revision in a
 later feature.
 
@@ -110,7 +111,8 @@ deduplication, queue-cap, and receipt rules in one package.
 - An empty approved issue set, an active Scout job, a reached daily cap, or an
   all-known issue set return exit 0 with `created: 0` and a stable reason.
 - Output contains counts, the selected issue number, safe job projection, and
-  the stable reason. It does not contain the policy's commands or paths.
+  the stable reason. It does not contain the repository, policy commands, or
+  paths.
 - The selector performs one complete preview before enqueue. A queue error
   returns a generic stable reason without printing private context.
 

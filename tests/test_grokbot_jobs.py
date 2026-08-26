@@ -50,6 +50,22 @@ def _claim_in_process(target: str, job_id: str, lease_id: str, connection) -> No
         connection.close()
 
 
+def _enqueue_scout_in_process(target: str, issue_number: int, connection) -> None:
+    """Exercise the Scout admission guard from two independent producers."""
+    spec = _spec()
+    spec.update({"label": "Repository Scout", "role": "repository-scout", "artifact": {"kind": "report"}})
+    try:
+        result = grokbot_jobs.enqueue_repository_scout(
+            Path(target), spec, f"scout-{issue_number}", daily_limit=3, now=NOW
+        )
+    except grokbot_jobs.GrokbotJobError as exc:
+        connection.send({"error": exc.reason})
+    else:
+        connection.send(result)
+    finally:
+        connection.close()
+
+
 def _enqueue(tmp_path: Path, *, artifact: str = "draft-pr", idempotency_key: str | None = None) -> str:
     spec = _spec()
     spec["artifact"] = {"kind": artifact}
@@ -96,6 +112,27 @@ def test_storage_is_private_and_keeps_the_full_envelope(tmp_path: Path):
     raw = job_path.read_text()
     assert "Build the private queue module." in raw
     assert "pytest -q tests/test_grokbot_jobs.py" in raw
+
+
+def test_concurrent_scout_admission_creates_only_one_active_job(tmp_path: Path):
+    first_parent, first_child = Pipe(duplex=False)
+    second_parent, second_child = Pipe(duplex=False)
+    first = Process(target=_enqueue_scout_in_process, args=(str(tmp_path), 1, first_child))
+    second = Process(target=_enqueue_scout_in_process, args=(str(tmp_path), 2, second_child))
+    first.start()
+    second.start()
+    first_child.close()
+    second_child.close()
+
+    first_result = first_parent.recv()
+    second_result = second_parent.recv()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    assert {result["reason"] for result in (first_result, second_result)} == {"created", "active-scout"}
+    assert len(list((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("*.json"))) == 1
 
 
 def test_status_returns_only_safe_projections(tmp_path: Path):

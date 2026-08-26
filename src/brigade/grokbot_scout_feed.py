@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,42 +42,53 @@ def preflight(target: Path, policy_path: Path, *, now: datetime | None = None) -
     """Validate a private policy and discover the first approved issue number."""
     policy = load_policy(policy_path)
     numbers = _discover_issue_numbers(policy)
-    return _selection(target, policy, numbers, _resolve_now(now))
+    try:
+        return _selection(target, policy, numbers, _resolve_now(now))
+    except grokbot_jobs.GrokbotJobError as exc:
+        raise ScoutFeedError("queue-error") from exc
 
 
 def apply(target: Path, policy_path: Path, *, now: datetime | None = None) -> dict[str, object]:
     """Recheck the scout policy and queue at most one approved read-only report."""
     policy = load_policy(policy_path)
     instant = _resolve_now(now)
-    selection = _selection(target, policy, _discover_issue_numbers(policy), instant)
-    if selection["reason"] != "ready":
-        return {**selection, "handle": None}
+    numbers = _discover_issue_numbers(policy)
+    try:
+        selection = _selection(target, policy, numbers, instant)
+        if selection["reason"] != "ready":
+            return {**selection, "handle": None}
 
-    issue_number = selection["issue_number"]
-    repository = policy["repository"]
-    assert isinstance(issue_number, int)
-    assert isinstance(repository, str)
-    handle = grokbot_jobs.enqueue(
-        target,
-        _scout_spec(policy, issue_number),
-        _scout_key(repository, issue_number),
-        now=instant,
-    )
-    if handle["idempotent"]:
+        issue_number = selection["issue_number"]
+        repository = policy["repository"]
+        daily_limit = policy["daily_limit"]
+        assert isinstance(issue_number, int)
+        assert isinstance(repository, str)
+        assert isinstance(daily_limit, int)
+        admission = grokbot_jobs.enqueue_repository_scout(
+            target,
+            _scout_spec(policy, issue_number),
+            _scout_key(repository, issue_number),
+            daily_limit=daily_limit,
+            now=instant,
+        )
+    except grokbot_jobs.GrokbotJobError as exc:
+        raise ScoutFeedError("queue-error") from exc
+    if admission["reason"] != "created":
         return {
             **selection,
             "created": 0,
-            "reason": "all-known",
+            "reason": admission["reason"],
             "issue_number": None,
-            "handle": handle,
+            "created_today": admission["created_today"],
+            "handle": admission["handle"],
         }
-    return {**selection, "created": 1, "reason": "created", "handle": handle}
+    return {**selection, "created": 1, "reason": "created", "handle": admission["handle"]}
 
 
 def load_policy(path: Path) -> dict[str, object]:
     """Load and validate an owner-only scout policy."""
     try:
-        payload = json.loads(grokbot_feed._read_manifest_snapshot(path))
+        payload = json.loads(_read_policy_snapshot(path))
     except grokbot_feed.FeedError as exc:
         raise ScoutFeedError("unsafe-policy") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -134,9 +146,7 @@ def _selection(
 ) -> dict[str, object]:
     records = _queue_snapshot(target)
     daily_limit = policy["daily_limit"]
-    repository = policy["repository"]
     assert isinstance(daily_limit, int)
-    assert isinstance(repository, str)
     scout_records = [record for record in records if record["spec"]["role"] == "repository-scout"]
     created_today = sum(
         grokbot_jobs._parse_timestamp(record["created_at"]).date() == instant.date() for record in scout_records
@@ -144,7 +154,6 @@ def _selection(
     result = {
         "created": 0,
         "reason": "ready",
-        "repository": repository,
         "issue_number": None,
         "daily_limit": daily_limit,
         "created_today": created_today,
@@ -156,6 +165,8 @@ def _selection(
     if created_today >= daily_limit:
         return {**result, "reason": "daily-limit-reached"}
     for number in numbers:
+        repository = policy["repository"]
+        assert isinstance(repository, str)
         if not _idempotency_exists(target, _scout_key(repository, number)):
             return {**result, "issue_number": number}
     return {**result, "reason": "all-known"}
@@ -179,8 +190,8 @@ def _is_active_scout(record: dict[str, Any]) -> bool:
 
 
 def _scout_key(repository: str, issue_number: int) -> str:
-    digest = hashlib.sha256(repository.encode("utf-8")).hexdigest()[:24]
-    return f"grokbot-scout:{digest}:issue-{issue_number}"
+    issue_bytes = issue_number.to_bytes((issue_number.bit_length() + 7) // 8, "big")
+    return hashlib.sha256(repository.encode("utf-8") + b"\x00" + issue_bytes).hexdigest()
 
 
 def _scout_spec(policy: dict[str, object], issue_number: int) -> dict[str, object]:
@@ -212,7 +223,7 @@ def _idempotency_exists(target: Path, key: str) -> bool:
     try:
         return grokbot_feed._existing_idempotency(target, key) is not None
     except grokbot_feed.FeedError as exc:
-        raise ScoutFeedError(exc.reason) from exc
+        raise grokbot_jobs.GrokbotJobError(exc.reason) from exc
 
 
 def _queue_snapshot(target: Path) -> list[dict[str, Any]]:
@@ -244,16 +255,56 @@ def _queue_snapshot(target: Path) -> list[dict[str, Any]]:
                 raise grokbot_jobs.GrokbotJobError("corrupt-storage")
             records.append(grokbot_jobs._validate_record(payload))
         return records
-    except grokbot_jobs.GrokbotJobError as exc:
-        raise ScoutFeedError(exc.reason) from exc
+    except grokbot_jobs.GrokbotJobError:
+        raise
     except OSError as exc:
-        raise ScoutFeedError("unsafe-storage") from exc
+        raise grokbot_jobs.GrokbotJobError("unsafe-storage") from exc
     finally:
         if descriptor is not None:
             try:
                 os.close(descriptor)
             except OSError as exc:
-                raise ScoutFeedError("unsafe-storage") from exc
+                raise grokbot_jobs.GrokbotJobError("unsafe-storage") from exc
+
+
+def _read_policy_snapshot(path: Path) -> bytes:
+    """Read an owner-only policy without accepting group or other access."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    else:
+        try:
+            info = Path(path).lstat()
+        except OSError as exc:
+            raise grokbot_feed.FeedError("unsafe-manifest") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise grokbot_feed.FeedError("unsafe-manifest")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(os.fspath(path), flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise grokbot_feed.FeedError("unsafe-manifest")
+        owner_uid = getattr(os, "getuid", None)
+        if owner_uid is not None and info.st_uid != owner_uid():
+            raise grokbot_feed.FeedError("unsafe-manifest")
+        if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise grokbot_feed.FeedError("unsafe-manifest")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 65536):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except grokbot_feed.FeedError:
+        raise
+    except OSError as exc:
+        raise grokbot_feed.FeedError("unsafe-manifest") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                raise grokbot_feed.FeedError("unsafe-manifest") from exc
 
 
 def _discover_issue_numbers(policy: dict[str, object]) -> list[int]:
