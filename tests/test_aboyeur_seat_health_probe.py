@@ -135,3 +135,92 @@ def test_seat_health_probe_runs_after_started_run_json(monkeypatch, tmp_path):
     assert observed
     assert all(flag is True for flag in observed if isinstance(flag, bool))
     assert "started" in observed
+
+
+class RecordingProbe:
+    """Wrap a healthy fixture probe while recording probe_roster kwargs."""
+
+    def __init__(self):
+        self.kwargs: dict[str, object] = {}
+        self._probe = SeatHealthProbe(adapter=FakeAdapter())
+
+    def probe_roster(self, roster, **kwargs):
+        self.kwargs = kwargs
+        return self._probe.probe_roster(roster, **kwargs)
+
+
+def test_run_passes_effective_sandbox_to_seat_health(monkeypatch, tmp_path):
+    """#1173: --sandbox read-only must reach the hard-isolation preflight."""
+    _stub_run_phases(monkeypatch)
+    recording = RecordingProbe()
+    monkeypatch.setattr(aboyeur.seat_health, "SeatHealthProbe", lambda **kwargs: recording)
+    output_dir = tmp_path / "run-sandbox-override"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+            sandbox="read-only",
+        )
+        == 0
+    )
+
+    assert recording.kwargs["sandbox"] == "read-only"
+    assert recording.kwargs["require_hard_isolation"] is False
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["health"]["effective_sandbox"] == "read-only"
+
+
+def test_read_only_run_preflight_records_sandbox_and_hard_isolation(monkeypatch, tmp_path):
+    _stub_run_phases(monkeypatch)
+    recording = RecordingProbe()
+    monkeypatch.setattr(aboyeur.seat_health, "SeatHealthProbe", lambda **kwargs: recording)
+    output_dir = tmp_path / "run-readonly-preflight"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+            read_only=True,
+            sandbox="read-only",
+        )
+        == 0
+    )
+
+    assert recording.kwargs["require_hard_isolation"] is True
+    assert recording.kwargs["sandbox"] == "read-only"
+
+
+def test_sandbox_override_upgrades_soft_declaration_to_hard_isolation():
+    """#1173: a soft roster declaration is judged against the runtime override."""
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent("chef", "codex", "plan and synthesize")},
+        max_workers=1,
+        sandbox="workspace-write",
+    )
+    probe = SeatHealthProbe(collect_executable_version=False)
+
+    declared = probe._default_check(
+        "isolation-compatibility", roster.agents["chef"], roster, None, 1.0, False, require_hard_isolation=True
+    )
+    assert declared.status == "failed"
+    assert declared.cause_code == "unsafe-isolation"
+
+    overridden = probe._default_check(
+        "isolation-compatibility",
+        roster.agents["chef"],
+        roster,
+        None,
+        1.0,
+        False,
+        require_hard_isolation=True,
+        sandbox="read-only",
+    )
+    assert overridden.status == "passed"
