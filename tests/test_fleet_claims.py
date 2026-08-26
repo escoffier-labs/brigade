@@ -605,11 +605,18 @@ class TestHubClaims:
             listed = fleet_hub.list_claims(conn)
             assert listed[0]["target"] == "repo-a"
             assert listed[0]["generation"] == 1
+            # A live migrated claim is not a released floor; lost-row
+            # re-acquire of this generation must still be possible.
+            assert (
+                conn.execute("SELECT generation FROM claim_generation_floors WHERE target = 'repo-a'").fetchone()
+                is None
+            )
+            status, payload = fleet_hub.handle_claim(conn, _claim("renew", holder="h1"))
+            assert status == 200 and payload["claim"]["generation"] == 1
+            assert fleet_hub.handle_claim(conn, _claim("release", holder="h1"))[1]["released"] is True
             assert conn.execute(
                 "SELECT generation FROM claim_generation_floors WHERE target = 'repo-a'"
             ).fetchone() == (1,)
-            status, payload = fleet_hub.handle_claim(conn, _claim("renew", holder="h1"))
-            assert status == 200 and payload["claim"]["generation"] == 1
         finally:
             conn.close()
 

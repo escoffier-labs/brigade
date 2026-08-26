@@ -768,13 +768,11 @@ def _validate_lease(raw: Any, field: str) -> dict[str, str | None]:
 
 
 def _backfill_generation_floors(conn: sqlite3.Connection) -> None:
-    """Raise each target's durable floor to the max generation already stored."""
-    conn.execute(
-        "INSERT INTO claim_generation_floors (target, generation) "
-        "SELECT target, MAX(generation) FROM claims GROUP BY target "
-        "ON CONFLICT(target) DO UPDATE SET "
-        "generation = MAX(claim_generation_floors.generation, excluded.generation)"
-    )
+    """Raise each target's durable floor to the highest *released* generation.
+
+    Live claims are not a floor. A lost-row heartbeat must be able to
+    re-acquire the same generation; only a release (tombstone) retires it.
+    """
     conn.execute(
         "INSERT INTO claim_generation_floors (target, generation) "
         "SELECT target, MAX(generation) FROM claim_tombstones GROUP BY target "
@@ -1096,10 +1094,6 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
                 supersede["acquired_at"],
             ),
         )
-        if cursor.rowcount == 1:
-            new_grant = prior is None or prior[10] <= now or prior[12] != holder or prior[1] != node
-            if new_grant:
-                _raise_generation_floor(conn, target, next_generation)
         conn.commit()
         if cursor.rowcount == 1:
             row = _fetch_claim(conn, target)
