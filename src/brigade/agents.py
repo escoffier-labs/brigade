@@ -1037,17 +1037,24 @@ def run_agent(
                 ok=False,
                 detail="codex-cloud does not take a model pin; the cloud environment sets the model",
             )
-        cloud_kwargs = {
-            "prompt": prompt,
-            "env_id": env_id,
-            "timeout": timeout,
-            "cwd": cwd,
-            "environment_audit": environment_audit,
-            "register_target": config_root,
-        }
         if process_registry is not None and _accepts_process_registry(codex_cloud.run_cloud_task):
-            return codex_cloud.run_cloud_task(**cloud_kwargs, process_registry=process_registry)
-        return codex_cloud.run_cloud_task(**cloud_kwargs)
+            return codex_cloud.run_cloud_task(
+                prompt,
+                env_id=env_id,
+                timeout=timeout,
+                cwd=cwd,
+                environment_audit=environment_audit,
+                register_target=config_root,
+                process_registry=process_registry,
+            )
+        return codex_cloud.run_cloud_task(
+            prompt,
+            env_id=env_id,
+            timeout=timeout,
+            cwd=cwd,
+            environment_audit=environment_audit,
+            register_target=config_root,
+        )
 
     if cli_ref.startswith(_OLLAMA_PREFIX):
         ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]
