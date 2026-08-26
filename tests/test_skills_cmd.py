@@ -1262,6 +1262,82 @@ def test_install_dir_still_rejects_external_symlink_target(tmp_path):
         skills_cmd._install_dir(workspace, "claude", "example")
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_install_refuses_symlinked_brigade_state_root(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.import_skill(target=workspace, source=source) == 0
+    outside_state = tmp_path / "outside-state"
+    shutil.move(str(workspace / ".brigade"), str(outside_state))
+    (workspace / ".brigade").symlink_to(outside_state, target_is_directory=True)
+    capsys.readouterr()
+
+    rc = skills_cmd.install(workspace=workspace, skill="security-review", harness="claude", json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "state root" in captured.err
+    installs = outside_state / "skills" / "installs"
+    if installs.is_dir():
+        assert not any(installs.iterdir())
+    assert not (workspace / ".claude" / "skills").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_import_refuses_symlinked_brigade_state_root(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = _write_skill(tmp_path / "source", name="state-root-victim")
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "seed")) == 0
+    outside_state = tmp_path / "outside-state"
+    shutil.move(str(workspace / ".brigade"), str(outside_state))
+    (workspace / ".brigade").symlink_to(outside_state, target_is_directory=True)
+    capsys.readouterr()
+
+    payload, error, rc = skills_cmd._registry_import_payload(
+        target=workspace, source=source, skill_id=None, force=False
+    )
+
+    assert payload is None
+    assert error is not None
+    assert "state root" in error
+    assert rc == 2
+    assert not (outside_state / "skills" / "registry" / "state-root-victim").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_state_root_anchor_detects_ancestor_swap_between_validation_and_write(tmp_path):
+    workspace = tmp_path / "ws"
+    (workspace / ".brigade").mkdir(parents=True)
+    anchor = skills_cmd._hold_state_root(workspace)
+    try:
+        swapped_root = tmp_path / "swapped-state"
+        shutil.copytree(workspace / ".brigade", swapped_root)
+        (workspace / ".brigade").rmdir()
+        (workspace / ".brigade").symlink_to(swapped_root, target_is_directory=True)
+
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            anchor.revalidate()
+    finally:
+        anchor.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_write_state_file_lands_relative_to_held_descriptor(tmp_path):
+    workspace = tmp_path / "ws"
+    (workspace / ".brigade").mkdir(parents=True)
+    with skills_cmd._held_state_root(workspace) as anchor:
+        skills_cmd._write_state_file(anchor, "skills", "installs", "receipt.json", data=b"{}\n")
+        skills_cmd._append_state_line(anchor, "skills", "installs", "history.jsonl", data=b'{"row": true}\n')
+        skills_cmd._append_state_line(anchor, "skills", "installs", "history.jsonl", data=b'{"row": 2}\n')
+
+    receipt = workspace / ".brigade" / "skills" / "installs" / "receipt.json"
+    history = workspace / ".brigade" / "skills" / "installs" / "history.jsonl"
+    assert receipt.read_bytes() == b"{}\n"
+    assert history.read_text().count("\n") == 2
+
+
 def test_skills_fleet_does_not_guess_source_for_malformed_v2_receipt(tmp_path, capsys):
     assert skills_cmd.install(workspace=tmp_path, skill="brigade-work", harness="cursor", json_output=True) == 0
     capsys.readouterr()

@@ -7,18 +7,20 @@ reviewed packs into harness-specific folders.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import hashlib
 import json
 import os
 import shlex
 import shutil
+import stat as stat_module
 import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from . import __version__ as BRIGADE_VERSION
 from . import mcp_server
@@ -430,29 +432,33 @@ def _registry_import_payload(
     dest = _skill_path(target, resolved_id)
     if dest.exists() and not force:
         return None, f"skill already exists: {dest}", 2
-    _copy_skill_source(source_dir, dest)
-    metadata = dict(incoming_metadata)
-    metadata.update(
-        {
-            "id": resolved_id,
-            "version": str(metadata.get("version") or "0.1.0"),
-            "source": str(source),
-            "imported_at": _now(),
-            "trust_level": str(metadata.get("trust_level") or "unreviewed"),
-            "required_tools": metadata.get("required_tools")
-            if isinstance(metadata.get("required_tools"), list)
-            else [],
-            "required_mcp_servers": metadata.get("required_mcp_servers")
-            if isinstance(metadata.get("required_mcp_servers"), list)
-            else [],
-            "supported_harnesses": metadata.get("supported_harnesses")
-            if isinstance(metadata.get("supported_harnesses"), list)
-            else list(HARNESS_TARGETS),
-            "tests": metadata.get("tests") if isinstance(metadata.get("tests"), list) else [],
-        }
-    )
-    metadata["fingerprint"] = _fingerprint(dest)
-    _write_json(_metadata_path(dest), metadata)
+    try:
+        with _held_state_root(target) as anchor:
+            _copy_skill_source(source_dir, dest)
+            metadata = dict(incoming_metadata)
+            metadata.update(
+                {
+                    "id": resolved_id,
+                    "version": str(metadata.get("version") or "0.1.0"),
+                    "source": str(source),
+                    "imported_at": _now(),
+                    "trust_level": str(metadata.get("trust_level") or "unreviewed"),
+                    "required_tools": metadata.get("required_tools")
+                    if isinstance(metadata.get("required_tools"), list)
+                    else [],
+                    "required_mcp_servers": metadata.get("required_mcp_servers")
+                    if isinstance(metadata.get("required_mcp_servers"), list)
+                    else [],
+                    "supported_harnesses": metadata.get("supported_harnesses")
+                    if isinstance(metadata.get("supported_harnesses"), list)
+                    else list(HARNESS_TARGETS),
+                    "tests": metadata.get("tests") if isinstance(metadata.get("tests"), list) else [],
+                }
+            )
+            metadata["fingerprint"] = _fingerprint(dest)
+            _write_state_file(anchor, "skills", "registry", resolved_id, "skill.json", data=_json_bytes(metadata))
+    except SkillsStatePathError as exc:
+        return None, str(exc), 2
     lint_payload = _lint_payload(target, str(dest), mode="lenient")
     return (
         {"target": str(target), "skill_id": resolved_id, "skill_dir": str(dest), "lint": lint_payload},
@@ -774,6 +780,191 @@ def _safe_install_path(value: object) -> str | None:
     return value.strip()
 
 
+class SkillsStatePathError(RuntimeError):
+    """The ``.brigade`` skills state root was redirected or swapped mid-operation."""
+
+
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_DIR_OPEN_FLAGS = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _CLOEXEC
+_HAS_DESCRIPTOR_ANCHOR = bool(_O_DIRECTORY) and bool(_O_NOFOLLOW) and os.open in os.supports_dir_fd
+
+
+@dataclass
+class _StateRootAnchor:
+    """A validated hold on the workspace's ``.brigade`` state root.
+
+    On POSIX the anchor holds an open descriptor taken with
+    ``O_DIRECTORY|O_NOFOLLOW``, so writes can be performed relative to the
+    held directory and a swapped-in replacement (different device/inode) is
+    detected by ``revalidate()``. On platforms without those APIs the anchor
+    validates via strict resolution immediately before each write; a residual
+    check-then-use window remains there and is documented in the issue fix.
+    """
+
+    workspace: Path
+    fd: int | None = None
+    identity: tuple[int, int] | None = None
+
+    def revalidate(self) -> None:
+        if not _HAS_DESCRIPTOR_ANCHOR:
+            _verify_state_root_no_descriptor(self.workspace)
+            return
+        expected = self.identity
+        fd, identity = _open_state_root_descriptor(self.workspace)
+        os.close(fd)
+        if identity != expected:
+            raise SkillsStatePathError(
+                f"skills state root swapped between validation and write: {self.workspace / '.brigade'}"
+            )
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+        self.fd = None
+        self.identity = None
+
+
+def _open_state_root_descriptor(workspace: Path) -> tuple[int, tuple[int, int]]:
+    state_root = workspace / ".brigade"
+    try:
+        link_mode = stat_module.S_ISLNK(os.lstat(state_root).st_mode)
+    except FileNotFoundError:
+        link_mode = False
+    except OSError as exc:
+        raise SkillsStatePathError(f"skills state root is missing: {state_root}") from exc
+    if link_mode:
+        raise SkillsStatePathError(f"skills state root must not be a symlink: {state_root}")
+    resolved = Path(os.path.realpath(state_root))
+    expected_resolved = Path(os.path.realpath(workspace)) / ".brigade"
+    if resolved != expected_resolved:
+        raise SkillsStatePathError(f"skills state root resolves outside the workspace: {state_root} -> {resolved}")
+    try:
+        fd = os.open(state_root, _DIR_OPEN_FLAGS)
+    except FileNotFoundError:
+        # A fresh workspace has no state root yet; create it ourselves so an
+        # attacker cannot win a race by planting a symlink at the path.
+        try:
+            os.makedirs(state_root, exist_ok=True)
+        except OSError as exc:
+            raise SkillsStatePathError(f"cannot create skills state root: {state_root}") from exc
+        try:
+            fd = os.open(state_root, _DIR_OPEN_FLAGS)
+        except OSError as exc:
+            raise SkillsStatePathError(
+                f"cannot open skills state root without following symlinks: {state_root}"
+            ) from exc
+    except OSError as exc:
+        raise SkillsStatePathError(f"cannot open skills state root without following symlinks: {state_root}") from exc
+    st = os.fstat(fd)
+    identity = (st.st_dev, st.st_ino)
+    st_path = os.stat(state_root)
+    if (st_path.st_dev, st_path.st_ino) != identity:
+        os.close(fd)
+        raise SkillsStatePathError(f"skills state root changed while being validated: {state_root}")
+    return fd, identity
+
+
+def _verify_state_root_no_descriptor(workspace: Path) -> None:
+    state_root = workspace / ".brigade"
+    if not state_root.exists():
+        try:
+            state_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SkillsStatePathError(f"cannot create skills state root: {state_root}") from exc
+    if not state_root.is_dir() or state_root.is_symlink():
+        raise SkillsStatePathError(f"skills state root is not a plain directory: {state_root}")
+    probe = state_root.resolve(strict=True)
+    if probe != Path(os.path.realpath(workspace)) / ".brigade":
+        raise SkillsStatePathError(f"skills state root resolves outside the workspace: {state_root} -> {probe}")
+
+
+def _hold_state_root(workspace: Path) -> _StateRootAnchor:
+    """Validate the state root and take a held descriptor anchor on POSIX."""
+    if _HAS_DESCRIPTOR_ANCHOR:
+        fd, identity = _open_state_root_descriptor(workspace)
+        return _StateRootAnchor(workspace=workspace, fd=fd, identity=identity)
+    _verify_state_root_no_descriptor(workspace)
+    return _StateRootAnchor(workspace=workspace)
+
+
+@contextlib.contextmanager
+def _held_state_root(workspace: Path) -> Iterator[_StateRootAnchor]:
+    anchor = _hold_state_root(workspace)
+    try:
+        yield anchor
+    finally:
+        anchor.close()
+
+
+def _write_state_file(anchor: _StateRootAnchor, *relative: str, data: bytes, mode: int = 0o644) -> None:
+    """Create or replace one file under the anchored state root."""
+    anchor.revalidate()
+    if not _HAS_DESCRIPTOR_ANCHOR:
+        destination = anchor.workspace.joinpath(".brigade").joinpath(*relative)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        return
+    assert anchor.fd is not None
+    parent_fd = anchor.fd
+    opened_chain: list[int] = []
+    for part in relative[:-1]:
+        try:
+            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+        except FileNotFoundError:
+            os.mkdir(part, 0o755, dir_fd=parent_fd)
+            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+        opened_chain.append(next_fd)
+        parent_fd = next_fd
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW | _CLOEXEC
+        file_fd = os.open(relative[-1], flags, mode, dir_fd=parent_fd)
+        try:
+            os.write(file_fd, data)
+        finally:
+            os.close(file_fd)
+    finally:
+        for fd in reversed(opened_chain):
+            os.close(fd)
+
+
+def _append_state_line(anchor: _StateRootAnchor, *relative: str, data: bytes) -> None:
+    """Append one line to a JSONL file under the anchored state root."""
+    anchor.revalidate()
+    if not _HAS_DESCRIPTOR_ANCHOR:
+        destination = anchor.workspace.joinpath(".brigade").joinpath(*relative)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("ab") as handle:
+            handle.write(data)
+        return
+    assert anchor.fd is not None
+    parent_fd = anchor.fd
+    opened_chain: list[int] = []
+    for part in relative[:-1]:
+        try:
+            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+        except FileNotFoundError:
+            os.mkdir(part, 0o755, dir_fd=parent_fd)
+            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+        opened_chain.append(next_fd)
+        parent_fd = next_fd
+    try:
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW | _CLOEXEC
+        file_fd = os.open(relative[-1], flags, 0o644, dir_fd=parent_fd)
+        try:
+            os.write(file_fd, data)
+        finally:
+            os.close(file_fd)
+    finally:
+        for fd in reversed(opened_chain):
+            os.close(fd)
+
+
+def _json_bytes(payload: dict[str, Any]) -> bytes:
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 def _adapter_map(target: Path) -> dict[str, dict[str, Any]]:
     adapters = {key: dict(value) for key, value in HARNESS_ADAPTERS.items()}
     config = _read_json(_adapters_config_path(target))
@@ -997,91 +1188,112 @@ def install(
     targets = install_targets if harness == "all" else (harness,)
     receipts: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    for install_target in targets:
-        if install_target == "hermes" and not _hermes_home().exists():
-            # Do not create ~/.hermes for someone who does not run Hermes.
-            skipped.append({"target": "hermes", "reason": "Hermes home not found (is Hermes installed?)"})
-            continue
-        dest = _install_dir(workspace, install_target, skill_id)
-        source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
-        rendered_text = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
-        render_fingerprint = _text_fingerprint(rendered_text)
-        render_contract = _renderer_contract(workspace, install_target)
-        render_errors = _rendered_skill_validation(rendered_text, install_target)
-        if render_errors:
-            if json_output:
-                print(
-                    json.dumps(
-                        {
-                            "workspace": str(workspace),
-                            "installed": False,
-                            "target": install_target,
-                            "errors": render_errors,
-                            "lint": lint_payload,
-                        },
-                        indent=2,
-                        sort_keys=True,
+    try:
+        state_anchor = _hold_state_root(workspace)
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        for install_target in targets:
+            if install_target == "hermes" and not _hermes_home().exists():
+                # Do not create ~/.hermes for someone who does not run Hermes.
+                skipped.append({"target": "hermes", "reason": "Hermes home not found (is Hermes installed?)"})
+                continue
+            dest = _install_dir(workspace, install_target, skill_id)
+            source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
+            rendered_text = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
+            render_fingerprint = _text_fingerprint(rendered_text)
+            render_contract = _renderer_contract(workspace, install_target)
+            render_errors = _rendered_skill_validation(rendered_text, install_target)
+            if render_errors:
+                if json_output:
+                    print(
+                        json.dumps(
+                            {
+                                "workspace": str(workspace),
+                                "installed": False,
+                                "target": install_target,
+                                "errors": render_errors,
+                                "lint": lint_payload,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
                     )
-                )
-            else:
-                for error in render_errors:
-                    print(f"error: {install_target}: {error}", file=sys.stderr)
-            return 1
-        if dest.exists() and not force:
-            print(f"error: installed skill already exists: {dest}", file=sys.stderr)
-            return 2
-        receipt_path = _installs_root(workspace) / f"{skill_id}-{install_target}.json"
-        previous_receipt = _read_json(receipt_path) if receipt_path.is_file() else {}
-        rollback_snapshot: str | None = None
-        if dest.exists():
-            rollback_dir = _rollback_root(workspace, skill_id, install_target) / _now().replace(":", "").replace(
-                "+", "Z"
-            ).replace(".", "-")
-            shutil.copytree(dest, rollback_dir)
-            rollback_snapshot = str(rollback_dir)
-            shutil.rmtree(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        _copy_skill_for_harness(source_dir, dest, metadata, skill_id, install_target)
-        installed_fingerprint = _fingerprint(dest)
-        installed_skill_fingerprint = _text_fingerprint(
-            _skill_md_path(dest).read_text(encoding="utf-8", errors="replace")
-        )
-        installed_metadata_fingerprint = _file_fingerprint(_metadata_path(dest))
-        installed_at = _now()
-        receipt = {
-            "schema_version": RECEIPT_SCHEMA_VERSION,
-            "workspace": str(workspace),
-            "receipt_id": f"{installed_at[:19].replace(':', '').replace('-', '')}-{skill_id}-{install_target}",
-            "skill_id": skill_id,
-            "target": install_target,
-            "installed_dir": str(dest),
-            "installed_at": installed_at,
-            "version": version,
-            "source_path": source_path,
-            "source": source_identity,
-            "render": {**render_contract, "fingerprint": render_fingerprint},
-            "installed": {
-                "bundle_fingerprint": installed_fingerprint,
-                "skill_fingerprint": installed_skill_fingerprint,
-                "metadata_fingerprint": installed_metadata_fingerprint,
-            },
-            "fingerprint": lint_payload.get("fingerprint"),
-            "source_fingerprint": lint_payload.get("fingerprint"),
-            "render_fingerprint": render_fingerprint,
-            "installed_fingerprint": installed_fingerprint,
-            "format": _adapter_map(workspace)[install_target].get("format"),
-            "rollback_snapshot": rollback_snapshot,
-            "previous_receipt": previous_receipt if previous_receipt else None,
-            "trust_score": lint_payload.get("trust_score"),
-            "changelog": lint_payload.get("changelog"),
-        }
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(receipt_path, receipt)
-        receipt["receipt_path"] = str(receipt_path)
-        history_receipt = dict(receipt)
-        history_receipt["receipt_path"] = str(receipt_path)
-        _append_jsonl(_install_history_path(workspace), history_receipt)
-        receipts.append(receipt)
+                else:
+                    for error in render_errors:
+                        print(f"error: {install_target}: {error}", file=sys.stderr)
+                return 1
+            if dest.exists() and not force:
+                print(f"error: installed skill already exists: {dest}", file=sys.stderr)
+                return 2
+            state_anchor.revalidate()
+            receipt_path = _installs_root(workspace) / f"{skill_id}-{install_target}.json"
+            previous_receipt = _read_json(receipt_path) if receipt_path.is_file() else {}
+            rollback_snapshot: str | None = None
+            if dest.exists():
+                rollback_dir = _rollback_root(workspace, skill_id, install_target) / _now().replace(":", "").replace(
+                    "+", "Z"
+                ).replace(".", "-")
+                shutil.copytree(dest, rollback_dir)
+                rollback_snapshot = str(rollback_dir)
+                shutil.rmtree(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _copy_skill_for_harness(source_dir, dest, metadata, skill_id, install_target)
+            installed_fingerprint = _fingerprint(dest)
+            installed_skill_fingerprint = _text_fingerprint(
+                _skill_md_path(dest).read_text(encoding="utf-8", errors="replace")
+            )
+            installed_metadata_fingerprint = _file_fingerprint(_metadata_path(dest))
+            installed_at = _now()
+            receipt = {
+                "schema_version": RECEIPT_SCHEMA_VERSION,
+                "workspace": str(workspace),
+                "receipt_id": f"{installed_at[:19].replace(':', '').replace('-', '')}-{skill_id}-{install_target}",
+                "skill_id": skill_id,
+                "target": install_target,
+                "installed_dir": str(dest),
+                "installed_at": installed_at,
+                "version": version,
+                "source_path": source_path,
+                "source": source_identity,
+                "render": {**render_contract, "fingerprint": render_fingerprint},
+                "installed": {
+                    "bundle_fingerprint": installed_fingerprint,
+                    "skill_fingerprint": installed_skill_fingerprint,
+                    "metadata_fingerprint": installed_metadata_fingerprint,
+                },
+                "fingerprint": lint_payload.get("fingerprint"),
+                "source_fingerprint": lint_payload.get("fingerprint"),
+                "render_fingerprint": render_fingerprint,
+                "installed_fingerprint": installed_fingerprint,
+                "format": _adapter_map(workspace)[install_target].get("format"),
+                "rollback_snapshot": rollback_snapshot,
+                "previous_receipt": previous_receipt if previous_receipt else None,
+                "trust_score": lint_payload.get("trust_score"),
+                "changelog": lint_payload.get("changelog"),
+            }
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_json(receipt_path, receipt)
+            receipt["receipt_path"] = str(receipt_path)
+            history_receipt = dict(receipt)
+            history_receipt["receipt_path"] = str(receipt_path)
+            _write_state_file(
+                state_anchor, "skills", "installs", f"{skill_id}-{install_target}.json", data=_json_bytes(receipt)
+            )
+            _append_state_line(
+                state_anchor,
+                "skills",
+                "installs",
+                "history.jsonl",
+                data=(json.dumps(history_receipt, sort_keys=True) + "\n").encode("utf-8"),
+            )
+            receipts.append(receipt)
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        state_anchor.close()
     receipt = {
         "workspace": str(workspace),
         "skill_id": skill_id,
@@ -1669,30 +1881,51 @@ def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = 
     skill_id = _slug(skill)
     targets = install_targets if harness == "all" else (harness,)
     removed: list[dict[str, Any]] = []
-    for install_target in targets:
-        try:
-            dest = _install_dir(workspace, install_target, skill_id)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        receipt_path = _installs_root(workspace) / f"{skill_id}-{install_target}.json"
-        if not dest.exists() and not receipt_path.is_file():
-            continue
-        if dest.exists():
-            shutil.rmtree(dest)
-        if receipt_path.is_file():
-            receipt_path.unlink()
-        _append_jsonl(
-            _install_history_path(workspace),
-            {
-                "action": "uninstall",
-                "skill_id": skill_id,
-                "harness": install_target,
-                "workspace": str(workspace),
-                "uninstalled_at": _now(),
-            },
-        )
-        removed.append({"harness": install_target, "path": str(dest)})
+    try:
+        state_anchor = _hold_state_root(workspace)
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        for install_target in targets:
+            state_anchor.revalidate()
+            try:
+                dest = _install_dir(workspace, install_target, skill_id)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            receipt_path = _installs_root(workspace) / f"{skill_id}-{install_target}.json"
+            if not dest.exists() and not receipt_path.is_file():
+                continue
+            if dest.exists():
+                shutil.rmtree(dest)
+            if receipt_path.is_file():
+                receipt_path.unlink()
+            _append_state_line(
+                state_anchor,
+                "skills",
+                "installs",
+                "history.jsonl",
+                data=(
+                    json.dumps(
+                        {
+                            "action": "uninstall",
+                            "skill_id": skill_id,
+                            "harness": install_target,
+                            "workspace": str(workspace),
+                            "uninstalled_at": _now(),
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode("utf-8"),
+            )
+            removed.append({"harness": install_target, "path": str(dest)})
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        state_anchor.close()
     if not removed:
         print(f"error: skill not installed: {skill} ({harness})", file=sys.stderr)
         return 1
