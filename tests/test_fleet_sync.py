@@ -106,8 +106,9 @@ class TestHub:
         handler = fleet_hub.make_handler("tok", Path("/nonexistent"))
         assert handler.server_version == "brigade-fleet-hub/1"
         assert handler.sys_version == ""
-        assert "Python" not in handler.version_string()
-        assert sys.version.split()[0] not in handler.version_string()
+        banner = f"{handler.server_version} {handler.sys_version}"
+        assert "Python" not in banner
+        assert sys.version.split()[0] not in banner
 
     def test_events_rejected_without_token(self, hub):
         url, _token, _db = hub
