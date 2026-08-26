@@ -1095,6 +1095,9 @@ def _direct_worker_error(worker: str, loaded_roster, roster_mod, *, read_only: b
         capability_error = roster_mod.read_only_capability_error(agent)
         if capability_error is not None:
             return capability_error
+        cloud_error = roster_mod.read_only_cloud_mutation_error(agent)
+        if cloud_error is not None:
+            return cloud_error
     if agent.cli is None:
         return f"worker has no CLI adapter: {worker}"
     if not roster_mod.is_cli_allowed(agent.cli, loaded_roster):

@@ -616,6 +616,7 @@ def dispatch(
             assert selected_agent.cli is not None
             cli_ref = selected_agent.cli
             seat_process_registry = process_registry.for_seat(selected_agent.name)
+            cloud_dispatch_kwargs = {"cloud_safe_mode": selected_agent.cloud_safe_mode}
             if selected_agent.transport == "acpx":
                 from . import acpx_adapter
 
@@ -648,6 +649,7 @@ def dispatch(
                     **direct_command_kwargs(selected_agent),
                     resume_session_id=resume_session_id,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                 )
             if selected_agent.env is not None:
                 # Env seats always dispatch through the direct CLI path. The
@@ -667,6 +669,7 @@ def dispatch(
                     read_only=effective_read_only,
                     env=dict(selected_agent.env),
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     **env_kwargs,
                 )
@@ -726,6 +729,7 @@ def dispatch(
                     cwd=cwd,
                     read_only=effective_read_only,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is None:
@@ -737,6 +741,7 @@ def dispatch(
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is None:
@@ -748,6 +753,7 @@ def dispatch(
                     read_only=effective_read_only,
                     model=selected_agent.model,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is None and selected_agent.model is None and selected_agent.reasoning is not None:
@@ -759,6 +765,7 @@ def dispatch(
                     read_only=effective_read_only,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is not None and selected_agent.model is not None and selected_agent.reasoning is None:
@@ -771,6 +778,7 @@ def dispatch(
                     sandbox=sandbox,
                     model=selected_agent.model,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is not None:
@@ -783,6 +791,7 @@ def dispatch(
                     sandbox=sandbox,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is not None:
@@ -795,6 +804,7 @@ def dispatch(
                     model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
+                    **cloud_dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                 )
             assert sandbox is not None

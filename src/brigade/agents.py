@@ -478,6 +478,7 @@ class AgentResult:
     failure_phase: str | None = None
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
+    cloud_environment: dict[str, str] | None = None
 
 
 def is_known(cli_ref: str) -> bool:
@@ -947,6 +948,7 @@ def run_agent(
     command: tuple[str, ...] | None = None,
     resume_session_id: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
+    cloud_safe_mode: bool = False,
 ) -> AgentResult:
     child_env: dict[str, str] | None = None
     resolved_overrides: dict[str, str] | None = None
@@ -1000,17 +1002,26 @@ def run_agent(
         )
 
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
-        env_id = cli_ref[len(_CODEX_CLOUD_PREFIX) :]
-        if not env_id:
+        env_token = cli_ref[len(_CODEX_CLOUD_PREFIX) :]
+        if not env_token:
             return AgentResult(
                 text="",
                 ok=False,
                 detail="codex-cloud reference needs an environment id: codex-cloud:<env-id>",
             )
+        if (read_only or sandbox == "read-only") and not cloud_safe_mode:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail="read-only runs cannot dispatch mutating codex-cloud tasks without cloud_safe_mode",
+                failure_phase="dispatch",
+                failure_kind="read-only-cloud-blocked",
+            )
         from . import codex_cloud
 
+        config_root = codex_cloud.resolve_config_target(cwd)
         try:
-            env_id = codex_cloud.resolve_environment_id(env_id, target=cwd)
+            env_id = codex_cloud.resolve_environment_id(env_token, target=config_root, environ=child_env or os.environ)
         except codex_cloud.CodexCloudConfigError:
             return AgentResult(
                 text="",
@@ -1019,21 +1030,24 @@ def run_agent(
                 failure_phase="dispatch",
                 failure_kind="codex-cloud-env-unconfigured",
             )
+        environment_audit = codex_cloud.environment_audit_ref(env_token, env_id)
         if model is not None:
             return AgentResult(
                 text="",
                 ok=False,
                 detail="codex-cloud does not take a model pin; the cloud environment sets the model",
             )
+        cloud_kwargs = {
+            "prompt": prompt,
+            "env_id": env_id,
+            "timeout": timeout,
+            "cwd": cwd,
+            "environment_audit": environment_audit,
+            "register_target": config_root,
+        }
         if process_registry is not None and _accepts_process_registry(codex_cloud.run_cloud_task):
-            return codex_cloud.run_cloud_task(
-                prompt,
-                env_id=env_id,
-                timeout=timeout,
-                cwd=cwd,
-                process_registry=process_registry,
-            )
-        return codex_cloud.run_cloud_task(prompt, env_id=env_id, timeout=timeout, cwd=cwd)
+            return codex_cloud.run_cloud_task(**cloud_kwargs, process_registry=process_registry)
+        return codex_cloud.run_cloud_task(**cloud_kwargs)
 
     if cli_ref.startswith(_OLLAMA_PREFIX):
         ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]

@@ -166,6 +166,7 @@ def register(
     branch: str | None = None,
     dispatched_at: str | None = None,
     source: str = "dispatch",
+    environment_audit: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if provider not in TRACKER_PROVIDERS:
         raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud, jules")
@@ -187,6 +188,8 @@ def register(
         "adopted_at": None,
         "source": source,
     }
+    if environment_audit:
+        entry.update(environment_audit)
     registry["entries"].append(entry)
     save_registry(target, registry)
     return entry
@@ -831,11 +834,11 @@ def observe_codex_cloud_tasks(target: Path) -> dict[str, Any]:
     try:
         inventory = codex_cloud.list_tasks(cwd=target)
     except Exception:  # noqa: BLE001 - observation must stay bounded
-        inventory = []
-    if inventory:
+        inventory = codex_cloud.ListTasksResult([])
+    if inventory.tasks:
         return {
             row["id"]: {"state": row.get("state"), "ready_at": None}
-            for row in inventory
+            for row in inventory.tasks
             if isinstance(row.get("id"), str)
         }
 

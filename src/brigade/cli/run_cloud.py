@@ -85,6 +85,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
     )
     p_doctor.add_argument("--json", action="store_true")
+    p_doctor.add_argument(
+        "--selector",
+        default="configured",
+        help="Codex Cloud environment selector to validate (configured, $VAR, or literal id).",
+    )
 
     p_canary = cloud_sub.add_parser("canary", help="Bounded Codex Cloud inventory check. Never exec or apply.")
     p_canary.add_argument("--target", type=Path, default=Path("."))
@@ -92,6 +97,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
     )
     p_canary.add_argument("--json", action="store_true")
+    p_canary.add_argument(
+        "--selector",
+        default="configured",
+        help="Codex Cloud environment selector to validate (configured, $VAR, or literal id).",
+    )
 
     p_grokbot = cloud_sub.add_parser("grokbot", help="Manage the private local Grok Bot job queue.")
     grokbot_sub = p_grokbot.add_subparsers(dest="grokbot_command", metavar="<grokbot-command>")
@@ -359,20 +369,24 @@ def _dispatch_codex_cloud_ops(args, target: Path) -> int:
         print("codex-cloud config saved")
         return 0
     if command == "doctor":
-        result = codex_cloud.doctor(target)
+        result = codex_cloud.doctor(target, selector=args.selector)
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
         else:
             print(f"codex-cloud doctor: {'ok' if result['ok'] else 'fail'}")
             print(f"environment_configured: {'yes' if result['environment_configured'] else 'no'}")
+            print(f"selector: {result.get('selector', args.selector)}")
         return 0 if result["ok"] else 1
     if command == "canary":
-        result = codex_cloud.canary(target)
+        result = codex_cloud.canary(target, selector=args.selector)
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
         else:
             print(f"codex-cloud canary: {'ok' if result['ok'] else 'fail'}")
             print(f"environment_configured: {'yes' if result['environment_configured'] else 'no'}")
+            print(f"selector: {result.get('selector', args.selector)}")
+            if not result["ok"]:
+                print(f"reason: {result.get('reason', 'unknown')}")
             print(f"task_count: {result['task_count']}")
             print("apply: no")
         return 0 if result["ok"] else 1

@@ -643,10 +643,12 @@ def test_codex_observer_uses_bounded_structured_inventory(tmp_path: Path, monkey
     monkeypatch.setattr(
         codex_cloud,
         "list_tasks",
-        lambda **kwargs: [
-            {"id": "task_e_structured01", "state": "running", "environment_id": "env-private"},
-            {"id": "task_e_structured02", "state": "completed"},
-        ],
+        lambda **kwargs: codex_cloud.ListTasksResult(
+            [
+                {"id": "task_e_structured01", "state": "running", "environment_id": "env-private"},
+                {"id": "task_e_structured02", "state": "completed"},
+            ]
+        ),
     )
     monkeypatch.setattr(
         cloud_tracker,

@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -57,7 +58,7 @@ def test_run_agent_threads_process_registry_to_codex_cloud(monkeypatch):
     registry = proc.ProcessRegistry()
     seen = {}
 
-    def fake_cloud_task(prompt, *, env_id, timeout, cwd=None, process_registry=None):
+    def fake_cloud_task(prompt, *, env_id, timeout, cwd=None, process_registry=None, **kwargs):
         seen.update(
             prompt=prompt,
             env_id=env_id,
@@ -77,7 +78,7 @@ def test_run_agent_threads_process_registry_to_codex_cloud(monkeypatch):
 
 
 def test_run_agent_preserves_legacy_codex_cloud_call_shape(monkeypatch):
-    def fake_cloud_task(prompt, *, env_id, timeout, cwd=None):
+    def fake_cloud_task(prompt, *, env_id, timeout, cwd=None, **kwargs):
         return agents.AgentResult(text=f"{env_id}: {prompt}", ok=True)
 
     monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
@@ -705,7 +706,7 @@ class TestFleetAdmission:
         assert result.timed_out is True
         assert recorded["release"] == []
 
-    def test_unknown_status_neither_renews_nor_releases_on_poll_timeout(self, monkeypatch):
+    def test_unknown_status_renews_lease_until_timeout(self, monkeypatch):
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -721,7 +722,7 @@ class TestFleetAdmission:
         )
 
         assert result.status == "uncertain"
-        assert recorded["renew"] == []
+        assert len(recorded["renew"]) == 1
         assert recorded["release"] == []
 
     def test_config_error_fails_closed_before_provider_exec(self, monkeypatch):
@@ -761,9 +762,7 @@ class TestFleetAdmission:
 
         assert result.ok
         assert registrations[0]["provider"] == "codex-cloud"
-        assert registrations[0]["label"] == cloud_tracker.lease_label(
-            "codex-cloud", None, cloud_tracker.prompt_hash(prompt)
-        )
+        assert registrations[0]["label"] == cloud_tracker.lease_label("codex", None, cloud_tracker.prompt_hash(prompt))
         assert prompt not in json.dumps(registrations[0])
 
 
@@ -784,7 +783,7 @@ class TestListTasks:
             "cursor": "c1",
         }
         monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(stdout=json.dumps(raw)))
-        tasks = codex_cloud.list_tasks()
+        tasks = codex_cloud.list_tasks().tasks
         assert tasks == [
             {"id": "task_t01", "state": "running", "environment_id": "env-1"},
             {"id": "task_t02", "state": "completed"},
@@ -795,12 +794,15 @@ class TestListTasks:
     def test_list_tasks_rejects_undocumented_plain_array(self, monkeypatch):
         raw = [{"id": "task_t3", "state": "FAILED", "title": "PRIVATE"}]
         monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(stdout=json.dumps(raw)))
-        assert codex_cloud.list_tasks() == []
+        outcome = codex_cloud.list_tasks()
+        assert outcome.tasks == []
+        assert outcome.ok is False
+        assert outcome.reason == "list-json-unsupported"
 
     def test_list_tasks_bounds_max_items(self, monkeypatch):
         raw = {"tasks": [{"id": f"task_t0{i}", "status": "RUNNING"} for i in range(5)]}
         monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(stdout=json.dumps(raw)))
-        tasks = codex_cloud.list_tasks(max_items=2)
+        tasks = codex_cloud.list_tasks(max_items=2).tasks
         assert len(tasks) == 2
         assert tasks[0]["id"] == "task_t00"
         assert tasks[1]["id"] == "task_t01"
@@ -817,20 +819,46 @@ class TestListTasks:
             return _result(stdout=json.dumps(pages.pop(0)))
 
         monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
-        assert codex_cloud.list_tasks(max_items=25) == [
+        assert codex_cloud.list_tasks(max_items=25).tasks == [
             {"id": "task_page1", "state": "running"},
             {"id": "task_page2", "state": "completed"},
         ]
         assert calls[0][-2:] == ["--limit", "20"]
         assert calls[1][-4:] == ["--limit", "20", "--cursor", "next"]
 
-    def test_list_tasks_returns_empty_on_command_failure(self, monkeypatch):
+    def test_list_tasks_returns_failure_reason_on_command_failure(self, monkeypatch):
         monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=1, stderr="boom"))
-        assert codex_cloud.list_tasks() == []
+        outcome = codex_cloud.list_tasks()
+        assert outcome.tasks == []
+        assert outcome.ok is False
+        assert outcome.reason == "provider-error"
+
+    def test_list_tasks_reports_missing_provider(self, monkeypatch):
+        monkeypatch.setattr(
+            codex_cloud.proc,
+            "run",
+            lambda *a, **k: _result(code=127, stderr="command not found: codex"),
+        )
+        outcome = codex_cloud.list_tasks()
+        assert outcome.ok is False
+        assert outcome.reason == "provider-missing"
+
+    def test_list_tasks_reports_auth_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            codex_cloud.proc,
+            "run",
+            lambda *a, **k: _result(code=1, stderr="Error: not logged in to Codex Cloud"),
+        )
+        outcome = codex_cloud.list_tasks()
+        assert outcome.ok is False
+        assert outcome.reason == "auth-failure"
 
     def test_list_tasks_returns_empty_on_non_json_output(self, monkeypatch):
         monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(stdout="not json"))
-        assert codex_cloud.list_tasks() == []
+        outcome = codex_cloud.list_tasks()
+        assert outcome.tasks == []
+        assert outcome.ok is False
+        assert outcome.reason == "list-json-invalid"
 
 
 class TestEnvironmentConfig:
@@ -872,10 +900,50 @@ class TestEnvironmentConfig:
         assert payload["environment"] == {"kind": "env", "name": "CODEX_CLOUD_ENV"}
         assert "env-" not in path.read_text(encoding="utf-8")
 
+    def test_config_file_literal_id_branch_stores_value_kind(self, tmp_path):
+        path = codex_cloud.save_environment_config(tmp_path, environment_id="env-local-file")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["environment"] == {"kind": "value", "id": "env-local-file"}
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+    def test_corrupt_config_fails_closed(self, tmp_path):
+        path = codex_cloud.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        with pytest.raises(codex_cloud.CodexCloudConfigError, match="unreadable"):
+            codex_cloud.load_environment_config(tmp_path)
+
+    def test_future_schema_config_fails_closed(self, tmp_path):
+        path = codex_cloud.config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"schema": "brigade.codex-cloud-config/2", "environment": {"kind": "value", "id": "x"}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(codex_cloud.CodexCloudConfigError, match="unsupported schema"):
+            codex_cloud.load_environment_config(tmp_path)
+
+    def test_resolve_config_target_finds_repo_root_from_subdirectory(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-from-parent")
+        codex_cloud.save_environment_config(tmp_path, environment_id_env="CODEX_CLOUD_ENV")
+        subdir = tmp_path / "pkg" / "src"
+        subdir.mkdir(parents=True)
+        assert codex_cloud.resolve_environment_id("configured", target=subdir) == "env-from-parent"
+
+    def test_environment_audit_uses_fingerprint_for_configured_selector(self):
+        audit = codex_cloud.environment_audit_ref("configured", "env-secret-id")
+        digest = hashlib.sha256(b"env-secret-id").hexdigest()[:12]
+        assert audit == {"environment_fingerprint": f"sha256:{digest}"}
+        assert "env-secret-id" not in json.dumps(audit)
+
+    def test_environment_audit_uses_raw_id_for_literal_selector(self):
+        audit = codex_cloud.environment_audit_ref("env-123", "env-123")
+        assert audit == {"environment_id": "env-123"}
+
     def test_run_agent_resolves_configured_before_dispatch(self, tmp_path, monkeypatch):
         seen: dict[str, str] = {}
 
-        def fake_cloud_task(prompt, *, env_id, timeout, cwd=None, process_registry=None):
+        def fake_cloud_task(prompt, *, env_id, timeout, cwd=None, process_registry=None, **kwargs):
             seen["env_id"] = env_id
             return agents.AgentResult(text="ok", ok=True)
 
@@ -913,8 +981,113 @@ class TestEnvironmentConfig:
         assert report["environment_configured"] is True
         assert report["task_count"] == 1
         assert report["apply"] is False
+        assert "environment_fingerprint" in report
         assert "env-canary" not in json.dumps(report)
         assert all(call[2] == "list" for call in fake.calls)
+
+    def test_canary_empty_inventory_passes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
+        monkeypatch.setattr(
+            codex_cloud.proc,
+            "run",
+            lambda *a, **k: _result(stdout=json.dumps({"tasks": []})),
+        )
+        report = codex_cloud.canary(tmp_path)
+        assert report["ok"] is True
+        assert report["task_count"] == 0
+
+    def test_canary_fails_closed_when_provider_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
+        monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=127, stderr="command not found"))
+        report = codex_cloud.canary(tmp_path)
+        assert report["ok"] is False
+        assert report["reason"] == "provider-missing"
+
+    def test_canary_fails_closed_on_auth_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
+        monkeypatch.setattr(
+            codex_cloud.proc,
+            "run",
+            lambda *a, **k: _result(code=1, stderr="Error: sign in required"),
+        )
+        report = codex_cloud.canary(tmp_path)
+        assert report["ok"] is False
+        assert report["reason"] == "auth-failure"
+
+    @pytest.mark.parametrize(
+        ("selector", "env_setup"),
+        [
+            ("configured", lambda monkeypatch, tmp_path: monkeypatch.setenv("CODEX_CLOUD_ENV", "env-seat")),
+            ("env-literal", lambda monkeypatch, tmp_path: None),
+            ("$CODEX_CLOUD_ENV", lambda monkeypatch, tmp_path: monkeypatch.setenv("CODEX_CLOUD_ENV", "env-seat")),
+        ],
+    )
+    def test_doctor_and_canary_validate_explicit_selector(self, tmp_path, monkeypatch, selector, env_setup):
+        env_setup(monkeypatch, tmp_path)
+        if selector == "configured":
+            codex_cloud.save_environment_config(tmp_path, environment_id_env="CODEX_CLOUD_ENV")
+        monkeypatch.setattr(
+            codex_cloud.proc,
+            "run",
+            lambda *a, **k: _result(stdout=json.dumps({"tasks": []})),
+        )
+        doctor = codex_cloud.doctor(tmp_path, selector=selector)
+        canary = codex_cloud.canary(tmp_path, selector=selector)
+        assert doctor["ok"] is True
+        assert canary["ok"] is True
+        assert doctor["selector"] == selector
+        assert canary["selector"] == selector
+
+    def test_run_agent_records_environment_audit_on_dispatch(self, tmp_path, monkeypatch):
+        seen: dict[str, object] = {}
+        codex_cloud.save_environment_config(tmp_path, environment_id_env="CODEX_CLOUD_ENV")
+        subdir = tmp_path / "pkg"
+        subdir.mkdir()
+
+        def fake_cloud_task(
+            prompt,
+            *,
+            env_id,
+            timeout,
+            cwd=None,
+            process_registry=None,
+            environment_audit=None,
+            register_target=None,
+            **kwargs,
+        ):
+            seen["environment_audit"] = environment_audit
+            seen["register_target"] = register_target
+            return agents.AgentResult(text="ok", ok=True, cloud_environment=environment_audit)
+
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-resolved")
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        monkeypatch.setattr(codex_cloud, "run_cloud_task", fake_cloud_task)
+        result = agents.run_agent("codex-cloud:configured", "fix it", cwd=subdir)
+        assert result.ok
+        assert seen["register_target"] == tmp_path.resolve()
+        assert seen["environment_audit"] == codex_cloud.environment_audit_ref("configured", "env-resolved")
+        assert result.cloud_environment == seen["environment_audit"]
+
+    def test_run_agent_blocks_read_only_without_cloud_safe_mode(self, monkeypatch):
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        result = agents.run_agent("codex-cloud:env-123", "fix it", read_only=True)
+        assert not result.ok
+        assert result.failure_kind == "read-only-cloud-blocked"
+
+    def test_run_agent_allows_read_only_with_cloud_safe_mode(self, monkeypatch):
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        monkeypatch.setattr(
+            codex_cloud,
+            "run_cloud_task",
+            lambda *a, **k: agents.AgentResult(text="ok", ok=True),
+        )
+        result = agents.run_agent(
+            "codex-cloud:env-123",
+            "fix it",
+            read_only=True,
+            cloud_safe_mode=True,
+        )
+        assert result.ok
 
 
 def test_codex_cloud_configured_ref_is_known():

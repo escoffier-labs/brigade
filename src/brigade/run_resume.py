@@ -395,6 +395,10 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
                 raw.get("read_only_capable", True),
                 f"agents.{name}.read_only_capable",
             ),
+            cloud_safe_mode=_as_bool(
+                raw.get("cloud_safe_mode", False),
+                f"agents.{name}.cloud_safe_mode",
+            ),
             capabilities=_as_capabilities(
                 raw.get("capabilities"),
                 f"agents.{name}.capabilities",

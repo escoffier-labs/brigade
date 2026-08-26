@@ -10,11 +10,13 @@ apply it deliberately with ``codex cloud apply <task-id>``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,19 @@ CONFIGURED_SELECTOR = "configured"
 DEFAULT_ENV_VAR = "CODEX_CLOUD_ENV"
 CONFIG_SCHEMA = "brigade.codex-cloud-config/1"
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_AUTH_FAILURE_RE = re.compile(
+    r"(?:\bnot (?:logged|signed) in\b|\bsign[- ]?in\b|\bauthentication\b|\bunauthorized\b|\b401\b)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class ListTasksResult:
+    """Bounded ``codex cloud list --json`` inventory with a safe failure reason."""
+
+    tasks: list[dict[str, Any]]
+    ok: bool = True
+    reason: str | None = None
 
 
 class CodexCloudConfigError(ValueError):
@@ -126,6 +141,59 @@ def config_path(target: Path) -> Path:
     return Path(target).expanduser().resolve() / ".brigade" / "cloud" / "codex.json"
 
 
+def resolve_config_target(start: Path | None) -> Path:
+    """Return the Brigade workspace root that owns cloud seat configuration."""
+    if start is None:
+        return Path(".").expanduser().resolve()
+    current = Path(start).expanduser()
+    try:
+        current = current.resolve()
+    except OSError:
+        pass
+    if current.is_file():
+        current = current.parent
+    for candidate in (current, *current.parents):
+        if config_path(candidate).is_file():
+            return candidate
+        try:
+            if (candidate / ".brigade").is_dir():
+                return candidate
+        except OSError:
+            continue
+    return current
+
+
+def validate_selector_token(token: str) -> None:
+    """Reject codex-cloud roster selectors that can only fail at dispatch."""
+    raw = (token or "").strip()
+    if not raw:
+        raise CodexCloudConfigError("codex-cloud environment token is empty")
+    if raw == CONFIGURED_SELECTOR:
+        return
+    if raw.startswith("$"):
+        if not ENV_NAME_RE.fullmatch(raw[1:]):
+            raise CodexCloudConfigError("invalid environment variable name")
+        return
+    if raw != raw.strip():
+        raise CodexCloudConfigError("codex-cloud literal environment id must not contain surrounding whitespace")
+
+
+def environment_audit_ref(selector_token: str, environment_id: str) -> dict[str, str]:
+    """Return the least-sensitive audit payload for a resolved cloud environment.
+
+    Literal roster tokens already declare the id in the reviewed roster, so
+    local receipts may store the raw value. ``configured`` and ``$VAR`` selectors
+    resolve from ambient process state; those runs store a stable fingerprint so
+    operators can correlate evidence without echoing provider ids into hub or
+    public output.
+    """
+    token = (selector_token or "").strip()
+    if token == CONFIGURED_SELECTOR or token.startswith("$"):
+        digest = hashlib.sha256(environment_id.encode("utf-8")).hexdigest()[:12]
+        return {"environment_fingerprint": f"sha256:{digest}"}
+    return {"environment_id": environment_id}
+
+
 def save_environment_config(
     target: Path,
     *,
@@ -151,15 +219,15 @@ def save_environment_config(
 
 
 def load_environment_config(target: Path) -> dict[str, Any] | None:
-    path = config_path(target)
+    path = config_path(resolve_config_target(target))
     if not path.is_file():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CodexCloudConfigError("codex cloud config is unreadable") from exc
     if not isinstance(data, dict) or data.get("schema") != CONFIG_SCHEMA:
-        return None
+        raise CodexCloudConfigError("codex cloud config uses an unsupported schema")
     return data
 
 
@@ -173,14 +241,18 @@ def _read_env_name(name: str, environ: Mapping[str, str]) -> str:
 
 
 def _resolve_configured(target: Path, environ: Mapping[str, str]) -> str:
-    config = load_environment_config(target)
-    spec = config.get("environment") if isinstance(config, dict) else None
-    if isinstance(spec, dict):
-        kind = spec.get("kind")
-        if kind == "env" and isinstance(spec.get("name"), str):
-            return _read_env_name(spec["name"], environ)
-        if kind == "value" and isinstance(spec.get("id"), str) and spec["id"].strip():
-            return spec["id"].strip()
+    root = resolve_config_target(target)
+    path = config_path(root)
+    if path.is_file():
+        config = load_environment_config(root)
+        spec = config.get("environment") if isinstance(config, dict) else None
+        if isinstance(spec, dict):
+            kind = spec.get("kind")
+            if kind == "env" and isinstance(spec.get("name"), str):
+                return _read_env_name(spec["name"], environ)
+            if kind == "value" and isinstance(spec.get("id"), str) and spec["id"].strip():
+                return spec["id"].strip()
+        raise CodexCloudConfigError("configured Codex Cloud environment is unavailable")
     fallback = (environ.get(DEFAULT_ENV_VAR) or "").strip()
     if fallback:
         return fallback
@@ -203,7 +275,7 @@ def resolve_environment_id(
     if not raw:
         raise CodexCloudConfigError("codex-cloud environment token is empty")
     mapping = os.environ if environ is None else environ
-    root = Path(target) if target is not None else Path(".")
+    root = resolve_config_target(Path(target) if target is not None else None)
     if raw.startswith("$"):
         return _read_env_name(raw[1:], mapping)
     if raw == CONFIGURED_SELECTOR:
@@ -211,34 +283,68 @@ def resolve_environment_id(
     return raw
 
 
-def doctor(target: Path, *, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+def doctor(
+    target: Path,
+    *,
+    selector: str = CONFIGURED_SELECTOR,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """Report whether a Codex Cloud seat can resolve an environment id."""
     mapping = os.environ if environ is None else environ
     try:
-        resolve_environment_id(CONFIGURED_SELECTOR, target=target, environ=mapping)
+        env_id = resolve_environment_id(selector, target=target, environ=mapping)
         configured = True
+        audit = environment_audit_ref(selector, env_id)
     except CodexCloudConfigError:
         configured = False
+        audit = None
     return {
         "ok": configured,
         "environment_configured": configured,
         "provider": "codex-cloud",
+        "selector": selector,
+        **(audit or {}),
     }
 
 
-def canary(target: Path, *, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+def canary(
+    target: Path,
+    *,
+    selector: str = CONFIGURED_SELECTOR,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """Bounded inventory check. Never calls ``codex cloud exec`` or ``apply``."""
     mapping = os.environ if environ is None else environ
     try:
-        resolve_environment_id(CONFIGURED_SELECTOR, target=target, environ=mapping)
+        env_id = resolve_environment_id(selector, target=target, environ=mapping)
     except CodexCloudConfigError:
-        return {"ok": False, "environment_configured": False, "task_count": 0, "apply": False}
-    tasks = list_tasks(cwd=target)
+        return {
+            "ok": False,
+            "environment_configured": False,
+            "task_count": 0,
+            "apply": False,
+            "selector": selector,
+            "reason": "environment-unconfigured",
+        }
+    inventory = list_tasks(cwd=target)
+    audit = environment_audit_ref(selector, env_id)
+    if not inventory.ok:
+        return {
+            "ok": False,
+            "environment_configured": True,
+            "task_count": 0,
+            "apply": False,
+            "selector": selector,
+            "reason": inventory.reason,
+            **audit,
+        }
     return {
         "ok": True,
         "environment_configured": True,
-        "task_count": len(tasks),
+        "task_count": len(inventory.tasks),
         "apply": False,
+        "selector": selector,
+        **audit,
     }
 
 
@@ -257,13 +363,26 @@ def _environment_id(task: dict[str, Any]) -> str | None:
     return None
 
 
+def _classify_list_failure(result: proc.Result) -> str:
+    if result.code == 127:
+        return "provider-missing"
+    if result.code == 126:
+        return "provider-unavailable"
+    combined = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
+    if result.code != 0 and _AUTH_FAILURE_RE.search(combined):
+        return "auth-failure"
+    if result.code != 0:
+        return "provider-error"
+    return "provider-error"
+
+
 def list_tasks(
     *,
     max_items: int = DEFAULT_MAX_ITEMS,
     cwd: Path | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     command_timeout: float = DEFAULT_LIST_TIMEOUT,
-) -> list[dict[str, Any]]:
+) -> ListTasksResult:
     """Run ``codex cloud list --json`` and return a bounded, sanitized task list.
 
     Only the documented ``{tasks: [...], cursor}`` schema is accepted. Reads use
@@ -284,21 +403,20 @@ def list_tasks(
         argv = ["codex", "cloud", "list", "--json", "--limit", str(limit)]
         if cursor is not None:
             argv += ["--cursor", cursor]
-        try:
-            if process_registry is None:
-                result = proc.run(argv, timeout=command_timeout, cwd=cwd)
-            else:
-                result = proc.run(argv, timeout=command_timeout, cwd=cwd, process_registry=process_registry)
-        except OSError:
-            break
+        if process_registry is None:
+            result = proc.run(argv, timeout=command_timeout, cwd=cwd)
+        else:
+            result = proc.run(argv, timeout=command_timeout, cwd=cwd, process_registry=process_registry)
+        if result.code == 127:
+            return ListTasksResult([], ok=False, reason="provider-missing")
         if result.code != 0:
-            break
+            return ListTasksResult([], ok=False, reason=_classify_list_failure(result))
         try:
             data = json.loads((result.stdout or "").strip())
         except json.JSONDecodeError:
-            break
+            return ListTasksResult([], ok=False, reason="list-json-invalid")
         if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
-            break
+            return ListTasksResult([], ok=False, reason="list-json-unsupported")
         for raw in data["tasks"]:
             if not isinstance(raw, dict):
                 continue
@@ -323,7 +441,7 @@ def list_tasks(
             break
         seen_cursors.add(next_cursor)
         cursor = next_cursor
-    return sanitized
+    return ListTasksResult(sanitized)
 
 
 def run_cloud_task(
@@ -341,6 +459,7 @@ def run_cloud_task(
     label: str | None = None,
     register_target: Path | None = None,
     session_id: str | None = None,
+    environment_audit: dict[str, str] | None = None,
 ):
     """Submit, poll, and collect one Codex Cloud task. Mirrors run_agent's contract."""
     from .agents import AgentResult
@@ -372,6 +491,7 @@ def run_cloud_task(
             thread_id=task_id,
             status=status,
             timed_out=False,
+            cloud_environment=environment_audit,
         )
 
     try:
@@ -384,16 +504,15 @@ def run_cloud_task(
     lease_id_str = ""
     holder: str | None = None
     prompt_hash = cloud_tracker.prompt_hash(prompt)
-    tracker_label = cloud_tracker.lease_label("codex-cloud", None, prompt_hash)
     repo: str | None = None
+    tracker_label = cloud_tracker.lease_label("codex", None, prompt_hash)
     if hub_configured:
         repo = _repo_from_cwd(cwd)
-        prompt_hash = cloud_tracker.prompt_hash(prompt)
-        admit_label = cloud_tracker.lease_label("codex", repo, prompt_hash)
+        tracker_label = cloud_tracker.lease_label("codex", repo, prompt_hash)
         admit = fleet_client.admit_cloud(
             "codex",
             repo=repo,
-            label=admit_label,
+            label=tracker_label,
             prompt_hash=prompt_hash,
             ttl_seconds=300,
         )
@@ -421,20 +540,7 @@ def run_cloud_task(
         return proc.run(command, timeout=command_timeout, cwd=cwd, process_registry=process_registry)
 
     deadline = clock() + timeout
-    try:
-        submit = run_command(argv, command_timeout=min(timeout, SUBMIT_TIMEOUT))
-    except OSError:
-        if hub_configured:
-            return AgentResult(
-                text="",
-                ok=False,
-                detail="cloud submit result was ambiguous",
-                status="uncertain",
-                failure_phase="dispatch",
-                failure_kind="uncertain",
-                timed_out=False,
-            )
-        return fail_result("cloud submit unavailable")
+    submit = run_command(argv, command_timeout=min(timeout, SUBMIT_TIMEOUT))
 
     task_id = None
     if submit.code == 0:
@@ -452,6 +558,7 @@ def run_cloud_task(
                 failure_phase="dispatch",
                 failure_kind="uncertain",
                 timed_out=submit.code == 124,
+                cloud_environment=environment_audit,
             )
         bind = fleet_client.bind_cloud(lease_id_str, provider_task_id=task_id, holder=holder)
         if not bind.granted:
@@ -466,6 +573,7 @@ def run_cloud_task(
                 failure_phase="dispatch",
                 failure_kind="fleet-bind-failed",
                 timed_out=False,
+                cloud_environment=environment_audit,
             )
     else:
         if submit.code == 124:
@@ -487,6 +595,7 @@ def run_cloud_task(
                 prompt_hash=prompt_hash,
                 session_id=session_id,
                 branch=branch,
+                environment_audit=environment_audit,
                 expected_artifact=({"kind": "branch", "pattern": branch} if branch else {"kind": "diff"}),
             )
         except Exception:
@@ -499,26 +608,10 @@ def run_cloud_task(
     status_text = ""
     status_word = None
     while True:
-        try:
-            st = run_command(
-                ["codex", "cloud", "status", task_id],
-                command_timeout=min(POLL_TIMEOUT, remaining()),
-            )
-        except OSError:
-            if hub_configured:
-                return AgentResult(
-                    text="",
-                    ok=False,
-                    detail="cloud status unavailable",
-                    thread_id=task_id,
-                    status="uncertain",
-                    failure_phase="dispatch",
-                    failure_kind="uncertain",
-                    timed_out=False,
-                )
-            return fail_result(
-                "cloud status unavailable", task_id=task_id, status="uncertain", failure_kind="uncertain"
-            )
+        st = run_command(
+            ["codex", "cloud", "status", task_id],
+            command_timeout=min(POLL_TIMEOUT, remaining()),
+        )
         status_text = (st.stdout + "\n" + st.stderr).strip()
         if st.code == 124:
             if hub_configured:
@@ -531,25 +624,39 @@ def run_cloud_task(
                     failure_phase="dispatch",
                     failure_kind="uncertain",
                     timed_out=True,
+                    cloud_environment=environment_audit,
                 )
             return timeout_result(
                 "cloud status timed out",
                 task_id=task_id,
                 text="",
             )
-        if st.code == 0:
-            verified_status = _verified_status(status_text)
-            status_word = (
-                verified_status if verified_status in TERMINAL_FAIL + TERMINAL_OK else _scan_status(status_text)
+        if st.code != 0:
+            if hub_configured:
+                return AgentResult(
+                    text="",
+                    ok=False,
+                    detail="cloud status unavailable",
+                    thread_id=task_id,
+                    status="uncertain",
+                    failure_phase="dispatch",
+                    failure_kind="uncertain",
+                    timed_out=False,
+                    cloud_environment=environment_audit,
+                )
+            return fail_result(
+                "cloud status unavailable", task_id=task_id, status="uncertain", failure_kind="uncertain"
             )
-            if hub_configured and verified_status not in TERMINAL_FAIL + TERMINAL_OK:
-                status_word = None
-            if status_word in TERMINAL_FAIL:
-                break
-            if status_word in TERMINAL_OK:
-                break
-            if hub_configured and verified_status in NONTERMINAL:
-                fleet_client.renew_cloud(lease_id_str, ttl_seconds=300, holder=holder)
+        verified_status = _verified_status(status_text)
+        status_word = verified_status if verified_status in TERMINAL_FAIL + TERMINAL_OK else _scan_status(status_text)
+        if hub_configured and verified_status not in TERMINAL_FAIL + TERMINAL_OK:
+            status_word = None
+        if status_word in TERMINAL_FAIL:
+            break
+        if status_word in TERMINAL_OK:
+            break
+        if hub_configured:
+            fleet_client.renew_cloud(lease_id_str, ttl_seconds=300, holder=holder)
         if clock() >= deadline:
             if hub_configured:
                 return AgentResult(
@@ -561,6 +668,7 @@ def run_cloud_task(
                     failure_phase="dispatch",
                     failure_kind="uncertain",
                     timed_out=True,
+                    cloud_environment=environment_audit,
                 )
             return timeout_result(
                 "cloud task timed out",
@@ -580,6 +688,7 @@ def run_cloud_task(
             detail=f"cloud task {status_word}"[:200],
             thread_id=task_id,
             status=status_word,
+            cloud_environment=environment_audit,
         )
 
     diff = run_command(
@@ -603,4 +712,10 @@ def run_cloud_task(
     else:
         parts.append("No diff produced (research or no-change task).")
     text = "\n\n".join(p for p in parts if p)
-    return AgentResult(text=text, ok=True, thread_id=task_id, status=status_word or "")
+    return AgentResult(
+        text=text,
+        ok=True,
+        thread_id=task_id,
+        status=status_word or "",
+        cloud_environment=environment_audit,
+    )

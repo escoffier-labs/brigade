@@ -697,6 +697,17 @@ def test_codex_cloud_env_var_seat_loads(tmp_path):
     assert loaded.agents["cloud"].cli == "codex-cloud:$CODEX_CLOUD_ENV"
 
 
+def test_codex_cloud_invalid_env_var_selector_rejected_at_load(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.cloud]\ncli = "codex-cloud:$lowercase"\nrole = "cloud worker"\n'
+        '[limits]\nallow_models = ["codex", "codex-cloud:*"]\n'
+    )
+    with pytest.raises(ValueError, match="invalid environment variable name"):
+        roster_mod.load_roster(_write(tmp_path, text))
+
+
 def test_env_rejects_ref_and_inline_collision(tmp_path):
     bad = ENV_SEAT.replace(
         'CLAUDE_CONFIG_DIR = "/tmp/claudex-config"',
