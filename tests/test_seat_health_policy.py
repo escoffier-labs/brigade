@@ -150,6 +150,85 @@ def test_same_seat_once_persists_then_retries_once(monkeypatch):
     assert [attempt.kind for attempt in results[0].attempts] == ["initial", "same-seat-once"]
 
 
+def test_decide_retry_records_receipt_entries():
+    state = seat_health_policy.SeatQuarantineState()
+    failure = _failure(failure_class=FailureClass.TIMEOUT, retry=RetryDisposition.FALLBACK)
+    decision = seat_health_policy.decide_retry(failure, seat="coder", state=state)
+    assert state.retry_decisions == [
+        {
+            "attempt": 1,
+            "seat": "coder",
+            "failure_kind": "timeout",
+            "decision": "fallback",
+            "reason": decision.detail,
+        }
+    ]
+    second_failure = _failure(
+        failure_class=FailureClass.NETWORK_UNAVAILABLE,
+        retry=RetryDisposition.SAME_SEAT_ONCE,
+    )
+    seat_health_policy.decide_retry(second_failure, seat="coder", state=state)
+    assert state.retry_decisions[1]["attempt"] == 2
+    assert state.retry_decisions[1]["decision"] == "quarantine"
+    assert state.retry_decisions[1]["failure_kind"] == "network-unavailable"
+
+
+def test_dispatch_appends_retry_decisions_to_state(monkeypatch):
+    calls: list[str] = []
+
+    def fake_run_agent(cli, prompt, **kwargs):
+        calls.append(cli)
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text="",
+                ok=False,
+                detail="network down",
+                failure_phase="dispatch",
+                failure_kind="network-error",
+            )
+        return agents.AgentResult(text="recovered", ok=True, detail="")
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan"),
+            "coder": Agent("coder", "claude", "code"),
+        },
+        max_workers=1,
+    )
+    state = seat_health_policy.SeatQuarantineState()
+    dispatch(
+        [Assignment(worker="coder", task="implement")],
+        roster,
+        build_prompt=lambda *args, **kwargs: "prompt",
+        run_appserver_worker=lambda *args, **kwargs: agents.AgentResult(text="", ok=False),
+        event_writer=lambda *args, **kwargs: lambda *a, **k: None,
+        quarantine_state=state,
+        reprobe_seat=lambda agent: True,
+        on_failed_attempt_persisted=lambda result: None,
+    )
+    assert [entry["seat"] for entry in state.retry_decisions] == ["coder"]
+    assert state.retry_decisions[0]["attempt"] == 1
+    assert state.retry_decisions[0]["failure_kind"] == "network-unavailable"
+    assert state.retry_decisions[0]["decision"] == "same-seat-once"
+
+
+def test_format_reroute_summary_names_fallback_and_skip():
+    fallback = {
+        "requested_seat": "coder",
+        "effective_seat": "coder-fallback",
+        "outcome": "fallback",
+        "typed_cause": "auth-required",
+    }
+    skipped = {"requested_seat": "reviewer", "effective_seat": None, "outcome": "skip", "typed_cause": "timeout"}
+    summary = seat_health_policy.format_reroute_summary([fallback, skipped])
+    assert summary == "note: seat reroute: coder -> coder-fallback [auth-required]; reviewer skipped [timeout]"
+    assert seat_health_policy.format_reroute_summary(None) is None
+    assert seat_health_policy.format_reroute_summary([]) is None
+
+
 def test_transport_fallback_decision_shape():
     decision = seat_health_policy.transport_fallback_decision(
         requested_transport="app-server",
