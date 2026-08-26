@@ -750,14 +750,32 @@ class TestSpoolHardening:
         monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
         monkeypatch.setattr(fleet_client, "FLUSH_BATCH_SIZE", 1)
         spool = self._spooled()
-        replaced: list[tuple[str, str]] = []
+        replaced: list[tuple[str, str, dict]] = []
         real_replace = fleet_client.os.replace
-        monkeypatch.setattr(
-            fleet_client.os, "replace", lambda a, b: replaced.append((str(a), str(b))) or real_replace(a, b)
-        )
+
+        def tracking_replace(a, b, **kwargs):
+            replaced.append((str(a), str(b), kwargs))
+            return real_replace(a, b, **kwargs)
+
+        monkeypatch.setattr(fleet_client.os, "replace", tracking_replace)
         assert fleet_client.flush_spool(_event()["node_id"], max_batches=1) == 1
-        assert replaced == [(str(spool) + ".tmp", str(spool))]
-        assert not (spool.parent / (spool.name + ".tmp")).exists()
+        # #1154: the rewrite goes through an exclusive, unpredictable temp
+        # file in the spool directory — never the predictable ".tmp" path.
+        assert len(replaced) == 1
+        src_name, dst_name, replace_kwargs = replaced[0]
+        if "src_dir_fd" in replace_kwargs:
+            # #1157 round 3: descriptor-scoped rewrite — both names resolve
+            # inside the validated spool directory itself.
+            assert replace_kwargs["src_dir_fd"] == replace_kwargs["dst_dir_fd"]
+            assert Path(dst_name).name == spool.name
+            assert Path(src_name).parent == Path(".")
+            assert src_name != spool.name + ".tmp"
+        else:
+            src = Path(src_name)
+            assert src.parent == spool.parent and src.name != spool.name + ".tmp"
+            assert dst_name == str(spool)
+            assert not src.exists()
+        assert not list(spool.parent.glob("*.tmp"))
         assert [json.loads(line)["sequence"] for line in spool.read_text().splitlines()] == [2, 3]
 
     def test_concurrent_append_and_flush_lose_nothing(self, hub, monkeypatch):

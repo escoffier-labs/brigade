@@ -72,17 +72,24 @@ fails closed rather than running unprotected on bad credentials.
 
 from __future__ import annotations
 
+import _thread
+import errno
 import json
 import logging
 import os
 import re
+import secrets
+import stat
+import sys
+import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -274,6 +281,56 @@ def resolve_node_id(base_path: Path | None = None) -> str:
 
 # --- transport ---------------------------------------------------------------
 
+# Hub traffic never goes through a configured proxy (#1154): the bearer token
+# must not be handed to HTTP_PROXY/HTTPS_PROXY before it reaches the (plain
+# HTTP, tailnet-bound) hub. An explicit empty ProxyHandler disables all
+# proxy resolution for these requests regardless of environment.
+#
+# Redirects are restricted to the origin the request already targets (#1157):
+# urllib's default redirect handler replays Authorization (the bearer token)
+# on every hop, so a cross-origin 302 from a compromised hub or an
+# on-path responder would leak it. Cross-origin redirects are refused (the
+# resulting HTTPError surfaces as an ordinary transport failure). Origins
+# compare with default ports normalized (#1157 round 2): http://hub and
+# http://hub:80 are the same origin.
+
+_DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: urllib.parse.SplitResult) -> tuple[str, str, int | None]:
+    """(scheme, host, effective port) for a URL split; the port defaults per
+    scheme when absent so explicit default ports compare equal."""
+    scheme = url.scheme.lower()
+    try:
+        port = url.port
+    except ValueError:
+        # A malformed port never matches anything: refuse the redirect.
+        port = -1
+    if port is None:
+        port = _DEFAULT_SCHEME_PORTS.get(scheme)
+    return scheme, (url.hostname or "").lower(), port
+
+
+def _same_origin(first: str, second: str) -> bool:
+    return _origin(urllib.parse.urlsplit(first)) == _origin(urllib.parse.urlsplit(second))
+
+
+class _HubRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _same_origin(req.full_url, newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_HUB_OPENER = urllib.request.build_opener(
+    _HubRedirectHandler(),
+    urllib.request.ProxyHandler({}),
+)
+
+
+def _hub_open(request: urllib.request.Request, *, timeout: float):
+    return _HUB_OPENER.open(request, timeout=timeout)
+
 
 def _post_events_blocking(hub_url: str, token: str, body: Any, *, timeout: float) -> None:
     request = urllib.request.Request(
@@ -283,7 +340,7 @@ def _post_events_blocking(hub_url: str, token: str, body: Any, *, timeout: float
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _hub_open(request, timeout=timeout) as response:
             if response.status != 200:
                 raise FleetClientError(f"hub returned HTTP {response.status}")
     except urllib.error.HTTPError as exc:
@@ -335,52 +392,184 @@ def spool_path(node_id: str) -> Path:
     return brigade_home() / SPOOL_DIRNAME / f"{safe_node_id}.jsonl"
 
 
+# Spool files are private (#1154): refuse a symlinked path where the OS can
+# tell us (O_NOFOLLOW is POSIX-only; Windows opens through the link target
+# but its per-user homes are not world-writable in the same way).
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+# Regular-file opens ignore O_NONBLOCK, but it makes an open on a FIFO or
+# device fail fast instead of blocking the journal writer forever.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+# Bounded retries for the exclusive temp-name loop in _write_spool_atomic;
+# a name from secrets.token_hex(16) colliding with a planted file is
+# already negligible, this only caps pathological adversarial spraying.
+_SPOOL_TEMP_ATTEMPTS = 8
+
+
+def _dir_fd_supported() -> bool:
+    """Whether descriptor-relative spool operations are available here.
+
+    Windows implements none of the ``dir_fd`` parameters (``os.supports_dir_fd``
+    is empty there), so its spool writes must take the path-based fallback
+    instead. Read at call time so the live platform decides.
+    """
+    if sys.platform == "win32":
+        return False
+    # ``os.replace`` shares ``os.rename``'s dir_fd support: supports_dir_fd
+    # registers the latter only.
+    return all(fn in os.supports_dir_fd for fn in (os.open, os.rename, os.unlink, os.stat))
+
+
+def _ensure_private_dir(path: Path) -> int | None:
+    """Create ``path`` (and parents), enforce 0700 through a directory
+    descriptor, and return that descriptor for ``dir_fd`` use.
+
+    Privacy is proven through the descriptor, not the path (#1157 round 2):
+    the directory is opened ``O_DIRECTORY|O_NOFOLLOW`` so a symlink swapped
+    in after any earlier check fails the open instead of redirecting every
+    write below it, forced to 0700 via ``fchmod``, and re-stat'ed through
+    the same descriptor to verify the bits landed. When privacy cannot be
+    enforced or verified, writing is refused (``FleetClientError``) rather
+    than warned about. The caller must close the returned descriptor when it
+    has finished opening files beneath the directory.
+
+    On platforms without descriptor-relative APIs (Windows: ``dir_fd`` is
+    unsupported per ``os.supports_dir_fd``, which also rules out
+    ``os.fchmod``), returns ``None`` so callers take their path-based
+    fallback: a symlinked spool directory is still refused, privacy is a
+    best-effort path ``chmod`` whose failure only warns — the documented
+    platform gap (#1157 round 3).
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    if not _dir_fd_supported():
+        if os.path.islink(path):
+            raise FleetClientError(f"fleet spool directory {path} is a symlink")
+        try:
+            os.chmod(path, 0o700)
+        except OSError as exc:
+            _LOG.warning("fleet spool directory %s could not be forced to 0700: %s", path, exc)
+        return None
+    try:
+        fd = os.open(str(path), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            # A symlinked spool directory would redirect every write below
+            # it; refuse instead of following attacker-chosen parents.
+            raise FleetClientError(f"fleet spool directory {path} is a symlink") from exc
+        if exc.errno == errno.ENOTDIR:
+            raise FleetClientError(f"fleet spool directory {path} is not a directory") from exc
+        raise FleetClientError(f"fleet spool directory {path} could not be opened safely: {exc}") from exc
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise FleetClientError(f"fleet spool directory {path} is not a directory")
+        try:
+            os.fchmod(fd, 0o700)
+        except OSError as exc:
+            raise FleetClientError(f"fleet spool directory {path} could not be forced to 0700: {exc}") from exc
+        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        if mode != 0o700:
+            raise FleetClientError(
+                f"fleet spool directory {path} could not be made private "
+                f"(mode {mode:03o}, expected 700); refusing to write"
+            )
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_private(path: Path, flags: int, *, dir_fd: int | None = None) -> int:
+    """Open a spool file no-follow and 0600, refusing non-regular files.
+
+    A symlink at the spool path raises OSError (O_NOFOLLOW) instead of
+    following it; anything that is not a regular file after the open (a
+    FIFO a local attacker swapped in) is closed and refused. ``dir_fd``
+    (the descriptor validated by ``_ensure_private_dir``) scopes the name
+    to the spool directory so a swapped parent cannot redirect it.
+    """
+    fd = os.open(
+        str(path) if dir_fd is None else path.name,
+        flags | _O_NOFOLLOW | _O_CLOEXEC | _O_NONBLOCK,
+        0o600,
+        dir_fd=dir_fd,
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise FleetClientError(f"fleet spool {path} is not a regular file")
+        # The creation mode only applies to a fresh file: an existing spool
+        # file left permissive (umask change, manual chmod) keeps its mode
+        # (#1157), so force it on every open.
+        _fchmod = getattr(os, "fchmod", None)
+        if _fchmod is not None:
+            try:
+                _fchmod(fd, 0o600)
+            except OSError as exc:
+                _LOG.warning("fleet spool %s could not be forced to 0600: %s", path, exc)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
 @contextmanager
-def _spool_lock(path: Path) -> Iterator[None]:
+def _spool_lock(path: Path) -> Iterator[int | None]:
     """Cross-process + cross-thread guard for one node's spool.
 
     Mirrors ``run_journal._append_critical_section``'s lock-file shape
     (``fcntl.flock`` on an adjacent lock file) with an ``msvcrt.locking``
-    branch so the same guarantee holds on Windows.
+    branch so the same guarantee holds on Windows. Yields the spool
+    directory descriptor validated by ``_ensure_private_dir`` (POSIX) so
+    the guarded operations open their files ``dir_fd``, or ``None`` where
+    that hardening is unavailable (Windows).
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_name(path.name + ".lock")
-    with _SPOOL_PROCESS_LOCK:
-        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
-        locked = False
-        try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                locked = True
-            elif msvcrt is not None:  # pragma: no cover - Windows
-                while True:
-                    try:
-                        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                        locked = True
-                        break
-                    except OSError:
-                        continue
-            yield
-        finally:
+    dir_fd = _ensure_private_dir(path.parent)
+    lock_name = path.name + ".lock"
+    try:
+        with _SPOOL_PROCESS_LOCK:
+            if dir_fd is not None:
+                fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | _O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
+            else:  # pragma: no cover - Windows
+                fd = os.open(str(path.with_name(lock_name)), os.O_RDWR | os.O_CREAT | _O_CLOEXEC, 0o600)
+            locked = False
             try:
-                if locked:
-                    if fcntl is not None:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                    elif msvcrt is not None:  # pragma: no cover - Windows
-                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    locked = True
+                elif msvcrt is not None:  # pragma: no cover - Windows
+                    while True:
+                        try:
+                            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                            locked = True
+                            break
+                        except OSError:
+                            continue
+                yield dir_fd
             finally:
-                os.close(fd)
+                try:
+                    if locked:
+                        if fcntl is not None:
+                            fcntl.flock(fd, fcntl.LOCK_UN)
+                        elif msvcrt is not None:  # pragma: no cover - Windows
+                            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                finally:
+                    os.close(fd)
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
 
 
 def _encode(event: dict[str, Any]) -> str:
     return json.dumps(event, sort_keys=True)
 
 
-def _read_spool(path: Path) -> list[dict[str, Any]]:
+def _read_spool(path: Path, *, dir_fd: int | None = None) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+        fd = _open_private(path, os.O_RDONLY, dir_fd=dir_fd)
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, FleetClientError):
         return events
     for line in text.splitlines():
         line = line.strip()
@@ -395,20 +584,77 @@ def _read_spool(path: Path) -> list[dict[str, Any]]:
     return events
 
 
-def _write_spool_atomic(path: Path, events: list[dict[str, Any]]) -> None:
-    """Replace the spool contents atomically; remove it when empty."""
+def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int | None = None) -> None:
+    """Replace the spool contents atomically; remove it when empty.
+
+    The temp file is created exclusive with an unpredictable name in the
+    spool directory (#1154), never a predictable ``.tmp`` path a local
+    attacker could pre-create or symlink to. The final ``os.replace`` is a
+    rename: it swaps the directory entry itself and never follows a symlink
+    planted at the destination. When a validated directory descriptor is
+    available, both the temp creation and the replace address it by name
+    relative to that descriptor (#1157 round 3) — ``tempfile.mkstemp``
+    cannot target a descriptor, so the temp is opened here with
+    ``O_CREAT|O_EXCL|O_NOFOLLOW`` and 0600 — so a directory swapped in
+    under the old path cannot redirect the rewrite.
+    """
     if not events:
-        path.unlink(missing_ok=True)
+        if dir_fd is not None:
+            try:
+                os.unlink(path.name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+        else:
+            path.unlink(missing_ok=True)
         return
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        handle.write("\n".join(_encode(e) for e in events) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    if dir_fd is None:
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(_encode(e) for e in events) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return
+    # Descriptor-scoped rewrite (#1157 round 3): create and replace by
+    # names relative to the validated descriptor.
+    tmp_name = ""
+    try:
+        fd = -1
+        for _ in range(_SPOOL_TEMP_ATTEMPTS):
+            candidate = f".{path.name}.{secrets.token_hex(16)}.tmp"
+            try:
+                fd = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
+                    0o600,
+                    dir_fd=dir_fd,
+                )
+            except FileExistsError:
+                continue
+            tmp_name = candidate
+            break
+        if not tmp_name:
+            raise FleetClientError(f"fleet spool {path}: exhausted private temp-name attempts")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(_encode(e) for e in events) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+        raise
 
 
-def _spool_append_locked(path: Path, event: dict[str, Any]) -> None:
+def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | None = None) -> None:
     """Append under the caller's lock, enforcing ``MAX_SPOOL_BYTES``.
 
     When the append would exceed the cap, the oldest events are dropped until
@@ -416,11 +662,14 @@ def _spool_append_locked(path: Path, event: dict[str, Any]) -> None:
     """
     line = _encode(event) + "\n"
     try:
-        current = path.stat().st_size
+        if dir_fd is not None:
+            current = os.stat(path.name, dir_fd=dir_fd).st_size
+        else:
+            current = path.stat().st_size
     except OSError:
         current = 0
     if current + len(line.encode("utf-8")) > MAX_SPOOL_BYTES:
-        events = _read_spool(path)
+        events = _read_spool(path, dir_fd=dir_fd)
         events.append(event)
         kept: list[dict[str, Any]] = []
         budget = MAX_SPOOL_BYTES // 2
@@ -433,10 +682,15 @@ def _spool_append_locked(path: Path, event: dict[str, Any]) -> None:
         kept.reverse()
         dropped = len(events) - len(kept)
         _LOG.warning("fleet spool %s exceeded %d bytes; dropped %d oldest event(s)", path, MAX_SPOOL_BYTES, dropped)
-        _write_spool_atomic(path, kept)
+        _write_spool_atomic(path, kept, dir_fd=dir_fd)
         return
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
+    try:
+        fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, dir_fd=dir_fd)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(line)
+    except FleetClientError:
+        _LOG.warning("fleet spool %s refused: not a regular file", path)
+        return
 
 
 def _flush_locked(
@@ -446,10 +700,17 @@ def _flush_locked(
     *,
     max_batches: int | None,
     timeout: float,
+    dir_fd: int | None = None,
 ) -> int:
-    events = _read_spool(path)
+    events = _read_spool(path, dir_fd=dir_fd)
     if not events:
-        path.unlink(missing_ok=True)
+        if dir_fd is not None:
+            try:
+                os.unlink(path.name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+        else:
+            path.unlink(missing_ok=True)
         return 0
     index = 0
     delivered = 0
@@ -470,7 +731,7 @@ def _flush_locked(
         batches += 1
     if index == 0:
         return 0
-    _write_spool_atomic(path, events[index:])
+    _write_spool_atomic(path, events[index:], dir_fd=dir_fd)
     return delivered
 
 
@@ -496,8 +757,8 @@ def flush_spool(
     path = spool_path(node_id)
     if not hub or not path.is_file():
         return 0
-    with _spool_lock(path):
-        return _flush_locked(path, hub, tok, max_batches=max_batches, timeout=timeout)
+    with _spool_lock(path) as dir_fd:
+        return _flush_locked(path, hub, tok, max_batches=max_batches, timeout=timeout, dir_fd=dir_fd)
 
 
 # --- reporting ---------------------------------------------------------------
@@ -544,10 +805,10 @@ def report_event(
     delivered = False
     try:
         if spool.is_file():
-            with _spool_lock(spool):
-                _spool_append_locked(spool, event)
+            with _spool_lock(spool) as dir_fd:
+                _spool_append_locked(spool, event, dir_fd=dir_fd)
                 try:
-                    _flush_locked(spool, hub, token, max_batches=1, timeout=REPORT_TIMEOUT_SECONDS)
+                    _flush_locked(spool, hub, token, max_batches=1, timeout=REPORT_TIMEOUT_SECONDS, dir_fd=dir_fd)
                 except (KeyboardInterrupt, SystemExit) as exc:
                     interrupted = exc
             delivered = not spool.is_file()
@@ -560,8 +821,8 @@ def report_event(
             except Exception:
                 pass
             if not delivered:
-                with _spool_lock(spool):
-                    _spool_append_locked(spool, event)
+                with _spool_lock(spool) as dir_fd:
+                    _spool_append_locked(spool, event, dir_fd=dir_fd)
     except (KeyboardInterrupt, SystemExit) as exc:
         # Interrupt during spool bookkeeping: the append/replace steps are
         # atomic, so the spool is consistent; make a last attempt to keep the
@@ -569,12 +830,15 @@ def report_event(
         interrupted = exc
         if not delivered:
             try:
-                with _spool_lock(spool):
-                    if event not in _read_spool(spool):
-                        _spool_append_locked(spool, event)
-            except Exception:
-                pass
-    except Exception:
+                with _spool_lock(spool) as dir_fd:
+                    if event not in _read_spool(spool, dir_fd=dir_fd):
+                        _spool_append_locked(spool, event, dir_fd=dir_fd)
+            except Exception as exc:
+                _LOG.warning("interrupted fleet event could not be made durable in the spool: %s", exc)
+    except Exception as exc:
+        # A failed spool write must never be silent (#1157): whatever broke
+        # it, say why before giving up on the undelivered event.
+        _LOG.warning("fleet event was not delivered and could not be spooled: %s", exc)
         return False
     if interrupted is not None:
         raise interrupted
@@ -653,7 +917,7 @@ def fetch_status(*, hub_url: str | None = None, include_all: bool = False) -> li
     url = hub.rstrip("/") + ("/status?all=1" if include_all else "/status")
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
     try:
-        with urllib.request.urlopen(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
         raise FleetClientError(f"fleet hub status failed: {exc}") from exc
@@ -716,6 +980,10 @@ class ClaimDecision:
     must present the same token. ``superseded`` is the unexpired same-node
     claim a ``supersede_dead_owner`` acquire replaced (issue #1141); a
     token-less release reports the deleted row in ``claim``.
+    For a granted ``repo_claim`` hold, ``cancel_event`` is the cooperative
+    cancel channel (#1157 round 2): it is set when ownership is lost under
+    abort policy, and is the *required* unwind signal for guarded blocks
+    entered off the main thread (where ``interrupt_main`` cannot reach).
     """
 
     granted: bool
@@ -726,6 +994,7 @@ class ClaimDecision:
     holder: str | None = None
     superseded: dict[str, Any] | None = None
     lock_run_dir: str | None = None
+    cancel_event: threading.Event | None = None
 
 
 class FleetClaimHeldError(FleetClientError):
@@ -773,7 +1042,7 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _hub_open(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code in (400, 401, 403, 409):
@@ -985,7 +1254,7 @@ def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> li
     url = hub.rstrip("/") + ("/claims?all=1" if include_all else "/claims")
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
     try:
-        with urllib.request.urlopen(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
         raise FleetClientError(f"fleet hub claims failed: {exc}") from exc
@@ -1016,7 +1285,7 @@ def _admin_request(path: str, body: dict[str, Any] | None, *, what: str) -> dict
         hub.rstrip("/") + path, data=data, headers=headers, method="POST" if data else "GET"
     )
     try:
-        with urllib.request.urlopen(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
@@ -1056,6 +1325,29 @@ def _claim_renew_interval(ttl_seconds: int) -> float:
 
 ORPHAN_RELEASE_RETRY_SECONDS = 30.0
 EXIT_ORPHAN_RELEASE_RETRIES = 2
+# A timed-out acquire can still be in flight when cleanup starts (#1157): a
+# "missing" answer inside this window may precede the abandoned request's
+# commit, so it is retried instead of accepted as definitive.
+ORPHAN_RELEASE_UNCERTAINTY_SECONDS = 2 * CLAIM_TIMEOUT_SECONDS + 1.0
+
+# What happens when the heartbeat learns another owner holds the claim
+# (#1152): "abort" (default) interrupts the run's dispatch so two machines
+# never keep working one repo unarbitrated; "continue" is the documented
+# opt-out for solo machines, via BRIGADE_FLEET_CLAIM_LOSS=continue.
+CLAIM_LOSS_POLICIES = ("abort", "continue")
+CLAIM_LOSS_ENV = "BRIGADE_FLEET_CLAIM_LOSS"
+
+# How long a lost-claim abort waits for the caller's ``on_claim_lost``
+# callback before forcing the interrupt anyway (#1157 round 2): notifying is
+# best-effort, the fail-closed abort is not.
+CLAIM_LOST_CALLBACK_GRACE_SECONDS = 5.0
+
+
+def _claim_loss_policy(explicit: str | None = None) -> str:
+    if explicit in CLAIM_LOSS_POLICIES:
+        return explicit
+    value = os.environ.get(CLAIM_LOSS_ENV, "").strip().lower()
+    return value if value in CLAIM_LOSS_POLICIES else "abort"
 
 
 def _schedule_orphan_release(
@@ -1067,18 +1359,108 @@ def _schedule_orphan_release(
     alone it would block every other machine for the full TTL. A daemon
     thread retries ``release`` until the hub gives any definitive answer
     (released, already gone, or held by someone else) or the TTL window
-    passes and expiry makes the point moot.
+    passes and expiry makes the point moot. The first attempt happens
+    immediately (#1157): a short-lived ``brigade run`` that lost its acquire
+    response must release before process exit kills this daemon thread.
     """
 
     def _loop() -> None:
-        deadline = time.monotonic() + ttl_seconds
+        started = time.monotonic()
+        deadline = started + ttl_seconds
         while time.monotonic() < deadline:
-            time.sleep(min(ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
             outcome = release_claim(target, node_id=node_id, holder=holder, conductor=conductor)
-            if outcome.reason != "hub-unavailable":
-                return
+            if outcome.reason == "hub-unavailable":
+                time.sleep(min(ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
+                continue
+            if outcome.reason == "missing" and time.monotonic() - started < ORPHAN_RELEASE_UNCERTAINTY_SECONDS:
+                # Not definitive yet (#1157): the acquire whose response we
+                # lost may still commit its row after this "missing". Keep
+                # retrying until the uncertainty window closes.
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
+            return
 
     threading.Thread(target=_loop, name="brigade-fleet-claim-orphan-release", daemon=True).start()
+
+
+def _abort_claim_owner(
+    target: str,
+    reason: str,
+    *,
+    owner_thread: threading.Thread,
+    cancel_event: threading.Event,
+    on_claim_lost: Callable[[str | None], None] | None,
+) -> None:
+    """Fail-closed abort of a guarded block whose claim was lost (#1152).
+
+    The interrupt is triggered independently of the caller's callback (#1157
+    round 2): a watchdog daemon forces it once the callback exceeds
+    ``CLAIM_LOST_CALLBACK_GRACE_SECONDS`` (a blocking callback delays
+    notification, never the abort), and the callback runs under a
+    ``BaseException`` catch so ``SystemExit`` raised inside it is logged
+    instead of honored. The callback completes (or the grace expires)
+    *before* the interrupt fires, so callers can record their state and have
+    it observed by the time the interrupt lands. When the claim's owner is
+    not the process main thread, ``_thread.interrupt_main()`` would stab an
+    unrelated thread while the owner kept working, so the interrupt is
+    replaced by the cooperative channel: ``cancel_event`` is already set and
+    the guarded block must unwind through ``ClaimDecision.cancel_event``.
+    The watchdog's grace fire and the callback-finally fire share one
+    lock-guarded check-and-set (#1157 round 3), so the grace boundary can
+    never deliver two interrupts.
+    """
+    owner_is_main = owner_thread is threading.main_thread()
+    # Cooperative observers learn first, whatever happens to the callback.
+    cancel_event.set()
+
+    def _interrupt() -> None:
+        if owner_is_main:
+            _thread.interrupt_main()
+        else:
+            # Not a silent no-op (#1157 round 2): name the requirement.
+            _LOG.warning(
+                "fleet claim on %s lost (%s): repo_claim was entered off the main thread; "
+                "the guarded block must unwind via ClaimDecision.cancel_event",
+                target,
+                reason,
+            )
+
+    if on_claim_lost is None:
+        _interrupt()
+        return
+    done = threading.Event()
+    fired = threading.Event()
+    # One-shot gate (#1157 round 3): at the grace boundary the watchdog and
+    # the callback's finally can both observe "not fired"; check-and-set is
+    # atomic under this lock, so exactly one path interrupts.
+    fired_gate = threading.Lock()
+
+    def _fire_once(*, forced: bool) -> None:
+        with fired_gate:
+            if fired.is_set():
+                return
+            fired.set()
+        if forced:
+            _LOG.warning(
+                "fleet claim-lost callback for %s exceeded %.1fs; forcing the abort",
+                target,
+                CLAIM_LOST_CALLBACK_GRACE_SECONDS,
+            )
+        _interrupt()
+
+    def _watchdog() -> None:
+        if done.wait(CLAIM_LOST_CALLBACK_GRACE_SECONDS) or fired.is_set():
+            return
+        _fire_once(forced=True)
+
+    threading.Thread(target=_watchdog, name="brigade-fleet-claim-abort", daemon=True).start()
+    try:
+        on_claim_lost(reason)
+    except BaseException:
+        _LOG.warning("fleet claim-lost callback raised; interrupting anyway", exc_info=True)
+    finally:
+        done.set()
+        _fire_once(forced=False)
 
 
 @contextmanager
@@ -1091,6 +1473,8 @@ def repo_claim(
     lock_owner: Mapping[str, object] | None = None,
     supersede_dead_owner: Mapping[str, object] | None = None,
     on_credential_failure: Callable[[str | None], None] | None = None,
+    on_claim_lost: Callable[[str | None], None] | None = None,
+    claim_loss_policy: str | None = None,
 ) -> Iterator[ClaimDecision]:
     """Hold a hub-arbitrated claim on ``target`` for the duration of the block.
 
@@ -1118,6 +1502,29 @@ def repo_claim(
     without one the credential refusal is logged loudly and the guarded block
     keeps running under the local lock: library callers never get signals or
     process-global behavior from this context manager.
+
+    Lost ownership (#1152) fails closed by default: when the heartbeat learns
+    another owner holds the claim (a renew answered 409 held-by-another, or
+    the re-acquire refused as ``held``), it logs once and aborts — with no
+    ``on_claim_lost`` callback the main thread is interrupted through the
+    same path as Ctrl-C, unwinding the active dispatch so two machines never
+    keep working one repo unarbitrated. The abort is independent of any
+    callback (#1157 round 2): a callback that blocks is cut off after
+    ``CLAIM_LOST_CALLBACK_GRACE_SECONDS`` and one that raises
+    ``SystemExit``/``KeyboardInterrupt`` is logged, and the interrupt fires
+    either way. Pass ``on_claim_lost`` to react yourself, or set
+    ``claim_loss_policy="continue"`` / the environment variable
+    ``BRIGADE_FLEET_CLAIM_LOSS=continue`` as the documented opt-out for solo
+    machines, restoring the old log-and-continue behavior.
+
+    Off-main-thread owners (#1157 round 2): ``_thread.interrupt_main()``
+    targets the process main thread, so when ``repo_claim`` is entered from
+    a worker thread the abort cannot be delivered as a KeyboardInterrupt
+    there — raising it would stab an unrelated thread. Instead the yielded
+    decision's ``cancel_event`` is set (and a WARNING names it): guarded
+    work off the main thread MUST observe ``decision.cancel_event`` and
+    unwind promptly; that cooperative check is the documented requirement
+    for non-main-thread claim owners.
 
     ``lock_owner`` is the ``run.lock`` owner payload of the lease this run
     holds; it is recorded on the claim row (and re-sent by the heartbeat's
@@ -1206,6 +1613,11 @@ def repo_claim(
         )
     stop = threading.Event()
     pending_orphan_release = threading.Event()
+    # Cooperative cancel channel (#1157 round 2): set on lost ownership so
+    # the owner thread's guarded block can observe it — the only abort path
+    # when repo_claim was entered off the main thread.
+    cancel_event = threading.Event()
+    owner_thread = threading.current_thread()
 
     def _renew_loop() -> None:
         warned_unavailable = False
@@ -1251,17 +1663,45 @@ def repo_claim(
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
+            if _claim_loss_policy(claim_loss_policy) == "continue":
+                # Documented opt-out (#1152) for solo machines: the old
+                # log-and-keep-going behavior, still loud.
+                _LOG.warning(
+                    "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock",
+                    target,
+                    outcome.reason,
+                )
+                return
+            if outcome.reason != "held":
+                # No live claim anywhere (e.g. the re-acquire raced a
+                # concurrent release): nothing to arbitrate, so this keeps
+                # the old log-and-stop behavior rather than interrupting.
+                _LOG.warning(
+                    "fleet claim heartbeat for %s lost the claim (%s); continuing on the local run lock",
+                    target,
+                    outcome.reason,
+                )
+                return
             _LOG.warning(
-                "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock",
+                "fleet claim heartbeat for %s lost ownership (%s); another owner holds the claim — "
+                "aborting the guarded run (opt out with %s=continue)",
                 target,
                 outcome.reason,
+                CLAIM_LOSS_ENV,
+            )
+            _abort_claim_owner(
+                target,
+                outcome.reason,
+                owner_thread=owner_thread,
+                cancel_event=cancel_event,
+                on_claim_lost=on_claim_lost,
             )
             return
 
     heartbeat = threading.Thread(target=_renew_loop, name="brigade-fleet-claim-renew", daemon=True)
     heartbeat.start()
     try:
-        yield decision
+        yield replace(decision, cancel_event=cancel_event)
     finally:
         stop.set()
         # Drain the heartbeat before releasing: an in-flight renew/acquire
@@ -1271,12 +1711,28 @@ def repo_claim(
         # guard above.
         heartbeat.join(timeout=2 * CLAIM_TIMEOUT_SECONDS + max(1.0, CLAIM_TIMEOUT_SECONDS))
         release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-        if pending_orphan_release.is_set() and release_outcome.reason == "hub-unavailable":
+        if pending_orphan_release.is_set() and release_outcome.reason in ("hub-unavailable", "missing"):
             # The CLI normally exits as soon as this context unwinds, so a
             # daemon retry would die before its first request. Keep the retry
             # budget inline and short: two additional calls, each already
-            # bounded by CLAIM_TIMEOUT_SECONDS.
+            # bounded by CLAIM_TIMEOUT_SECONDS. A definitive "missing" is
+            # retried too (#1157): an abandoned re-acquire may still be in
+            # flight and commit its row right after this release was told
+            # the claim is gone, which would leak it for the full TTL.
             for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
+                # Space each retry across one outstanding-request timeout
+                # (#1157): back-to-back retries can all complete before an
+                # abandoned re-acquire commits its row; sleeping one request
+                # deadline first gives that late commit time to land where
+                # this release can still delete it.
+                time.sleep(CLAIM_TIMEOUT_SECONDS)
                 release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-                if release_outcome.reason != "hub-unavailable":
+                if release_outcome.reason not in ("hub-unavailable", "missing"):
                     break
+            if release_outcome.reason in ("hub-unavailable", "missing"):
+                _LOG.warning(
+                    "fleet claim on %s: exit cleanup could not confirm the orphaned claim's release "
+                    "(last answer: %s); the row lives until its TTL expires",
+                    target,
+                    release_outcome.reason,
+                )
