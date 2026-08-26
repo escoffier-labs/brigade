@@ -3106,3 +3106,33 @@ def test_pack_list_and_show_refuse_symlinked_pack_dir_and_manifest(tmp_path, cap
     assert skills_cmd.pack_show(target=workspace, pack_id="latest") != 0
     captured = capsys.readouterr()
     _assert_no_marker(captured.out + captured.err, "pack show latest")
+
+
+def test_lint_missing_skill_json_source_has_registry_kind(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.lint(target=workspace, skill="session-sweep", json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    source = payload["source"]
+    assert isinstance(source, dict)
+    assert isinstance(source["kind"], str)
+    assert source["kind"] == "registry"
+    assert source["identity"] == "registry://skills/session-sweep"
+    assert payload["valid"] is False
+    assert payload["errors"]
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_lint_refused_symlinked_registry_entry_source_kind_and_no_content_echo(tmp_path, capsys):
+    workspace = _registry_with_symlinked_entry(tmp_path, "skill_json")
+    assert skills_cmd.lint(target=workspace, skill="registry:linked-skill", json_output=True) == 1
+    out = capsys.readouterr()
+    for marker in ("LINKED-SKILL-MD-MARKER", "LINKED-TITLE-MARKER", "LINKED-TRUST-MARKER"):
+        assert marker not in out.out + out.err
+    payload = json.loads(out.out)
+    source = payload["source"]
+    assert isinstance(source, dict)
+    assert source["kind"] == "registry"
+    assert source["identity"] == "registry://skills/linked-skill"
+    assert payload["valid"] is False
+    assert any("skill.json" in message for message in payload["errors"])
