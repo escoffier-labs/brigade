@@ -62,9 +62,12 @@ Before enqueue, the selector checks the local Grok Bot queue:
    create more than one job.
 
 The idempotency key is
-`grokbot-scout:<owner>:<repository>:issue-<number>`. A completed, failed,
-expired, or canceled issue job stays known. Re-running an issue requires a new
-operator-approved policy revision in a later feature.
+`grokbot-scout:<repository-sha256-prefix>:issue-<number>`, where the prefix is
+the first 24 lowercase hex characters of the repository string's SHA-256.
+This keeps the key within Brigade's 128-character bound for every valid
+repository. A completed, failed, expired, or canceled issue job stays known.
+Re-running an issue requires a new operator-approved policy revision in a
+later feature.
 
 ### Job envelope
 

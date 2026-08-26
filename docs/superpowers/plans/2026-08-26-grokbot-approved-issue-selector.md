@@ -261,7 +261,7 @@ def _queue_snapshot(target: Path) -> list[dict[str, object]]:
 
 Count same-day jobs by parsing `created_at` as an aware datetime, converting to UTC, and comparing `.date()` to `now.astimezone(timezone.utc).date()`. Count all Repository Scout states, including expired and failed attempts.
 
-- [ ] For each sorted issue number, build the stable key `grokbot-scout:<owner>:<repo>:issue-<number>` and use `grokbot_feed._existing_idempotency()` to skip known work. `preflight()` returns the selected issue without writing. `apply()` repeats the full selection immediately before calling `grokbot_jobs.enqueue()` and returns only safe counts, reason, issue number, and handle.
+- [ ] For each sorted issue number, build the stable key `grokbot-scout:<repository-sha256-prefix>:issue-<number>`, using the first 24 lowercase hex characters of the repository string's SHA-256, and use `grokbot_feed._existing_idempotency()` to skip known work. `preflight()` returns the selected issue without writing. `apply()` repeats the full selection immediately before calling `grokbot_jobs.enqueue()` and returns only safe counts, reason, issue number, and handle. Both public functions accept `now: datetime | None = None`. The default is an aware current UTC timestamp.
 
 - [ ] Run GREEN with the Task 2 command, then the whole new test file. Expect every test to pass.
 
