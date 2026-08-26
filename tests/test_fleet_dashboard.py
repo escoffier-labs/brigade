@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import http.client
 import json
 import threading
@@ -353,3 +354,150 @@ class TestPureRendering:
         )
         assert 'nonce="abc"' in page
         assert "Fleet: Repos" in page
+
+
+TAILSCALE_USER = "tailscale-user@example.invalid"
+
+
+@pytest.fixture()
+def hub_tailscale(tmp_path):
+    db = tmp_path / "hub" / "fleet.db"
+    server = fleet_hub.make_server("127.0.0.1", 0, db, TOKEN, allow_admin_writes=True, trust_tailscale_identity=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield ("127.0.0.1", server.server_address[1])
+    server.shutdown()
+    server.server_close()
+
+
+def _tailscale_headers(identity: str = TAILSCALE_USER, extra: dict | None = None) -> dict:
+    headers = {fleet_hub._TAILSCALE_IDENTITY_HEADER: identity, **(extra or {})}
+    return headers
+
+
+class TestTailscaleIdentity:
+    def test_default_off_rejects_tailscale_header(self, hub):
+        for path in ("/", "/deck", "/deck/repos", "/view/machines", "/view/repos"):
+            status, _headers, text = _request(hub, "GET", path, headers=_tailscale_headers())
+            assert status == 401, path
+            assert TAILSCALE_USER not in text
+
+    def test_trusted_loopback_dashboard_success(self, hub_tailscale):
+        for path in ("/", "/deck", "/deck/repos", "/view/machines", "/view/repos"):
+            status, headers, text = _request(hub_tailscale, "GET", path, headers=_tailscale_headers())
+            assert status == 200, path
+            assert headers["content-type"].startswith("text/html")
+            assert TAILSCALE_USER not in text
+
+    def test_trusted_loopback_allows_bearer_and_cookie_unchanged(self, hub_tailscale):
+        status, _headers, text = _request(hub_tailscale, "GET", "/deck", headers=_bearer())
+        assert status == 200
+        cookie = _login_cookie(hub_tailscale)
+        status, _headers, text = _request(hub_tailscale, "GET", "/deck", headers={"Cookie": cookie})
+        assert status == 200
+
+    def test_missing_empty_invalid_identity_fails(self, hub_tailscale):
+        for identity in (
+            "",
+            "   ",
+            "a" * 257,
+            "user@example\x01invalid.test",
+            "user@example\x1cinvalid.test",
+            "user@example\x7finvalid.test",
+        ):
+            status, _headers, text = _request(hub_tailscale, "GET", "/deck", headers=_tailscale_headers(identity))
+            assert status == 401, repr(identity)
+            if identity:
+                assert identity not in text
+
+    def test_missing_header_fails(self, hub_tailscale):
+        status, _headers, _text = _request(hub_tailscale, "GET", "/deck")
+        assert status == 401
+
+    def test_non_loopback_peer_fails_even_with_valid_header(self, hub_tailscale, monkeypatch):
+        monkeypatch.setattr(fleet_hub, "_is_loopback_address", lambda address: False)
+        status, _headers, text = _request(hub_tailscale, "GET", "/deck", headers=_tailscale_headers())
+        assert status == 401
+        assert TAILSCALE_USER not in text
+
+    def test_tailscale_identity_never_authorizes_api_routes(self, hub_tailscale):
+        for path in ("/status", "/claims", "/nodes", "/cloud", "/models"):
+            status, _headers, _text = _request(hub_tailscale, "GET", path, headers=_tailscale_headers())
+            assert status == 401, path
+        for path in ("/events", "/claims", "/nodes", "/cloud", "/models"):
+            status, _headers, _text = _request(
+                hub_tailscale,
+                "POST",
+                path,
+                headers=_tailscale_headers(extra={"Content-Type": "application/json"}),
+                body={},
+            )
+            assert status == 401, path
+
+    def test_tailscale_identity_not_in_dashboard_body(self, hub_tailscale):
+        _seed(hub_tailscale)
+        for path in ("/", "/deck", "/deck/repos", "/view/machines", "/view/repos"):
+            status, _headers, text = _request(hub_tailscale, "GET", path, headers=_tailscale_headers())
+            assert status == 200, path
+            assert TAILSCALE_USER not in text
+
+
+class TestLoopbackAddressHelper:
+    def test_is_loopback_address_ipv4(self):
+        assert fleet_hub._is_loopback_address("127.0.0.1") is True
+
+    def test_is_loopback_address_ipv6(self):
+        assert fleet_hub._is_loopback_address("::1") is True
+
+    def test_is_loopback_address_ipv4_mapped_ipv6(self):
+        assert fleet_hub._is_loopback_address("::ffff:127.0.0.1") is True
+
+    def test_is_loopback_address_non_loopback(self):
+        assert fleet_hub._is_loopback_address("192.168.1.1") is False
+        assert fleet_hub._is_loopback_address("::ffff:192.168.1.1") is False
+        assert fleet_hub._is_loopback_address("not-an-address") is False
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.0.2.10", "::", "2001:db8::10", "localhost"])
+def test_tailscale_identity_rejects_nonliteral_or_routable_bind(tmp_path, host):
+    with pytest.raises(fleet_hub.FleetHubError, match="requires a loopback --host"):
+        fleet_hub.make_server(
+            host,
+            0,
+            tmp_path / "fleet.db",
+            TOKEN,
+            trust_tailscale_identity=True,
+        )
+
+
+def test_dispatch_serve_forwards_trust_tailscale_identity(monkeypatch):
+    from brigade.cli.fleet import _dispatch_serve
+
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("brigade.fleet_hub.run", fake_run)
+    monkeypatch.setattr("brigade.fleet_command_deck.resolve_config_path", lambda path, env: None)
+    args = argparse.Namespace(
+        host="127.0.0.1",
+        port=3774,
+        db=None,
+        token_file=None,
+        allow_admin_writes=False,
+        deck_config=None,
+        trust_tailscale_identity=True,
+    )
+    assert _dispatch_serve(args) == 0
+    assert captured["trust_tailscale_identity"] is True
+    assert captured["host"] == "127.0.0.1"
+
+
+def test_cli_serve_trust_tailscale_identity_defaults_off():
+    from brigade import cli
+
+    args = cli._build_parser().parse_args(["fleet", "serve", "--host", "127.0.0.1"])
+
+    assert args.trust_tailscale_identity is False

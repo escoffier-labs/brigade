@@ -68,6 +68,15 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Command Deck JSON config (else BRIGADE_FLEET_DECK_CONFIG).",
     )
+    p_serve.add_argument(
+        "--trust-tailscale-identity",
+        action="store_true",
+        help=(
+            "Trust the Tailscale-User-Login header added by a Tailscale Serve reverse proxy for "
+            "dashboard routes only. Only safe when the hub is bound to a loopback interface and the "
+            "proxy strips spoofed identity headers."
+        ),
+    )
     p_serve.set_defaults(func=_dispatch_serve)
 
     p_nodes = fleet_sub.add_parser(
@@ -213,6 +222,7 @@ def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | No
         deck_config_path=fleet_command_deck.resolve_config_path(
             args.deck_config, os.environ if environ is None else environ
         ),
+        trust_tailscale_identity=bool(args.trust_tailscale_identity),
     )
 
 

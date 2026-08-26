@@ -94,6 +94,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -120,6 +121,8 @@ DASHBOARD_COOKIE = "brigade_fleet_view"
 DASHBOARD_COOKIE_MAX_AGE = 30 * 86400
 _DASHBOARD_COOKIE_PURPOSE = b"brigade-fleet-dashboard-cookie-v1"
 _DASHBOARD_PREFIX = "/view/"
+_TAILSCALE_IDENTITY_HEADER = "Tailscale-User-Login"
+_TAILSCALE_IDENTITY_MAX_LEN = 256
 
 CLAIM_ACTIONS = frozenset({"acquire", "renew", "release", "inspect"})
 # Request scopes (issue #1141): "holder" is the fencing-token contract; "node"
@@ -1521,12 +1524,26 @@ def _load_token(args: argparse.Namespace) -> str:
     raise FleetHubError("no fleet hub token: set BRIGADE_FLEET_TOKEN or pass --token-file")
 
 
+def _is_loopback_address(address: str) -> bool:
+    """True for IPv4, IPv6, and IPv4-mapped IPv6 loopback addresses."""
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if parsed.is_loopback:
+        return True
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        return parsed.ipv4_mapped.is_loopback
+    return False
+
+
 def make_handler(
     token: str,
     db_path: Path,
     *,
     allow_admin_writes: bool = False,
     deck_config: fleet_command_deck.DeckConfig | None = None,
+    trust_tailscale_identity: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     """Request handler bound to the admin ``token`` and the hub database.
 
@@ -1535,6 +1552,10 @@ def make_handler(
     behaviour); off by default so a migration is an explicit choice.
     ``deck_config`` is the startup-frozen Command Deck configuration: it is
     captured immutably in the handler closure and never re-read from disk.
+    ``trust_tailscale_identity`` enables dashboard authorization from the
+    Tailscale-User-Login header added by a Tailscale Serve reverse proxy. It
+    must only be used when the hub is bound to a loopback interface and the
+    proxy strips spoofed headers; the identity value is never logged or rendered.
     """
     frozen_deck = deck_config if deck_config is not None else fleet_command_deck.DeckConfig()
 
@@ -1592,6 +1613,30 @@ def make_handler(
             if morsel is None:
                 return False
             return hmac.compare_digest(morsel.value.encode("utf-8"), dashboard_cookie_value(token).encode("utf-8"))
+
+        def _tailscale_identity_authorized(self) -> bool:
+            """True when a trusted Tailscale Serve proxy presents a valid user login header.
+
+            The immediate TCP peer must be loopback; the header must be present,
+            non-empty, bounded, and free of control characters. The identity value
+            is never logged or rendered in any response. Only enabled when the hub
+            starts with ``--trust-tailscale-identity``.
+            """
+            if not trust_tailscale_identity:
+                return False
+            if not _is_loopback_address(self.client_address[0]):
+                return False
+            identity = self.headers.get(_TAILSCALE_IDENTITY_HEADER, "")
+            if not isinstance(identity, str):
+                return False
+            if len(identity) > _TAILSCALE_IDENTITY_MAX_LEN:
+                return False
+            if re.search(r"[\x00-\x1f\x7f-\x9f]", identity):
+                return False
+            identity = identity.strip()
+            if not identity:
+                return False
+            return True
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload).encode("utf-8")
@@ -1654,7 +1699,7 @@ def make_handler(
                 location = path + (f"?{rest}" if rest else "")
                 self._send_html(303, "", content_type=plain, extra_headers={"Location": location, "Set-Cookie": cookie})
                 return
-            if not (self._authorized() or self._cookie_authorized()):
+            if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
                 self._send_html(
                     401,
                     "Unauthorized: send the fleet bearer token, or open this page once with "
@@ -1724,7 +1769,7 @@ def make_handler(
                 )
                 self._send_html(303, "", content_type=plain, extra_headers={"Location": path, "Set-Cookie": cookie})
                 return
-            if not (self._authorized() or self._cookie_authorized()):
+            if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
                 self._send_html(
                     401,
                     "Unauthorized: send the fleet bearer token, or open this page once with "
@@ -1941,6 +1986,7 @@ def make_server(
     *,
     allow_admin_writes: bool = False,
     deck_config_path: Path | None = None,
+    trust_tailscale_identity: bool = False,
 ) -> ThreadingHTTPServer:
     """Build (but do not serve) the hub HTTPServer; used by tests.
 
@@ -1952,6 +1998,8 @@ def make_server(
     socket is bound; an invalid file raises ``DeckConfigError`` without
     creating anything.
     """
+    if trust_tailscale_identity and not _is_loopback_address(host):
+        raise FleetHubError("--trust-tailscale-identity requires a loopback --host")
     if deck_config_path is not None:
         deck_config = fleet_command_deck.load_config(Path(deck_config_path))
     else:
@@ -1959,7 +2007,13 @@ def make_server(
     init_db(Path(db_path)).close()
     return ThreadingHTTPServer(
         (host, port),
-        make_handler(token, Path(db_path), allow_admin_writes=allow_admin_writes, deck_config=deck_config),
+        make_handler(
+            token,
+            Path(db_path),
+            allow_admin_writes=allow_admin_writes,
+            deck_config=deck_config,
+            trust_tailscale_identity=trust_tailscale_identity,
+        ),
     )
 
 
@@ -1971,6 +2025,7 @@ def run(
     token_file: Path | None,
     allow_admin_writes: bool = False,
     deck_config_path: Path | None = None,
+    trust_tailscale_identity: bool = False,
 ) -> int:
     if not host:
         print("error: --host is required (the hub never binds all interfaces by default)", file=sys.stderr)
@@ -1988,6 +2043,7 @@ def run(
             token,
             allow_admin_writes=allow_admin_writes,
             deck_config_path=deck_config_path,
+            trust_tailscale_identity=trust_tailscale_identity,
         )
     except (FleetHubError, sqlite3.Error, fleet_command_deck.DeckConfigError) as exc:
         # Startup migration is the one place the hub touches the schema: if
@@ -1996,7 +2052,10 @@ def run(
         return 2
     bound_host, bound_port = str(server.server_address[0]), int(server.server_address[1])
     mode = "admin writes allowed" if allow_admin_writes else "node tokens required for writes"
-    print(f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()}; {mode})")
+    tailscale_mode = "tailscale identity trusted" if trust_tailscale_identity else "tailscale identity ignored"
+    print(
+        f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()}; {mode}; {tailscale_mode})"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
