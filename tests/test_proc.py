@@ -90,19 +90,36 @@ def test_process_registry_escalates_every_owned_process_group(monkeypatch):
 def test_registered_windows_process_starts_in_new_process_group(monkeypatch):
     captured = {}
 
+    class SilentJob:
+        def assign(self, process_handle):
+            return True
+
+        def resume(self, pid):
+            return True
+
+        def terminate(self):
+            return True
+
+        def close(self):
+            pass
+
     def fake_popen(args, **kwargs):
         captured["args"] = args
         captured.update(kwargs)
-        return _StubProcess(stdout=b"ok\n")
+        stub = _StubProcess(stdout=b"ok\n")
+        stub._handle = 424242
+        return stub
 
     monkeypatch.setattr(proc.os, "name", "nt")
     monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: SilentJob())
 
     result = proc.run(["worker.exe"], process_registry=proc.ProcessRegistry())
 
     assert result.code == 0
     assert result.stdout == "ok\n"
-    assert captured["creationflags"] == getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    expected_flags = getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) | proc._WINDOWS_CREATE_SUSPENDED
+    assert captured["creationflags"] == expected_flags
     assert "start_new_session" not in captured
 
 
@@ -293,18 +310,35 @@ def test_windows_registry_taskkill_timeout_is_bounded_and_falls_back(monkeypatch
 def test_windows_run_without_registry_still_starts_process_group(monkeypatch):
     captured = {}
 
+    class SilentJob:
+        def assign(self, process_handle):
+            return True
+
+        def resume(self, pid):
+            return True
+
+        def terminate(self):
+            return True
+
+        def close(self):
+            pass
+
     def fake_popen(args, **kwargs):
         captured.update(kwargs)
-        return _StubProcess(stdout=b"ok\n")
+        stub = _StubProcess(stdout=b"ok\n")
+        stub._handle = 424242
+        return stub
 
     monkeypatch.setattr(proc.os, "name", "nt")
     monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: SilentJob())
 
     result = proc.run(["worker.exe"])
 
     assert result.code == 0
     assert result.stdout == "ok\n"
-    assert captured["creationflags"] == getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    expected_flags = getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) | proc._WINDOWS_CREATE_SUSPENDED
+    assert captured["creationflags"] == expected_flags
     assert captured["stdin"] is subprocess.DEVNULL
 
 
@@ -734,14 +768,35 @@ def test_cutoff_after_child_exit_records_incomplete_group_failure(tmp_path):
     assert "process group" in result.stderr.lower()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_cleanup_failure_becomes_typed_nonzero_result(monkeypatch):
+    """#1207 round 2: an exception from group termination must not bypass Result."""
+
+    def exploding_stop(process, registry=None, child_job=None):
+        process.kill()
+        raise RuntimeError("job terminate exploded")
+
+    monkeypatch.setattr(proc, "_stop_child", exploding_stop)
+
+    result = proc.run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.3)
+
+    assert result.code != 0
+    assert "cleanup failed" in result.stderr.lower()
+    assert "job terminate exploded" in result.stderr
+
+
 def test_windows_run_assigns_child_to_owned_kill_on_close_job_object(monkeypatch):
-    """Windows tree termination must use an owned job object, not taskkill on an exited PID."""
+    """Windows tree termination must use an owned job object created before launch."""
 
     events: list[tuple[str, object]] = []
 
     class FakeJob:
         def assign(self, process_handle: int) -> bool:
             events.append(("assign", process_handle))
+            return True
+
+        def resume(self, pid: int) -> bool:
+            events.append(("resume", pid))
             return True
 
         def terminate(self) -> bool:
@@ -763,9 +818,18 @@ def test_windows_run_assigns_child_to_owned_kill_on_close_job_object(monkeypatch
             return 0
 
     stub = StubProcess()
+
+    def fake_popen(*args, **kwargs):
+        events.append(("popen", dict(kwargs)))
+        return stub
+
+    def fake_create_job():
+        events.append(("create", None))
+        return FakeJob()
+
     monkeypatch.setattr(proc.os, "name", "nt")
-    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: stub)
-    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: FakeJob())
+    monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(proc, "_create_windows_child_job", fake_create_job)
     monkeypatch.setattr(
         proc,
         "_terminate_windows_process_tree",
@@ -775,9 +839,77 @@ def test_windows_run_assigns_child_to_owned_kill_on_close_job_object(monkeypatch
     result = proc.run(["worker.exe"])
 
     assert result.code == 0
+    names = [event[0] for event in events]
+    # The job must exist before the child can run a single instruction, and
+    # assignment must complete before the suspended main thread resumes.
+    assert names.index("create") < names.index("popen") < names.index("assign") < names.index("resume")
+    popen_kwargs = events[names.index("popen")][1]
+    assert isinstance(popen_kwargs, dict)
+    assert popen_kwargs.get("creationflags", 0) & proc._WINDOWS_CREATE_SUSPENDED
     assert ("assign", 424242) in events
+    assert ("resume", 555) in events
     assert ("close", None) in events
     assert ("terminate", None) not in events
+
+
+def test_windows_run_without_job_object_fails_closed_before_launch(monkeypatch):
+    """#1207 round 2: job-creation failure is a typed launch failure, never an unguarded child."""
+    monkeypatch.setattr(proc.os, "name", "nt")
+
+    def no_popen(*args, **kwargs):
+        pytest.fail("child must not be launched when its owned job object cannot be created")
+
+    monkeypatch.setattr(proc.subprocess, "Popen", no_popen)
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: None)
+
+    result = proc.run(["worker.exe"])
+
+    assert result.code != 0
+    assert result.stdout == ""
+    assert "worker.exe" in result.stderr
+
+
+def test_windows_run_terminates_suspended_child_when_assignment_fails(monkeypatch):
+    """#1207 round 2: failed job assignment kills the still-suspended child; no taskkill orphan."""
+
+    observed: dict[str, object] = {}
+
+    class FailingJob:
+        def assign(self, process_handle: int) -> bool:
+            return False
+
+        def resume(self, pid: int) -> bool:
+            raise AssertionError("resume must never run after a failed assignment")
+
+        def terminate(self) -> bool:
+            raise AssertionError("the unassigned job owns nothing to terminate")
+
+        def close(self) -> None:
+            observed["closed"] = True
+
+    stub = _StubProcess()
+    stub._handle = 424242
+
+    def fake_kill():
+        observed["killed"] = True
+
+    stub.kill = fake_kill
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: stub)
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: FailingJob())
+    monkeypatch.setattr(
+        proc,
+        "_terminate_windows_process_tree",
+        lambda *args, **kwargs: pytest.fail("taskkill fallback must not run for a suspended child"),
+    )
+
+    result = proc.run(["worker.exe"])
+
+    assert result.code != 0
+    assert observed.get("killed") is True
+    assert observed.get("closed") is True
+    assert result.stdout == ""
 
 
 def test_stop_child_prefers_job_object_over_taskkill(monkeypatch):

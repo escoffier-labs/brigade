@@ -4163,3 +4163,186 @@ def test_ledger_import_inbox_snapshot_enforces_byte_cap(tmp_path, monkeypatch):
 
     with pytest.raises(ledger.ImportInboxSnapshotLimitExceeded):
         ledger._snapshot_import_inbox(tmp_path)
+
+
+def test_ledger_import_inbox_snapshot_detects_mid_read_append(tmp_path, monkeypatch):
+    """#1207 round 2: the before/after compare must cover size and mtime, not only inode fields."""
+    from brigade.work_cmd import ledger
+
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"A" * 64)
+
+    real_read = os.read
+    appended = {"done": False}
+
+    def fake_read(fd, size):
+        chunk = real_read(fd, size)
+        if chunk and not appended["done"]:
+            appended["done"] = True
+            with open(inbox, "ab") as writer:
+                writer.write(b"B" * 16)
+        return chunk
+
+    monkeypatch.setattr(os, "read", fake_read)
+
+    with pytest.raises(OSError, match="changed while snapshotting"):
+        ledger._snapshot_import_inbox(tmp_path)
+
+
+def test_inbox_replacement_between_snapshot_and_launch_aborts_run(tmp_path, monkeypatch):
+    """#1207 round 2: an inbox swapped after its snapshot aborts before the scanner launches."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+
+    launched: list[bool] = []
+    real_run_one = scanners_mod._scanner_run_one
+    real_snapshot = scanners_mod._snapshot_scanner_inbox
+
+    def spy_run_one(*args, **kwargs):
+        launched.append(True)
+        return real_run_one(*args, **kwargs)
+
+    def replacing_snapshot(target):
+        snapshot = real_snapshot(target)
+        replacement = ledger._make_import("Rogue finding", kind="finding", source="handoff-ingest")
+        ledger._write_imports(target, [replacement])
+        return snapshot
+
+    monkeypatch.setattr(scanners_mod, "_scanner_run_one", spy_run_one)
+    monkeypatch.setattr(scanners_mod, "_snapshot_scanner_inbox", replacing_snapshot)
+
+    script = tmp_path / "ok.py"
+    script.write_text("import sys\nsys.exit(0)\n")
+    _write_scanner_config(tmp_path, "swap-race", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="swap-race", force=True)
+
+    assert rc == 2
+    assert launched == []
+    assert any("changed" in str(error).lower() for error in payload["errors"])
+
+
+def test_same_inode_write_between_snapshot_and_launch_aborts_run(tmp_path, monkeypatch):
+    """#1207 round 2: a same-inode in-place rewrite after snapshot aborts before launch."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+
+    launched: list[bool] = []
+    real_run_one = scanners_mod._scanner_run_one
+    real_snapshot = scanners_mod._snapshot_scanner_inbox
+
+    def spy_run_one(*args, **kwargs):
+        launched.append(True)
+        return real_run_one(*args, **kwargs)
+
+    def mutating_snapshot(target):
+        snapshot = real_snapshot(target)
+        with open(helpers._imports_path(target), "ab") as handle:
+            handle.write(b'{"id": "concurrent-1", "kind": "task", "source": "x", "text": "y"}\n')
+        return snapshot
+
+    monkeypatch.setattr(scanners_mod, "_scanner_run_one", spy_run_one)
+    monkeypatch.setattr(scanners_mod, "_snapshot_scanner_inbox", mutating_snapshot)
+
+    script = tmp_path / "ok.py"
+    script.write_text("import sys\nsys.exit(0)\n")
+    _write_scanner_config(tmp_path, "append-race", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="append-race", force=True)
+
+    assert rc == 2
+    assert launched == []
+    assert any("changed" in str(error).lower() for error in payload["errors"])
+
+
+def test_scanner_inbox_run_lock_is_reentrant_per_process(tmp_path):
+    """#1207 round 2: nested writer paths inside one run must not self-deadlock."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            pass
+
+
+@pytest.mark.skipif(os.name != "posix" or not hasattr(sys, "executable"), reason="requires POSIX flock")
+def test_scanner_inbox_run_lock_blocks_other_process_writers(tmp_path):
+    """#1207 round 2: the run-wide inbox lock excludes honest writers in other processes."""
+    import subprocess
+
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import errno, fcntl, os, sys\n"
+        f"lock = {str(lock_path)!r}\n"
+        "fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except OSError as exc:\n"
+        "    sys.exit(0 if exc.errno in (errno.EACCES, errno.EAGAIN) else 1)\n"
+        "sys.exit(2)\n"
+    )
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        blocked = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True)
+    assert blocked.returncode == 0, f"lock did not block the other process: {blocked.stderr}"
+
+    released = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True)
+    assert released.returncode == 2, f"lock still held after release: {released.stderr}"
+
+
+def test_cleanup_failure_still_yields_failed_scanner_run_and_unblocks_reruns(tmp_path, monkeypatch):
+    """#1207 round 2: a cleanup exception must not bypass the Result or strand a running receipt."""
+    from brigade import proc as proc_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "sleeper.py"
+    script.write_text("import time\ntime.sleep(30)\n")
+    _write_scanner_config(tmp_path, "cleanup-boom", f"{sys.executable} {script}", timeout=1)
+
+    def exploding_stop(process, registry=None, child_job=None):
+        process.kill()
+        raise RuntimeError("job terminate exploded")
+
+    monkeypatch.setattr(proc_mod, "_stop_child", exploding_stop)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="cleanup-boom", force=True)
+
+    assert rc == 1
+    receipt = payload["runs"][0]
+    assert receipt["status"] == "failed"
+    persisted = json.loads((helpers._scanner_runs_root(tmp_path) / receipt["run_id"] / "receipt.json").read_text())
+    assert persisted["status"] == "failed"
+
+    payload2, rc2 = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="cleanup-boom", force=True)
+    assert rc2 == 1
+    assert payload2["runs"][0]["status"] == "failed"
+
+
+def test_run_one_exception_finalizes_scanner_receipt_as_failed(tmp_path, monkeypatch):
+    """#1207 round 2: an exception after the running receipt persists must finalize it failed."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "ok.py"
+    script.write_text("import sys\nsys.exit(0)\n")
+    scanner = {"id": "supervise-boom", "command": f"{sys.executable} {script}", "timeout": 20}
+
+    def raising_run(*args, **kwargs):
+        raise RuntimeError("child supervision exploded")
+
+    monkeypatch.setattr(scanners_mod.proc_mod, "run", raising_run)
+
+    with pytest.raises(RuntimeError, match="child supervision exploded"):
+        scanners_mod._scanner_run_one(tmp_path, scanner)
+
+    receipts = scanners_mod._scanner_receipts(tmp_path)
+    assert len(receipts) == 1
+    assert receipts[0]["status"] == "failed"
+    assert scanners_mod._scanner_running_receipts(tmp_path) == []
+    assert "child supervision exploded" in str(receipts[0].get("error"))

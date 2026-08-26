@@ -3457,14 +3457,26 @@ def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
                 )
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
             after.st_dev,
             after.st_ino,
             after.st_mode,
             after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
         ):
             raise OSError("import inbox changed while snapshotting")
-        return parent, name, b"".join(chunks), True
+        raw = b"".join(chunks)
+        if len(raw) != before.st_size:
+            raise OSError("import inbox changed while snapshotting")
+        return parent, name, raw, True
     except BaseException:
         os.close(parent)
         raise

@@ -9,6 +9,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -16,6 +17,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows does not provide flock.
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX does not provide msvcrt.
+    msvcrt = None  # type: ignore[assignment]
 
 from .. import dogfood_cmd
 from .. import proc as proc_mod
@@ -38,13 +49,16 @@ class _ScannerInboxSnapshot:
     """One bounded single-read capture of the pre-run inbox state.
 
     Carries raw bytes, parsed rows, an existence flag, and the identity of the
-    snapshotted inode so rollback can refuse a namespace swap.
+    snapshotted inode so rollback can refuse a namespace swap. ``size`` and
+    ``mtime_ns`` extend that refusal to same-inode concurrent writes.
     """
 
     raw: bytes
     rows: list[bytes]
     exists: bool
     identity: tuple[int, int] | None
+    size: int | None = None
+    mtime_ns: int | None = None
 
 
 # Total byte budget for one inbox or scanner JSONL read, and for any single
@@ -1251,6 +1265,12 @@ def _remove_scanner_inbox_at(parent: int, name: str) -> None:
 
 def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
     """Atomically publish complete inbox bytes through a held no-follow parent."""
+    with _scanner_inbox_run_lock(target):
+        _write_scanner_inbox_bytes_locked(target, data)
+
+
+def _write_scanner_inbox_bytes_locked(target: Path, data: bytes) -> None:
+    """Publish complete inbox bytes while holding the run-wide inbox lock."""
     parent, name, identities = _open_scanner_inbox_parent(target, create=True)
     temporary_name = _scanner_inbox_temp_name()
     temporary = -1
@@ -1375,9 +1395,108 @@ def _snapshot_scanner_inbox(target: Path) -> _ScannerInboxSnapshot:
             rows=_bounded_jsonl_rows(raw),
             exists=True,
             identity=_scanner_inbox_identity(before),
+            size=before.st_size,
+            mtime_ns=before.st_mtime_ns,
         )
     finally:
         os.close(descriptor)
+
+
+_SCANNER_INBOX_PROCESS_LOCK = threading.Lock()
+_SCANNER_INBOX_LOCK_DEPTH: dict[str, int] = {}
+
+
+def _scanner_inbox_lock_path(target: Path) -> Path:
+    """Return the lock file beside the inbox for run-wide writer exclusion."""
+    inbox = _scanner_inbox_path(target)
+    return inbox.with_name(inbox.name + ".lock")
+
+
+@contextlib.contextmanager
+def _scanner_inbox_run_lock(target: Path) -> Iterator[None]:
+    """Hold the workspace's scanner-inbox writer exclusion for the block.
+
+    Honest Brigade writers in any process serialize on an adjacent
+    ``flock``/``msvcrt`` lock file (reentrant per process so nested writer
+    paths inside one run cannot self-deadlock). A same-UID attacker can ignore
+    the advisory lock; launch-time revalidation detects that case instead.
+    """
+    key = str(_scanner_inbox_lock_path(target))
+    fd = -1
+    with _SCANNER_INBOX_PROCESS_LOCK:
+        depth = _SCANNER_INBOX_LOCK_DEPTH.get(key, 0) + 1
+        _SCANNER_INBOX_LOCK_DEPTH[key] = depth
+    try:
+        if depth == 1:
+            lock_path = Path(key)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                str(lock_path),
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOINHERIT", 0),
+                0o600,
+            )
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                elif msvcrt is not None:  # pragma: no cover - Windows only.
+                    while True:
+                        try:
+                            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                            break
+                        except OSError:
+                            continue
+            except BaseException:
+                os.close(fd)
+                fd = -1
+                raise
+        yield
+    finally:
+        with _SCANNER_INBOX_PROCESS_LOCK:
+            remaining = _SCANNER_INBOX_LOCK_DEPTH.get(key, 0) - 1
+            if remaining > 0:
+                _SCANNER_INBOX_LOCK_DEPTH[key] = remaining
+            else:
+                _SCANNER_INBOX_LOCK_DEPTH.pop(key, None)
+        if fd != -1:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                elif msvcrt is not None:  # pragma: no cover - Windows only.
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            finally:
+                os.close(fd)
+
+
+def _revalidate_scanner_inbox_snapshot(target: Path, snapshot: _ScannerInboxSnapshot) -> None:
+    """Refuse to launch unless the live inbox still matches its pre-run snapshot.
+
+    Runs under ``_scanner_inbox_run_lock`` immediately before launch and checks
+    the full identity — device, inode, size, mtime_ns — plus the bytes-read
+    length against what was snapshotted, so a same-UID writer that replaced or
+    modified the inbox in the gap aborts the run instead of having its rows
+    stamped as scanner-created or clobbered by rollback.
+    """
+    try:
+        descriptor = _open_scanner_inbox(target, os.O_RDONLY)
+    except FileNotFoundError as exc:
+        if snapshot.exists:
+            raise OSError("scanner inbox vanished since its pre-run snapshot") from exc
+        return
+    try:
+        opened = os.fstat(descriptor)
+        if not snapshot.exists:
+            raise OSError("scanner inbox appeared since its pre-run snapshot")
+        if snapshot.identity is None or _scanner_inbox_identity(opened) != snapshot.identity:
+            raise OSError("scanner inbox changed since its pre-run snapshot")
+        if snapshot.size is not None and opened.st_size != snapshot.size:
+            raise OSError("scanner inbox changed since its pre-run snapshot")
+        if snapshot.mtime_ns is not None and opened.st_mtime_ns != snapshot.mtime_ns:
+            raise OSError("scanner inbox changed since its pre-run snapshot")
+        live_raw = _scanner_inbox_descriptor_bytes(descriptor)
+    finally:
+        os.close(descriptor)
+    if len(live_raw) != len(snapshot.raw) or live_raw != snapshot.raw:
+        raise OSError("scanner inbox content changed since its pre-run snapshot")
 
 
 def _bounded_jsonl_rows(raw: bytes) -> list[bytes]:
@@ -1393,9 +1512,10 @@ def _bounded_jsonl_rows(raw: bytes) -> list[bytes]:
 
 def _append_scanner_inbox_bytes(target: Path, data: bytes) -> None:
     """Append scanner records by atomically publishing complete inbox bytes."""
-    existing = _scanner_inbox_bytes(target)
-    separator = b"\n" if existing and not existing.endswith((b"\n", b"\r")) else b""
-    _write_scanner_inbox_bytes(target, existing + separator + data)
+    with _scanner_inbox_run_lock(target):
+        existing = _scanner_inbox_bytes(target)
+        separator = b"\n" if existing and not existing.endswith((b"\n", b"\r")) else b""
+        _write_scanner_inbox_bytes(target, existing + separator + data)
 
 
 def _restore_scanner_inbox_bytes(target: Path, data: bytes, exists: bool) -> None:
@@ -1403,18 +1523,25 @@ def _restore_scanner_inbox_bytes(target: Path, data: bytes, exists: bool) -> Non
     if exists:
         _write_scanner_inbox_bytes(target, data)
         return
-    parent, name, identities = _open_scanner_inbox_parent(target, create=True)
-    try:
-        if not _scanner_inbox_parent_is_current(target, identities):
-            raise OSError("scanner inbox parent changed during restoration")
-        _remove_scanner_inbox_at(parent, name)
-        _fsync_scanner_inbox_parent(parent)
-    finally:
-        os.close(parent)
+    with _scanner_inbox_run_lock(target):
+        parent, name, identities = _open_scanner_inbox_parent(target, create=True)
+        try:
+            if not _scanner_inbox_parent_is_current(target, identities):
+                raise OSError("scanner inbox parent changed during restoration")
+            _remove_scanner_inbox_at(parent, name)
+            _fsync_scanner_inbox_parent(parent)
+        finally:
+            os.close(parent)
 
 
 def _require_scanner_inbox_identity(parent: int, name: str, identity: tuple[int, int]) -> None:
-    """Refuse rollback when the live inbox inode differs from its snapshot."""
+    """Refuse rollback when the live inbox inode differs from its snapshot.
+
+    Same-inode content changes are intentionally restorable here: the scanner
+    child itself may rewrite the inbox in place, and a failed run must roll
+    those rows back. Third-party writers are excluded by holding
+    ``_scanner_inbox_run_lock`` from snapshot through rollback.
+    """
     try:
         current = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
     except FileNotFoundError as exc:
@@ -1438,27 +1565,28 @@ def _restore_scanner_inbox_snapshot_direct(
     missing and rollback refuses any inbox whose inode no longer matches the
     snapshotted one.
     """
-    snapshot_exists = exists
-    snapshot_identity: tuple[int, int] | None = None
-    if isinstance(data, _ScannerInboxSnapshot):
-        payload = data.raw
-        snapshot_exists = data.exists
-        snapshot_identity = data.identity
-    else:
-        payload = data
-    parent, name, identities = _open_scanner_inbox_parent(target, create=True)
-    try:
-        if not _scanner_inbox_parent_is_current(target, identities):
-            raise OSError("scanner inbox parent changed during restoration")
-        if snapshot_exists:
-            if snapshot_identity is not None:
-                _require_scanner_inbox_identity(parent, name, snapshot_identity)
-            _restore_scanner_inbox_from_snapshot(parent, name, payload)
-        else:
-            _remove_scanner_inbox_at(parent, name)
-        _fsync_scanner_inbox_parent(parent)
-    finally:
-        os.close(parent)
+    with _scanner_inbox_run_lock(target):
+        parent, name, identities = _open_scanner_inbox_parent(target, create=True)
+        try:
+            if not _scanner_inbox_parent_is_current(target, identities):
+                raise OSError("scanner inbox parent changed during restoration")
+            snapshot_exists = exists
+            snapshot_identity: tuple[int, int] | None = None
+            if isinstance(data, _ScannerInboxSnapshot):
+                payload = data.raw
+                snapshot_exists = data.exists
+                snapshot_identity = data.identity
+            else:
+                payload = data
+            if snapshot_exists:
+                if snapshot_identity is not None:
+                    _require_scanner_inbox_identity(parent, name, snapshot_identity)
+                _restore_scanner_inbox_from_snapshot(parent, name, payload)
+            else:
+                _remove_scanner_inbox_at(parent, name)
+            _fsync_scanner_inbox_parent(parent)
+        finally:
+            os.close(parent)
 
 
 def _scanner_inbox_imports(target: Path) -> list[dict[str, Any]]:
@@ -2093,7 +2221,29 @@ def _scanner_run_one(
         )
         _write_scanner_run_receipt(receipt)
         return receipt
-    except BaseException:
+    except BaseException as exc:
+        # Finalize the persisted receipt so a cleanup or supervision failure
+        # can never leave it "running" and block every later run.
+        completed = helpers._now()
+        error = f"scanner run aborted before completion: {type(exc).__name__}: {exc}"
+        receipt.update(
+            {
+                "status": "failed",
+                "completed_at": completed.isoformat(),
+                "duration_seconds": (completed - started).total_seconds(),
+                "exit_code": None,
+                "timed_out": False,
+                "error": error,
+                "stdout_summary": "",
+                "stderr_summary": error,
+                "output_after": _scanner_output_snapshot(output_path),
+            }
+        )
+        try:
+            _write_scanner_run_receipt(receipt)
+        except Exception:
+            # Best effort only: the original failure must keep propagating.
+            pass
         # The payload finally only releases runs that reached `runs.append`.
         # Release here so a failure after install cannot retain the descriptors.
         _release_scanner_run_directory_authority(receipt)
@@ -2852,50 +3002,63 @@ def _scanners_run_payload(
                 for item in skipped
                 if isinstance(item.get("scanner"), dict)
             ]
-            try:
-                snapshot = _snapshot_scanner_inbox(target)
-            except OSError as exc:
-                # Never launch a scanner without a trustworthy pre-run inbox
-                # snapshot: rollback would otherwise publish an empty value
-                # over the real pre-run state.
-                return {
-                    "target": str(target),
-                    "errors": [f"scanner inbox snapshot failed before run: {exc}"],
-                    "runs": runs,
-                    "skipped": skipped_rows,
-                }, 2
-            before_raw = snapshot.raw
-            before_imports = [item for row in snapshot.rows if (item := _raw_row_object(row)) is not None]
-            before_ids = {
-                str(item.get("id"))
-                for item in before_imports
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            }
-            run = _scanner_run_one(target, scanner, force=force, isolated=isolated_scanners)
-            # Cover stamp/receipt failures: authority exists from `_scanner_run_one`.
-            runs.append(run)
-            if run.get("runs_directory_error"):
-                return {
-                    "target": str(target),
-                    "errors": [str(run.get("error") or "scanner runs directory is unavailable")],
-                    "runs": runs,
-                    "skipped": skipped_rows,
-                }, 1
-            _register_scanner_run_proof(scanner, run)
-            stamped_ids = _scanner_stamp_new_imports(
-                target=target,
-                scanner=scanner,
-                run=run,
-                before_ids=before_ids,
-                before_imports=before_imports,
-                before_raw=before_raw,
-                before_snapshot=snapshot,
-            )
-            run["provenance_imports_stamped"] = len(stamped_ids)
-            if stamped_ids:
-                run["stamped_import_ids"] = stamped_ids
-            _write_scanner_run_receipt(run)
-            contexts.append((scanner, run))
+            with _scanner_inbox_run_lock(target):
+                try:
+                    snapshot = _snapshot_scanner_inbox(target)
+                except OSError as exc:
+                    # Never launch a scanner without a trustworthy pre-run inbox
+                    # snapshot: rollback would otherwise publish an empty value
+                    # over the real pre-run state.
+                    return {
+                        "target": str(target),
+                        "errors": [f"scanner inbox snapshot failed before run: {exc}"],
+                        "runs": runs,
+                        "skipped": skipped_rows,
+                    }, 2
+                try:
+                    _revalidate_scanner_inbox_snapshot(target, snapshot)
+                except OSError as exc:
+                    # The lock only excludes honest Brigade writers; a same-UID
+                    # writer that replaced or modified the inbox in the gap is
+                    # caught here, before it can be stamped as scanner-created.
+                    return {
+                        "target": str(target),
+                        "errors": [f"scanner inbox changed before scanner launch: {exc}"],
+                        "runs": runs,
+                        "skipped": skipped_rows,
+                    }, 2
+                before_raw = snapshot.raw
+                before_imports = [item for row in snapshot.rows if (item := _raw_row_object(row)) is not None]
+                before_ids = {
+                    str(item.get("id"))
+                    for item in before_imports
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                }
+                run = _scanner_run_one(target, scanner, force=force, isolated=isolated_scanners)
+                # Cover stamp/receipt failures: authority exists from `_scanner_run_one`.
+                runs.append(run)
+                if run.get("runs_directory_error"):
+                    return {
+                        "target": str(target),
+                        "errors": [str(run.get("error") or "scanner runs directory is unavailable")],
+                        "runs": runs,
+                        "skipped": skipped_rows,
+                    }, 1
+                _register_scanner_run_proof(scanner, run)
+                stamped_ids = _scanner_stamp_new_imports(
+                    target=target,
+                    scanner=scanner,
+                    run=run,
+                    before_ids=before_ids,
+                    before_imports=before_imports,
+                    before_raw=before_raw,
+                    before_snapshot=snapshot,
+                )
+                run["provenance_imports_stamped"] = len(stamped_ids)
+                if stamped_ids:
+                    run["stamped_import_ids"] = stamped_ids
+                _write_scanner_run_receipt(run)
+                contexts.append((scanner, run))
         ingest_errors: list[str] = []
         ingest_payloads: list[tuple[dict[str, Any], dict[str, Any], Path, list[dict[str, Any]]]] = []
         if ingest_output:
