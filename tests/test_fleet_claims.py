@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
+import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -776,7 +779,8 @@ class TestClientClaims:
         monkeypatch.setattr(fleet_client, "renew_claim", controlled_renew)
         monkeypatch.setattr(fleet_client, "release_claim", controlled_release)
         monkeypatch.setattr(fleet_client, "_schedule_orphan_release", tracking_schedule)
-        with fleet_client.repo_claim("repo-a", ttl_seconds=60):
+        # Opt-out (#1152): this test exercises orphan cleanup, not loss policy.
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60, claim_loss_policy="continue"):
             conn = fleet_hub.init_db(db)
             try:
                 conn.execute("DELETE FROM claims")
@@ -859,7 +863,8 @@ class TestClientClaims:
         monkeypatch.setattr(fleet_client, "_run_with_deadline", controlled_deadline)
         monkeypatch.setattr(fleet_client, "renew_claim", controlled_renew)
         monkeypatch.setattr(fleet_client, "_schedule_orphan_release", tracking_schedule)
-        with fleet_client.repo_claim("repo-a", ttl_seconds=60):
+        # Opt-out (#1152): this test exercises orphan cleanup, not loss policy.
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60, claim_loss_policy="continue"):
             conn = fleet_hub.init_db(db)
             try:
                 conn.execute("DELETE FROM claims")
@@ -1434,6 +1439,79 @@ class TestDispatchWiring:
         assert held_during_run[0]["owner_conductor"] == "chef"
         assert fleet_client.fetch_claims() == []
 
+    def test_claim_loss_midrun_is_not_recorded_as_user_cancel(self, hub, workspace, monkeypatch, capsys):
+        """#1157: a mid-run claim-loss abort is printed and recorded as its
+        own failure kind, not 'canceled by user'."""
+        from brigade import aboyeur
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        ws, roster_path = workspace
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+
+        def post(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+            return 409, {
+                "granted": False,
+                "error": "held",
+                "owner": {"owner_node": NODE_B, "expires_at": "soon"},
+            }
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+        dispatched = []
+        monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or time.sleep(30))
+        assert self._run(ws, roster_path) == 2
+        err = capsys.readouterr().err
+        assert "fleet claim" in err and "was lost" in err
+        assert "run canceled: fleet claim lost to another owner" in err
+        assert "run canceled by user" not in err
+        # The receipt must carry the real failure kind (#1157 round 2), read
+        # back from run.json rather than trusting stderr.
+        receipt = json.loads((next((ws / ".brigade" / "runs").iterdir()) / "run.json").read_text(encoding="utf-8"))
+        assert receipt["status"] == "failed"
+        assert receipt["failure"]["kind"] == "fleet-claim-lost"
+        assert "fleet claim on ws was lost" in receipt["failure"]["detail"]
+
+    def test_claim_loss_kind_survives_heartbeat_receipt_failure(self, hub, workspace, monkeypatch):
+        """The terminal receipt is classified and recorded on the main thread
+        (#1157 round 2): a heartbeat-thread receipt-write failure (swallowed
+        by the best-effort callback) can no longer make the abort read back
+        as 'keyboard-interrupt'."""
+        from brigade import aboyeur
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        ws, roster_path = workspace
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+
+        def post(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+            return 409, {
+                "granted": False,
+                "error": "held",
+                "owner": {"owner_node": NODE_B, "expires_at": "soon"},
+            }
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+        real_record = aboyeur.record_run_termination
+
+        def failing_off_main(output_dir, **kwargs):
+            if threading.current_thread() is not threading.main_thread():
+                raise RuntimeError("simulated receipt write failure off the main thread")
+            return real_record(output_dir, **kwargs)
+
+        monkeypatch.setattr(aboyeur, "record_run_termination", failing_off_main)
+        monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: time.sleep(30))
+        assert self._run(ws, roster_path) == 2
+        receipt = json.loads((next((ws / ".brigade" / "runs").iterdir()) / "run.json").read_text(encoding="utf-8"))
+        assert receipt["status"] == "failed"
+        assert receipt["failure"]["kind"] == "fleet-claim-lost"
+        assert receipt["failure"]["kind"] != "keyboard-interrupt"
+
     def test_claim_taken_after_local_lock(self, hub, workspace, monkeypatch):
         """The hub claim is only ever held by the run that owns run.lock, so a
         queued sibling can neither run unclaimed nor release the winner's claim."""
@@ -1477,3 +1555,609 @@ class TestDispatchWiring:
         monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
         assert self._run(ws, roster_path) == 0
         assert dispatched == [1]
+
+    @staticmethod
+    def _receipt(ws: Path) -> dict:
+        return json.loads((next((ws / ".brigade" / "runs").iterdir()) / "run.json").read_text(encoding="utf-8"))
+
+    def test_dead_stderr_credential_refusal_still_aborts_as_fleet_credentials_rejected(
+        self, hub, workspace, monkeypatch
+    ):
+        """#1157 round 3: the credential-failure callback must record its
+        marker and fire the interrupt even when writing the diagnostic to
+        stderr fails; otherwise the exception is swallowed and the run
+        silently continues after the hub rejected this node's credentials."""
+        from brigade import aboyeur
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        ws, roster_path = workspace
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+
+        def post(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+            if body["action"] == "renew":
+                return 401, {"error": "token revoked"}
+            return 200, {"released": True}
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+
+        def fake_run(*_a, **_kw):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    payload = self._receipt(ws)
+                except (StopIteration, OSError, json.JSONDecodeError):
+                    payload = {}
+                if isinstance(payload.get("failure"), dict):
+                    return 0  # the abort landed; let the unwind finish it
+                time.sleep(0.02)
+            raise AssertionError("the credential refusal never aborted the run")
+
+        monkeypatch.setattr(aboyeur, "run", fake_run)
+        monkeypatch.setattr(sys, "stderr", _DeadStderr(sys.stderr))
+        # A permanently dead stderr also kills the outer summary print; the
+        # contract under test is the receipt classification, not that print.
+        with contextlib.suppress(ValueError):
+            self._run(ws, roster_path)
+        receipt = self._receipt(ws)
+        assert receipt["status"] == "failed"
+        assert receipt["failure"]["kind"] == "fleet-credentials-rejected"
+
+    def test_dead_stderr_claim_loss_is_recorded_fleet_claim_lost_not_user_cancel(self, hub, workspace, monkeypatch):
+        """#1157 round 3: the claim-loss marker must be recorded before the
+        fallible stderr print — with a dead stderr the independent abort
+        still fires, but the loss used to be recorded as a user cancel."""
+        from brigade import aboyeur
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        ws, roster_path = workspace
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+        monkeypatch.setattr(fleet_client, "CLAIM_LOST_CALLBACK_GRACE_SECONDS", 0.2)
+
+        def post(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+            return 409, {
+                "granted": False,
+                "error": "held",
+                "owner": {"owner_node": NODE_B, "expires_at": "soon"},
+            }
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+
+        # Poll instead of one long sleep: interrupt_main queues the
+        # KeyboardInterrupt for the interpreter's next bytecode check, which
+        # a single 30-second sleep syscall would never reach.
+        def fake_run(*_a, **_kw):
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                time.sleep(0.02)
+
+        monkeypatch.setattr(aboyeur, "run", fake_run)
+        monkeypatch.setattr(sys, "stderr", _DeadStderr(sys.stderr))
+        with contextlib.suppress(ValueError):
+            self._run(ws, roster_path)
+        receipt = self._receipt(ws)
+        assert receipt["status"] == "failed"
+        assert receipt["failure"]["kind"] == "fleet-claim-lost"
+        assert receipt["failure"]["kind"] != "keyboard-interrupt"
+
+
+class _DeadStderr:
+    """A stderr that fails the moment the fleet abort diagnostics are
+    written (closed pipe, full disk, ...); earlier traffic passes through,
+    so the run still reaches dispatch."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self._dead = False
+
+    def write(self, text: str, *args, **kwargs) -> int:
+        if self._dead or "fleet claim" in text or "fleet hub rejected" in text:
+            self._dead = True
+            raise ValueError("stderr is closed")
+        return self._inner.write(text, *args, **kwargs)
+
+    def flush(self) -> None:
+        return self._inner.flush()
+
+
+class TestClaimLossAborts:
+    """Lost ownership (#1152): when the heartbeat learns another owner holds
+    the claim, the run is aborted by default (fail closed, logged once);
+    BRIGADE_FLEET_CLAIM_LOSS=continue / claim_loss_policy="continue" is the
+    documented solo-machine opt-out."""
+
+    @pytest.fixture(autouse=True)
+    def _machine(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BRIGADE_HOME", str(home))
+        _plant_home_identity(home, NODE_A)
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "any-bearer")
+
+    @staticmethod
+    def _superseding_hub(monkeypatch):
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+
+        def post(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": body["node_id"]}}
+            return 409, {
+                "granted": False,
+                "error": "held by another node",
+                "owner": {"owner_node": NODE_B, "expires_at": "soon"},
+            }
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+
+    def test_lost_ownership_invokes_the_abort_callback_once(self, tmp_path, monkeypatch):
+        self._superseding_hub(monkeypatch)
+        seen: list[str | None] = []
+        with pytest.raises(KeyboardInterrupt):
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_claim_lost=seen.append) as decision:
+                assert decision.granted is True
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not seen:
+                    time.sleep(0.02)
+                assert seen == ["held"], "lost ownership never reached the caller"
+                pytest.fail("callback notification did not abort the run")
+        assert len(seen) == 1
+
+    def test_raising_claim_lost_callback_still_interrupts(self, tmp_path, monkeypatch, caplog):
+        """The fail-closed abort must not depend on the callback behaving
+        (#1157): a callback that raises is logged, then the run is still
+        interrupted."""
+        self._superseding_hub(monkeypatch)
+        seen: list[str | None] = []
+
+        def exploding_callback(reason: str | None) -> None:
+            seen.append(reason)
+            raise RuntimeError("callback blew up")
+
+        interrupts = []
+        monkeypatch.setattr(fleet_client._thread, "interrupt_main", lambda: interrupts.append(1))
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_claim_lost=exploding_callback):
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not seen:
+                    time.sleep(0.02)
+                assert seen == ["held"]
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not interrupts:
+                    time.sleep(0.02)
+        assert len(seen) == 1
+        assert interrupts, "a raising claim-lost callback suppressed the abort"
+        assert any("interrupting anyway" in r.message for r in caplog.records)
+
+    def test_systemexit_claim_lost_callback_still_interrupts(self, tmp_path, monkeypatch, caplog):
+        """A callback raising SystemExit (a BaseException, not Exception)
+        must not suppress the abort (#1157 round 2): the interrupt fires
+        independently of how the callback terminates."""
+        self._superseding_hub(monkeypatch)
+        seen: list[str | None] = []
+
+        def exiting_callback(reason: str | None) -> None:
+            seen.append(reason)
+            raise SystemExit(3)
+
+        interrupts = []
+        monkeypatch.setattr(fleet_client._thread, "interrupt_main", lambda: interrupts.append(1))
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_claim_lost=exiting_callback):
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not seen:
+                    time.sleep(0.02)
+                assert seen == ["held"]
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not interrupts:
+                    time.sleep(0.02)
+        assert interrupts, "a SystemExit-raising claim-lost callback suppressed the abort"
+        assert any("interrupting anyway" in r.message for r in caplog.records)
+
+    def test_blocking_claim_lost_callback_does_not_delay_the_abort(self, tmp_path, monkeypatch):
+        """A callback that blocks forever must not prevent the abort (#1157
+        round 2): the interrupt fires after a bounded grace period without
+        waiting for the callback to return."""
+        self._superseding_hub(monkeypatch)
+        monkeypatch.setattr(fleet_client, "CLAIM_LOST_CALLBACK_GRACE_SECONDS", 0.2)
+        monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.05)
+        release = threading.Event()
+
+        def blocking_callback(reason: str | None) -> None:
+            release.wait(30)  # blocks far beyond the grace window
+
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_claim_lost=blocking_callback):
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    time.sleep(0.02)
+                pytest.fail("run kept going while the claim-lost callback was stuck")
+        # The abort landed near the grace window, not after the callback's
+        # (simulated endless) wait.
+        assert time.monotonic() - started < 10
+        release.set()
+
+    def test_grace_boundary_race_fires_the_interrupt_exactly_once(self, monkeypatch):
+        """#1157 round 3: the watchdog and the callback's ``finally`` share
+        one atomic check-and-set on the one-shot fired flag. At the grace
+        boundary both paths can observe "not fired" — the interrupt must
+        still land exactly once."""
+        interrupts = []
+        monkeypatch.setattr(fleet_client._thread, "interrupt_main", lambda: interrupts.append(1))
+        monkeypatch.setattr(fleet_client, "CLAIM_LOST_CALLBACK_GRACE_SECONDS", 0.0)
+
+        # Makes the boundary race deterministic instead of lucky: the
+        # callback only returns once the watchdog has evaluated ``fired``
+        # (both paths therefore pass their independent "not fired" checks),
+        # and the watchdog's own set() stalls just before writing the flag.
+        # The racy Event is injected through fleet_client's threading
+        # namespace only — the real module stays untouched so Thread
+        # bootstrap internals keep their plain Event.
+        watchdog_checked = threading.Event()
+
+        class _RacyEvent(threading.Event):
+            def is_set(self):
+                result = super().is_set()
+                if threading.current_thread().name == "brigade-fleet-claim-abort":
+                    watchdog_checked.set()
+                return result
+
+            def set(self):
+                if threading.current_thread().name == "brigade-fleet-claim-abort":
+                    time.sleep(0.1)
+                return super().set()
+
+        shim = types.SimpleNamespace(
+            **{name: getattr(threading, name) for name in dir(threading) if not name.startswith("_")}
+        )
+        shim.Event = _RacyEvent
+        monkeypatch.setattr(fleet_client, "threading", shim)
+        seen: list[str | None] = []
+
+        def callback(reason: str | None) -> None:
+            seen.append(reason)
+            assert watchdog_checked.wait(5), "watchdog never reached its fired check"
+
+        fleet_client._abort_claim_owner(
+            "repo-a",
+            "held",
+            owner_thread=threading.main_thread(),
+            cancel_event=threading.Event(),
+            on_claim_lost=callback,
+        )
+        # A double fire from the stalled watchdog lands shortly after the
+        # callback's finally; give it the chance before counting.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and len(interrupts) < 2:
+            time.sleep(0.01)
+        assert seen == ["held"]
+        assert len(interrupts) == 1, f"expected exactly one interrupt, got {len(interrupts)}"
+
+    def test_claim_loss_off_main_thread_aborts_that_thread_cooperatively(self, tmp_path, monkeypatch, caplog):
+        """``interrupt_main()`` targets the process main thread (#1157 round
+        2): when ``repo_claim`` is entered from a worker thread the abort
+        must reach *that* thread's guarded work through the cooperative
+        ``ClaimDecision.cancel_event`` channel instead of stabbing the
+        unrelated main thread."""
+        self._superseding_hub(monkeypatch)
+        entered = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def owner() -> None:
+            try:
+                with fleet_client.repo_claim("repo-a", ttl_seconds=60) as decision:
+                    assert decision.granted is True
+                    assert decision.cancel_event is not None
+                    entered.set()
+                    # The guarded work observes the documented cancel channel.
+                    if not decision.cancel_event.wait(10):
+                        outcome["error"] = "guarded work never saw the cooperative cancel"
+                        return
+                    outcome["canceled"] = True
+            except BaseException as exc:  # noqa: BLE001 - carried to the asserts
+                outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+        worker = threading.Thread(target=owner, name="claim-owner")
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            worker.start()
+            assert entered.wait(5), "worker never entered the guarded claim"
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and "canceled" not in outcome:
+                worker.join(0.05)
+        worker.join(5)
+        assert outcome == {"canceled": True}, f"off-main-thread abort misfired: {outcome}"
+        assert any("cancel_event" in r.message for r in caplog.records)
+
+    def test_lost_ownership_default_aborts_via_main_thread_interrupt(self, tmp_path, monkeypatch):
+        self._superseding_hub(monkeypatch)
+        with pytest.raises(KeyboardInterrupt):
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60) as decision:
+                assert decision.granted is True
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    time.sleep(0.02)
+                pytest.fail("run kept going after the hub reported a new owner")
+
+    def test_continue_opt_out_keeps_the_old_behavior(self, tmp_path, monkeypatch, caplog):
+        self._superseding_hub(monkeypatch)
+        seen: list[str | None] = []
+        interrupts = []
+        monkeypatch.setattr(fleet_client._thread, "interrupt_main", lambda: interrupts.append(1))
+        monkeypatch.setenv("BRIGADE_FLEET_CLAIM_LOSS", "continue")
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_claim_lost=seen.append):
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and not any(
+                    "continuing on the local run lock" in r.message for r in caplog.records
+                ):
+                    time.sleep(0.02)
+        assert seen == [] and interrupts == []
+        assert sum("continuing on the local run lock" in r.message for r in caplog.records) == 1
+
+    def test_explicit_policy_parameter_wins_over_environment(self, tmp_path, monkeypatch):
+        self._superseding_hub(monkeypatch)
+        monkeypatch.setenv("BRIGADE_FLEET_CLAIM_LOSS", "continue")
+        with pytest.raises(KeyboardInterrupt):
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60, claim_loss_policy="abort"):
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    time.sleep(0.02)
+                pytest.fail("explicit abort policy was overridden by the environment")
+
+
+class TestExitOrphanReleaseHardening:
+    """#1157: the orphan-release background thread attempts immediately (a
+    short run must release before exit kills daemon threads), and the exit
+    path also retries a definitive 'missing' while an orphan re-acquire may
+    still be in flight — logging once if retries are exhausted."""
+
+    @pytest.fixture(autouse=True)
+    def _machine(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BRIGADE_HOME", str(home))
+        _plant_home_identity(home, NODE_A)
+        url = None
+        return home, url
+
+    def _hub_env(self, hub, monkeypatch):
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+
+    def test_orphan_release_attempts_immediately_before_backing_off(self, hub, monkeypatch):
+        self._hub_env(hub, monkeypatch)
+        monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 3600.0)
+        real = fleet_client._post_claim_blocking
+
+        def lossy(hub_url, tok, body, *, timeout):
+            status, payload = real(hub_url, tok, body, timeout=timeout)
+            if body["action"] == "acquire":
+                raise TimeoutError("response lost after commit")
+            return status, payload
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", lossy)
+        decision = fleet_client.acquire_claim("repo-a")  # commits a row we lose
+        assert not decision.granted
+        fleet_client._schedule_orphan_release(
+            "repo-a", node_id=NODE_A, holder=decision.holder or "", conductor=None, ttl_seconds=3600
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and fleet_client.fetch_claims(include_all=True):
+            time.sleep(0.02)
+        assert fleet_client.fetch_claims(include_all=True) == [], (
+            "orphan release did not attempt immediately despite the hour-long backoff"
+        )
+
+    def test_exit_retries_a_missing_answer_while_orphan_is_pending(self, hub, monkeypatch):
+        self._hub_env(hub, monkeypatch)
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.05)
+        real_renew = fleet_client.renew_claim
+        real_release = fleet_client.release_claim
+        renew_calls = {"n": 0}
+        release_calls = {"n": 0}
+
+        def renew_once_missing(target, **kwargs):
+            renew_calls["n"] += 1
+            if renew_calls["n"] == 1:
+                return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
+            return real_renew(target, **kwargs)
+
+        def release_first_missing(target, **kwargs):
+            release_calls["n"] += 1
+            if release_calls["n"] == 1:
+                return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
+            return real_release(target, **kwargs)
+
+        monkeypatch.setattr(fleet_client, "renew_claim", renew_once_missing)
+        monkeypatch.setattr(fleet_client, "release_claim", release_first_missing)
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and renew_calls["n"] < 1:
+                time.sleep(0.02)
+            assert renew_calls["n"] >= 1
+        assert release_calls["n"] == 2, "exit gave up after a definitive 'missing' with an orphan pending"
+        assert fleet_client.fetch_claims(include_all=True) == []
+
+    def test_orphan_release_retries_missing_within_uncertainty_window(self, hub, monkeypatch):
+        """A 'missing' answer during the uncertainty window is not definitive
+        (#1157): the acquire whose response was lost can still commit its row
+        after the first release is told the claim is gone, so the loop keeps
+        retrying until that late commit lands where it can be deleted."""
+        self._hub_env(hub, monkeypatch)
+        holder = "orphan-holder-late-commit"
+        # Commit the orphan row directly (the acquire whose response we lost).
+        granted = fleet_client.acquire_claim("repo-a", holder=holder)
+        assert granted.granted
+        real_release = fleet_client.release_claim
+        release_calls = {"n": 0}
+
+        def missing_then_real(target, **kwargs):
+            release_calls["n"] += 1
+            if release_calls["n"] == 1:
+                return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
+            return real_release(target, **kwargs)
+
+        monkeypatch.setattr(fleet_client, "release_claim", missing_then_real)
+        fleet_client._schedule_orphan_release("repo-a", node_id=NODE_A, holder=holder, conductor=None, ttl_seconds=60)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and fleet_client.fetch_claims(include_all=True):
+            time.sleep(0.05)
+        assert release_calls["n"] >= 2, "'missing' inside the uncertainty window ended cleanup"
+        assert fleet_client.fetch_claims(include_all=True) == [], "late-committed orphan leaked"
+
+    def test_exit_retry_is_spaced_across_a_late_reacquire_commit(self, hub, monkeypatch):
+        """Exit retries must not all complete before a late re-acquire commits
+        (#1157): spacing them across one outstanding-request timeout lets the
+        abandoned request land between retries and still be released."""
+        self._hub_env(hub, monkeypatch)
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+        real_post = fleet_client._post_claim_blocking
+        real_deadline = fleet_client._run_with_deadline
+        real_release = fleet_client.release_claim
+        reacquire_started = threading.Event()
+        allow_reacquire = threading.Event()
+        reacquire_committed = threading.Event()
+        first_release_done = threading.Event()
+        acquire_calls = {"n": 0}
+        deadline_calls = {"n": 0}
+        release_calls = {"n": 0}
+
+        def blocked_reacquire(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                acquire_calls["n"] += 1
+                if acquire_calls["n"] == 2:
+                    reacquire_started.set()
+                    assert allow_reacquire.wait(30)
+                    result = real_post(hub_url, tok, body, timeout=timeout)
+                    reacquire_committed.set()
+                    return result
+            return real_post(hub_url, tok, body, timeout=timeout)
+
+        def controlled_deadline(fn, *, timeout):
+            deadline_calls["n"] += 1
+            if deadline_calls["n"] == 2:
+                worker = threading.Thread(target=fn, daemon=True)
+                worker.start()
+                assert reacquire_started.wait(30)
+                raise TimeoutError("controlled abandoned re-acquire")
+            return real_deadline(fn, timeout=timeout)
+
+        def missing_first_then_real(target, **kwargs):
+            release_calls["n"] += 1
+            if release_calls["n"] == 1:
+                first_release_done.set()
+                return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
+            return real_release(target, **kwargs)
+
+        renew_calls = {"n": 0}
+
+        def missing_then_held(target, **kwargs):
+            renew_calls["n"] += 1
+            if renew_calls["n"] == 1:
+                return fleet_client.ClaimDecision(granted=False, reason="missing", holder=kwargs.get("holder"))
+            return fleet_client.ClaimDecision(granted=False, reason="held", holder=kwargs.get("holder"))
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", blocked_reacquire)
+        monkeypatch.setattr(fleet_client, "_run_with_deadline", controlled_deadline)
+        monkeypatch.setattr(fleet_client, "release_claim", missing_first_then_real)
+        monkeypatch.setattr(fleet_client, "renew_claim", missing_then_held)
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60, claim_loss_policy="continue"):
+            conn = fleet_hub.init_db(hub[2])
+            try:
+                conn.execute("DELETE FROM claims")
+                conn.commit()
+            finally:
+                conn.close()
+            assert reacquire_started.wait(30)
+            # The abandoned re-acquire commits only after the first exit
+            # release has already been told "missing".
+            threading.Thread(target=lambda: (first_release_done.wait(30), allow_reacquire.set()), daemon=True).start()
+        assert reacquire_committed.wait(10), "late re-acquire never committed"
+        assert release_calls["n"] >= 2, "exit did not retry after the first 'missing'"
+        assert fleet_client.fetch_claims(include_all=True) == [], "late re-acquire leaked for its TTL"
+
+    def test_exit_logs_when_orphan_cleanup_retries_are_exhausted(self, hub, monkeypatch, caplog):
+        self._hub_env(hub, monkeypatch)
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.05)
+        real_post = fleet_client._post_claim_blocking
+        real_deadline = fleet_client._run_with_deadline
+        reacquire_started = threading.Event()
+        allow_reacquire = threading.Event()
+        reacquire_finished = threading.Event()
+        timeout_observed = threading.Event()
+        acquire_calls = {"n": 0}
+        deadline_calls = {"n": 0}
+
+        def blocked_reacquire(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                acquire_calls["n"] += 1
+                if acquire_calls["n"] == 2:
+                    reacquire_started.set()
+                    assert allow_reacquire.wait(30)
+                    result = real_post(hub_url, tok, body, timeout=timeout)
+                    reacquire_finished.set()
+                    return result
+            return real_post(hub_url, tok, body, timeout=timeout)
+
+        def controlled_deadline(fn, *, timeout):
+            deadline_calls["n"] += 1
+            if deadline_calls["n"] == 2:
+                worker = threading.Thread(target=fn, daemon=True)
+                worker.start()
+                assert reacquire_started.wait(30)
+                timeout_observed.set()
+                raise TimeoutError("controlled abandoned re-acquire")
+            return real_deadline(fn, timeout=timeout)
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", blocked_reacquire)
+        monkeypatch.setattr(fleet_client, "_run_with_deadline", controlled_deadline)
+
+        def always_unavailable(target, **kwargs):
+            return fleet_client.ClaimDecision(
+                granted=False, reason="hub-unavailable", detail="down", holder=kwargs.get("holder")
+            )
+
+        # The first (heartbeat) acquire goes through the lossy path; releases
+        # always fail so exit cleanup exhausts its retry budget.
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(
+                    fleet_client,
+                    "renew_claim",
+                    lambda t, **kw: fleet_client.ClaimDecision(
+                        granted=False, reason="missing", holder=kw.get("holder")
+                    ),
+                )
+                mp.setattr(fleet_client, "release_claim", always_unavailable)
+                with fleet_client.repo_claim("repo-a", ttl_seconds=60):
+                    conn = fleet_hub.init_db(hub[2])
+                    try:
+                        conn.execute("DELETE FROM claims")
+                        conn.commit()
+                    finally:
+                        conn.close()
+                        assert reacquire_started.wait(30)
+                        assert timeout_observed.wait(30)
+                        allow_reacquire.set()
+                        assert reacquire_finished.wait(30)
+        exhausted = [r for r in caplog.records if "could not confirm" in r.message]
+        assert len(exhausted) == 1, "exit cleanup exhaustion was not logged exactly once"
+        # The exhaustion WARNING must name the residual exposure: the row
+        # lives until its TTL expires (original-review findings 2 and 3
+        # keep the timing approach; this residual is documented, not fixed).
+        assert "TTL expires" in exhausted[0].getMessage()
+        # Documented residual (#1157): a commit landing AFTER the final exit
+        # retry can no longer be released by this process — it leaks until
+        # the hub's TTL expiry. The test pins that window so a future change
+        # to the timing approach cannot silently widen it.
+        allow_reacquire.set()
+        assert reacquire_finished.wait(10), "late re-acquire never committed"
+        leaked = [c for c in fleet_client.fetch_claims(include_all=True) if c["target"] == "repo-a"]
+        assert len(leaked) == 1, "expected exactly the post-final-retry commit to leak as the documented residual"
