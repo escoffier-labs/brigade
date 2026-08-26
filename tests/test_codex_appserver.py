@@ -404,7 +404,14 @@ def test_over_cap_completed_record_ingested_via_stream_preserves_completion(monk
     assert server._output_limit_exceeded is True
     assert server.observed_completion_status("t-cap", "turn-1") == "completed"
 
-    monkeypatch.setattr(server, "request", lambda *args, **kwargs: {"turn": {"id": "turn-1"}})
+    def fake_request(method, params, timeout=None):  # noqa: ARG002
+        # Production timing: the reader notes completions concurrently, i.e.
+        # after reset_capture cleared pre-turn state and turn/start returned.
+        if method == "turn/start":
+            server._note_turn_completed("t-cap", {"id": "turn-1", "status": "completed"})
+        return {"turn": {"id": "turn-1"}}
+
+    monkeypatch.setattr(server, "request", fake_request)
     thread = codex_appserver.CodexThread(server, "t-cap", q)
     result = thread.run_turn("work", timeout=2.0)
     assert result.completed_observed is True
@@ -668,3 +675,231 @@ def test_appserver_env_reaches_child_without_seat_env(monkeypatch):
     server.close()
 
     assert captured["env"][receipt_schema.BRIGADE_RUN_ID_ENV] == "orch-appserver-1"
+
+
+def test_ingest_line_charges_parsed_record_once(monkeypatch):
+    """#1200 round 3: one valid record charges the budget exactly its length."""
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 4096)
+    line = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": "t-once", "itemId": "m", "delta": "x"},
+        }
+    ).encode("utf-8")
+    server = codex_appserver.AppServer(argv=FAKE)
+    q: queue.Queue = queue.Queue()
+    server._queues["t-once"] = q
+    server.reset_capture("t-once")
+
+    assert server._ingest_line(line) is True
+    assert server.capture_budget("t-once").used == len(line)
+
+
+def test_near_cap_normal_records_ingest_without_overflow(monkeypatch):
+    """#1200 round 3: traffic between half cap and full cap must still ingest."""
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 1024)
+    server = codex_appserver.AppServer(argv=FAKE)
+    q: queue.Queue = queue.Queue()
+    server._queues["t-near"] = q
+    server.reset_capture("t-near")
+    lines = [
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "t-near", "itemId": f"m-{i}", "delta": "y" * 150},
+            }
+        ).encode("utf-8")
+        for i in range(3)
+    ]
+    total = sum(len(line) for line in lines)
+    assert 512 < total <= 1024
+
+    for line in lines:
+        assert server._ingest_line(line) is True
+
+    budget = server.capture_budget("t-near")
+    assert budget.used == total
+    assert budget.overflowed is False
+    assert server._output_limit_exceeded is False
+
+
+def _oversized_completed_stream(raw_record: str) -> bytes:
+    return (raw_record + "\n").encode("utf-8")
+
+
+def _overflow_salvage(monkeypatch, raw_record: str):
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    server, _q = _ingestion_server(_oversized_completed_stream(raw_record))
+    server._read_loop()
+    assert server._output_limit_exceeded is True
+    return server
+
+
+def test_salvage_rejects_marker_in_string_and_nested_turn_decoy(monkeypatch):
+    """#1200 round 3: marker text and a decoy turn object must not forge salvage."""
+    raw = (
+        '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"t-cap",'
+        '"wrapper":{"turn":{"id":"ghost","status":"completed"}},'
+        '"echo":"turn/completed","pad":"' + "A" * 2048 + '"}}'
+    )
+    server = _overflow_salvage(monkeypatch, raw)
+
+    assert server.observed_completion_status("t-cap", "ghost") is None
+
+
+def test_salvage_is_string_aware_for_braces_inside_values(monkeypatch):
+    """#1200 round 3: braces inside string values must not corrupt extraction."""
+    raw = (
+        '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"t-cap",'
+        '"turn":{"id":"turn-b}","note":"braces }{ inside {\\"status\\":\\"failed\\"} string",'
+        '"status":"completed","pad":"' + "B" * 2048 + '"}}}'
+    )
+    server = _overflow_salvage(monkeypatch, raw)
+
+    assert server.observed_completion_status("t-cap", "turn-b}") == "completed"
+
+
+def test_salvage_rejects_duplicate_status_keys(monkeypatch):
+    """#1200 round 3: duplicate keys (completed then failed) must not read as success."""
+    raw = (
+        '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"t-cap",'
+        '"turn":{"id":"turn-c","status":"completed","status":"failed","pad":"' + "C" * 2048 + '"}}}'
+    )
+    server = _overflow_salvage(monkeypatch, raw)
+
+    assert server.observed_completion_status("t-cap", "turn-c") is None
+
+
+def test_salvage_rejects_duplicate_method_keys(monkeypatch):
+    raw = (
+        '{"jsonrpc":"2.0","method":"turn/completed","method":"item/completed",'
+        '"params":{"threadId":"t-cap","turn":{"id":"turn-c2","status":"completed",'
+        '"pad":"' + "C" * 2048 + '"}}}'
+    )
+    server = _overflow_salvage(monkeypatch, raw)
+
+    assert server.observed_completion_status("t-cap", "turn-c2") is None
+
+
+def test_salvage_uses_exact_params_thread_path_only(monkeypatch):
+    """#1200 round 3: decoy threadIds elsewhere never win; exact path does."""
+    raw = (
+        '{"jsonrpc":"2.0","method":"turn/completed","context":{"threadId":"evil"},'
+        '"params":{"thread":{"threadId":"also-evil"},"threadId":"t-cap",'
+        '"turn":{"id":"turn-d","inner":{"threadId":"nested"},'
+        '"status":"completed","pad":"' + "D" * 2048 + '"}}}'
+    )
+    server = _overflow_salvage(monkeypatch, raw)
+
+    assert server.observed_completion_status("evil", "turn-d") is None
+    assert server.observed_completion_status("also-evil", "turn-d") is None
+    assert server.observed_completion_status("nested", "turn-d") is None
+    assert server.observed_completion_status("t-cap", "turn-d") == "completed"
+
+
+def test_salvage_rejects_record_without_params_thread_id(monkeypatch):
+    """#1200 round 3: no top-level params.threadId means nothing to salvage."""
+    raw = (
+        '{"jsonrpc":"2.0","method":"turn/completed","extra":{"threadId":"ghost-th"},'
+        '"otherTurn":{"turn":{"id":"turn-e","status":"completed"}},'
+        '"pad":"' + "E" * 2048 + '"}'
+    )
+    server = _overflow_salvage(monkeypatch, raw)
+
+    assert server.observed_completion_status("ghost-th", "turn-e") is None
+    assert server.observed_completion_status("t-cap", "turn-e") is None
+
+
+def test_salvage_rejects_truncated_record(monkeypatch):
+    """#1200 round 3: a cut before the envelope paths complete never salvages."""
+    raw = (
+        '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"t-cap",'
+        '"turn":{"id":"turn-f","status":"compl' + "F" * 2048
+    )
+    server = _overflow_salvage(monkeypatch, raw)
+
+    assert server.observed_completion_status("t-cap", "turn-f") is None
+
+
+def test_salvage_walk_stays_within_metadata_window():
+    """#1200 round 3: fields beyond the 64 KiB walk window are never reached."""
+    server = codex_appserver.AppServer(argv=FAKE)
+    raw = (
+        '{"pad":"' + "G" * 70000 + '","jsonrpc":"2.0","method":"turn/completed",'
+        '"params":{"threadId":"t-cap","turn":{"id":"turn-g","status":"completed"}}}'
+    ).encode("utf-8")
+    assert len(raw) > codex_appserver._METADATA_WINDOW
+
+    server._note_overflow_metadata(raw)
+
+    assert server.observed_completion_status("t-cap", "turn-g") is None
+
+
+def test_salvage_accepts_well_formed_oversized_completed_record(monkeypatch):
+    raw = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+                "threadId": "t-cap",
+                "turn": {
+                    "id": "turn-h",
+                    "status": "completed",
+                    "items": [{"type": "agentMessage", "text": "Z" * 2048}],
+                },
+            },
+        }
+    )
+    server = _overflow_salvage(monkeypatch, raw)
+
+    assert server.observed_completion_status("t-cap", "turn-h") == "completed"
+
+
+def test_reused_turn_id_cannot_inherit_stale_completion(monkeypatch):
+    """#1200 round 3: reset before each turn drops stale completion entries."""
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    oversized_turn = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+                "threadId": "t-cap",
+                "turn": {
+                    "id": "turn-stale",
+                    "status": "completed",
+                    "items": [{"type": "agentMessage", "text": "Z" * 2048}],
+                },
+            },
+        }
+    )
+    server, q = _ingestion_server((oversized_turn + "\n").encode("utf-8"))
+    server._read_loop()
+    assert server.observed_completion_status("t-cap", "turn-stale") == "completed"
+
+    monkeypatch.setattr(server, "request", lambda *args, **kwargs: {"turn": {"id": "turn-stale"}})
+    thread = codex_appserver.CodexThread(server, "t-cap", q)
+    result = thread.run_turn("work", timeout=2.0)
+
+    assert result.output_limit_exceeded is True
+    assert result.completed_observed is False
+
+
+def test_output_limit_result_consumes_observed_completion():
+    """#1200 round 3: building the over-cap result consumes the completion entry."""
+    server = codex_appserver.AppServer(argv=FAKE)
+    q: queue.Queue = queue.Queue()
+    server._queues["t-consume"] = q
+    server.reset_capture("t-consume")
+    server._note_turn_completed("t-consume", {"id": "turn-x", "status": "completed"})
+    thread = codex_appserver.CodexThread(server, "t-consume", q)
+
+    first = thread._output_limit_result({}, [], "turn-x")
+
+    assert first.completed_observed is True
+    assert server.observed_completion_status("t-consume", "turn-x") is None
+
+    second = thread._output_limit_result({}, [], "turn-x")
+
+    assert second.completed_observed is False
