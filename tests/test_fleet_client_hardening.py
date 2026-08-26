@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import email
 import json
+import logging
 import os
 import stat
+import sys
 import tempfile
 import urllib.request
 from pathlib import Path
@@ -260,3 +262,53 @@ class TestHubRedirectOrigin:
     def test_handler_refuses_cross_origin_redirect(self):
         assert self._redirect("http://hub.example/events", "http://evil.example/events") is None
         assert self._redirect("http://hub.example/events", "https://hub.example/events") is None
+
+
+class TestSpoolPathFallbackWithoutDirFd:
+    """Platforms without descriptor-relative file APIs (Windows: empty
+    ``os.supports_dir_fd``) must take the documented path-based fallback
+    instead of failing inside ``dir_fd=`` calls and losing undelivered
+    events to a swallowed exception (#1157 round 3 regression)."""
+
+    @pytest.fixture()
+    def no_dir_fd(self, monkeypatch):
+        monkeypatch.setattr(os, "supports_dir_fd", set())
+
+    def test_platform_gate_forces_the_fallback(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert fleet_client._dir_fd_supported() is False
+
+    def test_ensure_private_dir_returns_none_when_dir_fd_unsupported(self, tmp_path, no_dir_fd):
+        spool_dir = tmp_path / "spool-dir"
+        assert fleet_client._ensure_private_dir(spool_dir) is None
+        assert spool_dir.is_dir()
+        if os.name == "posix":
+            assert stat.S_IMODE(os.stat(spool_dir).st_mode) == 0o700
+
+    def test_spool_append_and_atomic_rewrite_survive_without_dir_fd(self, tmp_path, no_dir_fd):
+        spool = tmp_path / "fleet-spool" / "node.jsonl"
+        with fleet_client._spool_lock(spool) as dir_fd:
+            assert dir_fd is None, "an unsupported platform must yield the path fallback, not a descriptor"
+            fleet_client._spool_append_locked(spool, {"run_id": "first"}, dir_fd=dir_fd)
+            assert [e["run_id"] for e in fleet_client._read_spool(spool)] == ["first"]
+            fleet_client._write_spool_atomic(spool, [{"run_id": "second"}], dir_fd=dir_fd)
+        assert [e["run_id"] for e in fleet_client._read_spool(spool)] == ["second"]
+        assert not list(spool.parent.glob("*.tmp")), "the fallback rewrite left a temp file behind"
+
+    def test_report_event_spools_through_the_fallback(self, home, no_dir_fd):
+        assert fleet_client.report_event({"run_id": "r1", "state": "run.started"}) is False
+        assert [e["run_id"] for e in fleet_client._read_spool(_spool())] == ["r1"]
+
+    def test_report_event_logs_when_the_spool_write_fails(self, home, monkeypatch, caplog):
+        def refusing_open(path):
+            raise fleet_client.FleetClientError(
+                f"fleet spool directory {path} could not be opened safely: simulated Windows PermissionError"
+            )
+
+        monkeypatch.setattr(fleet_client, "_ensure_private_dir", refusing_open)
+        with caplog.at_level(logging.WARNING, logger="brigade.fleet"):
+            assert fleet_client.report_event({"run_id": "r1", "state": "run.started"}) is False
+        assert any(
+            record.levelno == logging.WARNING and "could not be opened safely" in record.getMessage()
+            for record in caplog.records
+        ), "a failed spool write was swallowed silently"

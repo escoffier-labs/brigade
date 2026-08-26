@@ -80,6 +80,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -404,6 +405,20 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _SPOOL_TEMP_ATTEMPTS = 8
 
 
+def _dir_fd_supported() -> bool:
+    """Whether descriptor-relative spool operations are available here.
+
+    Windows implements none of the ``dir_fd`` parameters (``os.supports_dir_fd``
+    is empty there), so its spool writes must take the path-based fallback
+    instead. Read at call time so the live platform decides.
+    """
+    if sys.platform == "win32":
+        return False
+    # ``os.replace`` shares ``os.rename``'s dir_fd support: supports_dir_fd
+    # registers the latter only.
+    return all(fn in os.supports_dir_fd for fn in (os.open, os.rename, os.unlink, os.stat))
+
+
 def _ensure_private_dir(path: Path) -> int | None:
     """Create ``path`` (and parents), enforce 0700 through a directory
     descriptor, and return that descriptor for ``dir_fd`` use.
@@ -415,11 +430,24 @@ def _ensure_private_dir(path: Path) -> int | None:
     the same descriptor to verify the bits landed. When privacy cannot be
     enforced or verified, writing is refused (``FleetClientError``) rather
     than warned about. The caller must close the returned descriptor when it
-    has finished opening files beneath the directory. On platforms without
-    an fd-level mode API (Windows) returns ``None`` after a best-effort path
-    chmod with a warning — the documented platform gap.
+    has finished opening files beneath the directory.
+
+    On platforms without descriptor-relative APIs (Windows: ``dir_fd`` is
+    unsupported per ``os.supports_dir_fd``, which also rules out
+    ``os.fchmod``), returns ``None`` so callers take their path-based
+    fallback: a symlinked spool directory is still refused, privacy is a
+    best-effort path ``chmod`` whose failure only warns — the documented
+    platform gap (#1157 round 3).
     """
     path.mkdir(parents=True, exist_ok=True)
+    if not _dir_fd_supported():
+        if os.path.islink(path):
+            raise FleetClientError(f"fleet spool directory {path} is a symlink")
+        try:
+            os.chmod(path, 0o700)
+        except OSError as exc:
+            _LOG.warning("fleet spool directory %s could not be forced to 0700: %s", path, exc)
+        return None
     try:
         fd = os.open(str(path), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
     except OSError as exc:
@@ -433,23 +461,16 @@ def _ensure_private_dir(path: Path) -> int | None:
     try:
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             raise FleetClientError(f"fleet spool directory {path} is not a directory")
-        fchmod = getattr(os, "fchmod", None)
-        if fchmod is not None:
-            try:
-                fchmod(fd, 0o700)
-            except OSError as exc:
-                raise FleetClientError(f"fleet spool directory {path} could not be forced to 0700: {exc}") from exc
-            mode = stat.S_IMODE(os.fstat(fd).st_mode)
-            if mode != 0o700:
-                raise FleetClientError(
-                    f"fleet spool directory {path} could not be made private "
-                    f"(mode {mode:03o}, expected 700); refusing to write"
-                )
-        else:  # pragma: no cover - Windows lacks os.fchmod
-            try:
-                os.chmod(path, 0o700)
-            except OSError as exc:
-                _LOG.warning("fleet spool directory %s could not be forced to 0700: %s", path, exc)
+        try:
+            os.fchmod(fd, 0o700)
+        except OSError as exc:
+            raise FleetClientError(f"fleet spool directory {path} could not be forced to 0700: {exc}") from exc
+        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        if mode != 0o700:
+            raise FleetClientError(
+                f"fleet spool directory {path} could not be made private "
+                f"(mode {mode:03o}, expected 700); refusing to write"
+            )
     except BaseException:
         os.close(fd)
         raise
@@ -810,9 +831,12 @@ def report_event(
                 with _spool_lock(spool) as dir_fd:
                     if event not in _read_spool(spool, dir_fd=dir_fd):
                         _spool_append_locked(spool, event, dir_fd=dir_fd)
-            except Exception:
-                pass
-    except Exception:
+            except Exception as exc:
+                _LOG.warning("interrupted fleet event could not be made durable in the spool: %s", exc)
+    except Exception as exc:
+        # A failed spool write must never be silent (#1157): whatever broke
+        # it, say why before giving up on the undelivered event.
+        _LOG.warning("fleet event was not delivered and could not be spooled: %s", exc)
         return False
     if interrupted is not None:
         raise interrupted
