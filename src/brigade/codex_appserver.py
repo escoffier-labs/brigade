@@ -105,6 +105,9 @@ class TurnResult:
     detail: str = ""
     timed_out: bool = False
     output_limit_exceeded: bool = False
+    # #1200: True only when a turn/completed notification for this turn id was
+    # actually observed on the stream before the capture cap hit.
+    completed_observed: bool = False
 
 
 class AppServer:
@@ -623,6 +626,7 @@ class CodexThread:
                 thread_id=self.thread_id,
                 detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
                 output_limit_exceeded=True,
+                completed_observed=True,
             )
         if status == "completed":
             return TurnResult(

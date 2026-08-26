@@ -299,10 +299,37 @@ def test_consume_caps_deltas_during_accumulation(monkeypatch):
 
     assert result.output_limit_exceeded is True
     assert result.ok is False
+    assert result.completed_observed is False
     assert len(result.text.encode("utf-8")) <= 256
     assert server.capture_budget("thread-1").used <= 256
     assert server.capture_budget("thread-1").overflowed is True
     assert "combined output exceeded" in result.detail
+
+
+def test_over_cap_after_turn_completed_observed_keeps_completion_signal(monkeypatch):
+    """#1200: cap hit only when binding the final answer still records the observed completion."""
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 64)
+    q: queue.Queue = queue.Queue()
+    server = _BudgetStubServer()
+    thread = codex_appserver.CodexThread(server, "thread-1", q)
+    q.put({"method": "item/agentMessage/delta", "params": {"itemId": "msg-1", "delta": "hi"}})
+    q.put(
+        {
+            "method": "turn/completed",
+            "params": {
+                "turn": {
+                    "id": "turn-1",
+                    "status": "completed",
+                    "items": [{"type": "agentMessage", "text": "F" * 4096}],
+                }
+            },
+        }
+    )
+
+    result = thread.run_turn("work", timeout=2.0)
+
+    assert result.output_limit_exceeded is True
+    assert result.completed_observed is True
 
 
 def test_read_loop_stops_queueing_after_line_cap(monkeypatch):

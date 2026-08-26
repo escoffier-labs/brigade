@@ -851,7 +851,13 @@ def dispatch(
         ) -> WorkerResult:
             bounded_text = message_envelope.truncate_utf8(result.text)
             over_cap = _is_output_limit_failure(result)
-            preserved = _is_appserver_output_limit(result) and bool(bounded_text.strip())
+            # #1200: salvage stays a diagnostic only; ok=True additionally
+            # requires an observed turn/completed for this turn (#1144 intent).
+            preserved = (
+                _is_appserver_output_limit(result)
+                and bool(bounded_text.strip())
+                and bool(getattr(result, "turn_completed", False))
+            )
             captured = message_envelope.emit(
                 bounded_text,
                 kind="worker-result",
@@ -916,10 +922,11 @@ def dispatch(
                 return finish(result, agent)
             finished = finish(result, agent)
             if _is_appserver_output_limit(result):
-                # #1144: an over-cap capture is a transport artifact, not a
-                # seat-health signal. Preserved text was already delivered as
-                # ok above; an empty salvage must neither same-seat retry nor
-                # quarantine the seat.
+                # #1144/#1200: an over-cap capture is a transport artifact, not
+                # a seat-health signal. Preserved text was delivered as ok only
+                # when turn/completed was observed; otherwise it rides along as
+                # an ok=False diagnostic. Either way, neither same-seat retry
+                # nor quarantine applies.
                 return finished
             failure = failure_for_worker_result(finished)
             decision = decide_retry(failure, seat=assignment.worker, state=quarantine_state)
