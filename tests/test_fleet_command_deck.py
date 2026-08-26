@@ -531,6 +531,47 @@ def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(
         assert HOLDER_TOKEN not in body and "a" * 64 not in body
 
 
+def _asset_request(hub, path: str):
+    """Raw bytes request for binary assets; does not decode as text."""
+    host, port = hub
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    conn.request("GET", path, headers={})
+    response = conn.getresponse()
+    data = response.read()
+    headers = {k.lower(): v for k, v in response.getheaders()}
+    result = (response.status, headers, data)
+    conn.close()
+    return result
+
+
+def test_command_deck_asset_routes_and_metadata(tmp_path):
+    with _start_hub(tmp_path, CONFIG) as (hub, _db):
+        for path, expected_type in (
+            ("/favicon.ico", "image/x-icon"),
+            ("/favicon-32x32.png", "image/png"),
+            ("/apple-touch-icon.png", "image/png"),
+            ("/icon-192.png", "image/png"),
+            ("/icon-512.png", "image/png"),
+            ("/site.webmanifest", "application/manifest+json"),
+        ):
+            status, headers, body = _asset_request(hub, path)
+            assert status == 200, path
+            assert headers["content-type"].startswith(expected_type), path
+            assert int(headers["content-length"]) == len(body), path
+            assert headers["x-content-type-options"] == "nosniff", path
+
+        for path in ("/", "/deck", "/deck/repos"):
+            status, _headers, body = _request(hub, "GET", path, headers=_bearer())
+            assert status == 200, path
+            assert '<link rel="icon" type="image/x-icon" href="/favicon.ico"' in body
+            assert '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"' in body
+            assert '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"' in body
+            assert '<link rel="manifest" href="/site.webmanifest"' in body
+            assert '<meta name="theme-color" content="#111617"' in body
+            assert '<meta name="application-name" content="Fleet Hub"' in body
+            assert '<meta name="apple-mobile-web-app-title" content="Fleet Hub"' in body
+
+
 class TestDeckCli:
     def test_flag_precedence_env_fallback_and_forwarding(self, tmp_path, monkeypatch):
         from brigade import cli

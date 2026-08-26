@@ -685,6 +685,13 @@ def _document(title: str, nonce: str, nav: str, body: str) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{REFRESH_SECONDS}">
+<meta name="theme-color" content="#111617">
+<meta name="application-name" content="Fleet Hub">
+<meta name="apple-mobile-web-app-title" content="Fleet Hub">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
 <title>{esc(title)}</title>
 <style nonce="{nonce_attr}">
 body {{

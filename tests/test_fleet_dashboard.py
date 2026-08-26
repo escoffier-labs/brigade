@@ -292,6 +292,74 @@ class TestNoSecretsInHtml:
         assert "&lt;script&gt;x" in text
 
 
+def _asset_request(hub, path: str):
+    """Raw bytes request for binary assets; does not decode as text."""
+    host, port = hub
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    conn.request("GET", path, headers={})
+    response = conn.getresponse()
+    data = response.read()
+    headers = {k.lower(): v for k, v in response.getheaders()}
+    result = (response.status, headers, data)
+    conn.close()
+    return result
+
+
+class TestAssets:
+    def test_asset_routes_served_without_auth(self, hub):
+        for path, expected_type in (
+            ("/favicon.ico", "image/x-icon"),
+            ("/favicon-32x32.png", "image/png"),
+            ("/apple-touch-icon.png", "image/png"),
+            ("/icon-192.png", "image/png"),
+            ("/icon-512.png", "image/png"),
+            ("/site.webmanifest", "application/manifest+json"),
+        ):
+            status, headers, body = _asset_request(hub, path)
+            assert status == 200, path
+            assert headers["content-type"].startswith(expected_type), path
+            assert int(headers["content-length"]) == len(body), path
+            assert headers["x-content-type-options"] == "nosniff", path
+            assert "public" in headers["cache-control"], path
+
+    def test_webmanifest_shape(self, hub):
+        status, _headers, body = _asset_request(hub, "/site.webmanifest")
+        assert status == 200
+        manifest = json.loads(body.decode("utf-8"))
+        assert manifest["name"] == "Brigade Fleet Hub"
+        assert manifest["short_name"] == "Fleet Hub"
+        assert manifest["start_url"] == "/"
+        assert manifest["display"] == "standalone"
+        assert manifest["theme_color"] == "#111617"
+        assert manifest["background_color"] == "#182022"
+        icons = {icon["sizes"]: icon for icon in manifest["icons"]}
+        assert "192x192" in icons and "512x512" in icons
+        for icon in manifest["icons"]:
+            assert icon["purpose"] == "any maskable"
+            assert icon["type"] == "image/png"
+
+    def test_unknown_asset_like_paths_still_404(self, hub):
+        for path in ("/favicon-64x64.png", "/site.webmanifest.json", "/assets/favicon.ico", "/icon-999.png"):
+            status, _headers, _text = _request(hub, "GET", path)
+            assert status == 404, path
+
+    def test_legacy_pages_include_asset_metadata(self, hub):
+        for path in ("/view/machines", "/view/repos"):
+            status, _headers, body = _request(hub, "GET", path, headers=_bearer())
+            assert status == 200, path
+            assert '<link rel="icon" type="image/x-icon" href="/favicon.ico"' in body
+            assert '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"' in body
+            assert '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"' in body
+            assert '<link rel="manifest" href="/site.webmanifest"' in body
+            assert '<meta name="theme-color" content="#111617"' in body
+            assert '<meta name="application-name" content="Fleet Hub"' in body
+            assert '<meta name="apple-mobile-web-app-title" content="Fleet Hub"' in body
+
+    def test_api_routes_still_require_auth(self, hub):
+        for path in ("/status", "/claims", "/nodes", "/cloud", "/models"):
+            assert _request(hub, "GET", path)[0] == 401, path
+
+
 class TestPureRendering:
     def test_bucket_mapping(self):
         assert fleet_dashboard.bucket_for("run.completed", age_seconds=0) == "succeeded"

@@ -94,6 +94,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import importlib.resources
 import ipaddress
 import json
 import os
@@ -123,6 +124,30 @@ _DASHBOARD_COOKIE_PURPOSE = b"brigade-fleet-dashboard-cookie-v1"
 _DASHBOARD_PREFIX = "/view/"
 _TAILSCALE_IDENTITY_HEADER = "Tailscale-User-Login"
 _TAILSCALE_IDENTITY_MAX_LEN = 256
+
+# Static branding assets under ``brigade/assets/fleet_hub``; served without
+# auth because they carry no fleet data. Paths are exact and looked up by
+# basename only (no traversal).
+_ASSET_NAMES = frozenset(
+    {
+        "favicon.ico",
+        "favicon-32x32.png",
+        "apple-touch-icon.png",
+        "icon-192.png",
+        "icon-512.png",
+        "site.webmanifest",
+    }
+)
+_ASSET_CONTENT_TYPES: dict[str, str] = {
+    "favicon.ico": "image/x-icon",
+    "favicon-32x32.png": "image/png",
+    "apple-touch-icon.png": "image/png",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+    "site.webmanifest": "application/manifest+json",
+}
+_ASSET_ROUTES = {f"/{name}": name for name in _ASSET_NAMES}
+_ASSET_CACHE_CONTROL = "public, max-age=86400"
 
 CLAIM_ACTIONS = frozenset({"acquire", "renew", "release", "inspect"})
 # Request scopes (issue #1141): "holder" is the fencing-token contract; "node"
@@ -1676,6 +1701,33 @@ def make_handler(
             self.end_headers()
             self.wfile.write(data)
 
+        def _serve_asset(self, path: str) -> None:
+            """Serve an exact branding asset from the package resources.
+
+            No auth is required: these files carry no fleet data. The path is
+            looked up by basename inside ``brigade/assets/fleet_hub`` via
+            ``importlib.resources`` so there is no caller-selected filesystem
+            path and no traversal.
+            """
+            name = _ASSET_ROUTES.get(path)
+            if name is None:
+                self._send_json(404, {"error": "not found"})
+                return
+            try:
+                resource = importlib.resources.files("brigade") / "assets" / "fleet_hub" / name
+                data = resource.read_bytes()
+            except (OSError, ValueError, KeyError):
+                self._send_json(404, {"error": "not found"})
+                return
+            content_type = _ASSET_CONTENT_TYPES.get(name, "application/octet-stream")
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", _ASSET_CACHE_CONTROL)
+            self.end_headers()
+            self.wfile.write(data)
+
         def _serve_dashboard(self, path: str, query: str) -> None:
             plain = "text/plain; charset=utf-8"
             view = fleet_dashboard.DEFAULT_VIEW if path == "/" else path[len(_DASHBOARD_PREFIX) :]
@@ -1836,6 +1888,9 @@ def make_handler(
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             path, _, query = self.path.partition("?")
+            if path in _ASSET_ROUTES:
+                self._serve_asset(path)
+                return
             if path == "/health":
                 self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
                 return

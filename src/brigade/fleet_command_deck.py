@@ -921,6 +921,13 @@ def _document(body: str, *, nonce: str, now: datetime) -> str:
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta http-equiv="refresh" content="10">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta name="theme-color" content="#111617">'
+        '<meta name="application-name" content="Fleet Hub">'
+        '<meta name="apple-mobile-web-app-title" content="Fleet Hub">'
+        '<link rel="icon" type="image/x-icon" href="/favicon.ico">'
+        '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">'
+        '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">'
+        '<link rel="manifest" href="/site.webmanifest">'
         "<title>Command Deck</title>"
         f'<style nonce="{_esc(nonce)}">{_STYLE}</style>'
         f'<script nonce="{_esc(nonce)}">{_SCRIPT}</script>'
