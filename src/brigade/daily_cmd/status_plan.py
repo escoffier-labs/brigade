@@ -125,16 +125,68 @@ def _age_hours(value: object) -> float | None:
     return (_now() - parsed).total_seconds() / 3600
 
 
+def _slim_section(
+    payload: dict[str, Any], *, count_keys: tuple[str, ...] = ("issue_count", "open_count", "pending_count")
+) -> dict[str, Any]:
+    """Keep only identity/count/top-issue fields from a full health payload.
+
+    Daily status only reports counts and the top issue per subsystem; retaining
+    the raw section payloads (full queues, evidence bundles, check lists) kept
+    every section alive simultaneously and scaled peak RSS with workspace size.
+    """
+    slimmed: dict[str, Any] = {}
+    for key in ("config_path", "valid", "status", "configured"):
+        if key in payload:
+            slimmed[key] = payload[key]
+    for key in count_keys:
+        if key in payload:
+            slimmed[key] = payload[key]
+    for key in ("top_issue", "top_action", "top_pending", "top_finding"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            slimmed[key] = {
+                item_key: value.get(item_key)
+                for item_key in ("id", "name", "detail", "safe_summary", "severity", "status")
+                if item_key in value
+            }
+    return slimmed
+
+
+def _safe_daily_ref(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        item_key: value.get(item_key)
+        for item_key in ("action_id", "id", "status", "source_subsystem", "source_local_id", "safe_summary")
+        if item_key in value
+    }
+
+
 def _daily_center_status_payload(target: Path) -> dict[str, Any]:
     active = work_cmd._active_session_info(target)
     pending_tasks = work_cmd._pending_tasks(target)
     pending_imports = work_cmd._pending_imports(target)
-    action_queue = center_cmd.actions_health(target)
-    review_queue_count = len(pending_imports) + int(action_queue.get("open_count") or 0)
-    handoffs = handoff_cmd.draft_queue_payload(target)
-    memory = memory_cmd.health(target)
+    action_queue_full = center_cmd.actions_health(target)
+    review_queue_count = len(pending_imports) + int(action_queue_full.get("open_count") or 0)
+    handoff_drafts_full = handoff_cmd.draft_queue_payload(target)
+    handoff_counts = handoff_drafts_full.get("counts") if isinstance(handoff_drafts_full.get("counts"), dict) else {}
+    handoffs = {
+        "counts": handoff_counts,
+        "draft_count": handoff_drafts_full.get("draft_count"),
+        "issue_count": handoff_drafts_full.get("issue_count"),
+        "top_issue": handoff_drafts_full.get("top_issue"),
+        "latest_ingest_run": handoff_drafts_full.get("latest_ingest_run"),
+    }
+    del handoff_drafts_full
+    action_queue = {
+        **_slim_section(action_queue_full),
+        "open_count": action_queue_full.get("open_count"),
+        "top_action": _safe_daily_ref(action_queue_full.get("top_action")),
+    }
+    del action_queue_full
+    memory = _slim_section(memory_cmd.health(target))
     security = _daily_security_health(target)
-    notifications = notifications_cmd.health(target)
+    notifications = _slim_section(notifications_cmd.health(target))
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": "daily-center-status", "version": SCHEMA_VERSION},
@@ -214,22 +266,29 @@ def status_payload(target: Path) -> dict[str, Any]:
         {"latest": None, "checks": [], "issue_count": 0, "top_issue": None},
     )
     status_section_checks.append(check)
-    candidates = _all_candidates(
-        target,
-        diagnostics=status_section_checks,
-        operator_report_health=operator_report_health,
-    )
-    selected = _selected(candidates)
-    handoffs = center.get("handoff_drafts") if isinstance(center.get("handoff_drafts"), dict) else {}
-    memory = center.get("memory_care") if isinstance(center.get("memory_care"), dict) else {}
-    security = center.get("security") if isinstance(center.get("security"), dict) else {}
-    notifications = center.get("notifications") if isinstance(center.get("notifications"), dict) else {}
-    tools = center.get("tool_catalog") if isinstance(center.get("tool_catalog"), dict) else {}
     latest_report = (
         operator_report_health.get("latest")
         if isinstance(operator_report_health, dict) and isinstance(operator_report_health.get("latest"), dict)
         else None
     )
+    slim_report_health = {
+        key: operator_report_health.get(key)
+        for key in ("latest", "latest_diff", "issue_count", "top_issue", "checks")
+        if isinstance(operator_report_health, dict) and key in operator_report_health
+    }
+    del operator_report_health
+    candidates = _all_candidates(
+        target,
+        diagnostics=status_section_checks,
+        operator_report_health=slim_report_health,
+    )
+    selected = _selected(candidates)
+    del candidates
+    handoffs = center.get("handoff_drafts") if isinstance(center.get("handoff_drafts"), dict) else {}
+    memory = center.get("memory_care") if isinstance(center.get("memory_care"), dict) else {}
+    security = center.get("security") if isinstance(center.get("security"), dict) else {}
+    notifications = center.get("notifications") if isinstance(center.get("notifications"), dict) else {}
+    tools = center.get("tool_catalog") if isinstance(center.get("tool_catalog"), dict) else {}
     daily_health_fallback = {
         "schema_version": SCHEMA_VERSION,
         "config_path": str(_config_path(target)),

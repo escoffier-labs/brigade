@@ -98,6 +98,30 @@ def _plant_home_identity(home: Path, node_id: str) -> None:
     path.write_text(node_mod._format_node_toml(identity), encoding="utf-8")
 
 
+def _bound_find_workspace_to_tmp(monkeypatch, tmp_path: Path) -> None:
+    """Keep real discovery, but never climb past the pytest sandbox.
+
+    With ``TMPDIR`` under a host home that has ``~/.brigade/node.toml``,
+    ``find_workspace_for_path`` otherwise returns that host workspace.
+    """
+    real = fleet_client.find_workspace_for_path
+    try:
+        bound = tmp_path.resolve()
+    except OSError:
+        bound = tmp_path
+
+    def find_workspace_for_path(start: Path) -> Path | None:
+        found = real(start)
+        if found is None:
+            return None
+        try:
+            return found if found.resolve().is_relative_to(bound) else None
+        except OSError:
+            return None
+
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", find_workspace_for_path)
+
+
 class TestHubScopes:
     def test_acquire_scope_node_supersedes_own_dead_lease_only(self, hub):
         url, token, _db = hub
@@ -249,6 +273,7 @@ class TestHubScopes:
         status, payload = _post(url, token, release)
         assert status == 409 and payload["released"] is False
         assert "re-acquired" in payload["error"] and payload["owner"]["owner_conductor"] == "new-run"
+        assert f"now acquired {payload['owner']['acquired_at']}" in payload["error"]
         assert _post(url, token, _claim("renew", holder="fresh"))[1]["renewed"] is True
         # The current row's acquired_at releases it; force is fenced too when given.
         current = _post(url, token, inspect)[1]["claim"]["acquired_at"]
@@ -595,6 +620,7 @@ class TestReleaseCli:
 
         url, token, _db = hub
         _env(monkeypatch, url, token)
+        _bound_find_workspace_to_tmp(monkeypatch, tmp_path)
         ws_a, run_dir = self._dead_run(tmp_path / "work")
         lock = runguard.lock_path(ws_a)
         lock.mkdir(parents=True)
@@ -678,7 +704,10 @@ class TestReleaseCli:
 
         monkeypatch.setattr(fleet_client, "inspect_claim", inspect_then_new_run)
         assert cli.main(["fleet", "claims", "--release", "api"]) == 1
-        assert "re-acquired since it was inspected" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "re-acquired since it was inspected" in err
+        fresh = fleet_client.fetch_claims()[0]
+        assert fresh["acquired_at"] in err
         # 409, nothing deleted: the fresh run's claim survives and renews.
         assert [c["owner_conductor"] for c in fleet_client.fetch_claims()] == ["new-run"]
         assert _post(url, token, _claim("renew", target="api", holder="fresh"))[1]["renewed"] is True

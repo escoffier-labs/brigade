@@ -61,6 +61,9 @@ Thumbs.db
 !/scripts/verify_version_check_endpoint.py
 !/scripts/hyper-v-native-acceptance.ps1
 !/scripts/measure_work_store.py
+!/scripts/verify-fast
+!/scripts/ci_pytest_shard.py
+!/scripts/verify_lock.py
 /skills/
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE

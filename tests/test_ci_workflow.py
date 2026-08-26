@@ -294,6 +294,54 @@ def test_ci_component_manifest_provenance_job_installs_dev_test_dependencies():
     assert section.index(install) < section.index(pytest)
 
 
+def test_ci_workflow_cancels_superseded_runs_for_the_same_pr_or_ref():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    header = text[: text.index("jobs:")]
+    assert "group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}" in header
+    assert "cancel-in-progress: true" in header
+
+
+def test_ci_workflow_runs_four_shards_on_every_supported_python():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    shards = _workflow_job_section(text, "test-shards")
+    assert "name: test shard (${{ matrix.python }}, ${{ matrix.shard }})" in shards
+    assert 'python: ["3.10", "3.11", "3.12"]' in shards
+    assert "shard: [0, 1, 2, 3]" in shards
+    assert "fail-fast: false" in shards
+    assert "python scripts/ci_pytest_shard.py" in shards
+    assert '--shard-index "${{ matrix.shard }}" --shard-count 4' in shards
+
+
+def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    shards = _workflow_job_section(text, "test-shards")
+    coverage = _workflow_job_section(text, "coverage")
+    protected = _workflow_job_section(text, "test")
+    assert "COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}" in shards
+    assert "--cov=brigade --cov-report=\n" in shards
+    assert "--cov-report=term" not in shards
+    assert "uses: actions/upload-artifact@v4" in shards
+    assert "include-hidden-files: true" in shards
+    assert "uses: actions/download-artifact@v5" in coverage
+    assert "pattern: coverage-*" in coverage
+    assert "python -m coverage combine .coverage-data" in coverage
+    assert "python -m coverage report --fail-under=78" in coverage
+    assert "name: test (${{ matrix.python }})" in protected
+    assert "needs: [test-shards, coverage]" in protected
+    assert 'python: ["3.10", "3.11", "3.12"]' in protected
+    assert "if: ${{ always() }}" in protected
+    assert "SHARDS_RESULT: ${{ needs.test-shards.result }}" in protected
+    assert "COVERAGE_RESULT: ${{ needs.coverage.result }}" in protected
+
+
+def test_ci_workflow_caches_pip_for_jobs_that_install_dev_extras():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    for job_name in ("lint", "test-shards", "coverage", "component-manifest-provenance", "repo-metadata"):
+        section = _workflow_job_section(text, job_name)
+        assert "cache: pip" in section
+        assert "cache-dependency-path: pyproject.toml" in section
+
+
 def test_agents_doc_names_ci_only_jobs_outside_local_verify():
     text = (ROOT / "AGENTS.md").read_text()
 

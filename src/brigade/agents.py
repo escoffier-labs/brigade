@@ -475,6 +475,8 @@ class AgentResult:
     request_id: str | None = None
     acpx_version: str | None = None
     safe_events: tuple[dict[str, object], ...] = ()
+    # #1200: app-server only; True when turn/completed for this turn was observed.
+    turn_completed: bool = False
     failure_phase: str | None = None
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
@@ -1153,6 +1155,24 @@ def run_agent(
             reasoning=reasoning,
         )
 
+    if getattr(result, "incomplete_process_group", False):
+        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        incomplete_detail = "process group kept the output pipes open after child exit; terminated as incomplete"
+        failure_detail = scrub_detail(safe_stderr.strip() or incomplete_detail)[:200]
+        return AgentResult(
+            text=safe_text,
+            ok=False,
+            detail=failure_detail,
+            failure_phase="harness",
+            failure_kind="incomplete-process-group",
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            timed_out=False,
+            requested_model=model,
+            reasoning=reasoning,
+        )
+
     if result.decode_failed:
         safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
         failure_detail = scrub_detail(safe_stderr.strip() or result.decode_failure_detail)[:200]
@@ -1413,6 +1433,7 @@ def run_codex_appserver(
             transport="codex-app-server",
             requested_model=model,
             reasoning=reasoning,
+            turn_completed=getattr(turn, "completed_observed", False),
         )
     if not turn.ok:
         return AgentResult(

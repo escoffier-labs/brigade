@@ -3696,3 +3696,55 @@ def test_tools_cli(tmp_path, monkeypatch):
         ("doctor", {"target": tmp_path, "json_output": True}),
         ("import-issues", {"target": tmp_path, "json_output": True}),
     ]
+
+
+def test_inbox_archive_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    """Round 6 (M2): archive reads and publishes inside the canonical locks."""
+    import contextlib
+
+    _init_git_repo(tmp_path)
+    from brigade.work_cmd import ledger as ledger_mod
+
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    promoted = work_cmd._make_import("Archive race promoted", kind="task", source="repo-scan")
+    promoted.update({"status": "promoted", "updated_at": "2026-05-20T12:00:00+00:00"})
+    pending = work_cmd._make_import("Keep pending race", kind="task", source="repo-scan")
+    pending.update({"status": "pending", "updated_at": "2026-05-20T12:00:00+00:00"})
+    work_cmd._write_imports(tmp_path, [promoted, pending])
+
+    inbox = ledger_mod.helpers._imports_path(tmp_path)
+    real = ledger_mod._canonical_inbox_write
+
+    @contextlib.contextmanager
+    def patched(target):
+        with inbox.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "id": "scan-archive-1",
+                        "text": "scanner archive row",
+                        "kind": "task",
+                        "source": "scanner",
+                        "status": "pending",
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        with real(target):
+            yield
+
+    monkeypatch.setattr(ledger_mod, "_canonical_inbox_write", patched)
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 0
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    # The stale promoted row was archived out of the inbox...
+    assert promoted["id"] not in final
+    assert pending["id"] in final
+    # ...and the scanner commit landing before publication survived.
+    assert "scan-archive-1" in final, f"scanner commit deleted by archive: {sorted(final)}"
+    assert final["scan-archive-1"]["status"] == "pending"

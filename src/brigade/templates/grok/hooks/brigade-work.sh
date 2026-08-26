@@ -137,7 +137,7 @@ is_edit_tool() {
 
 is_raw_verification() {
   [[ -n "$tool_command" ]] || return 1
-  grep -Eiq '(^|[;&|[:space:]])(\.?/?scripts/verify|pytest|uv[[:space:]]+run[[:space:]]+pytest|python[0-9.]*[[:space:]]+-m[[:space:]]+pytest|ruff|mypy|pyright|eslint|tsc|vitest|jest|npm[[:space:]]+(run[[:space:]]+)?(test|lint|build|check|typecheck)|pnpm[[:space:]]+(run[[:space:]]+)?(test|lint|build|check|typecheck)|yarn[[:space:]]+(run[[:space:]]+)?(test|lint|build|check|typecheck)|bun[[:space:]]+(run[[:space:]]+)?(test|lint|build|check|typecheck)|go[[:space:]]+(test|vet|build)|cargo[[:space:]]+(test|check|clippy|build)|make[[:space:]]+(test|check|verify|lint|build)|just[[:space:]]+(test|check|verify|lint|build))([[:space:]]|$)' <<<"$tool_command"
+  grep -Eiq '(^|[;&|[:space:]])(([^;&|[:space:]]+/)?scripts/(verify-focused|verify)|pytest|uv[[:space:]]+run[[:space:]]+pytest|python[0-9.]*[[:space:]]+-m[[:space:]]+pytest|ruff|mypy|pyright|eslint|tsc|vitest|jest|npm[[:space:]]+(run[[:space:]]+)?(test|lint|build|check|typecheck)|pnpm[[:space:]]+(run[[:space:]]+)?(test|lint|build|check|typecheck)|yarn[[:space:]]+(run[[:space:]]+)?(test|lint|build|check|typecheck)|bun[[:space:]]+(run[[:space:]]+)?(test|lint|build|check|typecheck)|go[[:space:]]+(test|vet|build)|cargo[[:space:]]+(test|check|clippy|build)|make[[:space:]]+(test|check|verify|lint|build)|just[[:space:]]+(test|check|verify|lint|build))([[:space:]]|$)' <<<"$tool_command"
 }
 
 is_direct_brigade_verification() {

@@ -163,16 +163,18 @@ func verifyMaterializedHashes(text, rawJSON string, envMap map[string]any, artif
 			}
 		}
 		stored, _ := art["content_hash"].(string)
-		if stored == "" || !strings.HasPrefix(stored, "sha256:") {
-			continue
-		}
-		want := strings.TrimPrefix(stored, "sha256:")
-		if len(want) != 64 {
-			continue
-		}
 		kind, _ := art["kind"].(string)
 		url, _ := art["url"].(string)
 		computedText := provenance.SHA256Bytes([]byte(textnorm.Normalize(text)))
+		// #1203: an emitted artifact body must carry a canonical SHA-256
+		// digest. A missing, unprefixed, malformed, or short content_hash is
+		// itself a mismatch — the body stays ineligible instead of shipping
+		// under a clean item.
+		if !strings.HasPrefix(stored, "sha256:") || !canonicalHexDigest(strings.TrimPrefix(stored, "sha256:")) {
+			out = append(out, hashMismatch{Kind: "artifact", Expected: stored, Actual: computedText, Scope: "artifact.content_hash", Artifact: id})
+			continue
+		}
+		want := strings.TrimPrefix(stored, "sha256:")
 		// #1030: a kind=url content_hash that matches the URL string must not
 		// satisfy integrity when artifact text is present. The URL digest is
 		// only an alternative for URL-only (no-text) rows, which this loop
@@ -358,7 +360,22 @@ func loadItemsForSearchIntegrity(db itemQuerier, ids []string) (map[string]searc
 	return out, rows.Err()
 }
 
+// applySearchIntegrity verifies each result's item, attaches envelope fields,
+// and clears the snippet of ineligible hits. Caller-supplied snippets are kept
+// for eligible hits (used by paths whose snippets never come from the FTS row,
+// such as exact code-reference lookup).
 func applySearchIntegrity(db *sql.DB, results []SearchResult) error {
+	return applySearchIntegrityDetail(db, results, "", false)
+}
+
+// applySearchIntegrityWithVerifiedSnippets also rebuilds eligible snippets
+// from the verified in-memory item text so a modified or stale FTS row cannot
+// inject snippet wording (#1202). The FTS-derived snippet is discarded either way.
+func applySearchIntegrityWithVerifiedSnippets(db *sql.DB, results []SearchResult, query string) error {
+	return applySearchIntegrityDetail(db, results, query, true)
+}
+
+func applySearchIntegrityDetail(db *sql.DB, results []SearchResult, query string, rebuildSnippets bool) error {
 	items, err := loadItemsForSearchIntegrity(db, searchResultIDs(results))
 	if err != nil {
 		return err
@@ -374,6 +391,8 @@ func applySearchIntegrity(db *sql.DB, results []SearchResult) error {
 		results[i].TrustLabel = view.TrustLabel
 		if !contentEligible(view) {
 			results[i].Snippet = ""
+		} else if rebuildSnippets {
+			results[i].Snippet = verifiedSnippet(item.Text, query)
 		}
 		if view.IntegrityMismatch {
 			results[i].IntegrityMismatch = true
@@ -383,6 +402,95 @@ func applySearchIntegrity(db *sql.DB, results []SearchResult) error {
 		}
 	}
 	return nil
+}
+
+type searchQueryTerm struct {
+	value  string
+	prefix bool
+}
+
+// searchQueryTerms mirrors the term parsing of ftsQuery: whitespace-separated
+// terms, a trailing '*' marks a prefix match, quotes are stripped.
+func searchQueryTerms(query string) []searchQueryTerm {
+	fields := strings.Fields(query)
+	terms := make([]searchQueryTerm, 0, len(fields))
+	for _, field := range fields {
+		prefix := false
+		if len(field) > 1 && strings.HasSuffix(field, "*") {
+			prefix = true
+			field = strings.TrimSuffix(field, "*")
+		}
+		field = strings.ToLower(strings.Trim(field, `"`))
+		if field == "" {
+			continue
+		}
+		terms = append(terms, searchQueryTerm{value: field, prefix: prefix})
+	}
+	return terms
+}
+
+const verifiedSnippetWindow = 20
+
+// verifiedSnippet rebuilds a search snippet from verified item text so a
+// modified or stale FTS row cannot inject snippet wording (#1202). Matching
+// tokens are wrapped in brackets with "..." marking truncation.
+func verifiedSnippet(text, query string) string {
+	tokens := strings.Fields(text)
+	if len(tokens) == 0 {
+		return ""
+	}
+	terms := searchQueryTerms(query)
+	marked := make([]bool, len(tokens))
+	firstHit := -1
+	for i, token := range tokens {
+		folded := strings.ToLower(token)
+		for _, term := range terms {
+			if (term.prefix && strings.HasPrefix(folded, term.value)) || folded == term.value {
+				marked[i] = true
+				if firstHit < 0 {
+					firstHit = i
+				}
+				break
+			}
+		}
+	}
+	start, end := 0, len(tokens)
+	if len(tokens) > verifiedSnippetWindow {
+		end = verifiedSnippetWindow
+		if firstHit >= 0 {
+			start = firstHit - verifiedSnippetWindow/4
+			if start < 0 {
+				start = 0
+			}
+			if start+verifiedSnippetWindow > len(tokens) {
+				start = len(tokens) - verifiedSnippetWindow
+			}
+		}
+		end = start + verifiedSnippetWindow
+		if end > len(tokens) {
+			end = len(tokens)
+		}
+	}
+	var b strings.Builder
+	if start > 0 {
+		b.WriteString("...")
+	}
+	for i := start; i < end; i++ {
+		if i > start {
+			b.WriteByte(' ')
+		}
+		if marked[i] {
+			b.WriteByte('[')
+			b.WriteString(tokens[i])
+			b.WriteByte(']')
+		} else {
+			b.WriteString(tokens[i])
+		}
+	}
+	if end < len(tokens) {
+		b.WriteString("...")
+	}
+	return b.String()
 }
 
 func decodeMetadata(raw string) map[string]any {

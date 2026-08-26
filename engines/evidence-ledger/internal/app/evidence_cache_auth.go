@@ -1,0 +1,250 @@
+package app
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/escoffier-labs/miseledger/internal/security"
+)
+
+// Cached evidence bundles are re-opened by `evidence show` and regenerated
+// under their original bundle ID, so anything that can write the cache can
+// otherwise rewrite what a later show rematerializes (#1201). Each saved
+// bundle therefore carries an HMAC over its canonical reference — bundle ID,
+// item IDs, filters, and generated timestamp — keyed by a random 32-byte key
+// stored 0600 in the private data directory. Loading rejects a missing or
+// invalid MAC; unknown keys are dropped by the outbound sanitizer so the MAC
+// never reaches clients.
+//
+// Round 2 (#1201): the key file itself is validated on every load (regular
+// file, current uid, 0600, exactly 32 bytes) because a same-UID scanner can
+// otherwise read or replace it; first creation uses O_CREATE|O_EXCL so
+// concurrent initializers converge on one winner instead of sealing bundles
+// with competing keys. The residual same-UID exposure is tracked in #1093.
+//
+// Round 3 (#1201): platforms that cannot provide a race-free no-follow open
+// plus an ownership check fail closed — key load and creation are refused
+// with a typed error rather than degrading to a follow-the-symlink,
+// no-owner-check fallback. Tests simulate those platforms by overriding the
+// support seam below.
+//
+// Round 5 (#1201): after the safe directory-relative ENOENT, missing-key
+// creation used to return to the absolute pathname, so a data directory
+// swapped in between validation and creation received the fresh key material
+// — or an attacker-planted candidate file at that pathname was adopted as the
+// create-race "winner". One validated data-directory descriptor is now held
+// across the entire miss-or-create sequence: both the probe and the exclusive
+// creation are openat operations against that held descriptor and cannot be
+// redirected by renaming or replacing the pathname afterwards.
+var evidenceMACKeyPlatformSupported = defaultEvidenceMACKeyPlatformSupported
+
+// evidenceMACKeyAfterMissProbe runs after a directory-relative ENOENT and
+// before exclusive creation. Production leaves it nil; round-5 tests
+// interpose the data-directory swap exactly in that window (#1201).
+var evidenceMACKeyAfterMissProbe func()
+
+const (
+	evidenceBundleMACField   = "bundle_mac"
+	evidenceBundleMACDomain  = "miseledger.evidence.bundle-mac.v1\x00"
+	evidenceBundleMACKeyFile = "evidence-bundle-mac.key"
+)
+
+type evidenceBundleAuthPayload struct {
+	ID          string         `json:"id"`
+	GeneratedAt string         `json:"generated_at"`
+	Filters     map[string]any `json:"filters"`
+	ItemIDs     []string       `json:"item_ids"`
+}
+
+// EvidenceMACKeyError reports a MAC key file that was refused on load
+// (#1201 round 2): wrong type, owner, mode, or size. The residual same-UID
+// exposure is tracked in #1093.
+type EvidenceMACKeyError struct {
+	Reason string
+}
+
+func (e *EvidenceMACKeyError) Error() string {
+	return fmt.Sprintf("evidence bundle MAC key rejected: %s", e.Reason)
+}
+
+func evidenceBundleMACKeyPath() string {
+	return filepath.Join(ResolvePaths().DataDir, evidenceBundleMACKeyFile)
+}
+
+// loadOrCreateEvidenceBundleMACKey returns the validated key file contents,
+// creating it exclusively on first use. Every load re-validates the file
+// (regular, current uid, 0600, exactly 32 bytes) and refuses attacker-shaped
+// files with a typed error (#1201 round 2). The whole miss-or-create sequence
+// runs against one validated data-directory descriptor held for its duration
+// (#1201 round 5); concurrent first use converges on the openat O_EXCL
+// winner, and losers load the winner's key instead of generating a competing
+// one.
+func loadOrCreateEvidenceBundleMACKey() ([]byte, error) {
+	if !evidenceMACKeyPlatformSupported() {
+		return nil, &EvidenceMACKeyError{Reason: "key storage is not supported on this platform (no race-free no-follow open and no ownership check); refusing to seal or verify cached evidence bundles"}
+	}
+	if err := security.EnsurePrivateDir(ResolvePaths().DataDir); err != nil {
+		return nil, err
+	}
+	dfd, err := openValidatedDataDirForAuth()
+	if err != nil {
+		return nil, &EvidenceMACKeyError{Reason: fmt.Sprintf("refusing to use data directory for key storage: %v", err)}
+	}
+	defer closeDescriptor(dfd)
+	key, err := readEvidenceBundleMACKeyAt(dfd)
+	if err == nil {
+		return key, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		if isTornKeyRead(err) {
+			// Another initializer claimed the file moments ago and is still
+			// writing it (#1201 round 2): wait out the write instead of
+			// failing or generating a competing key.
+			return loadEvidenceBundleMACKeyWinner(dfd)
+		}
+		return nil, err
+	}
+	if evidenceMACKeyAfterMissProbe != nil {
+		evidenceMACKeyAfterMissProbe()
+	}
+	switch key, err := createEvidenceBundleMACKeyAt(dfd); {
+	case err == nil:
+		return key, nil
+	case errors.Is(err, fs.ErrExist):
+		// Lost the create race: seal against the winner's key.
+		return loadEvidenceBundleMACKeyWinner(dfd)
+	default:
+		return nil, err
+	}
+}
+
+// loadEvidenceBundleMACKeyWinner loads the create-race winner's key from the
+// same held data-directory descriptor the creation attempt ran against
+// (#1201 round 5), tolerating the brief window in which the winner has
+// claimed the file (O_EXCL) but not yet finished writing all 32 bytes
+// (#1201 round 2). Only that transient size signature is retried; every
+// other refusal — wrong owner, mode, symlink, persistent damage — fails
+// immediately.
+func loadEvidenceBundleMACKeyWinner(dfd int) ([]byte, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		key, err := readEvidenceBundleMACKeyAt(dfd)
+		if err == nil {
+			return key, nil
+		}
+		if errors.Is(err, fs.ErrNotExist) || !isTornKeyRead(err) || !time.Now().Before(deadline) {
+			return nil, err
+		}
+		time.Sleep(500 * time.Microsecond)
+	}
+}
+
+func isTornKeyRead(err error) bool {
+	var keyErr *EvidenceMACKeyError
+	return errors.As(err, &keyErr) && strings.Contains(keyErr.Reason, "expected exactly 32 bytes")
+}
+
+// validateEvidenceMACKeyContents validates an already-opened key handle:
+// regular file, current uid, mode 0600, bounded 33-byte read (#1201 round 2).
+// A missing file never reaches here; every other problem is a typed
+// *EvidenceMACKeyError.
+func validateEvidenceMACKeyContents(f *os.File) ([]byte, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return nil, &EvidenceMACKeyError{Reason: fmt.Sprintf("stat key file: %v", err)}
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &EvidenceMACKeyError{Reason: fmt.Sprintf("not a regular file (mode %s)", info.Mode())}
+	}
+	if err := checkEvidenceMACKeyOwner(info); err != nil {
+		return nil, err
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		return nil, &EvidenceMACKeyError{Reason: fmt.Sprintf("mode %04o, want 0600", perm)}
+	}
+	var buf [33]byte // bounded read: 32 key bytes plus 1 to detect oversize
+	n, err := io.ReadFull(f, buf[:])
+	if n != 32 || err != io.ErrUnexpectedEOF {
+		return nil, &EvidenceMACKeyError{Reason: fmt.Sprintf("expected exactly 32 bytes, found %d", n)}
+	}
+	key := make([]byte, 32)
+	copy(key, buf[:])
+	return key, nil
+}
+
+func evidenceBundleAuthPayloadFromTree(tree map[string]any) (evidenceBundleAuthPayload, error) {
+	id, _ := tree["id"].(string)
+	if id == "" {
+		return evidenceBundleAuthPayload{}, errors.New("evidence bundle is missing an id")
+	}
+	payload := evidenceBundleAuthPayload{
+		ID:          id,
+		GeneratedAt: stringField(tree, "generated_at"),
+		Filters:     anyToMap(tree["filters"]),
+		ItemIDs:     []string{},
+	}
+	for _, item := range bundleResultMaps(tree) {
+		if itemID, _ := item["id"].(string); itemID != "" {
+			payload.ItemIDs = append(payload.ItemIDs, itemID)
+		}
+	}
+	return payload, nil
+}
+
+func computeEvidenceBundleMAC(key []byte, payload evidenceBundleAuthPayload) string {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(evidenceBundleMACDomain))
+	_, _ = mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// sealEvidenceBundle computes and attaches the cache authentication field.
+func sealEvidenceBundle(bundle map[string]any) error {
+	key, err := loadOrCreateEvidenceBundleMACKey()
+	if err != nil {
+		return err
+	}
+	payload, err := evidenceBundleAuthPayloadFromTree(bundle)
+	if err != nil {
+		return err
+	}
+	bundle[evidenceBundleMACField] = computeEvidenceBundleMAC(key, payload)
+	return nil
+}
+
+// verifyEvidenceBundleAuth validates and strips the cache authentication
+// field. A bundle without it, or with one that does not cover exactly this
+// canonical reference, is rejected.
+func verifyEvidenceBundleAuth(bundle map[string]any) error {
+	stored, _ := bundle[evidenceBundleMACField].(string)
+	delete(bundle, evidenceBundleMACField)
+	if stored == "" {
+		return errors.New("evidence bundle authentication failed")
+	}
+	key, err := loadOrCreateEvidenceBundleMACKey()
+	if err != nil {
+		return err
+	}
+	payload, err := evidenceBundleAuthPayloadFromTree(bundle)
+	if err != nil {
+		return errors.New("evidence bundle authentication failed")
+	}
+	if !hmac.Equal([]byte(stored), []byte(computeEvidenceBundleMAC(key, payload))) {
+		return errors.New("evidence bundle authentication failed")
+	}
+	return nil
+}

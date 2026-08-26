@@ -41,7 +41,17 @@ DEFAULT_SORT = "attention"
 FILTER_KEYS = ("node", "repo", "seat", "state")
 _MAX_FILTER_LEN = 128
 
-TERMINAL_STATES = frozenset({"run.completed", "run.failed", "run.interrupted"})
+TERMINAL_STATES = frozenset(
+    {
+        "run.completed",
+        "run.failed",
+        "run.interrupted",
+        "verify.completed",
+        "external.completed",
+        "external.failed",
+        "external.canceled",
+    }
+)
 _AWAITING_STATES = frozenset({"run.paused", "approval.requested", "approval.held"})
 
 # Attention buckets in display rank: what needs a human sorts first.
@@ -144,11 +154,17 @@ def _parse_stamp(value: object) -> datetime | None:
     return parsed
 
 
-def bucket_for(state: str, *, age_seconds: float | None) -> str:
+def bucket_for(state: str, *, age_seconds: float | None, exit_status: int | None = None) -> str:
     """Map a run_event type plus its age to an attention bucket."""
-    if state == "run.completed":
+    if state == "verify.completed":
+        if exit_status == 130:
+            return "interrupted"
+        if exit_status not in (None, 0):
+            return "failed"
         return "succeeded"
-    if state == "run.interrupted":
+    if state in {"run.completed", "external.completed"}:
+        return "succeeded"
+    if state in {"run.interrupted", "external.canceled"}:
         return "interrupted"
     if state == "run.failed" or state.endswith(".failed"):
         return "failed"
@@ -182,6 +198,8 @@ def build_rows(
         if started is not None:
             end = now if live or last is None else last
             elapsed = max(0.0, (end - started).total_seconds())
+        raw_exit = run.get("exit_status")
+        exit_status = raw_exit if isinstance(raw_exit, int) and not isinstance(raw_exit, bool) else None
         rows.append(
             RunRow(
                 node_id=node_id,
@@ -190,7 +208,7 @@ def build_rows(
                 seat=str(run.get("seat") or ""),
                 harness=str(run.get("harness") or ""),
                 state=state,
-                bucket=bucket_for(state, age_seconds=age if live else None),
+                bucket=bucket_for(state, age_seconds=age if live else None, exit_status=exit_status),
                 last_ts=last_ts,
                 age_seconds=age,
                 started_epoch=started.timestamp() if started is not None and live else None,
@@ -253,6 +271,10 @@ class ClaimRow:
     target: str
     owner_node: str
     owner_conductor: str
+    harness: str
+    role: str
+    job: str
+    session: str
     ttl_remaining: float | None
     expired: bool
 
@@ -268,6 +290,10 @@ def build_claims(claims: list[dict[str, Any]], *, now: datetime) -> list[ClaimRo
                 target=str(claim.get("target") or ""),
                 owner_node=str(claim.get("owner_node") or ""),
                 owner_conductor=str(claim.get("owner_conductor") or ""),
+                harness=str(claim.get("harness") or ""),
+                role=str(claim.get("role") or ""),
+                job=str(claim.get("job") or ""),
+                session=str(claim.get("session") or ""),
                 ttl_remaining=remaining,
                 expired=expired,
             )
@@ -331,6 +357,10 @@ def _claim_text(claim: ClaimRow) -> str:
     who = short_node(claim.owner_node)
     if claim.owner_conductor:
         who += f" · {claim.owner_conductor}"
+    if claim.harness:
+        who += f" · {claim.harness}"
+    if claim.session:
+        who += f" · {claim.session}"
     if claim.expired:
         return f"{who} (expired)"
     if claim.ttl_remaining is None:

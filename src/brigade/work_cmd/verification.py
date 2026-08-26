@@ -687,6 +687,35 @@ def _safe_finalize_verify_receipt(
         return receipt, rc
 
 
+def _report_fleet_completion(target: Path, receipt: dict[str, Any], rc: int) -> None:
+    """Publish one redacted verify receipt outcome through Fleet's spool path."""
+    try:
+        from .. import fleet_client, outcome_cmd
+
+        digests = receipt.get("digests")
+        digest = digests.get("receipt_sha256") if isinstance(digests, dict) else None
+        run_id = receipt.get("run_id")
+        completed_at = receipt.get("completed_at")
+        if not all(isinstance(value, str) and value for value in (digest, run_id, completed_at)):
+            return
+        fleet_client.report_event(
+            {
+                "run_id": run_id,
+                "repo": target.name,
+                "harness": "brigade-work",
+                "state": "verify.completed",
+                "ts": completed_at,
+                "sequence": 0,
+                "digest": digest,
+                "exit_status": 128 + (-rc) if rc < 0 else rc,
+                "capability_fingerprint": outcome_cmd.capability_fingerprint(outcome_cmd.context_manifest()),
+            },
+            base_path=target,
+        )
+    except Exception:
+        return
+
+
 VERIFY_RUNS_KEEP = config.DEFAULT_VERIFY_RUNS_KEEP
 
 VERIFY_ARCHIVE_INDEX_NAME = "index.jsonl"
@@ -1698,6 +1727,7 @@ def _run_verify_commands(
             )
             finalized = True
     assert receipt is not None
+    _report_fleet_completion(target, receipt, rc)
     return receipt, rc
 
 
@@ -1756,6 +1786,7 @@ def _write_reused_receipt(
         _prune_verify_runs(target)
     except Exception:
         pass
+    _report_fleet_completion(target, receipt, 0)
     return receipt, 0
 
 

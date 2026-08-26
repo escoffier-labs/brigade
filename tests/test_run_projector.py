@@ -127,6 +127,15 @@ def _full_base_snapshot() -> dict:
         "route": "route-id",
         "skill_route_policy": "auto",
         "seat_routing": [{"requested_seat": "coder", "outcome": "skip"}],
+        "retry_decisions": [
+            {
+                "attempt": 1,
+                "seat": "coder",
+                "failure_kind": "network-unavailable",
+                "decision": "same-seat-once",
+                "reason": "seat coder may retry once after re-probe [network-unavailable]",
+            }
+        ],
         "health": {"schema": "brigade.seat_health_summary.v1", "healthy": 1},
         "worker_failure_summary": {"domain": "infrastructure", "classes": {}, "seats": []},
         "transport_routing": {"schema": "brigade.transport_routing.v1", "outcome": "fallback"},
@@ -538,7 +547,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 58
+    assert len(PRESERVED_FIELDS) == 59
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",

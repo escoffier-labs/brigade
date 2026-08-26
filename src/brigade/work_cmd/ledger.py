@@ -17,7 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence, cast
 from uuid import uuid4
-from . import constants, edges as edges_mod, helpers
+from . import constants, edges as edges_mod, helpers, inbox_lock
+from .inbox_lock import verify_canonical_write_locks
 from .. import component_paths, evidence_redaction, provenance, runguard, trust_gate
 from ..untrusted import scan_handoff_injection_heuristics
 
@@ -27,18 +28,75 @@ def _task_ledger_lock_path(target: Path) -> Path:
     return path.with_name(f"{path.name}.lock")
 
 
+#: Bounded window while an outside writer waits for the task-ledger lock.
+#: Patient by design so concurrent trusted writers serialize behind a brief
+#: holder instead of failing; bounded so a lost holder cannot block them
+#: forever (mirrors ``inbox_lock.DEFAULT_LOCK_DEADLINE_SECONDS``).
+TASK_LEDGER_LOCK_DEADLINE_SECONDS = inbox_lock.DEFAULT_LOCK_DEADLINE_SECONDS
+
+#: Shorter bound inside a scanner run: a marked child holding the writer lock
+#: must not pin the task-ledger lock behind another holder for long.
+SCANNER_CHILD_TASK_LEDGER_LOCK_DEADLINE_SECONDS = 5.0
+
+#: Poll interval while a bounded task-ledger acquisition waits for a busy lock.
+_TASK_LEDGER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
+
+
+class TaskLedgerLockTimeout(TimeoutError):
+    """Typed failure when the task-ledger lock stayed busy past its deadline."""
+
+
+def _task_ledger_lock_deadline_seconds() -> float:
+    """Return this process's bounded wait for the task-ledger lock.
+
+    Marked scanner children stay short so a child already holding the writer
+    lock cannot pin the task-ledger lock for a run window; outside writers get
+    the patient bounded window so concurrent trusted writers serialize instead
+    of failing immediately.
+    """
+    if inbox_lock.inside_scanner_run():
+        return SCANNER_CHILD_TASK_LEDGER_LOCK_DEADLINE_SECONDS
+    return TASK_LEDGER_LOCK_DEADLINE_SECONDS
+
+
+@contextmanager
+def _canonical_inbox_write(target: Path) -> Iterator[None]:
+    """Lock set for one canonical inbox read-modify-write (run then writer).
+
+    Inside a scanner run (``BRIGADE_SCANNER_RUN_ID``, a marker that carries no
+    capability) a self-importing child takes only the writer lock, which it
+    opens itself; outside writers take the run lock first and then the writer
+    lock. Resolved through the ``inbox_lock`` module so tests can instrument
+    either lock in one place.
+    """
+    if inbox_lock.inside_scanner_run():
+        with inbox_lock.inbox_writer_lock(target):
+            yield
+    else:
+        with inbox_lock.scanner_inbox_run_lock(target), inbox_lock.inbox_writer_lock(target):
+            yield
+
+
 def _acquire_task_ledger_lock(path: Path) -> runguard._LockOwnership:
-    deadline = time.monotonic() + 5.0
+    # Bounded retry so concurrent trusted writers serialize behind a brief
+    # holder instead of failing (the lock order task -> run -> writer means no
+    # holder ever waits on an inbox lock here). Inside a scanner run the bound
+    # is short and fails closed with ``RunLockError``: a marked child already
+    # holding the writer lock must never pin the task-ledger lock behind
+    # another holder for a long window. Outside writers are patient but still
+    # bounded, raising the typed timeout on expiry.
+    requested_seconds = _task_ledger_lock_deadline_seconds()
+    deadline = time.monotonic() + requested_seconds
     while True:
         try:
             return runguard._acquire_lock(path)
         except runguard.RunLockError as exc:
-            if time.monotonic() >= deadline:
-                raise runguard.RunLockError(
-                    f"task ledger lock still held after waiting 5s: {path}. "
-                    "Another process may be updating .brigade/work/tasks.json; retry shortly."
-                ) from exc
-            time.sleep(0.01)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if inbox_lock.inside_scanner_run():
+                    raise
+                raise TaskLedgerLockTimeout(f"task ledger lock stayed busy for {requested_seconds:g}s: {path}") from exc
+            time.sleep(min(_TASK_LEDGER_LOCK_RETRY_INTERVAL_SECONDS, remaining))
 
 
 @contextmanager
@@ -56,6 +114,14 @@ REASON_CORRUPT_LEDGER = "corrupt_ledger"
 REASON_UNSUPPORTED_LEDGER_VERSION = "unsupported_ledger_version"
 REASON_TRUST_POLICY = "trust_policy"
 REASON_IMPORT_SNAPSHOT_CHANGED = "import_snapshot_changed"
+
+# Byte budget enforced while reading one import-inbox snapshot, so growth
+# after any earlier size check can never drive unbounded chunk accumulation.
+_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES = 4 * 1024 * 1024
+
+
+class ImportInboxSnapshotLimitExceeded(OSError):
+    """Typed failure when an import inbox grows past its snapshot read cap."""
 
 
 class TaskLedgerError(ValueError):
@@ -480,13 +546,36 @@ def _read_import_inbox_raw(target: Path) -> tuple[bytes, tuple[int, int, int, in
         _validate_import_inbox_descriptor(descriptor)
         before = os.fstat(descriptor)
         chunks: list[bytes] = []
+        snapshot_total = 0
         while chunk := os.read(descriptor, 1024 * 1024):
+            snapshot_total += len(chunk)
+            if snapshot_total > _IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES:
+                raise ImportInboxSnapshotLimitExceeded(
+                    f"import inbox exceeds {_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES} byte snapshot limit"
+                )
             chunks.append(chunk)
         after = os.fstat(descriptor)
         identity = (before.st_dev, before.st_ino, before.st_mode, before.st_nlink)
-        if identity != (after.st_dev, after.st_ino, after.st_mode, after.st_nlink):
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
             raise OSError("import inbox changed while snapshotting")
-        return b"".join(chunks), identity, True
+        raw = b"".join(chunks)
+        if len(raw) != before.st_size:
+            raise OSError("import inbox changed while snapshotting")
+        return raw, identity, True
     finally:
         if descriptor != -1:
             os.close(descriptor)
@@ -531,19 +620,27 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
 
 
 def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
-    """Publish the inbox through its retained parent without following a link."""
-    parent, name, previous_raw, previous_exists = _snapshot_import_inbox(target)
-    rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
-    try:
-        _write_import_inbox_bytes_at(
-            parent,
-            name,
-            rendered,
-            previous_raw=previous_raw,
-            previous_exists=previous_exists,
-        )
-    finally:
-        os.close(parent)
+    """Publish the inbox under the canonical writer exclusion.
+
+    Every canonical writer holds the writer lock (outsiders take the run lock
+    first) so a concurrent import, promote, dismiss, or scanner run cannot
+    interleave with scanner stamping or rollback (reentrant, so callers
+    already inside the lock are unaffected).
+    """
+    with _canonical_inbox_write(target):
+        verify_canonical_write_locks(target)
+        parent, name, previous_raw, previous_exists = _snapshot_import_inbox(target)
+        rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
+        try:
+            _write_import_inbox_bytes_at(
+                parent,
+                name,
+                rendered,
+                previous_raw=previous_raw,
+                previous_exists=previous_exists,
+            )
+        finally:
+            os.close(parent)
 
 
 def _append_archived_imports(target: Path, imports: list[dict[str, Any]]) -> None:
@@ -3735,17 +3832,35 @@ def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
         _validate_import_inbox_descriptor(descriptor)
         before = os.fstat(descriptor)
         chunks: list[bytes] = []
+        snapshot_total = 0
         while chunk := os.read(descriptor, 1024 * 1024):
+            snapshot_total += len(chunk)
+            if snapshot_total > _IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES:
+                raise ImportInboxSnapshotLimitExceeded(
+                    f"import inbox exceeds {_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES} byte snapshot limit"
+                )
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
             after.st_dev,
             after.st_ino,
             after.st_mode,
             after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
         ):
             raise OSError("import inbox changed while snapshotting")
-        return parent, name, b"".join(chunks), True
+        raw = b"".join(chunks)
+        if len(raw) != before.st_size:
+            raise OSError("import inbox changed while snapshotting")
+        return parent, name, raw, True
     except BaseException:
         os.close(parent)
         raise
@@ -4122,7 +4237,14 @@ def _import_envelope_matches(item: dict[str, Any]) -> bool:
 
 
 def _backfill_import_provenance(target: Path) -> dict[str, Any]:
+    """Stamp inferred envelopes under the canonical inbox writer exclusion."""
+    with _canonical_inbox_write(target):
+        return _backfill_import_provenance_locked(target)
+
+
+def _backfill_import_provenance_locked(target: Path) -> dict[str, Any]:
     """Stamp inferred envelopes on inbox rows missing a valid matching envelope."""
+    verify_canonical_write_locks(target)
     imports = _read_imports(target)
     now = helpers._now().isoformat()
     updated: list[dict[str, Any]] = []
@@ -4425,6 +4547,39 @@ def _append_import_records(
     restore_existing_raw: Callable[[bytes, bool], None] | None = None,
     existing_imports: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Append records as one locked inbox read-modify-write transaction.
+
+    The canonical writer locks span the read through the publication so a
+    concurrent import, promote, dismiss, or scanner run cannot interleave
+    (reentrant per process for callers already inside the lock; a marked
+    self-importing child takes only the writer lock).
+    """
+    with _canonical_inbox_write(target):
+        return _append_import_records_locked(
+            target,
+            records,
+            dry_run=dry_run,
+            provenance_source=provenance_source,
+            contain_provenance_errors=contain_provenance_errors,
+            migrate_untrusted_identities=migrate_untrusted_identities,
+            preserve_existing_raw=preserve_existing_raw,
+            restore_existing_raw=restore_existing_raw,
+            existing_imports=existing_imports,
+        )
+
+
+def _append_import_records_locked(
+    target: Path,
+    records: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
+    provenance_source: str | None = None,
+    contain_provenance_errors: bool = False,
+    migrate_untrusted_identities: bool = False,
+    preserve_existing_raw: Callable[[bytes], None] | None = None,
+    restore_existing_raw: Callable[[bytes, bool], None] | None = None,
+    existing_imports: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     imports = existing_imports if existing_imports is not None else _read_imports(target)
     # One authenticated view of authority state for the whole append: the
     # snapshot is acquired once (after a reanchor pass) and consumed by
@@ -4540,6 +4695,7 @@ def _append_import_records(
         if identity is not None:
             existing_by_source[identity] = item
     if imported and not dry_run:
+        verify_canonical_write_locks(target)
         inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
         published = False
         try:
@@ -4975,64 +5131,84 @@ def _promote_matching_imports(
 
     Each matching item is applied all-or-nothing in memory. The task ledger is
     flushed only after the late-window CAS succeeds, so a refused promote writes
-    no task files and a failed item cannot ride a later success.
+    no task files and a failed item cannot ride a later success. Lock order is
+    task-ledger first, then the canonical writer locks (run then writer for an
+    outside promoter; writer only inside a run) spanning the snapshot through
+    the final publication so scanner stamping or rollback cannot interleave
+    with the promote.
     """
-    with _task_ledger_lock(target):
-        snapshot = _capture_reviewed_import_snapshot(target)
-        reviewed_join = _import_snapshot_join_set(
-            snapshot.items,
-            kind=kind,
-            source=source,
-            metadata_filters=metadata_filters,
-        )
-        _after_reviewed_import_snapshot(target, snapshot)
-        _require_reviewed_import_snapshot(
-            target,
-            snapshot,
-            reviewed_join,
-            kind=kind,
-            source=source,
-            metadata_filters=metadata_filters,
-        )
-        matching = _matching_pending_imports(
+    with _task_ledger_lock(target), _canonical_inbox_write(target):
+        return _promote_matching_imports_locked(
             target,
             kind=kind,
             source=source,
             metadata_filters=metadata_filters,
-            imports=snapshot.items,
         )
-        ledger = _read_task_ledger(target)
-        promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
-        failed: list[tuple[dict[str, Any], Exception]] = []
-        created_any = False
-        for item in matching:
-            text = str(item.get("text") or "").strip()
-            if not text:
-                continue
-            tasks_before = list(ledger["tasks"])
-            edges_before = list(edges_mod.ensure_ledger_edges(ledger))
-            try:
-                task, created = _mark_import_promoted(target, item, ledger=ledger)
-            except (edges_mod.EdgeError, TaskLedgerError) as exc:
-                ledger["tasks"][:] = tasks_before
-                ledger["edges"] = edges_before
-                failed.append((item, exc))
-                continue
-            promoted.append((item, task, created))
-            created_any = created_any or created
-        _after_batch_import_promote_applied(target, snapshot)
-        _require_reviewed_import_snapshot(
-            target,
-            snapshot,
-            reviewed_join,
-            kind=kind,
-            source=source,
-            metadata_filters=metadata_filters,
-        )
-        if created_any:
-            _write_task_ledger(target, ledger)
-        _write_imports(target, snapshot.items)
-        return promoted, failed
+
+
+def _promote_matching_imports_locked(
+    target: Path,
+    *,
+    kind: str | None = None,
+    source: str | None = None,
+    metadata_filters: dict[str, str] | None = None,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any], bool]], list[tuple[dict[str, Any], Exception]]]:
+    verify_canonical_write_locks(target)
+    snapshot = _capture_reviewed_import_snapshot(target)
+    reviewed_join = _import_snapshot_join_set(
+        snapshot.items,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    _after_reviewed_import_snapshot(target, snapshot)
+    _require_reviewed_import_snapshot(
+        target,
+        snapshot,
+        reviewed_join,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    matching = _matching_pending_imports(
+        target,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+        imports=snapshot.items,
+    )
+    ledger = _read_task_ledger(target)
+    promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+    failed: list[tuple[dict[str, Any], Exception]] = []
+    created_any = False
+    for item in matching:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        tasks_before = list(ledger["tasks"])
+        edges_before = list(edges_mod.ensure_ledger_edges(ledger))
+        try:
+            task, created = _mark_import_promoted(target, item, ledger=ledger)
+        except (edges_mod.EdgeError, TaskLedgerError) as exc:
+            ledger["tasks"][:] = tasks_before
+            ledger["edges"] = edges_before
+            failed.append((item, exc))
+            continue
+        promoted.append((item, task, created))
+        created_any = created_any or created
+    _after_batch_import_promote_applied(target, snapshot)
+    _require_reviewed_import_snapshot(
+        target,
+        snapshot,
+        reviewed_join,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    if created_any:
+        _write_task_ledger(target, ledger)
+    _write_imports(target, snapshot.items)
+    return promoted, failed
 
 
 def _handoff_is_document_target(value: str) -> bool:

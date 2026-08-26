@@ -454,6 +454,26 @@ class TestNodesCli:
         assert cli.main(["fleet", "nodes", "revoke", NODE_A, "--json"]) == 0
         assert json.loads(capsys.readouterr().out)["revoked"] is True
 
+    def test_nodes_table_renders_legacy_nonprintables_inert(self, hub, capsys):
+        from brigade import cli
+
+        url, db = hub
+        self._config(url)
+        _enroll(url, NODE_A, "clean")
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("UPDATE nodes SET label = ? WHERE node_id = ?", ("lab\x1b[31mel", NODE_A))
+            conn.commit()
+        finally:
+            conn.close()
+        assert cli.main(["fleet", "nodes", "list", "--json"]) == 0
+        listed = json.loads(capsys.readouterr().out)["nodes"]
+        assert listed[0]["label"] == "lab\x1b[31mel"
+        assert cli.main(["fleet", "nodes", "list"]) == 0
+        table = capsys.readouterr().out
+        assert "\x1b" not in table
+        assert "\\x1b[31mel" in table
+
     def test_errors_are_reported_not_raised(self, hub, capsys):
         from brigade import cli
 

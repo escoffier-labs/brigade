@@ -144,6 +144,58 @@ MiseLedger uses XDG paths when present:
 
 Directories and files created by the CLI use private permissions.
 
+### Legacy stationtrail scanner approval
+
+`import stationtrail` refuses to run a legacy scanner unless its executable
+SHA-256 digest is explicitly approved. The allowlist is a file,
+`stationtrail-approved-digests`, in the data directory shown above (for
+example `~/.local/share/miseledger/stationtrail-approved-digests`). One
+64-hex digest per line; an optional `sha256:` prefix and uppercase hex are
+normalized on load.
+
+Trust boundary: the file is operator-owned configuration, validated on every
+load like the evidence bundle MAC key — regular file (symlinks refused on
+every hop, including a symlinked data directory), owned by the current uid,
+mode 0600, bounded read. Any malformed digest line refuses the whole list
+closed. A missing file means no approvals are configured, and there is
+deliberately no environment-variable path: any child process can read its
+parent's environment, so approvals are only read from this owner-protected
+file.
+
+The engine resolves and opens `stationtrail` once per import or dry-run;
+probes, digest hashing, and execution all bind to those exact bytes: they
+are copied into an immutable private snapshot (0500 file in a 0700 directory
+created relative to the validated data-directory descriptor) whose digest is
+re-verified from the held open descriptor immediately before every exec, and
+every exec runs through that descriptor (`/proc/self/fd/<fd>` on linux), so
+renaming, replacing, or rewriting either the installed binary or the snapshot
+entry after approval cannot change what executes. Platforms without
+descriptor-based execution refuse to stage the scanner at all, and there is
+deliberately no fallback to the OS temp directory.
+
+Trust boundary: these guarantees hold against processes that may tamper with
+the scanner's pathname, its PATH entry, or the snapshot entry — but a process
+running as the same uid **with write access to the data directory** is outside
+this engine's model: it can chmod files it owns, wait out validation windows,
+or displace the data directory between operations. Isolating scanners under a
+different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
+
+Platform note (macOS and other non-linux unix): the portable Go syscall
+package exposes neither `openat` nor `unlinkat` there, so the strictly
+descriptor-relative primitives behind the above guarantees are linux-only.
+The engine stays functional on darwin: private files (approved digests,
+evidence bundle MAC key) are opened by pathname with `O_NOFOLLOW|O_CLOEXEC`
+relative to the already-validated data-directory path (`O_CREAT|O_EXCL` for
+creation), the validated directory descriptor is `fstat`ed before and after
+every open or removal and must keep an identical dev/ino pair, and the opened
+file must be a regular, singly linked, exactly-0600 file. The residual
+mutation window on darwin is pathname-based — entries inside the data
+directory can change between those parent identity checks — which only a
+same-uid DataDir writer could exploit, and that writer is outside this
+engine's model ([#1093](https://github.com/escoffier-labs/miseledger/issues/1093)).
+Snapshot execution itself remains linux-only: platforms without descriptor
+exec refuse to stage the scanner at all.
+
 ## Smoke Test
 
 ```bash
@@ -449,6 +501,8 @@ miseledger explain "adapter contract" --source codex --json
 ```
 
 Evidence output includes a stable bundle `id`, a `miseledger://evidence/<id>` resource URI, the query, filters, generated timestamp, result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Evidence results dedupe repeated content hashes. Generated bundles are cached under MiseLedger's private cache directory and can be shown later with `miseledger evidence show`.
+
+Cached bundles carry an HMAC over their canonical reference (bundle ID, item IDs, filters, `generated_at`), keyed by a random 32-byte key at `<data-dir>/miseledger/evidence-bundle-mac.key`. The key file is validated on every load — regular file (no symlink; opened with `O_NOFOLLOW` where available), owned by the current uid, mode 0600, exactly 32 bytes — and first creation is exclusive and descriptor-relative (`openat(O_CREAT|O_EXCL|O_NOFOLLOW, 0600)` against the validated data-directory handle held across the miss-or-create sequence), so concurrent initializers converge on one key and a data directory swapped in between cannot receive or interpose key material. A refused key fails the operation closed. Residual: a process running as the same uid can still read or replace a valid key once validation passes; isolating scanners under a different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
 
 The root `station.json` advertises bounded Brigade retrieval as
 `miseledger evidence <task> --markdown --limit 5`. That surface is stateful
