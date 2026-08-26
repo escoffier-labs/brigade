@@ -15,10 +15,14 @@ import (
 // environment, so MISELEDGER_STATIONTRAIL_APPROVED_DIGESTS published the
 // allowlist to the very binaries it gates. The allowlist now lives in an
 // owner-protected file under the private data directory and is validated on
-// every load exactly like the evidence bundle MAC key: regular file (opened
-// with O_NOFOLLOW where available), owned by the current uid, mode 0600,
-// bounded read. A missing file simply means no approvals are configured;
-// every other refusal is a typed error that fails the probe closed.
+// every load exactly like the evidence bundle MAC key: regular file, owned by
+// the current uid, mode 0600, bounded read, opened without following a single
+// symlink on either hop — the data directory itself is opened with
+// O_DIRECTORY|O_NOFOLLOW (unix; refused closed elsewhere) and verified to be
+// current-uid owned before the file is opened openat-style relative to that
+// handle (#1201 round 4). A missing file simply means no approvals are
+// configured; every other refusal is a typed error that fails the probe
+// closed.
 const (
 	evidenceScannerApprovalsFile = "stationtrail-approved-digests"
 	maxApprovedDigestsFileBytes  = 64 << 10
@@ -26,7 +30,8 @@ const (
 
 // StationTrailApprovedDigestsError reports an approved-digests file that was
 // refused on load (#1201/#1204 round 3): wrong type, owner, or mode, a
-// symlink, an oversized read, or any malformed digest token.
+// symlink, a redirected data directory, an oversized read, or any malformed
+// digest token.
 type StationTrailApprovedDigestsError struct {
 	Reason string
 }
@@ -44,11 +49,7 @@ func stationTrailApprovedDigestsPath() string {
 // file yields an empty allowlist; every other problem is refused with a
 // typed *StationTrailApprovedDigestsError so callers fail closed.
 func loadStationTrailApprovedDigests() (map[string]bool, error) {
-	path := stationTrailApprovedDigestsPath()
-	if linfo, lerr := os.Lstat(path); lerr == nil && linfo.Mode()&fs.ModeSymlink != 0 {
-		return nil, &StationTrailApprovedDigestsError{Reason: "refusing to open approved-digests file: path is a symlink"}
-	}
-	f, err := openEvidenceMACKeyFile(path)
+	f, err := openStationTrailApprovedDigests()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return map[string]bool{}, nil
@@ -56,6 +57,19 @@ func loadStationTrailApprovedDigests() (map[string]bool, error) {
 		return nil, &StationTrailApprovedDigestsError{Reason: fmt.Sprintf("refusing to open approved-digests file: %v", err)}
 	}
 	defer f.Close()
+	return validateApprovedDigestsFile(f)
+}
+
+// openStationTrailApprovedDigests binds the allowlist file handle without
+// following symlinks on any path component and without keeping a redirectable
+// pathname between open and read (#1201 round 4).
+func openStationTrailApprovedDigests() (*os.File, error) {
+	return openDataDirFile(ResolvePaths().DataDir, evidenceScannerApprovalsFile)
+}
+
+// validateApprovedDigestsFile validates an already-opened allowlist handle:
+// regular file, current-uid owner, mode 0600, bounded read, strict parsing.
+func validateApprovedDigestsFile(f *os.File) (map[string]bool, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, &StationTrailApprovedDigestsError{Reason: fmt.Sprintf("stat approved-digests file: %v", err)}

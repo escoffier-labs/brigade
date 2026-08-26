@@ -129,14 +129,15 @@ func isTornKeyRead(err error) bool {
 	return errors.As(err, &keyErr) && strings.Contains(keyErr.Reason, "expected exactly 32 bytes")
 }
 
-// readEvidenceBundleMACKeyFile opens and validates the key file. A missing
-// file surfaces as fs.ErrNotExist so callers can fall through to creation;
-// every other refusal is a typed *EvidenceMACKeyError.
+// readEvidenceBundleMACKeyFile opens and validates the key file. The open is
+// directory-relative and no-follow on every hop (#1201 round 4): the data
+// directory itself must be a current-uid-owned directory, not a symlink, so a
+// redirected data directory cannot feed the loader an attacker-chosen
+// current-uid 0600 key. A missing file surfaces as fs.ErrNotExist so callers
+// can fall through to creation; every other refusal is a typed
+// *EvidenceMACKeyError.
 func readEvidenceBundleMACKeyFile(path string) ([]byte, error) {
-	if linfo, lerr := os.Lstat(path); lerr == nil && linfo.Mode()&fs.ModeSymlink != 0 {
-		return nil, &EvidenceMACKeyError{Reason: "refusing to open key file: path is a symlink"}
-	}
-	f, err := openEvidenceMACKeyFile(path)
+	f, err := openDataDirFile(filepath.Dir(path), filepath.Base(path))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, err

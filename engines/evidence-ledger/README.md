@@ -154,18 +154,20 @@ example `~/.local/share/miseledger/stationtrail-approved-digests`). One
 normalized on load.
 
 Trust boundary: the file is operator-owned configuration, validated on every
-load like the evidence bundle MAC key — regular file (symlinks refused),
-owned by the current uid, mode 0600, bounded read. Any malformed digest line
-refuses the whole list closed. A missing file means no approvals are
-configured, and there is deliberately no environment-variable path: any
-child process can read its parent's environment, so approvals are only read
-from this owner-protected file.
+load like the evidence bundle MAC key — regular file (symlinks refused on
+every hop, including a symlinked data directory), owned by the current uid,
+mode 0600, bounded read. Any malformed digest line refuses the whole list
+closed. A missing file means no approvals are configured, and there is
+deliberately no environment-variable path: any child process can read its
+parent's environment, so approvals are only read from this owner-protected
+file.
 
 The engine resolves and opens `stationtrail` once per import or dry-run;
-probes, digest hashing, and execution all use that single artifact, and each
-exec re-verifies that the file under the resolved path is still the one that
-was hashed (device/inode). Install stationtrail in a root-owned directory so
-an unprivileged process cannot swap it between verification and execution.
+probes, digest hashing, and execution all bind to those exact bytes: they
+are copied into an immutable private snapshot (0500 file in a 0700 directory
+under the data directory) whose digest is re-verified against the approved
+digest, and every exec runs the snapshot path. Swapping, replacing, or
+rewriting the installed binary after approval cannot change what executes.
 
 ## Smoke Test
 
