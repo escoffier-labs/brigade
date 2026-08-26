@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, grokbot_jobs, grokbot_mcp
+from brigade import cli, fleet_client, grokbot_jobs, grokbot_mcp
 
 
 def _spec(role: str) -> dict[str, object]:
@@ -81,7 +81,7 @@ def test_exact_role_tool_inventories_and_hidden_direct_calls_are_indistinguishab
     assert hidden.value.public_error() == unknown.value.public_error()
 
 
-def test_workers_only_list_claim_and_read_their_configured_role(tmp_path: Path):
+def test_workers_only_list_claim_and_read_their_configured_role(tmp_path: Path, monkeypatch):
     implementation = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
     scout = grokbot_jobs.enqueue(tmp_path, _spec("repository-scout"), "scout-job")["job_id"]
     worker = _adapter(tmp_path)
@@ -97,6 +97,12 @@ def test_workers_only_list_claim_and_read_their_configured_role(tmp_path: Path):
     }
     assert grokbot_jobs.get_job(tmp_path, scout)["state"] == "queued"
 
+    monkeypatch.setattr(
+        fleet_client,
+        "admit_cloud",
+        lambda *args, **kwargs: fleet_client.CloudDecision(True, "ok", lease={"lease_id": implementation}),
+    )
+    monkeypatch.setattr(fleet_client, "bind_cloud", lambda *args, **kwargs: fleet_client.CloudDecision(True, "ok"))
     claimed = worker.call_tool("grokbot_queue_claim", {"job_id": implementation, "lease_id": "lease-a"})
     assert claimed["state"] == "claimed"
     assert claimed["execution_context"] == _spec("implementation-worker")
@@ -116,6 +122,220 @@ def test_worker_inputs_cannot_select_target_role_bot_identity_or_lease_duration(
                 {"job_id": job_id, "lease_id": "lease-a", forbidden: "attacker"},
             )
         assert error.value.public_error()["error"]["code"] == "invalid_request"
+
+
+def test_claim_is_admitted_before_queue_mutation_and_binds_the_deterministic_hub_lease(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def admit(provider: str, **kwargs: object) -> fleet_client.CloudDecision:
+        calls.append(("admit", {"provider": provider, **kwargs}))
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "queued"
+        return fleet_client.CloudDecision(True, "ok", lease={"lease_id": job_id})
+
+    def bind(lease_id: str, provider_task_id: str, **kwargs: object) -> fleet_client.CloudDecision:
+        calls.append(("bind", {"lease_id": lease_id, "provider_task_id": provider_task_id, **kwargs}))
+        return fleet_client.CloudDecision(True, "ok")
+
+    monkeypatch.setattr(fleet_client, "admit_cloud", admit)
+    monkeypatch.setattr(fleet_client, "bind_cloud", bind)
+
+    claimed = adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert claimed["state"] == "claimed"
+    assert [call[0] for call in calls] == ["admit", "bind"]
+    admitted = calls[0][1]
+    assert admitted == {
+        "provider": "grokbot-cloud",
+        "repo": "example/brigade",
+        "label": f"grokbot-cloud:example/brigade@{claimed['task_hash'].removeprefix('sha256:')[:12]}",
+        "prompt_hash": claimed["task_hash"].removeprefix("sha256:"),
+        "conductor": "implementation-worker",
+        "ttl_seconds": grokbot_mcp.LEASE_SECONDS,
+        "lease_id": job_id,
+        "holder": "lease-a",
+    }
+    assert calls[1][1] == {"lease_id": job_id, "provider_task_id": job_id, "holder": "lease-a"}
+
+
+def test_claim_denial_leaves_the_local_job_queued(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    monkeypatch.setattr(
+        fleet_client,
+        "admit_cloud",
+        lambda *args, **kwargs: fleet_client.CloudDecision(False, "refused"),
+    )
+    monkeypatch.setattr(fleet_client, "bind_cloud", lambda *args, **kwargs: pytest.fail("bind must not run"))
+
+    with pytest.raises(grokbot_mcp.AdapterError):
+        _adapter(tmp_path).call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "queued"
+
+
+def test_claim_releases_an_admitted_hub_lease_when_the_local_claim_fails(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    releases: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        fleet_client,
+        "admit_cloud",
+        lambda *args, **kwargs: fleet_client.CloudDecision(True, "ok", lease={"lease_id": job_id}),
+    )
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "claim_execution_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("lease-conflict")),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "release_cloud",
+        lambda lease_id, **kwargs: (
+            releases.append({"lease_id": lease_id, **kwargs}) or fleet_client.CloudDecision(True, "ok")
+        ),
+    )
+
+    with pytest.raises(grokbot_mcp.AdapterError):
+        _adapter(tmp_path).call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "queued"
+    assert releases == [{"lease_id": job_id, "state": "released", "holder": "lease-a"}]
+
+
+def test_renew_reconciles_a_legacy_running_job_and_normal_renewals_refresh_the_hub(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.LEASE_SECONDS)
+    grokbot_jobs.transition(tmp_path, job_id, adapter.config.bot_id, "lease-a", "running")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def renew(lease_id: str, **kwargs: object) -> fleet_client.CloudDecision:
+        calls.append(("renew", {"lease_id": lease_id, **kwargs}))
+        return fleet_client.CloudDecision(False, "refused")
+
+    def admit(provider: str, **kwargs: object) -> fleet_client.CloudDecision:
+        calls.append(("admit", {"provider": provider, **kwargs}))
+        return fleet_client.CloudDecision(True, "ok", lease={"lease_id": job_id})
+
+    def bind(lease_id: str, provider_task_id: str, **kwargs: object) -> fleet_client.CloudDecision:
+        calls.append(("bind", {"lease_id": lease_id, "provider_task_id": provider_task_id, **kwargs}))
+        return fleet_client.CloudDecision(True, "ok")
+
+    monkeypatch.setattr(fleet_client, "renew_cloud", renew)
+    monkeypatch.setattr(fleet_client, "admit_cloud", admit)
+    monkeypatch.setattr(fleet_client, "bind_cloud", bind)
+
+    renewed = adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert renewed["state"] == "running"
+    assert [name for name, _ in calls] == ["renew", "admit", "bind"]
+    assert calls[0][1] == {"lease_id": job_id, "ttl_seconds": grokbot_mcp.LEASE_SECONDS, "holder": "lease-a"}
+    assert calls[-1][1] == {"lease_id": job_id, "provider_task_id": job_id, "holder": "lease-a"}
+
+    calls.clear()
+    monkeypatch.setattr(
+        fleet_client,
+        "renew_cloud",
+        lambda lease_id, **kwargs: (
+            calls.append(("renew", {"lease_id": lease_id, **kwargs})) or fleet_client.CloudDecision(True, "ok")
+        ),
+    )
+    adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-a"})
+    assert [name for name, _ in calls] == ["renew"]
+
+
+def test_start_reconciles_a_missing_hub_lease_without_rolling_back_the_local_transition(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.LEASE_SECONDS)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        fleet_client,
+        "renew_cloud",
+        lambda *args, **kwargs: calls.append("renew") or fleet_client.CloudDecision(False, "refused"),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "admit_cloud",
+        lambda *args, **kwargs: (
+            calls.append("admit") or fleet_client.CloudDecision(True, "ok", lease={"lease_id": job_id})
+        ),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "bind_cloud",
+        lambda *args, **kwargs: calls.append("bind") or fleet_client.CloudDecision(True, "ok"),
+    )
+
+    started = adapter.call_tool("grokbot_queue_start", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert started["state"] == "running"
+    assert calls == ["renew", "admit", "bind"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "prepare", "expected_state"),
+    [
+        ("grokbot_queue_fail", {}, None, "failed"),
+        (
+            "grokbot_queue_complete",
+            {
+                "artifact": {
+                    "kind": "draft-pr",
+                    "url": "https://github.com/example/brigade/pull/123",
+                    "branch": "grokbot/job-1",
+                }
+            },
+            "running",
+            "completed",
+        ),
+        ("grokbot_queue_ack_cancel", {}, "cancel", "canceled"),
+    ],
+)
+def test_terminal_worker_transitions_release_hub_leases(
+    tmp_path: Path, monkeypatch, tool: str, arguments: dict[str, object], prepare: str | None, expected_state: str
+):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.LEASE_SECONDS)
+    if prepare == "running":
+        grokbot_jobs.transition(tmp_path, job_id, adapter.config.bot_id, "lease-a", "running")
+    elif prepare == "cancel":
+        grokbot_jobs.cancel(tmp_path, job_id)
+    releases: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        fleet_client,
+        "release_cloud",
+        lambda lease_id, **kwargs: (
+            releases.append({"lease_id": lease_id, **kwargs}) or fleet_client.CloudDecision(True, "ok")
+        ),
+    )
+
+    result = adapter.call_tool(tool, {"job_id": job_id, "lease_id": "lease-a", **arguments})
+
+    assert result["state"] == expected_state
+    assert releases == [{"lease_id": job_id, "state": expected_state, "holder": "lease-a"}]
+
+
+def test_hub_mirror_failures_do_not_undo_a_local_terminal_transition_or_leak_private_values(
+    tmp_path: Path, monkeypatch
+):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    grokbot_jobs.claim(tmp_path, job_id, adapter.config.bot_id, "lease-a", grokbot_mcp.LEASE_SECONDS)
+    monkeypatch.setattr(
+        fleet_client,
+        "release_cloud",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("lease-a PRIVATE_INSTRUCTIONS_MUST_NOT_LEAK")),
+    )
+
+    failed = adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+
+    assert failed["state"] == "failed"
+    projection = _adapter(tmp_path).call_tool("grokbot_queue_status", {"job_id": job_id})
+    rendered = json.dumps(projection)
+    assert "lease-a" not in rendered
+    assert "PRIVATE_INSTRUCTIONS_MUST_NOT_LEAK" not in rendered
 
 
 def test_safe_error_projection_never_exposes_queue_error_or_private_content(tmp_path: Path):

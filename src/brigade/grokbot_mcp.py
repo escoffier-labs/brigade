@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import grokbot_jobs
+from . import cloud_tracker, fleet_client, grokbot_jobs
 
 
 DEFAULT_BIND = "127.0.0.1:8766"
@@ -183,33 +183,102 @@ class GrokbotAdapter:
             return operation(self.config.target, job_id)
         if name == "grokbot_queue_claim":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
-            return grokbot_jobs.claim_execution_context(
-                self.config.target, job["job_id"], self.config.bot_id, _lease_id(arguments), LEASE_SECONDS
-            )
+            lease_id = _lease_id(arguments)
+            if not self._admit_hub_lease(job, lease_id):
+                raise AdapterError()
+            try:
+                result = grokbot_jobs.claim_execution_context(
+                    self.config.target, job["job_id"], self.config.bot_id, lease_id, LEASE_SECONDS
+                )
+            except Exception:
+                self._release_hub_lease(job["job_id"], lease_id, "released")
+                raise
+            self._bind_hub_lease(job["job_id"], lease_id)
+            return result
         if name == "grokbot_queue_renew":
-            job_id, lease_id = _job_id(arguments, {"job_id", "lease_id"}), _lease_id(arguments)
-            return grokbot_jobs.renew(self.config.target, job_id, self.config.bot_id, lease_id, LEASE_SECONDS)
+            job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
+            lease_id = _lease_id(arguments)
+            result = grokbot_jobs.renew(self.config.target, job["job_id"], self.config.bot_id, lease_id, LEASE_SECONDS)
+            self._renew_or_reconcile_hub_lease(result, lease_id)
+            return result
         if name in {"grokbot_queue_start", "grokbot_queue_fail", "grokbot_queue_ack_cancel"}:
             job_id, lease_id = _job_id(arguments, {"job_id", "lease_id"}), _lease_id(arguments)
             if name.endswith("start"):
-                return grokbot_jobs.transition(self.config.target, job_id, self.config.bot_id, lease_id, "running")
+                result = grokbot_jobs.transition(self.config.target, job_id, self.config.bot_id, lease_id, "running")
+                self._renew_or_reconcile_hub_lease(result, lease_id)
+                return result
             if name.endswith("fail"):
-                return grokbot_jobs.transition(self.config.target, job_id, self.config.bot_id, lease_id, "failed")
-            return grokbot_jobs.acknowledge_cancel(self.config.target, job_id, self.config.bot_id, lease_id)
+                result = grokbot_jobs.transition(self.config.target, job_id, self.config.bot_id, lease_id, "failed")
+            else:
+                result = grokbot_jobs.acknowledge_cancel(self.config.target, job_id, self.config.bot_id, lease_id)
+            self._release_hub_lease(job_id, lease_id, result["state"])
+            return result
         if name == "grokbot_queue_complete":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id", "artifact"})
             artifact = arguments.get("artifact")
             if not isinstance(artifact, dict):
                 raise AdapterError()
-            return grokbot_jobs.transition(
+            lease_id = _lease_id(arguments)
+            result = grokbot_jobs.transition(
                 self.config.target,
                 job["job_id"],
                 self.config.bot_id,
-                _lease_id(arguments),
+                lease_id,
                 "completed",
                 artifact=artifact,
             )
+            self._release_hub_lease(job["job_id"], lease_id, result["state"])
+            return result
         raise AdapterError()
+
+    def _admit_hub_lease(self, job: Mapping[str, Any], holder: str) -> bool:
+        """Gate new local claims on one deterministic fleet-hub lease."""
+        task_hash = job.get("task_hash")
+        repository = job.get("repository")
+        job_id = job.get("job_id")
+        if not isinstance(task_hash, str) or not isinstance(repository, str) or not isinstance(job_id, str):
+            return False
+        prompt_hash = task_hash.removeprefix("sha256:")
+        decision = self._hub_call(
+            fleet_client.admit_cloud,
+            "grokbot-cloud",
+            repo=repository,
+            label=cloud_tracker.lease_label("grokbot-cloud", repository, prompt_hash),
+            prompt_hash=prompt_hash,
+            conductor=self.config.instance,
+            ttl_seconds=LEASE_SECONDS,
+            lease_id=job_id,
+            holder=holder,
+        )
+        return bool(decision is not None and decision.granted)
+
+    def _bind_hub_lease(self, job_id: str, holder: str) -> None:
+        """Associate the deterministic fleet lease with its GrokBot job."""
+        self._hub_call(fleet_client.bind_cloud, job_id, provider_task_id=job_id, holder=holder)
+
+    def _renew_or_reconcile_hub_lease(self, job: Mapping[str, Any], holder: str) -> None:
+        """Mirror a live local lease, recreating only a definitively refused lease."""
+        job_id = job.get("job_id")
+        if not isinstance(job_id, str):
+            return
+        decision = self._hub_call(fleet_client.renew_cloud, job_id, ttl_seconds=LEASE_SECONDS, holder=holder)
+        if decision is None or decision.granted or decision.reason != "refused":
+            return
+        if self._admit_hub_lease(job, holder):
+            self._bind_hub_lease(job_id, holder)
+
+    def _release_hub_lease(self, job_id: str, holder: str, state: str) -> None:
+        """Best-effort terminal mirror that cannot roll back a queue transition."""
+        self._hub_call(fleet_client.release_cloud, job_id, state=state, holder=holder)
+
+    @staticmethod
+    def _hub_call(operation: Callable[..., Any], *args: Any, **kwargs: Any) -> fleet_client.CloudDecision | None:
+        """Contain hub failures at the mirror boundary without retaining details."""
+        try:
+            result = operation(*args, **kwargs)
+        except Exception:
+            return None
+        return result if isinstance(result, fleet_client.CloudDecision) else None
 
     def _eligible_job(self, arguments: dict[str, Any], allowed: set[str] | None = None) -> dict[str, Any]:
         job_id = _job_id(arguments, allowed or {"job_id"})
