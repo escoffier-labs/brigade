@@ -123,6 +123,23 @@ def test_template_blocks_raw_focused_verify_without_matching_similar_names(tmp_p
     assert json.loads(similar.stdout) == {"decision": "allow"}
 
 
+def test_template_blocks_path_qualified_raw_verify_without_matching_similar_names(tmp_path: Path):
+    target = tmp_path / "repo"
+    _write_config(target, ["grok"])
+
+    nested = _run_hook(tmp_path, _pre_tool_payload(target, "tools/ci/scripts/verify"))
+    parent = _run_hook(tmp_path, _pre_tool_payload(target, "../scripts/verify-focused"))
+    absolute = _run_hook(tmp_path, _pre_tool_payload(target, "/tmp/worktree/scripts/verify-focused"))
+    nested_similar = _run_hook(tmp_path, _pre_tool_payload(target, "tools/ci/scripts/verify-focused-extra"))
+    absolute_similar = _run_hook(tmp_path, _pre_tool_payload(target, "/tmp/worktree/scripts/verify-extra"))
+
+    assert json.loads(nested.stdout)["decision"] == "deny"
+    assert json.loads(parent.stdout)["decision"] == "deny"
+    assert json.loads(absolute.stdout)["decision"] == "deny"
+    assert json.loads(nested_similar.stdout) == {"decision": "allow"}
+    assert json.loads(absolute_similar.stdout) == {"decision": "allow"}
+
+
 def test_direct_brigade_verify_is_allowed_but_substring_bypasses_are_denied(tmp_path: Path):
     target = tmp_path / "repo"
     _write_config(target, ["grok"])
