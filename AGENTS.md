@@ -107,6 +107,11 @@ See AGENTS.md Definition of Done and CONTRIBUTING.md. Day-to-day:
   `python scripts/version_sync.py --check`, `python scripts/managed_snapshot.py --check`
   (or the combined `./scripts/verify`, which also runs coverage pytest)
 - Tests: `pytest -q` (full suite; expect a long run, ~30+ minutes)
+- Fast full gate while iterating: `./scripts/verify-fast` (same checks, pytest
+  parallelized via pytest-xdist, ~4 minutes). A few timing-sensitive tests flake
+  under parallel CPU load; re-run any parallel-only failure serially before
+  acting on it. The completion gate for reporting work done stays serial
+  `./scripts/verify`.
 - End-to-end smoke (same shape as CI `install-from-source`):
 
 ```bash

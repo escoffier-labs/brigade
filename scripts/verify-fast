@@ -1,0 +1,22 @@
+#!/bin/bash
+# Fast local iteration lane: the ./scripts/verify gates, with the pytest phase
+# parallelized via pytest-xdist. The canonical gate stays `./scripts/verify`
+# (serial). Parallel runs flake a handful of timing-sensitive tests under CPU
+# contention; treat new parallel-only failures as suspects, not verdicts -
+# re-run them serially before acting on them.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PY=${PY:-.venv/bin}
+"$PY/python" -c "import xdist" 2>/dev/null || {
+    echo "pytest-xdist is not installed. Re-sync: pip install -e \".[dev]\"" >&2
+    exit 1
+}
+"$PY/ruff" check .
+"$PY/ruff" format --check .
+"$PY/mypy"
+"$PY/python" scripts/version_sync.py --check
+"$PY/python" scripts/managed_snapshot.py --check
+"$PY/python" scripts/template_profile_snapshot.py --check
+JOBS=${JOBS:-auto}
+"$PY/pytest" -q -n "$JOBS" --cov=brigade --cov-report=term --cov-fail-under=78
