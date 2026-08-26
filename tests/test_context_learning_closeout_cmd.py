@@ -740,16 +740,42 @@ def test_closeout_commands_and_acceptance_summary(tmp_path, capsys):
         "cards": [
             {
                 "card_id": "card-one",
-                "card_file": "memory/cards/card-one.md",
+                "file": "memory/cards/card-one.md",
                 "issue_type": "stale",
+                "safe_summary": "One stale memory card",
                 "source_fingerprint": "memory-fp-one",
             }
         ],
     }
     _write_json(tmp_path / "memory" / "cards" / "decay" / "refresh-queue.json", queue)
-    assert memory_cmd.closeout(target=tmp_path, reason="reviewed", json_output=True) == 0
-    memory = json.loads(capsys.readouterr().out)
-    assert memory["source_fingerprints"] == ["memory-fp-one"]
+    # A nonempty unresolved queue must not be closed as reviewed (issue #1191).
+    assert memory_cmd.closeout(target=tmp_path, reason="reviewed", json_output=True) == 1
+    blocked = json.loads(capsys.readouterr().out)
+    assert blocked["status"] == "blocked"
+    assert blocked["candidate_count"] == 1
+    assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
+    assert memory_cmd.closeout(target=tmp_path, reason="reviewed", json_output=False) == 1
+    assert "unresolved" in capsys.readouterr().err
+    assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
+
+    # Explicit deferral stays available but requires a nonblank reason.
+    assert memory_cmd.closeout(target=tmp_path, defer=True, json_output=True) == 1
+    capsys.readouterr()
+    assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
+    assert memory_cmd.closeout(target=tmp_path, defer=True, reason="   ", json_output=False) == 1
+    capsys.readouterr()
+    assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
+    assert memory_cmd.closeout(target=tmp_path, defer=True, reason="waiting on card owner", json_output=True) == 0
+    deferred = json.loads(capsys.readouterr().out)
+    assert deferred["status"] == "deferred"
+    assert deferred["source_fingerprints"] == ["memory-fp-one"]
+
+    # An empty queue may still close reviewed.
+    _write_json(tmp_path / "memory" / "cards" / "decay" / "refresh-queue.json", {"version": 1, "cards": []})
+    assert memory_cmd.closeout(target=tmp_path, reason="queue drained", json_output=True) == 0
+    reviewed = json.loads(capsys.readouterr().out)
+    assert reviewed["status"] == "reviewed"
+    assert reviewed["source_fingerprints"] == []
 
     handoff_dir = tmp_path / ".claude" / "memory-handoffs"
     handoff_dir.mkdir(parents=True)
