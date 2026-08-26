@@ -257,6 +257,59 @@ class TestHeartbeatCredentialRefusal:
 
 
 class TestHubClaims:
+    def test_acquire_preserves_validated_external_harness_labels(self, hub):
+        url, token, _db = hub
+        status, payload = _post(
+            url,
+            token,
+            _claim(
+                harness="grokbot",
+                role="implementation-worker",
+                job="grokbot-" + "a" * 24,
+                session="lease-a",
+            ),
+        )
+
+        assert status == 200 and payload["granted"] is True
+        claim = payload["claim"]
+        assert {key: claim[key] for key in ("harness", "role", "job", "session")} == {
+            "harness": "grokbot",
+            "role": "implementation-worker",
+            "job": "grokbot-" + "a" * 24,
+            "session": "lease-a",
+        }
+        assert "holder_token" not in claim
+        listed = _get(url, "/claims", token)[1]["claims"]
+        assert len(listed) == 1
+        assert {key: listed[0][key] for key in ("harness", "role", "job", "session")} == {
+            "harness": "grokbot",
+            "role": "implementation-worker",
+            "job": "grokbot-" + "a" * 24,
+            "session": "lease-a",
+        }
+
+    def test_acquire_rejects_invalid_opaque_labels(self, hub):
+        url, token, _db = hub
+        for field, value, status in (
+            ("harness", " ", 400),
+            ("role", "x" * 129, 400),
+            ("job", "job\x1b[31m", 422),
+            ("session", "lease\x07", 422),
+        ):
+            code, payload = _post(url, token, _claim(**{field: value}))
+            assert code == status, (field, value, code, payload)
+            assert field in payload["error"] or "control" in payload["error"]
+        assert _get(url, "/claims", token)[1]["claims"] == []
+
+    def test_opaque_labels_are_acquire_only(self, hub):
+        url, token, _db = hub
+        assert _post(url, token, _claim(harness="grokbot", session="lease-a"))[0] == 200
+        for action in ("renew", "release"):
+            status, payload = _post(url, token, _claim(action, harness="grokbot"))
+            assert status == 400, action
+            assert "harness" in payload["error"]
+        assert _get(url, "/claims", token)[1]["claims"][0]["harness"] == "grokbot"
+
     def test_claims_require_auth(self, hub):
         url, _token, _db = hub
         assert _post(url, "", _claim())[0] == 401
@@ -854,6 +907,32 @@ class TestClientClaims:
             assert fleet_client.fetch_claims(include_all=True) == [], "released claim was resurrected"
             time.sleep(0.02)
 
+    def test_client_rejects_invalid_opaque_labels_without_posting(self, hub, monkeypatch):
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        posted: list[dict[str, object]] = []
+        real = fleet_client._post_claim_blocking
+
+        def capture(hub_url, tok, body, *, timeout):
+            posted.append(body)
+            return real(hub_url, tok, body, timeout=timeout)
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", capture)
+        for kwargs in (
+            {"harness": " "},
+            {"role": "x" * 129},
+            {"job": "job\x1b[31m"},
+            {"session": "lease\x07"},
+        ):
+            decision = fleet_client.acquire_claim("repo-a", node_id=NODE_A, **kwargs)
+            assert decision.granted is False
+            assert decision.reason != "ok"
+        assert posted == []
+        assert fleet_client.acquire_claim("repo-a", node_id=NODE_A, harness="grokbot", session="lease-a").granted
+        assert posted[-1]["harness"] == "grokbot"
+        assert posted[-1]["session"] == "lease-a"
+
     def test_resolve_claim_target_uses_workspace_name(self, tmp_path, monkeypatch):
         from brigade import node as node_mod
 
@@ -934,6 +1013,367 @@ class TestFleetClaimsCli:
         monkeypatch.delenv("BRIGADE_FLEET_HUB_URL", raising=False)
         assert cli.main(["fleet", "claims"]) == 1
         assert "no fleet hub configured" in capsys.readouterr().err
+
+    def _session_env(self, hub, tmp_path, monkeypatch):
+        url, token, _db = hub
+        home = tmp_path / "home"
+        monkeypatch.setenv("BRIGADE_HOME", str(home))
+        _plant_home_identity(home, NODE_A)
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        return url, token
+
+    def test_acquire_heartbeat_and_holder_release_fence_the_session(self, hub, tmp_path, monkeypatch, capsys):
+        from brigade import cli
+
+        self._session_env(hub, tmp_path, monkeypatch)
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--acquire",
+                    "repo-a",
+                    "--harness",
+                    "t3",
+                    "--session",
+                    "sess-1",
+                    "--role",
+                    "coder",
+                    "--job",
+                    "job-1",
+                    "--holder",
+                    "holder-a",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+        acquired = json.loads(capsys.readouterr().out)
+        assert acquired["granted"] is True
+        assert acquired["holder"] == "holder-a"
+        assert {key: acquired["claim"][key] for key in ("harness", "role", "job", "session")} == {
+            "harness": "t3",
+            "role": "coder",
+            "job": "job-1",
+            "session": "sess-1",
+        }
+        assert "holder_token" not in acquired["claim"]
+        assert cli.main(["fleet", "claims", "--heartbeat", "repo-a", "--holder", "holder-b"]) == 1
+        assert "held" in capsys.readouterr().err or "holder" in capsys.readouterr().err
+        assert cli.main(["fleet", "claims", "--heartbeat", "repo-a", "--holder", "holder-a", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["renewed"] is True
+        assert cli.main(["fleet", "claims", "--release", "repo-a", "--holder", "holder-b"]) == 1
+        assert _get(hub[0], "/claims", hub[1])[1]["claims"]
+        assert cli.main(["fleet", "claims", "--release", "repo-a", "--holder", "holder-a", "--json"]) == 0
+        released = json.loads(capsys.readouterr().out)
+        assert released["released"] is True
+        assert released.get("forced") is not True
+        assert _get(hub[0], "/claims", hub[1])[1]["claims"] == []
+
+    def test_holder_release_reports_terminal_outcome_without_queue_content(self, hub, tmp_path, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token = self._session_env(hub, tmp_path, monkeypatch)
+        events: list[dict[str, object]] = []
+        monkeypatch.setattr(fleet_client, "report_external_event", lambda **kwargs: events.append(kwargs) or True)
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--acquire",
+                    "repo-a",
+                    "--harness",
+                    "cursor-cloud",
+                    "--session",
+                    "sess-2",
+                    "--holder",
+                    "holder-c",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--release",
+                    "repo-a",
+                    "--holder",
+                    "holder-c",
+                    "--outcome",
+                    "external.completed",
+                    "--harness",
+                    "cursor-cloud",
+                    "--session",
+                    "sess-2",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["released"] is True
+        assert events == [
+            {
+                "target": "repo-a",
+                "harness": "cursor-cloud",
+                "role": None,
+                "job": None,
+                "session": "sess-2",
+                "state": "external.completed",
+            }
+        ]
+        assert "prompt" not in json.dumps(events)
+        assert "holder-c" not in json.dumps(events)
+        listed = _get(url, "/claims", token)[1]["claims"]
+        assert listed == []
+
+    def test_wrong_holder_outcome_releases_nothing_and_publishes_nothing(self, hub, tmp_path, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token = self._session_env(hub, tmp_path, monkeypatch)
+        events: list[dict[str, object]] = []
+        monkeypatch.setattr(fleet_client, "report_external_event", lambda **kwargs: events.append(kwargs) or True)
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--acquire",
+                    "repo-a",
+                    "--harness",
+                    "t3",
+                    "--session",
+                    "sess-3",
+                    "--holder",
+                    "holder-c",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--release",
+                    "repo-a",
+                    "--holder",
+                    "holder-wrong",
+                    "--outcome",
+                    "external.failed",
+                    "--harness",
+                    "t3",
+                    "--session",
+                    "sess-3",
+                    "--json",
+                ]
+            )
+            == 1
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["released"] is False
+        assert payload.get("outcome") in (None, "external.failed")
+        assert events == []
+        listed = _get(url, "/claims", token)[1]["claims"]
+        assert [claim["session"] for claim in listed] == ["sess-3"]
+
+    def test_holder_release_reports_outcome_only_after_granted_release(self, hub, tmp_path, monkeypatch, capsys):
+        from brigade import cli
+
+        self._session_env(hub, tmp_path, monkeypatch)
+        order: list[str] = []
+        real_release = fleet_client.release_claim
+
+        def release(target, **kwargs):
+            order.append("release")
+            return real_release(target, **kwargs)
+
+        monkeypatch.setattr(fleet_client, "release_claim", release)
+        monkeypatch.setattr(
+            fleet_client,
+            "report_external_event",
+            lambda **kwargs: order.append("event") or True,
+        )
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--acquire",
+                    "repo-a",
+                    "--harness",
+                    "cursor-cloud",
+                    "--session",
+                    "sess-4",
+                    "--holder",
+                    "holder-d",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--release",
+                    "repo-a",
+                    "--holder",
+                    "holder-d",
+                    "--outcome",
+                    "external.completed",
+                    "--harness",
+                    "cursor-cloud",
+                    "--session",
+                    "sess-4",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+        assert order == ["release", "event"]
+
+    def test_holder_release_rejects_invalid_opaque_labels_without_releasing(self, hub, tmp_path, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token = self._session_env(hub, tmp_path, monkeypatch)
+        events: list[dict[str, object]] = []
+        monkeypatch.setattr(fleet_client, "report_external_event", lambda **kwargs: events.append(kwargs) or True)
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--acquire",
+                    "repo-a",
+                    "--harness",
+                    "cursor-cloud",
+                    "--session",
+                    "sess-5",
+                    "--holder",
+                    "holder-e",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        invalid = (
+            ("--harness", "x" * 129),
+            ("--session", "sess\x07"),
+            ("--role", "x" * 129),
+            ("--job", "job\x1b[31m"),
+        )
+        for flag, value in invalid:
+            argv = [
+                "fleet",
+                "claims",
+                "--release",
+                "repo-a",
+                "--holder",
+                "holder-e",
+                "--outcome",
+                "external.completed",
+                "--harness",
+                "cursor-cloud",
+                "--session",
+                "sess-5",
+                flag,
+                value,
+            ]
+            assert cli.main(argv) == 2
+            err = capsys.readouterr().err
+            assert "control" in err or "at most" in err or "non-empty" in err
+        assert events == []
+        listed = _get(url, "/claims", token)[1]["claims"]
+        assert [claim["session"] for claim in listed] == ["sess-5"]
+
+    def test_holder_release_uses_normalized_opaque_labels(self, hub, tmp_path, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token = self._session_env(hub, tmp_path, monkeypatch)
+        events: list[dict[str, object]] = []
+        monkeypatch.setattr(fleet_client, "report_external_event", lambda **kwargs: events.append(kwargs) or True)
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--acquire",
+                    "repo-a",
+                    "--harness",
+                    "cursor-cloud",
+                    "--session",
+                    "sess-6",
+                    "--role",
+                    "worker",
+                    "--job",
+                    "job-6",
+                    "--holder",
+                    "holder-f",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert (
+            cli.main(
+                [
+                    "fleet",
+                    "claims",
+                    "--release",
+                    "repo-a",
+                    "--holder",
+                    "holder-f",
+                    "--outcome",
+                    "external.completed",
+                    "--harness",
+                    "  cursor-cloud  ",
+                    "--session",
+                    "  sess-6  ",
+                    "--role",
+                    "  worker  ",
+                    "--job",
+                    "  job-6  ",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["released"] is True
+        assert payload["outcome"] == "external.completed"
+        assert events == [
+            {
+                "target": "repo-a",
+                "harness": "cursor-cloud",
+                "role": "worker",
+                "job": "job-6",
+                "session": "sess-6",
+                "state": "external.completed",
+            }
+        ]
+        assert _get(url, "/claims", token)[1]["claims"] == []
+
+    def test_claims_table_renders_external_harness_labels(self, hub, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        _post(url, token, _claim(harness="grokbot", role="implementation-worker", job="job-9", session="lease-z"))
+        assert cli.main(["fleet", "claims"]) == 0
+        out = capsys.readouterr().out
+        header = out.splitlines()[0]
+        assert "harness" in header and "session" in header
+        assert "grokbot" in out and "lease-z" in out
+        assert "holder_token" not in out
 
 
 class TestDispatchWiring:

@@ -161,6 +161,29 @@ class TestHub:
         assert len(_get(url, "/status?all=true", token)[1]["runs"]) == 1
         assert len(_get(url, "/status?x=1&all=1", token)[1]["runs"]) == 1
 
+    def test_verify_and_external_completion_are_terminal_and_drop_secrets(self, hub):
+        url, token, _db = hub
+        verify = {
+            **_event(run_id="vr1", state="verify.completed", digest="dv"),
+            "exit_status": 0,
+            "capability_fingerprint": "fp-verify",
+            "token": "secret-token",
+            "headers": {"Authorization": "Bearer leaked"},
+            "artifact": {"diff": "NOPE"},
+        }
+        external = {**_event(run_id="ex1", state="external.completed", digest="de"), "prompt": "do not store"}
+        assert _post(url, token, [verify, external])[0] == 200
+        assert _get(url, "/status", token)[1]["runs"] == []
+        rows = {row["run_id"]: row for row in _get(url, "/status?all=1", token)[1]["runs"]}
+        assert rows["vr1"]["exit_status"] == 0
+        assert rows["vr1"]["capability_fingerprint"] == "fp-verify"
+        assert rows["ex1"]["state"] == "external.completed"
+        dumped = json.dumps(list(rows.values()))
+        assert "secret-token" not in dumped
+        assert "Bearer leaked" not in dumped
+        assert "NOPE" not in dumped
+        assert "do not store" not in dumped
+
     def test_batch_with_one_bad_event_stores_nothing(self, hub):
         url, token, db = hub
         status, _payload = _post(url, token, [_event(seq=1), {"node_id": "x"}])
@@ -585,6 +608,21 @@ class TestCli:
         out = capsys.readouterr().out
         assert "repo-a" in out and "worker/claude" in out and "run.created" in out
         assert out.splitlines()[0].split()[-1] == "age"
+
+    def test_status_table_shows_verify_exit_without_receipt_body(self, hub, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        event = {**_event(run_id="vr-status", state="verify.completed"), "exit_status": 3}
+        assert _post(url, token, event)[0] == 200
+        assert cli.main(["fleet", "status", "--all"]) == 0
+        out = capsys.readouterr().out
+        header = out.splitlines()[0]
+        assert "exit" in header
+        assert "verify.completed" in out and "3" in out
+        assert "commands" not in out and "stdout" not in out
 
     def test_status_table_renders_legacy_nonprintables_inert(self, hub, monkeypatch, capsys):
         from brigade import cli
