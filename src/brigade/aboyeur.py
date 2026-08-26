@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from functools import partial, wraps
 from json import JSONDecoder
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from . import agents
@@ -3264,6 +3264,7 @@ def _run_payload(
     health: dict[str, object] | None = None,
     worker_failure_summary: dict[str, object] | None = None,
     transport_routing: dict[str, object] | None = None,
+    retry_decisions: Sequence[Mapping[str, Any]] | None = None,
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
     kind: str = "work",
@@ -3311,6 +3312,8 @@ def _run_payload(
         payload["roster"] = resolution
     if roster.seat_routing:
         payload["seat_routing"] = [dict(decision) for decision in roster.seat_routing]
+    if retry_decisions:
+        payload["retry_decisions"] = [dict(entry) for entry in retry_decisions]
     if lock_workspace is not None:
         payload["lock_workspace"] = str(lock_workspace)
     if route is not None:
@@ -3431,6 +3434,7 @@ def record_run_start(
     existing_run_budget: dict[str, Any] | None = None
     existing_kind: str | None = None
     existing_causal_receipt: dict[str, Any] | None = None
+    existing_retry_decisions: list[dict[str, Any]] | None = None
     if run_json_exists:
         try:
             existing = json.loads(run_json.read_text(encoding="utf-8"))
@@ -3458,6 +3462,9 @@ def record_run_start(
             existing_kind = existing["kind"].strip()
         if isinstance(existing.get("causal_receipt"), dict):
             existing_causal_receipt = dict(existing["causal_receipt"])
+        existing_retry = existing.get("retry_decisions")
+        if isinstance(existing_retry, list):
+            existing_retry_decisions = [dict(entry) for entry in existing_retry if isinstance(entry, dict)]
     # Every new run carries both durable request fields. Existing runs enroll
     # only from their stored run.json fields, so legacy snapshot-only runs stay
     # untouched. An authority request implies lifecycle journaling even when an
@@ -3512,6 +3519,7 @@ def record_run_start(
                     if existing_causal_receipt is not None
                     else (causal_receipt.recorded_run(run_id=output_dir.name) if new_run else None)
                 ),
+                retry_decisions=existing_retry_decisions,
             ),
         )
     except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
@@ -3942,6 +3950,8 @@ def run(
     def _payload(**kwargs: Any) -> dict[str, object]:
         if "skill_route_policy" not in kwargs and skill_policy is not None:
             kwargs["skill_route_policy"] = skill_policy
+        if "retry_decisions" not in kwargs and quarantine_state.retry_decisions:
+            kwargs["retry_decisions"] = [dict(entry) for entry in quarantine_state.retry_decisions]
         if health_summary_payload is not None and "health" not in kwargs:
             kwargs["health"] = health_summary_payload
         if transport_routing_payload is not None and "transport_routing" not in kwargs:
@@ -3999,6 +4009,16 @@ def run(
                         kwargs["kind"] = existing["kind"].strip()
                     if "causal_receipt_payload" not in kwargs and isinstance(existing.get("causal_receipt"), dict):
                         kwargs["causal_receipt_payload"] = dict(existing["causal_receipt"])
+                    existing_retry = existing.get("retry_decisions")
+                    if isinstance(existing_retry, list):
+                        prior = [dict(entry) for entry in existing_retry if isinstance(entry, dict)]
+                        fresh = [
+                            dict(entry) for entry in (kwargs.get("retry_decisions") or []) if isinstance(entry, dict)
+                        ]
+                        seen = {json.dumps(entry, sort_keys=True) for entry in prior}
+                        kwargs["retry_decisions"] = prior + [
+                            entry for entry in fresh if json.dumps(entry, sort_keys=True) not in seen
+                        ]
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
@@ -5325,6 +5345,9 @@ def run(
                     worker=worker,
                 ),
             )
+    reroute_summary = seat_health_policy.format_reroute_summary(roster.seat_routing)
+    if reroute_summary is not None:
+        print(reroute_summary, file=sys.stderr)
     if not workers_ok:
         print(
             seat_health_policy.format_incomplete_warning(
