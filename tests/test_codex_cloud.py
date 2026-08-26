@@ -659,6 +659,114 @@ class TestFleetAdmission:
         assert result.detail == "cloud status unavailable"
         assert recorded["release"] == []
 
+    def test_transient_unknown_nonzero_status_recovers(self, monkeypatch):
+        recorded = _grant_hub(monkeypatch)
+        slept: list[float] = []
+        fake = FakeRuns(
+            {
+                "exec": [_result(stdout="task_statgrace1")],
+                "status": [
+                    _result(code=1, stdout="task is not visible yet"),
+                    _result(stdout="[PENDING] BRIGADE_CLOUD_MAIN_OK\nno diff"),
+                    _result(stdout="[COMPLETED] BRIGADE_CLOUD_MAIN_OK\nno diff"),
+                ],
+                "diff": [_result(stdout="")],
+            }
+        )
+        monkeypatch.setattr(codex_cloud.proc, "run", fake)
+        result = codex_cloud.run_cloud_task(
+            "x",
+            env_id="e",
+            timeout=600,
+            poll_interval=codex_cloud.POLL_INTERVAL,
+            sleep=slept.append,
+            clock=lambda: 0,
+        )
+        assert result.ok
+        assert result.status == "completed"
+        assert recorded["release"]
+        assert recorded["release"][0]["kwargs"]["state"] == "completed"
+        assert slept == [codex_cloud.POLL_INTERVAL, codex_cloud.POLL_INTERVAL]
+        assert len(recorded["renew"]) == 2
+
+    def test_nonzero_pending_status_continues_polling(self, monkeypatch):
+        recorded = _grant_hub(monkeypatch)
+        fake = FakeRuns(
+            {
+                "exec": [_result(stdout="task_pendingnz1")],
+                "status": [
+                    _result(code=1, stdout="[PENDING] BRIGADE_CLOUD_MAIN_OK\nno diff"),
+                    _result(stdout="[COMPLETED] BRIGADE_CLOUD_MAIN_OK\nno diff"),
+                ],
+                "diff": [_result(stdout="")],
+            }
+        )
+        monkeypatch.setattr(codex_cloud.proc, "run", fake)
+        result = codex_cloud.run_cloud_task(
+            "x",
+            env_id="e",
+            timeout=600,
+            poll_interval=0,
+            sleep=lambda s: None,
+            clock=lambda: 0,
+        )
+        assert result.ok
+        assert result.status == "completed"
+        assert len(recorded["renew"]) == 1
+        assert recorded["release"]
+
+    def test_unknown_nonzero_status_exhausts_grace_then_holds_lease(self, monkeypatch):
+        recorded = _grant_hub(monkeypatch)
+        fake = FakeRuns(
+            {
+                "exec": [_result(stdout="task_statnzex1")],
+                "status": [_result(code=1, stdout="provider dropped the connection")],
+            }
+        )
+        monkeypatch.setattr(codex_cloud.proc, "run", fake)
+        result = codex_cloud.run_cloud_task(
+            "x",
+            env_id="e",
+            timeout=600,
+            poll_interval=0,
+            sleep=lambda s: None,
+            clock=lambda: 0,
+        )
+        assert not result.ok
+        assert result.status == "uncertain"
+        assert result.failure_kind == "uncertain"
+        assert result.detail == "cloud status unavailable"
+        assert recorded["release"] == []
+        status_calls = sum(1 for call in fake.calls if call[2] == "status")
+        retries = codex_cloud.MAX_TRANSIENT_STATUS_RETRIES
+        assert status_calls == retries + 1
+        assert len(recorded["renew"]) == retries
+
+    def test_auth_failure_status_fails_immediately(self, monkeypatch):
+        recorded = _grant_hub(monkeypatch)
+        fake = FakeRuns(
+            {
+                "exec": [_result(stdout="task_statauth1")],
+                "status": [_result(code=1, stderr="Error: not logged in")],
+            }
+        )
+        monkeypatch.setattr(codex_cloud.proc, "run", fake)
+        result = codex_cloud.run_cloud_task(
+            "x",
+            env_id="e",
+            timeout=600,
+            poll_interval=0,
+            sleep=lambda s: None,
+            clock=lambda: 0,
+        )
+        assert not result.ok
+        assert result.status == "uncertain"
+        assert result.failure_kind == "auth-failure"
+        assert result.detail == "cloud status authentication failed"
+        assert recorded["release"] == []
+        assert sum(1 for call in fake.calls if call[2] == "status") == 1
+        assert recorded["renew"] == []
+
     def test_terminal_success_releases_lease_before_diff(self, monkeypatch):
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(

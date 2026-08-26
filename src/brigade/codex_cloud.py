@@ -37,6 +37,9 @@ CONFIG_SCHEMA = "brigade.codex-cloud-config/1"
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 LITERAL_SELECTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 MAX_CONSECUTIVE_HUB_UNAVAILABLE_RENEWS = 3
+# Live canary: first status after submit/bind can be unknown nonzero
+# propagation; two retries at POLL_INTERVAL covers the observed ~30s recovery.
+MAX_TRANSIENT_STATUS_RETRIES = 2
 _AUTH_FAILURE_RE = re.compile(
     r"(?:\bnot (?:logged|signed) in\b|\bsign[- ]?in\b|\bauthentication\b|\bunauthorized\b|\b401\b)",
     re.IGNORECASE,
@@ -649,6 +652,7 @@ def run_cloud_task(
     status_text = ""
     status_word = None
     consecutive_hub_unavailable_renews = 0
+    consecutive_unknown_nonzero = 0
     while True:
         st = run_command(
             ["codex", "cloud", "status", task_id],
@@ -656,8 +660,9 @@ def run_cloud_task(
         )
         status_text = (st.stdout + "\n" + st.stderr).strip()
         # A documented terminal marker is authoritative even when the CLI
-        # exits nonzero (live canary: `[ERROR]` plus exit 1). Unknown
-        # nonzero output still fails closed as transport uncertainty.
+        # exits nonzero (live canary: `[ERROR]` plus exit 1). Known
+        # nonterminal markers keep polling. Unknown nonzero output may
+        # retry a bounded number of times, then fails closed.
         verified_status = _verified_status(status_text)
         if verified_status in TERMINAL_FAIL + TERMINAL_OK:
             status_word = verified_status
@@ -680,22 +685,45 @@ def run_cloud_task(
                 task_id=task_id,
                 text="",
             )
-        if st.code != 0:
+        if st.code != 0 and _AUTH_FAILURE_RE.search(status_text):
             if hub_configured:
                 return AgentResult(
                     text="",
                     ok=False,
-                    detail="cloud status unavailable",
+                    detail="cloud status authentication failed",
                     thread_id=task_id,
                     status="uncertain",
                     failure_phase="dispatch",
-                    failure_kind="uncertain",
+                    failure_kind="auth-failure",
                     timed_out=False,
                     cloud_environment=environment_audit,
                 )
             return fail_result(
-                "cloud status unavailable", task_id=task_id, status="uncertain", failure_kind="uncertain"
+                "cloud status authentication failed",
+                task_id=task_id,
+                status="uncertain",
+                failure_kind="auth-failure",
             )
+        if st.code != 0 and verified_status not in NONTERMINAL:
+            consecutive_unknown_nonzero += 1
+            if consecutive_unknown_nonzero > MAX_TRANSIENT_STATUS_RETRIES:
+                if hub_configured:
+                    return AgentResult(
+                        text="",
+                        ok=False,
+                        detail="cloud status unavailable",
+                        thread_id=task_id,
+                        status="uncertain",
+                        failure_phase="dispatch",
+                        failure_kind="uncertain",
+                        timed_out=False,
+                        cloud_environment=environment_audit,
+                    )
+                return fail_result(
+                    "cloud status unavailable", task_id=task_id, status="uncertain", failure_kind="uncertain"
+                )
+        else:
+            consecutive_unknown_nonzero = 0
         status_word = verified_status if verified_status in TERMINAL_FAIL + TERMINAL_OK else _scan_status(status_text)
         if hub_configured and verified_status not in TERMINAL_FAIL + TERMINAL_OK:
             status_word = None
