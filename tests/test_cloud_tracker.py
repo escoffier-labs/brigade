@@ -630,6 +630,29 @@ def test_register_on_dispatch_from_codex_cloud(tmp_path: Path, monkeypatch):
     assert "prompt" not in calls[0]
 
 
+def test_codex_observer_uses_bounded_structured_inventory(tmp_path: Path, monkeypatch):
+    from brigade import codex_cloud
+
+    monkeypatch.setattr(
+        codex_cloud,
+        "list_tasks",
+        lambda **kwargs: [
+            {"id": "task_e_structured01", "state": "running", "environment_id": "env-private"},
+            {"id": "task_e_structured02", "state": "completed"},
+        ],
+    )
+    monkeypatch.setattr(
+        cloud_tracker,
+        "_run_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy parser should not run")),
+    )
+
+    assert cloud_tracker.observe_codex_cloud_tasks(tmp_path) == {
+        "task_e_structured01": {"state": "running", "ready_at": None},
+        "task_e_structured02": {"state": "completed", "ready_at": None},
+    }
+
+
 def test_center_cloud_card_uses_registry_rows(tmp_path: Path):
     from brigade.center_cmd.dashboard.views import agent_activity as view
 

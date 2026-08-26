@@ -826,25 +826,35 @@ def _parse_codex_cloud_list(stdout: str) -> dict[str, Any]:
 
 
 def observe_codex_cloud_tasks(target: Path) -> dict[str, Any]:
-    code, stdout, _stderr = _run_text(["codex", "cloud", "list"], cwd=target)
-    if code != 0 or not stdout.strip():
-        # Fall back to per-task status for known registry ids.
-        registry = load_registry(target)
-        tasks: dict[str, Any] = {}
-        for entry in registry["entries"]:
-            task_id = entry.get("task_id")
-            if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud":
-                continue
-            scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
-            blob = (sout + "\n" + serr).strip()
-            if scode != 0 and not blob:
-                continue
-            from . import codex_cloud
+    from . import codex_cloud
 
-            state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
-            tasks[task_id] = {"state": state, "ready_at": None}
-        return tasks
-    return _parse_codex_cloud_list(stdout)
+    try:
+        inventory = codex_cloud.list_tasks(cwd=target)
+    except Exception:  # noqa: BLE001 - observation must stay bounded
+        inventory = []
+    if inventory:
+        return {
+            row["id"]: {"state": row.get("state"), "ready_at": None}
+            for row in inventory
+            if isinstance(row.get("id"), str)
+        }
+
+    # Empty or unavailable structured inventory is not terminal evidence. Fall
+    # back to status reads only for task ids already present in the local
+    # registry, and never infer completion from absence.
+    registry = load_registry(target)
+    tasks: dict[str, Any] = {}
+    for entry in registry["entries"]:
+        task_id = entry.get("task_id")
+        if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud":
+            continue
+        scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
+        blob = (sout + "\n" + serr).strip()
+        if scode != 0 and not blob:
+            continue
+        state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
+        tasks[task_id] = {"state": state, "ready_at": None}
+    return tasks
 
 
 def observe_github(target: Path) -> dict[str, Any]:
