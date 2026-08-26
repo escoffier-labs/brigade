@@ -508,6 +508,89 @@ class TestHubClaims:
         finally:
             conn.close()
 
+    def test_acquire_after_release_is_refused_as_stale_generation(self, hub):
+        """A late-committing acquire for the released holder cannot resurrect the row."""
+        url, token, _db = hub
+        first = _post(url, token, _claim())[1]["claim"]
+        assert first["generation"] == 1
+        assert _post(url, token, _claim("release")) == (200, {"released": True})
+        status, payload = _post(url, token, _claim())
+        assert status == 409
+        assert payload["granted"] is False
+        assert payload["reason"] == "stale-generation"
+        assert payload["owner"] is None
+        assert _get(url, "/claims", token)[1]["claims"] == []
+        # A new holder on the same node, or the same holder on another node, may take the target.
+        status, payload = _post(url, token, _claim(holder="h2"))
+        assert status == 200 and payload["granted"] is True
+        assert payload["claim"]["generation"] == 2
+        assert _post(url, token, _claim("release", holder="h2"))[1]["released"] is True
+        status, payload = _post(url, token, _claim(node=NODE_B))
+        assert status == 200 and payload["granted"] is True
+        assert payload["claim"]["generation"] == 3
+
+    def test_late_acquire_with_stale_generation_or_lease_stamp_is_refused(self, hub):
+        url, token, _db = hub
+        lock = {"token": "run-lock-1", "acquired_at": "2026-08-26T00:00:00+00:00"}
+        granted = _post(url, token, _claim(lock=lock))[1]["claim"]
+        assert granted["generation"] == 1
+        assert _post(url, token, _claim("release"))[1]["released"] is True
+        status, payload = _post(url, token, _claim(generation=1))
+        assert status == 409 and payload["reason"] == "stale-generation"
+        status, payload = _post(url, token, _claim(holder="h-late", lock=lock))
+        assert status == 409 and payload["reason"] == "stale-generation"
+        status, payload = _post(url, token, _claim("renew", generation=1))
+        assert status == 409 and payload["reason"] == "stale-generation"
+        assert payload["renewed"] is False
+        assert _get(url, "/claims", token)[1]["claims"] == []
+
+    def test_no_row_release_still_tombs_an_in_flight_acquire(self, hub):
+        """Release before the first acquire lands still fences that holder."""
+        url, token, _db = hub
+        assert _post(url, token, _claim("release"))[1]["released"] is False
+        status, payload = _post(url, token, _claim())
+        assert status == 409 and payload["reason"] == "stale-generation"
+        assert _post(url, token, _claim(holder="h-fresh"))[1]["granted"] is True
+
+    def test_generation_is_only_valid_on_acquire_or_renew(self, hub):
+        url, token, _db = hub
+        assert _post(url, token, _claim("release", generation=1))[0] == 400
+        assert _post(url, token, _claim(generation=0))[0] == 400
+        assert _post(url, token, _claim(generation=True))[0] == 400
+
+    def test_schema_v4_rows_gain_generation_without_dropping_live_claims(self, tmp_path):
+        db = tmp_path / "v4.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, "
+            "owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, "
+            "holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, "
+            "ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, "
+            "lock_acquired_at TEXT, lock_run_dir TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO claims VALUES ('repo-a', ?, 'chef', NULL, NULL, NULL, NULL, 'h1', "
+            "'then', 'then', 900, ?, NULL, NULL, NULL)",
+            (NODE_A, time.time() + 900),
+        )
+        conn.execute("PRAGMA user_version=4")
+        conn.commit()
+        conn.close()
+        conn = fleet_hub.init_db(db)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+            assert "generation" in columns
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            assert "claim_tombstones" in tables
+            listed = fleet_hub.list_claims(conn)
+            assert listed[0]["target"] == "repo-a"
+            assert listed[0]["generation"] == 1
+            status, payload = fleet_hub.handle_claim(conn, _claim("renew", holder="h1"))
+            assert status == 200 and payload["claim"]["generation"] == 1
+        finally:
+            conn.close()
+
     def test_pre_holder_token_claims_table_is_recreated(self, tmp_path):
         db = tmp_path / "early-v2.db"
         conn = sqlite3.connect(str(db))
@@ -556,8 +639,22 @@ class TestClientClaims:
         assert fleet_client.renew_claim("repo-a", node_id=NODE_A, holder=holder).granted is True
         assert fleet_client.renew_claim("repo-a", node_id=NODE_B, holder="h-other").reason == "held"
         assert fleet_client.release_claim("repo-a", node_id=NODE_A, holder=holder).granted is True
-        assert fleet_client.renew_claim("repo-a", node_id=NODE_A, holder=holder).reason == "missing"
+        assert fleet_client.renew_claim("repo-a", node_id=NODE_A, holder=holder).reason == "stale-generation"
         assert fleet_client.fetch_claims() == []
+
+    def test_late_acquire_after_release_is_terminal_stale_generation(self, hub, monkeypatch):
+        url, token, _db = hub
+        self._env(monkeypatch, url, token)
+        won = fleet_client.acquire_claim("repo-a", node_id=NODE_A)
+        holder = won.holder
+        generation = (won.claim or {}).get("generation")
+        assert won.granted is True and holder and generation == 1
+        assert fleet_client.release_claim("repo-a", node_id=NODE_A, holder=holder).granted is True
+        late = fleet_client.acquire_claim("repo-a", node_id=NODE_A, holder=holder, generation=generation)
+        assert late.granted is False and late.reason == "stale-generation"
+        assert fleet_client.fetch_claims(include_all=True) == []
+        fresh = fleet_client.acquire_claim("repo-a", node_id=NODE_A)
+        assert fresh.granted is True and (fresh.claim or {}).get("generation") == 2
 
     def test_no_hub_and_unreachable_hub_reasons(self, monkeypatch):
         decision = fleet_client.acquire_claim("repo-a", node_id=NODE_A)
@@ -959,10 +1056,13 @@ class TestFleetClaimsCli:
         assert cli.main(["fleet", "claims", "--json"]) == 0
         payload = json.loads(capsys.readouterr().out)
         assert [c["target"] for c in payload["claims"]] == ["repo-a"]
+        assert payload["claims"][0]["generation"] == 1
         assert cli.main(["fleet", "claims"]) == 0
         out = capsys.readouterr().out
         assert "repo-a" in out and NODE_A[:12] in out and "cond-1" in out
-        assert out.splitlines()[0].split()[0] == "target"
+        header = out.splitlines()[0].split()
+        assert header[0] == "target" and "gen" in header
+        assert out.splitlines()[1].split()[header.index("gen")] == "1"
 
     def test_claims_table_renders_legacy_nonprintables_inert(self, hub, monkeypatch, capsys):
         from brigade import cli

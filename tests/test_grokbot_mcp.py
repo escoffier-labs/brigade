@@ -334,6 +334,39 @@ def test_best_effort_fleet_gaps_still_claim_the_queue(tmp_path: Path, monkeypatc
         assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
 
 
+def test_stale_generation_renew_is_terminal_and_does_not_reacquire(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def granted(target, **kwargs):
+        calls.append(("acquire", {"target": target, **kwargs}))
+        return fleet_client.ClaimDecision(
+            granted=True,
+            reason="ok",
+            holder=str(kwargs["holder"]),
+            claim={"generation": 1, "target": target},
+        )
+
+    def stale_renew(target, **kwargs):
+        calls.append(("renew", {"target": target, **kwargs}))
+        return fleet_client.ClaimDecision(granted=False, reason="stale-generation", holder=str(kwargs["holder"]))
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", granted)
+    monkeypatch.setattr(fleet_client, "renew_claim", stale_renew)
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(fleet_client, "report_external_event", lambda **kwargs: events.append(kwargs), raising=False)
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-stale"})
+    events.clear()
+    before = grokbot_jobs.get_job(tmp_path, job_id)["lease_expires_at"]
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-stale"})
+    assert grokbot_jobs.get_job(tmp_path, job_id)["lease_expires_at"] == before
+    assert events == []
+    assert [kind for kind, _payload in calls] == ["acquire", "renew"]
+    assert calls[1][1]["generation"] == 1
+
+
 def test_known_fleet_renew_refusal_does_not_heartbeat_or_extend_the_lease(tmp_path: Path, monkeypatch):
     job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
     adapter = _adapter(tmp_path)

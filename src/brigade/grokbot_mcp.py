@@ -144,6 +144,7 @@ class GrokbotAdapter:
     def __init__(self, config: ListenerConfig):
         config.validate()
         self.config = config
+        self._fleet_generations: dict[str, int] = {}
 
     def tool_inventory(self) -> list[dict[str, str]]:
         return [{"name": name, "description": _TOOL_DESCRIPTIONS[name]} for name in sorted(self._tools())]
@@ -257,23 +258,44 @@ class GrokbotAdapter:
     def _fleet_target(self) -> str:
         return fleet_client.resolve_claim_target(self.config.target)
 
+    def _remember_fleet_generation(self, holder: str, decision: fleet_client.ClaimDecision) -> None:
+        claim = decision.claim
+        if decision.granted and isinstance(claim, dict):
+            value = claim.get("generation")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+                self._fleet_generations[holder] = value
+                return
+        if decision.reason == "stale-generation":
+            self._fleet_generations.pop(holder, None)
+
     def _fleet_acquire(self, job_id: str, holder: str, session: str) -> fleet_client.ClaimDecision:
         try:
-            return fleet_client.acquire_claim(
-                self._fleet_target(),
-                holder=holder,
-                ttl_seconds=LEASE_SECONDS,
-                harness="grokbot",
-                role=self.config.instance,
-                job=job_id,
-                session=session,
-            )
+            kwargs: dict[str, Any] = {
+                "holder": holder,
+                "ttl_seconds": LEASE_SECONDS,
+                "harness": "grokbot",
+                "role": self.config.instance,
+                "job": job_id,
+                "session": session,
+            }
+            generation = self._fleet_generations.get(holder)
+            if generation is not None:
+                kwargs["generation"] = generation
+            decision = fleet_client.acquire_claim(self._fleet_target(), **kwargs)
+            self._remember_fleet_generation(holder, decision)
+            return decision
         except Exception:
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
 
     def _fleet_renew(self, holder: str) -> fleet_client.ClaimDecision:
         try:
-            return fleet_client.renew_claim(self._fleet_target(), holder=holder, ttl_seconds=LEASE_SECONDS)
+            kwargs: dict[str, Any] = {"holder": holder, "ttl_seconds": LEASE_SECONDS}
+            generation = self._fleet_generations.get(holder)
+            if generation is not None:
+                kwargs["generation"] = generation
+            decision = fleet_client.renew_claim(self._fleet_target(), **kwargs)
+            self._remember_fleet_generation(holder, decision)
+            return decision
         except Exception:
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
 
@@ -282,6 +304,7 @@ class GrokbotAdapter:
             fleet_client.release_claim(self._fleet_target(), holder=holder)
         except Exception:
             return
+        self._fleet_generations.pop(holder, None)
 
     def _fleet_event(self, job_id: str, session: str, state: str) -> None:
         try:

@@ -709,9 +709,11 @@ class ClaimDecision:
     release), ``"no-hub"`` (no hub configured), ``"no-identity"`` (this node
     has no usable identity to claim with), ``"auth-failed"`` (the hub
     refused this node's credentials (HTTP 401/403), a stable outcome that
-    is never retried or fallen back from; see ``FleetClaimAuthError``), or
-    ``"hub-unavailable"`` (network/hub failure; callers fall back to the
-    local run lock).
+    is never retried or fallen back from; see ``FleetClaimAuthError``),
+    ``"stale-generation"`` (the hub refused this acquire/renew because a
+    later release tombstoned this holder or generation; terminal — do not
+    retry or re-acquire), or ``"hub-unavailable"`` (network/hub failure;
+    callers fall back to the local run lock).
     ``holder`` is the fencing token this operation used; renew and release
     must present the same token. ``superseded`` is the unexpired same-node
     claim a ``supersede_dead_owner`` acquire replaced (issue #1141); a
@@ -824,6 +826,7 @@ def _claim_op(
     lock: Mapping[str, str] | None = None,
     supersede: Mapping[str, str] | None = None,
     acquired_at: str | None = None,
+    generation: int | None = None,
     harness: str | None = None,
     role: str | None = None,
     job: str | None = None,
@@ -861,6 +864,8 @@ def _claim_op(
             body["supersede"] = dict(supersede)
         if acquired_at is not None:
             body["acquired_at"] = acquired_at
+        if generation is not None:
+            body["generation"] = int(generation)
         if conductor:
             body["conductor"] = conductor
         try:
@@ -894,6 +899,8 @@ def _claim_op(
         return ClaimDecision(
             granted=True, reason="ok", claim=claim, holder=holder, superseded=superseded, lock_run_dir=run_dir
         )
+    if payload.get("reason") == "stale-generation":
+        return ClaimDecision(granted=False, reason="stale-generation", owner=owner, detail=detail, holder=holder)
     if status in (200, 409):
         return ClaimDecision(
             granted=False, reason="held" if owner is not None else "missing", owner=owner, detail=detail, holder=holder
@@ -913,6 +920,7 @@ def acquire_claim(
     role: str | None = None,
     job: str | None = None,
     session: str | None = None,
+    generation: int | None = None,
     **kwargs: Any,
 ) -> ClaimDecision:
     """Acquire ``target``; a fresh fencing token is minted unless ``holder``
@@ -940,12 +948,27 @@ def acquire_claim(
         role=role,
         job=job,
         session=session,
+        generation=generation,
         **kwargs,
     )
 
 
-def renew_claim(target: str, *, holder: str, **kwargs: Any) -> ClaimDecision:
-    return _claim_op("renew", target, holder=holder, **kwargs)
+def renew_claim(
+    target: str,
+    *,
+    holder: str,
+    generation: int | None = None,
+    lock_owner: Mapping[str, object] | None = None,
+    **kwargs: Any,
+) -> ClaimDecision:
+    return _claim_op(
+        "renew",
+        target,
+        holder=holder,
+        generation=generation,
+        lock=lease_from_lock_owner(lock_owner),
+        **kwargs,
+    )
 
 
 def release_claim(
@@ -1150,12 +1173,33 @@ def repo_claim(
         "ttl_seconds": ttl_seconds,
         "lock_owner": lock_owner,
     }
+    generation: int | None = None
+
+    def _remember_generation(outcome: ClaimDecision) -> None:
+        nonlocal generation
+        claim = outcome.claim
+        if not outcome.granted or not isinstance(claim, dict):
+            return
+        value = claim.get("generation")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            generation = value
+            acquire_kwargs["generation"] = value
+
     decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
+    _remember_generation(decision)
     if not decision.granted and decision.reason in ("hub-unavailable", "missing"):
         # One retry with the same fencing token: a lost response may have
         # committed the row (idempotent for this holder), and a 409 with no
         # owner means the target freed mid-request.
         decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
+        _remember_generation(decision)
+    if not decision.granted and decision.reason == "stale-generation":
+        _LOG.warning(
+            "fleet hub refused %s with stale generation; relying on the local run lock",
+            target,
+        )
+        yield decision
+        return
     if not decision.granted and decision.reason == "auth-failed":
         # Fail closed (#1161): bad credentials would turn "the hub refused"
         # into "every node runs unprotected on its local lock". No retry,
@@ -1210,7 +1254,21 @@ def repo_claim(
     def _renew_loop() -> None:
         warned_unavailable = False
         while not stop.wait(_claim_renew_interval(ttl_seconds)):
-            outcome = renew_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
+            outcome = renew_claim(
+                target,
+                holder=holder,
+                node_id=node_id,
+                conductor=conductor,
+                ttl_seconds=ttl_seconds,
+                generation=generation,
+                lock_owner=lock_owner,
+            )
+            if not outcome.granted and outcome.reason == "stale-generation":
+                _LOG.warning(
+                    "fleet claim heartbeat for %s saw a stale generation; not re-acquiring",
+                    target,
+                )
+                return
             if not outcome.granted and outcome.reason == "missing":
                 if stop.is_set():
                     # "missing" during shutdown is our own release landing
@@ -1225,7 +1283,14 @@ def repo_claim(
                 # still in flight.
                 pending_orphan_release.set()
                 outcome = acquire_claim(target, **acquire_kwargs)
+                if not outcome.granted and outcome.reason == "stale-generation":
+                    _LOG.warning(
+                        "fleet claim heartbeat for %s saw a stale generation; not re-acquiring",
+                        target,
+                    )
+                    return
             if outcome.granted:
+                _remember_generation(outcome)
                 warned_unavailable = False
                 continue
             if outcome.reason == "hub-unavailable":

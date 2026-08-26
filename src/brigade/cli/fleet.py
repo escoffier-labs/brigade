@@ -405,6 +405,13 @@ def _print_claim_failure(decision, *, what: str) -> bool:
     if decision.reason == "invalid":
         print(f"error: {decision.detail}", file=sys.stderr)
         return True
+    if decision.reason == "stale-generation":
+        print(
+            f"error: fleet claim {what} refused: stale generation"
+            + (f" ({decision.detail})" if decision.detail else ""),
+            file=sys.stderr,
+        )
+        return True
     return False
 
 
@@ -777,12 +784,13 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
     if args.json:
         print(_json.dumps({"claims": claims}, indent=2, sort_keys=True))
         return 0
-    headers = ("target", "node", "conductor", "harness", "session", "acquired", "expires")
+    headers = ("target", "node", "conductor", "harness", "session", "gen", "acquired", "expires")
     rows = []
     for claim in claims:
         expires = str(claim.get("expires_at") or "-")
         if claim.get("expired"):
             expires += " (expired)"
+        generation = claim.get("generation")
         rows.append(
             [
                 _safe_table_cell(str(claim.get("target") or "-")),
@@ -790,6 +798,7 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
                 _safe_table_cell(str(claim.get("owner_conductor") or "-")),
                 _safe_table_cell(str(claim.get("harness") or "-")),
                 _safe_table_cell(str(claim.get("session") or "-")),
+                _safe_table_cell("-" if generation is None else str(generation)),
                 _safe_table_cell(_format_age(claim.get("acquired_at"))),
                 _safe_table_cell(expires),
             ]

@@ -355,7 +355,9 @@ class TestHubScopes:
         try:
             columns = [row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()]
             assert columns.count("lock_token") == 1 and "lock_acquired_at" in columns and "lock_run_dir" in columns
+            assert "generation" in columns
             assert [c["target"] for c in fleet_hub.list_claims(conn)] == ["repo-a"]
+            assert fleet_hub.list_claims(conn)[0]["generation"] == 1
         finally:
             conn.close()
 

@@ -63,6 +63,12 @@ Endpoints:
   when the caller's ``node_id`` owns it the answer also carries
   ``lock_run_dir`` so that node's CLI can find the run and check its lock
   is dead before a token-less release (never to other callers).
+  Each live row carries a monotonic ``generation``. Release writes a
+  per-(target, holder, node) tombstone for that generation so a late
+  acquire or renew whose generation, holder, or lease stamp predates the
+  tombstone is refused with ``reason: "stale-generation"`` instead of
+  resurrecting the row (issue #1189). Schema v4 databases gain the
+  column and tombstone table additively.
   Trust boundary: ``node_id`` is bound to the node token that presents it,
   so a member can only act as itself; ``lock``, ``supersede`` and ``scope``
   remain caller-asserted intent that keeps *honest* clients from stealing
@@ -214,7 +220,23 @@ CREATE TABLE IF NOT EXISTS claims (
     expires_at REAL NOT NULL,
     lock_token TEXT,
     lock_acquired_at TEXT,
-    lock_run_dir TEXT
+    lock_run_dir TEXT,
+    generation INTEGER NOT NULL DEFAULT 1
+);
+"""
+# Release tombstones (issue #1189): survive the claim DELETE so a late
+# acquire/renew cannot recreate the row. One row per released holder on a
+# node; expired with the claim TTL. Additive on schema v4.
+_TOMBSTONES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS claim_tombstones (
+    target TEXT NOT NULL,
+    holder_token TEXT NOT NULL,
+    owner_node TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    lease_stamp TEXT,
+    released_at TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    PRIMARY KEY (target, holder_token, owner_node)
 );
 """
 _CLAIMS_ADDITIVE_COLUMNS = (
@@ -289,6 +311,8 @@ def _claims_table_needs_migration(claims_columns: set[str]) -> bool:
         return True
     if "holder_token" not in claims_columns:
         return True
+    if "generation" not in claims_columns:
+        return True
     return any(column not in claims_columns for column in _CLAIMS_ADDITIVE_COLUMNS)
 
 
@@ -362,6 +386,13 @@ def _migrate_claims_table(conn: sqlite3.Connection) -> None:
                     # wanted, not an error.
                     if "duplicate column" not in str(exc).lower():
                         raise
+            if "generation" not in claims_columns:
+                try:
+                    conn.execute("ALTER TABLE claims ADD COLUMN generation INTEGER NOT NULL DEFAULT 1")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+        conn.execute(_TOMBSTONES_SCHEMA)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -432,6 +463,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
                 # usually done the work already.
                 if _claims_table_needs_migration(_claims_columns(conn)):
                     _migrate_claims_table(conn)
+        conn.execute(_TOMBSTONES_SCHEMA)
         conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
         # v3 -> v4 is one additive table; IF NOT EXISTS is the whole migration.
         conn.execute(_NODES_SCHEMA)
@@ -672,9 +704,16 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
         # fresh run acquired after the caller looked. Only "force" may
         # delete unfenced.
         raise FleetHubError("claim field 'acquired_at' is required for a token-less node-scoped release")
+    generation = raw.get("generation")
+    if generation is not None:
+        if action not in ("acquire", "renew"):
+            raise FleetHubError("claim field 'generation' is only valid for acquire or renew")
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+            raise FleetHubError("claim field 'generation' must be a positive integer")
+    request["generation"] = generation
     lock = raw.get("lock")
-    if lock is not None and action != "acquire":
-        raise FleetHubError("claim field 'lock' is only valid for acquire")
+    if lock is not None and action not in ("acquire", "renew"):
+        raise FleetHubError("claim field 'lock' is only valid for acquire or renew")
     request["lock"] = _validate_lease(lock, "lock") if lock is not None else None
     supersede = raw.get("supersede")
     if action == "acquire" and scope == "node":
@@ -708,6 +747,12 @@ def _validate_lease(raw: Any, field: str) -> dict[str, str | None]:
     return lease
 
 
+def _as_generation(value: Any) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    return 1
+
+
 def _claim_payload(row: tuple[Any, ...]) -> dict[str, Any]:
     return {
         "target": row[0],
@@ -721,24 +766,128 @@ def _claim_payload(row: tuple[Any, ...]) -> dict[str, Any]:
         "renewed_at": row[8],
         "ttl_seconds": row[9],
         "expires_at": _epoch_to_iso(row[10]),
+        "generation": _as_generation(row[11] if len(row) > 11 else None),
     }
 
 
 # Payload columns only: holder_token is a fencing capability and is never
 # serialized to callers (it would let anyone forge a renew/release).
 _CLAIM_COLUMNS = (
-    "target, owner_node, owner_conductor, harness, role, job, session, acquired_at, renewed_at, ttl_seconds, expires_at"
+    "target, owner_node, owner_conductor, harness, role, job, session, "
+    "acquired_at, renewed_at, ttl_seconds, expires_at, generation"
 )
 
 
 def _fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | None:
     """Row as (_CLAIM_COLUMNS..., holder_token, lock_token, lock_acquired_at,
-    lock_run_dir); the fencing token is index 11, the lease token index 12."""
+    lock_run_dir); generation is index 11, the fencing token is index 12,
+    the lease token index 13."""
     return conn.execute(
         f"SELECT {_CLAIM_COLUMNS}, holder_token, lock_token, lock_acquired_at, lock_run_dir "
         "FROM claims WHERE target = ?",
         (target,),
     ).fetchone()
+
+
+def _fetch_tombstones(conn: sqlite3.Connection, target: str) -> list[tuple[Any, ...]]:
+    """Rows as (target, generation, holder_token, owner_node, lease_stamp,
+    released_at, expires_at)."""
+    return list(
+        conn.execute(
+            "SELECT target, generation, holder_token, owner_node, lease_stamp, released_at, expires_at "
+            "FROM claim_tombstones WHERE target = ?",
+            (target,),
+        ).fetchall()
+    )
+
+
+def _stale_generation_payload(action: str, target: str) -> dict[str, Any]:
+    key = "granted" if action == "acquire" else "renewed"
+    return {
+        key: False,
+        "error": f"claim generation on {target!r} is stale",
+        "reason": "stale-generation",
+        "owner": None,
+    }
+
+
+def _request_lease_stamp(request: dict[str, Any]) -> str | None:
+    lock = request.get("lock")
+    if not isinstance(lock, dict):
+        return None
+    stamp = lock.get("acquired_at")
+    return stamp.strip() if isinstance(stamp, str) and stamp.strip() else None
+
+
+def _is_stale_against_tombstones(
+    *,
+    node: str,
+    holder: str | None,
+    generation: int | None,
+    lease_stamp: str | None,
+    prior: tuple[Any, ...] | None,
+    tombstones: list[tuple[Any, ...]],
+    now: float,
+) -> bool:
+    live = [row for row in tombstones if row[6] > now]
+    if not live:
+        return False
+    live_same_holder = (
+        prior is not None and prior[10] > now and holder is not None and prior[12] == holder and prior[1] == node
+    )
+    if live_same_holder:
+        return generation is not None and generation < _as_generation(prior[11])
+    max_gen = max(_as_generation(row[1]) for row in live)
+    if generation is not None and generation <= max_gen:
+        return True
+    if holder is not None and any(row[2] == holder and row[3] == node for row in live):
+        return True
+    if lease_stamp and any(row[3] == node and row[4] and lease_stamp <= row[4] for row in live):
+        return True
+    return False
+
+
+def _next_claim_generation(prior: tuple[Any, ...] | None, tombstones: list[tuple[Any, ...]], now: float) -> int:
+    floor = 0
+    live = [row for row in tombstones if row[6] > now]
+    if live:
+        floor = max(floor, max(_as_generation(row[1]) for row in live))
+    if prior is not None and prior[10] > now:
+        floor = max(floor, _as_generation(prior[11]))
+    return floor + 1
+
+
+def _row_lease_stamp(row: tuple[Any, ...]) -> str | None:
+    lock_acquired_at = row[14] if len(row) > 14 else None
+    if isinstance(lock_acquired_at, str) and lock_acquired_at.strip():
+        return lock_acquired_at.strip()
+    acquired_at = row[7]
+    return acquired_at.strip() if isinstance(acquired_at, str) and acquired_at.strip() else None
+
+
+def _write_claim_tombstone(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    generation: int,
+    holder: str,
+    node: str,
+    lease_stamp: str | None,
+    ttl: int,
+    now: float,
+    now_iso: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO claim_tombstones "
+        "(target, holder_token, owner_node, generation, lease_stamp, released_at, expires_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(target, holder_token, owner_node) DO UPDATE SET "
+        "generation = MAX(claim_tombstones.generation, excluded.generation), "
+        "lease_stamp = excluded.lease_stamp, "
+        "released_at = excluded.released_at, "
+        "expires_at = excluded.expires_at",
+        (target, holder, node, generation, lease_stamp, now_iso, now + ttl),
+    )
 
 
 def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None) -> tuple[int, dict[str, Any]]:
@@ -775,6 +924,14 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
     without it): the delete is fenced to that exact row, so a claim
     re-acquired between the caller's inspect and its release is never
     deleted (409 with the current row). Only ``force`` deletes unfenced.
+
+    Release also writes a tombstone for the released (target, holder, node)
+    carrying that row's generation and lease stamp (issue #1189). A later
+    acquire or renew whose generation is not newer, whose holder matches the
+    tombstone, or whose lock ``acquired_at`` predates the tombstone stamp is
+    refused with ``reason: "stale-generation"``. A holder-scoped release
+    that finds no row still plants a tombstone so an in-flight acquire for
+    that holder cannot land after the release.
     """
     request = _validate_claim_request(raw)
     if caller_node is not None and request["node_id"] != caller_node:
@@ -796,24 +953,37 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             return 200, {"inspected": True, "claim": None, "owned": False}
         inspected: dict[str, Any] = {"inspected": True, "claim": _claim_payload(row), "owned": row[1] == node}
         if row[1] == node:
-            inspected["lock_run_dir"] = row[14]
+            inspected["lock_run_dir"] = row[15]
         return 200, inspected
     if request["action"] == "acquire":
-        # One write transaction: the prune, the prior-row read that the
-        # ``superseded`` receipt describes, and the upsert see one state.
+        # One write transaction: the prune, the tombstone check, the
+        # prior-row read that the ``superseded`` receipt describes, and the
+        # upsert see one state.
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM claims WHERE expires_at <= ?", (now,))
-        # Only a same-node supersede needs the prior row (to report what it
-        # replaced); expired rows are already gone, so this is a live claim.
-        prior = _fetch_claim(conn, target) if scope == "node" else None
+        conn.execute("DELETE FROM claim_tombstones WHERE expires_at <= ?", (now,))
+        prior = _fetch_claim(conn, target)
+        tombstones = _fetch_tombstones(conn, target)
+        if _is_stale_against_tombstones(
+            node=node,
+            holder=holder,
+            generation=request["generation"],
+            lease_stamp=_request_lease_stamp(request),
+            prior=prior,
+            tombstones=tombstones,
+            now=now,
+        ):
+            conn.commit()
+            return 409, _stale_generation_payload("acquire", target)
         lock = request["lock"] or {"token": None, "acquired_at": None, "run_dir": None}
         supersede = request["supersede"] or {"token": None, "acquired_at": None}
+        next_generation = _next_claim_generation(prior, tombstones, now)
         cursor = conn.execute(
             "INSERT INTO claims "
             "(target, owner_node, owner_conductor, harness, role, job, session, holder_token, "
             "lock_token, lock_acquired_at, lock_run_dir, "
-            "acquired_at, renewed_at, ttl_seconds, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "acquired_at, renewed_at, ttl_seconds, expires_at, generation) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(target) DO UPDATE SET "
             "owner_node = excluded.owner_node, "
             "owner_conductor = excluded.owner_conductor, "
@@ -828,6 +998,9 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             "acquired_at = CASE WHEN claims.holder_token = excluded.holder_token "
             "AND claims.owner_node = excluded.owner_node "
             "AND claims.expires_at > ? THEN claims.acquired_at ELSE excluded.acquired_at END, "
+            "generation = CASE WHEN claims.holder_token = excluded.holder_token "
+            "AND claims.owner_node = excluded.owner_node "
+            "AND claims.expires_at > ? THEN claims.generation ELSE excluded.generation END, "
             "renewed_at = excluded.renewed_at, "
             "ttl_seconds = excluded.ttl_seconds, "
             "expires_at = excluded.expires_at "
@@ -853,6 +1026,8 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
                 now_iso,
                 ttl,
                 now + ttl,
+                next_generation,
+                now,
                 now,
                 now,
                 supersede["token"],
@@ -876,9 +1051,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
                 now_iso,
                 ttl,
                 now + ttl,
+                next_generation,
             )
             granted: dict[str, Any] = {"granted": True, "claim": _claim_payload(row if row is not None else written)}
-            if prior is not None and prior[11] != holder:
+            if scope == "node" and prior is not None and prior[12] != holder:
                 granted["superseded"] = _claim_payload(prior)
             return 200, granted
         row = _fetch_claim(conn, target)
@@ -889,6 +1065,17 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             error += " under another lease than the reconciled dead run's (not superseded)"
         return 409, {"granted": False, "error": error, "owner": owner}
     if request["action"] == "renew":
+        prior = _fetch_claim(conn, target)
+        if _is_stale_against_tombstones(
+            node=node,
+            holder=holder,
+            generation=request["generation"],
+            lease_stamp=_request_lease_stamp(request),
+            prior=prior,
+            tombstones=_fetch_tombstones(conn, target),
+            now=now,
+        ):
+            return 409, _stale_generation_payload("renew", target)
         cursor = conn.execute(
             "UPDATE claims SET renewed_at = ?, ttl_seconds = ?, expires_at = ? "
             "WHERE target = ? AND holder_token = ? AND owner_node = ? AND expires_at > ?",
@@ -897,10 +1084,23 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         conn.commit()
         if cursor.rowcount == 1:
             row = _fetch_claim(conn, target)
-            written = (target, node, conductor, None, None, None, None, now_iso, now_iso, ttl, now + ttl)
+            written = (
+                target,
+                node,
+                conductor,
+                None,
+                None,
+                None,
+                None,
+                now_iso,
+                now_iso,
+                ttl,
+                now + ttl,
+                request["generation"] or 1,
+            )
             return 200, {"renewed": True, "claim": _claim_payload(row if row is not None else written)}
         row = _fetch_claim(conn, target)
-        if row is not None and row[10] > now and (row[11] != holder or row[1] != node):
+        if row is not None and row[10] > now and (row[12] != holder or row[1] != node):
             return 409, {
                 "renewed": False,
                 "error": f"target {target!r} is held by {row[1]}",
@@ -908,20 +1108,45 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             }
         return 409, {"renewed": False, "error": f"claim on {target!r} is expired or missing", "owner": None}
     if scope == "holder":
+        conn.execute("BEGIN IMMEDIATE")
+        prior = _fetch_claim(conn, target)
         cursor = conn.execute(
             "DELETE FROM claims WHERE target = ? AND holder_token = ? AND owner_node = ?",
             (target, holder, node),
         )
-        conn.commit()
         if cursor.rowcount == 1:
+            _write_claim_tombstone(
+                conn,
+                target=target,
+                generation=_as_generation(prior[11]) if prior is not None else 1,
+                holder=str(holder),
+                node=node,
+                lease_stamp=_row_lease_stamp(prior) if prior is not None else None,
+                ttl=int(prior[9]) if prior is not None else ttl,
+                now=now,
+                now_iso=now_iso,
+            )
+            conn.commit()
             return 200, {"released": True}
-        row = _fetch_claim(conn, target)
-        if row is not None:
+        if prior is not None:
+            conn.commit()
             return 409, {
                 "released": False,
-                "error": f"target {target!r} is held by {row[1]}",
-                "owner": _claim_payload(row),
+                "error": f"target {target!r} is held by {prior[1]}",
+                "owner": _claim_payload(prior),
             }
+        _write_claim_tombstone(
+            conn,
+            target=target,
+            generation=1,
+            holder=str(holder),
+            node=node,
+            lease_stamp=_request_lease_stamp(request),
+            ttl=ttl,
+            now=now,
+            now_iso=now_iso,
+        )
+        conn.commit()
         return 200, {"released": False}
     # Token-less release (issue #1141): the caller's own node's row, or with
     # "force" whoever holds the target. The read and the delete share one
@@ -936,6 +1161,18 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         "DELETE FROM claims WHERE target = ? AND (? = 1 OR owner_node = ?) AND (? IS NULL OR acquired_at = ?)",
         (target, int(scope == "force"), node, expected_acquired_at, expected_acquired_at),
     )
+    if cursor.rowcount == 1 and prior is not None:
+        _write_claim_tombstone(
+            conn,
+            target=target,
+            generation=_as_generation(prior[11]),
+            holder=str(prior[12]),
+            node=str(prior[1]),
+            lease_stamp=_row_lease_stamp(prior),
+            ttl=int(prior[9]),
+            now=now,
+            now_iso=now_iso,
+        )
     conn.commit()
     if cursor.rowcount == 1:
         released: dict[str, Any] = {"released": True}
