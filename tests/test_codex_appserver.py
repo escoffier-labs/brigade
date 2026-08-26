@@ -422,6 +422,48 @@ def test_over_cap_completed_record_ingested_via_stream_preserves_completion(monk
     assert result.output_limit_exceeded is True
 
 
+def test_over_cap_completed_record_is_noted_before_limit_signal(monkeypatch):
+    """#1200: completion metadata is recorded before the limit signal wakes waiters."""
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    delta = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": "t-cap", "itemId": "m", "delta": "y" * 50},
+        }
+    )
+    oversized_turn = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+                "threadId": "t-cap",
+                "turn": {
+                    "id": "turn-1",
+                    "status": "completed",
+                    "items": [{"type": "agentMessage", "text": "Z" * 80}],
+                },
+            },
+        }
+    )
+    assert len(delta) * 2 + len(oversized_turn) > proc.MAX_CAPTURE_BYTES
+    server, _q = _ingestion_server((delta + "\n" + delta + "\n" + oversized_turn + "\n").encode("utf-8"))
+    seen_at_signal: dict[str, str | None] = {}
+    original_signal = server._signal_output_limit
+
+    def spy_signal():
+        seen_at_signal["status"] = server.observed_completion_status("t-cap", "turn-1")
+        original_signal()
+
+    monkeypatch.setattr(server, "_signal_output_limit", spy_signal)
+
+    server._read_loop()
+
+    assert server._output_limit_exceeded is True
+    assert seen_at_signal["status"] == "completed"
+    assert server.observed_completion_status("t-cap", "turn-1") == "completed"
+
+
 def test_ingested_failed_status_over_cap_record_does_not_signal_completion(monkeypatch):
     """#1200: metadata recorded at ingestion still respects status for the salvage gate."""
     monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)

@@ -371,10 +371,13 @@ class AppServer:
         if not isinstance(msg, dict):
             return self._charge_record(line_bytes, None)
         thread_id = _message_thread_id(msg)
-        if not self._charge_record(line_bytes, thread_id):
-            # #1200: a parsed record can still overflow the shared budget.
+        if not self.capture_budget(thread_id).try_add(line_bytes):
+            # #1200: record parsed completion metadata BEFORE publishing the
+            # limit signal, under the same lock discipline, so a turn waiting
+            # on the limit never wakes to find its entry still absent.
             if msg.get("method") == "turn/completed":
                 self._note_turn_completed(thread_id, (msg.get("params") or {}).get("turn"))
+            self._signal_output_limit()
             return False
         if msg.get("method") == "turn/completed":
             self._note_turn_completed(thread_id, (msg.get("params") or {}).get("turn"))
