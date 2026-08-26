@@ -6,10 +6,11 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from brigade import cli, cloud_tracker, grokbot_jobs
+from brigade import cli, claude_cloud, cloud_tracker, cursor_cloud, grokbot_jobs
 
 
 NOW = datetime(2026, 8, 12, 20, 0, 0, tzinfo=timezone.utc)
@@ -668,3 +669,273 @@ def test_classic_brigade_run_task_still_parses(tmp_path: Path, monkeypatch, caps
     assert rc == 2
     err = capsys.readouterr().err
     assert "cloud" not in err.lower() or "roster" in err.lower() or "error" in err.lower()
+
+
+def test_provider_normalization_contract_accepts_all_cloud_providers(tmp_path: Path):
+    for provider in ("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules"):
+        entry = cloud_tracker.register(
+            tmp_path,
+            provider=provider,
+            task_id=f"task-{provider}",
+            label=f"{provider}-task",
+            prompt_hash="sha256:aa",
+        )
+        assert entry["provider"] == provider
+
+
+def test_provider_state_normalization_and_active_classification():
+    assert cloud_tracker.normalize_provider_state("READY") == "ready"
+    assert cloud_tracker.normalize_provider_state("completed") == "completed"
+    assert cloud_tracker.normalize_provider_state("FAILED") == "failed"
+    assert cloud_tracker.normalize_provider_state("canceled") == "canceled"
+    assert cloud_tracker.normalize_provider_state("timed_out") == "timed_out"
+    assert cloud_tracker.normalize_provider_state("  ") is None
+    assert cloud_tracker.is_active_state("running") is True
+    assert cloud_tracker.is_active_state("pending") is True
+    assert cloud_tracker.is_active_state("completed") is False
+    assert cloud_tracker.is_active_state("failed") is False
+
+
+def test_github_only_branch_is_orphaned_recovery_never_active_capacity(tmp_path: Path):
+    cloud_tracker.save_registry(
+        tmp_path,
+        {
+            "schema": cloud_tracker.REGISTRY_SCHEMA,
+            "version": 1,
+            "stale_ready_hours": 6,
+            "entries": [],
+        },
+    )
+    status = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={},
+        github={
+            "branches": [
+                {"name": "codex/orphan"},
+                {"name": "cursor/orphan"},
+                {"name": "claude/orphan"},
+                {"name": "jules/orphan"},
+                {"name": "grokbot/orphan"},
+            ],
+            "prs": [],
+        },
+        cursor_wired=False,
+    )
+    orphans = [e for e in status["entries"] if e["classification"] == "orphaned"]
+    assert {o["branch"] for o in orphans} == {
+        "codex/orphan",
+        "cursor/orphan",
+        "claude/orphan",
+        "jules/orphan",
+        "grokbot/orphan",
+    }
+    assert all(o["source"] == "github-branch" for o in orphans)
+
+
+def test_sync_command_exists_and_is_non_mutating(tmp_path: Path, capsys, monkeypatch):
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task-sync",
+        label="sync-task",
+        prompt_hash="sha256:bb",
+        dispatched_at=_iso(NOW),
+    )
+    monkeypatch.setattr(
+        cloud_tracker,
+        "observe_providers",
+        lambda target, **k: ({"task-sync": {"state": "running"}}, {"branches": [], "prs": []}, False),
+    )
+    rc = cli.main(["run", "cloud", "sync", "--target", str(tmp_path), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == cloud_tracker.SYNC_SCHEMA
+    assert payload["action"] == "reconcile"
+    assert payload["counts"]["needs_you"] == 0
+    assert payload["counts"]["active"] == 1
+
+
+def test_sync_payload_releases_terminal_row_when_hub_lease_matches(tmp_path: Path, monkeypatch):
+    from brigade import fleet_client
+
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task-sync",
+        label="sync-task",
+        prompt_hash="sha256:bb",
+        dispatched_at=_iso(NOW),
+    )
+    release_calls: list[dict[str, Any]] = []
+
+    def capture_release(lease_id: str, *, state: str | None = None, holder: str | None = None):
+        release_calls.append({"lease_id": lease_id, "state": state, "holder": holder})
+        return fleet_client.CloudDecision(True, "ok")
+
+    monkeypatch.setattr(fleet_client, "release_cloud", capture_release)
+    payload = cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={"task-sync": {"state": "ready", "ready_at": _iso(NOW)}},
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+        hub_leases=[{"lease_id": "lease-1", "provider_task_id": "task-sync"}],
+    )
+    assert payload["schema"] == cloud_tracker.SYNC_SCHEMA
+    assert payload["counts"]["released"] == 1
+    assert payload["counts"]["needs_you"] == 0
+    assert payload["counts"]["active"] == 0
+    assert release_calls
+    assert release_calls[0]["lease_id"] == "lease-1"
+
+
+def test_sync_payload_does_not_invent_needs_you_when_no_hub_lease_matches(tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task-sync",
+        label="sync-task",
+        prompt_hash="sha256:bb",
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={"task-sync": {"state": "ready", "ready_at": _iso(NOW)}},
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+        hub_leases=[],
+    )
+    assert payload["counts"]["released"] == 0
+    assert payload["counts"]["needs_you"] == 0
+    assert payload["counts"]["active"] == 0
+
+
+def test_active_states_include_cursor_creating_and_claude_active():
+    assert cloud_tracker.is_active_state("creating") is True
+    assert cloud_tracker.is_active_state("active") is True
+
+
+def test_observe_cursor_cloud_tasks_maps_sanitized_inventory(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CURSOR_API_KEY", "fake-cursor-key")
+    monkeypatch.setattr(
+        cursor_cloud,
+        "list_agents",
+        lambda *a, **k: [
+            {"id": "agent-c1", "name": "worker", "latestRunId": "r1", "latestRunState": "RUNNING"},
+            {"id": "agent-c2", "name": "reviewer", "latestRunId": "r2", "latestRunState": "FINISHED"},
+        ],
+    )
+    tasks = cloud_tracker.observe_cursor_cloud_tasks(tmp_path)
+    assert tasks == {
+        "agent-c1": {"state": "running"},
+        "agent-c2": {"state": "finished"},
+    }
+
+
+def test_observe_cursor_cloud_tasks_stays_bounded_on_api_failure(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CURSOR_API_KEY", "fake-cursor-key")
+    monkeypatch.setattr(
+        cursor_cloud, "list_agents", lambda *a, **k: (_ for _ in ()).throw(cursor_cloud.CursorCloudError("boom"))
+    )
+    cloud_tracker.register(
+        tmp_path,
+        provider="cursor-cloud",
+        task_id="agent-existing",
+        label="existing",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    tasks = cloud_tracker.observe_cursor_cloud_tasks(tmp_path)
+    assert tasks == {}
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks=tasks,
+        github={"branches": [], "prs": []},
+        cursor_wired=True,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "agent-existing")
+    assert row["classification"] == "pending"
+
+
+def test_status_payload_uses_cursor_inventory_for_registered_task(monkeypatch, tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="cursor-cloud",
+        task_id="agent-c1",
+        label="cursor-task",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={"agent-c1": {"state": "creating"}},
+        github={"branches": [], "prs": []},
+        cursor_wired=True,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "agent-c1")
+    assert row["provider_state"] == "creating"
+    assert row["classification"] == "pending"
+
+
+def test_observe_providers_does_not_call_claude_local_inventory(monkeypatch, tmp_path: Path):
+    called = []
+
+    def fail_if_called(*a, **k):
+        called.append(True)
+        raise RuntimeError("claude local inventory must not be observed as cloud authority")
+
+    monkeypatch.setattr(claude_cloud, "list_agents", fail_if_called)
+    tasks, _github, _cursor_wired = cloud_tracker.observe_providers(tmp_path)
+    assert tasks == {}
+    assert called == []
+
+
+def test_local_claude_session_cannot_make_claude_cloud_registry_row_active(monkeypatch, tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="claude-cloud",
+        task_id="sess-claude-1",
+        label="claude-task",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    monkeypatch.setattr(
+        claude_cloud,
+        "list_agents",
+        lambda *a, **k: [
+            {"id": "sess-claude-1", "name": "worker", "state": "active", "workspace": "/home/user/secret"},
+        ],
+    )
+    provider_tasks, _github, _cursor_wired = cloud_tracker.observe_providers(tmp_path)
+    assert provider_tasks == {}
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks=provider_tasks,
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-claude-1")
+    assert row["provider_state"] is None
+    assert row["classification"] == "pending"
+
+
+def test_status_payload_does_not_leak_claude_cwd_or_prompt_text(monkeypatch, tmp_path: Path, capsys):
+    cloud_tracker.register(
+        tmp_path,
+        provider="claude-cloud",
+        task_id="sess-claude-1",
+        label="claude-secret-task",
+        prompt_hash=_prompt_hash("secret prompt text"),
+        dispatched_at=_iso(NOW),
+    )
+    assert cli.main(["run", "cloud", "status", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    text = json.dumps(payload)
+    assert "/home/user/secret" not in text
+    assert "secret prompt text" not in text
+    assert "sess-claude-1" in text

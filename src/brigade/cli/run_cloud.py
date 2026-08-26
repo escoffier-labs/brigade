@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -26,9 +27,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Override and persist the stale-READY threshold in hours.",
     )
 
+    p_sync = cloud_sub.add_parser(
+        "sync", help="Reconcile cloud observations with hub leases (read-only status is not mutating)."
+    )
+    p_sync.add_argument("--target", type=Path, default=Path("."))
+    p_sync.add_argument("--json", action="store_true", help="Emit the sync JSON contract.")
+
     p_register = cloud_sub.add_parser("register", help="Register a dispatched cloud task.")
     p_register.add_argument("--target", type=Path, default=Path("."))
-    p_register.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud"))
+    p_register.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
     p_register.add_argument("--task-id", required=True)
     p_register.add_argument("--label", required=True)
     p_register.add_argument("--prompt-hash", default=None, help="sha256:... of the prompt; never store prompt text.")
@@ -44,7 +53,9 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p_adopt = cloud_sub.add_parser("adopt", help="Back-register an already-running task or orphaned branch.")
     p_adopt.add_argument("--target", type=Path, default=Path("."))
-    p_adopt.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud"))
+    p_adopt.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
     p_adopt.add_argument("--task-id", default=None)
     p_adopt.add_argument("--branch", default=None)
     p_adopt.add_argument("--label", default=None)
@@ -216,6 +227,38 @@ def dispatch(args) -> int:
             print(json.dumps(entry, indent=2, sort_keys=True))
         else:
             print(f"adopted {entry['id']} source={entry['source']}")
+        return 0
+
+    if command == "sync":
+        from .. import fleet_client
+
+        provider_tasks, github, cursor_wired = cloud_tracker.observe_providers(target)
+        hub_leases: list[dict[str, Any]] = []
+        try:
+            snapshot = fleet_client.fetch_cloud()
+            leases = snapshot.get("leases")
+            if isinstance(leases, list):
+                hub_leases = leases
+        except fleet_client.FleetClientError:
+            # No hub configured or unreachable: keep sync purely observational.
+            pass
+        payload = cloud_tracker.sync_payload(
+            target,
+            provider_tasks=provider_tasks,
+            github=github,
+            cursor_wired=cursor_wired,
+            hub_leases=hub_leases,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        print(f"cloud sync: {payload['target']}")
+        print(f"action: {payload['action']}")
+        print(
+            f"active: {payload['counts']['active']} released: {payload['counts']['released']} needs_you: {payload['counts']['needs_you']}"
+        )
+        for row in payload.get("needs_you", []):
+            print(f"  needs-you: {row.get('detail')}")
         return 0
 
     if command == "status":

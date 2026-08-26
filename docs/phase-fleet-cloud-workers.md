@@ -34,7 +34,7 @@ Cloud capacity is separate from physical-machine capacity:
 |---|---:|---|
 | Cursor Cloud | 3 | Cursor subscription and spend controls |
 | Codex Cloud | 2 | ChatGPT/Codex subscription pool |
-| Claude Code Cloud | 0 | Disabled while Claude Max usage is exhausted |
+| Claude Code Cloud | 0 | Claude Max is available; cloud launch stays disabled until sessions have a structured bindable status surface |
 | Jules Cloud | 15 | Google AI Pro subscription |
 | All hosted cloud providers | 4 | Brigade fleet policy |
 | Grok Bot | tracked, not hosted | Local/self-hosted seat policy |
@@ -129,12 +129,14 @@ https://code.claude.com/docs/en/cli-reference and
 https://code.claude.com/docs/en/claude-code-on-the-web lag this installed
 surface, so the contract is based on the installed binary.
 
-The launcher uses the installed Claude Code cloud surface only after its policy
-limit is raised above zero. While the subscription is exhausted, launch fails
-closed before invoking Claude. Existing Claude web sessions may be adopted by a
-safe session ID or branch evidence without storing prompts or transcripts. Any
-future launch requires hub admission and a proved durable session ID. Brigade
-must not automate claude.ai cookies or undocumented HTTP endpoints.
+Claude Max headless worker seats are available again as of 2026-08-26. Cloud
+launch remains disabled for a different reason: the installed CLI can create or
+attach to a cloud session, but it does not expose a structured cloud-session
+list or status contract that Brigade can use to bind, renew, and release a hub
+lease. Existing Claude web sessions are not adopted from local background
+session inventory. Any future launch requires hub admission, a proved durable
+session ID, and a provider-supported status surface. Brigade must not automate
+claude.ai cookies or undocumented HTTP endpoints.
 
 The first slice inventories `claude agents --json --all` through a bounded
 subprocess parser and labels it as installed-CLI observation. It does not call
@@ -266,8 +268,9 @@ suite.
    provider limits even when no cloud work is active.
 6. Launch one Cursor Cloud canary through Brigade, observe it in Cloud Workers,
    and confirm terminal release. Do not auto-apply its changes.
-7. Enable Claude only after subscription usage returns and a read-only canary
-   succeeds.
+7. Enable Claude Cloud only after a structured cloud-session status surface is
+   available and a read-only canary succeeds. This does not block normal
+   headless Claude worker seats.
 
 Rollback restores the prior beta checkout and service. Registry and hub history
 remain readable because migrations are additive.

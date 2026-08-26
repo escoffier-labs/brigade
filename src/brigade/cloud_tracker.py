@@ -16,14 +16,18 @@ from . import localio
 REGISTRY_SCHEMA = "brigade.run.cloud.registry.v1"
 STATUS_SCHEMA = "brigade.run.cloud.status.v1"
 SWEEP_SCHEMA = "brigade.run.cloud.sweep.v1"
+SYNC_SCHEMA = "brigade.run.cloud.sync.v1"
 
 DEFAULT_STALE_READY_HOURS = 6
-CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/")
-TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "grokbot-cloud"})
+CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/", "claude/", "jules/")
+TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules"})
+
 READY_STATES = frozenset({"ready", "completed", "succeeded", "applied"})
 FAILED_STATES = frozenset({"failed", "errored", "error", "cancelled", "canceled", "expired"})
 FINISHED_STATES = frozenset({"finished", "completed", "succeeded", "applied", "ready"})
 PENDING_STATES = frozenset({"pending", "claimed", "running", "queued", "in_progress", "dispatching"})
+ACTIVE_STATES = PENDING_STATES | frozenset({"creating", "active"})
+TERMINAL_STATES = FINISHED_STATES | FAILED_STATES | frozenset({"interrupted", "timed_out", "timeout"})
 
 CLASSIFICATIONS = (
     "pending",
@@ -206,11 +210,27 @@ def adopt(
     return entry
 
 
-def _normalize_provider_state(value: object) -> str | None:
+def normalize_provider_state(value: object) -> str | None:
+    """Public provider-state normalization: lower-case, strip, or None."""
     if not isinstance(value, str):
         return None
     word = value.strip().lower()
     return word or None
+
+
+def _normalize_provider_state(value: object) -> str | None:
+    """Internal alias kept for existing call sites."""
+    return normalize_provider_state(value)
+
+
+def is_active_state(state: str | None) -> bool:
+    """True for states that consume hosted capacity."""
+    return normalize_provider_state(state) in ACTIVE_STATES
+
+
+def is_terminal_state(state: str | None) -> bool:
+    """True for finished/failed states that should not hold capacity."""
+    return normalize_provider_state(state) in TERMINAL_STATES
 
 
 def _hours_since(earlier: datetime | None, now: datetime) -> float | None:
@@ -393,6 +413,10 @@ def _provider_for_branch(branch: str) -> str:
         return "cursor-cloud"
     if branch.startswith("grokbot/"):
         return "grokbot-cloud"
+    if branch.startswith("claude/"):
+        return "claude-cloud"
+    if branch.startswith("jules/"):
+        return "jules"
     return "codex-cloud"
 
 
@@ -548,6 +572,12 @@ def status_payload(
                 "authority": "best-effort" if cursor_wired else "unwired",
                 "detail": None if cursor_wired else "no API key; cursor cloud left unwired",
             },
+            "claude-cloud": {
+                "wired": False,
+                "authority": "disabled-by-policy",
+                "detail": "local/background sessions are not cloud discovery; claude cloud remains untracked/disabled until a structured bindable provider surface exists",
+            },
+            "jules": {"wired": False, "authority": "planned", "detail": "Jules adapter planned in Task 4"},
             "grokbot-cloud": {"wired": True, "authority": "local-queue"},
             "github": {"wired": True, "authority": "ground-truth"},
         },
@@ -555,6 +585,86 @@ def status_payload(
         "counts": {
             classification: sum(1 for row in entries if row.get("classification") == classification)
             for classification in CLASSIFICATIONS
+        },
+    }
+
+
+def sync_payload(
+    target: Path,
+    *,
+    now: datetime | None = None,
+    provider_tasks: dict[str, Any] | None = None,
+    github: dict[str, Any] | None = None,
+    cursor_wired: bool = False,
+    hub_leases: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Reconcile registry observations with hub leases without secrets.
+
+    Status is read-only; sync is the only mutating observation step and it is
+    bounded. Terminal observations release matching hub leases; active observations
+    are kept. No Needs You row is invented just because a terminal local registry
+    entry has no matching hub lease. No prompt text, bearer, key, or presigned URL
+    is recorded.
+    """
+    from . import fleet_client
+
+    observed = now or datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    status = status_payload(
+        target,
+        now=observed,
+        provider_tasks=provider_tasks,
+        github=github,
+        cursor_wired=cursor_wired,
+    )
+    hub_leases = hub_leases if isinstance(hub_leases, list) else []
+
+    active: list[dict[str, Any]] = []
+    terminal: list[dict[str, Any]] = []
+    for row in status.get("entries", []):
+        if not isinstance(row, dict):
+            continue
+        state = row.get("provider_state")
+        if is_active_state(state):
+            active.append(row)
+        elif is_terminal_state(state):
+            terminal.append(row)
+
+    released: list[dict[str, Any]] = []
+    needs_you: list[dict[str, Any]] = []
+    for row in terminal:
+        # Release a matching hub lease when a terminal observation is known and a
+        # lease id is present. Failures are recorded, not rethrown; no Needs You row
+        # is invented merely because a local registry entry has no matching lease.
+        task_id = row.get("task_id")
+        if not isinstance(task_id, str):
+            continue
+        match = next((lease for lease in hub_leases if str(lease.get("provider_task_id")) == task_id), None)
+        if isinstance(match, dict) and match.get("lease_id"):
+            try:
+                decision = fleet_client.release_cloud(
+                    str(match["lease_id"]), state=str(row.get("classification", "released"))
+                )
+                if decision.granted:
+                    released.append({"id": row.get("id"), "task_id": task_id, "lease_id": match["lease_id"]})
+            except Exception:  # noqa: BLE001 - sync must stay bounded
+                pass
+
+    return {
+        "schema": SYNC_SCHEMA,
+        "action": "reconcile",
+        "target": str(target.expanduser().resolve()),
+        "observed_at": status.get("observed_at"),
+        "stale_ready_hours": status.get("stale_ready_hours"),
+        "sources": status.get("sources"),
+        "active": active[:100],
+        "released": released[:100],
+        "needs_you": needs_you[:10],
+        "counts": {
+            "active": len(active),
+            "released": len(released),
+            "needs_you": len(needs_you),
         },
     }
 
@@ -785,8 +895,56 @@ def cursor_cloud_wired() -> bool:
     return False
 
 
+def _cursor_api_key() -> str | None:
+    """Return the first configured Cursor API key, or None."""
+    import os
+
+    for key in ("CURSOR_API_KEY", "CURSOR_CLOUD_API_KEY", "BG_AGENT_API_KEY"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
+    """Fetch sanitized Cursor Cloud inventory when an API key is present.
+
+    Provider API failures are bounded: the tracker stays available and no
+    existing registry entries are erased or admitted.
+    """
+    api_key = _cursor_api_key()
+    if not api_key:
+        return {}
+    try:
+        from . import cursor_cloud
+
+        agents = cursor_cloud.list_agents(api_key, max_pages=2, max_items=100)
+    except Exception:  # noqa: BLE001 - observation must stay bounded
+        return {}
+    tasks: dict[str, Any] = {}
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        agent_id = agent.get("id")
+        if not isinstance(agent_id, str):
+            continue
+        state = cursor_cloud.normalize_state(agent.get("latestRunState"))
+        tasks[agent_id] = {"state": state}
+    return tasks
+
+
 def observe_providers(target: Path, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], bool]:
-    return observe_codex_cloud_tasks(target), observe_github(target), cursor_cloud_wired()
+    provider_tasks: dict[str, Any] = {}
+    try:
+        provider_tasks.update(observe_codex_cloud_tasks(target))
+    except Exception:  # noqa: BLE001 - observation must stay bounded
+        pass
+    if cursor_cloud_wired():
+        try:
+            provider_tasks.update(observe_cursor_cloud_tasks(target))
+        except Exception:  # noqa: BLE001 - observation must stay bounded
+            pass
+    return provider_tasks, observe_github(target), cursor_cloud_wired()
 
 
 def center_activity_records(
