@@ -1338,6 +1338,202 @@ def test_write_state_file_lands_relative_to_held_descriptor(tmp_path):
     assert history.read_text().count("\n") == 2
 
 
+def _seed_workspace_with_skill(workspace: Path, tmp_path: Path) -> None:
+    workspace.mkdir(parents=True, exist_ok=True)
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "seed")) == 0
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_import_refuses_symlinked_registry_component(tmp_path):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    registry = workspace / ".brigade" / "skills" / "registry"
+    shutil.move(str(registry), str(tmp_path / "real-registry"))
+    registry.symlink_to(outside, target_is_directory=True)
+
+    payload, error, rc = skills_cmd._registry_import_payload(
+        target=workspace, source=_write_skill(tmp_path / "source"), skill_id=None, force=False
+    )
+
+    assert payload is None
+    assert error is not None
+    assert rc == 2
+    assert not any(outside.iterdir())
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_import_refuses_symlinked_skills_component(tmp_path):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    skills_dir = workspace / ".brigade" / "skills"
+    shutil.move(str(skills_dir), str(tmp_path / "real-skills"))
+    skills_dir.symlink_to(outside, target_is_directory=True)
+
+    payload, error, rc = skills_cmd._registry_import_payload(
+        target=workspace, source=_write_skill(tmp_path / "source"), skill_id=None, force=False
+    )
+
+    assert payload is None
+    assert error is not None
+    assert rc == 2
+    assert not any(outside.iterdir())
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_install_snapshot_refuses_symlinked_rollback_component(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    assert skills_cmd.install(workspace=workspace, skill="security-review", harness="claude", json_output=True) == 0
+    capsys.readouterr()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    rollback = workspace / ".brigade" / "skills" / "rollback"
+    rollback.symlink_to(outside, target_is_directory=True)
+
+    rc = skills_cmd.install(
+        workspace=workspace, skill="security-review", harness="claude", force=True, json_output=True
+    )
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "state root" in captured.err or "state path" in captured.err
+    assert not any(outside.iterdir())
+    # refusal happens before the destructive removal of the installed copy
+    assert (workspace / ".claude" / "skills" / "security-review" / "SKILL.md").is_file()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_install_receipt_write_refuses_symlinked_installs_component(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    installs = workspace / ".brigade" / "skills" / "installs"
+    installs.symlink_to(outside, target_is_directory=True)
+
+    rc = skills_cmd.install(workspace=workspace, skill="security-review", harness="claude", json_output=True)
+
+    assert rc == 2
+    assert not any(outside.iterdir())
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_uninstall_receipt_delete_refuses_symlinked_installs_component(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    assert skills_cmd.install(workspace=workspace, skill="security-review", harness="claude", json_output=True) == 0
+    capsys.readouterr()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim_receipt = outside / "security-review-claude.json"
+    victim_receipt.write_text("{}\n")
+    installs = workspace / ".brigade" / "skills" / "installs"
+    shutil.move(str(installs), str(tmp_path / "real-installs"))
+    installs.symlink_to(outside, target_is_directory=True)
+
+    rc = skills_cmd.uninstall(workspace=workspace, skill="security-review", harness="claude")
+
+    assert rc == 2
+    assert victim_receipt.read_text() == "{}\n"
+    # refusal happens before the installed copy is removed
+    assert (workspace / ".claude" / "skills" / "security-review").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_uninstall_internal_state_delete_refuses_symlinked_resources_component(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    assert skills_cmd.install(workspace=workspace, skill="security-review", harness="mcp", json_output=True) == 0
+    capsys.readouterr()
+    outside = tmp_path / "outside"
+    victim_dir = outside / "security-review"
+    victim_dir.mkdir(parents=True)
+    (victim_dir / "SKILL.md").write_text("victim\n")
+    resources = workspace / ".brigade" / "skills" / "mcp-resources"
+    shutil.move(str(resources), str(tmp_path / "real-resources"))
+    resources.symlink_to(outside, target_is_directory=True)
+
+    rc = skills_cmd.uninstall(workspace=workspace, skill="security-review", harness="mcp")
+
+    assert rc == 2
+    assert (victim_dir / "SKILL.md").read_text() == "victim\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_fallback_state_writes_refuse_symlinked_components(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws"
+    installs = workspace / ".brigade" / "skills" / "installs"
+    installs.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = workspace / ".brigade" / "skills" / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(skills_cmd, "_HAS_DESCRIPTOR_ANCHOR", False)
+    anchor = skills_cmd._hold_state_root(workspace)
+    try:
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._write_state_file(anchor, "skills", "linked", "receipt.json", data=b"x")
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._append_state_line(anchor, "skills", "linked", "history.jsonl", data=b"x")
+        (installs / "receipt.json").symlink_to(outside / "victim.txt")
+        (outside / "victim.txt").write_text("victim\n")
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._write_state_file(anchor, "skills", "installs", "receipt.json", data=b"x")
+    finally:
+        anchor.close()
+
+    assert (outside / "victim.txt").read_text() == "victim\n"
+    assert not (outside / "receipt.json").exists()
+    assert not (outside / "history.jsonl").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_simulated_fallback_install_refuses_symlinked_installs_component(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    installs = workspace / ".brigade" / "skills" / "installs"
+    installs.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(skills_cmd, "_HAS_DESCRIPTOR_ANCHOR", False)
+
+    rc = skills_cmd.install(workspace=workspace, skill="security-review", harness="claude", json_output=True)
+
+    assert rc == 2
+    assert not any(outside.iterdir())
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_missing_state_root_creation_refuses_swapped_ancestor(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = home / "ws"
+    workspace.mkdir()
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    real_mkdir = os.mkdir
+
+    def swap_during_creation(path, mode=0o777, *, dir_fd=None):
+        shutil.move(str(workspace), str(tmp_path / "ws-original"))
+        (home / "ws").symlink_to(evil, target_is_directory=True)
+        if dir_fd is None:
+            return real_mkdir(path, mode)
+        return real_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", swap_during_creation)
+
+    with pytest.raises(skills_cmd.SkillsStatePathError):
+        skills_cmd._open_state_root_descriptor(workspace)
+
+    monkeypatch.undo()
+    assert not (evil / ".brigade").exists()
+    assert (tmp_path / "ws-original" / ".brigade").is_dir()
+
+
 def test_skills_fleet_does_not_guess_source_for_malformed_v2_receipt(tmp_path, capsys):
     assert skills_cmd.install(workspace=tmp_path, skill="brigade-work", harness="cursor", json_output=True) == 0
     capsys.readouterr()
