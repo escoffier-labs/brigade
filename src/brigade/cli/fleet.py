@@ -106,6 +106,21 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_claims.add_argument("--all", action="store_true", help="Include expired claims.")
     p_claims.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
     p_claims.add_argument(
+        "--acquire",
+        metavar="TARGET",
+        default=None,
+        help=(
+            "Acquire TARGET for an external harness session. Records opaque --harness/--session labels "
+            "(optional --role/--job) and prints the fencing holder once."
+        ),
+    )
+    p_claims.add_argument(
+        "--heartbeat",
+        metavar="TARGET",
+        default=None,
+        help="Renew the live claim on TARGET. Requires the fencing --holder from --acquire.",
+    )
+    p_claims.add_argument(
         "--release",
         metavar="TARGET",
         default=None,
@@ -113,8 +128,25 @@ def register(sub: argparse._SubParsersAction) -> None:
             "Release the hub claim on TARGET, a claim key as listed by this command (a claim left behind by a "
             "crashed run). Refused unless this node holds it and the run that took it is verifiably dead: the "
             "claim's recorded run directory resolves to a workspace on this machine whose run lock has no live "
-            "owner (with --path, that workspace must be the one given). See --force."
+            "owner (with --path, that workspace must be the one given). See --force. With --holder, release "
+            "the exact session that acquired the row instead of the operator recovery path."
         ),
+    )
+    p_claims.add_argument("--harness", default=None, help="Opaque harness label for --acquire or --outcome.")
+    p_claims.add_argument("--role", default=None, help="Opaque role label for --acquire or --outcome.")
+    p_claims.add_argument("--job", default=None, help="Opaque job label for --acquire or --outcome.")
+    p_claims.add_argument("--session", default=None, help="Opaque session label for --acquire or --outcome.")
+    p_claims.add_argument(
+        "--holder",
+        default=None,
+        help="Fencing token printed by --acquire. Required for --heartbeat and session --release.",
+    )
+    p_claims.add_argument("--ttl", type=int, default=None, help="Claim TTL in seconds for --acquire or --heartbeat.")
+    p_claims.add_argument(
+        "--outcome",
+        default=None,
+        choices=("external.completed", "external.failed", "external.canceled"),
+        help="With --release --holder: release first, then publish this terminal event when the holder matches.",
     )
     p_claims.add_argument(
         "--path",
@@ -291,10 +323,11 @@ def _dispatch_status(args: argparse.Namespace) -> int:
     if args.json:
         print(_json.dumps({"runs": runs}, indent=2, sort_keys=True))
         return 0
-    headers = ("node", "repo", "run_id", "seat/harness", "state", "age")
+    headers = ("node", "repo", "run_id", "seat/harness", "state", "exit", "age")
     rows = []
     for run_row in runs:
         seat = "/".join(filter(None, [run_row.get("seat"), run_row.get("harness")])) or "-"
+        exit_status = run_row.get("exit_status")
         rows.append(
             [
                 _safe_table_cell(str(run_row.get("node_id") or "-"))[:12],
@@ -302,6 +335,7 @@ def _dispatch_status(args: argparse.Namespace) -> int:
                 _safe_table_cell(str(run_row.get("run_id") or "-")),
                 _safe_table_cell(seat),
                 _safe_table_cell(str(run_row.get("state") or "-")),
+                _safe_table_cell("-" if exit_status is None else str(exit_status)),
                 _safe_table_cell(_format_age(run_row.get("ts"))),
             ]
         )
@@ -367,6 +401,9 @@ def _print_claim_failure(decision, *, what: str) -> bool:
         if "'holder'" in detail or "'scope'" in detail or "'action'" in detail:
             detail += " (this fleet hub predates token-less release; upgrade it)"
         print(f"error: fleet hub claim {what} failed: {detail}", file=sys.stderr)
+        return True
+    if decision.reason == "invalid":
+        print(f"error: {decision.detail}", file=sys.stderr)
         return True
     return False
 
@@ -521,14 +558,213 @@ def _release_claim(raw_target: str, *, as_path: bool, node_override: str | None,
     return 0
 
 
+def _session_labels(args: argparse.Namespace) -> dict[str, str | None]:
+    return {
+        "harness": args.harness,
+        "role": args.role,
+        "job": args.job,
+        "session": args.session,
+    }
+
+
+def _acquire_session(
+    target: str,
+    *,
+    harness: str | None,
+    role: str | None,
+    job: str | None,
+    session: str | None,
+    holder: str | None,
+    ttl: int | None,
+    as_json: bool,
+) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    if not harness or not session:
+        print("error: --acquire requires --harness and --session", file=sys.stderr)
+        return 2
+    try:
+        fleet_client.validated_opaque_labels(harness=harness, role=role, job=job, session=session)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    decision = fleet_client.acquire_claim(
+        target,
+        holder=holder,
+        harness=harness,
+        role=role,
+        job=job,
+        session=session,
+        ttl_seconds=ttl if ttl is not None else fleet_client.DEFAULT_CLAIM_TTL_SECONDS,
+    )
+    if _print_claim_failure(decision, what="acquire"):
+        return 1
+    if as_json:
+        print(
+            _json.dumps(
+                {
+                    "target": target,
+                    "granted": decision.granted,
+                    "holder": decision.holder,
+                    "claim": decision.claim,
+                    "owner": decision.owner,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    if decision.granted:
+        if not as_json:
+            print(f"acquired claim on {target!r} harness {harness} session {session}")
+            print("holder token (shown once; the hub never lists it; pass it to --heartbeat / --release):")
+            print(decision.holder or "")
+        return 0
+    if not as_json:
+        owner = (decision.owner or {}).get("owner_node") or "-"
+        print(f"error: claim on {target!r} is held by node {owner}", file=sys.stderr)
+    return 1
+
+
+def _heartbeat_session(target: str, *, holder: str | None, ttl: int | None, as_json: bool) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    if not holder:
+        print("error: --heartbeat requires --holder", file=sys.stderr)
+        return 2
+    decision = fleet_client.renew_claim(
+        target,
+        holder=holder,
+        ttl_seconds=ttl if ttl is not None else fleet_client.DEFAULT_CLAIM_TTL_SECONDS,
+    )
+    if _print_claim_failure(decision, what="renew"):
+        return 1
+    if as_json:
+        print(
+            _json.dumps(
+                {"target": target, "renewed": decision.granted, "claim": decision.claim, "owner": decision.owner},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    if decision.granted:
+        if not as_json:
+            print(f"renewed claim on {target!r}")
+        return 0
+    if not as_json:
+        print(
+            f"error: claim on {target!r} is held or the holder token does not match",
+            file=sys.stderr,
+        )
+    return 1
+
+
+def _release_session(
+    target: str,
+    *,
+    holder: str,
+    outcome: str | None,
+    harness: str | None,
+    role: str | None,
+    job: str | None,
+    session: str | None,
+    as_json: bool,
+) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    if outcome is not None and (not harness or not session):
+        print("error: --outcome requires --harness and --session", file=sys.stderr)
+        return 2
+    try:
+        labels = (
+            fleet_client.validated_opaque_labels(harness=harness, role=role, job=job, session=session)
+            if outcome is not None
+            else {"harness": harness, "role": role, "job": job, "session": session}
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    harness, role, job, session = labels["harness"], labels["role"], labels["job"], labels["session"]
+    decision = fleet_client.release_claim(target, holder=holder)
+    if _print_claim_failure(decision, what="release"):
+        return 1
+    published = None
+    if decision.granted and outcome is not None:
+        if harness is None or session is None:
+            print("error: --outcome requires --harness and --session", file=sys.stderr)
+            return 2
+        fleet_client.report_external_event(
+            target=target, harness=harness, role=role, job=job, session=session, state=outcome
+        )
+        published = outcome
+    if as_json:
+        print(
+            _json.dumps(
+                {
+                    "target": target,
+                    "released": decision.granted,
+                    "forced": False,
+                    "claim": decision.claim,
+                    "owner": decision.owner,
+                    "outcome": published,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    if decision.granted:
+        if not as_json:
+            print(f"released claim on {target!r}")
+        return 0
+    if not as_json:
+        print(
+            f"error: claim on {target!r} is held or the holder token does not match",
+            file=sys.stderr,
+        )
+    return 1
+
+
 def _dispatch_claims(args: argparse.Namespace) -> int:
     import json as _json
 
     from .. import fleet_client
 
+    actions = [name for name in ("acquire", "heartbeat", "release") if getattr(args, name) is not None]
+    if len(actions) > 1:
+        print("error: --acquire, --heartbeat, and --release are mutually exclusive", file=sys.stderr)
+        return 2
     if args.release is None and (args.force or args.path or args.node is not None):
         print("error: --force, --path, and --node require --release <target>", file=sys.stderr)
         return 2
+    if args.holder is not None and (args.force or args.path or args.node is not None):
+        print("error: --holder cannot be combined with --force, --path, or --node", file=sys.stderr)
+        return 2
+    if args.outcome is not None and (args.release is None or args.holder is None):
+        print("error: --outcome requires --release <target> and --holder", file=sys.stderr)
+        return 2
+    if args.acquire is not None:
+        return _acquire_session(
+            args.acquire,
+            holder=args.holder,
+            ttl=args.ttl,
+            as_json=args.json,
+            **_session_labels(args),
+        )
+    if args.heartbeat is not None:
+        return _heartbeat_session(args.heartbeat, holder=args.holder, ttl=args.ttl, as_json=args.json)
+    if args.release is not None and args.holder is not None:
+        return _release_session(
+            args.release,
+            holder=args.holder,
+            outcome=args.outcome,
+            as_json=args.json,
+            **_session_labels(args),
+        )
     if args.release is not None:
         return _release_claim(
             args.release, as_path=args.path, node_override=args.node, force=args.force, as_json=args.json
@@ -541,7 +777,7 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
     if args.json:
         print(_json.dumps({"claims": claims}, indent=2, sort_keys=True))
         return 0
-    headers = ("target", "node", "conductor", "acquired", "expires")
+    headers = ("target", "node", "conductor", "harness", "session", "acquired", "expires")
     rows = []
     for claim in claims:
         expires = str(claim.get("expires_at") or "-")
@@ -552,6 +788,8 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
                 _safe_table_cell(str(claim.get("target") or "-")),
                 _safe_table_cell(str(claim.get("owner_node") or "-"))[:12],
                 _safe_table_cell(str(claim.get("owner_conductor") or "-")),
+                _safe_table_cell(str(claim.get("harness") or "-")),
+                _safe_table_cell(str(claim.get("session") or "-")),
                 _safe_table_cell(_format_age(claim.get("acquired_at"))),
                 _safe_table_cell(expires),
             ]

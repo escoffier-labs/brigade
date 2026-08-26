@@ -273,6 +273,7 @@ class TestHubScopes:
         status, payload = _post(url, token, release)
         assert status == 409 and payload["released"] is False
         assert "re-acquired" in payload["error"] and payload["owner"]["owner_conductor"] == "new-run"
+        assert f"now acquired {payload['owner']['acquired_at']}" in payload["error"]
         assert _post(url, token, _claim("renew", holder="fresh"))[1]["renewed"] is True
         # The current row's acquired_at releases it; force is fenced too when given.
         current = _post(url, token, inspect)[1]["claim"]["acquired_at"]
@@ -703,7 +704,10 @@ class TestReleaseCli:
 
         monkeypatch.setattr(fleet_client, "inspect_claim", inspect_then_new_run)
         assert cli.main(["fleet", "claims", "--release", "api"]) == 1
-        assert "re-acquired since it was inspected" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "re-acquired since it was inspected" in err
+        fresh = fleet_client.fetch_claims()[0]
+        assert fresh["acquired_at"] in err
         # 409, nothing deleted: the fresh run's claim survives and renews.
         assert [c["owner_conductor"] for c in fleet_client.fetch_claims()] == ["new-run"]
         assert _post(url, token, _claim("renew", target="api", holder="fresh"))[1]["renewed"] is True

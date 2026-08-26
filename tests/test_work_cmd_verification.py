@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from brigade import cli
+from brigade import fleet_client
 from brigade import graphtrail_delta
 from brigade import localio
 from brigade import receipts_cmd
@@ -52,6 +53,114 @@ def test_verify_run_marks_parser_rejected_command_as_rejected_not_failed(tmp_pat
     assert outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", json_output=True) == 0
     record = json.loads(capsys.readouterr().out)["record"]
     assert record["signal_value"] == 0
+
+
+def test_verify_run_reports_a_redacted_fleet_completion_event(tmp_path, monkeypatch):
+    _init_git_repo_with_head(tmp_path)
+    reported: list[dict[str, object]] = []
+    monkeypatch.setattr(fleet_client, "report_event", lambda event, **_kwargs: reported.append(event) or True)
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["true"], timeout=60) == 0
+
+    assert len(reported) == 1
+    event = reported[0]
+    assert event["state"] == "verify.completed"
+    assert event["repo"] == tmp_path.name
+    assert event["harness"] == "brigade-work"
+    assert event["exit_status"] == 0
+    assert isinstance(event["capability_fingerprint"], str) and event["capability_fingerprint"]
+    assert {"commands", "stdout", "stderr", "token", "credential", "headers", "artifacts"}.isdisjoint(event)
+
+
+def test_verify_run_reports_failed_completion_exit_status(tmp_path, monkeypatch):
+    _init_git_repo_with_head(tmp_path)
+    reported: list[dict[str, object]] = []
+    monkeypatch.setattr(fleet_client, "report_event", lambda event, **_kwargs: reported.append(event) or True)
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["false"], timeout=60) == 1
+
+    assert len(reported) == 1
+    event = reported[0]
+    assert event["state"] == "verify.completed"
+    assert event["exit_status"] == 1
+    assert {"commands", "stdout", "stderr", "token", "credential", "headers", "artifacts"}.isdisjoint(event)
+
+
+def test_verify_run_reports_canceled_completion_as_interrupted_exit(tmp_path, monkeypatch):
+    from brigade.work_cmd import verification as verify_mod
+
+    _init_git_repo_with_head(tmp_path)
+    reported: list[dict[str, object]] = []
+    monkeypatch.setattr(fleet_client, "report_event", lambda event, **_kwargs: reported.append(event) or True)
+
+    def interrupted_child_runner(execution_argv, *, cwd, env, timeout):
+        return verify_mod._VERIFY_INTERRUPTED_COMMAND_STATUS, None, "", ""
+
+    monkeypatch.setattr(verify_mod, "_run_verify_child_process", interrupted_child_runner)
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=[[sys.executable, "-c", "print(1)"]],
+        timeout=30,
+        json_output=True,
+    )
+    assert rc == 130
+    assert len(reported) == 1
+    event = reported[0]
+    assert event["state"] == "verify.completed"
+    assert event["exit_status"] == 130
+
+
+def test_verify_fleet_completion_encodes_negative_returncode_as_128_plus_signal(tmp_path, monkeypatch):
+    from brigade.work_cmd import verification as verify_mod
+
+    reported: list[dict[str, object]] = []
+    monkeypatch.setattr(fleet_client, "report_event", lambda event, **_kwargs: reported.append(event) or True)
+    receipt = {
+        "run_id": "vr-neg",
+        "completed_at": "2026-08-26T12:00:00+00:00",
+        "digests": {"receipt_sha256": "a" * 64},
+    }
+    verify_mod._report_fleet_completion(tmp_path, receipt, -9)
+    assert reported[0]["state"] == "verify.completed"
+    assert reported[0]["exit_status"] == 137
+
+
+def test_verify_run_spools_completion_and_flush_drains_it(tmp_path, monkeypatch):
+    import threading
+
+    from brigade import fleet_hub
+    from brigade import node as node_mod
+
+    _init_git_repo_with_head(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    identity = node_mod.NodeIdentity(node_id="node-verify", hostname="fleet-test", roles=(), platform="test")
+    path = node_mod.node_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(node_mod._format_node_toml(identity), encoding="utf-8")
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "test-token-12345")
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["true"], timeout=60) == 0
+    spool_files = list((fleet_client.brigade_home() / "fleet-spool").glob("*.jsonl"))
+    assert len(spool_files) == 1
+    event = json.loads(spool_files[0].read_text().splitlines()[0])
+    assert event["state"] == "verify.completed"
+    assert event["exit_status"] == 0
+    assert {"commands", "stdout", "token", "headers", "artifacts"}.isdisjoint(event)
+
+    db = tmp_path / "hub" / "fleet.db"
+    hub = fleet_hub.make_server("127.0.0.1", 0, db, "test-token-12345", allow_admin_writes=True)
+    thread = threading.Thread(target=hub.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{hub.server_address[1]}"
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        assert fleet_client.flush_spool(spool_files[0].stem, hub_url=url, token="test-token-12345") == 1
+        assert list((fleet_client.brigade_home() / "fleet-spool").glob("*.jsonl")) == []
+    finally:
+        hub.shutdown()
+        hub.server_close()
 
 
 _PYTHON_MISSING_PYTHON3_SUGGESTION = (
