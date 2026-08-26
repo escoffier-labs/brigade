@@ -10,6 +10,15 @@ state-root content authenticity; and on platforms without descriptor
 anchoring (Windows), state-root reads fall back to the lstat-guarded walker,
 which closes symlink/reparse redirection but keeps a small unavoidable
 check-then-use window because no held directory descriptor exists there.
+
+Further residuals from the final #1211 review are tracked in escoffier-labs/brigade#1214:
+generic ``import`` and ``inbox add`` classify a source only after resolving it;
+forced install snapshots a state-backed destination by pathname before the
+anchored delete refuses it; the lexical classifier does not normalise case or a
+symlinked workspace alias; outcome discovery walks the registry by pathname;
+plus small staging-path, hash-oracle, name-disclosure, and control-character
+items. All need write access to the state root without read access to the
+trusted skill directories.
 """
 
 from __future__ import annotations
