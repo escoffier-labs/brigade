@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import sys
 import threading
 import urllib.request
 from pathlib import Path
@@ -89,6 +91,24 @@ class TestHub:
         status, payload = _get(url, "/health", None)
         assert status == 200
         assert payload["ok"] is True
+        assert payload == {"ok": True, "service": "brigade-fleet-hub"}
+
+    def test_health_server_header_omits_python_banner(self, hub):
+        url, _token, _db = hub
+        request = urllib.request.Request(url + "/health")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            server = response.headers.get("Server", "")
+            payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload == {"ok": True, "service": "brigade-fleet-hub"}
+        assert "Python" not in server
+        assert sys.version.split()[0] not in server
+        handler = fleet_hub.make_handler("tok", Path("/nonexistent"))
+        assert handler.server_version == "brigade-fleet-hub/1"
+        assert handler.sys_version == ""
+        banner = f"{handler.server_version} {handler.sys_version}"
+        assert "Python" not in banner
+        assert sys.version.split()[0] not in banner
 
     def test_events_rejected_without_token(self, hub):
         url, _token, _db = hub
@@ -566,6 +586,44 @@ class TestCli:
         assert "repo-a" in out and "worker/claude" in out and "run.created" in out
         assert out.splitlines()[0].split()[-1] == "age"
 
+    def test_status_table_renders_legacy_nonprintables_inert(self, hub, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "INSERT INTO events "
+                "(node_id, run_id, sequence, digest, repo, seat, harness, state, ts, received_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    NODE_A,
+                    "r-legacy",
+                    1,
+                    "d1",
+                    "repo\x1b[31mred",
+                    "seat\x9b",
+                    "claude",
+                    "run.created",
+                    "2026-08-23T12:00:00+00:00",
+                    "2026-08-23T12:00:00+00:00",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        assert cli.main(["fleet", "status", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["runs"][0]["repo"] == "repo\x1b[31mred"
+        assert cli.main(["fleet", "status"]) == 0
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "\x9b" not in out
+        assert "\\x1b[31mred" in out
+        assert "\\x9b" in out
+
     def test_status_without_hub_is_error(self, tmp_path, monkeypatch, capsys):
         from brigade import cli
 
@@ -978,6 +1036,41 @@ class TestHubHardening:
         assert "database" in payload["error"]
         status, payload = _get(url, "/status", token)
         assert status == 200
+
+    def test_control_characters_rejected_at_event_ingestion(self, hub, tmp_path):
+        url, token, db = hub
+        crafted = (
+            {**_event(), "node_id": "node\x1b[31m"},
+            {**_event(), "run_id": "run\x07"},
+            {**_event(), "state": "run.\x9bstarted"},
+            {**_event(), "ts": "2026-08-23T12:00:00+00:00\x00"},
+            {**_event(), "digest": "d1\x1f"},
+            {**_event(), "repo": "repo\x1b[31mred"},
+            {**_event(), "seat": "worker\x80"},
+            {**_event(), "harness": "claude\x7f"},
+        )
+        for bad in crafted:
+            status, payload = _post(url, token, bad)
+            assert status == 422, bad
+            assert "control" in payload["error"]
+        conn = sqlite3.connect(str(db))
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+        finally:
+            conn.close()
+        # Clean values still ingest; length-style emptiness stays 400.
+        assert _post(url, token, _event())[0] == 200
+        status, payload = _post(url, token, {**_event(seq=2), "repo": ""})
+        assert status == 200
+        status, payload = _post(url, token, {**_event(), "node_id": ""})
+        assert status == 400
+        conn = fleet_hub.init_db(tmp_path / "direct.db")
+        try:
+            with pytest.raises(fleet_hub.FleetHubUnprocessable):
+                fleet_hub.store_events(conn, {**_event(), "repo": "r\x1b"})
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+        finally:
+            conn.close()
 
 
 def test_conftest_clears_fleet_env():
