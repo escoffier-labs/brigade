@@ -3,29 +3,37 @@
 ## Goal
 
 Make the beta fleet hub authoritative for cloud-agent admission and honest
-about active work. Cursor Cloud, Codex Cloud, Claude Code Cloud, and Grok Bot
-must share one safe status contract. Physical station tiles must contain only
-recent non-terminal work. Execute the tasks in order and do not cut a release.
+about active work. Cursor Cloud, Codex Cloud, Claude Code Cloud, Jules, and
+Grok Bot must share one safe status contract. Physical station tiles must contain
+only recent non-terminal work. Execute the tasks in order and do not cut a release.
 
 Approved design: `docs/phase-fleet-cloud-workers.md`.
 
 Historical evidence: Brigade evidence `d6471048624c3e6b28cdba49` records that
 the current `.brigade/cloud/registry.json` is local, Codex registers on dispatch,
-Cursor is only wired/unwired, GitHub is branch/PR evidence, and sweep never
-deletes.
+Cursor is only wired/unwired, Jules is not tracked, GitHub is branch/PR evidence,
+and sweep never deletes.
 
 ## Architecture
 
 - `fleet_hub.py` owns atomic cloud leases and provider circuit state in SQLite.
 - `fleet_client.py` is the only client of the new authenticated hub surface.
 - `cloud_tracker.py` preserves the local registry and normalizes provider and
-  GitHub evidence. It never receives or persists provider credentials.
-- `cursor_cloud.py` owns bounded read-only Cursor API calls using stdlib HTTP.
+  GitHub evidence. It also holds the shared provider contract base. It never
+  receives or persists provider credentials.
+- `cursor_cloud.py` owns bounded Cursor API inventory and lease-gated mutations
+  using stdlib `urllib`.
+- `claude_cloud.py` owns bounded `claude agents --json --all` inventory and the
+  disabled launch contract.
+- `jules_cloud.py` owns bounded Jules API inventory and lease-gated mutations
+  using stdlib `urllib`.
 - `codex_cloud.py` acquires and releases shared admission around the existing
   Codex submit/poll/diff flow.
 - `fleet_command_deck.py` projects physical runs and cloud leases separately.
 - Claude joins the contracts but stays disabled at limit zero. No live Claude
   call is allowed in this slice.
+- Jules joins the contracts at provider limit 15, bounded by the global hosted
+  cap of 4.
 
 The hub never calls a model provider. Dispatching nodes call providers locally,
 then report sanitized state through `fleet_client.py`.
@@ -78,6 +86,9 @@ then report sanitized state through `fleet_client.py`.
 **Owner:** one implementation worker after Task 1. This task owns all hub schema
 and client transport files to avoid overlapping migrations and HTTP routes.
 
+The Fleet Hub Task 2 implementation already includes the Jules provider cap of 15
+and the model/provider policy table. The global hosted cap remains 4.
+
 **Files:**
 
 - Modify `src/brigade/fleet_hub.py`
@@ -93,8 +104,8 @@ and client transport files to avoid overlapping migrations and HTTP routes.
   survive.
 - [ ] Add failing tests for one atomic admission transaction checking both the
   provider cap and global cap under concurrent requests. Initial policy is
-  Cursor 3, Codex 2, Claude 0, global 4. Grok Bot remains tracked but does not
-  consume these hosted-subscription slots.
+  Cursor 3, Codex 2, Claude 0, Jules 15, global 4. Grok Bot remains tracked but
+  does not consume these hosted-subscription slots.
 - [ ] Add failing authentication tests: node tokens may act only as their node;
   dashboard cookies are read-only; unknown/revoked credentials cannot admit,
   renew, bind, release, or change a circuit.
@@ -118,49 +129,117 @@ and client transport files to avoid overlapping migrations and HTTP routes.
 - [ ] Run selected fleet tests green through Brigade.
 - [ ] Commit `feat: add fleet-authoritative cloud admission`.
 
-## Task 3: provider normalization, Cursor inventory, and Claude contracts
+## Task 3: provider normalization, Cursor inventory/launch, and Claude disabled inventory contract
 
 **Owner:** one implementation worker after Task 2.
+
+This task owns the shared provider-normalization base in `cloud_tracker.py`, the
+Cursor Cloud adapter, and the Claude Code Cloud disabled inventory contract. It
+does not yet implement Jules or gate Codex Cloud.
 
 **Files:**
 
 - Create `src/brigade/cursor_cloud.py`
-- Modify `src/brigade/cloud_tracker.py`
+- Create `src/brigade/claude_cloud.py`
+- Modify `src/brigade/cloud_tracker.py` to hold the shared provider contract
 - Modify `src/brigade/cli/run_cloud.py`
 - Modify `tests/test_cloud_tracker.py`
 - Create or modify `tests/test_cursor_cloud.py`
+- Create `tests/test_claude_cloud.py`
 - Modify `docs/technical-guide.md`
 
 - [ ] Add failing tests for Cursor Basic-auth requests without leaking the key,
   bounded `GET /v1/agents` pagination, `latestRunId` resolution through the run
   endpoint, state normalization, retryable/unavailable errors, and active-only
   filtering. Network calls use fakes.
-- [ ] Add failing tests proving `claude-cloud` is accepted by register/adopt and
-  reported disabled with limit zero, while no `claude` subprocess is invoked.
+- [ ] Add failing Cursor launch tests proving hub admission precedes
+  `POST /v1/agents`, denial makes no provider request, successful creation binds
+  the returned agent and run IDs immediately, and submission failure releases
+  the unbound lease. `autoCreatePR` and merge remain off unless explicitly
+  authorized.
+- [ ] Add failing tests for bounded `claude agents --json --all` inventory using
+  fake subprocess output. Prove `claude-cloud` is accepted by register/adopt and
+  reported disabled with limit zero, while no Claude launch subprocess is
+  invoked.
 - [ ] Add failing tests proving GitHub-only branch inference remains orphaned
   recovery evidence and never becomes active capacity.
 - [ ] Add a failing CLI contract for `brigade run cloud sync --json`: provider
   observations reconcile safe active leases through `fleet_client`, terminal
   observations release them, and capacity refusals become Needs You records.
 - [ ] Run red through Brigade:
-  `brigade work verify run --target . --command "pytest -q tests/test_cloud_tracker.py tests/test_cursor_cloud.py" --capture brigade-work`.
+  `brigade work verify run --target . --command "pytest -q tests/test_cloud_tracker.py tests/test_cursor_cloud.py tests/test_claude_cloud.py" --capture brigade-work`.
 - [ ] Implement `cursor_cloud.py` with stdlib `urllib`, Basic auth, a bounded
   request deadline, maximum pages/items, strict JSON shape checks, and sanitized
   exceptions. Never include headers or response bodies in errors.
+- [ ] Gate Cursor agent and run creation through `fleet_client` admission. Bind
+  returned provider IDs before acknowledging launch, release failed unbound
+  submissions, and fail closed when a configured hub is unavailable.
+- [ ] Implement `claude_cloud.py` as a bounded parser for `claude agents --json
+  --all`. Keep launch disabled at the policy layer and do not call `claude
+  --cloud` in this slice.
+- [ ] Add the shared provider-normalization base in `cloud_tracker.py`. It covers
+  safe state names, repo/owner matching, prompt-hash handling, and the
+  register/adopt/status contract surface for Cursor, Claude, Jules, and Codex.
 - [ ] Add `claude-cloud` to provider and CLI choices. Report authority as
-  `disabled-by-policy` until the hub limit is raised. Do not guess a Claude list
-  API and do not run a live canary while usage is exhausted.
+  `disabled-by-policy` until the hub limit is raised. Treat the installed CLI
+  inventory as local observation, not a public web API, and do not run a live
+  canary while usage is exhausted.
 - [ ] Implement explicit `sync`; keep read-only `status` non-mutating. Sync may
   adopt an already-active browser-created Cursor task if admission remains, but
   cannot exceed the shared cap.
 - [ ] Keep registry v1 read-compatible and avoid rewriting or deleting old
   entries during status/sync.
 - [ ] Run provider tests green through Brigade.
-- [ ] Commit `feat: reconcile cloud provider workers through the fleet`.
+- [ ] Commit `feat: reconcile Cursor and Claude cloud contracts through the fleet`.
 
-## Task 4: gate Codex Cloud dispatch and release capacity
+## Task 4: Jules REST adapter and launch gate
 
 **Owner:** one implementation worker after Task 3.
+
+This task owns the Jules adapter and the `jules` provider contract. It does not
+implement the Cursor private cloud worker mode or the Claude self-hosted pool.
+
+**Files:**
+
+- Create `src/brigade/jules_cloud.py`
+- Modify `src/brigade/cloud_tracker.py` for the Jules contract
+- Modify `src/brigade/cli/run_cloud.py` for the `jules` provider choice
+- Modify `tests/test_cloud_tracker.py`
+- Create `tests/test_jules_cloud.py`
+- Modify `docs/technical-guide.md`
+
+- [ ] Add failing tests for Jules stdlib `urllib` requests without leaking the
+  API key, bounded `GET /v1alpha/sources` and `GET /v1alpha/sessions` pagination,
+  session create and approvePlan error paths, activity polling, and state
+  normalization. Network calls use fakes.
+- [ ] Add a failing test proving hub admission precedes `POST
+  /v1alpha/sessions` and the session ID is bound to the lease immediately after a
+  successful create.
+- [ ] Add a failing test proving `requirePlanApproval` defaults to true and
+  `AUTO_CREATE_PR` and patch application are off unless explicitly requested.
+- [ ] Add a failing test proving unknown Jules states hold capacity and that no
+  blind retry follows an ambiguous create timeout, because the API does not
+  document an idempotency key.
+- [ ] Add a failing test proving `brigade run cloud register` and `adopt`
+  accept `jules` and report it in `status --json`.
+- [ ] Run red through Brigade:
+  `brigade work verify run --target . --command "pytest -q tests/test_cloud_tracker.py tests/test_jules_cloud.py" --capture brigade-work`.
+- [ ] Implement `jules_cloud.py` with stdlib `urllib`, `X-Goog-Api-Key` auth, a
+  bounded request deadline, maximum pages/items, strict JSON shape checks, and
+  sanitized exceptions. Never include headers or response bodies in errors.
+- [ ] Wire `jules` into the shared provider contract in `cloud_tracker.py` and
+  into `cli/run_cloud.py` choices.
+- [ ] Implement `sync` and `status` for Jules. Sync is read-only polling unless
+  admission is already granted; launch is the only mutating flow and is gated by
+  the hub lease.
+- [ ] Keep registry read-compatible and avoid rewriting or deleting old entries
+  during status/sync.
+- [ ] Run provider tests green through Brigade.
+- [ ] Commit `feat: add Jules cloud adapter and launch gate`.
+
+## Task 5: gate Codex Cloud dispatch and release capacity
+
+**Owner:** one implementation worker after Task 4.
 
 **Files:**
 
@@ -184,9 +263,9 @@ and client transport files to avoid overlapping migrations and HTTP routes.
   Brigade.
 - [ ] Commit `feat: gate Codex Cloud dispatch on fleet capacity`.
 
-## Task 5: Cloud Workers command-deck projection
+## Task 6: Cloud Workers command-deck projection
 
-**Owner:** one implementation worker after Task 4.
+**Owner:** one implementation worker after Task 5.
 
 **Files:**
 
@@ -196,8 +275,8 @@ and client transport files to avoid overlapping migrations and HTTP routes.
 - Modify `tests/test_fleet_dashboard.py`
 
 - [ ] Add failing pure and HTTP tests for a separate Cloud Workers section with
-  Cursor, Codex, and Claude `used/limit`, circuit state, safe active task cards,
-  and zero-work empty states.
+  Cursor, Codex, Claude, and Jules `used/limit`, circuit state, safe active task
+  cards, and zero-work empty states.
 - [ ] Prove cloud work never increments Rocinante, Shadowfax, or Gandalf busy
   counts. Prove expired/terminal leases move to outcomes or Needs You and do not
   render as active.
@@ -212,12 +291,12 @@ and client transport files to avoid overlapping migrations and HTTP routes.
 - [ ] Run the dashboard tests green through Brigade.
 - [ ] Commit `feat: show cloud workers in the fleet command deck`.
 
-## Task 6: full verification, bounded security review, and beta rollout
+## Task 7: full verification, bounded security review, credential wiring, canaries, and beta rollout
 
 **Owner:** orchestrator for verification/deploy; Daybreak is read-only scan only.
 
 - [ ] Run focused integration tests through Brigade:
-  `brigade work verify run --target . --command "pytest -q tests/test_cloud_tracker.py tests/test_cursor_cloud.py tests/test_codex_cloud.py tests/test_fleet_command_deck.py tests/test_fleet_dashboard.py tests/test_fleet_claims.py tests/test_fleet_sync.py tests/test_fleet_nodes.py" --capture brigade-work`.
+  `brigade work verify run --target . --command "pytest -q tests/test_cloud_tracker.py tests/test_cursor_cloud.py tests/test_claude_cloud.py tests/test_jules_cloud.py tests/test_codex_cloud.py tests/test_fleet_command_deck.py tests/test_fleet_dashboard.py tests/test_fleet_claims.py tests/test_fleet_sync.py tests/test_fleet_nodes.py" --capture brigade-work`.
 - [ ] Capture the outcome against the implementation run/card.
 - [ ] Dispatch one bounded Daybreak review of only auth, secret handling, lease
   fencing, and SQLite concurrency. Do not run repetitive scans.
@@ -229,9 +308,9 @@ and client transport files to avoid overlapping migrations and HTTP routes.
   Rocinante, Shadowfax, and Gandalf using the device-fleet runbook. Preserve each
   machine's own node identity and token files.
 - [ ] Update `/etc/brigade/command-deck.json` with physical 10/8/4 and approved
-  cloud 3/2/0/global-4 limits. Restart only the fleet hub service after config
+  cloud 3/2/0/15/global-4 limits. Restart only the fleet hub service after config
   validation.
-- [ ] Run read-only Cursor and Codex inventory canaries. Do not call Claude.
+- [ ] Run read-only Cursor, Codex, and Jules inventory canaries. Do not call Claude.
 - [ ] Run `brigade run cloud sync --json`, `brigade fleet cloud --json`,
   `brigade fleet status --all`, and `brigade fleet claims`; then flush any
   preserved spool.
@@ -244,12 +323,12 @@ and client transport files to avoid overlapping migrations and HTTP routes.
 
 ## Worker routing and safety
 
-- Use `ox_worker` for implementation while Ox Alpha is available. Its Grok
-  fallback is forbidden for this task; if Ox fails, stop that run and explicitly
-  route the remaining work to the Codex Terra `coder` seat.
-- Do not use Cursor Grok or Composer. Do not use Claude seats while Max usage is
-  exhausted. Do not use retired GPT-5.3 Spark or GPT-5.5.
-- Use `daybreak` once for the bounded read-only security review in Task 6.
+- Use `cursor_worker` for routine implementation work.
+- Use `coder` for hard Codex work and `reviewer` for review of that Codex work.
+- Use `researcher` for read-only research.
+- Use `daybreak` once for the bounded read-only security review in Task 7.
+- Do not use Claude seats while Max usage is exhausted.
+- Do not use retired GPT-5.3 Spark or GPT-5.5.
 - Every behavior change follows red-green-refactor. Every test that counts runs
   through `brigade work verify run`, followed by outcome capture.
 - No push, merge, tag, release, event deletion, branch deletion, auto-apply, or
