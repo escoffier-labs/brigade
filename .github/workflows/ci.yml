@@ -263,6 +263,10 @@ jobs:
         run: python -m ruff format --check .
       - name: Mypy
         run: python -m mypy
+      - name: Size ratchet baseline
+        run: |
+          git fetch --no-tags --depth=1 origin ${{ github.base_ref || 'main' }}
+          python scripts/check_size_ratchet_baseline.py --base-ref origin/${{ github.base_ref || 'main' }}
       - name: Version sync
         run: python scripts/version_sync.py --check
       - name: Managed snapshot
