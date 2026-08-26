@@ -2847,3 +2847,262 @@ def test_inbox_read_commands_refuse_outside_proposal_content(tmp_path, capsys):
     assert listing["proposal_count"] == 0
     assert "OUTSIDE-FILE-MARKER" not in json.dumps(listing)
     assert outside_file.read_text() == '{"marker": "OUTSIDE-FILE-MARKER"}'
+
+
+# --- round-5 review findings: close the state-root read class -----------------
+
+
+def _import_sync_skill(tmp_path, name="sync-victim"):
+    """Import one registry skill into tmp_path and return the workspace."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = _write_skill(tmp_path / "sources", name=name)
+    metadata_path = source / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["codex"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=workspace, source=source, json_output=True) == 0
+    return workspace
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_sync_write_installs_exactly_the_linted_snapshot_bytes(tmp_path, capsys, monkeypatch):
+    workspace = _import_sync_skill(tmp_path)
+    # Control run: capture exactly what a clean sync writes.
+    assert skills_cmd.sync(workspace=workspace, harness="codex", trust="workspace", write=True, json_output=True) == 0
+    installed = workspace / ".codex" / "skills" / "sync-victim" / "SKILL.md"
+    expected_bytes = installed.read_bytes()
+    shutil.rmtree(workspace / ".codex" / "skills" / "sync-victim")
+
+    real_lint_payload = skills_cmd._lint_payload
+    registry_lint_calls = {"count": 0}
+
+    def lint_then_swap_source(target, skill_or_path, harness=None, *, mode="lenient"):
+        payload = real_lint_payload(target, skill_or_path, harness=harness, mode=mode)
+        # The attacker swaps the registry generation after the planning-phase
+        # validation but before the bytes that get installed are derived;
+        # sync must install exactly the bytes it linted in that same pass,
+        # never a generation nobody linted.
+        if str(skill_or_path).startswith("registry:"):
+            registry_lint_calls["count"] += 1
+            if registry_lint_calls["count"] >= 2:
+                registry_md = workspace / ".brigade" / "skills" / "registry" / "sync-victim" / "SKILL.md"
+                registry_md.write_bytes(b"# SWAPPED-AFTER-LINT-MARKER\n")
+        return payload
+
+    monkeypatch.setattr(skills_cmd, "_lint_payload", lint_then_swap_source)
+
+    assert skills_cmd.sync(workspace=workspace, harness="codex", trust="workspace", write=True, json_output=True) == 0
+    capsys.readouterr()
+    assert installed.is_file()
+    assert installed.read_bytes() == expected_bytes
+    assert b"SWAPPED-AFTER-LINT-MARKER" not in installed.read_bytes()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_sync_write_refuses_symlinked_history(tmp_path, capsys):
+    workspace = _import_sync_skill(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim-history.jsonl"
+    victim.write_text('{"note": "VICTIM-HISTORY-MARKER"}\n')
+    installs = workspace / ".brigade" / "skills" / "installs"
+    installs.mkdir(parents=True)
+    (installs / "history.jsonl").symlink_to(victim)
+
+    rc = skills_cmd.sync(workspace=workspace, harness="codex", trust="workspace", write=True, json_output=True)
+
+    captured = capsys.readouterr()
+    assert rc != 0, captured.out + captured.err
+    # The anchored read refuses before any plan material exists; the generic
+    # projection-parent refusal would name no file at all.
+    assert "history.jsonl" in captured.err
+    assert "VICTIM-HISTORY-MARKER" not in captured.out + captured.err
+    assert not (workspace / ".codex" / "skills" / "sync-victim").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_sync_write_refuses_symlinked_receipt(tmp_path, capsys):
+    workspace = _import_sync_skill(tmp_path)
+    assert skills_cmd.install(workspace=workspace, skill="registry:sync-victim", harness="codex", json_output=True) == 0
+    capsys.readouterr()
+    # Force an install action even though the receipt is unreadable.
+    shutil.rmtree(workspace / ".codex" / "skills" / "sync-victim")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim-receipt.json"
+    victim.write_text('{"note": "VICTIM-RECEIPT-MARKER"}')
+    receipt = workspace / ".brigade" / "skills" / "installs" / "sync-victim-codex.json"
+    receipt.unlink()
+    receipt.symlink_to(victim)
+
+    rc = skills_cmd.sync(workspace=workspace, harness="codex", trust="workspace", write=True, json_output=True)
+
+    captured = capsys.readouterr()
+    assert rc != 0, captured.out + captured.err
+    assert "sync-victim-codex.json" in captured.err
+    assert "VICTIM-RECEIPT-MARKER" not in captured.out + captured.err
+
+
+def _registry_with_symlinked_entry(tmp_path, placement):
+    """Registry entry whose dir, SKILL.md, or skill.json is an outside symlink."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside" / "linked-skill"
+    outside.mkdir(parents=True)
+    (outside / "SKILL.md").write_text("# LINKED-SKILL-MD-MARKER\n")
+    (outside / "CHANGELOG.md").write_text("# LINKED-CHANGELOG-MARKER\n\n- outside note.\n")
+    (outside / "skill.json").write_text(
+        json.dumps(
+            {
+                "id": "linked-skill",
+                "title": "Linked Skill LINKED-TITLE-MARKER",
+                "trust_level": "LINKED-TRUST-MARKER",
+            }
+        )
+    )
+    registry = workspace / ".brigade" / "skills" / "registry"
+    if placement == "dir":
+        entry = registry / "linked-skill"
+        entry.parent.mkdir(parents=True)
+        entry.symlink_to(outside, target_is_directory=True)
+    else:
+        plain = _write_skill(registry, name="linked-skill")
+        if placement == "skill_md":
+            (plain / "SKILL.md").unlink()
+            (plain / "SKILL.md").symlink_to(outside / "SKILL.md")
+        elif placement == "skill_json":
+            (plain / "skill.json").unlink()
+            (plain / "skill.json").symlink_to(outside / "skill.json")
+        else:
+            raise AssertionError(f"unknown placement: {placement}")
+    return workspace
+
+
+_MCP_READ_TOOLS = (
+    ("get_skill", {"skill_id": "linked-skill"}),
+    ("get_skill_metadata", {"skill_id": "linked-skill"}),
+    ("get_skill_changelog", {"skill_id": "linked-skill"}),
+    ("get_skill_compatibility", {"skill_id": "linked-skill"}),
+    ("lint_skill", {"skill_id": "linked-skill"}),
+)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+@pytest.mark.parametrize("placement", ["dir", "skill_md", "skill_json"])
+def test_registry_read_commands_never_echo_symlinked_entry_content(tmp_path, capsys, placement):
+    workspace = _registry_with_symlinked_entry(tmp_path, placement)
+    markers = (
+        "LINKED-SKILL-MD-MARKER",
+        "LINKED-CHANGELOG-MARKER",
+        "LINKED-TITLE-MARKER",
+        "LINKED-TRUST-MARKER",
+    )
+
+    def _assert_no_marker(text, context):
+        for marker in markers:
+            assert marker not in text, f"{context} leaked {marker}"
+
+    # lint (text and JSON): refused or absent, never echoing outside content
+    assert skills_cmd.lint(target=workspace, skill="registry:linked-skill") != 0
+    captured = capsys.readouterr()
+    _assert_no_marker(captured.out + captured.err, "lint text")
+    assert skills_cmd.lint(target=workspace, skill="registry:linked-skill", json_output=True) != 0
+    lint_out = capsys.readouterr().out
+    _assert_no_marker(lint_out, "lint json")
+
+    # diff --against registry
+    diff_rc = skills_cmd.diff(target=workspace, skill="registry:linked-skill", harness="codex", against="registry")
+    captured = capsys.readouterr()
+    assert diff_rc != 0
+    _assert_no_marker(captured.out + captured.err, "diff text")
+    skills_cmd.diff(
+        target=workspace, skill="registry:linked-skill", harness="codex", against="registry", json_output=True
+    )
+    _assert_no_marker(capsys.readouterr().out + capsys.readouterr().err, "diff json")
+
+    # search --json metadata
+    assert skills_cmd.search(target=workspace, query="linked", json_output=True) == 0
+    search_out = capsys.readouterr().out
+    _assert_no_marker(search_out, "search json")
+    payload = json.loads(search_out)
+    if placement == "dir":
+        assert payload["count"] == 0
+
+    # MCP reads and tool calls
+    text, found = skills_cmd._mcp_read_resource(workspace, "skill://registry/linked-skill/SKILL.md")
+    if text is not None:
+        _assert_no_marker(text, "mcp resource SKILL.md")
+    text, found = skills_cmd._mcp_read_resource(workspace, "skill://registry/linked-skill/skill.json")
+    if text is not None:
+        _assert_no_marker(text, "mcp resource skill.json")
+    text, found = skills_cmd._mcp_read_resource(workspace, "skill://registry/linked-skill/CHANGELOG.md")
+    assert text is None or "LINKED-CHANGELOG-MARKER" not in text
+    for tool, arguments in _MCP_READ_TOOLS:
+        result, is_error = skills_cmd._mcp_tool_call(workspace, tool, arguments)
+        _assert_no_marker(json.dumps(result, default=str), f"mcp tool {tool}")
+
+    # fleet status payload
+    fleet_payload = skills_cmd._fleet_status_payload(workspace)
+    _assert_no_marker(json.dumps(fleet_payload), "fleet status")
+
+    # profile packages
+    packages = skills_cmd.user_profile_skill_packages(workspace=workspace, harness="codex", minimum_trust="workspace")
+    _assert_no_marker(repr(packages), "profile packages")
+    assert all(package.skill_id != "linked-skill" for package in packages)
+
+    # doctor-style health issues
+    issues = skills_cmd._skill_health_issues(workspace)
+    _assert_no_marker(json.dumps(issues), "health issues")
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_pack_list_and_show_refuse_symlinked_pack_dir_and_manifest(tmp_path, capsys):
+    workspace = _import_sync_skill(tmp_path)
+    capsys.readouterr()
+    assert skills_cmd.pack_build(target=workspace, json_output=True) == 0
+    built = json.loads(capsys.readouterr().out)
+    packs_root = workspace / ".brigade" / "skills" / "packs"
+    real_pack = packs_root / built["pack_id"]
+
+    # case 1: whole pack directory symlinked to an outside tree with a marker manifest
+    outside_pack = tmp_path / "outside-pack"
+    shutil.move(str(real_pack), str(outside_pack))
+    pristine_manifest = (outside_pack / "skill-pack.json").read_bytes()
+    manifest = json.loads(pristine_manifest)
+    manifest["PACK-DIR-MANIFEST-MARKER"] = True
+    (outside_pack / "skill-pack.json").write_text(json.dumps(manifest))
+    real_pack.symlink_to(outside_pack, target_is_directory=True)
+
+    def _assert_no_marker(text, context):
+        assert "PACK-DIR-MANIFEST-MARKER" not in text, context
+
+    assert skills_cmd.pack_list(target=workspace, json_output=True) == 0
+    listing = capsys.readouterr().out
+    _assert_no_marker(listing, "pack list json")
+    assert json.loads(listing)["pack_count"] == 0
+    assert skills_cmd.pack_show(target=workspace, pack_id=built["pack_id"]) != 0
+    captured = capsys.readouterr()
+    _assert_no_marker(captured.out + captured.err, "pack show text")
+
+    # restore the plain pack with its pristine manifest, then symlink only
+    # the manifest outside
+    real_pack.unlink()
+    shutil.move(str(outside_pack), str(real_pack))
+    (real_pack / "skill-pack.json").write_bytes(pristine_manifest)
+    outside_manifest = tmp_path / "outside-manifest" / "skill-pack.json"
+    (real_pack / "skill-pack.json").unlink()
+    outside_manifest.parent.mkdir()
+    manifest_text = pristine_manifest.decode()
+    (real_pack / "skill-pack.json").symlink_to(outside_manifest)
+    assert "PACK-DIR-MANIFEST-MARKER" not in manifest_text
+
+    assert skills_cmd.pack_list(target=workspace, json_output=True) == 0
+    listing = capsys.readouterr().out
+    _assert_no_marker(listing, "pack list json with symlinked manifest")
+    assert json.loads(listing)["pack_count"] == 0
+
+    assert skills_cmd.pack_show(target=workspace, pack_id="latest") != 0
+    captured = capsys.readouterr()
+    _assert_no_marker(captured.out + captured.err, "pack show latest")

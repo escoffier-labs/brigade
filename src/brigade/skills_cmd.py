@@ -3,6 +3,13 @@
 Skills are treated as versioned workflow code: imports land in a local Brigade
 registry, lint checks provenance and injection risk, and installs materialize
 reviewed packs into harness-specific folders.
+
+Residuals (accepted, documented): rollback validates restored bytes to the
+fresh-install bar against a capture-time fingerprint and does not claim
+state-root content authenticity; and on platforms without descriptor
+anchoring (Windows), state-root reads fall back to the lstat-guarded walker,
+which closes symlink/reparse redirection but keeps a small unavoidable
+check-then-use window because no held directory descriptor exists there.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from typing import Any, Iterator
 
 from . import __version__ as BRIGADE_VERSION
 from . import mcp_server
-from .localio import slugify, utc_now_iso as _now, write_json as _write_json
+from .localio import slugify, utc_now_iso as _now
 from .projection import kernel as projection
 from .templates import template_root
 from .untrusted import scan_untrusted
@@ -344,12 +351,17 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
-def _changelog_payload(skill_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+def _changelog_payload(skill_dir: Path, metadata: dict[str, Any], *, contain: bool = False) -> dict[str, Any]:
     configured = metadata.get("changelog_path") or metadata.get("changelog")
     candidates: list[Path] = []
     if isinstance(configured, str) and configured.strip():
         configured_path = Path(configured).expanduser()
-        candidates.append(configured_path if configured_path.is_absolute() else skill_dir / configured_path)
+        # Contained mode (state-root served content) never reaches outside the
+        # skill directory for auxiliary files: an absolute or escaping
+        # changelog_path would launder outside file content into payloads.
+        escapes = configured_path.is_absolute() or ".." in configured_path.parts
+        if not (contain and escapes):
+            candidates.append(configured_path if configured_path.is_absolute() else skill_dir / configured_path)
     candidates.append(skill_dir / "CHANGELOG.md")
     path = next((candidate for candidate in candidates if candidate.is_file()), None)
     headings: list[str] = []
@@ -371,6 +383,8 @@ def _trust_score_payload(
     metadata: dict[str, Any],
     lint_payload: dict[str, Any] | None = None,
     source: dict[str, Any] | None = None,
+    *,
+    contain: bool = False,
 ) -> dict[str, Any]:
     score = 100
     signals: list[str] = []
@@ -396,7 +410,7 @@ def _trust_score_payload(
     if not tests:
         score -= 15
         signals.append("no tests declared")
-    changelog = _changelog_payload(skill_dir, metadata)
+    changelog = _changelog_payload(skill_dir, metadata, contain=contain)
     if not changelog["present"]:
         score -= 5
         signals.append("no changelog found")
@@ -500,8 +514,13 @@ def _resolve_diff_baseline(target: Path, skill_or_path: str, *, against: str = "
         skill_id = _slug(requested.removeprefix("bundled:"))
     else:
         skill_id = _slug(requested)
-    registry_dir = _skill_path(target, skill_id)
-    registry_exists = _skill_md_path(registry_dir).is_file()
+    # Registry existence is answered through the state-root anchor; a
+    # symlinked entry is treated as absent rather than followed.
+    try:
+        with _held_state_root(target) as anchor:
+            registry_exists = _read_state_file_bytes(anchor, "skills", "registry", skill_id, "SKILL.md") is not None
+    except SkillsStatePathError:
+        registry_exists = False
     bundled_exists = _bundled_skill_exists(skill_id)
     if against == "registry":
         if registry_exists:
@@ -532,22 +551,44 @@ def _source_identity(*, skill_dir: Path, skill_id: str, kind: str, reviewed: boo
     }
 
 
+def _anchored_load_registry_metadata(target: Path, skill_id: str) -> tuple[Path, dict[str, Any]]:
+    """Registry half of :func:`_load_skill`: display path plus anchored metadata."""
+    slug = _slug(skill_id)
+    skill_dir = _skill_path(target, slug)
+    try:
+        with _held_state_root(target) as anchor:
+            metadata = _anchored_registry_metadata(anchor, slug)
+    except SkillsStatePathError:
+        metadata = {}
+    return skill_dir, metadata
+
+
+def _registry_entry_present(target: Path, skill_id: str) -> bool:
+    """Anchored existence check for one plain registry entry directory."""
+    try:
+        with _held_state_root(target) as anchor:
+            return _state_entry_kind(anchor, "skills", "registry", _slug(skill_id)) == "dir"
+    except SkillsStatePathError:
+        return False
+
+
 def _load_skill(target: Path, skill_or_path: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     requested = str(skill_or_path)
     candidate = Path(requested).expanduser()
     kind = "path"
     reviewed = False
     if requested.startswith("registry:"):
-        requested_id = _slug(requested.removeprefix("registry:"))
-        skill_dir = _skill_path(target, requested_id)
+        skill_dir, metadata = _anchored_load_registry_metadata(target, requested.removeprefix("registry:"))
         kind = "registry"
     elif requested.startswith("bundled:"):
         requested_id = _slug(requested.removeprefix("bundled:"))
         skill_dir = _bundled_skill_path(requested_id)
         kind = "brigade-bundle"
         reviewed = True
+        metadata = _read_json(_metadata_path(skill_dir))
     elif candidate.exists():
         skill_dir = candidate if candidate.is_dir() else candidate.parent
+        metadata = _read_json(_metadata_path(skill_dir))
     else:
         requested_id = _slug(requested)
         bundled = _bundled_skill_path(requested_id)
@@ -555,10 +596,12 @@ def _load_skill(target: Path, skill_or_path: str) -> tuple[Path, dict[str, Any],
             skill_dir = bundled
             kind = "brigade-bundle"
             reviewed = True
+            metadata = _read_json(_metadata_path(bundled))
         else:
-            skill_dir = _skill_path(target, requested_id)
+            skill_dir, metadata = _anchored_load_registry_metadata(target, requested_id)
             kind = "registry"
-    metadata = _read_json(_metadata_path(skill_dir))
+    if not isinstance(metadata, dict):
+        metadata = {}
     metadata.setdefault("id", skill_dir.name)
     skill_id = _slug(str(metadata.get("id") or skill_dir.name))
     return (
@@ -573,8 +616,129 @@ def _load_skill(target: Path, skill_or_path: str) -> tuple[Path, dict[str, Any],
     )
 
 
+def _unreadable_source_lint_payload(target: Path, display_dir: Path, message: str) -> dict[str, Any]:
+    """Lint payload shape used when the source could not be read safely."""
+    return {
+        "target": str(target),
+        "skill_dir": str(display_dir),
+        "skill_id": display_dir.name,
+        "valid": False,
+        "errors": [message],
+        "warnings": [],
+        "harness": None,
+        "render_errors": [],
+        "injection": {"flagged": False, "count": 0, "markers": []},
+        "metadata": {},
+        "source": {},
+        "agent_skills": {
+            "mode": "lenient",
+            "fields": {},
+            "diagnostics": [],
+            "allowed_tools_are_permissions": False,
+        },
+        "fingerprint": None,
+        "changelog": {"present": False, "path": None, "fingerprint": None, "headings": []},
+        "trust_score": {
+            "score": 0,
+            "trust_level": "unreviewed",
+            "signals": ["skill directory unreadable"],
+            "tests_declared": 0,
+            "changelog": {"present": False, "path": None, "fingerprint": None, "headings": []},
+        },
+    }
+
+
+def _finalize_staged_registry_lint(
+    payload: dict[str, Any], target: Path, display_dir: Path, staged_dir: Path
+) -> dict[str, Any]:
+    """Repoint a lint computed over a private staging copy at the real entry.
+
+    Provenance describes the real registry entry while fingerprints stay
+    computed over the staged snapshot bytes; no message or payload field keeps
+    a reference into the trusted-but-ephemeral staging directory.
+    """
+
+    def _repoint(value: str) -> str:
+        return value.replace(str(staged_dir), str(display_dir))
+
+    for key in ("errors", "warnings", "render_errors"):
+        payload[key] = [_repoint(str(item)) for item in payload.get(key, [])]
+    for changelog_key in ("changelog",):
+        changelog = payload.get(changelog_key)
+        if isinstance(changelog, dict) and isinstance(changelog.get("path"), str):
+            changelog["path"] = _repoint(changelog["path"])
+    trust_score = payload.get("trust_score")
+    if isinstance(trust_score, dict) and isinstance(trust_score.get("changelog"), dict):
+        nested = trust_score["changelog"]
+        if isinstance(nested.get("path"), str):
+            nested["path"] = _repoint(nested["path"])
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    resolved_id = _slug(str(metadata.get("id") or display_dir.name))
+    staged_source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    source = _source_identity(skill_dir=display_dir, skill_id=resolved_id, kind="registry", reviewed=False)
+    source["skill_version"] = staged_source.get("skill_version")
+    source["fingerprint"] = staged_source.get("fingerprint")
+    source["metadata_fingerprint"] = staged_source.get("metadata_fingerprint")
+    payload["source"] = source
+    payload["fingerprint"] = source["fingerprint"]
+    if isinstance(trust_score, dict):
+        trust_score["provenance"] = source
+    payload["target"] = str(target)
+    payload["skill_dir"] = str(display_dir)
+    return payload
+
+
+def _lint_registry_payload(
+    target: Path,
+    skill_id: str,
+    harness: str | None = None,
+    *,
+    mode: str = "lenient",
+) -> dict[str, Any]:
+    """Lint a registry skill from one anchored snapshot staged into private temp space.
+
+    The entry tree is collected through the held state-root descriptor exactly
+    once; every lint read (SKILL.md, metadata, changelog, format validation)
+    consumes only those collected bytes from a trusted staging directory. A
+    refused or symlinked entry yields an invalid payload whose messages name
+    display paths only — outside file content is never echoed.
+    """
+    display_dir = _skill_path(target, skill_id)
+    try:
+        with _held_state_root(target) as anchor:
+            snapshot_dirs, snapshot_files = _read_registry_entry_tree(anchor, skill_id)
+            if ("skill.json",) not in snapshot_files:
+                # A missing, symlinked, or otherwise unreadable metadata file
+                # refuses the entry instead of linting an anonymous default.
+                return _unreadable_source_lint_payload(
+                    target,
+                    display_dir,
+                    "registry entry must contain a plain single-link skill.json"
+                    f" (symlinks are never followed): {display_dir / 'skill.json'}",
+                )
+            with tempfile.TemporaryDirectory(prefix="brigade-registry-lint-") as staging:
+                staged_root = Path(staging)
+                staged_dir = staged_root / skill_id
+                _write_snapshot_tree(snapshot_dirs, snapshot_files, staged_dir)
+                payload = _lint_path_payload(staged_root, str(staged_dir), harness=harness, mode=mode, contain=True)
+                _finalize_staged_registry_lint(payload, target, display_dir, staged_dir)
+    except SkillsStatePathError as exc:
+        return _unreadable_source_lint_payload(target, display_dir, str(exc))
+    return payload
+
+
 def _lint_payload(
     target: Path, skill_or_path: str, harness: str | None = None, *, mode: str = "lenient"
+) -> dict[str, Any]:
+    requested = str(skill_or_path)
+    if _selects_registry_skill(target, requested):
+        selector_id = requested.removeprefix("registry:") if requested.startswith("registry:") else requested
+        return _lint_registry_payload(target, _slug(selector_id), harness=harness, mode=mode)
+    return _lint_path_payload(target, skill_or_path, harness=harness, mode=mode)
+
+
+def _lint_path_payload(
+    target: Path, skill_or_path: str, harness: str | None = None, *, mode: str = "lenient", contain: bool = False
 ) -> dict[str, Any]:
     from . import agent_skill_format
 
@@ -655,12 +819,12 @@ def _lint_payload(
         "fingerprint": source["fingerprint"],
     }
     payload["changelog"] = (
-        _changelog_payload(skill_dir, metadata)
+        _changelog_payload(skill_dir, metadata, contain=contain)
         if skill_dir.is_dir()
         else {"present": False, "path": None, "fingerprint": None, "headings": []}
     )
     payload["trust_score"] = (
-        _trust_score_payload(skill_dir, metadata, payload, source)
+        _trust_score_payload(skill_dir, metadata, payload, source, contain=contain)
         if skill_dir.is_dir()
         else {
             "score": 0,
@@ -673,16 +837,79 @@ def _lint_payload(
     return payload
 
 
+def _plain_subdirs_under_anchor(anchor: _StateRootAnchor, *relative: str) -> list[str] | None:
+    """List plain subdirectory names under an anchored state path.
+
+    Returns ``None`` when the directory itself is missing; a symlinked or
+    non-directory component raises instead of being followed. On descriptor
+    platforms entries are enumerated from the held chain; elsewhere the
+    lstat-guarded fallback walker applies (symlinks skipped).
+    """
+    if not _HAS_DESCRIPTOR_ANCHOR:
+        base = (anchor.workspace / ".brigade").joinpath(*relative)
+        current = anchor.workspace / ".brigade"
+        for part in relative:
+            current = current / part
+            if not current.exists():
+                return None
+            if current.is_symlink() or _is_reparse_point(current) or not current.is_dir():
+                raise SkillsStatePathError(f"skills state path must be plain directories: {current}")
+        names: list[str] = []
+        for entry in sorted(base.iterdir(), key=lambda item: item.name):
+            if entry.is_symlink():
+                continue
+            try:
+                st = entry.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise SkillsStatePathError(f"skills state entry could not be inspected safely: {entry}") from exc
+            if stat_module.S_ISDIR(st.st_mode):
+                names.append(entry.name)
+        return names
+    fd, opened = _anchor_open_chain(anchor, *relative, missing_ok=True)
+    if fd is None:
+        return None
+    try:
+        names = []
+        for name in sorted(os.listdir(fd)):
+            try:
+                st = os.lstat(name, dir_fd=fd)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise SkillsStatePathError(
+                    f"skills state entry could not be inspected safely: {(anchor.workspace / '.brigade').joinpath(*relative, name)}"
+                ) from exc
+            if stat_module.S_ISDIR(st.st_mode):
+                names.append(name)
+        return names
+    finally:
+        for held_fd in reversed(opened):
+            os.close(held_fd)
+
+
 def _iter_registry(target: Path) -> list[dict[str, Any]]:
-    root = _registry_root(target)
+    """List registry entries through the held state-root anchor.
+
+    Entries are enumerated through the anchor (symlinked entry directories are
+    skipped, never followed) and each ``skill.json`` is read through
+    ``_read_state_file_bytes``, so no pathname lookup touches state-root
+    content. A refused anchor yields an empty listing.
+    """
     rows: list[dict[str, Any]] = []
-    if not root.is_dir():
-        return rows
-    for skill_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        metadata = _read_json(_metadata_path(skill_dir))
-        metadata.setdefault("id", skill_dir.name)
-        metadata.setdefault("title", metadata["id"])
-        rows.append({"skill_dir": str(skill_dir), "metadata": metadata})
+    try:
+        with _held_state_root(target) as anchor:
+            names = _plain_subdirs_under_anchor(anchor, "skills", "registry")
+            if names is None:
+                return rows
+            for name in names:
+                metadata = _anchored_registry_metadata(anchor, name)
+                metadata.setdefault("id", name)
+                metadata.setdefault("title", metadata["id"])
+                rows.append({"skill_dir": str(_skill_path(target, name)), "metadata": metadata})
+    except SkillsStatePathError:
+        return []
     return rows
 
 
@@ -1576,13 +1803,104 @@ def _copy_tree_into_anchor(source_dir: Path, anchor: _StateRootAnchor, *relative
     _write_collected_tree_into_anchor(dirs, files, anchor, *relative)
 
 
+def _read_registry_entry_tree(
+    anchor: _StateRootAnchor, skill_id: str
+) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
+    """Snapshot one registry entry through the held state-root descriptor.
+
+    A symlinked entry directory refuses here instead of being followed;
+    symlinked files inside the entry are skipped by the collector, so the
+    returned bytes are always plain state-root content reached through
+    descriptors.
+    """
+    return _read_tree_from_anchor(anchor, "skills", "registry", skill_id)
+
+
+def _anchored_registry_metadata(anchor: _StateRootAnchor, skill_id: str) -> dict[str, Any]:
+    """Read one registry ``skill.json`` through the anchor (missing/refused -> empty)."""
+    raw = _read_state_file_bytes(anchor, "skills", "registry", skill_id, "skill.json")
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _state_json_via_anchor(target: Path, *relative: str) -> dict[str, Any]:
+    """Read one JSON file under the state root through the held anchor.
+
+    Missing or refused files yield ``{}``; outside content is never followed.
+    """
+    try:
+        with _held_state_root(target) as anchor:
+            raw = _read_state_file_bytes(anchor, *relative)
+    except SkillsStatePathError:
+        return {}
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _anchored_registry_text(target: Path, skill_id: str, *relative_tail: str) -> str | None:
+    """Read one text file from a registry entry through the state-root anchor."""
+    try:
+        with _held_state_root(target) as anchor:
+            raw = _read_state_file_bytes(anchor, "skills", "registry", skill_id, *relative_tail)
+    except SkillsStatePathError:
+        return None
+    if raw is None:
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
+def _anchored_entry_changelog_text(
+    anchor: _StateRootAnchor, *entry_relative: str, metadata: dict[str, Any]
+) -> str | None:
+    """Read an entry's changelog through the anchor, honouring only contained paths.
+
+    A configured ``changelog_path`` is honoured when it is a relative path
+    staying inside the entry; absolute or escaping locations are ignored so a
+    state-root entry can never cause a read of outside content.
+    """
+    configured = metadata.get("changelog_path") or metadata.get("changelog")
+    candidates: list[tuple[str, ...]] = [("CHANGELOG.md",)]
+    if isinstance(configured, str) and configured.strip():
+        configured_path = Path(configured.strip())
+        if not configured_path.is_absolute() and ".." not in configured_path.parts:
+            candidates.insert(0, tuple(configured_path.parts))
+    for parts in candidates:
+        raw = _read_state_file_bytes(anchor, *entry_relative, *parts)
+        if raw is not None:
+            return raw.decode("utf-8", errors="replace")
+    return None
+
+
+def _selects_registry_skill(target: Path, requested: str) -> bool:
+    """Mirror :func:`_load_skill` resolution: does this selector land on the registry?"""
+    if requested.startswith("registry:"):
+        return True
+    if requested.startswith("bundled:"):
+        return False
+    candidate = Path(requested).expanduser()
+    if candidate.exists():
+        return False
+    bundled = _bundled_skill_path(_slug(requested))
+    return not _skill_md_path(bundled).is_file()
+
+
 def _json_bytes(payload: dict[str, Any]) -> bytes:
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def _adapter_map(target: Path) -> dict[str, dict[str, Any]]:
     adapters = {key: dict(value) for key, value in HARNESS_ADAPTERS.items()}
-    config = _read_json(_adapters_config_path(target))
+    config = _state_json_via_anchor(target, "skills", "adapters.json")
     overlay = config.get("adapters")
     if isinstance(overlay, dict):
         for adapter_id, value in overlay.items():
@@ -1839,17 +2157,36 @@ def install(
     if harness not in (*install_targets, "all"):
         print(f"error: unknown skill install target: {harness}", file=sys.stderr)
         return 2
+    # Fail fast on a redirected or broken state root so the typed refusal
+    # surfaces the same way for every source kind.
+    try:
+        _hold_state_root(workspace).close()
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     # Resolve the source once (the metadata read here is discarded), then
     # collect the source tree exactly once before anything validates it.
     # Metadata, lint, rendering, and every fingerprint below consume only
     # these collected bytes, so a source swapped between validation steps can
-    # never make the command install a generation nobody linted.
+    # never make the command install a generation nobody linted. Registry
+    # selections are collected through the held state-root anchor; external
+    # and bundled sources are trusted operator paths.
     source_dir, _discarded_metadata, resolved_source = _load_skill(workspace, skill)
     collected: tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]] | None = None
     staged_dir: Path | None = None
     staging_root: str | None = None
     try:
-        snapshot_dirs, snapshot_files = _collect_source_tree(source_dir)
+        if resolved_source.get("kind") == "registry":
+            # Collect exactly the entry that was requested (by its directory
+            # name), never one named by attacker-controlled metadata.
+            skill_slug = _slug(skill.removeprefix("registry:") if skill.startswith("registry:") else skill)
+            try:
+                with _held_state_root(workspace) as state_anchor:
+                    snapshot_dirs, snapshot_files = _read_registry_entry_tree(state_anchor, skill_slug)
+            except SkillsStatePathError:
+                raise
+        else:
+            snapshot_dirs, snapshot_files = _collect_source_tree(source_dir)
         collected = (snapshot_dirs, snapshot_files)
         with tempfile.TemporaryDirectory(prefix="brigade-install-lint-") as staging:
             staged_dir = Path(staging) / source_dir.name
@@ -2008,6 +2345,9 @@ def install(
                 # the snapshot from those bytes; the snapshot fingerprint is
                 # recorded in the new receipt so rollback can prove the
                 # snapshot it restores is byte-identical to what was captured.
+                # dest is normally a trusted harness dir; for custom adapters
+                # installing under .brigade it is state-root content captured
+                # to the rollback bar (accepted residual, see docstring).
                 replaced_dirs, replaced_files = _collect_source_tree(dest)
                 _write_collected_tree_into_anchor(
                     replaced_dirs, replaced_files, state_anchor, "skills", "rollback", skill_id, install_target, stamp
@@ -2174,8 +2514,9 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 )
                 items.append(item)
                 continue
-            source_dir = Path(str(lint_payload["skill_dir"]))
-            source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
+            # Registry rendering text comes from the anchored read; a refused
+            # entry contributes no text and the render below fails validation.
+            source_text = _anchored_registry_text(workspace, skill_id, "SKILL.md") or ""
             rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
             render_errors = _rendered_skill_validation(rendered, install_target)
             if render_errors:
@@ -2228,51 +2569,27 @@ _USER_PROFILE_MAX_BYTES = 8 * 1024 * 1024
 _USER_PROFILE_HARNESSES = {"claude", "codex", "openclaw", "kimi", "grok", "cursor", "opencode"}
 
 
-def _user_profile_read_package_files(skill_dir: Path) -> dict[str, bytes] | None:
-    """Read every regular, contained file under ``skill_dir`` as bytes.
+def _snapshot_package_files(snapshot_files: dict[tuple[str, ...], bytes]) -> dict[str, bytes] | None:
+    """Package-file view of an already-collected registry snapshot.
 
-    Returns ``None`` if the package would exceed the file-count or byte cap, so
-    the caller excludes the whole package rather than truncating it.
+    Returns ``None`` if the package would exceed the file-count or byte cap,
+    so the caller excludes the whole package rather than truncating it.
     """
     files: dict[str, bytes] = {}
     total = 0
-    root_resolved = skill_dir.resolve()
-    for dirpath, dirnames, filenames in os.walk(skill_dir, followlinks=False):
-        # Prune symlinked directories (never followed) and ``.git`` so neither
-        # os.walk nor the file loop descends into them.
-        kept: list[str] = []
-        for name in dirnames:
-            if name == ".git":
-                continue
-            if (Path(dirpath) / name).is_symlink():
-                continue
-            kept.append(name)
-        dirnames[:] = kept
-        for name in filenames:
-            file_path = Path(dirpath) / name
-            if file_path.is_symlink():
-                continue
-            if not file_path.is_file():
-                continue
-            rel = file_path.relative_to(skill_dir).as_posix()
-            parts = Path(rel).parts
-            # lexical containment: reject absolute-looking keys and ".." components
-            if rel.startswith("/") or ".." in parts:
-                continue
-            if rel == ".git" or rel.startswith(".git/"):
-                continue
-            # resolved-path containment: reject symlinks/hardlinks escaping the dir
-            try:
-                file_path.resolve().relative_to(root_resolved)
-            except ValueError:
-                continue
-            if len(files) >= _USER_PROFILE_MAX_FILES:
-                return None
-            data = file_path.read_bytes()
-            if total + len(data) > _USER_PROFILE_MAX_BYTES:
-                return None
-            files[rel] = data
-            total += len(data)
+    for parts, data in sorted(snapshot_files.items()):
+        rel = Path(*parts).as_posix()
+        if rel == ".git" or rel.startswith(".git/"):
+            continue
+        # lexical containment: reject absolute-looking keys and ".." components
+        if rel.startswith("/") or ".." in Path(rel).parts:
+            continue
+        if len(files) >= _USER_PROFILE_MAX_FILES:
+            return None
+        if total + len(data) > _USER_PROFILE_MAX_BYTES:
+            return None
+        files[rel] = data
+        total += len(data)
     return dict(sorted(files.items()))
 
 
@@ -2309,14 +2626,21 @@ def _user_profile_package(
     metadata_fingerprint = source.get("metadata_fingerprint")
     if not (isinstance(metadata_fingerprint, str) and metadata_fingerprint):
         return None
-    skill_dir = Path(str(lint_payload["skill_dir"]))
-    files = _user_profile_read_package_files(skill_dir)
+    # The package body comes from one anchored registry snapshot; nothing is
+    # walked or re-read by pathname under the state root.
+    try:
+        with _held_state_root(workspace) as anchor:
+            _snapshot_dirs, snapshot_files = _read_registry_entry_tree(anchor, skill_id)
+    except SkillsStatePathError:
+        return None
+    files = _snapshot_package_files(snapshot_files)
     if files is None:
         return None
-    skill_md_path = _skill_md_path(skill_dir)
-    if "SKILL.md" in files and skill_md_path.is_file():
-        source_text = skill_md_path.read_text(encoding="utf-8", errors="replace")
-        rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, harness)
+    source_text = snapshot_files.get(("SKILL.md",))
+    if "SKILL.md" in files and source_text is not None:
+        rendered = _render_skill_text_for_harness(
+            source_text.decode("utf-8", errors="replace"), metadata, skill_id, harness
+        )
         if _rendered_skill_validation(rendered, harness):
             return None
         files = {**files, "SKILL.md": rendered.encode("utf-8")}
@@ -2373,15 +2697,18 @@ def _sync_file_entries(root: Path) -> dict[str, tuple[bytes, int]]:
 
 
 def _sync_rendered_files(
-    source_dir: Path, metadata: dict[str, Any], skill_id: str, harness: str
+    snapshot_files: dict[tuple[str, ...], bytes], metadata: dict[str, Any], skill_id: str, harness: str
 ) -> dict[str, tuple[bytes, int]]:
-    files = _sync_file_entries(source_dir)
-    skill = files.get("SKILL.md")
+    """Build the desired install bundle from an already-collected snapshot.
+
+    Every byte comes from the snapshot; the registry source is never re-read
+    by pathname after validation.
+    """
+    files = {Path(*parts).as_posix(): (data, 0o644) for parts, data in sorted(snapshot_files.items())}
+    skill = snapshot_files.get(("SKILL.md",))
     if skill is not None:
-        rendered = _render_skill_text_for_harness(
-            skill[0].decode("utf-8", errors="replace"), metadata, skill_id, harness
-        )
-        files["SKILL.md"] = (rendered.encode("utf-8"), skill[1])
+        rendered = _render_skill_text_for_harness(skill.decode("utf-8", errors="replace"), metadata, skill_id, harness)
+        files["SKILL.md"] = (rendered.encode("utf-8"), 0o644)
     return files
 
 
@@ -2455,95 +2782,117 @@ def _sync_recovery_records(workspace: Path) -> list[dict[str, str]]:
 def _sync_projection_plan(
     *, workspace: Path, items: list[dict[str, Any]]
 ) -> tuple[projection.Plan | None, list[dict[str, Any]], str | None]:
+    """Plan sync mutations from one anchored snapshot per registry entry.
+
+    Each entry's bytes are collected through the held state-root descriptor
+    before linting; rendering, fingerprints, receipts, and every mutation
+    derive only from those collected bytes. History and prior receipts are
+    read through ``_read_state_file_bytes``, so a symlinked state file refuses
+    the plan instead of being followed.
+    """
     mutations: list[projection.MutationSpec] = []
     history_path = _install_history_path(workspace)
-    history_before = history_path.read_bytes() if history_path.is_file() else None
     history_lines: list[bytes] = []
     source_rows: list[dict[str, Any]] = []
-    for item in items:
-        skill_id = str(item["skill_id"])
-        harness = str(item["harness"])
-        lint = _lint_payload(workspace, f"registry:{skill_id}")
-        if not lint.get("valid"):
-            return None, items, f"skill lint failed during sync planning: {skill_id}"
-        metadata = lint.get("metadata") if isinstance(lint.get("metadata"), dict) else {}
-        source_dir = Path(str(lint["skill_dir"]))
-        desired_files = _sync_rendered_files(source_dir, metadata, skill_id, harness)
-        installed_dir = _install_dir(workspace, harness, skill_id)
-        previous_files = _sync_file_entries(installed_dir)
-        mutations.extend(
-            _sync_file_mutations(
-                root=installed_dir,
-                before=previous_files,
-                after=desired_files,
-                display_prefix=f"bundle:{skill_id}:{harness}",
-            )
-        )
-        installed_at = _now()
-        rollback_snapshot: str | None = None
-        if previous_files:
-            rollback_dir = (
-                _rollback_root(workspace, skill_id, harness)
-                / f"{installed_at[:19].replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
-            )
-            rollback_snapshot = str(rollback_dir)
+    with _held_state_root(workspace) as state_anchor:
+        history_before = _read_state_file_bytes(state_anchor, "skills", "installs", "history.jsonl")
+        for item in items:
+            skill_id = str(item["skill_id"])
+            harness = str(item["harness"])
+            # Collect exactly once, then validate the collected generation:
+            # a source swapped after this point cannot change what is installed.
+            snapshot_dirs, snapshot_files = _read_registry_entry_tree(state_anchor, skill_id)
+            with tempfile.TemporaryDirectory(prefix="brigade-sync-lint-") as staging:
+                staged_dir = Path(staging) / skill_id
+                _write_snapshot_tree(snapshot_dirs, snapshot_files, staged_dir)
+                lint = _lint_payload(Path(staging), str(staged_dir))
+            _finalize_staged_registry_lint(lint, workspace, _skill_path(workspace, skill_id), staged_dir)
+            if not lint.get("valid"):
+                return None, items, f"skill lint failed during sync planning: {skill_id}"
+            metadata = lint.get("metadata") if isinstance(lint.get("metadata"), dict) else {}
+            desired_files = _sync_rendered_files(snapshot_files, metadata, skill_id, harness)
+            installed_dir = _install_dir(workspace, harness, skill_id)
+            previous_files = _sync_file_entries(installed_dir)
             mutations.extend(
                 _sync_file_mutations(
-                    root=rollback_dir,
-                    before={},
-                    after=previous_files,
-                    display_prefix=f"rollback:{skill_id}:{harness}",
+                    root=installed_dir,
+                    before=previous_files,
+                    after=desired_files,
+                    display_prefix=f"bundle:{skill_id}:{harness}",
                 )
             )
-        source = lint.get("source") if isinstance(lint.get("source"), dict) else {}
-        render = _renderer_contract(workspace, harness)
-        skill_content = desired_files.get("SKILL.md", (b"", 0))[0].decode("utf-8", errors="replace")
-        receipt_path = _installs_root(workspace) / f"{skill_id}-{harness}.json"
-        previous_receipt = _read_json(receipt_path) if receipt_path.is_file() else {}
-        receipt = {
-            "schema_version": RECEIPT_SCHEMA_VERSION,
-            "workspace": str(workspace),
-            "receipt_id": f"{installed_at[:19].replace(':', '').replace('-', '')}-{skill_id}-{harness}",
-            "skill_id": skill_id,
-            "target": harness,
-            "installed_dir": str(installed_dir),
-            "installed_at": installed_at,
-            "version": str(metadata.get("version") or "0.1.0"),
-            "source_path": str(metadata.get("source") or source_dir),
-            "source": source,
-            "render": {**render, "fingerprint": _text_fingerprint(skill_content)},
-            "installed": {
-                "bundle_fingerprint": _sync_files_fingerprint(desired_files),
-                "skill_fingerprint": _text_fingerprint(skill_content),
-                "metadata_fingerprint": _text_fingerprint(
-                    desired_files.get("skill.json", (b"", 0))[0].decode("utf-8", errors="replace")
-                ),
-            },
-            "fingerprint": lint.get("fingerprint"),
-            "source_fingerprint": lint.get("fingerprint"),
-            "render_fingerprint": _text_fingerprint(skill_content),
-            "installed_fingerprint": _sync_files_fingerprint(desired_files),
-            "format": _adapter_map(workspace)[harness].get("format"),
-            "rollback_snapshot": rollback_snapshot,
-            "rollback_snapshot_fingerprint": (
-                _files_fingerprint(
-                    {tuple(Path(relative).parts): data for relative, (data, _mode) in previous_files.items()}
+            installed_at = _now()
+            rollback_snapshot: str | None = None
+            if previous_files:
+                rollback_dir = (
+                    _rollback_root(workspace, skill_id, harness)
+                    / f"{installed_at[:19].replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:8]}"
                 )
-                if rollback_snapshot
-                else None
-            ),
-            "previous_receipt": previous_receipt if previous_receipt else None,
-            "trust_score": lint.get("trust_score"),
-            "changelog": lint.get("changelog"),
-        }
-        receipt_before = receipt_path.read_bytes() if receipt_path.is_file() else None
-        receipt_after = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        receipt_mutation = _sync_single_file_mutation(receipt_path, receipt_before, receipt_after)
-        if receipt_mutation is not None:
-            mutations.append(receipt_mutation)
-        item["receipt"] = {**receipt, "receipt_path": str(receipt_path)}
-        history_lines.append((json.dumps(item["receipt"], sort_keys=True) + "\n").encode("utf-8"))
-        source_rows.append({"skill_id": skill_id, "harness": harness, "fingerprint": lint.get("fingerprint")})
+                rollback_snapshot = str(rollback_dir)
+                mutations.extend(
+                    _sync_file_mutations(
+                        root=rollback_dir,
+                        before={},
+                        after=previous_files,
+                        display_prefix=f"rollback:{skill_id}:{harness}",
+                    )
+                )
+            source = lint.get("source") if isinstance(lint.get("source"), dict) else {}
+            render = _renderer_contract(workspace, harness)
+            skill_content = desired_files.get("SKILL.md", (b"", 0))[0].decode("utf-8", errors="replace")
+            receipt_path = _installs_root(workspace) / f"{skill_id}-{harness}.json"
+            receipt_before = _read_state_file_bytes(state_anchor, "skills", "installs", f"{skill_id}-{harness}.json")
+            previous_receipt: dict[str, Any] = {}
+            if receipt_before is not None:
+                try:
+                    parsed = json.loads(receipt_before.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    previous_receipt = parsed
+            receipt = {
+                "schema_version": RECEIPT_SCHEMA_VERSION,
+                "workspace": str(workspace),
+                "receipt_id": f"{installed_at[:19].replace(':', '').replace('-', '')}-{skill_id}-{harness}",
+                "skill_id": skill_id,
+                "target": harness,
+                "installed_dir": str(installed_dir),
+                "installed_at": installed_at,
+                "version": str(metadata.get("version") or "0.1.0"),
+                "source_path": str(metadata.get("source") or _skill_path(workspace, skill_id)),
+                "source": source,
+                "render": {**render, "fingerprint": _text_fingerprint(skill_content)},
+                "installed": {
+                    "bundle_fingerprint": _sync_files_fingerprint(desired_files),
+                    "skill_fingerprint": _text_fingerprint(skill_content),
+                    "metadata_fingerprint": _text_fingerprint(
+                        desired_files.get("skill.json", (b"", 0))[0].decode("utf-8", errors="replace")
+                    ),
+                },
+                "fingerprint": lint.get("fingerprint"),
+                "source_fingerprint": lint.get("fingerprint"),
+                "render_fingerprint": _text_fingerprint(skill_content),
+                "installed_fingerprint": _sync_files_fingerprint(desired_files),
+                "format": _adapter_map(workspace)[harness].get("format"),
+                "rollback_snapshot": rollback_snapshot,
+                "rollback_snapshot_fingerprint": (
+                    _files_fingerprint(
+                        {tuple(Path(relative).parts): data for relative, (data, _mode) in previous_files.items()}
+                    )
+                    if rollback_snapshot
+                    else None
+                ),
+                "previous_receipt": previous_receipt if previous_receipt else None,
+                "trust_score": lint.get("trust_score"),
+                "changelog": lint.get("changelog"),
+            }
+            receipt_after = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            receipt_mutation = _sync_single_file_mutation(receipt_path, receipt_before, receipt_after)
+            if receipt_mutation is not None:
+                mutations.append(receipt_mutation)
+            item["receipt"] = {**receipt, "receipt_path": str(receipt_path)}
+            history_lines.append((json.dumps(item["receipt"], sort_keys=True) + "\n").encode("utf-8"))
+            source_rows.append({"skill_id": skill_id, "harness": harness, "fingerprint": lint.get("fingerprint")})
     history_after = (history_before or b"") + b"".join(history_lines)
     history_mutation = _sync_single_file_mutation(history_path, history_before, history_after)
     if history_mutation is not None:
@@ -2595,7 +2944,7 @@ def sync(
                 return 1
             try:
                 planned, mutable_items, error = _sync_projection_plan(workspace=workspace, items=mutable_items)
-            except (OSError, projection.PlanError, ValueError) as exc:
+            except (OSError, projection.PlanError, ValueError, SkillsStatePathError) as exc:
                 planned, error = None, str(exc)
             if error is not None:
                 print(f"error: {error}", file=sys.stderr)
@@ -2921,7 +3270,13 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
         return 2
     source_dir = Path(str(lint_payload["skill_dir"]))
     metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
-    source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
+    if baseline_skill.startswith("registry:"):
+        # The registry side of the diff is served through the state-root
+        # anchor, never re-read by pathname after the lint.
+        source_text = _anchored_registry_text(target, _slug(baseline_skill.removeprefix("registry:")), "SKILL.md")
+        source_text = source_text or ""
+    else:
+        source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
     rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, harness)
     installed_dir = _install_dir(target, harness, skill_id)
     installed_skill = _skill_md_path(installed_dir)
@@ -3028,7 +3383,10 @@ def pack_build(*, target: Path, json_output: bool = False) -> int:
             for row in _iter_registry(target):
                 skill_dir = Path(str(row["skill_dir"]))
                 skill_id = _slug(str(row["metadata"].get("id") or skill_dir.name))
-                _copy_tree_into_anchor(skill_dir, state_anchor, "skills", "packs", pack_id, "skills", skill_id)
+                snapshot_dirs, snapshot_files = _read_registry_entry_tree(state_anchor, skill_id)
+                _write_collected_tree_into_anchor(
+                    snapshot_dirs, snapshot_files, state_anchor, "skills", "packs", pack_id, "skills", skill_id
+                )
             _write_state_file(state_anchor, "skills", "packs", pack_id, "skill-pack.json", data=_json_bytes(payload))
             _write_state_file(
                 state_anchor,
@@ -3057,18 +3415,43 @@ def pack_build(*, target: Path, json_output: bool = False) -> int:
 
 
 def _skill_packs(target: Path) -> list[dict[str, Any]]:
+    """Enumerate pack manifests through the held state-root anchor.
+
+    Pack directories are listed by descriptor (symlinked entries are skipped,
+    never followed) and each ``skill-pack.json`` is read through
+    ``_read_state_file_bytes``; a refused read fails the whole listing closed.
+    """
     packs: list[dict[str, Any]] = []
-    for root in (_skill_packs_root(target), _skill_packs_archive_root(target)):
-        if not root.is_dir():
-            continue
-        for path in root.iterdir():
-            payload = _read_json(path / "skill-pack.json")
-            if payload:
-                payload.setdefault("path", str(path))
-                payload.setdefault("archived", root == _skill_packs_archive_root(target))
-                packs.append(payload)
+    try:
+        with _held_state_root(target) as anchor:
+            for sub, archived in ((("skills", "packs"), False), (("skills", "packs-archive"), True)):
+                names = _plain_subdirs_under_anchor(anchor, *sub)
+                if not names:
+                    continue
+                for name in names:
+                    payload = _anchored_pack_manifest_at(anchor, *sub, name)
+                    if payload:
+                        payload.setdefault("path", str(_pack_display(target, *sub, name)))
+                        payload.setdefault("archived", archived)
+                        packs.append(payload)
+    except SkillsStatePathError:
+        return []
     packs.sort(key=lambda item: str(item.get("created_at") or item.get("pack_id") or ""), reverse=True)
     return packs
+
+
+def _pack_display(target: Path, *relative: str) -> Path:
+    return (target / ".brigade").joinpath(*relative)
+
+
+def _is_under_state_root(path: Path, target: Path) -> bool:
+    """True when *path* resolves inside the workspace's ``.brigade`` state root."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    state_root = (target / ".brigade").resolve()
+    return resolved == state_root or state_root in resolved.parents
 
 
 def _find_skill_pack(target: Path, pack_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -3078,7 +3461,10 @@ def _find_skill_pack(target: Path, pack_id: str) -> tuple[dict[str, Any] | None,
     matches = [pack for pack in packs if str(pack.get("pack_id") or "").startswith(pack_id)]
     if not matches:
         path = Path(pack_id).expanduser()
-        if path.is_dir() and (path / "skill-pack.json").is_file():
+        # A user-supplied external pack path stays readable, but locations
+        # inside the state root are only ever served through the anchored
+        # enumeration above.
+        if not _is_under_state_root(path, target) and path.is_dir() and (path / "skill-pack.json").is_file():
             payload = _read_json(path / "skill-pack.json")
             payload.setdefault("path", str(path))
             return payload, None
@@ -3119,9 +3505,9 @@ def pack_show(*, target: Path, pack_id: str, json_output: bool = False) -> int:
     return 0
 
 
-def _anchored_pack_manifest(anchor: _StateRootAnchor, name: str) -> dict[str, Any]:
-    """Read one pack manifest from the anchored packs root (never by external path)."""
-    raw = _read_state_file_bytes(anchor, "skills", "packs", name, "skill-pack.json")
+def _anchored_pack_manifest_at(anchor: _StateRootAnchor, *relative: str) -> dict[str, Any]:
+    """Read one pack manifest from the anchored state root (never by external path)."""
+    raw = _read_state_file_bytes(anchor, *relative, "skill-pack.json")
     if raw is None:
         return {}
     try:
@@ -3129,6 +3515,10 @@ def _anchored_pack_manifest(anchor: _StateRootAnchor, name: str) -> dict[str, An
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _anchored_pack_manifest(anchor: _StateRootAnchor, name: str) -> dict[str, Any]:
+    return _anchored_pack_manifest_at(anchor, "skills", "packs", name)
 
 
 def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> int:
@@ -3222,7 +3612,7 @@ def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: b
     for skill_path in skill_paths:
         metadata = _read_json(skill_path / "skill.json")
         skill_id = _slug(str(metadata.get("id") or skill_path.name))
-        if _skill_path(target, skill_id).exists() and not force:
+        if _registry_entry_present(target, skill_id) and not force:
             conflicts.append(
                 {"skill_id": skill_id, "existing": str(_skill_path(target, skill_id)), "source": str(skill_path)}
             )
@@ -3350,25 +3740,31 @@ def _mcp_read_resource(target: Path, uri: str) -> tuple[str, str] | tuple[None, 
         return None, None
     skill_id, name = remainder.split("/", 1)
     skill_id = _slug(skill_id)
-    skill_dir = _skill_path(target, skill_id)
-    metadata = _read_json(_metadata_path(skill_dir))
-    if name == "SKILL.md":
-        path = _skill_md_path(skill_dir)
-        return (path.read_text(encoding="utf-8", errors="replace"), "text/markdown") if path.is_file() else (None, None)
-    if name == "skill.json":
-        return json.dumps(metadata, indent=2, sort_keys=True) + "\n", "application/json"
-    if name == "CHANGELOG.md":
-        changelog = _changelog_payload(skill_dir, metadata)
-        path = Path(str(changelog.get("path") or ""))
-        return (path.read_text(encoding="utf-8", errors="replace"), "text/markdown") if path.is_file() else (None, None)
-    if name == "compatibility.json":
-        return (
-            json.dumps(_compatibility_payload(target, f"registry:{skill_id}"), indent=2, sort_keys=True) + "\n",
-            "application/json",
-        )
-    if name == "history.json":
-        payload = {"skill_id": skill_id, "history": _install_history(target, skill_id=skill_id)}
-        return json.dumps(payload, indent=2, sort_keys=True) + "\n", "application/json"
+    # Every registry read below goes through the held state-root anchor; a
+    # refused or absent entry yields (None, None) instead of outside content.
+    try:
+        with _held_state_root(target) as anchor:
+            if name == "SKILL.md":
+                raw = _read_state_file_bytes(anchor, "skills", "registry", skill_id, "SKILL.md")
+                return (raw.decode("utf-8", errors="replace"), "text/markdown") if raw is not None else (None, None)
+            if name == "skill.json":
+                metadata = _anchored_registry_metadata(anchor, skill_id)
+                metadata.setdefault("id", skill_id)
+                return json.dumps(metadata, indent=2, sort_keys=True) + "\n", "application/json"
+            if name == "CHANGELOG.md":
+                metadata = _anchored_registry_metadata(anchor, skill_id)
+                text = _anchored_entry_changelog_text(anchor, "skills", "registry", skill_id, metadata=metadata)
+                return (text, "text/markdown") if text is not None else (None, None)
+            if name == "compatibility.json":
+                return (
+                    json.dumps(_compatibility_payload(target, f"registry:{skill_id}"), indent=2, sort_keys=True) + "\n",
+                    "application/json",
+                )
+            if name == "history.json":
+                payload = {"skill_id": skill_id, "history": _install_history(target, skill_id=skill_id)}
+                return json.dumps(payload, indent=2, sort_keys=True) + "\n", "application/json"
+    except SkillsStatePathError:
+        return None, None
     return None, None
 
 
@@ -3421,7 +3817,13 @@ def _mcp_tool_call(target: Path, name: str, arguments: dict[str, Any]) -> tuple[
         text, _ = _mcp_read_resource(target, f"skill://registry/{skill_id}/SKILL.md")
         return text or "", text is None
     if name == "get_skill_metadata":
-        return _read_json(_metadata_path(_skill_path(target, skill_id))), False
+        try:
+            with _held_state_root(target) as anchor:
+                metadata = _anchored_registry_metadata(anchor, skill_id)
+        except SkillsStatePathError:
+            metadata = {}
+        metadata.setdefault("id", skill_id)
+        return metadata, False
     if name == "get_skill_changelog":
         text, _ = _mcp_read_resource(target, f"skill://registry/{skill_id}/CHANGELOG.md")
         return text or "", text is None
@@ -3509,14 +3911,30 @@ def publish(*, target: Path, skill: str, scope: str, json_output: bool = False) 
 def adapters_init(*, target: Path, force: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     path = _adapters_config_path(target)
-    if path.exists() and not force:
+    # Existence is answered through the anchor, never by pathname probe.
+    try:
+        with _held_state_root(target) as anchor:
+            config_exists = _state_file_exists(anchor, "skills", "adapters.json")
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if config_exists and not force:
         print(f"error: skill adapter config already exists: {path}", file=sys.stderr)
         return 2
     payload = {
         "description": "Local skill harness adapter overlay. install_path is relative to the workspace and may use {skill_id}.",
         "adapters": {},
     }
-    _write_json(path, payload)
+    payload = {
+        "description": "Local skill harness adapter overlay. install_path is relative to the workspace and may use {skill_id}.",
+        "adapters": {},
+    }
+    try:
+        with _held_state_root(target) as anchor:
+            _write_state_file(anchor, "skills", "adapters.json", data=_json_bytes(payload))
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     output = {"target": str(target), "path": str(path), "adapter_count": len(payload["adapters"])}
     if json_output:
         print(json.dumps(output, indent=2, sort_keys=True))
@@ -3576,7 +3994,10 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
     source_text = ""
     skill_dir = Path(str(lint_payload.get("skill_dir") or ""))
     skill_md = _skill_md_path(skill_dir)
-    if skill_md.is_file():
+    if skill.startswith("registry:"):
+        # Anchored registry read; a refused entry contributes no text.
+        source_text = _anchored_registry_text(target, _slug(skill.removeprefix("registry:")), "SKILL.md") or ""
+    elif skill_md.is_file():
         source_text = skill_md.read_text(encoding="utf-8", errors="replace")
     adapters = []
     for adapter_id, adapter in _adapter_map(target).items():
@@ -3710,24 +4131,93 @@ def _fleet_skill_ids(target: Path) -> list[str]:
     return sorted(bundled | registry)
 
 
+def _plain_files_under_anchor(anchor: _StateRootAnchor, *relative: str) -> list[str] | None:
+    """List plain regular-file names under an anchored state path.
+
+    Mirrors :func:`_plain_subdirs_under_anchor`: ``None`` for a missing
+    directory, refusal for symlinked components, symlinked entries skipped.
+    """
+    if not _HAS_DESCRIPTOR_ANCHOR:
+        base = (anchor.workspace / ".brigade").joinpath(*relative)
+        current = anchor.workspace / ".brigade"
+        for part in relative:
+            current = current / part
+            if not current.exists():
+                return None
+            if current.is_symlink() or _is_reparse_point(current) or not current.is_dir():
+                raise SkillsStatePathError(f"skills state path must be plain directories: {current}")
+        names: list[str] = []
+        for entry in sorted(base.iterdir(), key=lambda item: item.name):
+            if entry.is_symlink():
+                continue
+            try:
+                st = entry.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise SkillsStatePathError(f"skills state entry could not be inspected safely: {entry}") from exc
+            if stat_module.S_ISREG(st.st_mode):
+                names.append(entry.name)
+        return names
+    fd, opened = _anchor_open_chain(anchor, *relative, missing_ok=True)
+    if fd is None:
+        return None
+    try:
+        names = []
+        for name in sorted(os.listdir(fd)):
+            try:
+                st = os.lstat(name, dir_fd=fd)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise SkillsStatePathError(
+                    f"skills state entry could not be inspected safely: {(anchor.workspace / '.brigade').joinpath(*relative, name)}"
+                ) from exc
+            if stat_module.S_ISREG(st.st_mode):
+                names.append(name)
+        return names
+    finally:
+        for held_fd in reversed(opened):
+            os.close(held_fd)
+
+
 def _fleet_receipts(target: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """Read install receipts through the held state-root anchor.
+
+    Receipt files are enumerated through the anchor and each one is read with
+    ``_read_state_file_bytes``; a symlinked receipt contributes nothing.
+    """
     receipts: dict[tuple[str, str], dict[str, Any]] = {}
-    root = _installs_root(target)
-    if not root.is_dir():
-        return receipts
-    install_targets = set(_install_targets(target))
-    for path in sorted(root.glob("*.json")):
-        receipt = _read_json(path)
-        skill_id = receipt.get("skill_id")
-        harness = receipt.get("target")
-        if (
-            isinstance(skill_id, str)
-            and skill_id
-            and isinstance(harness, str)
-            and harness in install_targets
-            and path == root / f"{_slug(skill_id)}-{harness}.json"
-        ):
-            receipts[(_slug(skill_id), harness)] = receipt
+    try:
+        with _held_state_root(target) as anchor:
+            names = _plain_files_under_anchor(anchor, "skills", "installs")
+            if not names:
+                return receipts
+            install_targets = set(_install_targets(target))
+            for name in names:
+                if not name.endswith(".json"):
+                    continue
+                raw = _read_state_file_bytes(anchor, "skills", "installs", name)
+                if raw is None:
+                    continue
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                skill_id = parsed.get("skill_id")
+                harness = parsed.get("target")
+                if (
+                    isinstance(skill_id, str)
+                    and skill_id
+                    and isinstance(harness, str)
+                    and harness in install_targets
+                    and name == f"{_slug(skill_id)}-{harness}.json"
+                ):
+                    receipts[(_slug(skill_id), harness)] = parsed
+    except SkillsStatePathError:
+        return {}
     return receipts
 
 
@@ -3861,7 +4351,11 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
             continue
         source_dir = Path(str(lint_payload["skill_dir"]))
         metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
-        source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
+        if selector.startswith("registry:"):
+            # Registry rendering text comes from the anchored read.
+            source_text = _anchored_registry_text(target, _slug(selector.removeprefix("registry:")), "SKILL.md") or ""
+        else:
+            source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
         supported = metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else []
         source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
         supported_state = harness in supported or not supported
@@ -3971,7 +4465,7 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
     for row in registry:
         metadata = row["metadata"]
         skill_id = _slug(str(metadata.get("id") or Path(row["skill_dir"]).name))
-        lint_payload = _lint_payload(target, str(row["skill_dir"]))
+        lint_payload = _lint_payload(target, f"registry:{skill_id}")
         for error in lint_payload.get("errors", []):
             issues.append(
                 {
@@ -4294,7 +4788,10 @@ def inbox_add(
                 return 2
             if force and existing != "missing":
                 _remove_tree_in_anchor(state_anchor, *proposal_rel)
-            _copy_tree_into_anchor(source_dir, state_anchor, *proposal_rel, "skill")
+            # Collect the candidate once: the copy and the recorded
+            # fingerprint both derive from these bytes, nothing is re-read.
+            collected_dirs, collected_files = _collect_source_tree(source_dir)
+            _write_collected_tree_into_anchor(collected_dirs, collected_files, state_anchor, *proposal_rel, "skill")
             lint_payload = _lint_payload(target, str(skill_dest))
             proposal = {
                 "proposal_id": proposal_dir.name,
@@ -4305,7 +4802,7 @@ def inbox_add(
                 "created_at": created,
                 "path": str(proposal_dir),
                 "skill_path": str(skill_dest),
-                "fingerprint": _fingerprint(skill_dest),
+                "fingerprint": _files_fingerprint(collected_files),
                 "lint": lint_payload,
             }
             _write_state_file(state_anchor, *proposal_rel, "proposal.json", data=_json_bytes(proposal))
