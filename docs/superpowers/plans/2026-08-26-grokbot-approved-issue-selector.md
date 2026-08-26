@@ -281,7 +281,7 @@ git commit -m "feat: select bounded Grok Bot scout work"
 - Modify: `docs/grokbot-mcp.md`
 - Modify: `docs/phase-grokbot-approved-issue-selector.md`
 
-- [ ] Add failing CLI tests for preview JSON, apply JSON, text no-work, malformed policy, and missing `gh`. Invoke `cli.main()` with:
+- [x] Add failing CLI tests for preview JSON, apply JSON, text no-work, malformed policy, and missing `gh`. Invoke `cli.main()` with:
 
 ```python
 [
@@ -294,7 +294,7 @@ git commit -m "feat: select bounded Grok Bot scout work"
 
 Assert preview exits 0 and has no queue root. Add `--apply` and assert one queued job. Errors exit 2 and print only `error: <stable-reason>`.
 
-- [ ] Run RED:
+- [x] Run RED:
 
 ```bash
 brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_grokbot_scout_feed.py -k cli" --capture brigade-work
@@ -302,7 +302,7 @@ brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_gro
 
 Expect argparse failure because `scout-feed` is unknown.
 
-- [ ] Register `scout-feed` beside `feed`:
+- [x] Register `scout-feed` beside `feed`:
 
 ```python
 p_scout_feed = grokbot_sub.add_parser(
@@ -315,29 +315,29 @@ p_scout_feed.add_argument("--apply", action="store_true", help="Enqueue after se
 
 Route it before the queue mutation switch. `_dispatch_grokbot_scout_feed()` catches `ScoutFeedError`, emits stable JSON or text, and never prints exception detail, subprocess output, commands, paths, or instructions.
 
-- [ ] Run GREEN with the CLI command and the complete new test file.
+- [x] Run GREEN with the CLI command and the complete new test file.
 
-- [ ] Add a sanitized policy example and systemd command to `docs/grokbot-mcp.md`. State that the approval label is the operator gate, the timer may run hourly, each pass creates at most one job, `daily_limit` counts failed and expired attempts, and the adapter cannot infer remaining quota percentage.
+- [x] Add a sanitized policy example and systemd command to `docs/grokbot-mcp.md`. State that the approval label is the operator gate, the timer may run hourly, each pass creates at most one job, `daily_limit` counts failed and expired attempts, and the adapter cannot infer remaining quota percentage.
 
-- [ ] Update the phase spec status to implemented only after tests pass.
+- [x] Update the phase spec status to implemented only after tests pass.
 
-- [ ] Run the focused contract through Brigade:
+- [x] Run the focused contract through Brigade:
 
 ```bash
 brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_grokbot_scout_feed.py tests/test_grokbot_feed.py tests/test_grokbot_jobs.py tests/test_grokbot_mcp.py tests/test_grokbot_ops.py" --command ".venv/bin/ruff check src/brigade/grokbot_scout_feed.py src/brigade/cli/run_cloud.py tests/test_grokbot_scout_feed.py" --command ".venv/bin/ruff format --check src/brigade/grokbot_scout_feed.py src/brigade/cli/run_cloud.py tests/test_grokbot_scout_feed.py" --command "git diff --check" --capture brigade-work
 ```
 
-- [ ] Run the repository completion gate:
+- [x] Run the repository completion gate:
 
 ```bash
 brigade work verify run --target . --command "./scripts/verify" --capture brigade-work --timeout 3600
 ```
 
-- [ ] Run Vale and detector checks on changed public prose through Brigade. Fix new findings without changing the approved security contract.
+- [x] Run Vale and detector checks on changed public prose through Brigade. Fix new findings without changing the approved security contract.
 
-- [ ] Write the required Memory Handoff in `.claude/memory-handoffs/` and lint it through Brigade.
+- [x] Write the required Memory Handoff in `.claude/memory-handoffs/` and lint it through Brigade.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/cli/run_cloud.py tests/test_grokbot_scout_feed.py docs/grokbot-mcp.md docs/phase-grokbot-approved-issue-selector.md .claude/memory-handoffs
