@@ -202,7 +202,7 @@ git commit -m "feat: validate approved Grok Bot scout policy"
 - Modify: `tests/test_grokbot_scout_feed.py`
 - Modify: `src/brigade/grokbot_scout_feed.py`
 
-- [ ] Add a failing apply test:
+- [x] Add a failing apply test:
 
 ```python
 def test_apply_creates_one_fixed_read_only_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -233,9 +233,9 @@ def test_apply_creates_one_fixed_read_only_job(tmp_path: Path, monkeypatch: pyte
     assert "src/brigade" not in rendered
 ```
 
-- [ ] Add failing no-work tests. Use `grokbot_jobs.enqueue()` to seed one active Repository Scout job and three same-day completed Scout jobs. Assert stable results for `active-job`, `daily-limit`, `all-known`, and `no-approved-issues`. Each result has `created: 0`, no `job`, and no task context.
+- [x] Add failing no-work tests. Use `grokbot_jobs.enqueue()` to seed one active Repository Scout job and three same-day completed Scout jobs. Assert stable results for `active-job`, `daily-limit`, `all-known`, and `no-approved-issues`. Each result has `created: 0`, no `job`, and no task context.
 
-- [ ] Run RED:
+- [x] Run RED:
 
 ```bash
 brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_grokbot_scout_feed.py -k 'apply or active or daily or known or no_approved'" --capture brigade-work
@@ -243,9 +243,9 @@ brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_gro
 
 Expect failure because apply and cap logic are missing.
 
-- [ ] Implement `_instructions()` as a fixed template that names only repository, label, and issue number. It must include the read-only and untrusted-context rules from the approved phase spec.
+- [x] Implement `_instructions()` as a fixed template that names only repository, label, and issue number. It must include the read-only and untrusted-context rules from the approved phase spec.
 
-- [ ] Implement `_queue_snapshot()` without creating queue state during preview:
+- [x] Implement `_queue_snapshot()` without creating queue state during preview:
 
 ```python
 def _queue_snapshot(target: Path) -> list[dict[str, object]]:
@@ -261,11 +261,11 @@ def _queue_snapshot(target: Path) -> list[dict[str, object]]:
 
 Count same-day jobs by parsing `created_at` as an aware datetime, converting to UTC, and comparing `.date()` to `now.astimezone(timezone.utc).date()`. Count all Repository Scout states, including expired and failed attempts.
 
-- [ ] For each sorted issue number, build the stable key `grokbot-scout:<repository-sha256-prefix>:issue-<number>`, using the first 24 lowercase hex characters of the repository string's SHA-256, and use `grokbot_feed._existing_idempotency()` to skip known work. `preflight()` returns the selected issue without writing. `apply()` repeats the full selection immediately before calling `grokbot_jobs.enqueue()` and returns only safe counts, reason, issue number, and handle. Both public functions accept `now: datetime | None = None`. The default is an aware current UTC timestamp.
+- [x] For each sorted issue number, build the stable key `grokbot-scout:<repository-sha256-prefix>:issue-<number>`, using the first 24 lowercase hex characters of the repository string's SHA-256, and use `grokbot_feed._existing_idempotency()` to skip known work. `preflight()` returns the selected issue without writing. `apply()` repeats the full selection immediately before calling `grokbot_jobs.enqueue()` and returns only safe counts, reason, issue number, and handle. Both public functions accept `now: datetime | None = None`. The default is an aware current UTC timestamp.
 
-- [ ] Run GREEN with the Task 2 command, then the whole new test file. Expect every test to pass.
+- [x] Run GREEN with the Task 2 command, then the whole new test file. Expect every test to pass.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/grokbot_scout_feed.py tests/test_grokbot_scout_feed.py
