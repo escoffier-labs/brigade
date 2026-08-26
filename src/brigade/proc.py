@@ -401,6 +401,21 @@ def _process_group_kwargs() -> dict[str, Any]:
     return {}
 
 
+def process_group_kwargs() -> dict[str, Any]:
+    """Public launcher kwargs so callers start children in their own group."""
+    return _process_group_kwargs()
+
+
+def terminate_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    terminate_grace: float = 0.5,
+    kill_grace: float = 0.5,
+) -> None:
+    """Kill a child and its whole process group via the shared cleanup path."""
+    _terminate_processes((process,), terminate_grace=terminate_grace, kill_grace=kill_grace)
+
+
 class _BoundedCollector:
     """Retain combined stdout/stderr up to ``MAX_CAPTURE_BYTES``."""
 
