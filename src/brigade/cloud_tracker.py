@@ -26,7 +26,11 @@ READY_STATES = frozenset({"ready", "completed", "succeeded", "applied"})
 FAILED_STATES = frozenset({"failed", "errored", "error", "cancelled", "canceled", "expired"})
 FINISHED_STATES = frozenset({"finished", "completed", "succeeded", "applied", "ready"})
 PENDING_STATES = frozenset({"pending", "claimed", "running", "queued", "in_progress", "dispatching"})
-ACTIVE_STATES = PENDING_STATES | frozenset({"creating", "active"})
+# Jules non-terminal states hold capacity until the provider explicitly finishes.
+JULES_HOLDING_STATES = frozenset(
+    {"planning", "awaiting_plan_approval", "awaiting_user_feedback", "paused", "state_unspecified"}
+)
+ACTIVE_STATES = PENDING_STATES | JULES_HOLDING_STATES | frozenset({"creating", "active"})
 TERMINAL_STATES = FINISHED_STATES | FAILED_STATES | frozenset({"interrupted", "timed_out", "timeout"})
 
 CLASSIFICATIONS = (
@@ -49,6 +53,26 @@ def registry_path(target: Path) -> Path:
 
 def prompt_hash(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+LEASE_LABEL_MAX = 120
+_LEASE_LABEL_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+
+
+def lease_label(provider: str, repo: str | None, prompt_hash_value: str | None) -> str:
+    """Return a bounded ``provider:owner/repo@<digest>`` lease label.
+
+    Prompt text is never a label. Hosted adapters call this so the hub, the
+    registry, and every dashboard row carry a stable identifier derived from the
+    provider, the repository, and the prompt hash instead of the prompt itself.
+    """
+    name = str(provider or "unknown").strip() or "unknown"
+    slug = str(repo or "").strip().removeprefix("https://github.com/").rstrip("/")
+    if not _LEASE_LABEL_REPO_RE.match(slug):
+        slug = "unknown-repo"
+    digest = str(prompt_hash_value or "").strip().rpartition(":")[2]
+    digest = digest[:12] if re.fullmatch(r"[0-9a-fA-F]+", digest or "") else "nohash"
+    return f"{name}:{slug}@{digest}"[:LEASE_LABEL_MAX]
 
 
 def _now_iso(now: datetime | None = None) -> str:
@@ -144,7 +168,7 @@ def register(
     source: str = "dispatch",
 ) -> dict[str, Any]:
     if provider not in TRACKER_PROVIDERS:
-        raise ValueError("provider must be codex-cloud, cursor-cloud, or grokbot-cloud")
+        raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud, jules")
     if not label.strip():
         raise ValueError("label must not be empty")
     if source == "dispatch" and not task_id:
@@ -532,6 +556,7 @@ def status_payload(
     stale_ready_hours = int(registry.get("stale_ready_hours", DEFAULT_STALE_READY_HOURS))
     provider_tasks = provider_tasks if isinstance(provider_tasks, dict) else {}
     github = github if isinstance(github, dict) else {"branches": [], "prs": []}
+    jules_wired = jules_cloud_wired()
 
     entries = [
         _classify_entry(
@@ -577,7 +602,11 @@ def status_payload(
                 "authority": "disabled-by-policy",
                 "detail": "local/background sessions are not cloud discovery; claude cloud remains untracked/disabled until a structured bindable provider surface exists",
             },
-            "jules": {"wired": False, "authority": "planned", "detail": "Jules adapter planned in Task 4"},
+            "jules": {
+                "wired": jules_wired,
+                "authority": "alpha REST" if jules_wired else "unwired",
+                "detail": None if jules_wired else "JULES_API_KEY not set",
+            },
             "grokbot-cloud": {"wired": True, "authority": "local-queue"},
             "github": {"wired": True, "authority": "ground-truth"},
         },
@@ -933,6 +962,50 @@ def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
     return tasks
 
 
+def jules_cloud_wired() -> bool:
+    """Jules Cloud is wired when an API key is present."""
+    import os
+
+    return bool(os.environ.get("JULES_API_KEY", "").strip())
+
+
+def _jules_api_key() -> str | None:
+    """Return the configured Jules API key, or None."""
+    import os
+
+    value = os.environ.get("JULES_API_KEY", "").strip()
+    return value or None
+
+
+def observe_jules_cloud_tasks(target: Path) -> dict[str, Any]:
+    """Fetch sanitized Jules Cloud inventory when an API key is present.
+
+    Provider API failures are bounded: the tracker stays available and no
+    existing registry entries are erased or admitted. Inventory is a positive
+    signal only. A failed fetch returns ``{}`` and a truncated page walk simply
+    omits ids, and absence of an id is never read as terminal, so unknown or
+    truncated inventory can never release capacity.
+    """
+    api_key = _jules_api_key()
+    if not api_key:
+        return {}
+    try:
+        from . import jules_cloud
+
+        sessions = jules_cloud.list_sessions(api_key, max_pages=2, max_items=100)
+    except Exception:  # noqa: BLE001 - observation must stay bounded
+        return {}
+    tasks: dict[str, Any] = {}
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        session_id = session.get("id")
+        if not isinstance(session_id, str):
+            continue
+        tasks[session_id] = {"state": normalize_provider_state(session.get("state"))}
+    return tasks
+
+
 def observe_providers(target: Path, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], bool]:
     provider_tasks: dict[str, Any] = {}
     try:
@@ -942,6 +1015,11 @@ def observe_providers(target: Path, **_kwargs: Any) -> tuple[dict[str, Any], dic
     if cursor_cloud_wired():
         try:
             provider_tasks.update(observe_cursor_cloud_tasks(target))
+        except Exception:  # noqa: BLE001 - observation must stay bounded
+            pass
+    if jules_cloud_wired():
+        try:
+            provider_tasks.update(observe_jules_cloud_tasks(target))
         except Exception:  # noqa: BLE001 - observation must stay bounded
             pass
     return provider_tasks, observe_github(target), cursor_cloud_wired()

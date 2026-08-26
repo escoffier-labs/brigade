@@ -245,6 +245,9 @@ def launch_agent(
     ``{"agent": {"id", "latestRunId", ...}, "run": {"id", "status", ...}}``;
     both identifiers are bound.
 
+    The lease label is derived from provider, repo, and prompt hash. Prompt text
+    is never persisted as a label.
+
     A provider HTTP 4xx/5xx releases the unbound lease as ``submit-failed``.
     A transport timeout, URLError, OSError, TimeoutError, or a malformed /
     oversized response is ambiguous after POST: the lease is held and the result
@@ -261,7 +264,7 @@ def launch_agent(
     admit = fleet_client.admit_cloud(
         "cursor-cloud",
         repo=canonical_repo,
-        label=prompt[:120],
+        label=cloud_tracker.lease_label("cursor-cloud", canonical_repo, prompt_hash),
         prompt_hash=prompt_hash,
         ttl_seconds=300,
     )

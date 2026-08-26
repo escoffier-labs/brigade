@@ -601,3 +601,42 @@ class TestRegistryContract:
         )
         assert adopted["provider"] == "cursor-cloud"
         assert adopted["source"] == "adopt-branch"
+
+
+class TestLeaseLabelPrivacy:
+    def test_lease_label_carries_no_prompt_text(self, monkeypatch):
+        opener = FakeOpener(
+            [
+                _json_response(
+                    {
+                        "agent": {"id": "agent-label", "latestRunId": "run-label"},
+                        "run": {"id": "run-label", "status": "CREATING"},
+                    }
+                ),
+            ]
+        )
+        admit_calls: list[dict[str, Any]] = []
+
+        def capture_admit(*args, **kwargs):
+            admit_calls.append(kwargs)
+            return fleet_client.CloudDecision(True, "ok", lease={"lease_id": "lease-1"}, holder="h1")
+
+        monkeypatch.setattr(fleet_client, "admit_cloud", capture_admit)
+        monkeypatch.setattr(fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+        monkeypatch.setattr(fleet_client, "release_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+
+        prompt = "rotate the production credentials for acme corp"
+        result = cursor_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt=prompt,
+            opener=opener.open,
+        )
+        assert result.ok
+        label = admit_calls[0]["label"]
+        expected_digest = cloud_tracker.prompt_hash(prompt).removeprefix("sha256:")[:12]
+        assert label == f"cursor-cloud:owner/repo@{expected_digest}"
+        assert len(label) <= cloud_tracker.LEASE_LABEL_MAX
+        for word in prompt.split():
+            assert word not in label
+        assert prompt not in json.dumps(admit_calls)

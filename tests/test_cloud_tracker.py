@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from brigade import cli, claude_cloud, cloud_tracker, cursor_cloud, grokbot_jobs
+from brigade import cli, claude_cloud, cloud_tracker, cursor_cloud, fleet_client, grokbot_jobs, jules_cloud
 
 
 NOW = datetime(2026, 8, 12, 20, 0, 0, tzinfo=timezone.utc)
@@ -939,3 +939,288 @@ def test_status_payload_does_not_leak_claude_cwd_or_prompt_text(monkeypatch, tmp
     assert "/home/user/secret" not in text
     assert "secret prompt text" not in text
     assert "sess-claude-1" in text
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_active", "expected_terminal"),
+    [
+        ("STATE_UNSPECIFIED", True, False),
+        ("QUEUED", True, False),
+        ("PLANNING", True, False),
+        ("AWAITING_PLAN_APPROVAL", True, False),
+        ("AWAITING_USER_FEEDBACK", True, False),
+        ("IN_PROGRESS", True, False),
+        ("PAUSED", True, False),
+        ("FAILED", False, True),
+        ("COMPLETED", False, True),
+    ],
+)
+def test_jules_states_hold_capacity_until_terminal(state, expected_active, expected_terminal):
+    normalized = cloud_tracker.normalize_provider_state(state)
+    assert cloud_tracker.is_active_state(normalized) is expected_active
+    assert cloud_tracker.is_terminal_state(normalized) is expected_terminal
+
+
+def test_jules_cloud_registry_entry_classifies_terminal_via_provider_tasks(tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-jules-1",
+        label="jules:owner/repo@0011223344ff",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={"sess-jules-1": {"state": "completed"}},
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-jules-1")
+    assert row["provider_state"] == "completed"
+    # `completed` is a READY state. With no expected artifact to miss and no
+    # staleness yet, a fresh terminal Jules session is landable, not pending.
+    assert row["classification"] == "ready-to-land"
+
+
+def test_jules_terminal_entry_expecting_a_missing_branch_needs_investigation(tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-jules-1b",
+        label="jules:owner/repo@0011223344ff",
+        prompt_hash=_prompt_hash("x"),
+        expected_artifact={"kind": "branch", "pattern": "jules/*"},
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={"sess-jules-1b": {"state": "completed"}},
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-jules-1b")
+    assert row["classification"] == "needs-investigation"
+
+
+def test_jules_cloud_registry_entry_with_branch_classifies_ready(tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-jules-2",
+        label="jules:owner/repo@aabbccdd0011",
+        prompt_hash=_prompt_hash("x"),
+        branch="jules/ready-fix",
+        expected_artifact={"kind": "branch", "pattern": "jules/*"},
+        dispatched_at=_iso(NOW),
+    )
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={"sess-jules-2": {"state": "completed", "ready_at": _iso(NOW)}},
+        github={"branches": [{"name": "jules/ready-fix"}], "prs": []},
+        cursor_wired=False,
+    )
+    row = next(r for r in payload["entries"] if r["task_id"] == "sess-jules-2")
+    assert row["provider_state"] == "completed"
+    assert row["classification"] == "ready-to-land"
+
+
+def test_observe_providers_includes_jules_inventory_when_key_present(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    monkeypatch.setattr(
+        jules_cloud,
+        "list_sessions",
+        lambda *a, **k: [
+            {"id": "sess-jules-3", "state": "IN_PROGRESS"},
+            {"id": "sess-jules-4", "state": "COMPLETED"},
+        ],
+    )
+    provider_tasks, _github, _cursor_wired = cloud_tracker.observe_providers(tmp_path)
+    assert provider_tasks == {
+        "sess-jules-3": {"state": "in_progress"},
+        "sess-jules-4": {"state": "completed"},
+    }
+
+
+def test_observe_providers_skips_jules_inventory_when_key_absent(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("JULES_API_KEY", raising=False)
+    monkeypatch.setattr(
+        jules_cloud,
+        "list_sessions",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("must not be called")),
+    )
+    provider_tasks, _github, _cursor_wired = cloud_tracker.observe_providers(tmp_path)
+    assert provider_tasks == {}
+
+
+def test_sync_payload_releases_terminal_jules_session(monkeypatch, tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="jules",
+        task_id="sess-jules-5",
+        label="jules:owner/repo@ffeeddcc9988",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    release_calls: list[dict[str, Any]] = []
+
+    def capture_release(lease_id: str, *, state: str | None = None, holder: str | None = None):
+        release_calls.append({"lease_id": lease_id, "state": state, "holder": holder})
+        return fleet_client.CloudDecision(True, "ok")
+
+    monkeypatch.setattr(fleet_client, "release_cloud", capture_release)
+    payload = cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={"sess-jules-5": {"state": "completed"}},
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+        hub_leases=[{"lease_id": "lease-jules-1", "provider_task_id": "sess-jules-5"}],
+    )
+    assert payload["schema"] == cloud_tracker.SYNC_SCHEMA
+    assert payload["counts"]["released"] == 1
+    assert payload["counts"]["needs_you"] == 0
+    assert payload["counts"]["active"] == 0
+    assert release_calls
+    assert release_calls[0]["lease_id"] == "lease-jules-1"
+
+
+def test_status_payload_jules_authority_reflects_key_presence(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    monkeypatch.setattr(cloud_tracker, "observe_jules_cloud_tasks", lambda *a, **k: {})
+    payload = cloud_tracker.status_payload(tmp_path)
+    assert payload["sources"]["jules"]["wired"] is True
+    assert payload["sources"]["jules"]["authority"] == "alpha REST"
+    assert payload["sources"]["jules"].get("detail") is None
+
+    monkeypatch.delenv("JULES_API_KEY", raising=False)
+    payload = cloud_tracker.status_payload(tmp_path)
+    assert payload["sources"]["jules"]["wired"] is False
+    assert payload["sources"]["jules"]["authority"] == "unwired"
+    assert payload["sources"]["jules"]["detail"] == "JULES_API_KEY not set"
+
+
+def test_observe_jules_inventory_normalizes_provider_state(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    monkeypatch.setattr(
+        jules_cloud,
+        "list_sessions",
+        lambda *a, **k: [
+            {"id": "sess-jules-norm", "state": "AWAITING_PLAN_APPROVAL"},
+            {"id": "sess-jules-none", "state": None},
+            "not-a-dict",
+            {"state": "QUEUED"},
+        ],
+    )
+    tasks = cloud_tracker.observe_jules_cloud_tasks(tmp_path)
+    assert tasks == {
+        "sess-jules-norm": {"state": "awaiting_plan_approval"},
+        "sess-jules-none": {"state": None},
+    }
+
+
+def _register_jules_pair(tmp_path: Path) -> None:
+    for task_id in ("sess-jules-seen", "sess-jules-unseen"):
+        cloud_tracker.register(
+            tmp_path,
+            provider="jules",
+            task_id=task_id,
+            label=f"jules:owner/repo@{'0' * 12}",
+            prompt_hash=_prompt_hash("x"),
+            dispatched_at=_iso(NOW),
+        )
+
+
+def _jules_hub_leases() -> list[dict[str, Any]]:
+    return [
+        {"lease_id": "lease-seen", "provider_task_id": "sess-jules-seen"},
+        {"lease_id": "lease-unseen", "provider_task_id": "sess-jules-unseen"},
+    ]
+
+
+def test_truncated_jules_inventory_never_releases_capacity_by_absence(monkeypatch, tmp_path: Path):
+    """A page walk that stops early omits ids; absence must not read as terminal."""
+    _register_jules_pair(tmp_path)
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    # max_items truncation drops sess-jules-unseen from the observed inventory.
+    monkeypatch.setattr(
+        jules_cloud, "list_sessions", lambda *a, **k: [{"id": "sess-jules-seen", "state": "in_progress"}]
+    )
+    release_calls: list[dict[str, Any]] = []
+
+    def capture_release(lease_id: str, *, state: str | None = None, holder: str | None = None):
+        release_calls.append({"lease_id": lease_id, "state": state})
+        return fleet_client.CloudDecision(True, "ok")
+
+    monkeypatch.setattr(fleet_client, "release_cloud", capture_release)
+    payload = cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks=cloud_tracker.observe_jules_cloud_tasks(tmp_path),
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+        hub_leases=_jules_hub_leases(),
+    )
+    assert release_calls == []
+    assert payload["counts"]["released"] == 0
+    assert payload["counts"]["active"] == 1
+
+
+def test_unknown_jules_inventory_never_releases_capacity_by_absence(monkeypatch, tmp_path: Path):
+    """A failed provider fetch yields no inventory, which must release nothing."""
+    _register_jules_pair(tmp_path)
+    monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
+    monkeypatch.setattr(
+        jules_cloud,
+        "list_sessions",
+        lambda *a, **k: (_ for _ in ()).throw(jules_cloud.JulesCloudError("boom")),
+    )
+    release_calls: list[str] = []
+
+    def capture_release(lease_id: str, *, state: str | None = None, holder: str | None = None):
+        release_calls.append(lease_id)
+        return fleet_client.CloudDecision(True, "ok")
+
+    monkeypatch.setattr(fleet_client, "release_cloud", capture_release)
+    payload = cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks=cloud_tracker.observe_jules_cloud_tasks(tmp_path),
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+        hub_leases=_jules_hub_leases(),
+    )
+    assert release_calls == []
+    assert payload["counts"]["released"] == 0
+
+
+def test_lease_label_is_bounded_and_prompt_free():
+    prompt = "rotate the production credentials for acme corp"
+    digest = cloud_tracker.prompt_hash(prompt)
+    label = cloud_tracker.lease_label("jules", "https://github.com/owner/repo", digest)
+    assert label == f"jules:owner/repo@{digest.removeprefix('sha256:')[:12]}"
+    assert len(label) <= cloud_tracker.LEASE_LABEL_MAX
+    for word in prompt.split():
+        assert word not in label
+
+
+@pytest.mark.parametrize(
+    ("provider", "repo", "digest", "expected"),
+    [
+        ("cursor-cloud", "owner/repo", "sha256:abcdef0123456789", "cursor-cloud:owner/repo@abcdef012345"),
+        ("jules", None, None, "jules:unknown-repo@nohash"),
+        ("jules", "https://evil.example.com/a/b", "sha256:aa", "jules:unknown-repo@aa"),
+        ("", "owner/repo", "not-a-hash", "unknown:owner/repo@nohash"),
+        ("jules", "owner/repo/extra", "sha256:bb", "jules:unknown-repo@bb"),
+    ],
+)
+def test_lease_label_rejects_unsafe_inputs(provider, repo, digest, expected):
+    assert cloud_tracker.lease_label(provider, repo, digest) == expected
+
+
+def test_lease_label_truncates_pathological_input():
+    label = cloud_tracker.lease_label("x" * 400, "owner/repo", "sha256:aa")
+    assert len(label) == cloud_tracker.LEASE_LABEL_MAX

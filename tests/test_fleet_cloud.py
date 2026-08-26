@@ -196,6 +196,20 @@ def test_client_fails_closed_for_configured_hub(monkeypatch):
     assert decision.granted is False and decision.reason == "hub-unavailable"
 
 
+def test_client_preserves_request_lease_id_when_granted_projection_omits_it(monkeypatch):
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "token"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda _base=None: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "_post_cloud_blocking",
+        lambda *args, **kwargs: (200, {"admitted": True, "lease": {"provider": "cursor"}}),
+    )
+    decision = fleet_client._cloud_op("admit", provider="cursor", lease_id="client-lease")
+    assert decision.granted is True
+    assert decision.lease is not None
+    assert decision.lease["lease_id"] == "client-lease"
+
+
 def test_cloud_and_policy_cli_views_are_read_only(monkeypatch, capsys):
     monkeypatch.setattr(
         fleet_client, "fetch_cloud", lambda include_all=False: {"leases": [], "policy": {"providers": []}}

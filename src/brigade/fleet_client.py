@@ -1111,6 +1111,12 @@ def _cloud_op(
     if status in (401, 403):
         return CloudDecision(False, "auth-failed", holder=fence)
     if status == 200 and payload.get(_CLOUD_OK_KEYS[action]) is True:
+        # The client minted the lease id and sent it in this request. Keep that
+        # request identity authoritative even if an older or malformed hub
+        # omits it from the public lease projection. Callers must always be able
+        # to bind, renew, or release a successful lease.
+        safe_lease = dict(safe_lease or {})
+        safe_lease["lease_id"] = lease
         return CloudDecision(True, "ok", lease=safe_lease, holder=fence)
     if status in (200, 409):
         return CloudDecision(False, "refused", lease=safe_lease, holder=fence)
