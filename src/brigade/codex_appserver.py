@@ -18,7 +18,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, NoReturn, cast
+from typing import Any, Callable, cast
 
 from . import proc as proc_mod
 
@@ -45,287 +45,11 @@ _DELTA_METHODS = frozenset(
     }
 )
 
-# #1200: bounded metadata salvage for oversized turn/completed records. The
-# record itself is never parsed or retained; a structural byte scanner walks
-# at most _METADATA_WINDOW bytes validating the exact salvage paths.
-_METADATA_WINDOW = 65536
-_MAX_SALVAGE_DEPTH = 128
-_STRING_ESCAPES = {
-    0x22: b'"',
-    0x5C: b"\\",
-    0x2F: b"/",
-    0x62: b"\b",
-    0x66: b"\f",
-    0x6E: b"\n",
-    0x72: b"\r",
-    0x74: b"\t",
-}
-_UTF8_REPLACEMENT = b"\xef\xbf\xbd"
-
-
-class _SalvageScanError(Exception):
-    """The oversized record is not a structurally valid salvage source."""
-
-
-class _SalvageTruncated(Exception):
-    """Internal unwind: input ended inside a value after the paths were captured."""
-
-
-class _BoundedRecordScanner:
-    """Byte-level structural JSON walker bounded by ``_METADATA_WINDOW``.
-
-    Only the exact salvage paths are extracted (top-level ``method``,
-    ``params.threadId``, ``params.turn.id``, ``params.turn.status``); every
-    other value is skipped structurally and strings are tracked so braces
-    inside them cannot desync the walk. Duplicate keys reject the record.
-    Because the reader hands salvage only a prefix of a genuinely oversized
-    record, an input end reached *inside a value* is tolerated once all four
-    exact-path fields are fully captured; any earlier end, or a cut between
-    tokens or mid-syntax, rejects the record.
-    """
-
-    def __init__(self, raw: bytes) -> None:
-        self._raw = raw
-        self._end = min(len(raw), _METADATA_WINDOW)
-        self._pos = 0
-        self._envelope_complete = False
-
-    def _fail(self) -> NoReturn:
-        raise _SalvageScanError
-
-    def _end_or_fail(self) -> NoReturn:
-        if self._envelope_complete:
-            raise _SalvageTruncated
-        self._fail()
-
-    def _skip_ws(self) -> None:
-        while self._pos < self._end and self._raw[self._pos] in (0x20, 0x09, 0x0A, 0x0D):
-            self._pos += 1
-
-    def _expect(self, byte: int) -> None:
-        self._skip_ws()
-        if self._pos >= self._end or self._raw[self._pos] != byte:
-            self._fail()
-        self._pos += 1
-
-    def _hex4(self) -> int:
-        if self._pos + 4 > self._end:
-            self._end_or_fail()
-        try:
-            value = int(self._raw[self._pos : self._pos + 4].decode("ascii"), 16)
-        except (UnicodeDecodeError, ValueError):
-            self._fail()
-        self._pos += 4
-        return value
-
-    def _unicode_escape(self) -> bytes:
-        code = self._hex4()
-        if 0xD800 <= code <= 0xDBFF:
-            if self._pos + 2 <= self._end and self._raw[self._pos] == 0x5C and self._raw[self._pos + 1] == 0x75:
-                self._pos += 2
-                low = self._hex4()
-                if 0xDC00 <= low <= 0xDFFF:
-                    code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
-            if 0xD800 <= code <= 0xDBFF:
-                return _UTF8_REPLACEMENT
-        elif 0xDC00 <= code <= 0xDFFF:
-            return _UTF8_REPLACEMENT
-        return chr(code).encode("utf-8")
-
-    def _scan_string(self) -> str:
-        self._expect(0x22)
-        out = bytearray()
-        while True:
-            if self._pos >= self._end:
-                self._end_or_fail()
-            byte = self._raw[self._pos]
-            if byte == 0x22:
-                self._pos += 1
-                return bytes(out).decode("utf-8", "replace")
-            if byte == 0x5C:
-                self._pos += 1
-                if self._pos >= self._end:
-                    self._end_or_fail()
-                escape = self._raw[self._pos]
-                if escape in _STRING_ESCAPES:
-                    out += _STRING_ESCAPES[escape]
-                    self._pos += 1
-                elif escape == 0x75:
-                    self._pos += 1
-                    out += self._unicode_escape()
-                else:
-                    self._fail()
-                continue
-            if byte < 0x20:
-                self._fail()
-            start = self._pos
-            while (
-                self._pos < self._end
-                and self._raw[self._pos] != 0x22
-                and self._raw[self._pos] != 0x5C
-                and self._raw[self._pos] >= 0x20
-            ):
-                self._pos += 1
-            out += self._raw[start : self._pos]
-
-    def _string_value(self) -> str:
-        self._skip_ws()
-        if self._pos >= self._end:
-            self._end_or_fail()
-        if self._raw[self._pos] != 0x22:
-            self._fail()
-        return self._scan_string()
-
-    def _skip_number(self) -> None:
-        start = self._pos
-        while self._pos < self._end and self._raw[self._pos] in b"+-.0123456789eE":
-            self._pos += 1
-        if self._pos == start:
-            self._fail()
-
-    def _skip_literal(self) -> None:
-        for literal in (b"true", b"false", b"null"):
-            end = self._pos + len(literal)
-            if end <= self._end and self._raw[self._pos : end] == literal:
-                self._pos = end
-                return
-        self._fail()
-
-    def _skip_member_value(self, key: str, level: int) -> None:
-        self._skip_value(level)
-
-    def _skip_value(self, depth: int) -> None:
-        if depth > _MAX_SALVAGE_DEPTH:
-            self._fail()
-        self._skip_ws()
-        if self._pos >= self._end:
-            self._end_or_fail()
-        lead = self._raw[self._pos]
-        if lead == 0x22:
-            self._scan_string()
-        elif lead == 0x7B:
-            self._scan_object(self._skip_member_value, depth + 1)
-        elif lead == 0x5B:
-            self._skip_array(depth + 1)
-        elif lead in b"-0123456789":
-            self._skip_number()
-        else:
-            self._skip_literal()
-
-    def _skip_array(self, depth: int) -> None:
-        if depth > _MAX_SALVAGE_DEPTH:
-            self._fail()
-        self._expect(0x5B)
-        self._skip_ws()
-        if self._pos < self._end and self._raw[self._pos] == 0x5D:
-            self._pos += 1
-            return
-        while True:
-            self._skip_value(depth)
-            self._skip_ws()
-            if self._pos >= self._end:
-                self._end_or_fail()
-            sep = self._raw[self._pos]
-            self._pos += 1
-            if sep == 0x2C:
-                continue
-            if sep == 0x5D:
-                return
-            self._fail()
-
-    def _scan_object(self, on_key: Callable[[str, int], None], depth: int) -> None:
-        if depth > _MAX_SALVAGE_DEPTH:
-            self._fail()
-        self._expect(0x7B)
-        seen: set[str] = set()
-        self._skip_ws()
-        if self._pos >= self._end:
-            self._end_or_fail()
-        if self._raw[self._pos] == 0x7D:
-            self._pos += 1
-            return
-        while True:
-            key = self._string_value()
-            if key in seen:
-                self._fail()
-            seen.add(key)
-            self._expect(0x3A)
-            on_key(key, depth)
-            self._skip_ws()
-            if self._pos >= self._end:
-                self._end_or_fail()
-            sep = self._raw[self._pos]
-            self._pos += 1
-            if sep == 0x2C:
-                continue
-            if sep == 0x7D:
-                return
-            self._fail()
-
-    def scan_turn_completed(self) -> tuple[str, str, str]:
-        """Return ``(thread_id, turn_id, status)`` from exact paths, or fail."""
-
-        method = ""
-        thread_id = ""
-        turn_id = ""
-        turn_status = ""
-
-        def refresh_complete() -> None:
-            self._envelope_complete = bool(method and thread_id and turn_id and turn_status)
-
-        def on_turn_key(key: str, level: int) -> None:
-            nonlocal turn_id, turn_status
-            if key == "id":
-                turn_id = self._string_value()
-            elif key == "status":
-                turn_status = self._string_value()
-            else:
-                self._skip_value(level)
-            refresh_complete()
-
-        def on_params_key(key: str, level: int) -> None:
-            nonlocal thread_id
-            if key == "threadId":
-                thread_id = self._string_value()
-            elif key == "turn":
-                self._scan_object(on_turn_key, level + 1)
-            else:
-                self._skip_value(level)
-            refresh_complete()
-
-        def on_root_key(key: str, level: int) -> None:
-            nonlocal method
-            if key == "method":
-                method = self._string_value()
-            elif key == "params":
-                self._scan_object(on_params_key, level + 1)
-            else:
-                self._skip_value(level)
-            refresh_complete()
-
-        try:
-            self._scan_object(on_root_key, 0)
-        except _SalvageTruncated:
-            pass
-        if method != "turn/completed" or not thread_id or not turn_id or not turn_status:
-            self._fail()
-        return thread_id, turn_id, turn_status
-
-
-def _salvage_completion_metadata(raw: bytes) -> tuple[str, str, str] | None:
-    """Extract ``(thread_id, turn_id, status)`` from an oversized record.
-
-    Returns ``None`` unless the record structurally validates as a complete
-    JSON object with top-level ``method == "turn/completed"`` and string
-    ``params.threadId``, ``params.turn.id``, ``params.turn.status``; duplicate
-    keys reject the record. The walk stays within ``_METADATA_WINDOW`` bytes
-    and the text is indexed, never materialized.
-    """
-
-    try:
-        return _BoundedRecordScanner(raw).scan_turn_completed()
-    except _SalvageScanError:
-        return None
+# #1200 round 4: completion is recorded only for records json.loads parsed
+# successfully; an oversized raw record (one the reader cannot hand to
+# json.loads within MAX_CAPTURE_BYTES) never signals completion. The map of
+# observed completions is bounded so interleaved turns cannot grow it forever.
+_MAX_OBSERVED_COMPLETIONS = 256
 
 
 def _byte_stream(stdout: Any) -> Any:
@@ -417,10 +141,10 @@ class AppServer:
         self._capture_budgets: dict[str, proc_mod.ByteBudget] = {}
         self._orphan_budget = proc_mod.ByteBudget()
         self._output_limit_exceeded = False
-        # #1200: thread id -> (turn id, status) of the active completion entry.
-        # One entry per thread: cleared by reset_capture before each turn and
-        # consumed once the over-cap result has been built.
-        self._observed_completions: dict[str, tuple[str, str]] = {}
+        # #1200: (thread id, turn id) -> status for every parsed turn/completed
+        # whose result has not been built yet. Keyed per turn so interleaved
+        # turns cannot erase each other's completions.
+        self._observed_completions: dict[tuple[str, str], str] = {}
 
     def __enter__(self) -> "AppServer":
         self.start()
@@ -528,16 +252,14 @@ class AppServer:
     def observed_completion_status(self, thread_id: str, turn_id: str) -> str | None:
         """#1200: status of a turn/completed observed on the stream, if any."""
 
-        entry = self._observed_completions.get(thread_id)
-        if entry is not None and entry[0] == turn_id:
-            return entry[1]
-        return None
+        with self._state_lock:
+            return self._observed_completions.get((thread_id, turn_id))
 
-    def consume_observed_completion(self, thread_id: str) -> None:
-        """#1200: drop the thread's active completion entry once used."""
+    def consume_observed_completion(self, thread_id: str, turn_id: str) -> str | None:
+        """#1200: atomically read-and-remove exactly this turn's entry."""
 
         with self._state_lock:
-            self._observed_completions.pop(thread_id, None)
+            return self._observed_completions.pop((thread_id, turn_id), None)
 
     def _note_turn_completed(self, thread_id: Any, turn: Any) -> None:
         if not isinstance(turn, dict):
@@ -546,12 +268,18 @@ class AppServer:
         status = turn.get("status")
         if isinstance(thread_id, str) and isinstance(turn_id, str):
             with self._state_lock:
-                self._observed_completions[thread_id] = (turn_id, status if isinstance(status, str) else "")
+                key = (thread_id, turn_id)
+                self._observed_completions.pop(key, None)
+                self._observed_completions[key] = status if isinstance(status, str) else ""
+                while len(self._observed_completions) > _MAX_OBSERVED_COMPLETIONS:
+                    del self._observed_completions[next(iter(self._observed_completions))]
 
     def reset_capture(self, thread_id: str) -> None:
         self._capture_budgets[thread_id] = proc_mod.ByteBudget()
         with self._state_lock:
-            self._observed_completions.pop(thread_id, None)
+            stale = [key for key in self._observed_completions if key[0] == thread_id]
+            for key in stale:
+                del self._observed_completions[key]
 
     def _attach(self, thread_id: str) -> "CodexThread":
         q: queue.Queue = queue.Queue()
@@ -602,14 +330,6 @@ class AppServer:
             except Exception:
                 pass
 
-    def _note_overflow_metadata(self, raw: bytes) -> None:
-        """#1200: preserve turn/completed metadata from an oversized record."""
-
-        salvaged = _salvage_completion_metadata(raw)
-        if salvaged is not None:
-            thread_id, turn_id, status = salvaged
-            self._observed_completions[thread_id] = (turn_id, status)
-
     def _trip_output_limit(self, line_bytes: int, thread_id: str | None = None) -> None:
         """Charge ``line_bytes`` against the cap (overflowing) and stop the child."""
 
@@ -629,7 +349,10 @@ class AppServer:
 
         A record larger than the cap is charged and rejected before
         ``json.loads``. Malformed or non-object records are charged too, so
-        they cannot bypass the cap by failing to parse.
+        they cannot bypass the cap by failing to parse. An oversized raw
+        record never signals completion (#1200): only a record json.loads
+        parses successfully records a turn/completed, including a parsed
+        record that then overflows the shared budget.
         """
 
         if self._output_limit_exceeded:
@@ -639,8 +362,6 @@ class AppServer:
             return True
         line_bytes = len(stripped)
         if line_bytes > proc_mod.MAX_CAPTURE_BYTES:
-            # #1200: preserve turn/completed metadata without retaining text.
-            self._note_overflow_metadata(stripped)
             self._trip_output_limit(line_bytes)
             return False
         try:
@@ -675,7 +396,6 @@ class AppServer:
             newline_at = leftover.find(b"\n")
             if newline_at < 0:
                 if len(leftover) > limit:
-                    self._note_overflow_metadata(bytes(leftover))
                     self._trip_output_limit(len(leftover))
                     leftover.clear()
                     break
@@ -918,28 +638,22 @@ class CodexThread:
         completed_texts.append(text)
         return True
 
-    def _completion_observed(self, turn_id: str) -> bool:
-        """#1200: salvage signal requires an observed turn/completed with status completed."""
-
-        getter = getattr(self._server, "observed_completion_status", None)
-        if not callable(getter):
-            return False
-        return getter(self.thread_id, turn_id) == "completed"
-
     def _output_limit_result(self, deltas: dict, completed_texts: list[str], turn_id: str = "") -> TurnResult:
-        result = TurnResult(
+        # #1200: one atomic read-and-remove of this exact turn's entry, so a
+        # sibling completion arriving between lookup and consume is never lost.
+        consume = getattr(self._server, "consume_observed_completion", None)
+        observed = None
+        if turn_id and callable(consume):
+            observed = consume(self.thread_id, turn_id)
+        return TurnResult(
             text=proc_mod.bound_text(self._salvage(deltas, completed_texts)),
             ok=False,
             status="failed",
             thread_id=self.thread_id,
             detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
             output_limit_exceeded=True,
-            completed_observed=bool(turn_id) and self._completion_observed(turn_id),
+            completed_observed=observed == "completed",
         )
-        consume = getattr(self._server, "consume_observed_completion", None)
-        if callable(consume):
-            consume(self.thread_id)
-        return result
 
     def _finish(self, completed, deltas: dict, completed_texts: list[str]) -> TurnResult:
         if completed is _DEAD:
