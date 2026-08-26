@@ -111,6 +111,18 @@ def test_fallback_recognizes_grok_config_and_blocks_raw_verification(tmp_path: P
     assert json.loads(result.stdout)["decision"] == "deny"
 
 
+def test_template_blocks_raw_focused_verify_without_matching_similar_names(tmp_path: Path):
+    target = tmp_path / "repo"
+    _write_config(target, ["grok"])
+
+    focused = _run_hook(tmp_path, _pre_tool_payload(target, "./scripts/verify-focused"))
+    similar = _run_hook(tmp_path, _pre_tool_payload(target, "./scripts/verify-focused-extra"))
+
+    assert "scripts/(verify-focused|verify)" in HOOK.read_text()
+    assert json.loads(focused.stdout)["decision"] == "deny"
+    assert json.loads(similar.stdout) == {"decision": "allow"}
+
+
 def test_direct_brigade_verify_is_allowed_but_substring_bypasses_are_denied(tmp_path: Path):
     target = tmp_path / "repo"
     _write_config(target, ["grok"])

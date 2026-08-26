@@ -256,6 +256,18 @@ def test_pretooluse_denies_raw_verification_with_exact_replacement(tmp_path: Pat
     assert "python -m pytest -q" in reason
 
 
+def test_pretooluse_denies_raw_focused_verify_without_matching_similar_names(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    result = runtime.handle_payload(
+        "PreToolUse",
+        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "./scripts/verify-focused"}),
+    )
+
+    assert runtime.is_raw_verification("./scripts/verify-focused")
+    assert not runtime.is_raw_verification("./scripts/verify-focused-extra")
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_pretooluse_avoids_recursion_and_false_positive_noise(tmp_path: Path):
     target = _wired_claude(tmp_path)
     for command in (
