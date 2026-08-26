@@ -15,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 
 _STREAM_ENCODING = "utf-8"
 MAX_CAPTURE_BYTES = 1_048_576
@@ -284,10 +284,15 @@ def _resume_windows_main_thread(kernel32: Any, pid: int) -> bool:
             return False
         try:
             # ResumeThread returns the previous suspend count; loop until the
-            # count reaches zero (or an error) instead of assuming one suspend.
+            # count reaches zero instead of assuming one suspend. A return of
+            # 0xFFFFFFFF is (DWORD)-1, i.e. failure: report it so the caller
+            # terminates the still-suspended child rather than leaving it
+            # frozen on its job assignment until timeout.
             for _ in range(32):
                 previous = resume_thread(thread)
-                if previous in (0, 0xFFFFFFFF):
+                if previous == 0xFFFFFFFF:
+                    return False
+                if previous == 0:
                     break
         finally:
             kernel32.CloseHandle(thread)
@@ -996,6 +1001,7 @@ def run(
     cwd: Optional[Path] = None,
     stdin: bytes | None = None,
     process_registry: ProcessRegistry | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> Result:
     windows_launch = os.name == "nt"
     child_job: _WindowsChildJob | None = None
@@ -1010,6 +1016,9 @@ def run(
                 stderr=f"command launch failed: {command} (owned process-tree job object is unavailable)",
             )
     try:
+        popen_kwargs: dict[str, Any] = dict(_process_group_kwargs(suspend=windows_launch))
+        if not windows_launch:
+            popen_kwargs["pass_fds"] = list(pass_fds)
         process = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
@@ -1018,7 +1027,7 @@ def run(
             env=env,
             cwd=cwd,
             shell=False,
-            **_process_group_kwargs(suspend=windows_launch),
+            **popen_kwargs,
         )
     except OSError as exc:
         code, message = _launch_failure(args, exc)

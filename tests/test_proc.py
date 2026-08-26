@@ -869,6 +869,119 @@ def test_windows_run_without_job_object_fails_closed_before_launch(monkeypatch):
     assert "worker.exe" in result.stderr
 
 
+class _FakeWindowsThreadHandle:
+    """Truthiness of a real HANDLE; identity only."""
+
+
+def _fake_windows_kernel32(resume_results, *, open_thread_handle="granted"):
+    """Minimal kernel32 standing in for tool-help enumeration of pid 555."""
+    calls: dict[str, list[object]] = {"resume": [], "closed": []}
+    thread_handle = _FakeWindowsThreadHandle()
+
+    class _FakeFunc:
+        """Callable tolerating the restype assignment real ctypes pointers accept."""
+
+        def __init__(self, fn):
+            self._fn = fn
+            self.restype = None
+
+        def __call__(self, *args, **kwargs):
+            return self._fn(*args, **kwargs)
+
+    def create_toolhelp(flags, source_pid):
+        return 424242
+
+    def thread_first(snapshot, entry):
+        fields = entry._obj
+        fields.th32OwnerProcessID = 555
+        fields.th32ThreadID = 777
+        return 1
+
+    def thread_next(snapshot, entry):
+        return 0
+
+    def open_thread(access, inherit, tid):
+        return thread_handle if open_thread_handle == "granted" else None
+
+    def resume_thread(thread):
+        result = resume_results.pop(0)
+        calls["resume"].append(result)
+        return result
+
+    def close_handle(handle):
+        calls["closed"].append(handle)
+        return 1
+
+    class FakeKernel32:
+        def __getattr__(self, name):
+            table = {
+                "createtoolhelp32snapshot": create_toolhelp,
+                "thread32first": thread_first,
+                "thread32next": thread_next,
+                "openthread": open_thread,
+                "resumethread": resume_thread,
+                "closehandle": close_handle,
+            }
+            fn = table.get(name.lower())
+            if fn is not None:
+                return _FakeFunc(fn)
+            raise AttributeError(name)
+
+    return FakeKernel32(), calls, thread_handle
+
+
+def test_windows_resume_reports_false_when_resumethread_fails():
+    """#1207 round 3: ResumeThread failure must not report a resumed child.
+
+    A CREATE_SUSPENDED child whose ResumeThread call returns (DWORD)-1 stays
+    frozen forever if launch reports success; the caller must see False so it
+    terminates the still-suspended process instead.
+    """
+    kernel32, calls, thread_handle = _fake_windows_kernel32([0xFFFFFFFF])
+
+    assert proc._resume_windows_main_thread(kernel32, 555) is False
+    assert calls["resume"] == [0xFFFFFFFF]
+    assert calls["closed"].count(thread_handle) == 1
+
+
+def test_windows_resume_reports_false_when_openthread_fails():
+    """#1207 round 3: an unopenable main thread is a resume failure."""
+    kernel32, calls, _thread = _fake_windows_kernel32([0], open_thread_handle=None)
+
+    assert proc._resume_windows_main_thread(kernel32, 555) is False
+    assert calls["resume"] == []
+    assert calls["closed"] == [424242], "only the tool-help snapshot handle should be closed"
+
+
+def test_windows_bind_terminates_suspended_child_when_resume_fails(monkeypatch):
+    """#1207 round 3: resume failure kills the suspended child via typed path."""
+    observed: dict[str, object] = {}
+
+    class ResumeFailingJob:
+        def assign(self, process_handle: int) -> bool:
+            return True
+
+        def resume(self, pid: int) -> bool:
+            return False
+
+        def terminate(self) -> bool:
+            raise AssertionError("the job owns nothing after a failed resume")
+
+        def close(self) -> None:
+            observed["closed"] = True
+
+    stub = _StubProcess()
+    stub._handle = 424242
+    stub.kill = lambda: observed.__setitem__("killed", True)
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    message = proc._bind_suspended_windows_child(ResumeFailingJob(), stub, ["worker.exe"])
+
+    assert "could not be resumed" in message
+    assert observed.get("killed") is True
+    assert observed.get("closed") is True
+
+
 def test_windows_run_terminates_suspended_child_when_assignment_fails(monkeypatch):
     """#1207 round 2: failed job assignment kills the still-suspended child; no taskkill orphan."""
 

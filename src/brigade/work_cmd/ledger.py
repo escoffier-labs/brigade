@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
+from .inbox_lock import scanner_inbox_run_lock, verify_inbox_lock
 from .. import component_paths, evidence_redaction, provenance, runguard, trust_gate
 from ..untrusted import scan_handoff_injection_heuristics
 
@@ -488,13 +489,36 @@ def _read_import_inbox_raw(target: Path) -> tuple[bytes, tuple[int, int, int, in
         _validate_import_inbox_descriptor(descriptor)
         before = os.fstat(descriptor)
         chunks: list[bytes] = []
+        snapshot_total = 0
         while chunk := os.read(descriptor, 1024 * 1024):
+            snapshot_total += len(chunk)
+            if snapshot_total > _IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES:
+                raise ImportInboxSnapshotLimitExceeded(
+                    f"import inbox exceeds {_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES} byte snapshot limit"
+                )
             chunks.append(chunk)
         after = os.fstat(descriptor)
         identity = (before.st_dev, before.st_ino, before.st_mode, before.st_nlink)
-        if identity != (after.st_dev, after.st_ino, after.st_mode, after.st_nlink):
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
             raise OSError("import inbox changed while snapshotting")
-        return b"".join(chunks), identity, True
+        raw = b"".join(chunks)
+        if len(raw) != before.st_size:
+            raise OSError("import inbox changed while snapshotting")
+        return raw, identity, True
     finally:
         if descriptor != -1:
             os.close(descriptor)
@@ -539,19 +563,27 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
 
 
 def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
-    """Publish the inbox through its retained parent without following a link."""
-    parent, name, previous_raw, previous_exists = _snapshot_import_inbox(target)
-    rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
-    try:
-        _write_import_inbox_bytes_at(
-            parent,
-            name,
-            rendered,
-            previous_raw=previous_raw,
-            previous_exists=previous_exists,
-        )
-    finally:
-        os.close(parent)
+    """Publish the inbox under the run-wide writer exclusion.
+
+    Every canonical writer holds the shared scanner-inbox lock so a
+    concurrent import, promote, or dismiss cannot interleave with scanner
+    stamping or rollback (reentrant, so callers already inside the lock are
+    unaffected).
+    """
+    with scanner_inbox_run_lock(target):
+        verify_inbox_lock(target)
+        parent, name, previous_raw, previous_exists = _snapshot_import_inbox(target)
+        rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
+        try:
+            _write_import_inbox_bytes_at(
+                parent,
+                name,
+                rendered,
+                previous_raw=previous_raw,
+                previous_exists=previous_exists,
+            )
+        finally:
+            os.close(parent)
 
 
 def _append_archived_imports(target: Path, imports: list[dict[str, Any]]) -> None:
@@ -3853,7 +3885,14 @@ def _import_envelope_matches(item: dict[str, Any]) -> bool:
 
 
 def _backfill_import_provenance(target: Path) -> dict[str, Any]:
+    """Stamp inferred envelopes under the run-wide inbox writer exclusion."""
+    with scanner_inbox_run_lock(target):
+        return _backfill_import_provenance_locked(target)
+
+
+def _backfill_import_provenance_locked(target: Path) -> dict[str, Any]:
     """Stamp inferred envelopes on inbox rows missing a valid matching envelope."""
+    verify_inbox_lock(target)
     imports = _read_imports(target)
     now = helpers._now().isoformat()
     updated: list[dict[str, Any]] = []
@@ -4156,6 +4195,38 @@ def _append_import_records(
     restore_existing_raw: Callable[[bytes, bool], None] | None = None,
     existing_imports: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Append records as one locked inbox read-modify-write transaction.
+
+    The shared scanner-inbox lock spans the read through the publication so a
+    concurrent import, promote, dismiss, or scanner run cannot interleave
+    (reentrant per process for callers already inside the lock).
+    """
+    with scanner_inbox_run_lock(target):
+        return _append_import_records_locked(
+            target,
+            records,
+            dry_run=dry_run,
+            provenance_source=provenance_source,
+            contain_provenance_errors=contain_provenance_errors,
+            migrate_untrusted_identities=migrate_untrusted_identities,
+            preserve_existing_raw=preserve_existing_raw,
+            restore_existing_raw=restore_existing_raw,
+            existing_imports=existing_imports,
+        )
+
+
+def _append_import_records_locked(
+    target: Path,
+    records: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
+    provenance_source: str | None = None,
+    contain_provenance_errors: bool = False,
+    migrate_untrusted_identities: bool = False,
+    preserve_existing_raw: Callable[[bytes], None] | None = None,
+    restore_existing_raw: Callable[[bytes, bool], None] | None = None,
+    existing_imports: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     imports = existing_imports if existing_imports is not None else _read_imports(target)
     existing = {
         _import_record_key(item)
@@ -4240,6 +4311,7 @@ def _append_import_records(
         if identity is not None:
             existing_by_source[identity] = item
     if imported and not dry_run:
+        verify_inbox_lock(target)
         inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
         published = False
         try:
@@ -4675,64 +4747,83 @@ def _promote_matching_imports(
 
     Each matching item is applied all-or-nothing in memory. The task ledger is
     flushed only after the late-window CAS succeeds, so a refused promote writes
-    no task files and a failed item cannot ride a later success.
+    no task files and a failed item cannot ride a later success. The task-ledger
+    lock is taken first, then the shared inbox writer lock spans the snapshot
+    through the final publication so scanner stamping or rollback cannot
+    interleave with the promote.
     """
-    with _task_ledger_lock(target):
-        snapshot = _capture_reviewed_import_snapshot(target)
-        reviewed_join = _import_snapshot_join_set(
-            snapshot.items,
-            kind=kind,
-            source=source,
-            metadata_filters=metadata_filters,
-        )
-        _after_reviewed_import_snapshot(target, snapshot)
-        _require_reviewed_import_snapshot(
-            target,
-            snapshot,
-            reviewed_join,
-            kind=kind,
-            source=source,
-            metadata_filters=metadata_filters,
-        )
-        matching = _matching_pending_imports(
+    with _task_ledger_lock(target), scanner_inbox_run_lock(target):
+        return _promote_matching_imports_locked(
             target,
             kind=kind,
             source=source,
             metadata_filters=metadata_filters,
-            imports=snapshot.items,
         )
-        ledger = _read_task_ledger(target)
-        promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
-        failed: list[tuple[dict[str, Any], Exception]] = []
-        created_any = False
-        for item in matching:
-            text = str(item.get("text") or "").strip()
-            if not text:
-                continue
-            tasks_before = list(ledger["tasks"])
-            edges_before = list(edges_mod.ensure_ledger_edges(ledger))
-            try:
-                task, created = _mark_import_promoted(target, item, ledger=ledger)
-            except (edges_mod.EdgeError, TaskLedgerError) as exc:
-                ledger["tasks"][:] = tasks_before
-                ledger["edges"] = edges_before
-                failed.append((item, exc))
-                continue
-            promoted.append((item, task, created))
-            created_any = created_any or created
-        _after_batch_import_promote_applied(target, snapshot)
-        _require_reviewed_import_snapshot(
-            target,
-            snapshot,
-            reviewed_join,
-            kind=kind,
-            source=source,
-            metadata_filters=metadata_filters,
-        )
-        if created_any:
-            _write_task_ledger(target, ledger)
-        _write_imports(target, snapshot.items)
-        return promoted, failed
+
+
+def _promote_matching_imports_locked(
+    target: Path,
+    *,
+    kind: str | None = None,
+    source: str | None = None,
+    metadata_filters: dict[str, str] | None = None,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any], bool]], list[tuple[dict[str, Any], Exception]]]:
+    verify_inbox_lock(target)
+    snapshot = _capture_reviewed_import_snapshot(target)
+    reviewed_join = _import_snapshot_join_set(
+        snapshot.items,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    _after_reviewed_import_snapshot(target, snapshot)
+    _require_reviewed_import_snapshot(
+        target,
+        snapshot,
+        reviewed_join,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    matching = _matching_pending_imports(
+        target,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+        imports=snapshot.items,
+    )
+    ledger = _read_task_ledger(target)
+    promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+    failed: list[tuple[dict[str, Any], Exception]] = []
+    created_any = False
+    for item in matching:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        tasks_before = list(ledger["tasks"])
+        edges_before = list(edges_mod.ensure_ledger_edges(ledger))
+        try:
+            task, created = _mark_import_promoted(target, item, ledger=ledger)
+        except (edges_mod.EdgeError, TaskLedgerError) as exc:
+            ledger["tasks"][:] = tasks_before
+            ledger["edges"] = edges_before
+            failed.append((item, exc))
+            continue
+        promoted.append((item, task, created))
+        created_any = created_any or created
+    _after_batch_import_promote_applied(target, snapshot)
+    _require_reviewed_import_snapshot(
+        target,
+        snapshot,
+        reviewed_join,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    if created_any:
+        _write_task_ledger(target, ledger)
+    _write_imports(target, snapshot.items)
+    return promoted, failed
 
 
 def _handoff_is_document_target(value: str) -> bool:

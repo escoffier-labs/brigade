@@ -9,7 +9,6 @@ import shutil
 import stat
 import sys
 import tempfile
-import threading
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -18,22 +17,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows does not provide flock.
-    fcntl = None  # type: ignore[assignment]
-
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - POSIX does not provide msvcrt.
-    msvcrt = None  # type: ignore[assignment]
-
 from .. import dogfood_cmd
 from .. import proc as proc_mod
 from ..install import apply_gitignore
-from . import constants, helpers, ledger as ledger_mod, config as config_mod
-
+from . import constants, helpers, inbox_lock, ledger as ledger_mod, config as config_mod
 from . import sweeps as sweeps_mod
+from .inbox_lock import scanner_inbox_run_lock as _scanner_inbox_run_lock
+from .inbox_lock import verify_inbox_lock as _verify_scanner_inbox_run_lock
+
+# Historical name kept for the writer-exclusion surface's existing callers/tests.
+_scanner_inbox_lock_path = inbox_lock.inbox_lock_path
 
 
 class ScannerInputLimitExceeded(OSError):
@@ -1271,6 +1264,7 @@ def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
 
 def _write_scanner_inbox_bytes_locked(target: Path, data: bytes) -> None:
     """Publish complete inbox bytes while holding the run-wide inbox lock."""
+    _verify_scanner_inbox_run_lock(target)
     parent, name, identities = _open_scanner_inbox_parent(target, create=True)
     temporary_name = _scanner_inbox_temp_name()
     temporary = -1
@@ -1402,71 +1396,6 @@ def _snapshot_scanner_inbox(target: Path) -> _ScannerInboxSnapshot:
         os.close(descriptor)
 
 
-_SCANNER_INBOX_PROCESS_LOCK = threading.Lock()
-_SCANNER_INBOX_LOCK_DEPTH: dict[str, int] = {}
-
-
-def _scanner_inbox_lock_path(target: Path) -> Path:
-    """Return the lock file beside the inbox for run-wide writer exclusion."""
-    inbox = _scanner_inbox_path(target)
-    return inbox.with_name(inbox.name + ".lock")
-
-
-@contextlib.contextmanager
-def _scanner_inbox_run_lock(target: Path) -> Iterator[None]:
-    """Hold the workspace's scanner-inbox writer exclusion for the block.
-
-    Honest Brigade writers in any process serialize on an adjacent
-    ``flock``/``msvcrt`` lock file (reentrant per process so nested writer
-    paths inside one run cannot self-deadlock). A same-UID attacker can ignore
-    the advisory lock; launch-time revalidation detects that case instead.
-    """
-    key = str(_scanner_inbox_lock_path(target))
-    fd = -1
-    with _SCANNER_INBOX_PROCESS_LOCK:
-        depth = _SCANNER_INBOX_LOCK_DEPTH.get(key, 0) + 1
-        _SCANNER_INBOX_LOCK_DEPTH[key] = depth
-    try:
-        if depth == 1:
-            lock_path = Path(key)
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(
-                str(lock_path),
-                os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOINHERIT", 0),
-                0o600,
-            )
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                elif msvcrt is not None:  # pragma: no cover - Windows only.
-                    while True:
-                        try:
-                            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                            break
-                        except OSError:
-                            continue
-            except BaseException:
-                os.close(fd)
-                fd = -1
-                raise
-        yield
-    finally:
-        with _SCANNER_INBOX_PROCESS_LOCK:
-            remaining = _SCANNER_INBOX_LOCK_DEPTH.get(key, 0) - 1
-            if remaining > 0:
-                _SCANNER_INBOX_LOCK_DEPTH[key] = remaining
-            else:
-                _SCANNER_INBOX_LOCK_DEPTH.pop(key, None)
-        if fd != -1:
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                elif msvcrt is not None:  # pragma: no cover - Windows only.
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            finally:
-                os.close(fd)
-
-
 def _revalidate_scanner_inbox_snapshot(target: Path, snapshot: _ScannerInboxSnapshot) -> None:
     """Refuse to launch unless the live inbox still matches its pre-run snapshot.
 
@@ -1476,6 +1405,7 @@ def _revalidate_scanner_inbox_snapshot(target: Path, snapshot: _ScannerInboxSnap
     modified the inbox in the gap aborts the run instead of having its rows
     stamped as scanner-created or clobbered by rollback.
     """
+    _verify_scanner_inbox_run_lock(target)
     try:
         descriptor = _open_scanner_inbox(target, os.O_RDONLY)
     except FileNotFoundError as exc:
@@ -1524,6 +1454,7 @@ def _restore_scanner_inbox_bytes(target: Path, data: bytes, exists: bool) -> Non
         _write_scanner_inbox_bytes(target, data)
         return
     with _scanner_inbox_run_lock(target):
+        _verify_scanner_inbox_run_lock(target)
         parent, name, identities = _open_scanner_inbox_parent(target, create=True)
         try:
             if not _scanner_inbox_parent_is_current(target, identities):
@@ -1566,6 +1497,7 @@ def _restore_scanner_inbox_snapshot_direct(
     snapshotted one.
     """
     with _scanner_inbox_run_lock(target):
+        _verify_scanner_inbox_run_lock(target)
         parent, name, identities = _open_scanner_inbox_parent(target, create=True)
         try:
             if not _scanner_inbox_parent_is_current(target, identities):
@@ -2174,6 +2106,10 @@ def _scanner_run_one(
                 covers = scanner_isolation.prepare_isolation_covers(sandbox)
                 argv = scanner_isolation.isolated_argv(argv, covers)
             timeout_seconds = float(scanner.get("timeout") or 300)
+            # Hand the held inbox lock to the child so a self-importing
+            # scanner joins its own run's exclusion window (via
+            # BRIGADE_INBOX_LOCK_FD) instead of deadlocking against it.
+            child_env.update(inbox_lock.child_lock_env(target))
             # Bounded streaming capture in its own process group: output is
             # capped, and overflow or timeout reaps the whole group so a
             # descendant holding the pipes cannot outlive the run.
@@ -2182,6 +2118,7 @@ def _scanner_run_one(
                 timeout=timeout_seconds,
                 env=child_env,
                 cwd=cwd,
+                pass_fds=inbox_lock.child_lock_pass_fds(target),
             )
         stdout = result.stdout
         stderr = result.stderr

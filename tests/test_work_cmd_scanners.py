@@ -4297,6 +4297,88 @@ def test_scanner_inbox_run_lock_blocks_other_process_writers(tmp_path):
     assert released.returncode == 2, f"lock still held after release: {released.stderr}"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symlinks")
+def test_scanner_inbox_run_lock_refuses_planted_symlink_lock_file(tmp_path):
+    """#1207 round 3: a symlink planted at the lock path must be refused."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"")
+    lock_path.symlink_to(outside)
+
+    with pytest.raises(OSError):
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            pass
+
+    assert outside.read_bytes() == b"", "the planted link target was locked or written"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX fifos")
+def test_scanner_inbox_run_lock_refuses_planted_fifo_lock_file(tmp_path):
+    """#1207 round 3: a FIFO planted at the lock path must be refused."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(lock_path)
+
+    with pytest.raises(OSError):
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            pass
+
+    assert lock_path.is_fifo(), "the FIFO was replaced by a regular lock file"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX hard links")
+def test_scanner_inbox_run_lock_refuses_multi_linked_lock_file(tmp_path):
+    """#1207 round 3: a multi-linked lock file must be refused."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    twin = tmp_path / "twin.lock"
+    twin.write_bytes(b"")
+    os.link(twin, lock_path)
+
+    with pytest.raises(OSError):
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            pass
+
+    assert twin.read_bytes() == b""
+
+
+def test_scanner_inbox_run_lock_detects_replaced_lock_file_during_run(tmp_path):
+    """#1207 round 3: replacing the locked inode mid-run refuses protected writes."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        held_identity = os.stat(lock_path, follow_symlinks=False)
+        lock_path.unlink()
+        replacement = tmp_path / "replacement.lock"
+        replacement.write_bytes(b"")
+        os.replace(replacement, lock_path)
+        assert os.stat(lock_path, follow_symlinks=False).st_ino != held_identity.st_ino
+
+        with pytest.raises(OSError, match="lock"):
+            scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"swap"}\n')
+
+
+def test_scanner_inbox_run_lock_verify_requires_held_lock(tmp_path):
+    """#1207 round 3: protected-write revalidation fails closed without the lock."""
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    with pytest.raises(OSError, match="not held"):
+        inbox_lock_mod.verify_inbox_lock(tmp_path)
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        inbox_lock_mod.verify_inbox_lock(tmp_path)
+
+
 def test_cleanup_failure_still_yields_failed_scanner_run_and_unblocks_reruns(tmp_path, monkeypatch):
     """#1207 round 2: a cleanup exception must not bypass the Result or strand a running receipt."""
     from brigade import proc as proc_mod
