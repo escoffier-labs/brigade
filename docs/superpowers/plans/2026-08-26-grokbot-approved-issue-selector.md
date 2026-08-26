@@ -39,7 +39,7 @@ Verification: focused Grok Bot tests, Ruff, Mypy through `scripts/verify`, docs 
 - Create: `tests/test_grokbot_scout_feed.py`
 - Create: `src/brigade/grokbot_scout_feed.py`
 
-- [ ] Add these fixtures and the first failing tests:
+- [x] Add these fixtures and the first failing tests:
 
 ```python
 from __future__ import annotations
@@ -119,7 +119,7 @@ def test_preflight_rejects_writable_policy_without_queue_state(
     assert not (tmp_path / ".brigade" / "cloud" / "grokbot").exists()
 ```
 
-- [ ] Run RED:
+- [x] Run RED:
 
 ```bash
 brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_grokbot_scout_feed.py -k 'preflight'" --capture brigade-work
@@ -127,7 +127,7 @@ brigade work verify run --target . --command ".venv/bin/pytest -q tests/test_gro
 
 Expect import failure because `grokbot_scout_feed` does not exist.
 
-- [ ] Implement the policy loader and discovery shell. Reuse `grokbot_feed._read_manifest_snapshot()` for the established owner and mode check, translate its error to `unsafe-policy`, and validate every value through `grokbot_jobs` validators:
+- [x] Implement the policy loader and discovery shell. Reuse `grokbot_feed._read_manifest_snapshot()` for the established owner and mode check, translate its error to `unsafe-policy`, and validate every value through `grokbot_jobs` validators:
 
 ```python
 POLICY_SCHEMA = "brigade.grokbot.scout-feed.v1"
@@ -186,9 +186,9 @@ def load_policy(path: Path) -> dict[str, object]:
 
 Return sorted unique numbers. Missing `gh`, nonzero exit, malformed JSON, unexpected fields, booleans, zero, or negative numbers raise stable reasons without including subprocess output.
 
-- [ ] Run GREEN with the Task 1 command. Add policy cases for wrong schema, missing approval, symlink, invalid repository, invalid paths, invalid commands, invalid timeout, invalid daily limit, missing `gh`, nonzero `gh`, and malformed output. Expect all to pass and leave queue state absent.
+- [x] Run GREEN with the Task 1 command. Add policy cases for wrong schema, missing approval, symlink, invalid repository, invalid paths, invalid commands, invalid timeout, invalid daily limit, missing `gh`, nonzero `gh`, and malformed output. Expect all to pass and leave queue state absent.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/grokbot_scout_feed.py tests/test_grokbot_scout_feed.py
