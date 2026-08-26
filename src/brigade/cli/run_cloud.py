@@ -70,6 +70,29 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_sweep.add_argument("--target", type=Path, default=Path("."))
     p_sweep.add_argument("--json", action="store_true")
 
+    p_setup = cloud_sub.add_parser("setup", help="Write local Codex Cloud environment configuration (no live task).")
+    p_setup.add_argument("--target", type=Path, default=Path("."))
+    p_setup.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
+    setup_src = p_setup.add_mutually_exclusive_group(required=True)
+    setup_src.add_argument("--env-var", help="Name of the environment variable holding the Codex Cloud env id.")
+    setup_src.add_argument("--env-id", help="Store a Codex Cloud env id locally. Prefer --env-var.")
+
+    p_doctor = cloud_sub.add_parser("doctor", help="Check Codex Cloud seat configuration without submitting a task.")
+    p_doctor.add_argument("--target", type=Path, default=Path("."))
+    p_doctor.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
+    p_doctor.add_argument("--json", action="store_true")
+
+    p_canary = cloud_sub.add_parser("canary", help="Bounded Codex Cloud inventory check. Never exec or apply.")
+    p_canary.add_argument("--target", type=Path, default=Path("."))
+    p_canary.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
+    p_canary.add_argument("--json", action="store_true")
+
     p_grokbot = cloud_sub.add_parser("grokbot", help="Manage the private local Grok Bot job queue.")
     grokbot_sub = p_grokbot.add_subparsers(dest="grokbot_command", metavar="<grokbot-command>")
     grokbot_sub.required = True
@@ -181,6 +204,8 @@ def dispatch(args) -> int:
 
     if command == "grokbot":
         return _dispatch_grokbot(args, target)
+    if command in {"setup", "doctor", "canary"}:
+        return _dispatch_codex_cloud_ops(args, target)
 
     from .. import cloud_tracker
 
@@ -310,6 +335,47 @@ def dispatch(args) -> int:
         print(report["note"])
         return 0
 
+    print(f"error: unknown cloud command: {command}", file=sys.stderr)
+    return 2
+
+
+def _dispatch_codex_cloud_ops(args, target: Path) -> int:
+    """Setup, doctor, and inventory canary for a Codex Cloud run seat."""
+    from .. import codex_cloud
+
+    if getattr(args, "provider", None) != "codex-cloud":
+        print("error: setup, doctor, and canary currently support --provider codex-cloud", file=sys.stderr)
+        return 2
+    command = args.run_cloud_command
+    if command == "setup":
+        try:
+            if args.env_var:
+                codex_cloud.save_environment_config(target, environment_id_env=args.env_var)
+            else:
+                codex_cloud.save_environment_config(target, environment_id=args.env_id)
+        except codex_cloud.CodexCloudConfigError:
+            print("error: invalid Codex Cloud setup", file=sys.stderr)
+            return 2
+        print("codex-cloud config saved")
+        return 0
+    if command == "doctor":
+        result = codex_cloud.doctor(target)
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(f"codex-cloud doctor: {'ok' if result['ok'] else 'fail'}")
+            print(f"environment_configured: {'yes' if result['environment_configured'] else 'no'}")
+        return 0 if result["ok"] else 1
+    if command == "canary":
+        result = codex_cloud.canary(target)
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(f"codex-cloud canary: {'ok' if result['ok'] else 'fail'}")
+            print(f"environment_configured: {'yes' if result['environment_configured'] else 'no'}")
+            print(f"task_count: {result['task_count']}")
+            print("apply: no")
+        return 0 if result["ok"] else 1
     print(f"error: unknown cloud command: {command}", file=sys.stderr)
     return 2
 

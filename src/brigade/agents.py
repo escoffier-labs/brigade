@@ -1007,14 +1007,24 @@ def run_agent(
                 ok=False,
                 detail="codex-cloud reference needs an environment id: codex-cloud:<env-id>",
             )
+        from . import codex_cloud
+
+        try:
+            env_id = codex_cloud.resolve_environment_id(env_id, target=cwd)
+        except codex_cloud.CodexCloudConfigError:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail="codex-cloud environment is not configured",
+                failure_phase="dispatch",
+                failure_kind="codex-cloud-env-unconfigured",
+            )
         if model is not None:
             return AgentResult(
                 text="",
                 ok=False,
                 detail="codex-cloud does not take a model pin; the cloud environment sets the model",
             )
-        from . import codex_cloud
-
         if process_registry is not None and _accepts_process_registry(codex_cloud.run_cloud_task):
             return codex_cloud.run_cloud_task(
                 prompt,

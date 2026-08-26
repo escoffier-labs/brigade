@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from brigade import cli, claude_cloud, cloud_tracker, cursor_cloud, fleet_client, grokbot_jobs, jules_cloud
+from brigade import cli, claude_cloud, cloud_tracker, codex_cloud, cursor_cloud, fleet_client, grokbot_jobs, jules_cloud
 
 
 NOW = datetime(2026, 8, 12, 20, 0, 0, tzinfo=timezone.utc)
@@ -22,6 +22,13 @@ def _iso(dt: datetime) -> str:
 
 def _prompt_hash(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def _isolate_hosted_providers(monkeypatch) -> None:
+    """Keep observe_providers tests off the host's live Cursor/Codex inventory."""
+    for key in ("CURSOR_API_KEY", "CURSOR_CLOUD_API_KEY", "BG_AGENT_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: [])
 
 
 def _grokbot_spec() -> dict[str, object]:
@@ -911,6 +918,7 @@ def test_observe_providers_does_not_call_claude_local_inventory(monkeypatch, tmp
         called.append(True)
         raise RuntimeError("claude local inventory must not be observed as cloud authority")
 
+    _isolate_hosted_providers(monkeypatch)
     monkeypatch.setattr(claude_cloud, "list_agents", fail_if_called)
     tasks, _github, _cursor_wired = cloud_tracker.observe_providers(tmp_path)
     assert tasks == {}
@@ -926,6 +934,7 @@ def test_local_claude_session_cannot_make_claude_cloud_registry_row_active(monke
         prompt_hash=_prompt_hash("x"),
         dispatched_at=_iso(NOW),
     )
+    _isolate_hosted_providers(monkeypatch)
     monkeypatch.setattr(
         claude_cloud,
         "list_agents",
@@ -1052,6 +1061,7 @@ def test_jules_cloud_registry_entry_with_branch_classifies_ready(tmp_path: Path)
 
 
 def test_observe_providers_includes_jules_inventory_when_key_present(monkeypatch, tmp_path: Path):
+    _isolate_hosted_providers(monkeypatch)
     monkeypatch.setenv("JULES_API_KEY", "fake-jules-key")
     monkeypatch.setattr(
         jules_cloud,
@@ -1069,6 +1079,7 @@ def test_observe_providers_includes_jules_inventory_when_key_present(monkeypatch
 
 
 def test_observe_providers_skips_jules_inventory_when_key_absent(monkeypatch, tmp_path: Path):
+    _isolate_hosted_providers(monkeypatch)
     monkeypatch.delenv("JULES_API_KEY", raising=False)
     monkeypatch.setattr(
         jules_cloud,

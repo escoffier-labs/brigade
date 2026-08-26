@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import agents, cloud_tracker, codex_cloud, fleet_client, proc
+from brigade import agents, cli, cloud_tracker, codex_cloud, fleet_client, proc
 
 
 def test_codex_cloud_ref_is_known_and_maps_to_codex():
@@ -831,3 +831,147 @@ class TestListTasks:
     def test_list_tasks_returns_empty_on_non_json_output(self, monkeypatch):
         monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(stdout="not json"))
         assert codex_cloud.list_tasks() == []
+
+
+class TestEnvironmentConfig:
+    def test_passthrough_literal_env_id(self, tmp_path):
+        assert codex_cloud.resolve_environment_id("env-123", target=tmp_path) == "env-123"
+
+    def test_env_var_selector_reads_named_variable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-from-var")
+        assert codex_cloud.resolve_environment_id("$CODEX_CLOUD_ENV", target=tmp_path) == "env-from-var"
+
+    def test_env_var_selector_missing_variable_fails(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CODEX_CLOUD_ENV", raising=False)
+        with pytest.raises(codex_cloud.CodexCloudConfigError, match="CODEX_CLOUD_ENV"):
+            codex_cloud.resolve_environment_id("$CODEX_CLOUD_ENV", target=tmp_path)
+
+    def test_configured_reads_env_var_reference(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-configured")
+        codex_cloud.save_environment_config(tmp_path, environment_id_env="CODEX_CLOUD_ENV")
+        assert codex_cloud.resolve_environment_id("configured", target=tmp_path) == "env-configured"
+
+    def test_configured_reads_inline_id_from_local_config(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CODEX_CLOUD_ENV", raising=False)
+        codex_cloud.save_environment_config(tmp_path, environment_id="env-local-file")
+        assert codex_cloud.resolve_environment_id("configured", target=tmp_path) == "env-local-file"
+
+    def test_configured_falls_back_to_default_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-default")
+        assert codex_cloud.resolve_environment_id("configured", target=tmp_path) == "env-default"
+
+    def test_configured_without_source_fails(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CODEX_CLOUD_ENV", raising=False)
+        with pytest.raises(codex_cloud.CodexCloudConfigError, match="configured"):
+            codex_cloud.resolve_environment_id("configured", target=tmp_path)
+
+    def test_config_file_does_not_store_secret_material(self, tmp_path):
+        path = codex_cloud.save_environment_config(tmp_path, environment_id_env="CODEX_CLOUD_ENV")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["schema"] == "brigade.codex-cloud-config/1"
+        assert payload["environment"] == {"kind": "env", "name": "CODEX_CLOUD_ENV"}
+        assert "env-" not in path.read_text(encoding="utf-8")
+
+    def test_run_agent_resolves_configured_before_dispatch(self, tmp_path, monkeypatch):
+        seen: dict[str, str] = {}
+
+        def fake_cloud_task(prompt, *, env_id, timeout, cwd=None, process_registry=None):
+            seen["env_id"] = env_id
+            return agents.AgentResult(text="ok", ok=True)
+
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-resolved")
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        monkeypatch.setattr(codex_cloud, "run_cloud_task", fake_cloud_task)
+        result = agents.run_agent("codex-cloud:configured", "fix it", cwd=tmp_path)
+        assert result.ok
+        assert seen["env_id"] == "env-resolved"
+
+    def test_run_agent_unresolved_configured_does_not_dispatch(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.delenv("CODEX_CLOUD_ENV", raising=False)
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        monkeypatch.setattr(
+            codex_cloud, "run_cloud_task", lambda *a, **k: calls.append(k) or agents.AgentResult(ok=True)
+        )
+        result = agents.run_agent("codex-cloud:configured", "fix it", cwd=tmp_path)
+        assert not result.ok
+        assert result.failure_kind == "codex-cloud-env-unconfigured"
+        assert calls == []
+
+    def test_canary_lists_tasks_and_never_execs_or_applies(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
+        fake = FakeRuns(
+            {
+                "list": [_result(stdout=json.dumps({"tasks": [{"id": "task_c01", "status": "COMPLETED"}]}))],
+                "exec": [_result(stdout="task_should_not_run")],
+                "apply": [_result(stdout="applied")],
+            }
+        )
+        monkeypatch.setattr(codex_cloud.proc, "run", fake)
+        report = codex_cloud.canary(tmp_path)
+        assert report["ok"] is True
+        assert report["environment_configured"] is True
+        assert report["task_count"] == 1
+        assert report["apply"] is False
+        assert "env-canary" not in json.dumps(report)
+        assert all(call[2] == "list" for call in fake.calls)
+
+
+def test_codex_cloud_configured_ref_is_known():
+    assert agents.is_known("codex-cloud:configured")
+    assert agents.is_known("codex-cloud:$CODEX_CLOUD_ENV")
+    assert agents.command_for("codex-cloud:configured") == "codex"
+
+
+class TestCodexCloudCli:
+    def test_setup_writes_env_var_reference(self, tmp_path, capsys):
+        rc = cli.main(
+            [
+                "run",
+                "cloud",
+                "setup",
+                "--provider",
+                "codex-cloud",
+                "--target",
+                str(tmp_path),
+                "--env-var",
+                "CODEX_CLOUD_ENV",
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "codex-cloud config saved" in out
+        payload = json.loads((tmp_path / ".brigade" / "cloud" / "codex.json").read_text(encoding="utf-8"))
+        assert payload["environment"] == {"kind": "env", "name": "CODEX_CLOUD_ENV"}
+
+    def test_setup_rejects_missing_source(self, tmp_path):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["run", "cloud", "setup", "--provider", "codex-cloud", "--target", str(tmp_path)])
+        assert exc.value.code == 2
+
+    def test_doctor_reports_unconfigured_without_env_id(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.delenv("CODEX_CLOUD_ENV", raising=False)
+        rc = cli.main(["run", "cloud", "doctor", "--provider", "codex-cloud", "--target", str(tmp_path), "--json"])
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert payload["environment_configured"] is False
+        assert "env-" not in json.dumps(payload)
+
+    def test_canary_cli_never_submits(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
+        calls = []
+
+        def fake_run(argv, timeout=30.0, env=None, cwd=None, process_registry=None):
+            calls.append(argv)
+            return _result(stdout=json.dumps({"tasks": []}))
+
+        monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+        rc = cli.main(["run", "cloud", "canary", "--provider", "codex-cloud", "--target", str(tmp_path), "--json"])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["apply"] is False
+        assert "env-canary" not in json.dumps(payload)
+        assert all(argv[2] == "list" for argv in calls)
+        assert not any(argv[2] in {"exec", "apply"} for argv in calls)

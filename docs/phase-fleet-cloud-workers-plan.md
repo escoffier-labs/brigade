@@ -247,19 +247,19 @@ implement the Cursor private cloud worker mode or the Claude self-hosted pool.
 - Modify `tests/test_codex_cloud.py`
 - Modify `src/brigade/agents.py` only if the adapter boundary requires it
 
-- [ ] Add failing tests proving admission happens before `codex cloud exec`, a
+- [x] Add failing tests proving admission happens before `codex cloud exec`, a
   denial invokes no provider process, submit failure releases the unbound lease,
   task ID binding follows submit, renewals follow running observations, and all
   terminal/error/timeout paths release capacity.
-- [ ] Add a failing test proving the diff is still returned but never applied.
-- [ ] Run the focused tests red through Brigade.
-- [ ] Wrap the existing Codex Cloud flow with `fleet_client` admission. Preserve
+- [x] Add a failing test proving the diff is still returned but never applied.
+- [x] Run the focused tests red through Brigade.
+- [x] Wrap the existing Codex Cloud flow with `fleet_client` admission. Preserve
   the current local registry, timeouts, process registry, prompt hashing, and
   result shape. Do not add automatic `codex cloud apply`.
-- [ ] Make hub auth/unavailability a stable fail-closed launch result when fleet
+- [x] Make hub auth/unavailability a stable fail-closed launch result when fleet
   is configured. No-hub developer environments keep the existing local behavior
   only when no hub is configured at all.
-- [ ] Run `tests/test_codex_cloud.py` and tracker regressions green through
+- [x] Run `tests/test_codex_cloud.py` and tracker regressions green through
   Brigade.
 - [ ] Commit `feat: gate Codex Cloud dispatch on fleet capacity`.
 

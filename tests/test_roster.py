@@ -675,6 +675,28 @@ def test_env_rejected_on_codex_cloud_seat(tmp_path):
         roster_mod.load_roster(_write(tmp_path, bad))
 
 
+def test_codex_cloud_configured_seat_loads_without_inline_env_id(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.cloud]\ncli = "codex-cloud:configured"\nrole = "cloud worker"\n'
+        '[limits]\nallow_models = ["codex", "codex-cloud:*"]\n'
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    assert loaded.agents["cloud"].cli == "codex-cloud:configured"
+
+
+def test_codex_cloud_env_var_seat_loads(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.cloud]\ncli = "codex-cloud:$CODEX_CLOUD_ENV"\nrole = "cloud worker"\n'
+        '[limits]\nallow_models = ["codex", "codex-cloud:*"]\n'
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    assert loaded.agents["cloud"].cli == "codex-cloud:$CODEX_CLOUD_ENV"
+
+
 def test_env_rejects_ref_and_inline_collision(tmp_path):
     bad = ENV_SEAT.replace(
         'CLAUDE_CONFIG_DIR = "/tmp/claudex-config"',

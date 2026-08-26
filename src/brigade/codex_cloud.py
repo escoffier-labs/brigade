@@ -1,20 +1,24 @@
 """Codex Cloud adapter: submit a task, poll to a terminal state, return the result.
 
-A roster seat references it as ``cli = "codex-cloud:<env-id>"`` (environment ids
-come from the Codex Cloud workspace; browse them with ``codex cloud``). The
-worker's text is the task's final status plus its unified diff. The diff is
-NEVER applied locally; apply it deliberately with ``codex cloud apply <task-id>``.
+A roster seat references it as ``cli = "codex-cloud:configured"`` (resolved
+from ``CODEX_CLOUD_ENV`` or ``brigade run cloud setup``) or
+``cli = "codex-cloud:<env-id>"``. Environment ids come from the Codex Cloud
+workspace UI; ``codex cloud list --json`` omits them. The worker's text is the
+task's final status plus its unified diff. The diff is NEVER applied locally;
+apply it deliberately with ``codex cloud apply <task-id>``.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from . import cloud_tracker, fleet_client, proc
+from . import cloud_tracker, fleet_client, localio, proc
 
 SUBMIT_TIMEOUT = 120.0
 POLL_TIMEOUT = 60.0
@@ -25,6 +29,15 @@ DEFAULT_MAX_ITEMS = 250
 DEFAULT_LIST_TIMEOUT = 10.0
 MAX_LIST_PAGES = 20
 MAX_LIST_LIMIT = 20
+CONFIGURED_SELECTOR = "configured"
+DEFAULT_ENV_VAR = "CODEX_CLOUD_ENV"
+CONFIG_SCHEMA = "brigade.codex-cloud-config/1"
+ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+class CodexCloudConfigError(ValueError):
+    """Raised when a Codex Cloud seat cannot resolve its environment id."""
+
 
 # Status keywords scanned (word-bounded, case-insensitive) in `codex cloud status`.
 TERMINAL_OK = ("ready", "completed", "succeeded", "applied", "finished")
@@ -107,6 +120,126 @@ def _verified_status(text: str) -> str | None:
         return None
     token = match.group(1).strip().lower().replace(" ", "_")
     return token if token in TERMINAL_FAIL + TERMINAL_OK + NONTERMINAL else None
+
+
+def config_path(target: Path) -> Path:
+    return Path(target).expanduser().resolve() / ".brigade" / "cloud" / "codex.json"
+
+
+def save_environment_config(
+    target: Path,
+    *,
+    environment_id: str | None = None,
+    environment_id_env: str | None = None,
+) -> Path:
+    """Write a local Codex Cloud environment reference. Prefer an env-var name."""
+    if (environment_id is None) == (environment_id_env is None):
+        raise CodexCloudConfigError("provide exactly one of environment_id or environment_id_env")
+    if environment_id_env is not None:
+        if not ENV_NAME_RE.fullmatch(environment_id_env):
+            raise CodexCloudConfigError("invalid environment variable name")
+        environment: dict[str, str] = {"kind": "env", "name": environment_id_env}
+    else:
+        value = (environment_id or "").strip()
+        if not value:
+            raise CodexCloudConfigError("environment_id is empty")
+        environment = {"kind": "value", "id": value}
+    path = config_path(target)
+    localio.write_json(path, {"schema": CONFIG_SCHEMA, "environment": environment})
+    path.chmod(0o600)
+    return path
+
+
+def load_environment_config(target: Path) -> dict[str, Any] | None:
+    path = config_path(target)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("schema") != CONFIG_SCHEMA:
+        return None
+    return data
+
+
+def _read_env_name(name: str, environ: Mapping[str, str]) -> str:
+    if not ENV_NAME_RE.fullmatch(name):
+        raise CodexCloudConfigError("invalid environment variable name")
+    value = (environ.get(name) or "").strip()
+    if not value:
+        raise CodexCloudConfigError(f"{name} is unset")
+    return value
+
+
+def _resolve_configured(target: Path, environ: Mapping[str, str]) -> str:
+    config = load_environment_config(target)
+    spec = config.get("environment") if isinstance(config, dict) else None
+    if isinstance(spec, dict):
+        kind = spec.get("kind")
+        if kind == "env" and isinstance(spec.get("name"), str):
+            return _read_env_name(spec["name"], environ)
+        if kind == "value" and isinstance(spec.get("id"), str) and spec["id"].strip():
+            return spec["id"].strip()
+    fallback = (environ.get(DEFAULT_ENV_VAR) or "").strip()
+    if fallback:
+        return fallback
+    raise CodexCloudConfigError("configured Codex Cloud environment is unavailable")
+
+
+def resolve_environment_id(
+    token: str,
+    *,
+    target: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve a roster token to a Codex Cloud environment id.
+
+    Literal tokens pass through. ``$NAME`` reads that process environment
+    variable. ``configured`` reads ``.brigade/cloud/codex.json`` or
+    ``CODEX_CLOUD_ENV``. The resolved id is never logged here.
+    """
+    raw = (token or "").strip()
+    if not raw:
+        raise CodexCloudConfigError("codex-cloud environment token is empty")
+    mapping = os.environ if environ is None else environ
+    root = Path(target) if target is not None else Path(".")
+    if raw.startswith("$"):
+        return _read_env_name(raw[1:], mapping)
+    if raw == CONFIGURED_SELECTOR:
+        return _resolve_configured(root, mapping)
+    return raw
+
+
+def doctor(target: Path, *, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Report whether a Codex Cloud seat can resolve an environment id."""
+    mapping = os.environ if environ is None else environ
+    try:
+        resolve_environment_id(CONFIGURED_SELECTOR, target=target, environ=mapping)
+        configured = True
+    except CodexCloudConfigError:
+        configured = False
+    return {
+        "ok": configured,
+        "environment_configured": configured,
+        "provider": "codex-cloud",
+    }
+
+
+def canary(target: Path, *, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Bounded inventory check. Never calls ``codex cloud exec`` or ``apply``."""
+    mapping = os.environ if environ is None else environ
+    try:
+        resolve_environment_id(CONFIGURED_SELECTOR, target=target, environ=mapping)
+    except CodexCloudConfigError:
+        return {"ok": False, "environment_configured": False, "task_count": 0, "apply": False}
+    tasks = list_tasks(cwd=target)
+    return {
+        "ok": True,
+        "environment_configured": True,
+        "task_count": len(tasks),
+        "apply": False,
+    }
 
 
 def _environment_id(task: dict[str, Any]) -> str | None:
