@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import stat as stat_module
 import sys
 from pathlib import Path
@@ -2521,3 +2522,328 @@ def test_user_profile_skill_packages_creates_no_directories(tmp_path, capsys):
     after = {p for p in tmp_path.rglob("*") if p.is_dir()}
     assert packages
     assert before == after
+
+
+# --- Round-5 review findings (PR #1211) -------------------------------------
+
+
+def _state_receipt(workspace: Path, skill_id: str, harness: str) -> dict:
+    return json.loads((workspace / ".brigade" / "skills" / "installs" / f"{skill_id}-{harness}.json").read_text())
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_install_refuses_source_swapped_between_lint_and_collection(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = _write_skill(tmp_path / "source")
+    real_collect = skills_cmd._collect_source_tree
+
+    def swap_then_collect(source_dir):
+        # The attacker swaps the registry generation after the lint read but
+        # before the bytes are collected; the swapped generation declares an
+        # unknown trust level and must never be installed unlinted.
+        (source_dir / "skill.json").write_text(
+            json.dumps({"id": "security-review", "title": "Security Review", "trust_level": "not-a-level"})
+        )
+        return real_collect(source_dir)
+
+    monkeypatch.setattr(skills_cmd, "_collect_source_tree", swap_then_collect)
+
+    rc = skills_cmd.install(workspace=workspace, skill=str(source), harness="claude", json_output=True)
+
+    captured = capsys.readouterr()
+    assert rc != 0, captured.out + captured.err
+    assert not (workspace / ".claude" / "skills" / "security-review").exists()
+
+
+def test_rollback_refuses_modified_snapshot_and_restores_pristine(tmp_path, capsys):
+    workspace, installed = _workspace_with_rollback_snapshot(tmp_path)
+    receipt_path = workspace / ".brigade" / "skills" / "installs" / "security-review-claude.json"
+    original_receipt = receipt_path.read_text()
+    stamp = Path(json.loads(original_receipt)["rollback_snapshot"]).name
+    snapshot_dir = workspace / ".brigade" / "skills" / "rollback" / "security-review" / "claude" / stamp
+    pristine = (snapshot_dir / "SKILL.md").read_bytes()
+    capsys.readouterr()
+
+    (snapshot_dir / "SKILL.md").write_bytes(b"# tampered snapshot\n")
+    rc = skills_cmd.rollback(workspace=workspace, skill="security-review", harness="claude")
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "fingerprint" in captured.err
+    assert installed.read_text() == "# B\n"
+    assert snapshot_dir.is_dir()
+
+    # an unbound legacy snapshot (no recorded fingerprint) is refused too
+    receipt = json.loads(original_receipt)
+    receipt["rollback_snapshot_fingerprint"] = None
+    receipt_path.write_text(json.dumps(receipt))
+    (snapshot_dir / "SKILL.md").write_bytes(pristine)
+    rc = skills_cmd.rollback(workspace=workspace, skill="security-review", harness="claude")
+
+    assert rc == 2
+    assert installed.read_text() == "# B\n"
+    assert snapshot_dir.is_dir()
+
+    # the pristine bound snapshot still rolls back
+    receipt_path.write_text(original_receipt)
+    rc = skills_cmd.rollback(workspace=workspace, skill="security-review", harness="claude", json_output=True)
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["target"] == "claude"
+    assert installed.read_bytes() == pristine
+    assert not snapshot_dir.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_publish_writes_proposal_through_anchor_not_symlinked_component(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim.json").write_text("keep\n")
+    proposals = workspace / ".brigade" / "skills" / "publish-proposals"
+    proposals.symlink_to(outside, target_is_directory=True)
+
+    rc = skills_cmd.publish(target=workspace, skill="security-review", scope="public")
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "state root" in captured.err or "state path" in captured.err or "refusing" in captured.err
+    assert [path.name for path in outside.iterdir()] == ["victim.json"]
+    assert not (workspace / ".brigade" / "skills" / "publish-proposals" / "security-review-public.json").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_inbox_accept_and_reject_refuse_symlinked_proposal_directory(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    capsys.readouterr()
+    other = _write_skill(tmp_path / "other-source", name="docs-review")
+    assert skills_cmd.inbox_add(target=workspace, source=other, summary="review", json_output=True) == 0
+    proposal_id = json.loads(capsys.readouterr().out)["proposal_id"]
+    inbox = workspace / ".brigade" / "skills" / "inbox"
+    real_name = sorted(path.name for path in inbox.iterdir())[0]
+    outside = tmp_path / "outside"
+    planted = outside / real_name
+    planted.mkdir(parents=True)
+    (planted / "proposal.json").write_text(
+        json.dumps({"proposal_id": real_name, "skill_id": "docs-review", "status": "pending"})
+    )
+    (planted / "skill").mkdir()
+    (planted / "skill" / "SKILL.md").write_text("# outside planted skill\n")
+    shutil.move(str(inbox / real_name), str(tmp_path / "real-proposal"))
+    (inbox / real_name).symlink_to(planted, target_is_directory=True)
+    capsys.readouterr()
+
+    rc_accept = skills_cmd.inbox_accept(target=workspace, proposal_id=proposal_id)
+    rc_reject = skills_cmd.inbox_reject(target=workspace, proposal_id=proposal_id, reason="no")
+
+    assert rc_accept == 2
+    assert rc_reject == 2
+    meta = json.loads((planted / "proposal.json").read_text())
+    assert meta["status"] == "pending"
+    # the import must never launder the outside tree into the registry
+    assert not (workspace / ".brigade" / "skills" / "registry" / "docs-review").exists()
+    assert (planted / "skill" / "SKILL.md").read_text() == "# outside planted skill\n"
+
+
+def test_pack_archive_never_honours_manifest_supplied_path(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    trusted = tmp_path / "trusted-victim"
+    trusted.mkdir()
+    (trusted / "precious.txt").write_text("do not move\n")
+    pack_id = "20990101-000000-forged-pack"
+    pack_dir = workspace / ".brigade" / "skills" / "packs" / pack_id
+    (pack_dir / "skills").mkdir(parents=True)
+    (pack_dir / "skill-pack.json").write_text(
+        json.dumps(
+            {"pack_id": pack_id, "created_at": "2099-01-01T00:00:00+00:00", "skill_count": 0, "path": str(trusted)}
+        )
+    )
+
+    rc = skills_cmd.pack_archive(target=workspace, pack_id=pack_id)
+
+    assert rc == 0
+    # the manifest-supplied physical path was never honoured as the move source
+    assert (trusted / "precious.txt").is_file()
+    archived = workspace / ".brigade" / "skills" / "packs-archive" / pack_id
+    assert (archived / "skill-pack.json").is_file()
+    assert not pack_dir.exists()
+
+
+def test_round5_commands_fail_closed_without_descriptor_anchor(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    capsys.readouterr()
+    candidate = _write_skill(tmp_path / "candidate-source", name="candidate-skill")
+    assert skills_cmd.inbox_add(target=workspace, source=candidate, summary="c", json_output=True) == 0
+    proposal_id = json.loads(capsys.readouterr().out)["proposal_id"]
+    pack_id = "20990101-000000-packed"
+    pack_dir = workspace / ".brigade" / "skills" / "packs" / pack_id
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "skill-pack.json").write_text(
+        json.dumps({"pack_id": pack_id, "created_at": "2099-01-01T00:00:00+00:00", "skill_count": 0})
+    )
+    monkeypatch.setattr(skills_cmd, "_HAS_DESCRIPTOR_ANCHOR", False)
+    capsys.readouterr()
+
+    assert skills_cmd.publish(target=workspace, skill="security-review", scope="public") == 2
+    assert not (workspace / ".brigade" / "skills" / "publish-proposals").exists()
+
+    assert skills_cmd.inbox_accept(target=workspace, proposal_id=proposal_id) == 2
+    inbox_meta = json.loads(next((workspace / ".brigade" / "skills" / "inbox").glob("*/proposal.json")).read_text())
+    assert inbox_meta["status"] == "pending"
+    assert not (workspace / ".brigade" / "skills" / "registry" / "candidate-skill").exists()
+
+    assert skills_cmd.inbox_reject(target=workspace, proposal_id=proposal_id, reason="r") == 2
+    inbox_meta = json.loads(next((workspace / ".brigade" / "skills" / "inbox").glob("*/proposal.json")).read_text())
+    assert inbox_meta["status"] == "pending"
+
+    assert skills_cmd.pack_build(target=workspace) == 2
+    assert [path.name for path in (workspace / ".brigade" / "skills" / "packs").iterdir()] == [pack_id]
+
+    assert skills_cmd.pack_archive(target=workspace, pack_id=pack_id) == 2
+    assert pack_dir.is_dir()
+    assert not (workspace / ".brigade" / "skills" / "packs-archive").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform cannot create FIFOs")
+@pytest.mark.skipif(not hasattr(signal, "alarm"), reason="platform lacks alarm-based hang detection")
+def test_install_refuses_fifo_receipt_and_history_without_blocking(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    assert skills_cmd.install(workspace=workspace, skill="security-review", harness="claude", json_output=True) == 0
+    capsys.readouterr()
+    installs = workspace / ".brigade" / "skills" / "installs"
+    original_receipt = (installs / "security-review-claude.json").read_bytes()
+
+    class _Alarm(BaseException):
+        pass
+
+    def _raise_alarm(*_args):
+        raise _Alarm()
+
+    previous_handler = signal.signal(signal.SIGALRM, _raise_alarm)
+    try:
+        (installs / "security-review-claude.json").unlink()
+        os.mkfifo(installs / "security-review-claude.json")
+        signal.alarm(10)
+        try:
+            rc_receipt = skills_cmd.install(
+                workspace=workspace, skill="security-review", harness="claude", force=True, json_output=True
+            )
+        except _Alarm:
+            pytest.fail("install blocked on a FIFO planted at the receipt path")
+        finally:
+            signal.alarm(0)
+        assert rc_receipt == 2
+        capsys.readouterr()
+
+        # restore a real receipt so only history.jsonl is hostile: the append
+        # primitive itself must refuse the FIFO instead of blocking on open
+        (installs / "security-review-claude.json").unlink()
+        (installs / "security-review-claude.json").write_bytes(original_receipt)
+        (installs / "history.jsonl").unlink(missing_ok=True)
+        os.mkfifo(installs / "history.jsonl")
+        signal.alarm(10)
+        try:
+            rc_history = skills_cmd.install(
+                workspace=workspace, skill="security-review", harness="claude", force=True, json_output=True
+            )
+        except _Alarm:
+            pytest.fail("install blocked on a FIFO planted at history.jsonl")
+        finally:
+            signal.alarm(0)
+        assert rc_history == 2
+        assert "error:" in capsys.readouterr().err
+    finally:
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_diff_and_history_reads_never_follow_symlinked_state_files(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    assert skills_cmd.install(workspace=workspace, skill="security-review", harness="claude", json_output=True) == 0
+    capsys.readouterr()
+    installs = workspace / ".brigade" / "skills" / "installs"
+    outside_receipt = tmp_path / "outside-receipt.json"
+    marker = {"schema_version": 3, "marker": "OUTSIDE-RECEIPT-MARKER"}
+    outside_receipt.write_text(json.dumps(marker))
+    (installs / "security-review-claude.json").unlink()
+    (installs / "security-review-claude.json").symlink_to(outside_receipt)
+    outside_history = tmp_path / "outside-history.jsonl"
+    outside_history.write_text('{"row": "OUTSIDE-HISTORY-MARKER"}\n')
+    (installs / "history.jsonl").unlink()
+    (installs / "history.jsonl").symlink_to(outside_history)
+
+    assert skills_cmd.diff(target=workspace, skill="security-review", harness="claude", json_output=True) == 0
+    diff_out = capsys.readouterr().out
+    assert "OUTSIDE-RECEIPT-MARKER" not in diff_out
+    assert json.loads(diff_out)["drift"]["receipt_known"] is False
+
+    assert skills_cmd.history(target=workspace, json_output=True) == 0
+    history_payload = json.loads(capsys.readouterr().out)
+    assert "OUTSIDE-HISTORY-MARKER" not in json.dumps(history_payload)
+    assert history_payload["count"] == 0
+
+    assert outside_receipt.read_text() == json.dumps(marker)
+    assert outside_history.read_text() == '{"row": "OUTSIDE-HISTORY-MARKER"}\n'
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_inbox_read_commands_refuse_outside_proposal_content(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    capsys.readouterr()
+    source = _write_skill(tmp_path / "leak-source", name="leaky-skill")
+    assert skills_cmd.inbox_add(target=workspace, source=source, summary="x", json_output=True) == 0
+    proposal_id = json.loads(capsys.readouterr().out)["proposal_id"]
+    inbox = workspace / ".brigade" / "skills" / "inbox"
+    real_name = sorted(path.name for path in inbox.iterdir())[0]
+
+    outside = tmp_path / "outside"
+    planted = outside / real_name
+    planted.mkdir(parents=True)
+    (planted / "proposal.json").write_text(
+        json.dumps(
+            {
+                "proposal_id": real_name,
+                "skill_id": "leaky-skill",
+                "status": "pending",
+                "marker": "OUTSIDE-PROPOSAL-MARKER",
+            }
+        )
+    )
+    (planted / "skill").mkdir()
+    (planted / "skill" / "SKILL.md").write_text("# OUTSIDE-SKILL-MARKER\n")
+    shutil.move(str(inbox / real_name), str(tmp_path / "real-proposal"))
+    (inbox / real_name).symlink_to(planted, target_is_directory=True)
+
+    assert skills_cmd.inbox_list(target=workspace, json_output=True) == 0
+    listing = json.loads(capsys.readouterr().out)
+    assert listing["proposal_count"] == 0
+    assert "OUTSIDE-PROPOSAL-MARKER" not in json.dumps(listing)
+
+    assert skills_cmd.inbox_show(target=workspace, proposal_id=proposal_id) == 2
+    assert "not found" in capsys.readouterr().err
+
+    assert skills_cmd.inbox_diff(target=workspace, proposal_id=proposal_id) == 2
+    diff_err = capsys.readouterr().err + capsys.readouterr().out
+    assert "OUTSIDE-SKILL-MARKER" not in diff_err
+
+    # a symlinked proposal file inside a plain proposal directory is refused too
+    plain = inbox / "20980101-000000-second"
+    plain.mkdir()
+    outside_file = tmp_path / "outside-meta.json"
+    outside_file.write_text('{"marker": "OUTSIDE-FILE-MARKER"}')
+    (plain / "proposal.json").symlink_to(outside_file)
+
+    assert skills_cmd.inbox_list(target=workspace, json_output=True) == 0
+    listing = json.loads(capsys.readouterr().out)
+    assert listing["proposal_count"] == 0
+    assert "OUTSIDE-FILE-MARKER" not in json.dumps(listing)
+    assert outside_file.read_text() == '{"marker": "OUTSIDE-FILE-MARKER"}'

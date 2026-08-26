@@ -16,6 +16,7 @@ import shlex
 import shutil
 import stat as stat_module
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1005,8 +1006,14 @@ def _write_state_file(anchor: _StateRootAnchor, *relative: str, data: bytes, mod
                 # Replace an existing file without O_TRUNC: open it, prove
                 # the descriptor is a single-link regular file, and only
                 # then truncate. A hardlink to an outside victim is
-                # refused before the victim loses a byte.
-                file_fd = os.open(relative[-1], _FILE_REPLACE_FLAGS, dir_fd=parent_fd)
+                # refused before the victim loses a byte. O_NONBLOCK keeps
+                # a planted FIFO from blocking the open itself; it has no
+                # effect once fstat proves the descriptor is a regular file.
+                file_fd = os.open(
+                    relative[-1],
+                    _FILE_REPLACE_FLAGS | _O_NONBLOCK,
+                    dir_fd=parent_fd,
+                )
                 _require_single_link_regular(file_fd, str(display))
             try:
                 os.ftruncate(file_fd, 0)
@@ -1037,7 +1044,10 @@ def _append_state_line(anchor: _StateRootAnchor, *relative: str, data: bytes) ->
                     next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
                 opened_chain.append(next_fd)
                 parent_fd = next_fd
-            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW | _CLOEXEC
+            # O_NONBLOCK keeps a planted FIFO from blocking the open itself;
+            # it has no effect once fstat proves the descriptor is a regular
+            # file, so appends to real state files behave exactly as before.
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW | _O_NONBLOCK | _CLOEXEC
             file_fd = os.open(relative[-1], flags, 0o644, dir_fd=parent_fd)
             try:
                 # Validate before the first byte moves: an append to a
@@ -1478,7 +1488,16 @@ def _state_entry_kind(anchor: _StateRootAnchor, *relative: str) -> str:
 def _read_tree_from_anchor(
     anchor: _StateRootAnchor, *relative: str
 ) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
-    """Read a plain directory subtree out of the anchored state root via descriptors."""
+    """Read a plain directory subtree out of the anchored state root via descriptors.
+
+    Without descriptor anchoring the subtree is collected through the
+    lstat-guarded fallback walker (symlinks skipped, hardlinks refused);
+    callers still fail closed on any anchored mutation they attempt with the
+    result.
+    """
+    if not _HAS_DESCRIPTOR_ANCHOR:
+        base = (anchor.workspace / ".brigade").joinpath(*relative)
+        return _collect_source_tree(base)
     dir_fd, opened = _anchor_open_chain(anchor, *relative)
     try:
         return _collect_fd_tree(dir_fd, (), (anchor.workspace / ".brigade").joinpath(*relative), "skills state")
@@ -1587,12 +1606,47 @@ def _install_targets(workspace: Path) -> tuple[str, ...]:
 
 
 def _latest_install_receipt(target: Path, skill_id: str, harness: str) -> dict[str, Any]:
-    latest_path = _installs_root(target) / f"{_slug(skill_id)}-{harness}.json"
-    return _read_json(latest_path) if latest_path.is_file() else {}
+    """Read the canonical receipt through the held state-root anchor.
+
+    A symlinked (or otherwise refused) receipt contributes no data: callers
+    report the installation as unknown instead of surfacing outside JSON.
+    """
+    try:
+        with _held_state_root(target) as state_anchor:
+            raw = _read_state_file_bytes(state_anchor, "skills", "installs", f"{_slug(skill_id)}-{harness}.json")
+    except SkillsStatePathError:
+        return {}
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _install_history(target: Path, skill_id: str | None = None, harness: str | None = None) -> list[dict[str, Any]]:
-    rows = _read_jsonl(_install_history_path(target))
+    """Read ``history.jsonl`` through the held state-root anchor.
+
+    A symlinked or refused history file yields no rows rather than following
+    the link to outside content.
+    """
+    try:
+        with _held_state_root(target) as state_anchor:
+            raw = _read_state_file_bytes(state_anchor, "skills", "installs", "history.jsonl")
+    except SkillsStatePathError:
+        raw = None
+    rows: list[dict[str, Any]] = []
+    if raw is not None:
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                rows.append(value)
     if skill_id is not None:
         rows = [row for row in rows if row.get("skill_id") == _slug(skill_id)]
     if harness is not None:
@@ -1785,26 +1839,55 @@ def install(
     if harness not in (*install_targets, "all"):
         print(f"error: unknown skill install target: {harness}", file=sys.stderr)
         return 2
-    lint_payload = _lint_payload(workspace, skill)
-    if not lint_payload["valid"]:
-        if json_output:
-            print(
-                json.dumps(
-                    {"workspace": str(workspace), "installed": False, "lint": lint_payload}, indent=2, sort_keys=True
-                )
-            )
-        else:
-            print(f"error: skill lint failed: {skill}", file=sys.stderr)
-        return 1
-    source_dir = Path(lint_payload["skill_dir"])
-    skill_id = _slug(str(lint_payload["skill_id"]))
-    metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
-    source_identity = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
-    version = str(metadata.get("version") or "0.1.0")
-    source_path = str(metadata.get("source") or source_dir)
-    # Collect the source tree exactly once, through held descriptors; every
-    # render, fingerprint, and copy below consumes only these bytes.
-    snapshot_dirs, snapshot_files = _collect_source_tree(source_dir)
+    # Resolve the source once (the metadata read here is discarded), then
+    # collect the source tree exactly once before anything validates it.
+    # Metadata, lint, rendering, and every fingerprint below consume only
+    # these collected bytes, so a source swapped between validation steps can
+    # never make the command install a generation nobody linted.
+    source_dir, _discarded_metadata, resolved_source = _load_skill(workspace, skill)
+    collected: tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]] | None = None
+    staged_dir: Path | None = None
+    staging_root: str | None = None
+    try:
+        snapshot_dirs, snapshot_files = _collect_source_tree(source_dir)
+        collected = (snapshot_dirs, snapshot_files)
+        with tempfile.TemporaryDirectory(prefix="brigade-install-lint-") as staging:
+            staged_dir = Path(staging) / source_dir.name
+            staging_root = staging
+            _write_snapshot_tree(snapshot_dirs, snapshot_files, staged_dir)
+            lint_payload = _lint_payload(Path(staging), str(staged_dir))
+    except SkillsStatePathError as exc:
+        lint_payload = {
+            "target": str(workspace),
+            "skill_dir": str(source_dir),
+            "skill_id": source_dir.name,
+            "valid": False,
+            "errors": [str(exc)],
+            "warnings": [],
+            "harness": None,
+            "render_errors": [],
+            "injection": {"flagged": False, "count": 0, "markers": []},
+            "metadata": {},
+            "source": {},
+            "agent_skills": {
+                "mode": "lenient",
+                "fields": {},
+                "diagnostics": [],
+                "allowed_tools_are_permissions": False,
+            },
+            "fingerprint": None,
+            "changelog": {"present": False, "path": None, "fingerprint": None, "headings": []},
+            "trust_score": {
+                "score": 0,
+                "trust_level": "unreviewed",
+                "signals": ["skill directory unreadable"],
+                "tests_declared": 0,
+                "changelog": {"present": False, "path": None, "fingerprint": None, "headings": []},
+            },
+        }
+    lint_payload["target"] = str(workspace)
+    lint_payload["skill_dir"] = str(source_dir)
+    snapshot_dirs, snapshot_files = collected if collected is not None else ([], {})
     source_skill_md = snapshot_files.get(("SKILL.md",))
     if source_skill_md is None:
         # The collector skips symlinks instead of following them: a symlinked
@@ -1824,10 +1907,46 @@ def install(
         else:
             print(f"error: {message}", file=sys.stderr)
         return 2
+    if not lint_payload["valid"]:
+        if json_output:
+            print(
+                json.dumps(
+                    {"workspace": str(workspace), "installed": False, "lint": lint_payload}, indent=2, sort_keys=True
+                )
+            )
+        else:
+            print(f"error: skill lint failed: {skill}", file=sys.stderr)
+        return 1
+    skill_id = _slug(str(lint_payload["skill_id"]))
+    metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
+    source_identity = dict(resolved_source)
+    source_identity["skill_version"] = str(metadata.get("version") or "0.1.0")
+    version = str(metadata.get("version") or "0.1.0")
+    source_path = str(metadata.get("source") or source_dir)
     snapshot_fingerprint = _files_fingerprint(snapshot_files)
+    # Provenance is derived from the original resolution; the fingerprints are
+    # derived from the collected snapshot. Together they describe exactly the
+    # generation that was linted and that the copies below materialize.
+    source_identity["fingerprint"] = snapshot_fingerprint
+    source_identity["metadata_fingerprint"] = _bytes_fingerprint(snapshot_files.get(("skill.json",)))
     lint_payload["fingerprint"] = snapshot_fingerprint
-    if isinstance(lint_payload.get("source"), dict):
-        lint_payload["source"]["fingerprint"] = snapshot_fingerprint
+    lint_payload["source"] = source_identity
+    # Trust scoring is provenance-sensitive: recompute it against the real
+    # resolution so a staged-lint run scores the skill exactly like a direct
+    # lint of the source would.
+    if staged_dir is not None:
+        lint_payload["trust_score"] = _trust_score_payload(staged_dir, metadata, lint_payload, source_identity)
+    # The staged copy must not leak its temporary location into output or
+    # receipts: report changelog paths against the real source directory.
+    trust_block = lint_payload.get("trust_score")
+    for container in (
+        lint_payload.get("changelog"),
+        trust_block.get("changelog") if isinstance(trust_block, dict) else None,
+    ):
+        if isinstance(container, dict):
+            path_text = container.get("path")
+            if staging_root is not None and isinstance(path_text, str) and path_text.startswith(staging_root):
+                container["path"] = str(source_dir / Path(path_text).relative_to(staging_root))
     targets = install_targets if harness == "all" else (harness,)
     receipts: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -1881,11 +2000,20 @@ def install(
             _require_plain_state_dirs(state_anchor, "skills", "rollback")
             previous_receipt = _previous_install_receipt(state_anchor, skill_id=skill_id, harness=install_target)
             rollback_snapshot: str | None = None
+            rollback_snapshot_fingerprint: str | None = None
             if dest.exists():
                 stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-")
                 rollback_dir = _rollback_root(workspace, skill_id, install_target) / stamp
-                _copy_tree_into_anchor(dest, state_anchor, "skills", "rollback", skill_id, install_target, stamp)
+                # Collect the about-to-be-replaced copy once and materialize
+                # the snapshot from those bytes; the snapshot fingerprint is
+                # recorded in the new receipt so rollback can prove the
+                # snapshot it restores is byte-identical to what was captured.
+                replaced_dirs, replaced_files = _collect_source_tree(dest)
+                _write_collected_tree_into_anchor(
+                    replaced_dirs, replaced_files, state_anchor, "skills", "rollback", skill_id, install_target, stamp
+                )
                 rollback_snapshot = str(rollback_dir)
+                rollback_snapshot_fingerprint = _files_fingerprint(replaced_files)
                 if under_state_root:
                     _remove_tree_in_anchor(state_anchor, *state_parts)
                 else:
@@ -1926,6 +2054,7 @@ def install(
                 "installed_fingerprint": installed_fingerprint,
                 "format": _adapter_map(workspace)[install_target].get("format"),
                 "rollback_snapshot": rollback_snapshot,
+                "rollback_snapshot_fingerprint": rollback_snapshot_fingerprint,
                 "previous_receipt": previous_receipt if previous_receipt else None,
                 "trust_score": lint_payload.get("trust_score"),
                 "changelog": lint_payload.get("changelog"),
@@ -2396,6 +2525,13 @@ def _sync_projection_plan(
             "installed_fingerprint": _sync_files_fingerprint(desired_files),
             "format": _adapter_map(workspace)[harness].get("format"),
             "rollback_snapshot": rollback_snapshot,
+            "rollback_snapshot_fingerprint": (
+                _files_fingerprint(
+                    {tuple(Path(relative).parts): data for relative, (data, _mode) in previous_files.items()}
+                )
+                if rollback_snapshot
+                else None
+            ),
             "previous_receipt": previous_receipt if previous_receipt else None,
             "trust_score": lint.get("trust_score"),
             "changelog": lint.get("changelog"),
@@ -2662,6 +2798,40 @@ def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = F
             under_state_root = install_rel.startswith(".brigade/")
             state_parts = tuple(part for part in install_rel.split("/") if part)[1:]
             dirs, files = _read_tree_from_anchor(state_anchor, *snapshot_rel)
+            # The snapshot lives in attacker-influenced state: treat it as
+            # untrusted input. It is only restored when its bytes match the
+            # fingerprint recorded for this installation at snapshot-capture
+            # time and when the same lint and rendered-text validation a fresh
+            # install runs accepts those bytes. Unbound legacy snapshots carry
+            # no recorded fingerprint and are refused outright.
+            recorded_snapshot_fingerprint = current_receipt.get("rollback_snapshot_fingerprint")
+            if not isinstance(recorded_snapshot_fingerprint, str) or not recorded_snapshot_fingerprint:
+                print(
+                    f"error: rollback snapshot carries no recorded fingerprint for {skill_id} on {harness}",
+                    file=sys.stderr,
+                )
+                return 2
+            snapshot_skill_md = files.get(("SKILL.md",))
+            snapshot_text = snapshot_skill_md.decode("utf-8", errors="replace") if snapshot_skill_md is not None else ""
+            if _files_fingerprint(files) != recorded_snapshot_fingerprint:
+                print(
+                    f"error: rollback snapshot does not match the fingerprint recorded for {skill_id} on {harness}",
+                    file=sys.stderr,
+                )
+                return 2
+            with tempfile.TemporaryDirectory(prefix="brigade-rollback-lint-") as staging:
+                staged = Path(staging) / "snapshot"
+                _write_snapshot_tree(dirs, files, staged)
+                snapshot_lint = _lint_payload(Path(staging), str(staged))
+            render_refusals = _rendered_skill_validation(snapshot_text, harness)
+            if render_refusals or not snapshot_lint.get("valid"):
+                problems = [*render_refusals, *(snapshot_lint.get("errors") or [])]
+                detail = "; ".join(problems[:5])
+                print(
+                    f"error: rollback snapshot failed validation for {skill_id} on {harness}: {detail}",
+                    file=sys.stderr,
+                )
+                return 2
             payload = {
                 "workspace": str(workspace),
                 "skill_id": skill_id,
@@ -2851,22 +3021,31 @@ def pack_build(*, target: Path, json_output: bool = False) -> int:
         return 2
     pack_id = f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-skill-pack"
     pack_dir = _skill_packs_root(target) / pack_id
-    skills_dir = pack_dir / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    payload = _skill_pack_payload(target)
-    payload.update({"pack_id": pack_id, "status": "built"})
-    for row in _iter_registry(target):
-        skill_dir = Path(str(row["skill_dir"]))
-        skill_id = _slug(str(row["metadata"].get("id") or skill_dir.name))
-        shutil.copytree(skill_dir, skills_dir / skill_id)
-    _write_json(pack_dir / "skill-pack.json", payload)
-    (pack_dir / "SKILL_PACK.md").write_text(
-        f"# Skill Pack {pack_id}\n\n"
-        f"- skills: {payload['skill_count']}\n"
-        f"- fingerprint: {payload['evidence_fingerprint']}\n"
-        f"- import: brigade skills pack import {pack_dir}\n",
-        encoding="utf-8",
-    )
+    try:
+        with _held_state_root(target) as state_anchor:
+            payload = _skill_pack_payload(target)
+            payload.update({"pack_id": pack_id, "status": "built"})
+            for row in _iter_registry(target):
+                skill_dir = Path(str(row["skill_dir"]))
+                skill_id = _slug(str(row["metadata"].get("id") or skill_dir.name))
+                _copy_tree_into_anchor(skill_dir, state_anchor, "skills", "packs", pack_id, "skills", skill_id)
+            _write_state_file(state_anchor, "skills", "packs", pack_id, "skill-pack.json", data=_json_bytes(payload))
+            _write_state_file(
+                state_anchor,
+                "skills",
+                "packs",
+                pack_id,
+                "SKILL_PACK.md",
+                data=(
+                    f"# Skill Pack {pack_id}\n\n"
+                    f"- skills: {payload['skill_count']}\n"
+                    f"- fingerprint: {payload['evidence_fingerprint']}\n"
+                    f"- import: brigade skills pack import {pack_dir}\n"
+                ).encode("utf-8"),
+            )
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     payload["path"] = str(pack_dir)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2940,29 +3119,90 @@ def pack_show(*, target: Path, pack_id: str, json_output: bool = False) -> int:
     return 0
 
 
+def _anchored_pack_manifest(anchor: _StateRootAnchor, name: str) -> dict[str, Any]:
+    """Read one pack manifest from the anchored packs root (never by external path)."""
+    raw = _read_state_file_bytes(anchor, "skills", "packs", name, "skill-pack.json")
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    pack, error = _find_skill_pack(target, pack_id)
-    if pack is None:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
-    source = Path(str(pack.get("path") or _skill_packs_root(target) / str(pack.get("pack_id"))))
-    destination = _skill_packs_archive_root(target) / source.name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        print(f"error: archived skill pack already exists: {destination}", file=sys.stderr)
+    archive_root = _skill_packs_archive_root(target)
+    try:
+        with _held_state_root(target) as state_anchor:
+            if not _HAS_DESCRIPTOR_ANCHOR:
+                raise _fallback_mutation_refusal("moves", archive_root)
+            # The archived entry is always a validated plain directory
+            # directly under the anchored packs root; a manifest-supplied
+            # physical path is never honoured as the move source.
+            candidates: list[tuple[str, dict[str, Any]]] = []
+            try:
+                packs_fd, packs_opened = _anchor_open_chain(state_anchor, "skills", "packs")
+            except SkillsStatePathError:
+                packs_fd, packs_opened = None, []
+            if packs_fd is not None:
+                try:
+                    for name in sorted(os.listdir(packs_fd)):
+                        try:
+                            st = os.lstat(name, dir_fd=packs_fd)
+                        except FileNotFoundError:
+                            continue
+                        if stat_module.S_ISDIR(st.st_mode):
+                            candidates.append((name, _anchored_pack_manifest(state_anchor, name)))
+                finally:
+                    for fd in reversed(packs_opened):
+                        os.close(fd)
+            if pack_id == "latest":
+                dated = [row for row in candidates if row[1]]
+                matches = [max(dated, key=lambda row: (str(row[1].get("created_at") or ""), row[0]))] if dated else []
+            else:
+                matches = [row for row in candidates if row[0].startswith(pack_id)]
+            if not matches:
+                print(f"error: skill pack not found: {pack_id}", file=sys.stderr)
+                return 1
+            if len(matches) > 1:
+                print(f"error: skill pack id is ambiguous: {pack_id}", file=sys.stderr)
+                return 1
+            pack_name, _manifest = matches[0]
+            destination = archive_root / pack_name
+            archive_fd, archive_opened = _anchor_open_chain(state_anchor, "skills", "packs-archive", create=True)
+            try:
+                packs_fd, packs_opened = _anchor_open_chain(state_anchor, "skills", "packs")
+                try:
+                    try:
+                        os.stat(pack_name, dir_fd=archive_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        print(f"error: archived skill pack already exists: {destination}", file=sys.stderr)
+                        return 2
+                    with _anchored_fs_errors(str(destination)):
+                        os.rename(pack_name, pack_name, src_dir_fd=packs_fd, dst_dir_fd=archive_fd)
+                finally:
+                    for fd in reversed(packs_opened):
+                        os.close(fd)
+            finally:
+                for fd in reversed(archive_opened):
+                    os.close(fd)
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
-    source.rename(destination)
     payload = {
         "target": str(target),
-        "pack_id": pack.get("pack_id"),
+        "pack_id": pack_name,
         "status": "archived",
         "archive_path": str(destination),
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    print(f"archived: {pack.get('pack_id')}")
+    print(f"archived: {pack_name}")
     print(f"path: {destination}")
     return 0
 
@@ -3225,6 +3465,10 @@ def serve_mcp(*, target: Path, json_output: bool = False, stdio: bool = False) -
 
 def publish(*, target: Path, skill: str, scope: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
+    scope_slug = _slug(scope)
+    if not scope_slug:
+        print(f"error: invalid publish scope: {scope}", file=sys.stderr)
+        return 2
     lint_payload = _lint_payload(target, skill)
     if not lint_payload["valid"]:
         print(f"error: skill lint failed: {skill}", file=sys.stderr)
@@ -3238,9 +3482,19 @@ def publish(*, target: Path, skill: str, scope: str, json_output: bool = False) 
         "created_at": _now(),
         "next": "Review provenance, compatibility, permissions, and rollback before sharing this skill.",
     }
-    out = target / ".brigade" / "skills" / "publish-proposals" / f"{_slug(str(lint_payload['skill_id']))}-{scope}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    _write_json(out, payload)
+    # The destination name is derived from validated slugs only; the write
+    # itself goes through the held state-root anchor, so a symlinked
+    # publish-proposals component refuses the command instead of redirecting
+    # it outside the workspace.
+    proposal_name = f"{_slug(str(lint_payload['skill_id']))}-{scope_slug}.json"
+    out = target / ".brigade" / "skills" / "publish-proposals" / proposal_name
+    try:
+        with _held_state_root(target) as state_anchor:
+            _require_plain_state_dirs(state_anchor, "skills", "publish-proposals")
+            _write_state_file(state_anchor, "skills", "publish-proposals", proposal_name, data=_json_bytes(payload))
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     payload["proposal_path"] = str(out)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -3917,10 +4171,6 @@ def import_issues(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
-def _proposal_path(target: Path, proposal_id: str) -> Path:
-    return _inbox_root(target) / _slug(proposal_id)
-
-
 def _proposal_meta_path(path: Path) -> Path:
     return path / "proposal.json"
 
@@ -3929,27 +4179,87 @@ def _proposal_skill_path(path: Path) -> Path:
     return path / "skill"
 
 
-def _read_proposal(path: Path) -> dict[str, Any]:
-    payload = _read_json(_proposal_meta_path(path))
-    payload.setdefault("proposal_id", path.name)
-    payload.setdefault("path", str(path))
-    return payload
+def _anchored_proposals(target: Path) -> list[tuple[str, dict[str, Any]]]:
+    """List inbox proposals through the held state-root anchor.
 
-
-def _proposal_paths(target: Path) -> list[Path]:
-    root = _inbox_root(target)
-    if not root.is_dir():
+    Only plain directories carrying a readable ``proposal.json`` contribute.
+    A symlinked inbox component refuses the whole listing, a symlinked
+    proposal directory is skipped, and a symlinked proposal file refuses that
+    entry: outside file contents can never reach the output.
+    """
+    entries: list[tuple[str, bytes]] = []
+    try:
+        with _held_state_root(target) as state_anchor:
+            if not _HAS_DESCRIPTOR_ANCHOR:
+                # lstat-guarded fallback for platforms without anchoring.
+                root = _inbox_root(target)
+                if root.is_symlink() or _is_reparse_point(root) or not root.is_dir():
+                    return []
+                for child in sorted(root.iterdir(), key=lambda item: item.name):
+                    if child.is_symlink() or _is_reparse_point(child) or not child.is_dir():
+                        continue
+                    meta = _proposal_meta_path(child)
+                    try:
+                        st = os.lstat(meta)
+                    except OSError:
+                        continue
+                    if stat_module.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0):
+                        continue
+                    if not stat_module.S_ISREG(st.st_mode):
+                        continue
+                    try:
+                        entries.append((child.name, meta.read_bytes()))
+                    except OSError:
+                        continue
+            else:
+                try:
+                    inbox_fd, opened = _anchor_open_chain(state_anchor, "skills", "inbox")
+                except SkillsStatePathError:
+                    return []
+                names: list[str] = []
+                try:
+                    for name in sorted(os.listdir(inbox_fd)):
+                        try:
+                            st = os.lstat(name, dir_fd=inbox_fd)
+                        except FileNotFoundError:
+                            continue
+                        if stat_module.S_ISDIR(st.st_mode):
+                            names.append(name)
+                finally:
+                    for fd in reversed(opened):
+                        os.close(fd)
+                for name in names:
+                    try:
+                        raw = _read_state_file_bytes(state_anchor, "skills", "inbox", name, "proposal.json")
+                    except SkillsStatePathError:
+                        continue
+                    if raw is not None:
+                        entries.append((name, raw))
+    except SkillsStatePathError:
         return []
-    return sorted([path for path in root.iterdir() if path.is_dir()], key=lambda p: p.name)
+    proposals: list[tuple[str, dict[str, Any]]] = []
+    for name, raw in entries:
+        try:
+            meta = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        meta.setdefault("proposal_id", name)
+        meta.setdefault("path", str(_inbox_root(target) / name))
+        proposals.append((name, meta))
+    return proposals
 
 
-def _resolve_proposal(target: Path, proposal_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
-    matches = [path for path in _proposal_paths(target) if path.name.startswith(_slug(proposal_id))]
+def _resolve_proposal(target: Path, proposal_id: str) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    """Resolve one proposal to its validated directory name under the anchor."""
+    slug = _slug(proposal_id)
+    matches = [(name, meta) for name, meta in _anchored_proposals(target) if name.startswith(slug)]
     if not matches:
         return None, None, f"skill proposal not found: {proposal_id}"
     if len(matches) > 1:
         return None, None, f"skill proposal id is ambiguous: {proposal_id}"
-    return matches[0], _read_proposal(matches[0]), None
+    return matches[0][0], matches[0][1], None
 
 
 def inbox_add(
@@ -4013,7 +4323,7 @@ def inbox_add(
 
 def inbox_list(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    proposals = [_read_proposal(path) for path in _proposal_paths(target)]
+    proposals = [meta for _name, meta in _anchored_proposals(target)]
     payload = {"target": str(target), "proposal_count": len(proposals), "proposals": proposals}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -4028,7 +4338,7 @@ def inbox_list(*, target: Path, json_output: bool = False) -> int:
 
 def inbox_show(*, target: Path, proposal_id: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    _, proposal, error = _resolve_proposal(target, proposal_id)
+    _name, proposal, error = _resolve_proposal(target, proposal_id)
     if proposal is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -4044,15 +4354,30 @@ def inbox_show(*, target: Path, proposal_id: str, json_output: bool = False) -> 
 
 def inbox_diff(*, target: Path, proposal_id: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    path, proposal, error = _resolve_proposal(target, proposal_id)
-    if path is None or proposal is None:
+    name, proposal, error = _resolve_proposal(target, proposal_id)
+    if name is None or proposal is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    proposed = _proposal_skill_path(path) / "SKILL.md"
-    existing = _skill_path(target, str(proposal.get("skill_id") or path.name)) / "SKILL.md"
-    before = existing.read_text(encoding="utf-8", errors="replace").splitlines() if existing.is_file() else []
-    after = proposed.read_text(encoding="utf-8", errors="replace").splitlines() if proposed.is_file() else []
-    diff = list(difflib.unified_diff(before, after, fromfile=str(existing), tofile=str(proposed), lineterm=""))
+    skill_id = _slug(str(proposal.get("skill_id") or name))
+    proposed_display = _inbox_root(target) / name / "skill" / "SKILL.md"
+    existing_display = _skill_path(target, skill_id) / "SKILL.md"
+    try:
+        with _held_state_root(target) as state_anchor:
+            # Both sides are read through the held anchor: the proposed tree
+            # via descriptor collection and the registry copy via the
+            # anchored reader, so symlinked components never drag outside
+            # file contents into the diff.
+            _proposal_dirs, proposed_files = _read_tree_from_anchor(state_anchor, "skills", "inbox", name, "skill")
+            existing_raw = _read_state_file_bytes(state_anchor, "skills", "registry", skill_id, "SKILL.md")
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    proposed_raw = proposed_files.get(("SKILL.md",))
+    before = existing_raw.decode("utf-8", errors="replace").splitlines() if existing_raw is not None else []
+    after = proposed_raw.decode("utf-8", errors="replace").splitlines() if proposed_raw is not None else []
+    diff = list(
+        difflib.unified_diff(before, after, fromfile=str(existing_display), tofile=str(proposed_display), lineterm="")
+    )
     payload = {
         "target": str(target),
         "proposal_id": proposal.get("proposal_id"),
@@ -4068,24 +4393,37 @@ def inbox_diff(*, target: Path, proposal_id: str, json_output: bool = False) -> 
 
 def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    path, proposal, error = _resolve_proposal(target, proposal_id)
-    if path is None or proposal is None:
+    name, proposal, error = _resolve_proposal(target, proposal_id)
+    if name is None or proposal is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
     if proposal.get("status") != "pending" and not force:
         print(f"error: skill proposal is not pending: {proposal.get('status')}", file=sys.stderr)
         return 2
-    payload, import_error, rc = _registry_import_payload(
-        target=target,
-        source=_proposal_skill_path(path),
-        skill_id=str(proposal.get("skill_id") or path.name),
-        force=force,
-    )
-    if payload is None:
-        print(f"error: {import_error}", file=sys.stderr)
-        return rc
-    proposal.update({"status": "accepted", "accepted_at": _now(), "registry": payload})
-    _write_json(_proposal_meta_path(path), proposal)
+    try:
+        with _held_state_root(target) as state_anchor:
+            # The proposal's skill tree is read back through the anchor and
+            # staged from those collected bytes; a symlinked proposal
+            # component can never redirect the import outside the held state
+            # root, and the status write below goes through the anchor too.
+            proposal_dirs, proposal_files = _read_tree_from_anchor(state_anchor, "skills", "inbox", name, "skill")
+            with tempfile.TemporaryDirectory(prefix="brigade-proposal-import-") as staging:
+                staged = Path(staging) / "skill"
+                _write_snapshot_tree(proposal_dirs, proposal_files, staged)
+                payload, import_error, rc = _registry_import_payload(
+                    target=target,
+                    source=staged,
+                    skill_id=str(proposal.get("skill_id") or name),
+                    force=force,
+                )
+            if payload is None:
+                print(f"error: {import_error}", file=sys.stderr)
+                return rc
+            proposal.update({"status": "accepted", "accepted_at": _now(), "registry": payload})
+            _write_state_file(state_anchor, "skills", "inbox", name, "proposal.json", data=_json_bytes(proposal))
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if json_output:
         print(json.dumps(proposal, indent=2, sort_keys=True))
         return rc
@@ -4097,12 +4435,17 @@ def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_ou
 
 def inbox_reject(*, target: Path, proposal_id: str, reason: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    path, proposal, error = _resolve_proposal(target, proposal_id)
-    if path is None or proposal is None:
+    name, proposal, error = _resolve_proposal(target, proposal_id)
+    if name is None or proposal is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    proposal.update({"status": "rejected", "rejected_at": _now(), "reason": reason})
-    _write_json(_proposal_meta_path(path), proposal)
+    try:
+        with _held_state_root(target) as state_anchor:
+            proposal.update({"status": "rejected", "rejected_at": _now(), "reason": reason})
+            _write_state_file(state_anchor, "skills", "inbox", name, "proposal.json", data=_json_bytes(proposal))
+    except SkillsStatePathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if json_output:
         print(json.dumps(proposal, indent=2, sort_keys=True))
         return 0
