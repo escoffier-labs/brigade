@@ -256,3 +256,58 @@ def test_daily_status_does_not_decode_full_operator_report_history(tmp_path, mon
         "(expected root cause: status_payload calls latest_report and candidate gathering "
         "re-enters report_health)"
     )
+
+
+def test_latest_json_payload_skips_oversized_artifact(tmp_path, monkeypatch):
+    """Oversized per-repo artifacts are referenced, not parsed into memory."""
+    import json as _json
+
+    from brigade.repos_cmd import fleet
+
+    root = tmp_path / "closeouts" / "20260101-000000-fake"
+    root.mkdir(parents=True)
+    big_payload = {"closeout_id": "fake-closeout", "padding": "x" * 4096}
+    (root / "closeout.json").write_text(_json.dumps(big_payload))
+    monkeypatch.setattr(fleet, "_LATEST_JSON_MAX_BYTES", 64)
+
+    payload = fleet._latest_json_payload(tmp_path / "closeouts", "closeout.json")
+
+    assert payload is not None
+    assert payload.get("oversized") is True
+    assert payload.get("path", "").endswith("closeout.json")
+    assert "padding" not in payload, (
+        "_latest_json_payload must not load artifact JSON larger than "
+        "fleet._LATEST_JSON_MAX_BYTES into memory; per-repo working set must stay bounded"
+    )
+
+
+def test_dirty_counts_streams_porcelain_output(tmp_path):
+    """Per-repo git status output is streamed line-by-line, not buffered whole."""
+    import subprocess
+    import tracemalloc
+
+    from brigade.repos_cmd import fleet
+
+    repo = tmp_path / "noisy-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    long_name = "f" * 200 + ".txt"
+    for index in range(800):
+        (repo / f"{index:04d}-{long_name}").write_text("fake\n")
+
+    tracemalloc.start()
+    try:
+        tracked, untracked = fleet._dirty_counts(repo)
+    finally:
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+    assert tracked == 0
+    assert untracked == 800
+    # Each porcelain line is ~205 bytes; the whole dump is ~164 KB. The old
+    # implementation held stdout plus a splitlines copy (>300 KB) at peak.
+    assert peak < 64 * 1024, (
+        f"_dirty_counts peak traced allocation was {peak} bytes for an ~164 KB "
+        "porcelain dump; it must stream lines instead of buffering the whole "
+        "per-repo subprocess output in memory"
+    )

@@ -296,6 +296,11 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     tool_health = tools_cmd.health(target)
     roadmap_health = roadmap_cmd.health(target)
     repo_health = repos_cmd.health(target)
+    # Reduce immediately: the raw fleet health embeds per-repo scan state that
+    # scales with repo count; holding it (plus every other section payload)
+    # until the return literal was the unbounded working set.
+    repo_fleet_section = _compact_repo_fleet_health(repo_health)
+    del repo_health
     pantry_health = pantry_cmd.status_payload(target)
     notification_health = notifications_cmd.health(target)
     context_health = context_cmd.health(target)
@@ -310,7 +315,15 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
-    handoff_drafts = handoff_cmd.draft_queue_payload(target)
+    handoff_drafts_full = handoff_cmd.draft_queue_payload(target)
+    handoff_drafts = {
+        "counts": handoff_drafts_full.get("counts"),
+        "issue_count": handoff_drafts_full.get("issue_count"),
+        "top_issue": handoff_drafts_full.get("top_issue"),
+        "latest_ingest_run": handoff_drafts_full.get("latest_ingest_run"),
+        "drafts": (handoff_drafts_full.get("drafts") or [])[:limit],
+    }
+    del handoff_drafts_full
     from ... import brief_sections
 
     return {
@@ -415,7 +428,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "patterns": roadmap_health["patterns"],
         },
         "repo_fleet": {
-            **_compact_repo_fleet_health(repo_health),
+            **repo_fleet_section,
         },
         "pantry": pantry_health,
         "notifications": notification_health,

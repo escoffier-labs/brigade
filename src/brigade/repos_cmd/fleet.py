@@ -394,16 +394,31 @@ def _git_value(repo: Path, *args: str) -> str | None:
 
 
 def _dirty_counts(repo: Path) -> tuple[int, int]:
-    result = _git(repo, "status", "--porcelain=v1")
-    if result.returncode != 0:
+    # Stream git's line output instead of capturing the whole porcelain dump in
+    # memory: a repo with a huge dirty/untracked set previously held every line
+    # in a single string at once.
+    if not repo.is_dir():
         return 0, 0
     tracked = 0
     untracked = 0
-    for line in result.stdout.splitlines():
-        if line.startswith("??"):
-            untracked += 1
-        elif line.strip():
-            tracked += 1
+    try:
+        proc = subprocess.Popen(
+            ["git", "-C", str(repo), "status", "--porcelain=v1"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return 0, 0
+    assert proc.stdout is not None
+    with proc.stdout:
+        for line in proc.stdout:
+            if line.startswith("??"):
+                untracked += 1
+            elif line.strip():
+                tracked += 1
+    if proc.wait() != 0:
+        return 0, 0
     return tracked, untracked
 
 
@@ -427,11 +442,23 @@ def _latest_json(root: Path, filename: str) -> str | None:
     return str(candidates[0]) if candidates else None
 
 
+_LATEST_JSON_MAX_BYTES = 8 * 1024 * 1024
+
+
 def _latest_json_payload(root: Path, filename: str) -> dict[str, Any] | None:
     path_value = _latest_json(root, filename)
     if path_value is None:
         return None
-    payload = _read_json(Path(path_value))
+    path = Path(path_value)
+    try:
+        oversized = path.stat().st_size > _LATEST_JSON_MAX_BYTES
+    except OSError:
+        oversized = False
+    if oversized:
+        # Artifact files can grow with repo history; keep a bounded reference
+        # instead of parsing an arbitrarily large JSON document into memory.
+        return {"path": path_value, "oversized": True}
+    payload = _read_json(path)
     if payload is not None:
         payload.setdefault("path", path_value)
     return payload
