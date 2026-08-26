@@ -1,13 +1,17 @@
 package app
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -141,51 +145,82 @@ func TestSearchSnippetDerivedFromVerifiedTextNotFTSRow(t *testing.T) {
 }
 
 // #1204: the stationtrail capability probe must block on any failure it
-// cannot positively attribute to a legacy scanner.
+// cannot positively attribute to a legacy scanner. Round 2: the same
+// executable controls both the unknown-command text and the parseable
+// --version output, so implicit legacy tolerance was forgeable; it now
+// additionally requires the operator to approve the executable's SHA-256
+// digest.
 func TestStationTrailProbeBlocksUnidentifiedFailures(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("sh shim test requires a posix shell")
 	}
-	shim := func(script string) string {
+	shim := func(script string) (string, string) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "stationtrail")
 		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		return dir
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(body)
+		return dir, hex.EncodeToString(sum[:])
 	}
+	forgedLegacy := `if [ "$1" = "--version" ]; then echo "stationtrail 0.1.2"; exit 0; fi; echo 'stationtrail: unknown command '"'"'capabilities'"'"'' >&2; exit 64`
 	cases := []struct {
-		name      string
-		script    string
-		wantBlock bool
+		name     string
+		script   string
+		approval string // "", "self", or "other"
+		wantPass bool
 	}{
 		{
-			name:      "malformed capabilities JSON blocks",
-			script:    `echo 'this is not json'; exit 0`,
-			wantBlock: true,
+			name:     "malformed capabilities JSON blocks",
+			script:   `echo 'this is not json'; exit 0`,
+			wantPass: false,
 		},
 		{
-			name:      "nonzero exit without legacy marker blocks",
-			script:    `echo 'fatal: cache corrupted' >&2; exit 9`,
-			wantBlock: true,
+			name:     "nonzero exit without legacy marker blocks",
+			script:   `echo 'fatal: cache corrupted' >&2; exit 9`,
+			wantPass: false,
 		},
 		{
-			name:      "positively identified legacy version is tolerated",
-			script:    `if [ "$1" = "--version" ]; then echo "stationtrail 0.1.2"; exit 0; fi; echo 'stationtrail: unknown command '"'"'capabilities'"'"'' >&2; exit 64`,
-			wantBlock: false,
+			name:     "forged legacy fingerprint with parseable version blocks without operator approval",
+			script:   forgedLegacy,
+			approval: "",
+			wantPass: false,
+		},
+		{
+			name:     "approval naming a different binary does not tolerate the forged legacy fingerprint",
+			script:   forgedLegacy,
+			approval: "other",
+			wantPass: false,
+		},
+		{
+			name:     "operator-approved executable digest tolerates the identified legacy version",
+			script:   forgedLegacy,
+			approval: "self",
+			wantPass: true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			withTempHome(t)
 			runOK(t, "init")
-			t.Setenv("PATH", shim(tc.script))
-			err := checkStationTrailCompat("codex")
-			if tc.wantBlock && err == nil {
-				t.Fatal("unidentified probe failure was tolerated as a compatible legacy scanner")
+			dir, digest := shim(tc.script)
+			switch tc.approval {
+			case "self":
+				t.Setenv(stationTrailApprovedDigestsEnv, digest)
+			case "other":
+				t.Setenv(stationTrailApprovedDigestsEnv, strings.Repeat("a", 64))
 			}
-			if !tc.wantBlock && err != nil {
-				t.Fatalf("identified legacy scanner blocked: %v", err)
+			t.Setenv("PATH", dir)
+			err := checkStationTrailCompat("codex")
+			if tc.wantPass && err != nil {
+				t.Fatalf("approved scanner blocked: %v", err)
+			}
+			if !tc.wantPass && err == nil {
+				t.Fatal("unidentified probe failure was tolerated as a compatible legacy scanner")
 			}
 		})
 	}
@@ -328,5 +363,277 @@ func TestEvidenceBundleCacheRejectsMissingMAC(t *testing.T) {
 	}
 	if _, err := loadEvidenceBundleRef(id); err == nil {
 		t.Fatal("bundle without authentication was accepted")
+	}
+}
+
+// Round-2 sendback helpers.
+
+func writeEvidenceMACKeyFile(t *testing.T, data []byte, perm os.FileMode) string {
+	t.Helper()
+	path := evidenceBundleMACKeyPath()
+	if err := security.EnsurePrivateDir(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, perm); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, perm); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// #1201 round 2: loading the MAC key must validate it is a regular file,
+// owned by the current uid, mode 0600, exactly 32 bytes — refusing otherwise
+// with a typed error instead of sealing bundles with an attacker-supplied key.
+func TestEvidenceBundleMACKeyLoadValidatesFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix key-file semantics (symlinks, uid, modes)")
+	}
+	withTempHome(t)
+	runOK(t, "init")
+
+	t.Run("generated key reloads", func(t *testing.T) {
+		key, err := loadOrCreateEvidenceBundleMACKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		reloaded, err := loadOrCreateEvidenceBundleMACKey()
+		if err != nil {
+			t.Fatalf("valid generated key refused on reload: %v", err)
+		}
+		if !bytes.Equal(key, reloaded) {
+			t.Fatal("reload returned a different key than was generated")
+		}
+	})
+
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, path string)
+		reason string
+	}{
+		{
+			name: "symlinked key file refused",
+			mutate: func(t *testing.T, path string) {
+				target := filepath.Join(filepath.Dir(path), "elsewhere.key")
+				if err := os.WriteFile(target, bytes.Repeat([]byte{7}, 32), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+			reason: "refusing to open",
+		},
+		{
+			name: "directory instead of regular file refused",
+			mutate: func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			reason: "not a regular file",
+		},
+		{
+			name: "group-readable mode refused",
+			mutate: func(t *testing.T, path string) {
+				writeEvidenceMACKeyFile(t, bytes.Repeat([]byte{7}, 32), 0o644)
+			},
+			reason: "want 0600",
+		},
+		{
+			name: "oversized key file refused",
+			mutate: func(t *testing.T, path string) {
+				writeEvidenceMACKeyFile(t, bytes.Repeat([]byte{7}, 40), 0o600)
+			},
+			reason: "expected exactly 32 bytes",
+		},
+		{
+			name: "short key file refused",
+			mutate: func(t *testing.T, path string) {
+				writeEvidenceMACKeyFile(t, bytes.Repeat([]byte{7}, 8), 0o600)
+			},
+			reason: "expected exactly 32 bytes",
+		},
+		{
+			name: "empty key file refused",
+			mutate: func(t *testing.T, path string) {
+				writeEvidenceMACKeyFile(t, nil, 0o600)
+			},
+			reason: "expected exactly 32 bytes",
+		},
+		{
+			name: "foreign-owner key file refused",
+			mutate: func(t *testing.T, path string) {
+				writeEvidenceMACKeyFile(t, bytes.Repeat([]byte{7}, 32), 0o600)
+				if err := os.Chown(path, os.Getuid()+1337, -1); err != nil {
+					t.Skipf("cannot chown to a foreign uid as this user: %v", err)
+				}
+			},
+			reason: "owned by uid",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := evidenceBundleMACKeyPath()
+			tc.mutate(t, path)
+			key, err := loadOrCreateEvidenceBundleMACKey()
+			if err == nil {
+				t.Fatalf("malformed MAC key accepted (%s): sealed bundles would use attacker-controlled bytes", tc.name)
+			}
+			var keyErr *EvidenceMACKeyError
+			if !errors.As(err, &keyErr) {
+				t.Fatalf("refusal is not a typed *EvidenceMACKeyError: %v", err)
+			}
+			if !strings.Contains(keyErr.Error(), tc.reason) {
+				t.Fatalf("typed error %q does not mention %q", keyErr.Error(), tc.reason)
+			}
+			if key != nil {
+				t.Fatal("refused load returned key material")
+			}
+		})
+	}
+
+	// After every refusal above the file may be gone or damaged; a fresh
+	// environment must still be able to regenerate cleanly.
+	t.Run("recovers by regenerating after refusal", func(t *testing.T) {
+		withTempHome(t)
+		runOK(t, "init")
+		path := evidenceBundleMACKeyPath()
+		writeEvidenceMACKeyFile(t, []byte("too short"), 0o644)
+		if _, err := loadOrCreateEvidenceBundleMACKey(); err == nil {
+			t.Fatal("damaged key accepted")
+		}
+		os.Remove(path)
+		key, err := loadOrCreateEvidenceBundleMACKey()
+		if err != nil || len(key) != 32 {
+			t.Fatalf("regeneration after refusal failed: %v", err)
+		}
+	})
+}
+
+// #1201 round 2: concurrent first use must produce one shared key, never two
+// competing keys where a bundle gets sealed with the loser.
+func TestEvidenceBundleMACKeyConcurrentFirstUseAgreesOnOneKey(t *testing.T) {
+	const racers = 8
+	// Each round races creation in a fresh HOME; several rounds make a
+	// competing-key loss deterministic to catch instead of timing-lucky.
+	for round := 0; round < 12; round++ {
+		t.Run(fmt.Sprintf("round-%02d", round), func(t *testing.T) {
+			withTempHome(t)
+			runOK(t, "init")
+			start := make(chan struct{})
+			keys := make([][]byte, racers)
+			errs := make([]error, racers)
+			var wg sync.WaitGroup
+			for i := 0; i < racers; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					<-start
+					keys[i], errs[i] = loadOrCreateEvidenceBundleMACKey()
+				}(i)
+			}
+			close(start)
+			wg.Wait()
+			for i, err := range errs {
+				if err != nil {
+					t.Fatalf("racer %d failed: %v", i, err)
+				}
+				if len(keys[i]) != 32 {
+					t.Fatalf("racer %d returned %d-byte key", i, len(keys[i]))
+				}
+			}
+			for i := 1; i < racers; i++ {
+				if !bytes.Equal(keys[0], keys[i]) {
+					t.Fatalf("concurrent initializers disagreed: racer 0 and racer %d hold different keys; a bundle sealed with the loser would not verify", i)
+				}
+			}
+			onDisk, err := os.ReadFile(evidenceBundleMACKeyPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(onDisk) != 32 {
+				t.Fatalf("on-disk key is %d bytes, want 32", len(onDisk))
+			}
+			if !bytes.Equal(onDisk, keys[0]) {
+				t.Fatal("on-disk winner differs from the loaded keys")
+			}
+			if runtime.GOOS != "windows" {
+				info, err := os.Stat(evidenceBundleMACKeyPath())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if info.Mode().Perm() != 0o600 {
+					t.Fatalf("on-disk key mode = %o, want 600", info.Mode().Perm())
+				}
+			}
+		})
+	}
+}
+
+// #1205 round 2: scanner stderr retained for diagnostics is capped.
+func TestCappedWriterBoundsRetainedBytes(t *testing.T) {
+	w := &cappedWriter{limit: maxScannerStderrBytes}
+	big := bytes.Repeat([]byte("e"), int(maxScannerStderrBytes)+1024)
+	if n, err := w.Write(big); err != nil || n != len(big) {
+		t.Fatalf("Write reported n=%d err=%v, want full count with no error", n, err)
+	}
+	got := w.String()
+	if int64(len(got)) > maxScannerStderrBytes+256 {
+		t.Fatalf("retained %d bytes for a %d byte cap", len(got), maxScannerStderrBytes)
+	}
+	if !w.truncated || !strings.Contains(got, "truncated") {
+		t.Fatalf("truncation not surfaced: truncated=%v tail=%q", w.truncated, got[max(0, len(got)-120):])
+	}
+	small := &cappedWriter{limit: maxScannerStderrBytes}
+	if _, err := small.Write([]byte("boom: real cause")); err != nil {
+		t.Fatal(err)
+	}
+	if small.truncated || !strings.Contains(small.String(), "real cause") {
+		t.Fatalf("small stderr lost or marked: %q truncated=%v", small.String(), small.truncated)
+	}
+}
+
+// #1205 round 2: end-to-end — a scanner that floods stderr cannot make the
+// engine buffer an unbounded amount of scanner-controlled text.
+func TestScannerStderrIsCappedInProbeRunner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sh shim test requires a posix shell")
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\nhead -c %d /dev/zero >&2\nexit 7\n", maxScannerStderrBytes*4)
+	if err := os.WriteFile(filepath.Join(dir, "stationtrail"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", dir)
+	defer t.Setenv("PATH", oldPath)
+	oldTimeout := stationTrailProbeTimeout
+	stationTrailProbeTimeout = 30 * time.Second
+	t.Cleanup(func() { stationTrailProbeTimeout = oldTimeout })
+
+	out, err := runStationTrailBounded([]string{"capabilities", "--json"}, stationTrailProbeTimeout, stationTrailCapsMaxOutput)
+	if err == nil {
+		t.Fatal("flooding scanner exited zero")
+	}
+	var cmdErr *stationTrailCommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("expected *stationTrailCommandError, got %T: %v", err, err)
+	}
+	if len(cmdErr.Stderr) > int(maxScannerStderrBytes)+256 {
+		t.Fatalf("retained %d bytes of scanner stderr against a %d byte cap", len(cmdErr.Stderr), maxScannerStderrBytes)
+	}
+	if len(out) != 0 {
+		t.Fatalf("unexpected stdout payload from failing scanner: %q", out[:min(len(out), 64)])
 	}
 }

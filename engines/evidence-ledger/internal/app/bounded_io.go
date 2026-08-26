@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -14,10 +15,45 @@ const (
 	maxScannerSubcommandOutput int64 = 8 << 20 // 8 MiB
 	// maxScannerSummaryBytes caps the scanner-written summary JSON document.
 	maxScannerSummaryBytes int64 = 1 << 20 // 1 MiB
+	// maxScannerStderrBytes caps how much scanner stderr is retained for
+	// diagnostics (#1205 round 2).
+	maxScannerStderrBytes int64 = 1 << 20 // 1 MiB
 )
 
 // maxEvidenceBundleBytes caps a cached evidence bundle read back from disk.
 var maxEvidenceBundleBytes int64 = 64 << 20 // 64 MiB
+
+// cappedWriter collects scanner stderr but retains at most limit bytes of it
+// (#1205 round 2). Writes are never rejected — the excess is dropped and the
+// truncation is surfaced by String — so a flooding scanner cannot turn its
+// own diagnostics into an engine-side allocation or a broken pipe.
+type cappedWriter struct {
+	buf       bytes.Buffer
+	limit     int64
+	truncated bool
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	if w.truncated || int64(w.buf.Len()) >= w.limit {
+		w.truncated = true
+		return len(p), nil
+	}
+	space := int(w.limit) - w.buf.Len()
+	if space < len(p) {
+		w.buf.Write(p[:space])
+		w.truncated = true
+		return len(p), nil
+	}
+	w.buf.Write(p)
+	return len(p), nil
+}
+
+func (w *cappedWriter) String() string {
+	if !w.truncated {
+		return w.buf.String()
+	}
+	return w.buf.String() + fmt.Sprintf("\n[scanner stderr exceeded the %d byte cap and was truncated]", w.limit)
+}
 
 // readAllBounded reads r fully but refuses input larger than limit bytes.
 func readAllBounded(r io.Reader, limit int64) ([]byte, error) {

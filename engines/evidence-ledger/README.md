@@ -450,6 +450,8 @@ miseledger explain "adapter contract" --source codex --json
 
 Evidence output includes a stable bundle `id`, a `miseledger://evidence/<id>` resource URI, the query, filters, generated timestamp, result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Evidence results dedupe repeated content hashes. Generated bundles are cached under MiseLedger's private cache directory and can be shown later with `miseledger evidence show`.
 
+Cached bundles carry an HMAC over their canonical reference (bundle ID, item IDs, filters, `generated_at`), keyed by a random 32-byte key at `<data-dir>/miseledger/evidence-bundle-mac.key`. The key file is validated on every load — regular file (no symlink; opened with `O_NOFOLLOW` where available), owned by the current uid, mode 0600, exactly 32 bytes — and first creation is exclusive (`O_CREATE|O_EXCL`), so concurrent initializers converge on one key. A refused key fails the operation closed. Residual: a process running as the same uid can still read or replace a valid key once validation passes; isolating scanners under a different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
+
 The root `station.json` advertises bounded Brigade retrieval as
 `miseledger evidence <task> --markdown --limit 5`. That surface is stateful
 because it opens the archive and caches the generated bundle. Its

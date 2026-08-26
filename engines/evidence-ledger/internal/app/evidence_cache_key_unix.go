@@ -1,0 +1,30 @@
+//go:build unix
+
+package app
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"syscall"
+)
+
+// evidenceMACKeyOpenNoFollow refuses to follow a symlink at the key path, so
+// a same-UID attacker cannot point the loader at a file it controls (#1201).
+const evidenceMACKeyCreateNoFollow = syscall.O_NOFOLLOW
+
+func openEvidenceMACKeyFile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+}
+
+// checkEvidenceMACKeyOwner rejects a key file the current uid does not own.
+func checkEvidenceMACKeyOwner(info fs.FileInfo) error {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return &EvidenceMACKeyError{Reason: "cannot determine key file owner"}
+	}
+	if uid := os.Getuid(); st.Uid != uint32(uid) {
+		return &EvidenceMACKeyError{Reason: fmt.Sprintf("owned by uid %d, running uid %d", st.Uid, uid)}
+	}
+	return nil
+}
