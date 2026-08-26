@@ -59,6 +59,13 @@ Expected key location and permissions:
 
 The key is still readable by any same-uid process that can find it. The sticky marker raises the bar (the attacker must also write `~/.brigade`) but is defense in depth, not a hard boundary. Privilege separation or an OS-mediated secret is the only class close; both stay opt-in so zero-dependency `quickstart` keeps working.
 
+### Canonical import dedupe and the isolation posture
+
+The two import-authentication postures are split deliberately (#881):
+
+- **Legacy identity grants stay signed-only in every workspace.** Granting a legacy source/content identity during untrusted-identity migration (`_legacy_import_source_content_identity` and the existing-migration-proof path) always requires one verified authority snapshot — a store whose HMAC envelope verifies against the operator key. Forged receipt or proof bytes never grant legacy identity, with or without the isolation flag.
+- **Canonical dedupe suppression follows the workspace posture.** In a workspace with `authority_store.isolation = "external-key"`, suppressing an incoming duplicate requires that same verified snapshot plus the bound persisted sidecar. In a workspace without it, no verifier-signed store can exist, and a same-uid writer can already rewrite the import inbox directly (issue #1093 tracks that same-uid boundary), so suppression falls back to the pre-#881 evidence grade: a persisted sidecar proof validated against the workspace's own authority record (the `_unsigned_dedupe_proof_for_non_isolated_workspace` predicate). The first fallback selection per process logs one warning naming the downgrade; enabling `external-key` isolation restores the signed-snapshot requirement on the next run.
+
 ## Review Flow
 
 ```bash

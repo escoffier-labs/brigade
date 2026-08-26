@@ -3451,6 +3451,39 @@ def _authenticated_legacy_import_proof(
     return _has_persisted_import_proof(item, target=target, record=record)
 
 
+_UNSIGNED_DEDUPE_DOWNGRADE_WARNED = False
+
+
+def _unsigned_dedupe_proof_for_non_isolated_workspace(target: Path | None) -> bool:
+    """Return whether canonical dedupe may fall back to the unsigned proof path.
+
+    Without ``authority_store.isolation = "external-key"`` no verifier-signed
+    store can exist for this workspace, and a same-uid writer can already
+    rewrite the import inbox directly (issue #1093 tracks that boundary), so
+    canonical dedupe suppression degrades to the pre-#881 evidence grade: a
+    persisted sidecar plus its reproducible receipt validated against the
+    workspace's own authority record. The first selection per process prints
+    one warning naming that downgrade; workspaces with external-key isolation
+    always keep the signed-snapshot requirement.
+    """
+    global _UNSIGNED_DEDUPE_DOWNGRADE_WARNED
+    if target is None:
+        return False
+    from .. import authority_key
+
+    if authority_key.hmac_enabled(target):
+        return False
+    if not _UNSIGNED_DEDUPE_DOWNGRADE_WARNED:
+        _UNSIGNED_DEDUPE_DOWNGRADE_WARNED = True
+        print(
+            'warning: authority_store.isolation is not "external-key"; canonical import'
+            " dedupe suppression is downgraded to unsigned persisted-proof evidence"
+            " (persisted sidecar plus reproducible receipt) in this workspace",
+            file=sys.stderr,
+        )
+    return True
+
+
 def _legacy_import_source_content_identity(
     item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
 ) -> tuple[str, str, str] | None:
@@ -4326,6 +4359,14 @@ def _append_import_records(
     # snapshot is acquired once (after a reanchor pass) and consumed by
     # every proof validator below, which never reopen the store (#881).
     authority_record = _acquire_authenticated_authority_snapshot(target)
+    # Canonical-dedupe posture split (#881 operator decision): suppression
+    # consumes the single authenticated snapshot whenever the store verifies
+    # as signed; only where no verifier-signed store can exist - isolation is
+    # not "external-key" - does it fall back to the pre-#881 unsigned proof
+    # path (persisted sidecar plus reproducible receipt), warning once per
+    # process about the downgrade. Legacy identity grants below never take
+    # that fallback: they stay signed-only.
+    unsigned_dedupe_fallback = authority_record is None and _unsigned_dedupe_proof_for_non_isolated_workspace(target)
     existing = {
         _import_record_key(item)
         for item in imports
@@ -4351,14 +4392,20 @@ def _append_import_records(
         identity = _import_source_identity(record)
         if identity is not None and identity in existing_by_source:
             existing_item = existing_by_source[identity]
-            # Every proof used to suppress an incoming import must be backed
-            # by the one signed authority record acquired above; unsigned
-            # sidecar or receipt bindings are scanner-reproducible and
-            # forgeable (#881), and the validators consume that single
-            # snapshot instead of reopening the store mid-validation.
-            canonical_existing_proof = authority_record is not None and _has_persisted_import_proof(
-                existing_item, target=target, record=authority_record
-            )
+            # Dedupe suppression consumes the one signed authority record
+            # acquired above when one exists. Without external-key isolation
+            # no signed store can exist, so the explicit unsigned downgrade
+            # predicate admits the pre-#881 persisted-proof path instead;
+            # unsigned sidecar or receipt bindings stay forgeable (#881) and
+            # are never trusted for legacy identity grants.
+            if authority_record is not None:
+                canonical_existing_proof = _has_persisted_import_proof(
+                    existing_item, target=target, record=authority_record
+                )
+            elif unsigned_dedupe_fallback:
+                canonical_existing_proof = _has_persisted_import_proof(existing_item, target=target)
+            else:
+                canonical_existing_proof = False
             canonical_existing_row = _has_canonical_untrusted_import_identity(existing_item)
             canonical_incoming_row = _has_canonical_untrusted_import_identity(record)
             canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row

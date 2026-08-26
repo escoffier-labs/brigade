@@ -924,6 +924,49 @@ def test_store_swap_between_validators_cannot_combine_snapshots(
     assert ledger._legacy_import_source_content_identity(item, target=tmp_path) is None
 
 
+def test_unsigned_dedupe_refused_in_external_key_isolated_workspace(tmp_path: Path) -> None:
+    """#881 posture split: with ``authority_store.isolation = "external-key"``
+    canonical dedupe suppression keeps requiring the verified authority
+    snapshot. A canonical duplicate whose persisted sidecar is missing is
+    re-imported instead of suppressed, and no unsigned downgrade warning is
+    logged for an isolated workspace."""
+
+    _bind_workspace(tmp_path)
+    text = "isolated unsigned dedupe probe"
+    canonical_hash = ledger._untrusted_import_canonical_hash({"text": text, "kind": "task"})
+    existing = ledger._make_import(
+        text,
+        kind="task",
+        source="learning-loop",
+        metadata={
+            "source_item_key": f"learning-loop:{canonical_hash}",
+            "source_fingerprint": canonical_hash,
+        },
+    )
+    ledger._write_persisted_import_proofs(tmp_path, [existing], operation_id="0" * 32)
+    proof_name = ledger._import_proof_name(existing["id"])
+    assert proof_name is not None
+    (tmp_path / ".brigade" / "work" / "imports" / "proofs" / proof_name).unlink()
+    assert ledger._authority_store_binding_is_verifier_signed(tmp_path)
+    incoming = ledger._sanitize_untrusted_import_record(
+        {"text": text, "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+
 def test_forged_post_run_receipt_is_rejected_by_legacy_import(tmp_path: Path) -> None:
     """#881 regression: scanner-reproducible receipt bytes bound only by an
     unsigned authority record must not grant a legacy import identity."""

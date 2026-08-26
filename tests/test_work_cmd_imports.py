@@ -449,6 +449,41 @@ def test_work_import_ingest_dedupes_canonical_existing_row_without_scanner_recei
     assert duplicate["skipped"] == 1
 
 
+def test_unsigned_dedupe_downgrade_suppresses_in_non_isolated_workspace(tmp_path, monkeypatch, capsys):
+    """#881 posture split: without ``authority_store.isolation = "external-key"``
+    no verifier-signed store can exist, so canonical dedupe suppression falls
+    back to the pre-#881 unsigned proof path and warns once per process about
+    the downgrade."""
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.ledger, "_UNSIGNED_DEDUPE_DOWNGRADE_WARNED", False)
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Unsigned dedupe downgrade probe",
+                "kind": "finding",
+                "source": "external-scanner",
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = capsys.readouterr()
+    assert json.loads(first.out)["created"] == 1
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    second = capsys.readouterr()
+    duplicate = json.loads(second.out)
+    assert duplicate["created"] == 0
+    assert duplicate["skipped"] == 1
+
+    downgrade_warnings = [
+        line for line in (first.err + second.err).splitlines() if "canonical import" in line and "downgraded" in line
+    ]
+    assert len(downgrade_warnings) == 1
+
+
 def test_work_import_ingest_contains_stamp_failure_without_leaking_record_content(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     hostile_marker = "HOSTILE-PRIVATE-PAYLOAD-DO-NOT-LEAK"

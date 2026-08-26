@@ -2611,7 +2611,11 @@ def test_alternate_legacy_identity_path_requires_authenticated_proof(tmp_path: P
 
 
 def test_unsigned_canonical_dedupe_cannot_suppress_incoming(tmp_path: Path):
-    """#881: unsigned sidecar bindings must not suppress a genuine incoming record."""
+    """#881 posture split: in an external-key isolated workspace, dedupe
+    suppression keeps requiring the verifier-signed snapshot, so a same-uid
+    writer's planted sidecar bytes cannot suppress a genuine incoming record.
+    Converted from the round-1 non-isolated fixture per the operator decision;
+    the outcome assertions are unchanged."""
 
     text = "unsigned dedupe probe"
     canonical_hash = ledger._untrusted_import_canonical_hash({"text": text, "kind": "task"})
@@ -2624,9 +2628,18 @@ def test_unsigned_canonical_dedupe_cannot_suppress_incoming(tmp_path: Path):
             "source_fingerprint": canonical_hash,
         },
     )
+    _enable_external_key_isolation(tmp_path)
     ledger._write_persisted_import_proofs(tmp_path, [existing], operation_id="0" * 32)
     assert ledger._has_persisted_import_proof(existing, target=tmp_path)
-    assert not ledger._authority_store_binding_is_verifier_signed(tmp_path)
+    assert ledger._authority_store_binding_is_verifier_signed(tmp_path)
+    # Same-uid writer replaces the persisted sidecar with forged bytes after
+    # the run exits; the signed store binding no longer matches those bytes,
+    # so the proof is unauthenticated and must never suppress.
+    proof_name = ledger._import_proof_name(existing["id"])
+    assert proof_name is not None
+    (tmp_path / ".brigade" / "work" / "imports" / "proofs" / proof_name).write_text(
+        json.dumps({"schema_version": 1, "forged": True}), encoding="utf-8"
+    )
     incoming = ledger._sanitize_untrusted_import_record(
         {"text": text, "kind": "task", "source": "learning-loop", "metadata": {}},
         importer_source="learning-loop",
