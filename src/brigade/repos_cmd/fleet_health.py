@@ -779,6 +779,21 @@ def first_run_plan(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
+def _bounded_report_ref(payload: dict[str, Any]) -> dict[str, Any]:
+    """Bounded reference to a stored fleet report; never embeds the report body."""
+    return {
+        "report_id": payload.get("report_id"),
+        "created_at": payload.get("created_at"),
+        "generated_at": payload.get("generated_at"),
+        "path": payload.get("path"),
+        "closeout": payload.get("closeout") if isinstance(payload.get("closeout"), dict) else None,
+        "repo_count": payload.get("repo_count"),
+        "blocker_count": payload.get("blocker_count"),
+        "warning_count": payload.get("warning_count"),
+        "digest": fleet._fingerprint_payload(payload),
+    }
+
+
 def report_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     latest = sweeps.latest_report(target)
@@ -813,7 +828,12 @@ def report_health(target: Path) -> dict[str, Any]:
                 "suggested_next_command": "brigade repos report build",
             }
         )
-    return {"latest": latest, "checks": checks, "issue_count": len(checks), "top_issue": checks[0] if checks else None}
+    return {
+        "latest": _bounded_report_ref(latest),
+        "checks": checks,
+        "issue_count": len(checks),
+        "top_issue": checks[0] if checks else None,
+    }
 
 
 __all__ = tuple(name for name in globals() if not name.startswith("__"))

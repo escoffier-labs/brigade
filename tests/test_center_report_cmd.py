@@ -354,3 +354,25 @@ def test_center_report_integrates_with_work_and_release(tmp_path, monkeypatch, c
     assert release_cmd.candidate_build(target=tmp_path, base_ref=None, json_output=True) == 0
     candidate = json.loads(capsys.readouterr().out)
     assert candidate["operator_report"]["latest"]["report_id"]
+
+
+def test_center_report_build_size_does_not_grow_with_history(tmp_path, capsys):
+    _seed_task_and_import(tmp_path)
+    sizes: list[int] = []
+    for _ in range(3):
+        assert center_cmd.report_build(target=tmp_path, json_output=True) == 0
+        capsys.readouterr()
+        reports = sorted((tmp_path / ".brigade" / "center" / "reports").iterdir())
+        newest = max(reports, key=lambda path: path.stat().st_mtime)
+        evidence = json.loads((newest / "CENTER_EVIDENCE.json").read_text())
+        sizes.append((newest / "CENTER_EVIDENCE.json").stat().st_size)
+    # Size must not grow with report history; tiny deltas from transient
+    # health-check churn are tolerated, unbounded nesting is not.
+    assert max(sizes) - min(sizes) < sizes[0] // 20
+    latest_ref = evidence["status"]["operator_report"]["latest"]
+    assert isinstance(latest_ref, dict)
+    assert latest_ref["report_id"]
+    assert latest_ref["digest"]
+    assert "reviews" not in latest_ref
+    assert "activity" not in latest_ref
+    assert "status" not in latest_ref
