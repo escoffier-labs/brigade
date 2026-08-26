@@ -28,7 +28,15 @@ def _terminalize_escaped_run(
     *,
     seat: str | None,
     should_terminalize: Callable[[], bool] | None = None,
+    interrupt_failure: Callable[[], tuple[str, str, str, str] | None] | None = None,
 ) -> Iterator[None]:
+    """Terminalize a run that escaped its normal result path.
+
+    ``interrupt_failure`` (#1157 round 2) classifies a KeyboardInterrupt on
+    the main thread: when it returns a ``(status, failure_phase,
+    failure_kind, detail)`` tuple (a fleet heartbeat abort), the receipt
+    carries that kind instead of "keyboard-interrupt"."""
+
     from .. import aboyeur as aboyeur_mod
     from .. import runguard
 
@@ -37,19 +45,31 @@ def _terminalize_escaped_run(
     except runguard.RetainRunLockError:
         raise
     except KeyboardInterrupt:
+        failure = interrupt_failure() if interrupt_failure is not None else None
         if (
             (should_terminalize is None or should_terminalize())
             and output_dir is not None
             and (output_dir / "run.json").is_file()
         ):
-            aboyeur_mod.record_run_termination(
-                output_dir,
-                status="canceled",
-                failure_phase=None,
-                failure_kind="keyboard-interrupt",
-                detail="run canceled by user",
-                seat=seat,
-            )
+            if failure is not None:
+                status, phase, kind, detail = failure
+                aboyeur_mod.record_run_termination(
+                    output_dir,
+                    status=status,
+                    failure_phase=phase,
+                    failure_kind=kind,
+                    detail=detail,
+                    seat=seat,
+                )
+            else:
+                aboyeur_mod.record_run_termination(
+                    output_dir,
+                    status="canceled",
+                    failure_phase=None,
+                    failure_kind="keyboard-interrupt",
+                    detail="run canceled by user",
+                    seat=seat,
+                )
         raise
     except TimeoutError as exc:
         detail = " ".join(str(exc).split()) or "run timed out"
@@ -488,61 +508,66 @@ def dispatch(args) -> int:
     # this the interrupt would be remembered as "canceled by user".
     fleet_claim_loss: list[str] = []
 
+    def _fleet_interrupt_failure() -> tuple[str, str, str, str] | None:
+        """Classify a fleet-caused interrupt from the main thread (#1157
+        round 2): returns ``(status, failure_phase, failure_kind, detail)``
+        for the terminal receipt, or None for a genuine user Ctrl-C. The
+        markers are appended by the heartbeat-thread callbacks before they
+        let the abort fire, so a failed receipt write can never downgrade
+        the abort to "keyboard-interrupt"."""
+        if fleet_claim_loss:
+            detail = fleet_claim_loss[0]
+            return (
+                "failed",
+                "dispatch",
+                "fleet-claim-lost",
+                f"fleet claim on {claim_target} was lost ({detail}); run canceled",
+            )
+        if fleet_credential_failure:
+            detail = fleet_credential_failure[0]
+            return (
+                "failed",
+                "dispatch",
+                "fleet-credentials-rejected",
+                f"fleet hub rejected this node's credentials ({detail}); run canceled",
+            )
+        return None
+
     def abort_on_fleet_claim_lost(reason: str | None) -> None:
         """Heartbeat-thread callback (#1157): another owner now holds the
-        claim this run was granted. Record the claim-loss failure first (the
-        first terminal receipt wins), then interrupt the main thread."""
+        claim this run was granted. Only the cheap classification marker is
+        recorded here; the terminal receipt itself is written by the
+        main-thread handler (#1157 round 2), where a write failure surfaces
+        loudly instead of silently degrading to a user-cancel record."""
         detail = reason or "held by another node"
         print(
             f"error: fleet claim on {claim_target!r} was lost ({detail}); canceling the active run",
             file=sys.stderr,
         )
         fleet_claim_loss.append(detail)
-        if output_dir is not None and (output_dir / "run.json").is_file():
-            try:
-                aboyeur_mod.record_run_termination(
-                    output_dir,
-                    status="failed",
-                    failure_phase="dispatch",
-                    failure_kind="fleet-claim-lost",
-                    detail=f"fleet claim on {claim_target} was lost ({detail}); run canceled",
-                    seat=lifecycle_seat,
-                )
-            except Exception:
-                pass  # the printed error stands; never mask the interrupt
 
     def abort_on_fleet_credential_failure(detail: str | None) -> None:
         """Heartbeat-thread callback (#1161): the hub rejected this machine's
         token while dispatch is active.
 
-        Print and record the credential failure first. The first terminal
-        receipt wins, so without this the interrupt would be remembered as an
-        operator cancel. Then interrupt the main thread, which unwinds the
-        active dispatch through the same prompt-cancel path as Ctrl-C."""
-        message = (
+        Print and mark the failure; the main-thread handler writes the
+        terminal receipt from the marker (#1157 round 2). Then interrupt the
+        main thread, which unwinds the active dispatch through the same
+        prompt-cancel path as Ctrl-C."""
+        print(
             f"error: fleet hub rejected this node's credentials ({detail or 'auth refused'}); "
             "canceling the active run; enroll this machine with 'brigade fleet nodes add <node_id>' "
-            "and set [fleet] node_token_file"
+            "and set [fleet] node_token_file",
+            file=sys.stderr,
         )
-        print(message, file=sys.stderr)
         fleet_credential_failure.append(detail or "auth refused")
-        if output_dir is not None and (output_dir / "run.json").is_file():
-            try:
-                aboyeur_mod.record_run_termination(
-                    output_dir,
-                    status="failed",
-                    failure_phase="dispatch",
-                    failure_kind="fleet-credentials-rejected",
-                    detail=f"fleet hub rejected this node's credentials ({detail or 'auth refused'}); run canceled",
-                    seat=lifecycle_seat,
-                )
-            except Exception:
-                pass  # the printed error stands; never mask the interrupt
         _thread.interrupt_main()
 
     try:
         with ExitStack() as lifecycle:
-            lifecycle.enter_context(_terminalize_escaped_run(output_dir, seat=lifecycle_seat))
+            lifecycle.enter_context(
+                _terminalize_escaped_run(output_dir, seat=lifecycle_seat, interrupt_failure=_fleet_interrupt_failure)
+            )
             lifecycle.enter_context(aboyeur_mod.terminal_sigterm_handler(output_dir, seat=lifecycle_seat))
             if output_dir is not None:
                 start_kwargs: dict[str, Any] = {
@@ -663,15 +688,31 @@ def dispatch(args) -> int:
             except runguard.RetainRunLockError:
                 raise
             except KeyboardInterrupt:
+                failure = _fleet_interrupt_failure()
                 if output_dir is not None:
-                    aboyeur_mod.record_run_termination(
-                        output_dir,
-                        status="canceled",
-                        failure_phase=None,
-                        failure_kind="keyboard-interrupt",
-                        detail="run canceled by user",
-                        seat=lifecycle_seat,
-                    )
+                    if failure is not None:
+                        # The interrupt came from a fleet heartbeat abort
+                        # (#1157/#1161); record the real kind from the main
+                        # thread so a heartbeat-side receipt failure can
+                        # never downgrade it to a user cancel (#1157 round 2).
+                        status, phase, kind, detail = failure
+                        aboyeur_mod.record_run_termination(
+                            output_dir,
+                            status=status,
+                            failure_phase=phase,
+                            failure_kind=kind,
+                            detail=detail,
+                            seat=lifecycle_seat,
+                        )
+                    else:
+                        aboyeur_mod.record_run_termination(
+                            output_dir,
+                            status="canceled",
+                            failure_phase=None,
+                            failure_kind="keyboard-interrupt",
+                            detail="run canceled by user",
+                            seat=lifecycle_seat,
+                        )
                 raise
             except TimeoutError as exc:
                 detail = " ".join(str(exc).split()) or "run timed out"

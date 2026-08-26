@@ -136,15 +136,22 @@ after the journal write completes and the lock is released):
 - Hub traffic never uses a proxy (#1154): the client's opener is built with
   an empty `ProxyHandler`, so `HTTP_PROXY`/`HTTPS_PROXY` can neither receive
   the bearer token nor blackhole tailnet requests. Prefer HTTPS via Tailscale
-  Serve where possible. Redirects are followed only within the same origin;
-  a cross-origin 302 is refused instead of replaying the Authorization
-  header to another host (#1157).
+  Serve where possible. Redirects are followed only within the same origin,
+  compared with default ports normalized (`http://hub` and `http://hub:80`
+  are one origin); a cross-origin 302 is refused instead of replaying the
+  Authorization header to another host (#1157).
 - The spool is private (#1154): the spool directory is created 0700, spool,
   lock, and temp files are created 0600 (existing files forced back to 0600
   on every open), opens are no-follow (`O_NOFOLLOW`
   where available) and refuse non-regular files and symlinked spool
   directories, and atomic rewrites use
-  exclusive, unpredictable temp names in the spool directory.
+  exclusive, unpredictable temp names in the spool directory. The
+  directory's privacy is enforced through a descriptor, not the path
+  (#1157 round 2): it is opened `O_DIRECTORY|O_NOFOLLOW`, forced to 0700
+  via `fchmod`, and re-stat'ed through the same descriptor; lock and spool
+  files are opened `dir_fd` against that validated descriptor. When 0700
+  cannot be applied or verified, writes are refused (an event stays
+  undelivered) rather than written to a possibly-readable directory.
 - `brigade fleet status [--all] [--json]`.
 
 ## Phase 3 surface
@@ -209,14 +216,27 @@ Lost ownership fails closed by default (#1152): when the mid-run heartbeat
 learns another owner holds the claim (a renew answered 409 held-by-another),
 the run is aborted — with no callback the main thread is interrupted through
 the same path as Ctrl-C and the loss is logged once — so two machines never
-keep working one repo unarbitrated. `repo_claim` accepts `on_claim_lost` to
-react differently — the abort still follows the notification even when the
-callback raises or returns without stopping the run (#1157) — and
+keep working one repo unarbitrated. The abort does not depend on the
+callback behaving (#1157 round 2): a callback that blocks is cut off after a
+bounded grace period (`CLAIM_LOST_CALLBACK_GRACE_SECONDS`) and one that
+raises `SystemExit` or `KeyboardInterrupt` is logged; the interrupt fires
+either way, after the callback has had its chance to record state.
+`repo_claim` accepts `on_claim_lost` to react differently, and
 `BRIGADE_FLEET_CLAIM_LOSS=continue` (or
 `claim_loss_policy="continue"`) is the documented opt-out for solo machines,
 restoring the old log-and-continue behavior. `brigade run` records a mid-run
 claim-loss abort as a failed run with failure kind `fleet-claim-lost`, never
-as "canceled by user".
+as "canceled by user"; the receipt is classified and written on the main
+thread from the heartbeat's marker (#1157 round 2), so a heartbeat-side
+receipt-write failure cannot downgrade the abort to a user cancel.
+
+Off-main-thread owners (#1157 round 2): `_thread.interrupt_main()` targets
+the process main thread, so when `repo_claim` is entered from a worker
+thread the abort is delivered cooperatively instead — the yielded decision's
+`cancel_event` is set and a WARNING names it. Guarded work entered off the
+main thread MUST observe `decision.cancel_event` and unwind promptly; that
+check is the documented requirement for non-main-thread claim owners (the
+CLI always enters on the main thread and is unaffected).
 
 Orphan cleanup (#1157): a lost acquire response schedules a background
 release that attempts **immediately**, then backs off, so a short-lived run

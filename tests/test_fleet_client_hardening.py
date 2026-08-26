@@ -3,6 +3,7 @@ no-follow spool files."""
 
 from __future__ import annotations
 
+import email
 import json
 import os
 import stat
@@ -135,3 +136,91 @@ class TestSpoolPrivacy:
         assert used[0].parent == spool.parent
         assert not used[0].exists() and not list(spool.parent.glob("*.tmp"))
         assert [e["run_id"] for e in fleet_client._read_spool(spool)] == ["new"]
+
+    @pytest.mark.skipif(os.name != "posix", reason="descriptor-based enforcement is POSIX-only")
+    def test_unenforceable_dir_privacy_refuses_the_write(self, home, monkeypatch):
+        """Privacy enforcement through the descriptor is not best-effort
+        (#1157 round 2): when 0700 cannot be applied (or cannot be verified),
+        the spool write is refused instead of warned about."""
+        spool = _spool()
+        spool.parent.mkdir(parents=True)
+
+        def refusing_fchmod(fd, mode):
+            raise PermissionError("simulated immutable directory mode")
+
+        monkeypatch.setattr(os, "fchmod", refusing_fchmod)
+        with pytest.raises(fleet_client.FleetClientError):
+            with fleet_client._spool_lock(spool):
+                pass
+        assert list(spool.parent.iterdir()) == [], "the lock file was created despite refused privacy"
+
+    @pytest.mark.skipif(os.name != "posix", reason="descriptor-based enforcement is POSIX-only")
+    def test_unverifiable_dir_mode_refuses_the_write(self, home, monkeypatch):
+        """A fchmod that applies the wrong bits must be caught by the
+        post-fstat verification (#1157 round 2), not waved through."""
+        spool = _spool()
+        spool.parent.mkdir(parents=True)
+        real_fchmod = os.fchmod
+
+        def weakening_fchmod(fd, mode):
+            real_fchmod(fd, 0o755)  # enforcement silently lands permissive
+
+        monkeypatch.setattr(os, "fchmod", weakening_fchmod)
+        with pytest.raises(fleet_client.FleetClientError):
+            with fleet_client._spool_lock(spool):
+                pass
+
+    @pytest.mark.skipif(os.name != "posix", reason="descriptor-based enforcement is POSIX-only")
+    def test_report_event_refused_when_dir_privacy_cannot_be_enforced(self, home, monkeypatch):
+        def refusing_fchmod(fd, mode):
+            raise PermissionError("simulated immutable directory mode")
+
+        monkeypatch.setattr(os, "fchmod", refusing_fchmod)
+        assert fleet_client.report_event({"run_id": "r1", "state": "run.started"}) is False
+        assert not _spool().exists(), "an event was spooled although privacy could not be enforced"
+
+    @pytest.mark.skipif(os.name != "posix", reason="symlink semantics under test are POSIX-only")
+    def test_symlinked_spool_directory_is_refused(self, home, tmp_path):
+        victim = tmp_path / "victim-dir"
+        victim.mkdir()
+        spool = _spool()
+        spool.parent.parent.mkdir(parents=True, exist_ok=True)
+        spool.parent.symlink_to(victim, target_is_directory=True)
+        assert fleet_client.report_event({"run_id": "r1", "state": "run.started"}) is False
+        assert list(victim.iterdir()) == [], "writes followed a symlinked spool directory"
+
+
+class TestHubRedirectOrigin:
+    """Redirects stay on the request's origin, with default ports
+    normalized so http://hub and http://hub:80 are the same origin
+    (#1157 round 2)."""
+
+    def _redirect(self, from_url: str, to_url: str):
+        handler = fleet_client._HubRedirectHandler()
+        request = urllib.request.Request(from_url, method="GET")
+        headers = email.message_from_string("Content-Type: text/plain\r\n\r\n")
+        return handler.redirect_request(request, fp=None, code=302, msg="Found", headers=headers, newurl=to_url)
+
+    def test_default_port_counts_as_same_origin(self):
+        assert fleet_client._same_origin("http://hub.example/a", "http://hub.example:80/b")
+        assert fleet_client._same_origin("http://hub.example:80/a", "http://hub.example/b")
+        assert fleet_client._same_origin("https://hub.example/a", "https://hub.example:443/b")
+
+    def test_cross_origin_still_refused(self):
+        cases = [
+            ("http://hub.example/a", "https://hub.example/a"),
+            ("http://hub.example/a", "http://hub.example:8080/a"),
+            ("http://hub.example/a", "http://other.example/a"),
+            ("https://hub.example:443/a", "https://hub.example:8443/a"),
+        ]
+        for first, second in cases:
+            assert not fleet_client._same_origin(first, second), (first, second)
+
+    def test_handler_follows_default_port_redirect(self):
+        redirected = self._redirect("http://hub.example:80/events", "http://hub.example/events")
+        assert redirected is not None
+        assert redirected.full_url == "http://hub.example/events"
+
+    def test_handler_refuses_cross_origin_redirect(self):
+        assert self._redirect("http://hub.example/events", "http://evil.example/events") is None
+        assert self._redirect("http://hub.example/events", "https://hub.example/events") is None

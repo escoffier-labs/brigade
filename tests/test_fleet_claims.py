@@ -936,6 +936,50 @@ class TestDispatchWiring:
         assert "fleet claim" in err and "was lost" in err
         assert "run canceled: fleet claim lost to another owner" in err
         assert "run canceled by user" not in err
+        # The receipt must carry the real failure kind (#1157 round 2), read
+        # back from run.json rather than trusting stderr.
+        receipt = json.loads((next((ws / ".brigade" / "runs").iterdir()) / "run.json").read_text(encoding="utf-8"))
+        assert receipt["status"] == "failed"
+        assert receipt["failure"]["kind"] == "fleet-claim-lost"
+        assert "fleet claim on ws was lost" in receipt["failure"]["detail"]
+
+    def test_claim_loss_kind_survives_heartbeat_receipt_failure(self, hub, workspace, monkeypatch):
+        """The terminal receipt is classified and recorded on the main thread
+        (#1157 round 2): a heartbeat-thread receipt-write failure (swallowed
+        by the best-effort callback) can no longer make the abort read back
+        as 'keyboard-interrupt'."""
+        from brigade import aboyeur
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        ws, roster_path = workspace
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+
+        def post(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+            return 409, {
+                "granted": False,
+                "error": "held",
+                "owner": {"owner_node": NODE_B, "expires_at": "soon"},
+            }
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+        real_record = aboyeur.record_run_termination
+
+        def failing_off_main(output_dir, **kwargs):
+            if threading.current_thread() is not threading.main_thread():
+                raise RuntimeError("simulated receipt write failure off the main thread")
+            return real_record(output_dir, **kwargs)
+
+        monkeypatch.setattr(aboyeur, "record_run_termination", failing_off_main)
+        monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: time.sleep(30))
+        assert self._run(ws, roster_path) == 2
+        receipt = json.loads((next((ws / ".brigade" / "runs").iterdir()) / "run.json").read_text(encoding="utf-8"))
+        assert receipt["status"] == "failed"
+        assert receipt["failure"]["kind"] == "fleet-claim-lost"
+        assert receipt["failure"]["kind"] != "keyboard-interrupt"
 
     def test_claim_taken_after_local_lock(self, hub, workspace, monkeypatch):
         """The hub claim is only ever held by the run that owns run.lock, so a
@@ -1049,6 +1093,90 @@ class TestClaimLossAborts:
         assert len(seen) == 1
         assert interrupts, "a raising claim-lost callback suppressed the abort"
         assert any("interrupting anyway" in r.message for r in caplog.records)
+
+    def test_systemexit_claim_lost_callback_still_interrupts(self, tmp_path, monkeypatch, caplog):
+        """A callback raising SystemExit (a BaseException, not Exception)
+        must not suppress the abort (#1157 round 2): the interrupt fires
+        independently of how the callback terminates."""
+        self._superseding_hub(monkeypatch)
+        seen: list[str | None] = []
+
+        def exiting_callback(reason: str | None) -> None:
+            seen.append(reason)
+            raise SystemExit(3)
+
+        interrupts = []
+        monkeypatch.setattr(fleet_client._thread, "interrupt_main", lambda: interrupts.append(1))
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_claim_lost=exiting_callback):
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not seen:
+                    time.sleep(0.02)
+                assert seen == ["held"]
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not interrupts:
+                    time.sleep(0.02)
+        assert interrupts, "a SystemExit-raising claim-lost callback suppressed the abort"
+        assert any("interrupting anyway" in r.message for r in caplog.records)
+
+    def test_blocking_claim_lost_callback_does_not_delay_the_abort(self, tmp_path, monkeypatch):
+        """A callback that blocks forever must not prevent the abort (#1157
+        round 2): the interrupt fires after a bounded grace period without
+        waiting for the callback to return."""
+        self._superseding_hub(monkeypatch)
+        monkeypatch.setattr(fleet_client, "CLAIM_LOST_CALLBACK_GRACE_SECONDS", 0.2)
+        monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.05)
+        release = threading.Event()
+
+        def blocking_callback(reason: str | None) -> None:
+            release.wait(30)  # blocks far beyond the grace window
+
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_claim_lost=blocking_callback):
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    time.sleep(0.02)
+                pytest.fail("run kept going while the claim-lost callback was stuck")
+        # The abort landed near the grace window, not after the callback's
+        # (simulated endless) wait.
+        assert time.monotonic() - started < 10
+        release.set()
+
+    def test_claim_loss_off_main_thread_aborts_that_thread_cooperatively(self, tmp_path, monkeypatch, caplog):
+        """``interrupt_main()`` targets the process main thread (#1157 round
+        2): when ``repo_claim`` is entered from a worker thread the abort
+        must reach *that* thread's guarded work through the cooperative
+        ``ClaimDecision.cancel_event`` channel instead of stabbing the
+        unrelated main thread."""
+        self._superseding_hub(monkeypatch)
+        entered = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def owner() -> None:
+            try:
+                with fleet_client.repo_claim("repo-a", ttl_seconds=60) as decision:
+                    assert decision.granted is True
+                    assert decision.cancel_event is not None
+                    entered.set()
+                    # The guarded work observes the documented cancel channel.
+                    if not decision.cancel_event.wait(10):
+                        outcome["error"] = "guarded work never saw the cooperative cancel"
+                        return
+                    outcome["canceled"] = True
+            except BaseException as exc:  # noqa: BLE001 - carried to the asserts
+                outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+        worker = threading.Thread(target=owner, name="claim-owner")
+        with caplog.at_level("WARNING", logger="brigade.fleet"):
+            worker.start()
+            assert entered.wait(5), "worker never entered the guarded claim"
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and "canceled" not in outcome:
+                worker.join(0.05)
+        worker.join(5)
+        assert outcome == {"canceled": True}, f"off-main-thread abort misfired: {outcome}"
+        assert any("cancel_event" in r.message for r in caplog.records)
 
     def test_lost_ownership_default_aborts_via_main_thread_interrupt(self, tmp_path, monkeypatch):
         self._superseding_hub(monkeypatch)
@@ -1324,3 +1452,15 @@ class TestExitOrphanReleaseHardening:
                         assert reacquire_finished.wait(30)
         exhausted = [r for r in caplog.records if "could not confirm" in r.message]
         assert len(exhausted) == 1, "exit cleanup exhaustion was not logged exactly once"
+        # The exhaustion WARNING must name the residual exposure: the row
+        # lives until its TTL expires (original-review findings 2 and 3
+        # keep the timing approach; this residual is documented, not fixed).
+        assert "TTL expires" in exhausted[0].getMessage()
+        # Documented residual (#1157): a commit landing AFTER the final exit
+        # retry can no longer be released by this process — it leaks until
+        # the hub's TTL expiry. The test pins that window so a future change
+        # to the timing approach cannot silently widen it.
+        allow_reacquire.set()
+        assert reacquire_finished.wait(10), "late re-acquire never committed"
+        leaked = [c for c in fleet_client.fetch_claims(include_all=True) if c["target"] == "repo-a"]
+        assert len(leaked) == 1, "expected exactly the post-final-retry commit to leak as the documented residual"
