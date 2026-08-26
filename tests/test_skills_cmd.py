@@ -1101,7 +1101,11 @@ def test_explicit_registry_source_does_not_inherit_bundled_review(tmp_path, caps
     source = _write_skill(tmp_path / "source", name="brigade-work")
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
     imported = json.loads(capsys.readouterr().out)
-    assert imported["lint"]["source"]["kind"] == "path"
+    # The freshly written entry is linted through its anchored registry
+    # identity; the point of this test is that it does not inherit bundled
+    # "reviewed" provenance.
+    assert imported["lint"]["source"]["kind"] == "registry"
+    assert imported["lint"]["source"]["reviewed"] is False
     assert imported["lint"]["trust_score"]["trust_level"] == "workspace"
 
     assert (
@@ -2875,25 +2879,25 @@ def test_sync_write_installs_exactly_the_linted_snapshot_bytes(tmp_path, capsys,
     shutil.rmtree(workspace / ".codex" / "skills" / "sync-victim")
 
     real_lint_payload = skills_cmd._lint_payload
-    registry_lint_calls = {"count": 0}
+    staged_lint_calls = {"count": 0}
+    registry_md = workspace / ".brigade" / "skills" / "registry" / "sync-victim" / "SKILL.md"
 
     def lint_then_swap_source(target, skill_or_path, harness=None, *, mode="lenient"):
         payload = real_lint_payload(target, skill_or_path, harness=harness, mode=mode)
-        # The attacker swaps the registry generation after the planning-phase
-        # validation but before the bytes that get installed are derived;
-        # sync must install exactly the bytes it linted in that same pass,
-        # never a generation nobody linted.
-        if str(skill_or_path).startswith("registry:"):
-            registry_lint_calls["count"] += 1
-            if registry_lint_calls["count"] >= 2:
-                registry_md = workspace / ".brigade" / "skills" / "registry" / "sync-victim" / "SKILL.md"
-                registry_md.write_bytes(b"# SWAPPED-AFTER-LINT-MARKER\n")
+        # The attacker swaps the registry generation right after the
+        # projection pass has linted its anchored snapshot; the installed
+        # bytes must still be exactly the snapshot that was linted in that
+        # same pass, never a generation nobody linted.
+        if "brigade-sync-lint-" in str(skill_or_path):
+            staged_lint_calls["count"] += 1
+            registry_md.write_bytes(b"# SWAPPED-AFTER-LINT-MARKER\n")
         return payload
 
     monkeypatch.setattr(skills_cmd, "_lint_payload", lint_then_swap_source)
 
     assert skills_cmd.sync(workspace=workspace, harness="codex", trust="workspace", write=True, json_output=True) == 0
     capsys.readouterr()
+    assert staged_lint_calls["count"] >= 1
     assert installed.is_file()
     assert installed.read_bytes() == expected_bytes
     assert b"SWAPPED-AFTER-LINT-MARKER" not in installed.read_bytes()
@@ -3136,3 +3140,233 @@ def test_lint_refused_symlinked_registry_entry_source_kind_and_no_content_echo(t
     assert source["identity"] == "registry://skills/linked-skill"
     assert payload["valid"] is False
     assert any("skill.json" in message for message in payload["errors"])
+
+
+# --- round-6 review findings: pathname reads of state-root content -------------
+
+
+def _round6_workspace(tmp_path, capsys, name="state-victim"):
+    """Fresh workspace with one imported registry skill (mcp-capable)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = _write_skill(tmp_path / "sources", name=name)
+    assert skills_cmd.import_skill(target=workspace, source=source, json_output=True) == 0
+    capsys.readouterr()
+    return workspace
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_state_backed_install_reads_go_through_the_anchor(tmp_path, capsys):
+    workspace = _round6_workspace(tmp_path, capsys, name="mcp-victim")
+    assert skills_cmd.install(workspace=workspace, skill="registry:mcp-victim", harness="mcp", json_output=True) == 0
+    capsys.readouterr()
+    installed_md = workspace / ".brigade" / "skills" / "mcp-resources" / "mcp-victim" / "SKILL.md"
+    assert installed_md.is_file()
+    outside = tmp_path / "outside-secret.md"
+    outside.write_text("# INSTALLED-SYMLINK-MARKER\n")
+    installed_md.unlink()
+    installed_md.symlink_to(outside)
+
+    # Advance the registry so diff and sync have a changed generation to compare.
+    registry_md = workspace / ".brigade" / "skills" / "registry" / "mcp-victim" / "SKILL.md"
+    registry_md.write_text("# Security Review v2\n\nChanged guidance.\n")
+
+    assert skills_cmd.diff(target=workspace, skill="registry:mcp-victim", harness="mcp") == 0
+    diff_out = capsys.readouterr().out
+    assert "INSTALLED-SYMLINK-MARKER" not in diff_out
+
+    assert skills_cmd.compatibility(target=workspace, skill="registry:mcp-victim", json_output=True) in {0, 1}
+    compat_out = capsys.readouterr().out
+    assert "INSTALLED-SYMLINK-MARKER" not in compat_out
+
+    assert skills_cmd.fleet_status(target=workspace, json_output=True) == 0
+    fleet_out = capsys.readouterr().out
+    assert "INSTALLED-SYMLINK-MARKER" not in fleet_out
+
+    assert skills_cmd.sync(workspace=workspace, harness="mcp", trust="workspace", write=True, json_output=True) == 0
+    sync_out = capsys.readouterr().out
+    assert "INSTALLED-SYMLINK-MARKER" not in sync_out
+    # The contaminated state-backed destination is refused for this run: the
+    # planted symlink is neither followed, overwritten blind, nor copied into
+    # rollback material.
+    sync_payload = json.loads(sync_out)
+    assert sync_payload["applied"]["updated"] == 0
+    assert any(item["result"] == "excluded" for item in sync_payload["items"])
+    assert installed_md.is_symlink()
+    rollback_root = workspace / ".brigade" / "skills" / "rollback"
+    if rollback_root.is_dir():
+        for rollback_file in rollback_root.rglob("*"):
+            if rollback_file.is_file():
+                assert b"INSTALLED-SYMLINK-MARKER" not in rollback_file.read_bytes()
+
+    # A clean reinstall through install --force heals the destination from
+    # registry bytes only.
+    assert skills_cmd.install(workspace=workspace, skill="registry:mcp-victim", harness="mcp", force=True) == 0
+    capsys.readouterr()
+    assert installed_md.is_file() and not installed_md.is_symlink()
+    assert b"INSTALLED-SYMLINK-MARKER" not in installed_md.read_bytes()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_explicit_registry_pathname_selects_the_anchored_entry(tmp_path, capsys):
+    workspace = _round6_workspace(tmp_path, capsys, name="path-victim")
+    entry_md = workspace / ".brigade" / "skills" / "registry" / "path-victim" / "SKILL.md"
+    outside = tmp_path / "outside-registry-secret.md"
+    outside.write_text("# REGISTRY-PATH-MARKER\n")
+    entry_md.unlink()
+    entry_md.symlink_to(outside)
+
+    explicit = str(workspace / ".brigade" / "skills" / "registry" / "path-victim")
+    assert skills_cmd.lint(target=workspace, skill=explicit) == 1
+    lint_cap = capsys.readouterr()
+    assert "REGISTRY-PATH-MARKER" not in lint_cap.out + lint_cap.err
+
+    # An existing state-root pathname is never treated as a trusted external
+    # source: it resolves to the anchored registry entry, which refuses.
+    assert skills_cmd.diff(target=workspace, skill=explicit, harness="codex") == 1
+    diff_cap = capsys.readouterr()
+    assert "REGISTRY-PATH-MARKER" not in diff_cap.out + diff_cap.err
+
+
+def test_import_and_inbox_lint_consume_collected_bytes(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    import_source = _write_skill(tmp_path / "sources", name="collect-victim")
+    inbox_source = _write_skill(tmp_path / "sources2", name="inbox-collect-victim")
+    real_write = skills_cmd._write_collected_tree_into_anchor
+    swapped = {"count": 0}
+
+    def write_then_swap(dirs, files, anchor, *relative):
+        real_write(dirs, files, anchor, *relative)
+        swapped["count"] += 1
+        outside = tmp_path / f"swapped-secret-{swapped['count']}.md"
+        marker = "# COLLECTED-SWAP-MARKER\n" if relative[1] == "registry" else "# INBOX-COLLECTED-SWAP-MARKER\n"
+        outside.write_text(marker)
+        entry_md = (workspace / ".brigade").joinpath(*relative, "SKILL.md")
+        entry_md.unlink()
+        entry_md.symlink_to(outside)
+
+    monkeypatch.setattr(skills_cmd, "_write_collected_tree_into_anchor", write_then_swap)
+
+    expected_import = skills_cmd._files_fingerprint(skills_cmd._collect_source_tree(import_source)[1])
+    assert skills_cmd.import_skill(target=workspace, source=import_source, json_output=True) == 0
+    imported = json.loads(capsys.readouterr().out)
+    assert imported["lint"]["valid"] is True
+    # The recorded fingerprint describes the collected bytes, not whatever the
+    # state-root pathname points at after the copy.
+    assert imported["lint"]["fingerprint"] == expected_import
+    assert "COLLECTED-SWAP-MARKER" not in json.dumps(imported)
+
+    expected_inbox = skills_cmd._files_fingerprint(skills_cmd._collect_source_tree(inbox_source)[1])
+    assert skills_cmd.inbox_add(target=workspace, source=inbox_source, summary="pending", json_output=True) == 0
+    proposal_out = capsys.readouterr().out
+    proposal = json.loads(proposal_out)
+    assert proposal["lint"]["valid"] is True
+    assert proposal["lint"]["fingerprint"] == expected_inbox
+    assert "INBOX-COLLECTED-SWAP-MARKER" not in proposal_out
+    # The staged-lint repointer keeps temporary staging directories out of the
+    # persisted proposal metadata.
+    skill_dest_display = workspace / ".brigade" / "skills" / "inbox" / str(proposal["proposal_id"]) / "skill"
+    assert "brigade-inbox-lint-" not in proposal_out
+    if proposal["lint"].get("changelog", {}).get("present"):
+        assert proposal["lint"]["changelog"]["path"] == str(skill_dest_display / "CHANGELOG.md")
+    assert swapped["count"] == 2
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_sync_write_regates_generation_swapped_before_projection(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = _write_skill(tmp_path / "sources", name="swap-victim")
+    assert skills_cmd.import_skill(target=workspace, source=source, json_output=True) == 0
+    capsys.readouterr()
+    registry_dir = workspace / ".brigade" / "skills" / "registry" / "swap-victim"
+
+    real_lint_payload = skills_cmd._lint_payload
+    fired = {"swapped": False}
+
+    def lint_then_swap_before_projection(target, skill_or_path, harness=None, *, mode="lenient"):
+        payload = real_lint_payload(target, skill_or_path, harness=harness, mode=mode)
+        # Fire once the planning pass has gated on generation A: generation B
+        # (lint-valid, unreviewed metadata) appears before the projection
+        # snapshot, and sync --write must re-gate on it instead of installing.
+        if str(skill_or_path).startswith("registry:") and not fired["swapped"]:
+            fired["swapped"] = True
+            md = registry_dir / "SKILL.md"
+            md.write_text("# SWAPPED-PROJECTION-MARKER\n\nUnreviewed body.\n")
+            meta = json.loads((registry_dir / "skill.json").read_text())
+            meta["trust_level"] = "unreviewed"
+            (registry_dir / "skill.json").write_text(json.dumps(meta))
+        return payload
+
+    monkeypatch.setattr(skills_cmd, "_lint_payload", lint_then_swap_before_projection)
+
+    rc = skills_cmd.sync(workspace=workspace, harness="codex", trust="workspace", write=True, json_output=True)
+    assert fired["swapped"]
+    payload = json.loads(capsys.readouterr().out)
+    installed = workspace / ".codex" / "skills" / "swap-victim" / "SKILL.md"
+    assert not installed.exists()
+    assert payload["applied"]["installed"] == 0
+    assert rc == 0
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_pack_commands_refuse_symlinked_state_pack_directory(tmp_path, capsys):
+    workspace = _round6_workspace(tmp_path, capsys, name="pack-victim")
+    assert skills_cmd.pack_build(target=workspace, json_output=True) == 0
+    built = json.loads(capsys.readouterr().out)
+    pack_display = Path(built["path"])
+    pack_name = pack_display.name
+    assert pack_display.is_dir()
+
+    outside = tmp_path / "outside-pack"
+    outside.mkdir(parents=True)
+    manifest = dict(built)
+    manifest["pack_id"] = pack_name
+    manifest["note"] = "PACK-LINK-MARKER"
+    (outside / "skill-pack.json").write_text(json.dumps(manifest))
+    shutil.copytree(pack_display, outside / "skills" / "linked-victim")
+    shutil.rmtree(pack_display)
+    pack_display.symlink_to(outside)
+
+    assert skills_cmd.pack_show(target=workspace, pack_id=str(pack_display)) != 0
+    show_cap = capsys.readouterr()
+    assert "PACK-LINK-MARKER" not in show_cap.out + show_cap.err
+
+    assert skills_cmd.pack_import(target=workspace, pack=pack_display) != 0
+    import_cap = capsys.readouterr()
+    assert "PACK-LINK-MARKER" not in import_cap.out + import_cap.err
+    assert not (workspace / ".brigade" / "skills" / "registry" / "linked-victim").exists()
+
+
+def test_no_tmp_staging_paths_in_install_errors_or_proposal_metadata(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    bad = _write_skill(tmp_path / "sources", name="bad-metadata")
+    meta = json.loads((bad / "skill.json").read_text())
+    meta["trust_level"] = "bogus-level"
+    (bad / "skill.json").write_text(json.dumps(meta))
+
+    assert skills_cmd.install(workspace=workspace, skill=str(bad), harness="codex", json_output=True) == 1
+    captured = capsys.readouterr()
+    blob = captured.out + captured.err
+    assert "brigade-install-lint-" not in blob
+    assert "brigade-import-lint-" not in blob
+    error_payload = json.loads(captured.out)
+    # Changelog references point at the real source, never the staging copy.
+    assert error_payload["lint"]["changelog"]["path"] == str(bad / "CHANGELOG.md")
+    assert error_payload["lint"]["trust_score"]["changelog"]["path"] == str(bad / "CHANGELOG.md")
+
+    good = _write_skill(tmp_path / "sources2", name="provenance-victim")
+    original_source = str(good.resolve())
+    assert skills_cmd.inbox_add(target=workspace, source=good, json_output=True) == 0
+    added = json.loads(capsys.readouterr().out)
+    assert skills_cmd.inbox_accept(target=workspace, proposal_id=str(added["proposal_id"]), json_output=True) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    registry_meta = json.loads(
+        (workspace / ".brigade" / "skills" / "registry" / "provenance-victim" / "skill.json").read_text()
+    )
+    # Accepted proposals keep their original provenance, never the private
+    # staging directory the import ran from.
+    assert registry_meta.get("source") == original_source
+    assert "brigade-proposal-import-" not in json.dumps(accepted)
