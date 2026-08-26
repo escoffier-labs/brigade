@@ -218,6 +218,8 @@ def _render_roster_toml(
             lines.append(f"timeout_seconds = {toml_compat.format_toml_value(agent.timeout_seconds)}")
         if not agent.read_only_capable:
             lines.append("read_only_capable = false")
+        if agent.cloud_safe_mode:
+            lines.append("cloud_safe_mode = true")
         if agent.invalid_final_fallback is not None:
             lines.append(f"invalid_final_fallback = {toml_compat.format_toml_value(agent.invalid_final_fallback)}")
         if agent.env is not None:

@@ -660,6 +660,71 @@ class TestFleetAdmission:
         assert result.ok
         assert len(recorded["renew"]) == 2
 
+    def test_renew_refused_stops_polling_without_release(self, monkeypatch):
+        recorded = _grant_hub(monkeypatch)
+
+        def fake_renew(*args, **kwargs):
+            recorded["renew"].append({"args": args, "kwargs": kwargs})
+            return fleet_client.CloudDecision(False, "refused", holder=kwargs.get("holder"))
+
+        monkeypatch.setattr(fleet_client, "renew_cloud", fake_renew)
+        fake = FakeRuns(
+            {
+                "exec": [_result(stdout="task_renew_refused1")],
+                "status": [
+                    _result(stdout="Status: running"),
+                    _result(stdout="Status: running"),
+                ],
+            }
+        )
+        monkeypatch.setattr(codex_cloud.proc, "run", fake)
+        result = codex_cloud.run_cloud_task(
+            "x",
+            env_id="e",
+            timeout=600,
+            poll_interval=0,
+            sleep=lambda s: None,
+            clock=lambda: 0,
+        )
+        assert not result.ok
+        assert result.status == "uncertain"
+        assert result.failure_kind == "fleet-lease-lost"
+        assert recorded["renew"]
+        assert recorded["release"] == []
+        assert len(fake.calls) == 2
+
+    def test_consecutive_hub_unavailable_renews_fail_closed_without_duplicate_exec(self, monkeypatch):
+        recorded = _grant_hub(monkeypatch)
+        renew_calls = {"n": 0}
+
+        def fake_renew(*args, **kwargs):
+            renew_calls["n"] += 1
+            recorded["renew"].append({"args": args, "kwargs": kwargs})
+            return fleet_client.CloudDecision(False, "hub-unavailable", holder=kwargs.get("holder"))
+
+        monkeypatch.setattr(fleet_client, "renew_cloud", fake_renew)
+        fake = FakeRuns(
+            {
+                "exec": [_result(stdout="task_renew_hub1")],
+                "status": [_result(stdout="Status: running")],
+            }
+        )
+        monkeypatch.setattr(codex_cloud.proc, "run", fake)
+        result = codex_cloud.run_cloud_task(
+            "x",
+            env_id="e",
+            timeout=600,
+            poll_interval=0,
+            sleep=lambda s: None,
+            clock=lambda: 0,
+        )
+        assert not result.ok
+        assert result.status == "uncertain"
+        assert result.failure_kind == "fleet-lease-lost"
+        assert renew_calls["n"] == codex_cloud.MAX_CONSECUTIVE_HUB_UNAVAILABLE_RENEWS
+        assert sum(1 for call in fake.calls if call[2] == "exec") == 1
+        assert recorded["release"] == []
+
     def test_diff_is_read_only_and_never_applies(self, monkeypatch):
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
@@ -983,7 +1048,9 @@ class TestEnvironmentConfig:
         assert report["apply"] is False
         assert "environment_fingerprint" in report
         assert "env-canary" not in json.dumps(report)
-        assert all(call[2] == "list" for call in fake.calls)
+        codex_calls = [call for call in fake.calls if call[:2] == ["codex", "cloud"]]
+        assert all(call[2] == "list" for call in codex_calls)
+        assert codex_calls
 
     def test_canary_empty_inventory_passes(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
@@ -995,6 +1062,65 @@ class TestEnvironmentConfig:
         report = codex_cloud.canary(tmp_path)
         assert report["ok"] is True
         assert report["task_count"] == 0
+
+    def test_canary_reports_environment_seen_when_inventory_matches(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
+        monkeypatch.setattr(
+            codex_cloud.proc,
+            "run",
+            lambda *a, **k: _result(
+                stdout=json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                "id": "task_c01",
+                                "status": "COMPLETED",
+                                "environment_id": "env-canary",
+                            }
+                        ]
+                    }
+                )
+            ),
+        )
+        report = codex_cloud.canary(tmp_path)
+        assert report["ok"] is True
+        assert report["environment_seen"] == "true"
+        assert "reason" not in report
+
+    def test_canary_reports_environment_not_seen_when_inventory_differs(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
+        monkeypatch.setattr(
+            codex_cloud.proc,
+            "run",
+            lambda *a, **k: _result(
+                stdout=json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                "id": "task_c01",
+                                "status": "COMPLETED",
+                                "environment_id": "env-other",
+                            }
+                        ]
+                    }
+                )
+            ),
+        )
+        report = codex_cloud.canary(tmp_path)
+        assert report["ok"] is True
+        assert report["environment_seen"] == "false"
+        assert report["reason"] == "environment-not-seen"
+
+    def test_canary_empty_inventory_leaves_environment_seen_unknown(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
+        monkeypatch.setattr(
+            codex_cloud.proc,
+            "run",
+            lambda *a, **k: _result(stdout=json.dumps({"tasks": []})),
+        )
+        report = codex_cloud.canary(tmp_path)
+        assert report["ok"] is True
+        assert report["environment_seen"] == "unknown"
 
     def test_canary_fails_closed_when_provider_missing(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CODEX_CLOUD_ENV", "env-canary")
@@ -1090,6 +1216,24 @@ class TestEnvironmentConfig:
         assert result.ok
 
 
+class TestSelectorValidation:
+    @pytest.mark.parametrize(
+        "token",
+        [
+            " env-1 ",
+            "--env",
+            "a\nb",
+            "",
+        ],
+    )
+    def test_validate_selector_token_rejects_invalid_literals(self, token):
+        with pytest.raises(codex_cloud.CodexCloudConfigError):
+            codex_cloud.validate_selector_token(token)
+
+    def test_validate_selector_token_accepts_reviewed_literal(self):
+        codex_cloud.validate_selector_token("env-123")
+
+
 def test_codex_cloud_configured_ref_is_known():
     assert agents.is_known("codex-cloud:configured")
     assert agents.is_known("codex-cloud:$CODEX_CLOUD_ENV")
@@ -1146,5 +1290,7 @@ class TestCodexCloudCli:
         assert payload["ok"] is True
         assert payload["apply"] is False
         assert "env-canary" not in json.dumps(payload)
-        assert all(argv[2] == "list" for argv in calls)
+        codex_calls = [argv for argv in calls if argv[:2] == ["codex", "cloud"]]
+        assert all(argv[2] == "list" for argv in codex_calls)
+        assert codex_calls
         assert not any(argv[2] in {"exec", "apply"} for argv in calls)

@@ -334,6 +334,7 @@ class WorkerResult:
     failure_phase: str | None = None
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
+    cloud_environment: dict[str, str] | None = None
     env_overrides: tuple[str, ...] = ()
     endpoint_host: str | None = None
     attempts: tuple[WorkerAttempt, ...] = ()
@@ -820,6 +821,7 @@ def dispatch(
                 model=selected_agent.model,
                 reasoning=selected_agent.reasoning,
                 process_registry=seat_process_registry,
+                **cloud_dispatch_kwargs,
                 **direct_command_kwargs(selected_agent),
             )
 
@@ -889,6 +891,7 @@ def dispatch(
                     result.failure_kind if captured.delivered or result.failure_kind is not None else "unclassified"
                 ),
                 transport_warning=result.transport_warning,
+                cloud_environment=result.cloud_environment,
                 thread_id=result.thread_id,
                 status=result.status,
                 stdout=_bound_capture_text(result.stdout),

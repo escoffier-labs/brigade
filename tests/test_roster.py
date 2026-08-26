@@ -5,6 +5,7 @@ import pytest
 
 from brigade import agents
 from brigade import cli
+from brigade import cloud_tracker
 from brigade import roster as roster_mod
 
 VALID = """
@@ -695,6 +696,44 @@ def test_codex_cloud_env_var_seat_loads(tmp_path):
     )
     loaded = roster_mod.load_roster(_write(tmp_path, text))
     assert loaded.agents["cloud"].cli == "codex-cloud:$CODEX_CLOUD_ENV"
+
+
+@pytest.mark.parametrize(
+    "cli",
+    [
+        'cli = "codex-cloud: env-1 "\n',
+        'cli = "codex-cloud:--env"\n',
+        'cli = "codex-cloud:a\\nb"\n',
+    ],
+)
+def test_codex_cloud_invalid_literal_selector_rejected_at_roster_load(tmp_path, cli):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        "[agents.cloud]\n"
+        f"{cli}"
+        'role = "cloud worker"\n'
+        '[limits]\nallow_models = ["codex", "codex-cloud:*"]\n'
+    )
+    with pytest.raises(ValueError, match="cli is invalid"):
+        roster_mod.load_roster(_write(tmp_path, text))
+
+
+def test_cloud_tracker_register_allowlists_environment_audit_keys(tmp_path):
+    entry = cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task_audit1",
+        label="audit-test",
+        environment_audit={
+            "environment_fingerprint": "sha256:abc",
+            "provider": "evil-override",
+            "task_id": "evil-task",
+        },
+    )
+    assert entry["environment_fingerprint"] == "sha256:abc"
+    assert entry["provider"] == "codex-cloud"
+    assert entry["task_id"] == "task_audit1"
 
 
 def test_codex_cloud_invalid_env_var_selector_rejected_at_load(tmp_path):

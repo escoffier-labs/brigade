@@ -501,6 +501,12 @@ class SeatHealthProbe:
     def _model_check(
         self, seat: Any, roster: Any, workspace: Path | None, timeout_seconds: float, allow_model_smoke: bool
     ) -> SeatHealthCheck:
+        if isinstance(seat.cli, str) and seat.cli.startswith("codex-cloud:"):
+            return SeatHealthCheck(
+                "model-reachability",
+                "degraded",
+                "cloud seats validate via `brigade run cloud canary`; model smoke is not provider-safe",
+            )
         if seat.model is None:
             return SeatHealthCheck("model-reachability", "degraded", "seat has no exact model declaration")
         # Roster doctor retains its established inventory rendering below.  It

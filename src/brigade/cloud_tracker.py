@@ -189,7 +189,10 @@ def register(
         "source": source,
     }
     if environment_audit:
-        entry.update(environment_audit)
+        for key in ("environment_id", "environment_fingerprint"):
+            value = environment_audit.get(key)
+            if isinstance(value, str) and value:
+                entry[key] = value
     registry["entries"].append(entry)
     save_registry(target, registry)
     return entry

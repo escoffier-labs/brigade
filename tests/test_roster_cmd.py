@@ -76,6 +76,25 @@ def test_review_heavy_ships_daybreak_codex_security_seat():
     assert "codex" in loaded.allow_models
 
 
+def test_render_roster_toml_includes_cloud_safe_mode():
+    loaded = roster.Roster(
+        orchestrator="chef",
+        agents={
+            "chef": roster.Agent(name="chef", cli="codex", role="plan"),
+            "cloud-worker": roster.Agent(
+                name="cloud-worker",
+                cli="codex-cloud:env-123",
+                role="implement",
+                cloud_safe_mode=True,
+            ),
+        },
+        allow_models=("codex", "codex-cloud:*"),
+    )
+    rendered = roster_cmd._render_roster_toml(loaded, {})
+    assert "cloud_safe_mode = true" in rendered
+    assert "[agents.cloud-worker]" in rendered
+
+
 @pytest.mark.parametrize("preset_name", EXPECTED_PRESET_NAMES)
 def test_packaged_presets_parse(preset_name):
     path = next(item for item in roster_cmd.preset_roster_paths() if item.name == preset_name)

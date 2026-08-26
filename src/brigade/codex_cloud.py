@@ -35,6 +35,8 @@ CONFIGURED_SELECTOR = "configured"
 DEFAULT_ENV_VAR = "CODEX_CLOUD_ENV"
 CONFIG_SCHEMA = "brigade.codex-cloud-config/1"
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+LITERAL_SELECTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+MAX_CONSECUTIVE_HUB_UNAVAILABLE_RENEWS = 3
 _AUTH_FAILURE_RE = re.compile(
     r"(?:\bnot (?:logged|signed) in\b|\bsign[- ]?in\b|\bauthentication\b|\bunauthorized\b|\b401\b)",
     re.IGNORECASE,
@@ -152,6 +154,15 @@ def resolve_config_target(start: Path | None) -> Path:
         pass
     if current.is_file():
         current = current.parent
+    home = Path.home()
+    git_root: Path | None = None
+    try:
+        from . import runguard
+
+        if runguard.is_git_worktree(current):
+            git_root = runguard.git_root(current)
+    except Exception:  # noqa: BLE001 - repo boundary is best-effort
+        git_root = None
     for candidate in (current, *current.parents):
         if config_path(candidate).is_file():
             return candidate
@@ -160,12 +171,20 @@ def resolve_config_target(start: Path | None) -> Path:
                 return candidate
         except OSError:
             continue
+        if candidate == home or (git_root is not None and candidate == git_root):
+            break
     return current
 
 
 def validate_selector_token(token: str) -> None:
     """Reject codex-cloud roster selectors that can only fail at dispatch."""
-    raw = (token or "").strip()
+    if token is None:
+        raise CodexCloudConfigError("codex-cloud environment token is empty")
+    if token != token.strip():
+        raise CodexCloudConfigError("codex-cloud selector must not contain surrounding whitespace")
+    if any(ch.isspace() for ch in token):
+        raise CodexCloudConfigError("codex-cloud selector must not contain whitespace")
+    raw = token.strip()
     if not raw:
         raise CodexCloudConfigError("codex-cloud environment token is empty")
     if raw == CONFIGURED_SELECTOR:
@@ -174,8 +193,10 @@ def validate_selector_token(token: str) -> None:
         if not ENV_NAME_RE.fullmatch(raw[1:]):
             raise CodexCloudConfigError("invalid environment variable name")
         return
-    if raw != raw.strip():
-        raise CodexCloudConfigError("codex-cloud literal environment id must not contain surrounding whitespace")
+    if raw.startswith("-"):
+        raise CodexCloudConfigError("codex-cloud literal environment id must not look like a CLI flag")
+    if not LITERAL_SELECTOR_RE.fullmatch(raw):
+        raise CodexCloudConfigError("invalid codex-cloud literal environment id")
 
 
 def environment_audit_ref(selector_token: str, environment_id: str) -> dict[str, str]:
@@ -189,6 +210,7 @@ def environment_audit_ref(selector_token: str, environment_id: str) -> dict[str,
     """
     token = (selector_token or "").strip()
     if token == CONFIGURED_SELECTOR or token.startswith("$"):
+        # Truncated unsalted digest for local receipt correlation only; not a secret token.
         digest = hashlib.sha256(environment_id.encode("utf-8")).hexdigest()[:12]
         return {"environment_fingerprint": f"sha256:{digest}"}
     return {"environment_id": environment_id}
@@ -283,6 +305,20 @@ def resolve_environment_id(
     return raw
 
 
+def _environment_seen(env_id: str, tasks: list[dict[str, Any]]) -> str:
+    """Return whether inventory rows expose the resolved environment id."""
+    if not tasks:
+        return "unknown"
+    seen_ids = {
+        task_id
+        for task in tasks
+        if isinstance(task, dict) and isinstance(task_id := task.get("environment_id"), str) and task_id.strip()
+    }
+    if not seen_ids:
+        return "unknown"
+    return "true" if env_id in seen_ids else "false"
+
+
 def doctor(
     target: Path,
     *,
@@ -328,6 +364,7 @@ def canary(
         }
     inventory = list_tasks(cwd=target)
     audit = environment_audit_ref(selector, env_id)
+    environment_seen = _environment_seen(env_id, inventory.tasks)
     if not inventory.ok:
         return {
             "ok": False,
@@ -335,17 +372,22 @@ def canary(
             "task_count": 0,
             "apply": False,
             "selector": selector,
+            "environment_seen": environment_seen,
             "reason": inventory.reason,
             **audit,
         }
-    return {
+    report: dict[str, Any] = {
         "ok": True,
         "environment_configured": True,
         "task_count": len(inventory.tasks),
         "apply": False,
         "selector": selector,
+        "environment_seen": environment_seen,
         **audit,
     }
+    if environment_seen == "false":
+        report["reason"] = "environment-not-seen"
+    return report
 
 
 def _environment_id(task: dict[str, Any]) -> str | None:
@@ -368,11 +410,11 @@ def _classify_list_failure(result: proc.Result) -> str:
         return "provider-missing"
     if result.code == 126:
         return "provider-unavailable"
+    if result.code == 124:
+        return "provider-timeout"
     combined = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
     if result.code != 0 and _AUTH_FAILURE_RE.search(combined):
         return "auth-failure"
-    if result.code != 0:
-        return "provider-error"
     return "provider-error"
 
 
@@ -407,8 +449,6 @@ def list_tasks(
             result = proc.run(argv, timeout=command_timeout, cwd=cwd)
         else:
             result = proc.run(argv, timeout=command_timeout, cwd=cwd, process_registry=process_registry)
-        if result.code == 127:
-            return ListTasksResult([], ok=False, reason="provider-missing")
         if result.code != 0:
             return ListTasksResult([], ok=False, reason=_classify_list_failure(result))
         try:
@@ -473,6 +513,7 @@ def run_cloud_task(
             thread_id=task_id,
             status="timeout",
             timed_out=True,
+            cloud_environment=environment_audit,
         )
 
     def fail_result(
@@ -607,6 +648,7 @@ def run_cloud_task(
 
     status_text = ""
     status_word = None
+    consecutive_hub_unavailable_renews = 0
     while True:
         st = run_command(
             ["codex", "cloud", "status", task_id],
@@ -656,7 +698,38 @@ def run_cloud_task(
         if status_word in TERMINAL_OK:
             break
         if hub_configured:
-            fleet_client.renew_cloud(lease_id_str, ttl_seconds=300, holder=holder)
+            renew = fleet_client.renew_cloud(lease_id_str, ttl_seconds=300, holder=holder)
+            if not renew.granted:
+                if renew.reason in ("refused", "auth-failed"):
+                    return AgentResult(
+                        text="",
+                        ok=False,
+                        detail="cloud lease renew refused",
+                        thread_id=task_id,
+                        status="uncertain",
+                        failure_phase="dispatch",
+                        failure_kind="fleet-lease-lost",
+                        timed_out=False,
+                        cloud_environment=environment_audit,
+                    )
+                if renew.reason == "hub-unavailable":
+                    consecutive_hub_unavailable_renews += 1
+                    if consecutive_hub_unavailable_renews >= MAX_CONSECUTIVE_HUB_UNAVAILABLE_RENEWS:
+                        return AgentResult(
+                            text="",
+                            ok=False,
+                            detail="cloud lease renew unavailable",
+                            thread_id=task_id,
+                            status="uncertain",
+                            failure_phase="dispatch",
+                            failure_kind="fleet-lease-lost",
+                            timed_out=False,
+                            cloud_environment=environment_audit,
+                        )
+                else:
+                    consecutive_hub_unavailable_renews = 0
+            else:
+                consecutive_hub_unavailable_renews = 0
         if clock() >= deadline:
             if hub_configured:
                 return AgentResult(

@@ -3239,6 +3239,25 @@ def test_roster_payload_includes_read_only_capability():
     assert payload["agents"]["coder"]["read_only_capable"] is False
 
 
+def test_roster_payload_includes_cloud_safe_mode():
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "cloud-worker": Agent(
+                name="cloud-worker",
+                cli="codex-cloud:env-123",
+                role="implement",
+                cloud_safe_mode=True,
+            ),
+        },
+    )
+    payload = aboyeur._roster_payload(roster)
+
+    assert payload["agents"]["cloud-worker"]["cloud_safe_mode"] is True
+    assert payload["agents"]["chef"]["cloud_safe_mode"] is False
+
+
 def test_direct_worker_rejects_incapable_read_only_seat_after_bootstrap_only(monkeypatch, tmp_path, capsys):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(
