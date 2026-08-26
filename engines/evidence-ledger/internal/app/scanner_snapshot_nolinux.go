@@ -1,17 +1,20 @@
-//go:build !unix
+//go:build unix && !linux
 
 package app
 
 import (
 	"os"
 	"runtime"
+	"syscall"
 )
 
-// Descriptor-based execution of the verified snapshot requires a way to
-// execute through an already-held open descriptor (linux /proc/self/fd/<fd>).
-// Platforms without that primitive must fail closed rather than degrade to
-// pathname execution, which would reopen the verification-to-exec swap window
-// the snapshot exists to close (#1201 round 5).
+// Non-linux unix platforms (darwin included) have no descriptor-relative
+// directory creation, no close-on-exec control, and — without linux
+// /proc/self/fd — no way to execute through an already-held open descriptor.
+// Snapshot materialization therefore fails closed here exactly as on the
+// other non-linux platforms; unlike them, validated data-directory
+// descriptors ARE held for key storage and private-file loading
+// (scanner_datadir_nolinux.go), so closeDescriptor must really close.
 
 // stationTrailDescriptorExecSupported reports whether this platform can
 // execute a file through an already-held open descriptor.
@@ -54,8 +57,10 @@ func rmdirSnapshotDirAt(sd *stationTrailSnapshotDir) error {
 	return &stationTrailDescriptorExecError{GOOS: runtime.GOOS, Reason: "no descriptor-relative rmdir"}
 }
 
-// closeDescriptor closes a raw held descriptor; none are ever held here.
+// closeDescriptor closes a raw held descriptor.
 func closeDescriptor(fd int) error {
-	_ = fd
-	return nil
+	if fd < 0 {
+		return nil
+	}
+	return syscall.Close(fd)
 }

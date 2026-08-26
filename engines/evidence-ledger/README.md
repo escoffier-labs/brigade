@@ -180,6 +180,22 @@ this engine's model: it can chmod files it owns, wait out validation windows,
 or displace the data directory between operations. Isolating scanners under a
 different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
 
+Platform note (macOS and other non-linux unix): the portable Go syscall
+package exposes neither `openat` nor `unlinkat` there, so the strictly
+descriptor-relative primitives behind the above guarantees are linux-only.
+The engine stays functional on darwin: private files (approved digests,
+evidence bundle MAC key) are opened by pathname with `O_NOFOLLOW|O_CLOEXEC`
+relative to the already-validated data-directory path (`O_CREAT|O_EXCL` for
+creation), the validated directory descriptor is `fstat`ed before and after
+every open or removal and must keep an identical dev/ino pair, and the opened
+file must be a regular, singly linked, exactly-0600 file. The residual
+mutation window on darwin is pathname-based — entries inside the data
+directory can change between those parent identity checks — which only a
+same-uid DataDir writer could exploit, and that writer is outside this
+engine's model ([#1093](https://github.com/escoffier-labs/miseledger/issues/1093)).
+Snapshot execution itself remains linux-only: platforms without descriptor
+exec refuse to stage the scanner at all.
+
 ## Smoke Test
 
 ```bash
