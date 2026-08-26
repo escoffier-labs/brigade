@@ -102,6 +102,27 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_flush = fleet_sub.add_parser("flush", help="Re-POST locally spooled events to the fleet hub.")
     p_flush.set_defaults(func=_dispatch_flush)
 
+    p_cloud = fleet_sub.add_parser("cloud", help="Read the fleet hub's sanitized cloud lease snapshot.")
+    p_cloud.add_argument("--all", action="store_true", help="Include released and expired cloud leases.")
+    p_cloud.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
+    p_cloud.set_defaults(func=_dispatch_cloud)
+
+    p_models = fleet_sub.add_parser("models", help="Read the fleet hub's sanitized model policy.")
+    p_models.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
+    p_models.set_defaults(func=_dispatch_models)
+    models_sub = p_models.add_subparsers(dest="models_command", metavar="<models-command>")
+    p_models_set = models_sub.add_parser("set", help="Set one provider/model/seat policy (admin token).")
+    p_models_set.add_argument("provider", help="Lowercase provider identifier.")
+    p_models_set.add_argument("model", help="Lowercase model identifier.")
+    p_models_set.add_argument("seat", help="Lowercase seat identifier.")
+    enabled = p_models_set.add_mutually_exclusive_group(required=True)
+    enabled.add_argument("--enable", action="store_true", help="Enable this model policy.")
+    enabled.add_argument("--disable", action="store_true", help="Disable this model policy.")
+    p_models_set.add_argument("--limit", type=int, default=None, help="Optional concurrent-use limit (0 through 64).")
+    p_models_set.add_argument("--notes", default=None, help="Optional operator note (stored as safe policy metadata).")
+    p_models_set.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_models_set.set_defaults(func=_dispatch_models_set)
+
     p_claims = fleet_sub.add_parser("claims", help="List active repo claims held on the fleet hub, or release one.")
     p_claims.add_argument("--all", action="store_true", help="Include expired claims.")
     p_claims.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
@@ -565,6 +586,106 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
     if not rows:
         print("(no active fleet claims)")
+    return 0
+
+
+def _dispatch_cloud(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    try:
+        snapshot = fleet_client.fetch_cloud(include_all=args.all)
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(snapshot, indent=2, sort_keys=True))
+        return 0
+    leases = snapshot.get("leases") if isinstance(snapshot.get("leases"), list) else []
+    headers = ("lease", "provider", "node", "state", "expires")
+    rows = [
+        [
+            str(lease.get("lease_id") or "-"),
+            str(lease.get("provider") or "-"),
+            str(lease.get("owner_node") or "-")[:12],
+            str(lease.get("state") or "-"),
+            str(lease.get("expires_at") or "-"),
+        ]
+        for lease in leases
+        if isinstance(lease, dict)
+    ]
+    widths = [
+        max(len(header), *(len(row[index]) for row in rows)) if rows else len(header)
+        for index, header in enumerate(headers)
+    ]
+    print("  ".join(header.ljust(width) for header, width in zip(headers, widths, strict=True)))
+    for row in rows:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)))
+    if not rows:
+        print("(no cloud leases)")
+    return 0
+
+
+def _dispatch_models(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    try:
+        models = fleet_client.fetch_model_policy()
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps({"models": models}, indent=2, sort_keys=True))
+        return 0
+    headers = ("provider", "model", "enabled", "limit")
+    rows = [
+        [
+            str(model.get("provider") or "-"),
+            str(model.get("model") or "-"),
+            "yes" if model.get("enabled") else "no",
+            str(model.get("limit") if model.get("limit") is not None else "-"),
+        ]
+        for model in models
+    ]
+    widths = [
+        max(len(header), *(len(row[index]) for row in rows)) if rows else len(header)
+        for index, header in enumerate(headers)
+    ]
+    print("  ".join(header.ljust(width) for header, width in zip(headers, widths, strict=True)))
+    for row in rows:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)))
+    if not rows:
+        print("(no model policy entries)")
+    return 0
+
+
+def _dispatch_models_set(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client
+
+    try:
+        policy = fleet_client.set_model_policy(
+            args.provider,
+            args.model,
+            args.seat,
+            enabled=bool(args.enable),
+            limit=args.limit,
+            notes=args.notes,
+        )
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(policy, indent=2, sort_keys=True))
+        return 0
+    print(
+        f"model policy {policy.get('provider')}/{policy.get('model')} ({policy.get('seat')}): "
+        f"{'enabled' if policy.get('enabled') else 'disabled'}"
+    )
     return 0
 
 

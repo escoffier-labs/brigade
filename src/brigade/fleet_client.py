@@ -115,6 +115,11 @@ DEFAULT_CLAIM_TTL_SECONDS = 900
 # One acquire is retried once, so a configured-but-blackholed hub costs at
 # most 2 x this per `brigade run` before falling open on the local lock.
 CLAIM_TIMEOUT_SECONDS = 2.5
+# Cloud admission fences provider work, so its transport uses the same hard
+# deadline as claims. A missing or unavailable hub is a refusal, never a
+# reason to start provider work locally.
+CLOUD_TIMEOUT_SECONDS = 2.5
+MAX_CLOUD_RESPONSE_BYTES = 64 * 1024
 # 4xx statuses that are transient or operator-fixable: keep the spool. 403
 # is a credential mismatch (a node token that is not this node's, or the
 # admin token on a hub without --allow-admin-writes), fixed by config.
@@ -953,6 +958,282 @@ class FleetClaimAuthError(FleetClaimHeldError):
     unprotected would pretend the hub had answered. ``repo_claim`` raises
     this instead of yielding, so dispatch fails closed.
     """
+
+
+@dataclass(frozen=True)
+class CloudDecision:
+    """Outcome of one cloud-lease operation.
+
+    ``holder`` is returned only to the local caller that supplied or minted
+    it. The hub never returns holder tokens, and ``lease`` is restricted to
+    the public lease fields before this value leaves the transport layer.
+    """
+
+    granted: bool
+    reason: str
+    lease: dict[str, Any] | None = None
+    detail: str | None = None
+    holder: str | None = None
+
+
+_CLOUD_OK_KEYS = {"admit": "admitted", "bind": "bound", "renew": "renewed", "release": "released"}
+_CLOUD_LEASE_FIELDS = frozenset(
+    {
+        "lease_id",
+        "provider",
+        "provider_task_id",
+        "repo",
+        "label",
+        "owner_node",
+        "owner_conductor",
+        "state",
+        "admitted_at",
+        "renewed_at",
+        "ttl_seconds",
+        "expires_at",
+        "artifact_ref",
+        "released_at",
+        "expired",
+    }
+)
+_MODEL_POLICY_FIELDS = frozenset({"provider", "model", "seat", "enabled", "limit", "notes"})
+
+
+def _bounded_json_response(response: Any) -> Any:
+    """Decode one small hub response without retaining arbitrary bodies."""
+    raw = response.read(MAX_CLOUD_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_CLOUD_RESPONSE_BYTES:
+        raise FleetClientError("fleet hub cloud response exceeded the size limit")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FleetClientError("fleet hub cloud response was not valid JSON") from exc
+
+
+def _post_cloud_blocking(hub_url: str, token: str, body: dict[str, Any], *, timeout: float) -> tuple[int, Any]:
+    """POST one cloud operation, returning only a bounded decoded payload."""
+    request = urllib.request.Request(
+        hub_url.rstrip("/") + "/cloud",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with _hub_open(request, timeout=timeout) as response:
+            return response.status, _bounded_json_response(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 401, 403, 409):
+            try:
+                return exc.code, _bounded_json_response(exc)
+            except FleetClientError:
+                return exc.code, {}
+        raise
+
+
+def _post_model_policy_blocking(hub_url: str, token: str, body: dict[str, Any], *, timeout: float) -> tuple[int, Any]:
+    """POST /models mutation, returning only a bounded decoded payload."""
+    request = urllib.request.Request(
+        hub_url.rstrip("/") + "/models",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with _hub_open(request, timeout=timeout) as response:
+            return response.status, _bounded_json_response(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 401, 403, 409):
+            try:
+                return exc.code, _bounded_json_response(exc)
+            except FleetClientError:
+                return exc.code, {}
+        raise
+
+
+def _get_cloud_blocking(hub_url: str, path: str, token: str, *, timeout: float) -> Any:
+    request = urllib.request.Request(
+        hub_url.rstrip("/") + path,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with _hub_open(request, timeout=timeout) as response:
+        if response.status != 200:
+            raise FleetClientError(f"fleet hub cloud request failed: HTTP {response.status}")
+        return _bounded_json_response(response)
+
+
+def _safe_cloud_lease(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    return {key: value for key, value in raw.items() if key in _CLOUD_LEASE_FIELDS}
+
+
+def _safe_model_policy(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    return {key: value for key, value in raw.items() if key in _MODEL_POLICY_FIELDS}
+
+
+def _cloud_op(
+    action: str,
+    *,
+    provider: str | None = None,
+    lease_id: str | None = None,
+    holder: str | None = None,
+    node_id: str | None = None,
+    hub_url: str | None = None,
+    token: str | None = None,
+    base_path: Path | None = None,
+    **fields: Any,
+) -> CloudDecision:
+    """One bounded cloud operation that fails closed on every uncertainty."""
+    lease = lease_id or uuid4().hex
+    fence = holder or uuid4().hex
+    try:
+        config = load_fleet_config()
+        hub = hub_url or config["hub_url"]
+        if not hub:
+            return CloudDecision(False, "no-hub", holder=fence)
+        node = node_id or resolve_node_id(base_path)
+        if not _node_id_is_claimable(node):
+            return CloudDecision(False, "no-identity", detail=node, holder=fence)
+        body: dict[str, Any] = {"action": action, "lease_id": lease, "node_id": node, "holder": fence}
+        if provider is not None:
+            body["provider"] = provider
+        body.update(fields)
+        status, payload = _run_with_deadline(
+            lambda: _post_cloud_blocking(hub, token or config["token"], body, timeout=CLOUD_TIMEOUT_SECONDS),
+            timeout=CLOUD_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return CloudDecision(False, "hub-unavailable", holder=fence)
+    payload = payload if isinstance(payload, dict) else {}
+    safe_lease = _safe_cloud_lease(payload.get("lease"))
+    if status in (401, 403):
+        return CloudDecision(False, "auth-failed", holder=fence)
+    if status == 200 and payload.get(_CLOUD_OK_KEYS[action]) is True:
+        return CloudDecision(True, "ok", lease=safe_lease, holder=fence)
+    if status in (200, 409):
+        return CloudDecision(False, "refused", lease=safe_lease, holder=fence)
+    return CloudDecision(False, "hub-unavailable", holder=fence)
+
+
+def admit_cloud(
+    provider: str,
+    *,
+    repo: str | None = None,
+    label: str | None = None,
+    prompt_hash: str | None = None,
+    conductor: str | None = None,
+    ttl_seconds: int = 300,
+    **kwargs: Any,
+) -> CloudDecision:
+    return _cloud_op(
+        "admit",
+        provider=provider,
+        repo=repo,
+        label=label,
+        prompt_hash=prompt_hash,
+        conductor=conductor,
+        ttl_seconds=ttl_seconds,
+        **kwargs,
+    )
+
+
+def bind_cloud(
+    lease_id: str, provider_task_id: str, *, artifact_ref: str | None = None, **kwargs: Any
+) -> CloudDecision:
+    return _cloud_op("bind", lease_id=lease_id, provider_task_id=provider_task_id, artifact_ref=artifact_ref, **kwargs)
+
+
+def renew_cloud(lease_id: str, *, ttl_seconds: int = 900, **kwargs: Any) -> CloudDecision:
+    return _cloud_op("renew", lease_id=lease_id, ttl_seconds=ttl_seconds, **kwargs)
+
+
+def release_cloud(lease_id: str, *, state: str = "released", **kwargs: Any) -> CloudDecision:
+    return _cloud_op("release", lease_id=lease_id, state=state, **kwargs)
+
+
+def fetch_cloud(*, hub_url: str | None = None, include_all: bool = False) -> dict[str, Any]:
+    """Return the hub's sanitized cloud snapshot, never holder capabilities."""
+    config = load_fleet_config()
+    hub = hub_url or config["hub_url"]
+    if not hub:
+        raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    try:
+        payload = _run_with_deadline(
+            lambda: _get_cloud_blocking(
+                hub, "/cloud?all=1" if include_all else "/cloud", config["token"], timeout=CLOUD_TIMEOUT_SECONDS
+            ),
+            timeout=CLOUD_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise FleetClientError("fleet hub cloud read failed") from exc
+    if not isinstance(payload, dict):
+        return {"leases": [], "policy": {}}
+    leases = payload.get("leases")
+    policy = payload.get("policy")
+    return {
+        "leases": [safe for item in leases if (safe := _safe_cloud_lease(item)) is not None]
+        if isinstance(leases, list)
+        else [],
+        "policy": policy if isinstance(policy, dict) else {},
+    }
+
+
+def fetch_model_policy(*, hub_url: str | None = None) -> list[dict[str, Any]]:
+    """Return the bounded, sanitized model-policy rows from the hub."""
+    config = load_fleet_config()
+    hub = hub_url or config["hub_url"]
+    if not hub:
+        raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    try:
+        payload = _run_with_deadline(
+            lambda: _get_cloud_blocking(hub, "/models", config["token"], timeout=CLOUD_TIMEOUT_SECONDS),
+            timeout=CLOUD_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise FleetClientError("fleet hub model policy read failed") from exc
+    models = payload.get("models") if isinstance(payload, dict) else None
+    return (
+        [safe for item in models if (safe := _safe_model_policy(item)) is not None] if isinstance(models, list) else []
+    )
+
+
+def set_model_policy(
+    provider: str, model: str, seat: str, *, enabled: bool, limit: int | None = None, notes: str | None = None
+) -> dict[str, Any]:
+    """Set one seat's provider/model policy with the configured admin token."""
+    body = {
+        "action": "set",
+        "provider": provider,
+        "model": model,
+        "seat": seat,
+        "enabled": enabled,
+        "limit": limit,
+        "notes": notes,
+    }
+    try:
+        settings = load_fleet_settings()
+        hub = settings["hub_url"]
+        if not hub:
+            raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+        admin_token = settings["admin_token"]
+        if not admin_token:
+            raise FleetClientError(
+                "no fleet admin token configured (~/.brigade/fleet.toml [fleet] token_file or BRIGADE_FLEET_TOKEN)"
+            )
+        status, payload = _run_with_deadline(
+            lambda: _post_model_policy_blocking(hub, admin_token, body, timeout=CLOUD_TIMEOUT_SECONDS),
+            timeout=CLOUD_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise FleetClientError("fleet hub model policy update failed") from exc
+    payload = payload if isinstance(payload, dict) else {}
+    if status == 200:
+        policy = _safe_model_policy(payload.get("policy"))
+        return policy if policy else {}
+    detail = payload.get("error") if isinstance(payload.get("error"), str) else None
+    raise FleetClientError(f"fleet hub model policy update refused: HTTP {status}{': ' + detail if detail else ''}")
 
 
 def resolve_claim_target(base_path: Path | None = None) -> str:

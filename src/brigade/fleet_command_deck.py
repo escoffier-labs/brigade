@@ -10,7 +10,7 @@ import html
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -55,11 +55,44 @@ class StationConfig:
 
 
 @dataclass(frozen=True)
+class CloudProviderConfig:
+    """Safe, startup-frozen admission defaults for one cloud provider."""
+
+    limit: int
+    enabled: bool = True
+    hosted: bool = True
+
+
+@dataclass(frozen=True)
+class CloudConfig:
+    """Hosted subscription pool limits, separate from physical stations."""
+
+    global_limit: int
+    providers: Mapping[str, CloudProviderConfig]
+
+
+def default_cloud_config() -> CloudConfig:
+    """Public fleet defaults. Private/operator-specific lanes stay absent."""
+    return CloudConfig(
+        global_limit=4,
+        providers={
+            "cursor": CloudProviderConfig(limit=3),
+            "codex": CloudProviderConfig(limit=2),
+            "claude": CloudProviderConfig(limit=0, enabled=False),
+            "jules": CloudProviderConfig(limit=15),
+            # Grok Bot is tracked but has no hosted-subscription admission cost.
+            "grok-bot": CloudProviderConfig(limit=64, hosted=False),
+        },
+    )
+
+
+@dataclass(frozen=True)
 class DeckConfig:
     stations: Sequence[StationConfig] = ()
     stale_after_seconds: int = 1800
     outcome_window: int = 20
     failed_lookback_seconds: int = 86400
+    cloud: CloudConfig = field(default_factory=default_cloud_config)
 
 
 @dataclass(frozen=True)
@@ -146,6 +179,7 @@ def load_config(path: Path) -> DeckConfig:
         stale_after_seconds=_bounded_int(raw, "stale_after_seconds", 1800, 300, 21600),
         outcome_window=_bounded_int(raw, "outcome_window", 20, 1, 100),
         failed_lookback_seconds=_bounded_int(raw, "failed_lookback_seconds", 86400, 1, 2_592_000),
+        cloud=_cloud_config(raw.get("cloud")),
     )
 
 
@@ -177,6 +211,32 @@ def _bounded_int(raw: Mapping[str, object], key: str, default: int, low: int, hi
     if type(value) is not int or not low <= value <= high:
         raise DeckConfigError(f"{key} must be an integer in {low}..{high}")
     return value
+
+
+def _cloud_config(raw: object) -> CloudConfig:
+    defaults = default_cloud_config()
+    if raw is None:
+        return defaults
+    if not isinstance(raw, Mapping):
+        raise DeckConfigError("cloud must be a JSON object")
+    global_limit = _bounded_int(raw, "global_limit", defaults.global_limit, 0, 64)
+    configured = raw.get("providers", {})
+    if not isinstance(configured, Mapping):
+        raise DeckConfigError("cloud.providers must be a JSON object")
+    providers = dict(defaults.providers)
+    for name, item in configured.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name):
+            raise DeckConfigError("cloud provider name is invalid")
+        if not isinstance(item, Mapping):
+            raise DeckConfigError("cloud provider must be a JSON object")
+        previous = providers.get(name, CloudProviderConfig(limit=0, enabled=False))
+        limit = _bounded_int(item, "limit", previous.limit, 0, 64)
+        enabled = item.get("enabled", previous.enabled)
+        hosted = item.get("hosted", previous.hosted)
+        if type(enabled) is not bool or type(hosted) is not bool:
+            raise DeckConfigError("cloud provider enabled and hosted must be booleans")
+        providers[name] = CloudProviderConfig(limit=limit, enabled=enabled, hosted=hosted)
+    return CloudConfig(global_limit=global_limit, providers=providers)
 
 
 def _strip_controls(value: str) -> str:
