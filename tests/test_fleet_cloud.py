@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import sqlite3
@@ -222,6 +223,32 @@ def test_client_fails_closed_for_configured_hub(monkeypatch):
     )
     decision = fleet_client.admit_cloud("cursor", repo="repo-a")
     assert decision.granted is False and decision.reason == "hub-unavailable"
+
+
+def test_admit_cloud_normalizes_prefixed_prompt_hash_on_hub_wire(monkeypatch):
+    """cloud_tracker stores sha256:<hex>; the hub accepts bare hex only."""
+    bodies: list[dict[str, object]] = []
+
+    def capture_post(_hub, _token, body, *, timeout):
+        bodies.append(dict(body))
+        return 200, {"admitted": True, "lease": {"provider": "cursor", "lease_id": body["lease_id"]}}
+
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "token"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda _base=None: NODE_A)
+    monkeypatch.setattr(fleet_client, "_post_cloud_blocking", capture_post)
+
+    prompt = "rotate the production credentials"
+    prefixed = "sha256:" + hashlib.sha256(prompt.encode()).hexdigest()
+    bare = prefixed.removeprefix("sha256:")
+
+    decision = fleet_client.admit_cloud("cursor", repo="repo-a", prompt_hash=prefixed)
+    assert decision.granted is True
+    assert bodies[0]["prompt_hash"] == bare
+    assert bodies[0]["prompt_hash"] != prefixed
+
+    decision = fleet_client.admit_cloud("cursor", repo="repo-a", prompt_hash=bare)
+    assert decision.granted is True
+    assert bodies[1]["prompt_hash"] == bare
 
 
 def test_client_preserves_request_lease_id_when_granted_projection_omits_it(monkeypatch):

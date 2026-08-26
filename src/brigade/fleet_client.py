@@ -1073,6 +1073,16 @@ def _safe_model_policy(raw: Any) -> dict[str, Any] | None:
     return {key: value for key, value in raw.items() if key in _MODEL_POLICY_FIELDS}
 
 
+def _normalize_cloud_prompt_hash(value: str | None) -> str | None:
+    """Strip the cloud-tracker ``sha256:`` prefix before hub admission."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped.removeprefix("sha256:")
+
+
 def _cloud_op(
     action: str,
     *,
@@ -1099,6 +1109,9 @@ def _cloud_op(
         body: dict[str, Any] = {"action": action, "lease_id": lease, "node_id": node, "holder": fence}
         if provider is not None:
             body["provider"] = provider
+        if "prompt_hash" in fields:
+            fields = dict(fields)
+            fields["prompt_hash"] = _normalize_cloud_prompt_hash(fields.get("prompt_hash"))
         body.update(fields)
         status, payload = _run_with_deadline(
             lambda: _post_cloud_blocking(hub, token or config["token"], body, timeout=CLOUD_TIMEOUT_SECONDS),
