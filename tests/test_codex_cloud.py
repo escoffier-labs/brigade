@@ -613,6 +613,52 @@ class TestFleetAdmission:
         assert recorded["release"][0]["args"][0] == "lease-1"
         assert recorded["release"][0]["kwargs"]["state"] == "failed"
 
+    def test_nonzero_status_with_error_marker_releases_failed_lease(self, monkeypatch):
+        recorded = _grant_hub(monkeypatch)
+        fake = FakeRuns(
+            {
+                "exec": [_result(stdout="task_err1")],
+                "status": [_result(code=1, stdout="[ERROR] environment setup failed\nbrigade  -  2s ago")],
+            }
+        )
+        monkeypatch.setattr(codex_cloud.proc, "run", fake)
+        result = codex_cloud.run_cloud_task(
+            "x",
+            env_id="e",
+            timeout=600,
+            poll_interval=0,
+            sleep=lambda s: None,
+            clock=lambda: 0,
+        )
+        assert not result.ok
+        assert result.status == "error"
+        assert recorded["release"]
+        assert recorded["release"][0]["args"][0] == "lease-1"
+        assert recorded["release"][0]["kwargs"]["state"] == "error"
+
+    def test_unknown_nonzero_status_holds_lease(self, monkeypatch):
+        recorded = _grant_hub(monkeypatch)
+        fake = FakeRuns(
+            {
+                "exec": [_result(stdout="task_statnz1")],
+                "status": [_result(code=1, stdout="provider dropped the connection")],
+            }
+        )
+        monkeypatch.setattr(codex_cloud.proc, "run", fake)
+        result = codex_cloud.run_cloud_task(
+            "x",
+            env_id="e",
+            timeout=600,
+            poll_interval=0,
+            sleep=lambda s: None,
+            clock=lambda: 0,
+        )
+        assert not result.ok
+        assert result.status == "uncertain"
+        assert result.failure_kind == "uncertain"
+        assert result.detail == "cloud status unavailable"
+        assert recorded["release"] == []
+
     def test_terminal_success_releases_lease_before_diff(self, monkeypatch):
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(

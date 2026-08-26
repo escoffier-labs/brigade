@@ -655,6 +655,13 @@ def run_cloud_task(
             command_timeout=min(POLL_TIMEOUT, remaining()),
         )
         status_text = (st.stdout + "\n" + st.stderr).strip()
+        # A documented terminal marker is authoritative even when the CLI
+        # exits nonzero (live canary: `[ERROR]` plus exit 1). Unknown
+        # nonzero output still fails closed as transport uncertainty.
+        verified_status = _verified_status(status_text)
+        if verified_status in TERMINAL_FAIL + TERMINAL_OK:
+            status_word = verified_status
+            break
         if st.code == 124:
             if hub_configured:
                 return AgentResult(
@@ -689,7 +696,6 @@ def run_cloud_task(
             return fail_result(
                 "cloud status unavailable", task_id=task_id, status="uncertain", failure_kind="uncertain"
             )
-        verified_status = _verified_status(status_text)
         status_word = verified_status if verified_status in TERMINAL_FAIL + TERMINAL_OK else _scan_status(status_text)
         if hub_configured and verified_status not in TERMINAL_FAIL + TERMINAL_OK:
             status_word = None
