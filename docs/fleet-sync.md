@@ -149,7 +149,12 @@ after the journal write completes and the lock is released):
   directory's privacy is enforced through a descriptor, not the path
   (#1157 round 2): it is opened `O_DIRECTORY|O_NOFOLLOW`, forced to 0700
   via `fchmod`, and re-stat'ed through the same descriptor; lock and spool
-  files are opened `dir_fd` against that validated descriptor. When 0700
+  files are opened `dir_fd` against that validated descriptor. Atomic
+  rewrites are descriptor-scoped too (#1157 round 3): the temp file is
+  opened `O_CREAT|O_EXCL|O_NOFOLLOW` with an unpredictable name and the
+  replace is issued with `src_dir_fd`/`dst_dir_fd`, so both resolve inside
+  the validated directory and a concurrent directory swap under the old
+  path cannot redirect them. When 0700
   cannot be applied or verified, writes are refused (an event stays
   undelivered) rather than written to a possibly-readable directory.
 - `brigade fleet status [--all] [--json]`.
@@ -220,7 +225,9 @@ keep working one repo unarbitrated. The abort does not depend on the
 callback behaving (#1157 round 2): a callback that blocks is cut off after a
 bounded grace period (`CLAIM_LOST_CALLBACK_GRACE_SECONDS`) and one that
 raises `SystemExit` or `KeyboardInterrupt` is logged; the interrupt fires
-either way, after the callback has had its chance to record state.
+either way, after the callback has had its chance to record state. The
+grace-boundary fire and the callback-completion fire share one atomic
+check-and-set, so the abort interrupts exactly once (#1157 round 3).
 `repo_claim` accepts `on_claim_lost` to react differently, and
 `BRIGADE_FLEET_CLAIM_LOSS=continue` (or
 `claim_loss_policy="continue"`) is the documented opt-out for solo machines,
@@ -228,7 +235,12 @@ restoring the old log-and-continue behavior. `brigade run` records a mid-run
 claim-loss abort as a failed run with failure kind `fleet-claim-lost`, never
 as "canceled by user"; the receipt is classified and written on the main
 thread from the heartbeat's marker (#1157 round 2), so a heartbeat-side
-receipt-write failure cannot downgrade the abort to a user cancel.
+receipt-write failure cannot downgrade the abort to a user cancel. The CLI's
+abort callbacks record their classification markers before any stderr
+diagnostic and interrupt from a `finally` (#1157 round 3), so a failed
+stderr write can neither swallow a credential-refusal abort (kind
+`fleet-credentials-rejected`) nor downgrade a lost-claim abort to a user
+cancel.
 
 Off-main-thread owners (#1157 round 2): `_thread.interrupt_main()` targets
 the process main thread, so when `repo_claim` is entered from a worker

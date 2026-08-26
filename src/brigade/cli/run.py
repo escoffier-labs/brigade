@@ -538,30 +538,35 @@ def dispatch(args) -> int:
         claim this run was granted. Only the cheap classification marker is
         recorded here; the terminal receipt itself is written by the
         main-thread handler (#1157 round 2), where a write failure surfaces
-        loudly instead of silently degrading to a user-cancel record."""
+        loudly instead of silently degrading to a user-cancel record.
+        The marker lands before the fallible stderr print (#1157 round 3):
+        a failed write must not stop the abort from being classified."""
         detail = reason or "held by another node"
+        fleet_claim_loss.append(detail)
         print(
             f"error: fleet claim on {claim_target!r} was lost ({detail}); canceling the active run",
             file=sys.stderr,
         )
-        fleet_claim_loss.append(detail)
 
     def abort_on_fleet_credential_failure(detail: str | None) -> None:
         """Heartbeat-thread callback (#1161): the hub rejected this machine's
         token while dispatch is active.
 
-        Print and mark the failure; the main-thread handler writes the
-        terminal receipt from the marker (#1157 round 2). Then interrupt the
-        main thread, which unwinds the active dispatch through the same
-        prompt-cancel path as Ctrl-C."""
-        print(
-            f"error: fleet hub rejected this node's credentials ({detail or 'auth refused'}); "
-            "canceling the active run; enroll this machine with 'brigade fleet nodes add <node_id>' "
-            "and set [fleet] node_token_file",
-            file=sys.stderr,
-        )
+        The marker is appended before any diagnostic and the interrupt fires
+        from ``finally`` (#1157 round 3): a stderr write failure must leave
+        the abort and its classification intact, never swallow the callback
+        into a logged warning while the run continues. The main-thread
+        handler writes the terminal receipt from the marker (#1157 round 2)."""
         fleet_credential_failure.append(detail or "auth refused")
-        _thread.interrupt_main()
+        try:
+            print(
+                f"error: fleet hub rejected this node's credentials ({detail or 'auth refused'}); "
+                "canceling the active run; enroll this machine with 'brigade fleet nodes add <node_id>' "
+                "and set [fleet] node_token_file",
+                file=sys.stderr,
+            )
+        finally:
+            _thread.interrupt_main()
 
     try:
         with ExitStack() as lifecycle:

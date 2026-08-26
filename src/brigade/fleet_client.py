@@ -78,6 +78,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import stat
 import tempfile
 import threading
@@ -397,6 +398,10 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 # Regular-file opens ignore O_NONBLOCK, but it makes an open on a FIFO or
 # device fail fast instead of blocking the journal writer forever.
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+# Bounded retries for the exclusive temp-name loop in _write_spool_atomic;
+# a name from secrets.token_hex(16) colliding with a planted file is
+# already negligible, this only caps pathological adversarial spraying.
+_SPOOL_TEMP_ATTEMPTS = 8
 
 
 def _ensure_private_dir(path: Path) -> int | None:
@@ -563,10 +568,12 @@ def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int
     spool directory (#1154), never a predictable ``.tmp`` path a local
     attacker could pre-create or symlink to. The final ``os.replace`` is a
     rename: it swaps the directory entry itself and never follows a symlink
-    planted at the destination. Residual note (documented, #1157 round 2):
-    ``tempfile.mkstemp`` cannot target a descriptor on this interpreter, so
-    temp creation addresses the validated directory by path; the O_EXCL
-    name and the rename semantics above bound that window.
+    planted at the destination. When a validated directory descriptor is
+    available, both the temp creation and the replace address it by name
+    relative to that descriptor (#1157 round 3) — ``tempfile.mkstemp``
+    cannot target a descriptor, so the temp is opened here with
+    ``O_CREAT|O_EXCL|O_NOFOLLOW`` and 0600 — so a directory swapped in
+    under the old path cannot redirect the rewrite.
     """
     if not events:
         if dir_fd is not None:
@@ -577,16 +584,50 @@ def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int
         else:
             path.unlink(missing_ok=True)
         return
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    tmp = Path(tmp_name)
+    if dir_fd is None:
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(_encode(e) for e in events) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return
+    # Descriptor-scoped rewrite (#1157 round 3): create and replace by
+    # names relative to the validated descriptor.
+    tmp_name = ""
     try:
+        fd = -1
+        for _ in range(_SPOOL_TEMP_ATTEMPTS):
+            candidate = f".{path.name}.{secrets.token_hex(16)}.tmp"
+            try:
+                fd = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
+                    0o600,
+                    dir_fd=dir_fd,
+                )
+            except FileExistsError:
+                continue
+            tmp_name = candidate
+            break
+        if not tmp_name:
+            raise FleetClientError(f"fleet spool {path}: exhausted private temp-name attempts")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write("\n".join(_encode(e) for e in events) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        os.replace(tmp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        if tmp_name:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
         raise
 
 
@@ -1260,6 +1301,9 @@ def _abort_claim_owner(
     unrelated thread while the owner kept working, so the interrupt is
     replaced by the cooperative channel: ``cancel_event`` is already set and
     the guarded block must unwind through ``ClaimDecision.cancel_event``.
+    The watchdog's grace fire and the callback-finally fire share one
+    lock-guarded check-and-set (#1157 round 3), so the grace boundary can
+    never deliver two interrupts.
     """
     owner_is_main = owner_thread is threading.main_thread()
     # Cooperative observers learn first, whatever happens to the callback.
@@ -1282,17 +1326,28 @@ def _abort_claim_owner(
         return
     done = threading.Event()
     fired = threading.Event()
+    # One-shot gate (#1157 round 3): at the grace boundary the watchdog and
+    # the callback's finally can both observe "not fired"; check-and-set is
+    # atomic under this lock, so exactly one path interrupts.
+    fired_gate = threading.Lock()
+
+    def _fire_once(*, forced: bool) -> None:
+        with fired_gate:
+            if fired.is_set():
+                return
+            fired.set()
+        if forced:
+            _LOG.warning(
+                "fleet claim-lost callback for %s exceeded %.1fs; forcing the abort",
+                target,
+                CLAIM_LOST_CALLBACK_GRACE_SECONDS,
+            )
+        _interrupt()
 
     def _watchdog() -> None:
         if done.wait(CLAIM_LOST_CALLBACK_GRACE_SECONDS) or fired.is_set():
             return
-        fired.set()
-        _LOG.warning(
-            "fleet claim-lost callback for %s exceeded %.1fs; forcing the abort",
-            target,
-            CLAIM_LOST_CALLBACK_GRACE_SECONDS,
-        )
-        _interrupt()
+        _fire_once(forced=True)
 
     threading.Thread(target=_watchdog, name="brigade-fleet-claim-abort", daemon=True).start()
     try:
@@ -1300,9 +1355,8 @@ def _abort_claim_owner(
     except BaseException:
         _LOG.warning("fleet claim-lost callback raised; interrupting anyway", exc_info=True)
     finally:
-        if not fired.is_set():
-            fired.set()
-            _interrupt()
+        done.set()
+        _fire_once(forced=False)
 
 
 @contextmanager

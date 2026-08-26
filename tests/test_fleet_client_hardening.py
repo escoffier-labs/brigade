@@ -138,6 +138,42 @@ class TestSpoolPrivacy:
         assert [e["run_id"] for e in fleet_client._read_spool(spool)] == ["new"]
 
     @pytest.mark.skipif(os.name != "posix", reason="descriptor-based enforcement is POSIX-only")
+    def test_swapped_spool_directory_never_receives_the_rewrite(self, home, tmp_path):
+        """#1157 round 3: the atomic rewrite must address the spool through
+        the validated directory descriptor. A directory swapped in between
+        validation and the rewrite never receives temp files or the replace."""
+        spool = _spool()
+        real_dir = spool.parent
+        real_dir.mkdir(parents=True)
+        os.chmod(real_dir, 0o700)
+        spool.write_text(json.dumps({"run_id": "old"}) + "\n", encoding="utf-8")
+        decoy = tmp_path / "decoy"
+        decoy.mkdir()
+        os.chmod(decoy, 0o700)
+        sentinel = decoy / spool.name
+        sentinel.write_text("do not touch\n", encoding="utf-8")
+
+        with fleet_client._spool_lock(spool) as dir_fd:
+            assert dir_fd is not None
+            evacuated = tmp_path / "evacuated"
+            # Swap the directory out from under the validated descriptor:
+            # the old path now resolves to the decoy, dir_fd still points at
+            # the evacuated real directory.
+            real_dir.rename(evacuated)
+            decoy.rename(real_dir)
+            try:
+                fleet_client._write_spool_atomic(spool, [{"run_id": "new"}], dir_fd=dir_fd)
+            finally:
+                real_dir.rename(decoy)
+                evacuated.rename(real_dir)
+
+        assert sorted(p.name for p in decoy.iterdir()) == [sentinel.name]
+        assert sentinel.read_text(encoding="utf-8") == "do not touch\n"
+        rewritten = json.loads((real_dir / spool.name).read_text(encoding="utf-8"))
+        assert rewritten["run_id"] == "new"
+        assert not list(real_dir.glob("*.tmp")), "a temp file was left behind in the real spool directory"
+
+    @pytest.mark.skipif(os.name != "posix", reason="descriptor-based enforcement is POSIX-only")
     def test_unenforceable_dir_privacy_refuses_the_write(self, home, monkeypatch):
         """Privacy enforcement through the descriptor is not best-effort
         (#1157 round 2): when 0700 cannot be applied (or cannot be verified),

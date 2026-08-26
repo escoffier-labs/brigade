@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
+import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -1025,6 +1028,116 @@ class TestDispatchWiring:
         assert self._run(ws, roster_path) == 0
         assert dispatched == [1]
 
+    @staticmethod
+    def _receipt(ws: Path) -> dict:
+        return json.loads((next((ws / ".brigade" / "runs").iterdir()) / "run.json").read_text(encoding="utf-8"))
+
+    def test_dead_stderr_credential_refusal_still_aborts_as_fleet_credentials_rejected(
+        self, hub, workspace, monkeypatch
+    ):
+        """#1157 round 3: the credential-failure callback must record its
+        marker and fire the interrupt even when writing the diagnostic to
+        stderr fails; otherwise the exception is swallowed and the run
+        silently continues after the hub rejected this node's credentials."""
+        from brigade import aboyeur
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        ws, roster_path = workspace
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+
+        def post(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+            if body["action"] == "renew":
+                return 401, {"error": "token revoked"}
+            return 200, {"released": True}
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+
+        def fake_run(*_a, **_kw):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    payload = self._receipt(ws)
+                except (StopIteration, OSError, json.JSONDecodeError):
+                    payload = {}
+                if isinstance(payload.get("failure"), dict):
+                    return 0  # the abort landed; let the unwind finish it
+                time.sleep(0.02)
+            raise AssertionError("the credential refusal never aborted the run")
+
+        monkeypatch.setattr(aboyeur, "run", fake_run)
+        monkeypatch.setattr(sys, "stderr", _DeadStderr(sys.stderr))
+        # A permanently dead stderr also kills the outer summary print; the
+        # contract under test is the receipt classification, not that print.
+        with contextlib.suppress(ValueError):
+            self._run(ws, roster_path)
+        receipt = self._receipt(ws)
+        assert receipt["status"] == "failed"
+        assert receipt["failure"]["kind"] == "fleet-credentials-rejected"
+
+    def test_dead_stderr_claim_loss_is_recorded_fleet_claim_lost_not_user_cancel(self, hub, workspace, monkeypatch):
+        """#1157 round 3: the claim-loss marker must be recorded before the
+        fallible stderr print — with a dead stderr the independent abort
+        still fires, but the loss used to be recorded as a user cancel."""
+        from brigade import aboyeur
+
+        url, token, _db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        ws, roster_path = workspace
+        monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
+        monkeypatch.setattr(fleet_client, "CLAIM_LOST_CALLBACK_GRACE_SECONDS", 0.2)
+
+        def post(hub_url, tok, body, *, timeout):
+            if body["action"] == "acquire":
+                return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+            return 409, {
+                "granted": False,
+                "error": "held",
+                "owner": {"owner_node": NODE_B, "expires_at": "soon"},
+            }
+
+        monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+
+        # Poll instead of one long sleep: interrupt_main queues the
+        # KeyboardInterrupt for the interpreter's next bytecode check, which
+        # a single 30-second sleep syscall would never reach.
+        def fake_run(*_a, **_kw):
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                time.sleep(0.02)
+
+        monkeypatch.setattr(aboyeur, "run", fake_run)
+        monkeypatch.setattr(sys, "stderr", _DeadStderr(sys.stderr))
+        with contextlib.suppress(ValueError):
+            self._run(ws, roster_path)
+        receipt = self._receipt(ws)
+        assert receipt["status"] == "failed"
+        assert receipt["failure"]["kind"] == "fleet-claim-lost"
+        assert receipt["failure"]["kind"] != "keyboard-interrupt"
+
+
+class _DeadStderr:
+    """A stderr that fails the moment the fleet abort diagnostics are
+    written (closed pipe, full disk, ...); earlier traffic passes through,
+    so the run still reaches dispatch."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self._dead = False
+
+    def write(self, text: str, *args, **kwargs) -> int:
+        if self._dead or "fleet claim" in text or "fleet hub rejected" in text:
+            self._dead = True
+            raise ValueError("stderr is closed")
+        return self._inner.write(text, *args, **kwargs)
+
+    def flush(self) -> None:
+        return self._inner.flush()
+
 
 class TestClaimLossAborts:
     """Lost ownership (#1152): when the heartbeat learns another owner holds
@@ -1142,6 +1255,62 @@ class TestClaimLossAborts:
         # (simulated endless) wait.
         assert time.monotonic() - started < 10
         release.set()
+
+    def test_grace_boundary_race_fires_the_interrupt_exactly_once(self, monkeypatch):
+        """#1157 round 3: the watchdog and the callback's ``finally`` share
+        one atomic check-and-set on the one-shot fired flag. At the grace
+        boundary both paths can observe "not fired" — the interrupt must
+        still land exactly once."""
+        interrupts = []
+        monkeypatch.setattr(fleet_client._thread, "interrupt_main", lambda: interrupts.append(1))
+        monkeypatch.setattr(fleet_client, "CLAIM_LOST_CALLBACK_GRACE_SECONDS", 0.0)
+
+        # Makes the boundary race deterministic instead of lucky: the
+        # callback only returns once the watchdog has evaluated ``fired``
+        # (both paths therefore pass their independent "not fired" checks),
+        # and the watchdog's own set() stalls just before writing the flag.
+        # The racy Event is injected through fleet_client's threading
+        # namespace only — the real module stays untouched so Thread
+        # bootstrap internals keep their plain Event.
+        watchdog_checked = threading.Event()
+
+        class _RacyEvent(threading.Event):
+            def is_set(self):
+                result = super().is_set()
+                if threading.current_thread().name == "brigade-fleet-claim-abort":
+                    watchdog_checked.set()
+                return result
+
+            def set(self):
+                if threading.current_thread().name == "brigade-fleet-claim-abort":
+                    time.sleep(0.1)
+                return super().set()
+
+        shim = types.SimpleNamespace(
+            **{name: getattr(threading, name) for name in dir(threading) if not name.startswith("_")}
+        )
+        shim.Event = _RacyEvent
+        monkeypatch.setattr(fleet_client, "threading", shim)
+        seen: list[str | None] = []
+
+        def callback(reason: str | None) -> None:
+            seen.append(reason)
+            assert watchdog_checked.wait(5), "watchdog never reached its fired check"
+
+        fleet_client._abort_claim_owner(
+            "repo-a",
+            "held",
+            owner_thread=threading.main_thread(),
+            cancel_event=threading.Event(),
+            on_claim_lost=callback,
+        )
+        # A double fire from the stalled watchdog lands shortly after the
+        # callback's finally; give it the chance before counting.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and len(interrupts) < 2:
+            time.sleep(0.01)
+        assert seen == ["held"]
+        assert len(interrupts) == 1, f"expected exactly one interrupt, got {len(interrupts)}"
 
     def test_claim_loss_off_main_thread_aborts_that_thread_cooperatively(self, tmp_path, monkeypatch, caplog):
         """``interrupt_main()`` targets the process main thread (#1157 round
