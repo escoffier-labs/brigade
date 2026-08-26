@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -1723,6 +1724,220 @@ def test_unlink_error_path_raises_typed_error_not_name_error(tmp_path):
     with skills_cmd._held_state_root(workspace) as anchor:
         with pytest.raises(skills_cmd.SkillsStatePathError, match="could not be removed safely"):
             skills_cmd._unlink_in_anchor(anchor, "skills", "installs", long_name)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_state_write_append_and_read_refuse_hardlinked_targets(tmp_path):
+    workspace = tmp_path / "ws"
+    (workspace / ".brigade" / "skills" / "installs").mkdir(parents=True)
+    victim_receipt = tmp_path / "victim-receipt.txt"
+    victim_history = tmp_path / "victim-history.txt"
+    receipt = workspace / ".brigade" / "skills" / "installs" / "receipt.json"
+    history = workspace / ".brigade" / "skills" / "installs" / "history.jsonl"
+
+    with skills_cmd._held_state_root(workspace) as anchor:
+        skills_cmd._write_state_file(anchor, "skills", "installs", "receipt.json", data=b'{"v": 1}\n')
+        skills_cmd._append_state_line(anchor, "skills", "installs", "history.jsonl", data=b'{"row": 1}\n')
+        os.link(receipt, victim_receipt)
+        os.link(history, victim_history)
+
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._write_state_file(anchor, "skills", "installs", "receipt.json", data=b'{"v": 2}\n')
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._append_state_line(anchor, "skills", "installs", "history.jsonl", data=b'{"row": 2}\n')
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "receipt.json")
+
+    assert receipt.read_bytes() == b'{"v": 1}\n'
+    assert history.read_bytes() == b'{"row": 1}\n'
+    # the victims share inodes with the state files: unchanged because every
+    # mutating call was refused before any byte moved
+    assert victim_receipt.read_bytes() == b'{"v": 1}\n'
+    assert victim_history.read_bytes() == b'{"row": 1}\n'
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform cannot create FIFOs")
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_state_read_refuses_fifo_instead_of_blocking(tmp_path):
+    workspace = tmp_path / "ws"
+    (workspace / ".brigade" / "skills" / "installs").mkdir(parents=True)
+    os.mkfifo(workspace / ".brigade" / "skills" / "installs" / "pipe.json")
+
+    with skills_cmd._held_state_root(workspace) as anchor:
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "pipe.json")
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_install_refuses_hardlinked_receipt_and_history_without_touching_victims(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    assert skills_cmd.install(workspace=workspace, skill="security-review", harness="claude", json_output=True) == 0
+    capsys.readouterr()
+    installs = workspace / ".brigade" / "skills" / "installs"
+    victim_receipt = tmp_path / "victim-receipt.json"
+    victim_history = tmp_path / "victim-history.jsonl"
+    os.link(installs / "security-review-claude.json", victim_receipt)
+    os.link(installs / "history.jsonl", victim_history)
+    before_receipt = victim_receipt.read_bytes()
+    before_history = victim_history.read_bytes()
+
+    rc = skills_cmd.install(
+        workspace=workspace, skill="security-review", harness="claude", force=True, json_output=True
+    )
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "Traceback" not in captured.err
+    assert victim_receipt.read_bytes() == before_receipt
+    assert victim_history.read_bytes() == before_history
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_install_refuses_symlinked_previous_receipt_and_leaks_no_outside_content(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    _seed_workspace_with_skill(workspace, tmp_path)
+    assert skills_cmd.install(workspace=workspace, skill="security-review", harness="claude", json_output=True) == 0
+    capsys.readouterr()
+    outside = tmp_path / "outside.json"
+    outside_payload = {"schema_version": 99, "injected": "OUTSIDE-RECEIPT-CONTENT"}
+    outside.write_text(json.dumps(outside_payload) + "\n")
+    receipt = workspace / ".brigade" / "skills" / "installs" / "security-review-claude.json"
+    receipt.unlink()
+    receipt.symlink_to(outside)
+    history = workspace / ".brigade" / "skills" / "installs" / "history.jsonl"
+
+    rc = skills_cmd.install(
+        workspace=workspace, skill="security-review", harness="claude", force=True, json_output=True
+    )
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "OUTSIDE-RECEIPT-CONTENT" not in captured.out
+    assert "OUTSIDE-RECEIPT-CONTENT" not in history.read_text()
+    assert outside.read_text() == json.dumps(outside_payload) + "\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_symlinked_source_skill_md_never_reaches_state_or_rendered_install(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = _write_skill(tmp_path / "source")
+    secret = tmp_path / "outside-secret.md"
+    secret.write_text("# OUTSIDE SKILL SECRET\n")
+    (source / "SKILL.md").unlink()
+    (source / "SKILL.md").symlink_to(secret)
+
+    for harness in ("mcp", "claude"):
+        rc = skills_cmd.install(workspace=workspace, skill=str(source), harness=harness, json_output=True)
+        captured = capsys.readouterr()
+        assert rc == 2, captured.out + captured.err
+        assert "OUTSIDE SKILL SECRET" not in captured.out
+
+    for root in (workspace / ".brigade", workspace / ".claude"):
+        if root.is_dir():
+            for path in root.rglob("*"):
+                if path.is_file():
+                    assert "OUTSIDE SKILL SECRET" not in path.read_text(errors="replace")
+
+
+def test_fallback_without_descriptor_anchor_fails_closed_for_state_mutations(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws"
+    installs = workspace / ".brigade" / "skills" / "installs"
+    installs.mkdir(parents=True)
+    (installs / "existing.json").write_text("{}\n")
+    (installs / "subtree").mkdir()
+    (installs / "subtree" / "keep.txt").write_text("keep\n")
+    monkeypatch.setattr(skills_cmd, "_HAS_DESCRIPTOR_ANCHOR", False)
+    dirs: list[tuple[str, ...]] = [("nested",)]
+    files: dict[tuple[str, ...], bytes] = {("nested", "new.txt"): b"data\n"}
+    anchor = skills_cmd._hold_state_root(workspace)
+    try:
+        assert skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "existing.json") == b"{}\n"
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._write_state_file(anchor, "skills", "installs", "written.json", data=b"x\n")
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._append_state_line(anchor, "skills", "installs", "history.jsonl", data=b"x\n")
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._unlink_in_anchor(anchor, "skills", "installs", "existing.json")
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._remove_tree_in_anchor(anchor, "skills", "installs", "subtree")
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._write_collected_tree_into_anchor(dirs, files, anchor, "skills", "installs", "planted")
+    finally:
+        anchor.close()
+
+    assert (installs / "existing.json").read_text() == "{}\n"
+    assert (installs / "subtree" / "keep.txt").read_text() == "keep\n"
+    assert not (installs / "written.json").exists()
+    assert not (installs / "history.jsonl").exists()
+    assert not (installs / "planted").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_fallback_read_keeps_working_but_refuses_symlinked_state_file(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws"
+    installs = workspace / ".brigade" / "skills" / "installs"
+    installs.mkdir(parents=True)
+    (installs / "plain.txt").write_text("plain\n")
+    (installs / "link.txt").symlink_to(tmp_path / "target.txt")
+    monkeypatch.setattr(skills_cmd, "_HAS_DESCRIPTOR_ANCHOR", False)
+    anchor = skills_cmd._hold_state_root(workspace)
+    try:
+        assert skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "plain.txt") == b"plain\n"
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "link.txt")
+    finally:
+        anchor.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW descriptor anchoring")
+def test_anchor_primitives_translate_injected_os_errors_into_typed_refusals(tmp_path, monkeypatch):
+    def _raise_io(*_args, **_kwargs):
+        raise OSError(errno.EIO, "injected failure")
+
+    workspace = tmp_path / "ws"
+    installs = workspace / ".brigade" / "skills" / "installs"
+    installs.mkdir(parents=True)
+    (installs / "existing.json").write_text("{}\n")
+    (installs / "child").mkdir()
+    (installs / "child" / "leaf.txt").write_text("leaf\n")
+
+    with skills_cmd._held_state_root(workspace) as anchor:
+        monkeypatch.setattr(os, "write", _raise_io)
+        with pytest.raises(skills_cmd.SkillsStatePathError) as exc_info:
+            skills_cmd._write_state_file(anchor, "skills", "installs", "written.json", data=b"x\n")
+        assert isinstance(exc_info.value.__cause__, OSError)
+        with pytest.raises(skills_cmd.SkillsStatePathError) as exc_info:
+            skills_cmd._append_state_line(anchor, "skills", "installs", "history.jsonl", data=b"x\n")
+        assert isinstance(exc_info.value.__cause__, OSError)
+        monkeypatch.undo()
+
+        monkeypatch.setattr(os, "rmdir", _raise_io)
+        with pytest.raises(skills_cmd.SkillsStatePathError) as exc_info:
+            skills_cmd._remove_tree_in_anchor(anchor, "skills", "installs", "child")
+        assert isinstance(exc_info.value.__cause__, OSError)
+        monkeypatch.undo()
+
+        monkeypatch.setattr(os, "unlink", _raise_io)
+        with pytest.raises(skills_cmd.SkillsStatePathError) as exc_info:
+            skills_cmd._unlink_in_anchor(anchor, "skills", "installs", "existing.json")
+        assert isinstance(exc_info.value.__cause__, OSError)
+        monkeypatch.undo()
+
+        monkeypatch.setattr(os, "write", _raise_io)
+        with pytest.raises(skills_cmd.SkillsStatePathError) as exc_info:
+            skills_cmd._write_collected_tree_into_anchor(
+                [("d",)], {("d", "f.txt"): b"x"}, anchor, "skills", "installs", "planted"
+            )
+        assert isinstance(exc_info.value.__cause__, OSError)
+        monkeypatch.undo()
+
+    # the injected failures never corrupted unrelated state files
+    assert (installs / "existing.json").read_text() == "{}\n"
 
 
 def test_skills_fleet_does_not_guess_source_for_malformed_v2_receipt(tmp_path, capsys):

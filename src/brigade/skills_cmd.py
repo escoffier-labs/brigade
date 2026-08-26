@@ -252,37 +252,39 @@ def _rendered_skill_validation(text: str, harness: str) -> list[str]:
     return errors
 
 
-def _copy_skill_for_harness(
-    source_dir: Path, dest: Path, metadata: dict[str, Any], skill_id: str, harness: str
-) -> None:
-    if dest.exists():
+def _write_snapshot_tree(dirs: list[tuple[str, ...]], files: dict[tuple[str, ...], bytes], dest: Path) -> None:
+    """Materialize a collected snapshot at *dest* (trusted, non-state-root destination).
+
+    Every byte written comes from the snapshot; no source file is re-read by
+    path, so a symlink planted in the source after collection cannot smuggle
+    outside content into the copy.
+    """
+    if dest.is_symlink() or _is_reparse_point(dest):
+        dest.unlink()
+    elif dest.exists():
         shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_dir, dest)
-    source_skill = _skill_md_path(source_dir)
-    if source_skill.is_file():
-        rendered = _render_skill_text_for_harness(
-            source_skill.read_text(encoding="utf-8", errors="replace"), metadata, skill_id, harness
-        )
-        _skill_md_path(dest).write_text(rendered, encoding="utf-8")
+    dest.mkdir(parents=True)
+    for parts in dirs:
+        (dest.joinpath(*parts)).mkdir(parents=True, exist_ok=True)
+    for parts, data in files.items():
+        (dest.joinpath(*parts)).write_bytes(data)
 
 
-def _copy_skill_for_harness_anchored(
-    source_dir: Path,
-    anchor: "_StateRootAnchor",
-    relative: tuple[str, ...],
-    metadata: dict[str, Any],
-    skill_id: str,
-    harness: str,
-) -> None:
-    """Harness copy for destinations that live inside the anchored state root."""
-    _copy_tree_into_anchor(source_dir, anchor, *relative)
-    source_skill = _skill_md_path(source_dir)
-    if source_skill.is_file():
-        rendered = _render_skill_text_for_harness(
-            source_skill.read_text(encoding="utf-8", errors="replace"), metadata, skill_id, harness
-        )
-        _write_state_file(anchor, *relative, "SKILL.md", data=rendered.encode("utf-8"))
+def _files_fingerprint(files: dict[tuple[str, ...], bytes]) -> str:
+    """``_fingerprint`` over an already-collected snapshot (same digest layout)."""
+    digest = hashlib.sha256()
+    for parts in sorted(files, key=lambda key: "/".join(key)):
+        if parts[-1] in {".DS_Store", "skill.json"}:
+            continue
+        digest.update("/".join(parts).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(files[parts])
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _bytes_fingerprint(data: bytes | None) -> str:
+    return hashlib.sha256(b"<missing>" if data is None else data).hexdigest()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -797,9 +799,13 @@ class SkillsStatePathError(RuntimeError):
 
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _DIR_OPEN_FLAGS = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _CLOEXEC
-_FILE_READ_FLAGS = os.O_RDONLY | _O_NOFOLLOW | _CLOEXEC
+# O_NONBLOCK so opening a planted FIFO cannot block the read; regular files
+# ignore it.
+_FILE_READ_FLAGS = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _CLOEXEC
+_FILE_REPLACE_FLAGS = os.O_WRONLY | _O_NOFOLLOW | _CLOEXEC
 _HAS_DESCRIPTOR_ANCHOR = bool(_O_DIRECTORY) and bool(_O_NOFOLLOW) and os.open in os.supports_dir_fd
 
 
@@ -922,34 +928,91 @@ def _held_state_root(workspace: Path) -> Iterator[_StateRootAnchor]:
         anchor.close()
 
 
+@contextlib.contextmanager
+def _anchored_fs_errors(display: str) -> Iterator[None]:
+    """Translate unexpected filesystem errors inside anchor primitives.
+
+    Callers only catch :class:`SkillsStatePathError`; a race that loses an
+    open, mkdir, or write mid-primitive must surface as the typed refusal
+    (original exception preserved as ``__cause__``), never as a raw
+    ``OSError`` traceback.
+    """
+    try:
+        yield
+    except SkillsStatePathError:
+        raise
+    except OSError as exc:
+        raise SkillsStatePathError(f"skills state operation could not complete safely: {display}: {exc}") from exc
+
+
+def _require_single_link_regular(fd: int, display: str) -> None:
+    """Validate an opened descriptor: plain regular file with exactly one link.
+
+    A second link means the state file is a hardlink sharing an inode with an
+    outside victim; truncating or appending would damage that victim. FIFOs
+    and other non-regular files are refused as well.
+    """
+    st = os.fstat(fd)
+    if not stat_module.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        raise SkillsStatePathError(f"skills state file must be a plain single-link regular file: {display}")
+
+
+def _write_all_fd(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
+
+
+def _fallback_mutation_refusal(verb: str, display: Path) -> SkillsStatePathError:
+    return SkillsStatePathError(
+        f"skills state-root {verb} requires descriptor anchoring, which is unavailable on this platform; "
+        f"refusing unanchored mutation: {display}"
+    )
+
+
 def _write_state_file(anchor: _StateRootAnchor, *relative: str, data: bytes, mode: int = 0o644) -> None:
     """Create or replace one file under the anchored state root."""
     anchor.revalidate()
+    display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        parent = _fallback_prepare_parent(anchor, *relative[:-1])
-        target = parent / relative[-1]
-        if target.is_symlink() or _is_reparse_point(target):
-            raise SkillsStatePathError(f"skills state file must not be a symlink or reparse point: {target}")
-        target.write_bytes(data)
-        return
+        # Fail closed: without a held directory descriptor the final open
+        # cannot be anchored to the validated root, so the check-then-use
+        # window would be exploitable. Mutate nothing.
+        raise _fallback_mutation_refusal("writes", display)
     assert anchor.fd is not None
     parent_fd = anchor.fd
     opened_chain: list[int] = []
-    for part in relative[:-1]:
-        try:
-            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
-        except FileNotFoundError:
-            os.mkdir(part, 0o755, dir_fd=parent_fd)
-            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
-        opened_chain.append(next_fd)
-        parent_fd = next_fd
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW | _CLOEXEC
-        file_fd = os.open(relative[-1], flags, mode, dir_fd=parent_fd)
-        try:
-            os.write(file_fd, data)
-        finally:
-            os.close(file_fd)
+        with _anchored_fs_errors(str(display)):
+            for part in relative[:-1]:
+                try:
+                    next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    os.mkdir(part, 0o755, dir_fd=parent_fd)
+                    next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                opened_chain.append(next_fd)
+                parent_fd = next_fd
+            try:
+                # Try O_EXCL first: a file created here cannot alias
+                # anything else.
+                file_fd = os.open(
+                    relative[-1],
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _CLOEXEC,
+                    mode,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                # Replace an existing file without O_TRUNC: open it, prove
+                # the descriptor is a single-link regular file, and only
+                # then truncate. A hardlink to an outside victim is
+                # refused before the victim loses a byte.
+                file_fd = os.open(relative[-1], _FILE_REPLACE_FLAGS, dir_fd=parent_fd)
+                _require_single_link_regular(file_fd, str(display))
+            try:
+                os.ftruncate(file_fd, 0)
+                _write_all_fd(file_fd, data)
+            finally:
+                os.close(file_fd)
     finally:
         for fd in reversed(opened_chain):
             os.close(fd)
@@ -958,32 +1021,31 @@ def _write_state_file(anchor: _StateRootAnchor, *relative: str, data: bytes, mod
 def _append_state_line(anchor: _StateRootAnchor, *relative: str, data: bytes) -> None:
     """Append one line to a JSONL file under the anchored state root."""
     anchor.revalidate()
+    display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        parent = _fallback_prepare_parent(anchor, *relative[:-1])
-        target = parent / relative[-1]
-        if target.is_symlink() or _is_reparse_point(target):
-            raise SkillsStatePathError(f"skills state file must not be a symlink or reparse point: {target}")
-        with target.open("ab") as handle:
-            handle.write(data)
-        return
+        raise _fallback_mutation_refusal("appends", display)
     assert anchor.fd is not None
     parent_fd = anchor.fd
     opened_chain: list[int] = []
-    for part in relative[:-1]:
-        try:
-            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
-        except FileNotFoundError:
-            os.mkdir(part, 0o755, dir_fd=parent_fd)
-            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
-        opened_chain.append(next_fd)
-        parent_fd = next_fd
     try:
-        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW | _CLOEXEC
-        file_fd = os.open(relative[-1], flags, 0o644, dir_fd=parent_fd)
-        try:
-            os.write(file_fd, data)
-        finally:
-            os.close(file_fd)
+        with _anchored_fs_errors(str(display)):
+            for part in relative[:-1]:
+                try:
+                    next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    os.mkdir(part, 0o755, dir_fd=parent_fd)
+                    next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                opened_chain.append(next_fd)
+                parent_fd = next_fd
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW | _CLOEXEC
+            file_fd = os.open(relative[-1], flags, 0o644, dir_fd=parent_fd)
+            try:
+                # Validate before the first byte moves: an append to a
+                # hardlinked state file would also append to the victim.
+                _require_single_link_regular(file_fd, str(display))
+                _write_all_fd(file_fd, data)
+            finally:
+                os.close(file_fd)
     finally:
         for fd in reversed(opened_chain):
             os.close(fd)
@@ -1094,8 +1156,16 @@ def _anchor_open_chain(
                 fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
             except FileNotFoundError:
                 if create:
-                    os.mkdir(part, 0o755, dir_fd=parent_fd)
-                    fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                    try:
+                        os.mkdir(part, 0o755, dir_fd=parent_fd)
+                    except OSError as exc:
+                        raise SkillsStatePathError(f"skills state path could not be created safely: {current}") from exc
+                    try:
+                        fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                    except OSError as exc:
+                        raise SkillsStatePathError(
+                            f"skills state path could not be reopened safely: {current}"
+                        ) from exc
                 elif missing_ok:
                     return None, opened
                 else:
@@ -1160,39 +1230,29 @@ def _rm_children_recursive(dir_fd: int) -> None:
 
 def _remove_tree_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
     """Recursively delete a subtree under the anchored state root, ``dir_fd`` throughout."""
+    display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        parent = _fallback_prepare_parent(anchor, *relative[:-1], create=False)
-        if parent is None:
-            return
-        target = parent / relative[-1]
-        if target.is_symlink() or _is_reparse_point(target):
-            target.unlink()
-        elif target.is_dir():
-            shutil.rmtree(target)
-        elif target.exists():
-            target.unlink()
-        return
+        raise _fallback_mutation_refusal("removals", display)
     parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
     if parent_fd is None:
         return
     try:
-        try:
-            st = os.stat(relative[-1], dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            raise SkillsStatePathError(
-                f"skills state path is not removable safely: {(anchor.workspace / '.brigade').joinpath(*relative)}"
-            ) from exc
-        if stat_module.S_ISDIR(st.st_mode):
-            child_fd = os.open(relative[-1], _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+        with _anchored_fs_errors(str(display)):
             try:
-                _rm_children_recursive(child_fd)
-            finally:
-                os.close(child_fd)
-            os.rmdir(relative[-1], dir_fd=parent_fd)
-        else:
-            os.unlink(relative[-1], dir_fd=parent_fd)
+                st = os.stat(relative[-1], dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise SkillsStatePathError(f"skills state path is not removable safely: {display}") from exc
+            if stat_module.S_ISDIR(st.st_mode):
+                child_fd = os.open(relative[-1], _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                try:
+                    _rm_children_recursive(child_fd)
+                finally:
+                    os.close(child_fd)
+                os.rmdir(relative[-1], dir_fd=parent_fd)
+            else:
+                os.unlink(relative[-1], dir_fd=parent_fd)
     finally:
         for fd in reversed(opened):
             os.close(fd)
@@ -1200,14 +1260,9 @@ def _remove_tree_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
 
 def _unlink_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
     """Unlink one file under the anchored state root without following symlinks."""
+    display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        parent = _fallback_prepare_parent(anchor, *relative[:-1], create=False)
-        if parent is None:
-            return
-        target = parent / relative[-1]
-        if target.is_symlink() or _is_reparse_point(target) or target.is_file():
-            target.unlink()
-        return
+        raise _fallback_mutation_refusal("unlinks", display)
     parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1])
     try:
         try:
@@ -1215,9 +1270,7 @@ def _unlink_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
         except FileNotFoundError:
             pass
         except OSError as exc:
-            raise SkillsStatePathError(
-                f"skills state file could not be removed safely: {(anchor.workspace / '.brigade').joinpath(*relative)}"
-            ) from exc
+            raise SkillsStatePathError(f"skills state file could not be removed safely: {display}") from exc
     finally:
         for fd in reversed(opened):
             os.close(fd)
@@ -1331,44 +1384,53 @@ def _collect_source_tree(source_dir: Path) -> tuple[list[tuple[str, ...]], dict[
 
 
 def _read_state_file_bytes(anchor: _StateRootAnchor, *relative: str) -> bytes | None:
-    """Read one regular file under the anchored state root without following symlinks.
+    """Read one regular single-link file under the anchored state root.
 
-    Returns ``None`` when the file is missing; a symlinked tail is refused.
+    Returns ``None`` when the file is missing; a symlinked tail, a FIFO or
+    other non-regular file, and hardlinks are refused instead of followed.
     """
+    display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
         parent = _fallback_prepare_parent(anchor, *relative[:-1], create=False)
         if parent is None:
             return None
         target = parent / relative[-1]
-        if target.is_symlink() or _is_reparse_point(target):
-            raise SkillsStatePathError(
-                f"skills state file must not be a symlink or reparse point: {(anchor.workspace / '.brigade').joinpath(*relative)}"
-            )
-        if not target.is_file():
+        try:
+            st = os.lstat(target)
+        except FileNotFoundError:
             return None
+        except OSError as exc:
+            raise SkillsStatePathError(f"skills state file could not be inspected safely: {display}") from exc
+        if stat_module.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0):
+            raise SkillsStatePathError(f"skills state file must not be a symlink or reparse point: {display}")
+        if not stat_module.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise SkillsStatePathError(f"skills state file must be a plain single-link regular file: {display}")
         return target.read_bytes()
     parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
     if parent_fd is None:
         return None
     try:
-        try:
-            file_fd = os.open(relative[-1], _FILE_READ_FLAGS, dir_fd=parent_fd)
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise SkillsStatePathError(
-                f"skills state file could not be read safely: {(anchor.workspace / '.brigade').joinpath(*relative)}"
-            ) from exc
-        try:
-            chunks: list[bytes] = []
-            while True:
-                chunk = os.read(file_fd, 1 << 16)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        finally:
-            os.close(file_fd)
-        return b"".join(chunks)
+        with _anchored_fs_errors(str(display)):
+            try:
+                file_fd = os.open(relative[-1], _FILE_READ_FLAGS, dir_fd=parent_fd)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise SkillsStatePathError(f"skills state file could not be read safely: {display}") from exc
+            try:
+                # O_NOFOLLOW refuses the symlink at open; fstat closes the
+                # remaining gaps: FIFOs (opened via O_NONBLOCK), other
+                # non-regular files, and hardlinks to outside victims.
+                _require_single_link_regular(file_fd, str(display))
+                chunks: list[bytes] = []
+                while True:
+                    chunk = os.read(file_fd, 1 << 16)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            finally:
+                os.close(file_fd)
+            return b"".join(chunks)
     finally:
         for fd in reversed(opened):
             os.close(fd)
@@ -1432,64 +1494,53 @@ def _write_collected_tree_into_anchor(
 
     Destination components are created and opened with ``O_NOFOLLOW`` relative
     to the held descriptor, so a planted symlink anywhere below the state root
-    refuses the write instead of redirecting it. An existing destination is
+    refuses the write instead of redirecting it.     An existing destination is
     removed first, matching the previous copytree-over behaviour.
     """
+    display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        parent = _fallback_prepare_parent(anchor, *relative[:-1])
-        dest = parent / relative[-1]
-        if dest.is_symlink() or _is_reparse_point(dest):
-            dest.unlink()
-        elif dest.exists():
-            shutil.rmtree(dest)
-        dest.mkdir(parents=True)
-        for parts in dirs:
-            (dest.joinpath(*parts)).mkdir(parents=True, exist_ok=True)
-        for parts, data in files.items():
-            (dest.joinpath(*parts)).write_bytes(data)
-        return
+        raise _fallback_mutation_refusal("copies", display)
     _remove_tree_in_anchor(anchor, *relative)
     dest_parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], create=True)
     try:
-        try:
-            os.mkdir(relative[-1], 0o755, dir_fd=dest_parent_fd)
-            dest_fd = os.open(relative[-1], _DIR_OPEN_FLAGS, dir_fd=dest_parent_fd)
-        except OSError as exc:
-            raise SkillsStatePathError(
-                f"skills state destination could not be created safely: {(anchor.workspace / '.brigade').joinpath(*relative)}"
-            ) from exc
-        try:
-            for parts in dirs:
-                parent_fd = dest_fd
-                chain: list[int] = []
-                try:
-                    for part in parts:
-                        os.mkdir(part, 0o755, dir_fd=parent_fd)
-                        next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
-                        chain.append(next_fd)
-                        parent_fd = next_fd
-                finally:
-                    for fd in reversed(chain):
-                        os.close(fd)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _CLOEXEC
-            for parts, data in files.items():
-                parent_fd = dest_fd
-                chain = []
-                try:
-                    for part in parts[:-1]:
-                        next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
-                        chain.append(next_fd)
-                        parent_fd = next_fd
-                    file_fd = os.open(parts[-1], flags, 0o644, dir_fd=parent_fd)
+        with _anchored_fs_errors(str(display)):
+            try:
+                os.mkdir(relative[-1], 0o755, dir_fd=dest_parent_fd)
+                dest_fd = os.open(relative[-1], _DIR_OPEN_FLAGS, dir_fd=dest_parent_fd)
+            except OSError as exc:
+                raise SkillsStatePathError(f"skills state destination could not be created safely: {display}") from exc
+            try:
+                for parts in dirs:
+                    parent_fd = dest_fd
+                    chain: list[int] = []
                     try:
-                        os.write(file_fd, data)
+                        for part in parts:
+                            os.mkdir(part, 0o755, dir_fd=parent_fd)
+                            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                            chain.append(next_fd)
+                            parent_fd = next_fd
                     finally:
-                        os.close(file_fd)
-                finally:
-                    for fd in reversed(chain):
-                        os.close(fd)
-        finally:
-            os.close(dest_fd)
+                        for fd in reversed(chain):
+                            os.close(fd)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _CLOEXEC
+                for parts, data in files.items():
+                    parent_fd = dest_fd
+                    chain = []
+                    try:
+                        for part in parts[:-1]:
+                            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                            chain.append(next_fd)
+                            parent_fd = next_fd
+                        file_fd = os.open(parts[-1], flags, 0o644, dir_fd=parent_fd)
+                        try:
+                            _write_all_fd(file_fd, data)
+                        finally:
+                            os.close(file_fd)
+                    finally:
+                        for fd in reversed(chain):
+                            os.close(fd)
+            finally:
+                os.close(dest_fd)
     finally:
         for fd in reversed(opened):
             os.close(fd)
@@ -1628,6 +1679,27 @@ def _valid_receipt_contract(receipt: dict[str, Any], *, skill_id: str, harness: 
     return installed.get("skill_fingerprint") == render.get("fingerprint")
 
 
+def _previous_install_receipt(anchor: _StateRootAnchor, *, skill_id: str, harness: str) -> dict[str, Any]:
+    """Read the canonical receipt through the anchor; retain only contract-valid receipts.
+
+    The read goes through ``_read_state_file_bytes`` (``O_NOFOLLOW``, regular
+    file, single link), so a symlinked or hardlinked receipt refuses the
+    operation instead of dragging outside content into state or output.
+    Content that parses but does not satisfy the receipt contract contributes
+    no ``previous_receipt``.
+    """
+    raw = _read_state_file_bytes(anchor, "skills", "installs", f"{skill_id}-{harness}.json")
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict) or not _valid_receipt_contract(data, skill_id=skill_id, harness=harness):
+        return {}
+    return data
+
+
 def _drift_payload(
     *,
     target: Path,
@@ -1730,6 +1802,32 @@ def install(
     source_identity = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
     version = str(metadata.get("version") or "0.1.0")
     source_path = str(metadata.get("source") or source_dir)
+    # Collect the source tree exactly once, through held descriptors; every
+    # render, fingerprint, and copy below consumes only these bytes.
+    snapshot_dirs, snapshot_files = _collect_source_tree(source_dir)
+    source_skill_md = snapshot_files.get(("SKILL.md",))
+    if source_skill_md is None:
+        # The collector skips symlinks instead of following them: a symlinked
+        # SKILL.md must refuse the install rather than let the pathname
+        # re-reads below launder outside content into state.
+        message = "SKILL.md must be a plain regular file in the skill source (symlinks are never followed): " + str(
+            _skill_md_path(source_dir)
+        )
+        if json_output:
+            print(
+                json.dumps(
+                    {"workspace": str(workspace), "installed": False, "errors": [message], "lint": lint_payload},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"error: {message}", file=sys.stderr)
+        return 2
+    snapshot_fingerprint = _files_fingerprint(snapshot_files)
+    lint_payload["fingerprint"] = snapshot_fingerprint
+    if isinstance(lint_payload.get("source"), dict):
+        lint_payload["source"]["fingerprint"] = snapshot_fingerprint
     targets = install_targets if harness == "all" else (harness,)
     receipts: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -1745,7 +1843,7 @@ def install(
                 skipped.append({"target": "hermes", "reason": "Hermes home not found (is Hermes installed?)"})
                 continue
             dest = _install_dir(workspace, install_target, skill_id)
-            source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
+            source_text = source_skill_md.decode("utf-8", errors="replace")
             rendered_text = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
             render_fingerprint = _text_fingerprint(rendered_text)
             render_contract = _renderer_contract(workspace, install_target)
@@ -1781,7 +1879,7 @@ def install(
             # Refuse redirected state paths before anything is mutated.
             _require_plain_state_dirs(state_anchor, "skills", "installs")
             _require_plain_state_dirs(state_anchor, "skills", "rollback")
-            previous_receipt = _read_json(receipt_path) if receipt_path.is_file() else {}
+            previous_receipt = _previous_install_receipt(state_anchor, skill_id=skill_id, harness=install_target)
             rollback_snapshot: str | None = None
             if dest.exists():
                 stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-")
@@ -1792,18 +1890,18 @@ def install(
                     _remove_tree_in_anchor(state_anchor, *state_parts)
                 else:
                     shutil.rmtree(dest)
+            install_files = dict(snapshot_files)
+            install_files[("SKILL.md",)] = rendered_text.encode("utf-8")
             if under_state_root:
-                _copy_skill_for_harness_anchored(
-                    source_dir, state_anchor, state_parts, metadata, skill_id, install_target
-                )
+                _write_collected_tree_into_anchor(snapshot_dirs, install_files, state_anchor, *state_parts)
             else:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                _copy_skill_for_harness(source_dir, dest, metadata, skill_id, install_target)
-            installed_fingerprint = _fingerprint(dest)
-            installed_skill_fingerprint = _text_fingerprint(
-                _skill_md_path(dest).read_text(encoding="utf-8", errors="replace")
-            )
-            installed_metadata_fingerprint = _file_fingerprint(_metadata_path(dest))
+                _write_snapshot_tree(snapshot_dirs, install_files, dest)
+            # Fingerprints are computed from the same bytes that were written;
+            # nothing is read back through a pathname.
+            installed_fingerprint = _files_fingerprint(install_files)
+            installed_skill_fingerprint = render_fingerprint
+            installed_metadata_fingerprint = _bytes_fingerprint(install_files.get(("skill.json",)))
             installed_at = _now()
             receipt = {
                 "schema_version": RECEIPT_SCHEMA_VERSION,
