@@ -57,6 +57,14 @@ REASON_UNSUPPORTED_LEDGER_VERSION = "unsupported_ledger_version"
 REASON_TRUST_POLICY = "trust_policy"
 REASON_IMPORT_SNAPSHOT_CHANGED = "import_snapshot_changed"
 
+# Byte budget enforced while reading one import-inbox snapshot, so growth
+# after any earlier size check can never drive unbounded chunk accumulation.
+_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES = 4 * 1024 * 1024
+
+
+class ImportInboxSnapshotLimitExceeded(OSError):
+    """Typed failure when an import inbox grows past its snapshot read cap."""
+
 
 class TaskLedgerError(ValueError):
     """Fail-closed read/parse failure for ``.brigade/work/tasks.json``."""
@@ -3440,7 +3448,13 @@ def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
         _validate_import_inbox_descriptor(descriptor)
         before = os.fstat(descriptor)
         chunks: list[bytes] = []
+        snapshot_total = 0
         while chunk := os.read(descriptor, 1024 * 1024):
+            snapshot_total += len(chunk)
+            if snapshot_total > _IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES:
+                raise ImportInboxSnapshotLimitExceeded(
+                    f"import inbox exceeds {_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES} byte snapshot limit"
+                )
             chunks.append(chunk)
         after = os.fstat(descriptor)
         if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (

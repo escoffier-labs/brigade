@@ -11,6 +11,7 @@ import sys
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,20 @@ class ScannerInputLimitExceeded(OSError):
 
 class ScannerSnapshotLimitExceeded(OSError):
     """Typed failure when a rollback snapshot of a run artifact is oversized."""
+
+
+@dataclass(frozen=True)
+class _ScannerInboxSnapshot:
+    """One bounded single-read capture of the pre-run inbox state.
+
+    Carries raw bytes, parsed rows, an existence flag, and the identity of the
+    snapshotted inode so rollback can refuse a namespace swap.
+    """
+
+    raw: bytes
+    rows: list[bytes]
+    exists: bool
+    identity: tuple[int, int] | None
 
 
 # Total byte budget for one inbox or scanner JSONL read, and for any single
@@ -1192,7 +1207,11 @@ def _scanner_inbox_descriptor_bytes(descriptor: int) -> bytes:
     _validate_scanner_inbox_descriptor(descriptor)
     os.lseek(descriptor, 0, os.SEEK_SET)
     chunks: list[bytes] = []
+    total = 0
     while chunk := os.read(descriptor, 1024 * 1024):
+        total += len(chunk)
+        if total > _SCANNER_INPUT_TOTAL_LIMIT_BYTES:
+            raise ScannerInputLimitExceeded(f"scanner inbox exceeds {_SCANNER_INPUT_TOTAL_LIMIT_BYTES} byte read limit")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -1290,7 +1309,7 @@ def _scanner_inbox_bytes(target: Path) -> bytes:
     except FileNotFoundError:
         return b""
     try:
-        with os.fdopen(descriptor, "rb") as handle:
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
             descriptor = -1
             chunks: list[bytes] = []
             total = 0
@@ -1305,6 +1324,60 @@ def _scanner_inbox_bytes(target: Path) -> bytes:
     finally:
         if descriptor != -1:
             os.close(descriptor)
+
+
+def _snapshot_scanner_inbox(target: Path) -> _ScannerInboxSnapshot:
+    """Capture the pre-run inbox in one bounded read, or fail loudly.
+
+    Returns raw bytes, parsed rows, an existence flag, and stable before/after
+    fstat identity. Every OSError — including the typed read limit — propagates
+    so callers abort before launching a scanner instead of degrading to an
+    empty snapshot that rollback would then publish over the real inbox.
+    """
+    try:
+        descriptor = _open_scanner_inbox(target, os.O_RDONLY)
+    except FileNotFoundError:
+        return _ScannerInboxSnapshot(raw=b"", rows=[], exists=False, identity=None)
+    try:
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            before = os.fstat(descriptor)
+            chunks: list[bytes] = []
+            total = 0
+            while chunk := handle.read(1024 * 1024):
+                total += len(chunk)
+                if total > _SCANNER_INPUT_TOTAL_LIMIT_BYTES:
+                    raise ScannerInputLimitExceeded(
+                        f"scanner inbox exceeds {_SCANNER_INPUT_TOTAL_LIMIT_BYTES} byte read limit"
+                    )
+                chunks.append(chunk)
+            after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise OSError("scanner inbox changed while snapshotting")
+        raw = b"".join(chunks)
+        if len(raw) != before.st_size:
+            raise OSError("scanner inbox changed while snapshotting")
+        return _ScannerInboxSnapshot(
+            raw=raw,
+            rows=_bounded_jsonl_rows(raw),
+            exists=True,
+            identity=_scanner_inbox_identity(before),
+        )
+    finally:
+        os.close(descriptor)
 
 
 def _bounded_jsonl_rows(raw: bytes) -> list[bytes]:
@@ -1340,14 +1413,47 @@ def _restore_scanner_inbox_bytes(target: Path, data: bytes, exists: bool) -> Non
         os.close(parent)
 
 
-def _restore_scanner_inbox_snapshot_direct(target: Path, data: bytes, exists: bool) -> None:
-    """Recover a scanner transaction without re-entering its publication wrapper."""
+def _require_scanner_inbox_identity(parent: int, name: str, identity: tuple[int, int]) -> None:
+    """Refuse rollback when the live inbox inode differs from its snapshot."""
+    try:
+        current = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
+    except FileNotFoundError as exc:
+        raise OSError("scanner inbox vanished since its pre-run snapshot") from exc
+    try:
+        opened = os.fstat(current)
+        if _scanner_inbox_identity(opened) != identity:
+            raise OSError("scanner inbox changed since its pre-run snapshot; refusing rollback")
+    finally:
+        os.close(current)
+
+
+def _restore_scanner_inbox_snapshot_direct(
+    target: Path,
+    data: _ScannerInboxSnapshot | bytes,
+    exists: bool = True,
+) -> None:
+    """Recover a scanner transaction without re-entering its publication wrapper.
+
+    When ``data`` is a full snapshot, a missing pre-run inbox is restored as
+    missing and rollback refuses any inbox whose inode no longer matches the
+    snapshotted one.
+    """
+    snapshot_exists = exists
+    snapshot_identity: tuple[int, int] | None = None
+    if isinstance(data, _ScannerInboxSnapshot):
+        payload = data.raw
+        snapshot_exists = data.exists
+        snapshot_identity = data.identity
+    else:
+        payload = data
     parent, name, identities = _open_scanner_inbox_parent(target, create=True)
     try:
         if not _scanner_inbox_parent_is_current(target, identities):
             raise OSError("scanner inbox parent changed during restoration")
-        if exists:
-            _restore_scanner_inbox_from_snapshot(parent, name, data)
+        if snapshot_exists:
+            if snapshot_identity is not None:
+                _require_scanner_inbox_identity(parent, name, snapshot_identity)
+            _restore_scanner_inbox_from_snapshot(parent, name, payload)
         else:
             _remove_scanner_inbox_at(parent, name)
         _fsync_scanner_inbox_parent(parent)
@@ -1434,7 +1540,12 @@ def _scanner_stamp_new_imports(
     before_ids: set[str],
     before_imports: list[dict[str, Any]],
     before_raw: bytes | None = None,
+    before_snapshot: _ScannerInboxSnapshot | None = None,
 ) -> list[str]:
+    if before_snapshot is not None:
+        before_raw = before_snapshot.raw
+    if before_raw is None:
+        before_raw = b""
     try:
         imports_raw = _scanner_inbox_bytes(target)
     except OSError:
@@ -1444,8 +1555,6 @@ def _scanner_stamp_new_imports(
             "rejection_reasons": {"provenance_stamp_failed": 1},
         }
         return []
-    if before_raw is None:
-        before_raw = b""
     stamped_ids: list[str] = []
     staged_proof_items: list[dict[str, Any]] = []
     rejected = 0
@@ -1484,7 +1593,10 @@ def _scanner_stamp_new_imports(
             else:
                 unmatched += 1
         try:
-            _restore_scanner_inbox_snapshot_direct(target, before_raw, exists=True)
+            _restore_scanner_inbox_snapshot_direct(
+                target,
+                before_snapshot if before_snapshot is not None else before_raw,
+            )
         except OSError:
             run["self_import"] = {
                 "created": 0,
@@ -1957,14 +2069,22 @@ def _scanner_run_one(
             )
         elif timed_out:
             error = f"scanner timed out after {scanner.get('timeout')} seconds"
+        elif result.incomplete_process_group:
+            error = (
+                "scanner process group kept the output pipes open after child exit; "
+                "output incomplete and group terminated"
+            )
         receipt.update(
             {
-                "status": "completed" if (result.code == 0 and not result.output_limit_exceeded) else "failed",
+                "status": "completed"
+                if (result.code == 0 and not result.output_limit_exceeded and not result.incomplete_process_group)
+                else "failed",
                 "completed_at": completed.isoformat(),
                 "duration_seconds": (completed - started).total_seconds(),
                 "exit_code": None if result.output_limit_exceeded else result.code,
                 "timed_out": timed_out,
                 "output_limit_exceeded": result.output_limit_exceeded,
+                "incomplete_process_group": result.incomplete_process_group,
                 "error": error,
                 "stdout_summary": _scanner_run_summary(stdout),
                 "stderr_summary": _scanner_run_summary(stderr),
@@ -2727,12 +2847,25 @@ def _scanners_run_payload(
     contexts: list[tuple[dict[str, Any], dict[str, Any]]] = []
     try:
         for scanner in selected:
+            skipped_rows = [
+                {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
+                for item in skipped
+                if isinstance(item.get("scanner"), dict)
+            ]
             try:
-                before_raw = _scanner_inbox_bytes(target)
-                before_imports = _scanner_inbox_imports(target)
-            except OSError:
-                before_raw = b""
-                before_imports = []
+                snapshot = _snapshot_scanner_inbox(target)
+            except OSError as exc:
+                # Never launch a scanner without a trustworthy pre-run inbox
+                # snapshot: rollback would otherwise publish an empty value
+                # over the real pre-run state.
+                return {
+                    "target": str(target),
+                    "errors": [f"scanner inbox snapshot failed before run: {exc}"],
+                    "runs": runs,
+                    "skipped": skipped_rows,
+                }, 2
+            before_raw = snapshot.raw
+            before_imports = [item for row in snapshot.rows if (item := _raw_row_object(row)) is not None]
             before_ids = {
                 str(item.get("id"))
                 for item in before_imports
@@ -2742,11 +2875,6 @@ def _scanners_run_payload(
             # Cover stamp/receipt failures: authority exists from `_scanner_run_one`.
             runs.append(run)
             if run.get("runs_directory_error"):
-                skipped_rows = [
-                    {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
-                    for item in skipped
-                    if isinstance(item.get("scanner"), dict)
-                ]
                 return {
                     "target": str(target),
                     "errors": [str(run.get("error") or "scanner runs directory is unavailable")],
@@ -2761,6 +2889,7 @@ def _scanners_run_payload(
                 before_ids=before_ids,
                 before_imports=before_imports,
                 before_raw=before_raw,
+                before_snapshot=snapshot,
             )
             run["provenance_imports_stamped"] = len(stamped_ids)
             if stamped_ids:

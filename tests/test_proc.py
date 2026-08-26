@@ -717,3 +717,92 @@ def test_run_delimited_stderr_under_limit_is_not_truncated():
     assert result.code == 0
     assert result.stderr_truncated is False
     assert result.stderr == "warn\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_cutoff_after_child_exit_records_incomplete_group_failure(tmp_path):
+    """#1197: the post-exit drain cutoff must fail closed, not return the child's exit 0."""
+    parent_code = (
+        "import subprocess, sys; "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        "print('early output', flush=True)"
+    )
+    result = proc.run([sys.executable, "-c", parent_code], timeout=20)
+
+    assert result.incomplete_process_group is True
+    assert result.code != 0
+    assert "process group" in result.stderr.lower()
+
+
+def test_windows_run_assigns_child_to_owned_kill_on_close_job_object(monkeypatch):
+    """Windows tree termination must use an owned job object, not taskkill on an exited PID."""
+
+    events: list[tuple[str, object]] = []
+
+    class FakeJob:
+        def assign(self, process_handle: int) -> bool:
+            events.append(("assign", process_handle))
+            return True
+
+        def terminate(self) -> bool:
+            events.append(("terminate", None))
+            return True
+
+        def close(self) -> None:
+            events.append(("close", None))
+
+    class StubProcess:
+        pid = 555
+        returncode = 0
+        _handle = 424242
+        stdout = None
+        stderr = None
+        stdin = None
+
+        def poll(self):
+            return 0
+
+    stub = StubProcess()
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: stub)
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: FakeJob())
+    monkeypatch.setattr(
+        proc,
+        "_terminate_windows_process_tree",
+        lambda *args, **kwargs: pytest.fail("taskkill fallback must not run when a job object owns the tree"),
+    )
+
+    result = proc.run(["worker.exe"])
+
+    assert result.code == 0
+    assert ("assign", 424242) in events
+    assert ("close", None) in events
+    assert ("terminate", None) not in events
+
+
+def test_stop_child_prefers_job_object_over_taskkill(monkeypatch):
+    class FakeJob:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def terminate(self) -> bool:
+            self.calls.append("terminate")
+            return True
+
+    class StubProcess:
+        pid = 555
+        waits: list[float] = []
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc, "_terminate_processes", lambda *a, **k: pytest.fail("taskkill path must not run"))
+
+    job = FakeJob()
+    proc._stop_child(StubProcess(), None, child_job=job)
+
+    assert job.calls == ["terminate"]

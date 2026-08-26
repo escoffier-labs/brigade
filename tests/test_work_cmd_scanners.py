@@ -3746,7 +3746,12 @@ def test_scanner_run_bounded_output_reaps_child_and_records_typed_failure(tmp_pa
 
 
 def test_scanner_run_does_not_wait_for_descendant_holding_pipes(tmp_path):
-    """#1197: a grandchild holding the output pipes must not outlive the run timeout."""
+    """#1197: a grandchild holding the pipes is reaped promptly AND fails the run.
+
+    The pre-fix behavior asserted `completed` here; the security review found
+    that a terminated group must never stand as success, so this test now
+    asserts the typed incomplete-process-group failure.
+    """
     from brigade.work_cmd import scanners as scanners_mod
 
     script = tmp_path / "pipe_holder.py"
@@ -3757,11 +3762,51 @@ def test_scanner_run_does_not_wait_for_descendant_holding_pipes(tmp_path):
     )
     _write_scanner_config(tmp_path, "pipe-holder", f"{sys.executable} {script}", timeout=20)
 
-    payload, _rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="pipe-holder", force=True)
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="pipe-holder", force=True)
     receipt = payload["runs"][0]
 
-    assert receipt["status"] == "completed"
+    assert rc == 1
+    assert receipt["status"] == "failed"
+    assert receipt.get("incomplete_process_group") is True
+    assert receipt["exit_code"] != 0
+    assert "process group" in str(receipt.get("error")).lower()
     assert float(receipt["duration_seconds"]) < 15
+
+
+def test_scanner_cutoff_appended_rows_get_no_proof_and_are_rolled_back(tmp_path):
+    """#1197: rows appended before the group cutoff must not become eligible work."""
+    from brigade.work_cmd import config as config_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "late_writer.py"
+    script.write_text(
+        "import json, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "inbox = Path.cwd() / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record = {'id': 'late-1', 'kind': 'task', 'source': 'late-writer',\n"
+        "          'text': 'Late sneaky row', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "sys.exit(0)\n"
+    )
+    _write_scanner_config(tmp_path, "late-writer", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="late-writer", force=True)
+    receipt = payload["runs"][0]
+
+    assert rc == 1
+    assert receipt["status"] == "failed"
+    assert receipt.get("incomplete_process_group") is True
+    loaded, _errors = config_mod._load_scanner_config(tmp_path)
+    assert scanners_mod._scanner_run_proof(loaded[0], receipt) is None
+    inbox = helpers._imports_path(tmp_path)
+    if inbox.exists():
+        assert "late-1" not in inbox.read_text()
+    assert scanners_mod._scanner_import_counts(tmp_path)["total"] == 0
 
 
 def test_scanner_inbox_read_enforces_total_byte_limit(tmp_path, monkeypatch):
@@ -3916,3 +3961,205 @@ def test_failed_scanner_run_leaves_no_eligible_work_end_to_end(tmp_path):
     assert counts["total"] == 0
     assert receipt["self_import"]["created"] == 0
     assert receipt["self_import"]["rejection_reasons"] == {"run_not_completed": 1}
+
+
+def test_scanner_run_aborts_before_launch_when_pre_run_snapshot_unavailable(tmp_path, monkeypatch):
+    """#1207: an un-snapshotable inbox must abort the run before the scanner launches."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    launched: list[bool] = []
+    real_run_one = scanners_mod._scanner_run_one
+
+    def spy_run_one(*args, **kwargs):
+        launched.append(True)
+        return real_run_one(*args, **kwargs)
+
+    def broken_snapshot(_target):
+        raise OSError("inbox snapshot unavailable")
+
+    monkeypatch.setattr(scanners_mod, "_scanner_run_one", spy_run_one)
+    monkeypatch.setattr(scanners_mod, "_snapshot_scanner_inbox", broken_snapshot)
+
+    script = tmp_path / "writer.py"
+    script.write_text("import sys\nsys.exit(0)\n")
+    _write_scanner_config(tmp_path, "snap-fail", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="snap-fail", force=True)
+
+    assert rc == 2
+    assert launched == []
+    assert any("snapshot" in str(error).lower() for error in payload["errors"])
+
+
+def test_oversized_pre_run_inbox_aborts_run_and_preserves_exact_bytes(tmp_path, monkeypatch):
+    """#1207: a swallowed snapshot OSError used to let a failed scanner destroy the inbox."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+    inbox = helpers._imports_path(tmp_path)
+    original = inbox.read_bytes() + b"x" * 256
+    inbox.write_bytes(original)
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 64)
+
+    script = tmp_path / "truncator.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "inbox = Path.cwd() / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.write_text('')\n"
+        "record = {'id': 'sneaky-trunc', 'kind': 'task', 'source': 'truncator',\n"
+        "          'text': 'Sneaky', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "sys.exit(3)\n"
+    )
+    _write_scanner_config(tmp_path, "truncator", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="truncator", force=True)
+
+    assert rc == 2
+    assert payload["runs"] == []
+    assert inbox.read_bytes() == original
+
+
+def test_failed_run_after_truncation_restores_exact_original_bytes(tmp_path):
+    """#1207: under-cap snapshot + mid-run truncation still restores the original bytes."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+    inbox = helpers._imports_path(tmp_path)
+    original = inbox.read_bytes()
+
+    script = tmp_path / "truncator.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "inbox = Path.cwd() / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.write_text('')\n"
+        "record = {'id': 'sneaky-trunc', 'kind': 'task', 'source': 'truncator',\n"
+        "          'text': 'Sneaky', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "sys.exit(3)\n"
+    )
+    _write_scanner_config(tmp_path, "truncator", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="truncator", force=True)
+
+    assert rc == 1
+    assert payload["runs"][0]["status"] == "failed"
+    assert inbox.read_bytes() == original
+
+
+def test_missing_pre_run_inbox_stays_missing_after_failed_run(tmp_path):
+    """#1207: restoring a previously missing inbox must not create an empty file."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "creator.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "inbox = Path.cwd() / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record = {'id': 'creator-1', 'kind': 'task', 'source': 'creator',\n"
+        "          'text': 'Created row', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "sys.exit(3)\n"
+    )
+    _write_scanner_config(tmp_path, "creator", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="creator", force=True)
+
+    assert rc == 1
+    assert payload["runs"][0]["status"] == "failed"
+    assert not helpers._imports_path(tmp_path).exists()
+
+
+def test_pre_run_snapshot_detects_torn_same_uid_write(tmp_path, monkeypatch):
+    """#1207: a same-UID writer mutating the inode mid-read must be detected."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b'{"id": "r1"}\n')
+
+    real_fdopen = os.fdopen
+    mutated = {"done": False}
+
+    def fake_fdopen(fd, mode="rb", *args, **kwargs):
+        handle = real_fdopen(fd, mode, *args, **kwargs)
+        original_read = handle.read
+
+        def read(size=-1):
+            chunk = original_read(size)
+            if chunk and not mutated["done"]:
+                mutated["done"] = True
+                with open(inbox, "r+b") as writer:
+                    writer.seek(0)
+                    writer.write(b"B" * 32)
+                    writer.flush()
+            return chunk
+
+        handle.read = read
+        return handle
+
+    monkeypatch.setattr(scanners_mod.os, "fdopen", fake_fdopen)
+
+    with pytest.raises(OSError, match="changed while snapshotting"):
+        scanners_mod._snapshot_scanner_inbox(tmp_path)
+
+
+def test_rollback_refuses_inbox_swapped_since_snapshot(tmp_path):
+    """#1207: rollback must refuse when the live inbox no longer matches its snapshot."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+
+    snapshot = scanners_mod._snapshot_scanner_inbox(tmp_path)
+
+    replacement = ledger._make_import("Replacement finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [replacement])
+
+    with pytest.raises(OSError):
+        scanners_mod._restore_scanner_inbox_snapshot_direct(tmp_path, snapshot)
+
+
+def test_scanner_inbox_descriptor_bytes_enforces_byte_cap(tmp_path, monkeypatch):
+    """#1207: rollback descriptor reads enforce the cap while reading, not up front."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 16)
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"a" * 64)
+
+    descriptor = scanners_mod._open_scanner_inbox(tmp_path, os.O_RDONLY)
+    try:
+        with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+            scanners_mod._scanner_inbox_descriptor_bytes(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_ledger_import_inbox_snapshot_enforces_byte_cap(tmp_path, monkeypatch):
+    """#1207: the ordinary import snapshot also bounds its chunk accumulation."""
+    from brigade.work_cmd import ledger
+
+    big = [{"id": f"r{index}", "kind": "task", "source": "x", "text": "y" * 32} for index in range(8)]
+    ledger._write_imports(tmp_path, big)
+
+    monkeypatch.setattr(ledger, "_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES", 16)
+
+    with pytest.raises(ledger.ImportInboxSnapshotLimitExceeded):
+        ledger._snapshot_import_inbox(tmp_path)
