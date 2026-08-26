@@ -332,6 +332,111 @@ def test_over_cap_after_turn_completed_observed_keeps_completion_signal(monkeypa
     assert result.completed_observed is True
 
 
+@pytest.mark.parametrize("status", ["failed", "interrupted"])
+def test_over_cap_completion_requires_completed_status(monkeypatch, status):
+    """#1200 finding 2: salvage signal requires turn status == completed."""
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 64)
+    q: queue.Queue = queue.Queue()
+    server = _BudgetStubServer()
+    thread = codex_appserver.CodexThread(server, "thread-1", q)
+    q.put({"method": "item/agentMessage/delta", "params": {"itemId": "msg-1", "delta": "hi"}})
+    q.put(
+        {
+            "method": "turn/completed",
+            "params": {
+                "turn": {
+                    "id": "turn-1",
+                    "status": status,
+                    "items": [{"type": "agentMessage", "text": "F" * 4096}],
+                }
+            },
+        }
+    )
+
+    result = thread.run_turn("work", timeout=2.0)
+
+    assert result.output_limit_exceeded is True
+    assert result.completed_observed is False
+    assert result.ok is False
+
+
+def _ingestion_server(lines: bytes):
+    server = codex_appserver.AppServer(argv=FAKE)
+    q: queue.Queue = queue.Queue()
+    server._queues["t-cap"] = q
+    server.reset_capture("t-cap")
+
+    class FakeProc:
+        stdout = io.BytesIO(lines)
+
+    server._proc = FakeProc()
+    return server, q
+
+
+def test_over_cap_completed_record_ingested_via_stream_preserves_completion(monkeypatch):
+    """#1200 finding 1: the real ingestion path records an over-cap turn/completed."""
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    delta = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": "t-cap", "itemId": "m", "delta": "ok"},
+        }
+    )
+    oversized_turn = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+                "threadId": "t-cap",
+                "turn": {
+                    "id": "turn-1",
+                    "status": "completed",
+                    "items": [{"type": "agentMessage", "text": "Z" * 2048}],
+                },
+            },
+        }
+    )
+    server, q = _ingestion_server((delta + "\n" + oversized_turn + "\n").encode("utf-8"))
+
+    server._read_loop()
+
+    assert server._output_limit_exceeded is True
+    assert server.observed_completion_status("t-cap", "turn-1") == "completed"
+
+    monkeypatch.setattr(server, "request", lambda *args, **kwargs: {"turn": {"id": "turn-1"}})
+    thread = codex_appserver.CodexThread(server, "t-cap", q)
+    result = thread.run_turn("work", timeout=2.0)
+    assert result.completed_observed is True
+    assert result.ok is False
+    assert result.output_limit_exceeded is True
+
+
+def test_ingested_failed_status_over_cap_record_does_not_signal_completion(monkeypatch):
+    """#1200: metadata recorded at ingestion still respects status for the salvage gate."""
+    monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
+    oversized_turn = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+                "threadId": "t-cap",
+                "turn": {
+                    "id": "turn-1",
+                    "status": "failed",
+                    "error": {"message": "boom"},
+                    "items": [{"type": "agentMessage", "text": "Z" * 2048}],
+                },
+            },
+        }
+    )
+    server, _q = _ingestion_server((oversized_turn + "\n").encode("utf-8"))
+
+    server._read_loop()
+
+    assert server.observed_completion_status("t-cap", "turn-1") == "failed"
+
+
 def test_read_loop_stops_queueing_after_line_cap(monkeypatch):
     monkeypatch.setattr(proc, "MAX_CAPTURE_BYTES", 512)
     captured = {"queued": 0, "peak": 0}

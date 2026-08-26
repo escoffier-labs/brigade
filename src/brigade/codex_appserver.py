@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -44,6 +45,53 @@ _DELTA_METHODS = frozenset(
         "process/outputDelta",
     }
 )
+
+# #1200: bounded metadata salvage for oversized turn/completed records. The
+# record itself is never parsed or retained; only the turn id and status are.
+_TURN_COMPLETED_MARKER = b'"turn/completed"'
+_TURN_OBJECT_ID_RE = re.compile(rb'"id"\s*:\s*"([^"]+)"')
+_THREAD_ID_RE = re.compile(rb'"threadId"\s*:\s*"([^"]+)"')
+_STATUS_RE = re.compile(rb'"status"\s*:\s*"([^"]+)"')
+_METADATA_WINDOW = 65536
+
+
+def _turn_object_window(raw: bytes) -> bytes:
+    start = raw.find(b'"turn"')
+    if start < 0:
+        return b""
+    brace = raw.find(b"{", start)
+    if brace < 0:
+        return b""
+    depth = 0
+    end = brace
+    while end < len(raw) and end - brace < _METADATA_WINDOW:
+        char = raw[end : end + 1]
+        if char == b"{":
+            depth += 1
+        elif char == b"}":
+            depth -= 1
+            if depth == 0:
+                break
+        end += 1
+    return raw[brace : end + 1]
+
+
+def _salvage_completion_metadata(raw: bytes) -> tuple[str | None, str | None]:
+    """Extract (turn id, status) from an oversized turn/completed record."""
+
+    if _TURN_COMPLETED_MARKER not in raw:
+        return None, None
+    window = _turn_object_window(raw)
+    turn_match = _TURN_OBJECT_ID_RE.search(window)
+    status_match = _STATUS_RE.search(window)
+    turn_id = turn_match.group(1).decode("utf-8", "replace") if turn_match else None
+    status = status_match.group(1).decode("utf-8", "replace") if status_match else None
+    return turn_id, status
+
+
+def _message_thread_id_from_raw(raw: bytes) -> str:
+    match = _THREAD_ID_RE.search(raw)
+    return match.group(1).decode("utf-8", "replace") if match else ""
 
 
 def _byte_stream(stdout: Any) -> Any:
@@ -135,6 +183,9 @@ class AppServer:
         self._capture_budgets: dict[str, proc_mod.ByteBudget] = {}
         self._orphan_budget = proc_mod.ByteBudget()
         self._output_limit_exceeded = False
+        # #1200: (thread_id, turn_id) -> status for every turn/completed seen
+        # during ingestion, including oversized records (metadata only).
+        self._observed_completions: dict[tuple[str, str], str] = {}
 
     def __enter__(self) -> "AppServer":
         self.start()
@@ -239,6 +290,19 @@ class AppServer:
             return self._orphan_budget
         return self._capture_budgets.setdefault(thread_id, proc_mod.ByteBudget())
 
+    def observed_completion_status(self, thread_id: str, turn_id: str) -> str | None:
+        """#1200: status of a turn/completed observed on the stream, if any."""
+
+        return self._observed_completions.get((thread_id, turn_id))
+
+    def _note_turn_completed(self, thread_id: Any, turn: Any) -> None:
+        if not isinstance(turn, dict):
+            return
+        turn_id = turn.get("id")
+        status = turn.get("status")
+        if isinstance(thread_id, str) and isinstance(turn_id, str):
+            self._observed_completions[(thread_id, turn_id)] = status if isinstance(status, str) else ""
+
     def reset_capture(self, thread_id: str) -> None:
         self._capture_budgets[thread_id] = proc_mod.ByteBudget()
 
@@ -291,6 +355,13 @@ class AppServer:
             except Exception:
                 pass
 
+    def _note_overflow_metadata(self, raw: bytes) -> None:
+        """#1200: preserve turn/completed metadata from an oversized record."""
+
+        turn_id, status = _salvage_completion_metadata(raw)
+        if turn_id is not None:
+            self._observed_completions[(_message_thread_id_from_raw(raw), turn_id)] = status or ""
+
     def _trip_output_limit(self, line_bytes: int, thread_id: str | None = None) -> None:
         """Charge ``line_bytes`` against the cap (overflowing) and stop the child."""
 
@@ -320,6 +391,8 @@ class AppServer:
             return True
         line_bytes = len(stripped)
         if line_bytes > proc_mod.MAX_CAPTURE_BYTES:
+            # #1200: preserve turn/completed metadata without retaining text.
+            self._note_overflow_metadata(stripped)
             self._trip_output_limit(line_bytes)
             return False
         try:
@@ -329,6 +402,13 @@ class AppServer:
         if not isinstance(msg, dict):
             return self._charge_record(line_bytes, None)
         thread_id = _message_thread_id(msg)
+        if not self._charge_record(line_bytes, thread_id):
+            # #1200: a parsed record can still overflow the shared budget.
+            if msg.get("method") == "turn/completed":
+                self._note_turn_completed(thread_id, (msg.get("params") or {}).get("turn"))
+            return False
+        if msg.get("method") == "turn/completed":
+            self._note_turn_completed(thread_id, (msg.get("params") or {}).get("turn"))
         if not self._charge_record(line_bytes, thread_id):
             return False
         if msg.get("id") is not None and "method" in msg:
@@ -349,6 +429,7 @@ class AppServer:
             newline_at = leftover.find(b"\n")
             if newline_at < 0:
                 if len(leftover) > limit:
+                    self._note_overflow_metadata(bytes(leftover))
                     self._trip_output_limit(len(leftover))
                     leftover.clear()
                     break
@@ -478,7 +559,7 @@ class CodexThread:
 
         completed = self._consume(deadline, turn_id, deltas, completed_texts, on_event)
         if completed is _OUTPUT_LIMIT or self._server_output_limited():
-            return self._output_limit_result(deltas, completed_texts)
+            return self._output_limit_result(deltas, completed_texts, turn_id)
         if completed is not None:
             return self._finish(completed, deltas, completed_texts)
 
@@ -489,7 +570,7 @@ class CodexThread:
             pass
         completed = self._consume(time.monotonic() + _INTERRUPT_GRACE, turn_id, deltas, completed_texts, on_event)
         if completed is _OUTPUT_LIMIT or self._server_output_limited():
-            return self._output_limit_result(deltas, completed_texts)
+            return self._output_limit_result(deltas, completed_texts, turn_id)
         salvaged = self._salvage(deltas, completed_texts)
         detail = f"timeout after {timeout}s; interrupted"
         if completed is _DEAD:
@@ -591,7 +672,15 @@ class CodexThread:
         completed_texts.append(text)
         return True
 
-    def _output_limit_result(self, deltas: dict, completed_texts: list[str]) -> TurnResult:
+    def _completion_observed(self, turn_id: str) -> bool:
+        """#1200: salvage signal requires an observed turn/completed with status completed."""
+
+        getter = getattr(self._server, "observed_completion_status", None)
+        if not callable(getter):
+            return False
+        return getter(self.thread_id, turn_id) == "completed"
+
+    def _output_limit_result(self, deltas: dict, completed_texts: list[str], turn_id: str = "") -> TurnResult:
         return TurnResult(
             text=proc_mod.bound_text(self._salvage(deltas, completed_texts)),
             ok=False,
@@ -599,6 +688,7 @@ class CodexThread:
             thread_id=self.thread_id,
             detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
             output_limit_exceeded=True,
+            completed_observed=bool(turn_id) and self._completion_observed(turn_id),
         )
 
     def _finish(self, completed, deltas: dict, completed_texts: list[str]) -> TurnResult:
@@ -626,7 +716,8 @@ class CodexThread:
                 thread_id=self.thread_id,
                 detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
                 output_limit_exceeded=True,
-                completed_observed=True,
+                # #1200: only a genuinely completed turn is a salvage signal.
+                completed_observed=status == "completed",
             )
         if status == "completed":
             return TurnResult(
