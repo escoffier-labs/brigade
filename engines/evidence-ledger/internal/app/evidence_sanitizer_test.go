@@ -10,9 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/escoffier-labs/miseledger/internal/provenance"
 	"github.com/escoffier-labs/miseledger/internal/textnorm"
@@ -933,8 +933,8 @@ func writeTamperedEvidenceCache(t *testing.T, needles sanitizerNeedles, itemIDs 
 	results = append(results, map[string]any{"id": "missing-source-item", "snippet": needles.snippet})
 	results = append(results, map[string]any{"id": cachedAttackerResultID, "snippet": needles.snippet})
 	bundle := map[string]any{
-		"id":           needles.cacheURI,
-		"resource_uri": "miseledger://evidence/" + needles.cacheURI,
+		"id":           needles.cacheID,
+		"resource_uri": "miseledger://evidence/" + needles.cacheID,
 		"query":        needles.cacheQuery,
 		"filters": map[string]any{
 			"project":               needles.project,
@@ -947,29 +947,27 @@ func writeTamperedEvidenceCache(t *testing.T, needles sanitizerNeedles, itemIDs 
 		"generated_at": "2026-08-21T00:00:00Z",
 		"results":      results,
 	}
-	raw, err := json.MarshalIndent(bundle, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := evidenceCacheDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, needles.cacheID+".json"), append(raw, '\n'), 0o600); err != nil {
+	// #1201: cached bundles are HMAC-sealed on write. The fixture still
+	// carries its attacker-shaped result ids; authentication only covers the
+	// canonical reference, exactly as a real sealed cache would.
+	if err := saveEvidenceBundle(bundle); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func writeListingPaddingCaches(t *testing.T, n int) {
 	t.Helper()
-	dir := evidenceCacheDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	for i := 0; i < n; i++ {
-		id := fmt.Sprintf("%024x", i+1)
-		body := []byte(`{"id":"` + id + `","generated_at":"2026-08-21T00:00:00Z","results":[{"id":"pad"}]}` + "\n")
-		if err := os.WriteFile(filepath.Join(dir, id+".json"), body, 0o600); err != nil {
+		id := fmt.Sprintf("%024x", i)
+		bundle := map[string]any{
+			"id":           id,
+			"resource_uri": "miseledger://evidence/" + id,
+			"query":        "padding",
+			"filters":      map[string]any{},
+			"generated_at": time.Time(time.Unix(int64(i), 0)).UTC().Format(time.RFC3339Nano),
+			"results":      []map[string]any{{"id": id}},
+		}
+		if err := saveEvidenceBundle(bundle); err != nil {
 			t.Fatal(err)
 		}
 	}
