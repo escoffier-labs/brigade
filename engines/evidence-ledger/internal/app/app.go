@@ -1296,7 +1296,15 @@ func cmdImportStationTrail(args []string, out, errw io.Writer) int {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "stationtrail", cmdArgs...)
+		bin, err := openStationTrailBinary()
+		if err != nil {
+			return fatalf(errw, "import stationtrail: %s", err)
+		}
+		defer bin.Close()
+		cmd, err := bin.command(ctx, cmdArgs...)
+		if err != nil {
+			return fatalf(errw, "import stationtrail: %s", err)
+		}
 		stderr := &cappedWriter{limit: maxScannerStderrBytes} // #1205: scanner stderr is capped
 		cmd.Stderr = stderr
 		stdout, err := cmd.StdoutPipe()
@@ -1400,45 +1408,9 @@ var stationTrailLegacyCommandMarkers = []string{
 	"flag provided but not defined",
 }
 
-// stationTrailApprovedDigestsEnv names the operator configuration listing the
-// SHA-256 hex digests of stationtrail executables whose legacy behavior is
-// explicitly tolerated (#1204 round 2). Entries are comma-, semicolon-, or
-// whitespace-separated and may carry a `sha256:` prefix.
-const stationTrailApprovedDigestsEnv = "MISELEDGER_STATIONTRAIL_APPROVED_DIGESTS"
-
 // maxScannerBinaryDigestBytes bounds reading the scanner executable for
 // hashing; an oversized or unreadable binary simply fails closed (#1204).
 const maxScannerBinaryDigestBytes int64 = 64 << 20 // 64 MiB
-
-// stationTrailExecutableDigest returns the lowercase SHA-256 hex digest of
-// the resolved stationtrail executable.
-func stationTrailExecutableDigest() (string, error) {
-	binPath, err := exec.LookPath("stationtrail")
-	if err != nil {
-		return "", err
-	}
-	data, err := readFileBounded(binPath, maxScannerBinaryDigestBytes)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-// stationTrailApprovedDigests parses the operator-approved legacy digest list.
-func stationTrailApprovedDigests() map[string]bool {
-	approved := map[string]bool{}
-	fields := strings.FieldsFunc(os.Getenv(stationTrailApprovedDigestsEnv), func(r rune) bool {
-		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
-	})
-	for _, field := range fields {
-		digest := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(field), "sha256:"))
-		if digest != "" {
-			approved[digest] = true
-		}
-	}
-	return approved
-}
 
 type stationTrailCommandError struct {
 	Stdout string
@@ -1456,39 +1428,6 @@ func (e *stationTrailCommandError) Error() string {
 	return msg
 }
 
-// runStationTrailBounded runs a stationtrail subcommand with a timeout and a
-// hard output cap. A deadline, read-limit, start, or wait failure is returned
-// as an error; a nonzero exit is returned as *stationTrailCommandError so the
-// caller can inspect the scanner's own output.
-func runStationTrailBounded(args []string, timeout time.Duration, maxOutput int64) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "stationtrail", args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	// #1205: scanner stderr is capped so a flooding scanner cannot drive an
-	// unbounded engine-side allocation through its own diagnostics.
-	stderr := &cappedWriter{limit: maxScannerStderrBytes}
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	out, readErr := readAllBounded(stdout, maxOutput)
-	waitErr := cmd.Wait()
-	if ctx.Err() == context.DeadlineExceeded {
-		return nil, fmt.Errorf("stationtrail %s timed out after %s", strings.Join(args, " "), timeout)
-	}
-	if readErr != nil {
-		return nil, readErr
-	}
-	if waitErr != nil {
-		return out, &stationTrailCommandError{Stdout: string(out), Stderr: stderr.String()}
-	}
-	return out, nil
-}
-
 func looksLikeLegacyStationTrail(output string) bool {
 	folded := strings.ToLower(output)
 	for _, marker := range stationTrailLegacyCommandMarkers {
@@ -1501,10 +1440,10 @@ func looksLikeLegacyStationTrail(output string) bool {
 
 var stationTrailVersionPattern = regexp.MustCompile(`^v?[0-9]+(?:\.[0-9]+){1,3}`)
 
-// stationTrailReportedVersion asks the binary its version and returns it only
-// when the answer parses as a version string.
-func stationTrailReportedVersion() (string, bool) {
-	out, err := runStationTrailBounded([]string{"--version"}, stationTrailProbeTimeout, stationTrailCapsMaxOutput)
+// stationTrailReportedVersion asks THIS binary its version and returns it
+// only when the answer parses as a version string.
+func stationTrailReportedVersion(bin *stationTrailBinary) (string, bool) {
+	out, err := bin.runBounded([]string{"--version"}, stationTrailProbeTimeout, stationTrailCapsMaxOutput)
 	if err != nil {
 		return "", false
 	}
@@ -1524,11 +1463,23 @@ func stationTrailReportedVersion() (string, bool) {
 // positively identified legacy version whose executable digest the operator
 // explicitly approved comes back with LegacyIdentified (#1204, round 2: the
 // same executable controls both the unknown-command text and the parseable
-// --version output, so implicit legacy tolerance was forgeable). Missing-
-// binary is handled by toolpath.Require at the import entrypoints before
-// this is consulted.
+// --version output, so implicit legacy tolerance was forgeable). Round 3:
+// probe, version check, digest, and any later execution share ONE resolved,
+// opened artifact — see stationTrailBinary. Missing-binary is handled by
+// toolpath.Require at the import entrypoints before this is consulted.
 func stationTrailCaps() stationTrailProbe {
-	raw, err := runStationTrailBounded([]string{"capabilities", "--json"}, stationTrailProbeTimeout, stationTrailCapsMaxOutput)
+	bin, err := openStationTrailBinary()
+	if err != nil {
+		return stationTrailProbe{Status: stationTrailProbeFailed, Err: err}
+	}
+	defer bin.Close()
+	return stationTrailCapsFrom(bin)
+}
+
+// stationTrailCapsFrom probes a specific opened stationtrail artifact so the
+// caller can keep executing that same artifact afterwards (import path).
+func stationTrailCapsFrom(bin *stationTrailBinary) stationTrailProbe {
+	raw, err := bin.runBounded([]string{"capabilities", "--json"}, stationTrailProbeTimeout, stationTrailCapsMaxOutput)
 	if err == nil {
 		var caps stationTrailCapabilities
 		if err := json.Unmarshal(raw, &caps); err != nil || emptyStationTrailCaps(caps) {
@@ -1538,9 +1489,16 @@ func stationTrailCaps() stationTrailProbe {
 	}
 	var cmdErr *stationTrailCommandError
 	if errors.As(err, &cmdErr) && looksLikeLegacyStationTrail(cmdErr.Stdout + "\n" + cmdErr.Stderr) {
-		if version, ok := stationTrailReportedVersion(); ok {
-			digest, digestErr := stationTrailExecutableDigest()
-			if digestErr == nil && stationTrailApprovedDigests()[digest] {
+		if version, ok := stationTrailReportedVersion(bin); ok {
+			approved, listErr := loadStationTrailApprovedDigests()
+			digest, digestErr := bin.digest()
+			if listErr != nil {
+				return stationTrailProbe{
+					Status: stationTrailProbeFailed,
+					Err:    fmt.Errorf("identified legacy stationtrail %s but its approved-digests file could not be loaded (%v); implicit legacy tolerance is disabled", version, listErr),
+				}
+			}
+			if digestErr == nil && approved[digest] {
 				return stationTrailProbe{
 					Caps:   stationTrailCapabilities{Version: version},
 					Status: stationTrailProbeLegacyIdentified,
@@ -1549,12 +1507,12 @@ func stationTrailCaps() stationTrailProbe {
 			if digestErr != nil {
 				return stationTrailProbe{
 					Status: stationTrailProbeFailed,
-					Err:    fmt.Errorf("identified legacy stationtrail %s but its executable could not be hashed (%v); implicit legacy tolerance is disabled — approve the binary's SHA-256 via %s", version, digestErr, stationTrailApprovedDigestsEnv),
+					Err:    fmt.Errorf("identified legacy stationtrail %s but its executable could not be hashed (%v); implicit legacy tolerance is disabled — approve the binary's SHA-256 in %s", version, digestErr, stationTrailApprovedDigestsPath()),
 				}
 			}
 			return stationTrailProbe{
 				Status: stationTrailProbeFailed,
-				Err:    fmt.Errorf("identified legacy stationtrail %s but its executable digest sha256:%s is not approved via %s; implicit legacy tolerance is disabled", version, digest, stationTrailApprovedDigestsEnv),
+				Err:    fmt.Errorf("identified legacy stationtrail %s but its executable digest sha256:%s is not approved via %s; implicit legacy tolerance is disabled", version, digest, stationTrailApprovedDigestsPath()),
 			}
 		}
 	}
@@ -1599,7 +1557,16 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 	if err := toolpath.Require("stationtrail", toolpath.HintStationTrail); err != nil {
 		return ingest.AdapterResult{}, stationTrailSummary{}, err
 	}
-	if err := checkStationTrailCompat(sourceKind); err != nil {
+	// Round 3 (#1201): the compat probe, digest approval, and the import
+	// execution all operate on ONE resolved, opened executable so a writable
+	// PATH entry cannot present an approved binary for hashing and a
+	// different one for execution.
+	bin, err := openStationTrailBinary()
+	if err != nil {
+		return ingest.AdapterResult{}, stationTrailSummary{}, err
+	}
+	defer bin.Close()
+	if err := evalStationTrailCompat(stationTrailCapsFrom(bin), sourceKind); err != nil {
 		return ingest.AdapterResult{}, stationTrailSummary{}, err
 	}
 	summaryFile, err := os.CreateTemp("", "miseledger-stationtrail-*.json")
@@ -1621,7 +1588,10 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "stationtrail", cmdArgs...)
+	cmd, err := bin.command(ctx, cmdArgs...)
+	if err != nil {
+		return ingest.AdapterResult{}, stationTrailSummary{}, err
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return ingest.AdapterResult{}, stationTrailSummary{}, err

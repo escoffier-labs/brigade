@@ -144,6 +144,29 @@ MiseLedger uses XDG paths when present:
 
 Directories and files created by the CLI use private permissions.
 
+### Legacy stationtrail scanner approval
+
+`import stationtrail` refuses to run a legacy scanner unless its executable
+SHA-256 digest is explicitly approved. The allowlist is a file,
+`stationtrail-approved-digests`, in the data directory shown above (for
+example `~/.local/share/miseledger/stationtrail-approved-digests`). One
+64-hex digest per line; an optional `sha256:` prefix and uppercase hex are
+normalized on load.
+
+Trust boundary: the file is operator-owned configuration, validated on every
+load like the evidence bundle MAC key — regular file (symlinks refused),
+owned by the current uid, mode 0600, bounded read. Any malformed digest line
+refuses the whole list closed. A missing file means no approvals are
+configured, and there is deliberately no environment-variable path: any
+child process can read its parent's environment, so approvals are only read
+from this owner-protected file.
+
+The engine resolves and opens `stationtrail` once per import or dry-run;
+probes, digest hashing, and execution all use that single artifact, and each
+exec re-verifies that the file under the resolved path is still the one that
+was hashed (device/inode). Install stationtrail in a root-owned directory so
+an unprivileged process cannot swap it between verification and execution.
+
 ## Smoke Test
 
 ```bash

@@ -13,6 +13,11 @@ import (
 // a same-UID attacker cannot point the loader at a file it controls (#1201).
 const evidenceMACKeyCreateNoFollow = syscall.O_NOFOLLOW
 
+// defaultEvidenceMACKeyPlatformSupported reports that unix provides the
+// race-free no-follow open (O_NOFOLLOW) and the uid ownership check the MAC
+// key trust requirements are built on.
+func defaultEvidenceMACKeyPlatformSupported() bool { return true }
+
 func openEvidenceMACKeyFile(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }

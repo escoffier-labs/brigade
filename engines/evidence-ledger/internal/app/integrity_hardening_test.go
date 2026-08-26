@@ -210,9 +210,11 @@ func TestStationTrailProbeBlocksUnidentifiedFailures(t *testing.T) {
 			dir, digest := shim(tc.script)
 			switch tc.approval {
 			case "self":
-				t.Setenv(stationTrailApprovedDigestsEnv, digest)
+				writeStationTrailApprovalsFile(t, "SHA256:"+strings.ToUpper(digest)+"\n", 0o600)
 			case "other":
-				t.Setenv(stationTrailApprovedDigestsEnv, strings.Repeat("a", 64))
+				writeStationTrailApprovalsFile(t, strings.Repeat("a", 64)+"\n", 0o600)
+			default:
+				removeStationTrailApprovalsFile(t)
 			}
 			t.Setenv("PATH", dir)
 			err := checkStationTrailCompat("codex")
@@ -622,7 +624,12 @@ func TestScannerStderrIsCappedInProbeRunner(t *testing.T) {
 	stationTrailProbeTimeout = 30 * time.Second
 	t.Cleanup(func() { stationTrailProbeTimeout = oldTimeout })
 
-	out, err := runStationTrailBounded([]string{"capabilities", "--json"}, stationTrailProbeTimeout, stationTrailCapsMaxOutput)
+	bin, err := openStationTrailBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bin.Close()
+	out, err := bin.runBounded([]string{"capabilities", "--json"}, stationTrailProbeTimeout, stationTrailCapsMaxOutput)
 	if err == nil {
 		t.Fatal("flooding scanner exited zero")
 	}

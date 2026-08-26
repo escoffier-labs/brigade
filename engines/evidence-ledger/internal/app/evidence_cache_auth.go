@@ -32,6 +32,13 @@ import (
 // otherwise read or replace it; first creation uses O_CREATE|O_EXCL so
 // concurrent initializers converge on one winner instead of sealing bundles
 // with competing keys. The residual same-UID exposure is tracked in #1093.
+//
+// Round 3 (#1201): platforms that cannot provide a race-free no-follow open
+// plus an ownership check fail closed — key load and creation are refused
+// with a typed error rather than degrading to a follow-the-symlink,
+// no-owner-check fallback. Tests simulate those platforms by overriding the
+// support seam below.
+var evidenceMACKeyPlatformSupported = defaultEvidenceMACKeyPlatformSupported
 const (
 	evidenceBundleMACField   = "bundle_mac"
 	evidenceBundleMACDomain  = "miseledger.evidence.bundle-mac.v1\x00"
@@ -67,6 +74,9 @@ func evidenceBundleMACKeyPath() string {
 // the O_EXCL winner; losers load the winner's key instead of generating a
 // competing one.
 func loadOrCreateEvidenceBundleMACKey() ([]byte, error) {
+	if !evidenceMACKeyPlatformSupported() {
+		return nil, &EvidenceMACKeyError{Reason: "key storage is not supported on this platform (no race-free no-follow open and no ownership check); refusing to seal or verify cached evidence bundles"}
+	}
 	path := evidenceBundleMACKeyPath()
 	if err := security.EnsurePrivateDir(filepath.Dir(path)); err != nil {
 		return nil, err

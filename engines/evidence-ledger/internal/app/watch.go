@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -335,7 +334,14 @@ func dryRunStationTrail(sourceKind, root string, values map[string]string) (stat
 	if err := toolpath.Require("stationtrail", toolpath.HintStationTrail); err != nil {
 		return stationTrailSummary{}, err
 	}
-	if err := checkStationTrailCompat(sourceKind); err != nil {
+	// Round 3 (#1201): the compat probe and the dry-run execution share one
+	// resolved, opened executable.
+	bin, err := openStationTrailBinary()
+	if err != nil {
+		return stationTrailSummary{}, err
+	}
+	defer bin.Close()
+	if err := evalStationTrailCompat(stationTrailCapsFrom(bin), sourceKind); err != nil {
 		return stationTrailSummary{}, err
 	}
 	cmdArgs := []string{sourceKind, root, "--dry-run", "--json"}
@@ -350,7 +356,10 @@ func dryRunStationTrail(sourceKind, root string, values map[string]string) (stat
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "stationtrail", cmdArgs...)
+	cmd, err := bin.command(ctx, cmdArgs...)
+	if err != nil {
+		return stationTrailSummary{}, err
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	b, err := cmd.Output()
