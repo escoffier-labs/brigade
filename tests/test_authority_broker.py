@@ -88,7 +88,9 @@ def test_handoff_never_puts_secret_in_env_construction():
     assert "input=handoff.decode" in text
     assert 'child_env["BRIGADE_REQUIRE_TRUST_CAPABILITY"]' in text
     assert "BRIGADE_CAPABILITY_SECRET" not in source
-    assert "capture_output" in source
+    # Scanner child stdout/stderr stay captured (#1197 switched to the bounded
+    # streaming runner in brigade.proc), never inherited from the parent.
+    assert "proc_mod.run(" in source
 
 
 def test_key_load_refuses_world_readable(tmp_path: Path, monkeypatch):

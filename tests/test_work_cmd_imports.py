@@ -2,6 +2,7 @@ import importlib
 import json
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -4348,3 +4349,490 @@ def test_import_promote_handoff_rejects_quarantined(tmp_path, capsys):
     work_cmd._write_imports(tmp_path, [item])
     assert work_cmd.import_promote_handoff(target=tmp_path, import_id=item["id"]) == 2
     assert "quarantined" in capsys.readouterr().err
+
+
+def _seed_inbox(target, rows: bytes):
+    inbox = work_cmd.helpers._imports_path(target)
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    inbox.write_bytes(rows)
+    return inbox
+
+
+def _spawn_ledger_writer_child(tmp_path, mode):
+    """Run one ledger inbox writer in a real second process (cross-process lock)."""
+    marker = tmp_path / f"{mode}.done.marker"
+    if mode == "append":
+        body = (
+            "imported, skipped, dismissed, rejected = ledger._append_import_records("
+            "target, [{'text': 'worker row', 'kind': 'task', 'source': 'manual'}], "
+            "contain_provenance_errors=True)\n"
+            "ok = bool(imported)\n"
+        )
+    else:
+        body = "summary = ledger._backfill_import_provenance(target)\nok = summary.get('stamped', 0) >= 1\n"
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from brigade.work_cmd import ledger\n"
+        f"target = Path({str(tmp_path)!r})\n" + body + f"Path({str(marker)!r}).write_text('done' if ok else 'failed')\n"
+        "sys.exit(0 if ok else 3)\n"
+    )
+    process = subprocess.Popen([sys.executable, "-c", script])
+    return process, marker
+
+
+def _marker_stays_absent(marker, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if marker.exists():
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def test_append_import_records_serializes_behind_held_scanner_inbox_lock(tmp_path):
+    """#1207 round 3: a concurrent import waits instead of racing scanner stamping."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = _seed_inbox(tmp_path, b'{"id":"seed","kind":"task","source":"seed","text":"seed row"}\n')
+    child, marker = _spawn_ledger_writer_child(tmp_path, "append")
+    try:
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            # The scanner run publishes stamped bytes while holding the lock.
+            scanners_mod._append_scanner_inbox_bytes(
+                tmp_path,
+                b'{"id":"scan-1","kind":"task","source":"repo-scan","text":"scan row"}\n',
+            )
+            assert _marker_stays_absent(marker, 1.0), "import published through a held scanner inbox lock"
+    finally:
+        try:
+            child.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            raise
+    assert marker.read_text() == "done"
+
+    texts = [json.loads(row).get("text") for row in inbox.read_bytes().splitlines() if row.strip()]
+    assert "seed row" in texts
+    assert "scan row" in texts
+    assert "worker row" in texts
+
+
+def test_scanner_rollback_under_lock_does_not_clobber_concurrent_import(tmp_path):
+    """#1207 round 3: rollback publishes before a blocked import re-reads the inbox."""
+    import os
+
+    from brigade.work_cmd import scanners as scanners_mod
+
+    pre_rows = b'{"id":"pre","kind":"task","source":"seed","text":"pre row"}\n'
+    inbox = _seed_inbox(tmp_path, pre_rows)
+    child, marker = _spawn_ledger_writer_child(tmp_path, "append")
+    try:
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            assert _marker_stays_absent(marker, 1.0), "import ran through a held scanner inbox lock"
+            # A failed run rolls the inbox back to its exact pre-run snapshot.
+            snapshot = scanners_mod._ScannerInboxSnapshot(
+                raw=pre_rows,
+                rows=scanners_mod._raw_jsonl_rows(pre_rows),
+                exists=True,
+                identity=scanners_mod._scanner_inbox_identity(os.stat(inbox)),
+            )
+            scanners_mod._restore_scanner_inbox_snapshot_direct(tmp_path, snapshot)
+        try:
+            child.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            raise
+    finally:
+        pass
+    assert marker.read_text() == "done"
+
+    final_text = inbox.read_text()
+    assert '"pre row"' in final_text, final_text
+    assert '"worker row"' in final_text, f"concurrent import lost to rollback: {final_text!r}"
+
+
+def test_backfill_import_provenance_serializes_behind_held_scanner_inbox_lock(tmp_path):
+    """#1207 round 3: the provenance backfill read-modify-write holds the run lock."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = _seed_inbox(
+        tmp_path,
+        b'{"id":"row-1","kind":"finding","source":"code-review","text":"needs stamp"}\n',
+    )
+    child, marker = _spawn_ledger_writer_child(tmp_path, "backfill")
+    try:
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            assert child.poll() is None, "backfill process exited before the lock was released"
+            assert _marker_stays_absent(marker, 1.0), "backfill wrote through a held scanner inbox lock"
+        try:
+            child.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            raise
+    finally:
+        pass
+    assert marker.read_text() == "done"
+
+    stamped = json.loads(inbox.read_text().splitlines()[0])
+    envelope = stamped.get("metadata", {}).get("provenance")
+    trust = envelope.get("trust") if isinstance(envelope, dict) else None
+    assert isinstance(trust, dict) and trust.get("assigned_by"), "backfill did not stamp the row"
+
+
+def test_read_import_inbox_raw_is_bounded_by_snapshot_limit(tmp_path, monkeypatch):
+    """#1207 round 3: the reviewed-inbox read enforces the same byte cap."""
+    from brigade.work_cmd import ledger as ledger_mod
+
+    _seed_inbox(tmp_path, (b'{"id":"row","kind":"task","source":"s","text":"' + b"x" * 128 + b'"}\n'))
+    monkeypatch.setattr(ledger_mod, "_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES", 64)
+
+    with pytest.raises(ledger_mod.ImportInboxSnapshotLimitExceeded):
+        ledger_mod._read_import_inbox_raw(tmp_path)
+
+
+@pytest.mark.parametrize("mutation", ["growth", "in_place"])
+def test_read_import_inbox_raw_detects_mid_read_mutation(tmp_path, monkeypatch, mutation):
+    """#1207 round 3: same-inode growth and in-place edits fail the read."""
+    import os
+
+    from brigade.work_cmd import ledger as ledger_mod
+
+    initial = b'{"id":"row-1","kind":"task","source":"s","text":"first"}\n'
+    appended = b'{"id":"row-2","kind":"task","source":"s","text":"second"}\n'
+    inbox = _seed_inbox(tmp_path, initial)
+    mutated = {"done": False}
+    real_read = os.read
+
+    def mutating_read(fd, size):
+        chunk = real_read(fd, size)
+        if chunk and not mutated["done"]:
+            mutated["done"] = True
+            if mutation == "growth":
+                with open(inbox, "ab") as handle:
+                    handle.write(appended)
+            else:
+                fd2 = os.open(inbox, os.O_WRONLY)
+                try:
+                    os.pwrite(fd2, b"X", 0)
+                finally:
+                    os.close(fd2)
+        return chunk
+
+    monkeypatch.setattr(os, "read", mutating_read)
+
+    with pytest.raises(OSError, match="changed while snapshotting"):
+        raw, identity, exists = ledger_mod._read_import_inbox_raw(tmp_path)
+
+
+# --- #1207 round 4: two-lock design (no inherited descriptors) -------------
+
+
+def _spawn_self_import_child(tmp_path, rows, run_id):
+    """Run one self-importing scanner child (marker env) in a second process."""
+    import os
+
+    src_root = Path(__file__).parents[1] / "src"
+    done = tmp_path / f"self-import-{run_id}.done.marker"
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import ledger\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"rows = {rows!r}\n"
+        "ok = True\n"
+        "for row in rows:\n"
+        "    imported, _skipped, _dismissed, _rejected = ledger._append_import_records(\n"
+        "        target, [{'text': row, 'kind': 'task', 'source': 'manual'}],\n"
+        "        contain_provenance_errors=True)\n"
+        "    ok = ok and bool(imported)\n"
+        f"Path({str(done)!r}).write_text('done' if ok else 'failed')\n"
+        "sys.exit(0 if ok else 3)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env={**os.environ, "BRIGADE_SCANNER_RUN_ID": run_id},
+    )
+    return process, done
+
+
+def _inbox_texts(tmp_path):
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    if not inbox.exists():
+        return []
+    return [json.loads(row).get("text") for row in inbox.read_bytes().splitlines() if row.strip()]
+
+
+def test_two_concurrent_self_importing_children_serialize_on_writer_lock(tmp_path):
+    """Round 4 (F2): sibling self-imports serialize; no lost update; no run lock.
+
+    The launcher's run window is held for the whole test, and both children
+    still complete: a marked child takes only the writer lock (its own open
+    file description), so siblings exclude each other and the launcher's lock
+    is untouched.
+    """
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _seed_inbox(tmp_path, b'{"id":"seed","kind":"task","source":"seed","text":"seed row"}\n')
+    first_rows = [f"child-one row {index}" for index in range(6)]
+    second_rows = [f"child-two row {index}" for index in range(6)]
+    child_one, done_one = _spawn_self_import_child(tmp_path, first_rows, "run-one")
+    child_two, done_two = _spawn_self_import_child(tmp_path, second_rows, "run-two")
+    try:
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            deadline = time.monotonic() + 30
+            while not (done_one.exists() and done_two.exists()):
+                assert time.monotonic() < deadline, "marked children blocked on the launcher's run lock"
+                assert child_one.poll() in (None, 0), "child one failed"
+                assert child_two.poll() in (None, 0), "child two failed"
+                time.sleep(0.02)
+        assert child_one.wait(timeout=15) == 0
+        assert child_two.wait(timeout=15) == 0
+    finally:
+        for child in (child_one, child_two):
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=15)
+    texts = _inbox_texts(tmp_path)
+    for row in [*first_rows, *second_rows]:
+        assert row in texts
+    assert len(texts) >= 13
+
+
+def test_outside_writer_blocks_under_run_lock_then_proceeds_after_release(tmp_path):
+    """Round 4: an unmarked writer waits for run+writer, then completes."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _seed_inbox(tmp_path, b'{"id":"seed","kind":"task","source":"seed","text":"seed row"}\n')
+    child, marker = _spawn_ledger_writer_child(tmp_path, "append")
+    try:
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            assert _marker_stays_absent(marker, 1.0), "outside writer ran through the held run lock"
+        assert child.wait(timeout=30) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=15)
+    assert marker.read_text() == "done"
+    assert "worker row" in _inbox_texts(tmp_path)
+
+
+def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_path):
+    """Round 4 (F3): writer-then-task overlap resolves without deadlock.
+
+    With the inherited-lock inversion gone, the task-ledger lock is taken
+    first by every legitimate caller, so holders never wait on inbox locks
+    and the former five-second wait/failure path is removed: a contended
+    acquisition fails closed immediately (typed ``RunLockError``, no spin),
+    and succeeds once the holder releases. The overlapping child therefore
+    neither hangs nor breaks exclusion.
+    """
+    import os
+
+    from brigade.work_cmd import ledger as ledger_mod
+
+    src_root = Path(__file__).parents[1] / "src"
+    acquired = tmp_path / "child.writer.acquired.marker"
+    parent_holding = tmp_path / "parent.task.held.marker"
+    parent_released = tmp_path / "parent.task.released.marker"
+    fast_failed = tmp_path / "child.task.fastfailed.marker"
+    done = tmp_path / "child.task.done.marker"
+    script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade import runguard\n"
+        "from brigade.work_cmd import inbox_lock, ledger\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"acquired = Path({str(acquired)!r})\n"
+        f"parent_holding = Path({str(parent_holding)!r})\n"
+        f"parent_released = Path({str(parent_released)!r})\n"
+        f"fast_failed = Path({str(fast_failed)!r})\n"
+        f"done = Path({str(done)!r})\n"
+        "def wait_for(marker):\n"
+        "    while not marker.exists():\n"
+        "        time.sleep(0.02)\n"
+        "with inbox_lock.inbox_writer_lock(target):\n"
+        "    acquired.write_text('1')\n"
+        "    wait_for(parent_holding)\n"
+        "    try:\n"
+        "        with ledger._task_ledger_lock(target):\n"
+        "            raise AssertionError('contended acquisition must fail')\n"
+        "    except runguard.RunLockError:\n"
+        "        fast_failed.write_text('1')\n"
+        "    wait_for(parent_released)\n"
+        "    with ledger._task_ledger_lock(target):\n"
+        "        done.write_text('done')\n"
+        "sys.exit(0)\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env={**os.environ, "BRIGADE_SCANNER_RUN_ID": "task-child"},
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not acquired.exists():
+            assert time.monotonic() < deadline, "child never acquired the writer lock"
+            time.sleep(0.02)
+        with ledger_mod._task_ledger_lock(tmp_path):
+            parent_holding.write_text("1")
+            deadline = time.monotonic() + 10
+            while not fast_failed.exists():
+                assert time.monotonic() < deadline, "child hung on the task lock instead of failing closed"
+                time.sleep(0.02)
+            assert not done.exists(), "child took the task ledger lock while we held it"
+        parent_released.write_text("1")
+        assert child.wait(timeout=30) == 0
+        assert done.exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=15)
+
+
+def _inject_scanner_commit_before_writer_lock(monkeypatch, tmp_path, row):
+    """Round 6 (M2): land a trusted scanner commit just before this writer's
+    canonical exclusion begins, simulating a commit between a pre-lock read
+    and the locked publication. A writer that read before locking deletes it."""
+    import contextlib
+
+    from brigade.work_cmd import ledger as ledger_mod
+
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    if not inbox.exists():
+        inbox.write_bytes(b"")
+    real = ledger_mod._canonical_inbox_write
+
+    @contextlib.contextmanager
+    def patched(target):
+        with inbox.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+        with real(target):
+            yield
+
+    monkeypatch.setattr(ledger_mod, "_canonical_inbox_write", patched)
+
+
+def test_import_add_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {"id": "scan-add-1", "text": "scanner add row", "kind": "task", "source": "scanner", "status": "pending"},
+    )
+    assert work_cmd.import_add(target=tmp_path, text="manual add row") == 0
+    texts = [item.get("text") for item in work_cmd._read_imports(tmp_path)]
+    assert "manual add row" in texts
+    assert "scanner add row" in texts
+
+
+def test_import_context_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {"id": "scan-ctx-1", "text": "scanner context row", "kind": "task", "source": "scanner", "status": "pending"},
+    )
+    assert work_cmd.import_context(target=tmp_path, text="manual context body") == 0
+    texts = [item.get("text") for item in work_cmd._read_imports(tmp_path)]
+    assert any("manual context body" in str(text) for text in texts)
+    assert "scanner context row" in texts
+
+
+def test_promote_handoff_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "handoff-race-import.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Record durable scanner race decision",
+                "kind": "decision",
+                "source": "chat-memory-sweep",
+                "metadata": {
+                    "source_item_key": "chat:decision:race",
+                    "source_fingerprint": "fingerprint-race",
+                    "scanner_id": "chat-surfaces",
+                    "scanner_run_id": "run-1",
+                    "sweep_id": "sweep-1",
+                    "evidence_summary": "Safe evidence at https://private.example/token=SECRET123456.",
+                    "local_evidence_path": ".brigade/evidence/chat-decision.json",
+                },
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    seeded = json.loads(work_cmd.helpers._imports_path(tmp_path).read_text())
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {"id": "scan-handoff-1", "text": "scanner handoff row", "kind": "task", "source": "scanner"},
+    )
+    assert work_cmd.import_promote_handoff(target=tmp_path, import_id=seeded["id"]) == 0
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    assert final[seeded["id"]]["status"] == "promoted"
+    assert "scan-handoff-1" in final, f"scanner commit deleted by handoff promotion: {sorted(final)}"
+
+
+def test_single_promote_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    seeded = work_cmd._make_import("promote race item", kind="task", source="manual")
+    work_cmd._write_imports(tmp_path, [seeded])
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {
+            "id": "scan-promote-1",
+            "text": "scanner promote row",
+            "kind": "task",
+            "source": "scanner",
+            "status": "pending",
+        },
+    )
+    assert work_cmd.import_promote(target=tmp_path, import_id=seeded["id"]) == 0
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    assert final[seeded["id"]]["status"] == "promoted"
+    assert final["scan-promote-1"]["status"] == "pending"
+    assert "scan-promote-1" in final, f"scanner commit deleted by promotion: {sorted(final)}"
+
+
+def test_dismiss_all_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    seeded = work_cmd._make_import("dismiss all race item", kind="task", source="repo-scan")
+    work_cmd._write_imports(tmp_path, [seeded])
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {"id": "scan-dismiss-1", "text": "scanner dismiss row", "kind": "task", "source": "scanner"},
+    )
+    assert work_cmd.import_dismiss(target=tmp_path, all_matching=True, reason="cleanup") == 0
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    # Both rows match the --all filter, so both are dismissed in place; the
+    # scanner row must survive as a row rather than be deleted by stale state.
+    assert final[seeded["id"]]["status"] == "dismissed"
+    assert "scan-dismiss-1" in final, f"scanner commit deleted by dismiss --all: {sorted(final)}"
+    assert final["scan-dismiss-1"]["status"] == "dismissed"
+
+
+def test_dismiss_single_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    seeded = work_cmd._make_import("dismiss race item", kind="task", source="repo-scan")
+    work_cmd._write_imports(tmp_path, [seeded])
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {
+            "id": "scan-one-1",
+            "text": "scanner single row",
+            "kind": "task",
+            "source": "scanner",
+            "status": "pending",
+        },
+    )
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=seeded["id"], reason="cleanup") == 0
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    assert final[seeded["id"]]["status"] == "dismissed"
+    assert final["scan-one-1"]["status"] == "pending"
+    assert "scan-one-1" in final, f"scanner commit deleted by dismiss: {sorted(final)}"

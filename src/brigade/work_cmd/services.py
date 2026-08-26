@@ -1078,23 +1078,26 @@ def inbox_archive(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     now = helpers._now()
-    imports = [item for item in ledger_mod._read_imports(target) if isinstance(item, dict)]
-    archived: list[dict[str, Any]] = []
-    kept: list[dict[str, Any]] = []
-    for item in imports:
-        status = str(item.get("status", "pending"))
-        timestamp = _archive_import_cutoff(item)
-        age_hours = (now - timestamp).total_seconds() / 3600 if timestamp is not None else 0
-        if status in {"promoted", "dismissed", "superseded"} and age_hours >= constants.IMPORT_ARCHIVE_STALE_HOURS:
-            archived_item = dict(item)
-            archived_item["archived_at"] = now.isoformat()
-            archived_item["archive_reason"] = f"{status}_older_than_{constants.IMPORT_ARCHIVE_STALE_HOURS}h"
-            archived.append(archived_item)
-        else:
-            kept.append(item)
-    if archived:
-        ledger_mod._append_archived_imports(target, archived)
-        ledger_mod._write_imports(target, kept)
+    # Round 6 (M2): read and publish inside one canonical lock window so a
+    # scanner commit landing before this writer excludes survives the archive.
+    with ledger_mod._canonical_inbox_write(target):
+        imports = [item for item in ledger_mod._read_imports(target) if isinstance(item, dict)]
+        archived: list[dict[str, Any]] = []
+        kept: list[dict[str, Any]] = []
+        for item in imports:
+            status = str(item.get("status", "pending"))
+            timestamp = _archive_import_cutoff(item)
+            age_hours = (now - timestamp).total_seconds() / 3600 if timestamp is not None else 0
+            if status in {"promoted", "dismissed", "superseded"} and age_hours >= constants.IMPORT_ARCHIVE_STALE_HOURS:
+                archived_item = dict(item)
+                archived_item["archived_at"] = now.isoformat()
+                archived_item["archive_reason"] = f"{status}_older_than_{constants.IMPORT_ARCHIVE_STALE_HOURS}h"
+                archived.append(archived_item)
+            else:
+                kept.append(item)
+        if archived:
+            ledger_mod._append_archived_imports(target, archived)
+            ledger_mod._write_imports(target, kept)
     payload = {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),

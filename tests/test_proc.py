@@ -90,19 +90,36 @@ def test_process_registry_escalates_every_owned_process_group(monkeypatch):
 def test_registered_windows_process_starts_in_new_process_group(monkeypatch):
     captured = {}
 
+    class SilentJob:
+        def assign(self, process_handle):
+            return True
+
+        def resume(self, pid):
+            return True
+
+        def terminate(self):
+            return True
+
+        def close(self):
+            pass
+
     def fake_popen(args, **kwargs):
         captured["args"] = args
         captured.update(kwargs)
-        return _StubProcess(stdout=b"ok\n")
+        stub = _StubProcess(stdout=b"ok\n")
+        stub._handle = 424242
+        return stub
 
     monkeypatch.setattr(proc.os, "name", "nt")
     monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: SilentJob())
 
     result = proc.run(["worker.exe"], process_registry=proc.ProcessRegistry())
 
     assert result.code == 0
     assert result.stdout == "ok\n"
-    assert captured["creationflags"] == getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    expected_flags = getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) | proc._WINDOWS_CREATE_SUSPENDED
+    assert captured["creationflags"] == expected_flags
     assert "start_new_session" not in captured
 
 
@@ -293,18 +310,35 @@ def test_windows_registry_taskkill_timeout_is_bounded_and_falls_back(monkeypatch
 def test_windows_run_without_registry_still_starts_process_group(monkeypatch):
     captured = {}
 
+    class SilentJob:
+        def assign(self, process_handle):
+            return True
+
+        def resume(self, pid):
+            return True
+
+        def terminate(self):
+            return True
+
+        def close(self):
+            pass
+
     def fake_popen(args, **kwargs):
         captured.update(kwargs)
-        return _StubProcess(stdout=b"ok\n")
+        stub = _StubProcess(stdout=b"ok\n")
+        stub._handle = 424242
+        return stub
 
     monkeypatch.setattr(proc.os, "name", "nt")
     monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: SilentJob())
 
     result = proc.run(["worker.exe"])
 
     assert result.code == 0
     assert result.stdout == "ok\n"
-    assert captured["creationflags"] == getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    expected_flags = getattr(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) | proc._WINDOWS_CREATE_SUSPENDED
+    assert captured["creationflags"] == expected_flags
     assert captured["stdin"] is subprocess.DEVNULL
 
 
@@ -740,3 +774,310 @@ def test_run_delimited_stderr_under_limit_is_not_truncated():
     assert result.code == 0
     assert result.stderr_truncated is False
     assert result.stderr == "warn\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_cutoff_after_child_exit_records_incomplete_group_failure(tmp_path):
+    """#1197: the post-exit drain cutoff must fail closed, not return the child's exit 0."""
+    parent_code = (
+        "import subprocess, sys; "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        "print('early output', flush=True)"
+    )
+    result = proc.run([sys.executable, "-c", parent_code], timeout=20)
+
+    assert result.incomplete_process_group is True
+    assert result.code != 0
+    assert "process group" in result.stderr.lower()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_cleanup_failure_becomes_typed_nonzero_result(monkeypatch):
+    """#1207 round 2: an exception from group termination must not bypass Result."""
+
+    def exploding_stop(process, registry=None, child_job=None):
+        process.kill()
+        raise RuntimeError("job terminate exploded")
+
+    monkeypatch.setattr(proc, "_stop_child", exploding_stop)
+
+    result = proc.run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.3)
+
+    assert result.code != 0
+    assert "cleanup failed" in result.stderr.lower()
+    assert "job terminate exploded" in result.stderr
+
+
+def test_windows_run_assigns_child_to_owned_kill_on_close_job_object(monkeypatch):
+    """Windows tree termination must use an owned job object created before launch."""
+
+    events: list[tuple[str, object]] = []
+
+    class FakeJob:
+        def assign(self, process_handle: int) -> bool:
+            events.append(("assign", process_handle))
+            return True
+
+        def resume(self, pid: int) -> bool:
+            events.append(("resume", pid))
+            return True
+
+        def terminate(self) -> bool:
+            events.append(("terminate", None))
+            return True
+
+        def close(self) -> None:
+            events.append(("close", None))
+
+    class StubProcess:
+        pid = 555
+        returncode = 0
+        _handle = 424242
+        stdout = None
+        stderr = None
+        stdin = None
+
+        def poll(self):
+            return 0
+
+    stub = StubProcess()
+
+    def fake_popen(*args, **kwargs):
+        events.append(("popen", dict(kwargs)))
+        return stub
+
+    def fake_create_job():
+        events.append(("create", None))
+        return FakeJob()
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(proc, "_create_windows_child_job", fake_create_job)
+    monkeypatch.setattr(
+        proc,
+        "_terminate_windows_process_tree",
+        lambda *args, **kwargs: pytest.fail("taskkill fallback must not run when a job object owns the tree"),
+    )
+
+    result = proc.run(["worker.exe"])
+
+    assert result.code == 0
+    names = [event[0] for event in events]
+    # The job must exist before the child can run a single instruction, and
+    # assignment must complete before the suspended main thread resumes.
+    assert names.index("create") < names.index("popen") < names.index("assign") < names.index("resume")
+    popen_kwargs = events[names.index("popen")][1]
+    assert isinstance(popen_kwargs, dict)
+    assert popen_kwargs.get("creationflags", 0) & proc._WINDOWS_CREATE_SUSPENDED
+    assert ("assign", 424242) in events
+    assert ("resume", 555) in events
+    assert ("close", None) in events
+    assert ("terminate", None) not in events
+
+
+def test_windows_run_without_job_object_fails_closed_before_launch(monkeypatch):
+    """#1207 round 2: job-creation failure is a typed launch failure, never an unguarded child."""
+    monkeypatch.setattr(proc.os, "name", "nt")
+
+    def no_popen(*args, **kwargs):
+        pytest.fail("child must not be launched when its owned job object cannot be created")
+
+    monkeypatch.setattr(proc.subprocess, "Popen", no_popen)
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: None)
+
+    result = proc.run(["worker.exe"])
+
+    assert result.code != 0
+    assert result.stdout == ""
+    assert "worker.exe" in result.stderr
+
+
+class _FakeWindowsThreadHandle:
+    """Truthiness of a real HANDLE; identity only."""
+
+
+def _fake_windows_kernel32(resume_results, *, open_thread_handle="granted"):
+    """Minimal kernel32 standing in for tool-help enumeration of pid 555."""
+    calls: dict[str, list[object]] = {"resume": [], "closed": []}
+    thread_handle = _FakeWindowsThreadHandle()
+
+    class _FakeFunc:
+        """Callable tolerating the restype assignment real ctypes pointers accept."""
+
+        def __init__(self, fn):
+            self._fn = fn
+            self.restype = None
+
+        def __call__(self, *args, **kwargs):
+            return self._fn(*args, **kwargs)
+
+    def create_toolhelp(flags, source_pid):
+        return 424242
+
+    def thread_first(snapshot, entry):
+        fields = entry._obj
+        fields.th32OwnerProcessID = 555
+        fields.th32ThreadID = 777
+        return 1
+
+    def thread_next(snapshot, entry):
+        return 0
+
+    def open_thread(access, inherit, tid):
+        return thread_handle if open_thread_handle == "granted" else None
+
+    def resume_thread(thread):
+        result = resume_results.pop(0)
+        calls["resume"].append(result)
+        return result
+
+    def close_handle(handle):
+        calls["closed"].append(handle)
+        return 1
+
+    class FakeKernel32:
+        def __getattr__(self, name):
+            table = {
+                "createtoolhelp32snapshot": create_toolhelp,
+                "thread32first": thread_first,
+                "thread32next": thread_next,
+                "openthread": open_thread,
+                "resumethread": resume_thread,
+                "closehandle": close_handle,
+            }
+            fn = table.get(name.lower())
+            if fn is not None:
+                return _FakeFunc(fn)
+            raise AttributeError(name)
+
+    return FakeKernel32(), calls, thread_handle
+
+
+def test_windows_resume_reports_false_when_resumethread_fails():
+    """#1207 round 3: ResumeThread failure must not report a resumed child.
+
+    A CREATE_SUSPENDED child whose ResumeThread call returns (DWORD)-1 stays
+    frozen forever if launch reports success; the caller must see False so it
+    terminates the still-suspended process instead.
+    """
+    kernel32, calls, thread_handle = _fake_windows_kernel32([0xFFFFFFFF])
+
+    assert proc._resume_windows_main_thread(kernel32, 555) is False
+    assert calls["resume"] == [0xFFFFFFFF]
+    assert calls["closed"].count(thread_handle) == 1
+
+
+def test_windows_resume_reports_false_when_openthread_fails():
+    """#1207 round 3: an unopenable main thread is a resume failure."""
+    kernel32, calls, _thread = _fake_windows_kernel32([0], open_thread_handle=None)
+
+    assert proc._resume_windows_main_thread(kernel32, 555) is False
+    assert calls["resume"] == []
+    assert calls["closed"] == [424242], "only the tool-help snapshot handle should be closed"
+
+
+def test_windows_bind_terminates_suspended_child_when_resume_fails(monkeypatch):
+    """#1207 round 3: resume failure kills the suspended child via typed path."""
+    observed: dict[str, object] = {}
+
+    class ResumeFailingJob:
+        def assign(self, process_handle: int) -> bool:
+            return True
+
+        def resume(self, pid: int) -> bool:
+            return False
+
+        def terminate(self) -> bool:
+            raise AssertionError("the job owns nothing after a failed resume")
+
+        def close(self) -> None:
+            observed["closed"] = True
+
+    stub = _StubProcess()
+    stub._handle = 424242
+    stub.kill = lambda: observed.__setitem__("killed", True)
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    message = proc._bind_suspended_windows_child(ResumeFailingJob(), stub, ["worker.exe"])
+
+    assert "could not be resumed" in message
+    assert observed.get("killed") is True
+    assert observed.get("closed") is True
+
+
+def test_windows_run_terminates_suspended_child_when_assignment_fails(monkeypatch):
+    """#1207 round 2: failed job assignment kills the still-suspended child; no taskkill orphan."""
+
+    observed: dict[str, object] = {}
+
+    class FailingJob:
+        def assign(self, process_handle: int) -> bool:
+            return False
+
+        def resume(self, pid: int) -> bool:
+            raise AssertionError("resume must never run after a failed assignment")
+
+        def terminate(self) -> bool:
+            raise AssertionError("the unassigned job owns nothing to terminate")
+
+        def close(self) -> None:
+            observed["closed"] = True
+
+    stub = _StubProcess()
+    stub._handle = 424242
+
+    def fake_kill():
+        observed["killed"] = True
+
+    stub.kill = fake_kill
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: stub)
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: FailingJob())
+    monkeypatch.setattr(
+        proc,
+        "_terminate_windows_process_tree",
+        lambda *args, **kwargs: pytest.fail("taskkill fallback must not run for a suspended child"),
+    )
+
+    result = proc.run(["worker.exe"])
+
+    assert result.code != 0
+    assert observed.get("killed") is True
+    assert observed.get("closed") is True
+    assert result.stdout == ""
+
+
+def test_stop_child_prefers_job_object_over_taskkill(monkeypatch):
+    class FakeJob:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def terminate(self) -> bool:
+            self.calls.append("terminate")
+            return True
+
+    class StubProcess:
+        pid = 555
+        waits: list[float] = []
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc, "_terminate_processes", lambda *a, **k: pytest.fail("taskkill path must not run"))
+
+    job = FakeJob()
+    proc._stop_child(StubProcess(), None, child_job=job)
+
+    assert job.calls == ["terminate"]
+
+
+def test_run_exposes_no_descriptor_passing_plumbing():
+    """#1207 round 4: scanner children inherit no descriptors (no lock adoption)."""
+    import inspect
+
+    assert "pass_fds" not in inspect.signature(proc.run).parameters

@@ -1,5 +1,7 @@
 import json
 import subprocess
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -2050,3 +2052,55 @@ def test_import_promote_all_late_window_cas_refusal_writes_zero_task_files(tmp_p
     assert inbox[0]["id"] == reviewed["id"]
     assert inbox[0]["text"] == "Forged unreviewed payload injected after apply"
     assert inbox[0].get("status", "pending") == "pending"
+
+
+def test_concurrent_task_ledger_writers_serialize_instead_of_failing(tmp_path):
+    """Two trusted writers contend on the task-ledger lock and both succeed.
+
+    Regression guard for the round-4/5 sendback on PR #1207: removing the
+    bounded wait around ``_acquire_task_ledger_lock`` made any writer that
+    overlapped a brief holder fail closed with ``RunLockError``. The second
+    writer here starts while the first still holds the lock; it must wait
+    within the bounded window and complete its read-modify-write instead of
+    failing.
+    """
+    _init_git_repo(tmp_path)
+    first_holds = threading.Event()
+    second_started = threading.Event()
+    release_first = threading.Event()
+    results: list[str] = []
+    errors: list[str] = []
+
+    def _append_task(task_id: str) -> None:
+        try:
+            if task_id == "writer-second":
+                second_started.set()
+            with work_cmd._task_ledger_lock(tmp_path):
+                if task_id == "writer-first":
+                    first_holds.set()
+                    assert release_first.wait(timeout=30), "first writer was never released"
+                ledger = work_cmd._read_task_ledger(tmp_path)
+                ledger["tasks"].append({"id": task_id, "text": f"concurrent {task_id}", "status": "pending"})
+                work_cmd._write_task_ledger(tmp_path, ledger)
+                results.append(task_id)
+        except BaseException as exc:
+            errors.append(f"{task_id}: {exc!r}")
+
+    first = threading.Thread(target=_append_task, args=("writer-first",))
+    first.start()
+    assert first_holds.wait(timeout=30), "first writer never acquired the lock"
+    second = threading.Thread(target=_append_task, args=("writer-second",))
+    second.start()
+    assert second_started.wait(timeout=30), "second writer never started"
+    time.sleep(0.5)
+    release_first.set()
+    first.join(timeout=60)
+    second.join(timeout=60)
+    assert not first.is_alive(), "first writer hung on the task-ledger lock"
+    assert not second.is_alive(), "second writer hung on the task-ledger lock"
+
+    assert errors == []
+    assert sorted(results) == ["writer-first", "writer-second"]
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    ids = {task.get("id") for task in ledger.get("tasks", []) if isinstance(task, dict)}
+    assert {"writer-first", "writer-second"} <= ids

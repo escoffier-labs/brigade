@@ -3708,3 +3708,1709 @@ def test_scanner_read_receipt_accepts_run_directory_path(tmp_path: Path) -> None
     receipt = scanners_mod._scanner_read_receipt(run_dir)
     assert receipt is not None
     assert receipt["run_id"] == run_id
+
+
+def _write_scanner_config(tmp_path: Path, scanner_id: str, command: str, *, timeout: int = 30) -> None:
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "{scanner_id}"
+source = "{scanner_id}"
+command = "{command}"
+cadence = "daily@02:00"
+enabled = true
+timeout = {timeout}
+output_path = ".brigade/scanner-output.json"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+
+def test_scanner_run_bounded_output_reaps_child_and_records_typed_failure(tmp_path):
+    """#1197: unbounded scanner output must trip a typed failure, not exhaust memory."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "loud.py"
+    script.write_text("import sys\nsys.stdout.write('x' * 4194304)\n")
+    _write_scanner_config(tmp_path, "loud-scan", f"{sys.executable} {script}", timeout=60)
+
+    payload, _rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="loud-scan", force=True)
+    receipt = payload["runs"][0]
+
+    assert receipt["status"] == "failed"
+    assert receipt.get("output_limit_exceeded") is True
+    assert "capture limit" in str(receipt.get("error"))
+    assert receipt["exit_code"] != 0
+
+
+def test_scanner_run_does_not_wait_for_descendant_holding_pipes(tmp_path):
+    """#1197: a grandchild holding the pipes is reaped promptly AND fails the run.
+
+    The pre-fix behavior asserted `completed` here; the security review found
+    that a terminated group must never stand as success, so this test now
+    asserts the typed incomplete-process-group failure.
+    """
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "pipe_holder.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "sys.exit(0)\n"
+    )
+    _write_scanner_config(tmp_path, "pipe-holder", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="pipe-holder", force=True)
+    receipt = payload["runs"][0]
+
+    assert rc == 1
+    assert receipt["status"] == "failed"
+    assert receipt.get("incomplete_process_group") is True
+    assert receipt["exit_code"] != 0
+    assert "process group" in str(receipt.get("error")).lower()
+    assert float(receipt["duration_seconds"]) < 15
+
+
+def test_scanner_cutoff_appended_rows_get_no_proof_and_are_rolled_back(tmp_path):
+    """#1197: rows appended before the group cutoff must not become eligible work."""
+    from brigade.work_cmd import config as config_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "late_writer.py"
+    script.write_text(
+        "import json, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "inbox = Path.cwd() / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record = {'id': 'late-1', 'kind': 'task', 'source': 'late-writer',\n"
+        "          'text': 'Late sneaky row', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "sys.exit(0)\n"
+    )
+    _write_scanner_config(tmp_path, "late-writer", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="late-writer", force=True)
+    receipt = payload["runs"][0]
+
+    assert rc == 1
+    assert receipt["status"] == "failed"
+    assert receipt.get("incomplete_process_group") is True
+    loaded, _errors = config_mod._load_scanner_config(tmp_path)
+    assert scanners_mod._scanner_run_proof(loaded[0], receipt) is None
+    inbox = helpers._imports_path(tmp_path)
+    if inbox.exists():
+        assert "late-1" not in inbox.read_text()
+    assert scanners_mod._scanner_import_counts(tmp_path)["total"] == 0
+
+
+def test_scanner_inbox_read_enforces_total_byte_limit(tmp_path, monkeypatch):
+    """#1198: inbox reads must reject oversized files with a typed failure."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 64)
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"x" * 128)
+
+    with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+        scanners_mod._scanner_inbox_bytes(tmp_path)
+
+
+def test_scanner_stamp_rejects_oversized_inbox_with_typed_failure(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 64)
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"x" * 128)
+    scanner = {"id": "bounded", "source": "bounded"}
+    run = _verified_builtin_scanner_run(scanner)
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner=scanner,
+        run=run,
+        before_ids=set(),
+        before_imports=[],
+        before_raw=b"",
+    )
+
+    assert stamped == []
+    assert run["self_import"]["created"] == 0
+    assert run["self_import"]["rejection_reasons"] == {"provenance_stamp_failed": 1}
+
+
+def test_scanner_inbox_imports_enforce_per_record_byte_limit(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_RECORD_LIMIT_BYTES", 32)
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(json.dumps({"id": "r1", "text": "y" * 128}).encode() + b"\n")
+
+    with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+        scanners_mod._scanner_inbox_imports(tmp_path)
+
+
+def test_scanner_jsonl_ingestion_enforces_total_and_per_record_limits(tmp_path, monkeypatch):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    path = imports / "output.jsonl"
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 64)
+    path.write_bytes(b'{"text":"' + b"z" * 256 + b'"}\n')
+    with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+        scanners_mod._scanner_read_import_jsonl(
+            tmp_path,
+            {"id": "ingest", "source": "ingest", "import_path": "imports/output.jsonl"},
+        )
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_RECORD_LIMIT_BYTES", 16)
+    path.write_bytes(json.dumps({"id": "r1", "text": "w" * 64}).encode() + b"\n")
+    with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+        scanners_mod._scanner_read_import_jsonl(
+            tmp_path,
+            {"id": "ingest", "source": "ingest", "import_path": "imports/output.jsonl"},
+        )
+
+
+def test_scanner_rollback_snapshot_is_bounded(tmp_path, monkeypatch):
+    """#1198: rollback snapshots of run artifacts must be bounded."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_SNAPSHOT_LIMIT_BYTES", 16)
+    authority = scanners_mod._open_scanner_run_directory(tmp_path, "snapshot-run")
+    try:
+        run_dir = helpers._scanner_runs_root(tmp_path) / "snapshot-run"
+        (run_dir / "stdout.log").write_bytes(b"a" * 64)
+        with pytest.raises(scanners_mod.ScannerSnapshotLimitExceeded):
+            scanners_mod._write_scanner_run_file(authority, "stdout.log", b"replacement")
+    finally:
+        os.close(authority.directory)
+        os.close(authority.root)
+
+
+def test_failed_scanner_run_restores_pre_run_inbox_and_rejects_new_rows(tmp_path):
+    """#1199: a failed run must not leave eligible rows behind in the inbox."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    sneaky = ledger._make_import("Sneaky pending finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+    inbox = helpers._imports_path(tmp_path)
+    before_raw = inbox.read_bytes()
+    inbox.write_bytes(before_raw + json.dumps(sneaky, sort_keys=True).encode() + b"\n")
+
+    scanner = {"id": "handoff-ingest", "source": "handoff-ingest"}
+    run = {"run_id": "failed-run", "status": "failed", "exit_code": 3}
+
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner=scanner,
+        run=run,
+        before_ids={before_row["id"]},
+        before_imports=[before_row],
+        before_raw=before_raw,
+    )
+
+    assert stamped == []
+    assert inbox.read_bytes() == before_raw
+    assert run["self_import"]["created"] == 0
+    assert run["self_import"]["rejection_reasons"] == {"run_not_completed": 1}
+
+
+def test_failed_scanner_run_leaves_no_eligible_work_end_to_end(tmp_path):
+    """#1199 end to end: scanner appends a pending row then exits nonzero."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "sneaky.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "root = Path.cwd()\n"
+        "inbox = root / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record = {'id': 'sneaky-1', 'kind': 'task', 'source': 'sneaky-scan',\n"
+        "          'text': 'Eligible sneaky row', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "sys.exit(3)\n"
+    )
+    _write_scanner_config(tmp_path, "sneaky-scan", f"{sys.executable} {script}", timeout=30)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="sneaky-scan", force=True)
+    receipt = payload["runs"][0]
+
+    assert rc == 1
+    assert receipt["status"] == "failed"
+    inbox = helpers._imports_path(tmp_path)
+    if inbox.exists():
+        rows = [row for row in inbox.read_text().splitlines() if row.strip()]
+        assert all(json.loads(row).get("id") != "sneaky-1" for row in rows)
+    counts = scanners_mod._scanner_import_counts(tmp_path)
+    assert counts["total"] == 0
+    assert receipt["self_import"]["created"] == 0
+    assert receipt["self_import"]["rejection_reasons"] == {"run_not_completed": 1}
+
+
+def test_scanner_run_aborts_before_launch_when_pre_run_snapshot_unavailable(tmp_path, monkeypatch):
+    """#1207: an un-snapshotable inbox must abort the run before the scanner launches."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    launched: list[bool] = []
+    real_run_one = scanners_mod._scanner_run_one
+
+    def spy_run_one(*args, **kwargs):
+        launched.append(True)
+        return real_run_one(*args, **kwargs)
+
+    def broken_snapshot(_target):
+        raise OSError("inbox snapshot unavailable")
+
+    monkeypatch.setattr(scanners_mod, "_scanner_run_one", spy_run_one)
+    monkeypatch.setattr(scanners_mod, "_snapshot_scanner_inbox", broken_snapshot)
+
+    script = tmp_path / "writer.py"
+    script.write_text("import sys\nsys.exit(0)\n")
+    _write_scanner_config(tmp_path, "snap-fail", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="snap-fail", force=True)
+
+    assert rc == 2
+    assert launched == []
+    assert any("snapshot" in str(error).lower() for error in payload["errors"])
+
+
+def test_oversized_pre_run_inbox_aborts_run_and_preserves_exact_bytes(tmp_path, monkeypatch):
+    """#1207: a swallowed snapshot OSError used to let a failed scanner destroy the inbox."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+    inbox = helpers._imports_path(tmp_path)
+    original = inbox.read_bytes() + b"x" * 256
+    inbox.write_bytes(original)
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 64)
+
+    script = tmp_path / "truncator.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "inbox = Path.cwd() / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.write_text('')\n"
+        "record = {'id': 'sneaky-trunc', 'kind': 'task', 'source': 'truncator',\n"
+        "          'text': 'Sneaky', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "sys.exit(3)\n"
+    )
+    _write_scanner_config(tmp_path, "truncator", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="truncator", force=True)
+
+    assert rc == 2
+    assert payload["runs"] == []
+    assert inbox.read_bytes() == original
+
+
+def test_failed_run_after_truncation_restores_exact_original_bytes(tmp_path):
+    """#1207: under-cap snapshot + mid-run truncation still restores the original bytes."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+    inbox = helpers._imports_path(tmp_path)
+    original = inbox.read_bytes()
+
+    script = tmp_path / "truncator.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "inbox = Path.cwd() / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.write_text('')\n"
+        "record = {'id': 'sneaky-trunc', 'kind': 'task', 'source': 'truncator',\n"
+        "          'text': 'Sneaky', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "sys.exit(3)\n"
+    )
+    _write_scanner_config(tmp_path, "truncator", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="truncator", force=True)
+
+    assert rc == 1
+    assert payload["runs"][0]["status"] == "failed"
+    assert inbox.read_bytes() == original
+
+
+def test_missing_pre_run_inbox_stays_missing_after_failed_run(tmp_path):
+    """#1207: restoring a previously missing inbox must not create an empty file."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "creator.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "inbox = Path.cwd() / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "inbox.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record = {'id': 'creator-1', 'kind': 'task', 'source': 'creator',\n"
+        "          'text': 'Created row', 'status': 'pending',\n"
+        "          'created_at': '2026-08-25T00:00:00+00:00',\n"
+        "          'updated_at': '2026-08-25T00:00:00+00:00'}\n"
+        "with inbox.open('a') as handle:\n"
+        "    handle.write(json.dumps(record) + '\\n')\n"
+        "sys.exit(3)\n"
+    )
+    _write_scanner_config(tmp_path, "creator", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="creator", force=True)
+
+    assert rc == 1
+    assert payload["runs"][0]["status"] == "failed"
+    assert not helpers._imports_path(tmp_path).exists()
+
+
+def test_pre_run_snapshot_detects_torn_same_uid_write(tmp_path, monkeypatch):
+    """#1207: a same-UID writer mutating the inode mid-read must be detected."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b'{"id": "r1"}\n')
+
+    real_fdopen = os.fdopen
+    mutated = {"done": False}
+
+    def fake_fdopen(fd, mode="rb", *args, **kwargs):
+        handle = real_fdopen(fd, mode, *args, **kwargs)
+        original_read = handle.read
+
+        def read(size=-1):
+            chunk = original_read(size)
+            if chunk and not mutated["done"]:
+                mutated["done"] = True
+                with open(inbox, "r+b") as writer:
+                    writer.seek(0)
+                    writer.write(b"B" * 32)
+                    writer.flush()
+            return chunk
+
+        handle.read = read
+        return handle
+
+    monkeypatch.setattr(scanners_mod.os, "fdopen", fake_fdopen)
+
+    with pytest.raises(OSError, match="changed while snapshotting"):
+        scanners_mod._snapshot_scanner_inbox(tmp_path)
+
+
+def test_rollback_refuses_inbox_swapped_since_snapshot(tmp_path):
+    """#1207: rollback must refuse when the live inbox no longer matches its snapshot."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+
+    snapshot = scanners_mod._snapshot_scanner_inbox(tmp_path)
+
+    replacement = ledger._make_import("Replacement finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [replacement])
+
+    with pytest.raises(OSError):
+        scanners_mod._restore_scanner_inbox_snapshot_direct(tmp_path, snapshot)
+
+
+def test_scanner_inbox_descriptor_bytes_enforces_byte_cap(tmp_path, monkeypatch):
+    """#1207: rollback descriptor reads enforce the cap while reading, not up front."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(scanners_mod, "_SCANNER_INPUT_TOTAL_LIMIT_BYTES", 16)
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"a" * 64)
+
+    descriptor = scanners_mod._open_scanner_inbox(tmp_path, os.O_RDONLY)
+    try:
+        with pytest.raises(scanners_mod.ScannerInputLimitExceeded):
+            scanners_mod._scanner_inbox_descriptor_bytes(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_ledger_import_inbox_snapshot_enforces_byte_cap(tmp_path, monkeypatch):
+    """#1207: the ordinary import snapshot also bounds its chunk accumulation."""
+    from brigade.work_cmd import ledger
+
+    big = [{"id": f"r{index}", "kind": "task", "source": "x", "text": "y" * 32} for index in range(8)]
+    ledger._write_imports(tmp_path, big)
+
+    monkeypatch.setattr(ledger, "_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES", 16)
+
+    with pytest.raises(ledger.ImportInboxSnapshotLimitExceeded):
+        ledger._snapshot_import_inbox(tmp_path)
+
+
+def test_ledger_import_inbox_snapshot_detects_mid_read_append(tmp_path, monkeypatch):
+    """#1207 round 2: the before/after compare must cover size and mtime, not only inode fields."""
+    from brigade.work_cmd import ledger
+
+    inbox = helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"A" * 64)
+
+    real_read = os.read
+    appended = {"done": False}
+
+    def fake_read(fd, size):
+        chunk = real_read(fd, size)
+        if chunk and not appended["done"]:
+            appended["done"] = True
+            with open(inbox, "ab") as writer:
+                writer.write(b"B" * 16)
+        return chunk
+
+    monkeypatch.setattr(os, "read", fake_read)
+
+    with pytest.raises(OSError, match="changed while snapshotting"):
+        ledger._snapshot_import_inbox(tmp_path)
+
+
+def test_inbox_replacement_between_snapshot_and_launch_aborts_run(tmp_path, monkeypatch):
+    """#1207 round 2: an inbox swapped after its snapshot aborts before the scanner launches."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+
+    launched: list[bool] = []
+    real_run_one = scanners_mod._scanner_run_one
+    real_snapshot = scanners_mod._snapshot_scanner_inbox
+
+    def spy_run_one(*args, **kwargs):
+        launched.append(True)
+        return real_run_one(*args, **kwargs)
+
+    def replacing_snapshot(target):
+        snapshot = real_snapshot(target)
+        replacement = ledger._make_import("Rogue finding", kind="finding", source="handoff-ingest")
+        ledger._write_imports(target, [replacement])
+        return snapshot
+
+    monkeypatch.setattr(scanners_mod, "_scanner_run_one", spy_run_one)
+    monkeypatch.setattr(scanners_mod, "_snapshot_scanner_inbox", replacing_snapshot)
+
+    script = tmp_path / "ok.py"
+    script.write_text("import sys\nsys.exit(0)\n")
+    _write_scanner_config(tmp_path, "swap-race", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="swap-race", force=True)
+
+    assert rc == 2
+    assert launched == []
+    assert any("changed" in str(error).lower() for error in payload["errors"])
+
+
+def test_same_inode_write_between_snapshot_and_launch_aborts_run(tmp_path, monkeypatch):
+    """#1207 round 2: a same-inode in-place rewrite after snapshot aborts before launch."""
+    from brigade.work_cmd import ledger, scanners as scanners_mod
+
+    before_row = ledger._make_import("Legit prior finding", kind="finding", source="handoff-ingest")
+    ledger._write_imports(tmp_path, [before_row])
+
+    launched: list[bool] = []
+    real_run_one = scanners_mod._scanner_run_one
+    real_snapshot = scanners_mod._snapshot_scanner_inbox
+
+    def spy_run_one(*args, **kwargs):
+        launched.append(True)
+        return real_run_one(*args, **kwargs)
+
+    def mutating_snapshot(target):
+        snapshot = real_snapshot(target)
+        with open(helpers._imports_path(target), "ab") as handle:
+            handle.write(b'{"id": "concurrent-1", "kind": "task", "source": "x", "text": "y"}\n')
+        return snapshot
+
+    monkeypatch.setattr(scanners_mod, "_scanner_run_one", spy_run_one)
+    monkeypatch.setattr(scanners_mod, "_snapshot_scanner_inbox", mutating_snapshot)
+
+    script = tmp_path / "ok.py"
+    script.write_text("import sys\nsys.exit(0)\n")
+    _write_scanner_config(tmp_path, "append-race", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="append-race", force=True)
+
+    assert rc == 2
+    assert launched == []
+    assert any("changed" in str(error).lower() for error in payload["errors"])
+
+
+def test_scanner_inbox_run_lock_is_reentrant_per_process(tmp_path):
+    """#1207 round 2: nested writer paths inside one run must not self-deadlock."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            pass
+
+
+@pytest.mark.skipif(os.name != "posix" or not hasattr(sys, "executable"), reason="requires POSIX flock")
+def test_scanner_inbox_run_lock_blocks_other_process_writers(tmp_path):
+    """#1207 round 2: the run-wide inbox lock excludes honest writers in other processes."""
+    import subprocess
+
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import errno, fcntl, os, sys\n"
+        f"lock = {str(lock_path)!r}\n"
+        "fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except OSError as exc:\n"
+        "    sys.exit(0 if exc.errno in (errno.EACCES, errno.EAGAIN) else 1)\n"
+        "sys.exit(2)\n"
+    )
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        blocked = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True)
+    assert blocked.returncode == 0, f"lock did not block the other process: {blocked.stderr}"
+
+    released = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True)
+    assert released.returncode == 2, f"lock still held after release: {released.stderr}"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symlinks")
+def test_scanner_inbox_run_lock_refuses_planted_symlink_lock_file(tmp_path):
+    """#1207 round 3: a symlink planted at the lock path must be refused."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"")
+    lock_path.symlink_to(outside)
+
+    with pytest.raises(OSError):
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            pass
+
+    assert outside.read_bytes() == b"", "the planted link target was locked or written"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX fifos")
+def test_scanner_inbox_run_lock_refuses_planted_fifo_lock_file(tmp_path):
+    """#1207 round 3: a FIFO planted at the lock path must be refused."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(lock_path)
+
+    with pytest.raises(OSError):
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            pass
+
+    assert lock_path.is_fifo(), "the FIFO was replaced by a regular lock file"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX hard links")
+def test_scanner_inbox_run_lock_refuses_multi_linked_lock_file(tmp_path):
+    """#1207 round 3: a multi-linked lock file must be refused."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    twin = tmp_path / "twin.lock"
+    twin.write_bytes(b"")
+    os.link(twin, lock_path)
+
+    with pytest.raises(OSError):
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            pass
+
+    assert twin.read_bytes() == b""
+
+
+def test_scanner_inbox_run_lock_detects_replaced_lock_file_during_run(tmp_path):
+    """#1207 round 3: replacing the locked inode mid-run refuses protected writes."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        held_identity = os.stat(lock_path, follow_symlinks=False)
+        lock_path.unlink()
+        replacement = tmp_path / "replacement.lock"
+        replacement.write_bytes(b"")
+        os.replace(replacement, lock_path)
+        assert os.stat(lock_path, follow_symlinks=False).st_ino != held_identity.st_ino
+
+        with pytest.raises(OSError, match="lock"):
+            scanners_mod._write_scanner_inbox_bytes(tmp_path, b'{"text":"swap"}\n')
+
+
+def test_scanner_inbox_run_lock_verify_requires_held_lock(tmp_path):
+    """#1207 round 3: protected-write revalidation fails closed without the lock."""
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    with pytest.raises(OSError, match="not held"):
+        inbox_lock_mod.verify_inbox_lock(tmp_path)
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        inbox_lock_mod.verify_inbox_lock(tmp_path)
+
+
+def test_cleanup_failure_still_yields_failed_scanner_run_and_unblocks_reruns(tmp_path, monkeypatch):
+    """#1207 round 2: a cleanup exception must not bypass the Result or strand a running receipt."""
+    from brigade import proc as proc_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "sleeper.py"
+    script.write_text("import time\ntime.sleep(30)\n")
+    _write_scanner_config(tmp_path, "cleanup-boom", f"{sys.executable} {script}", timeout=1)
+
+    def exploding_stop(process, registry=None, child_job=None):
+        process.kill()
+        raise RuntimeError("job terminate exploded")
+
+    monkeypatch.setattr(proc_mod, "_stop_child", exploding_stop)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="cleanup-boom", force=True)
+
+    assert rc == 1
+    receipt = payload["runs"][0]
+    assert receipt["status"] == "failed"
+    persisted = json.loads((helpers._scanner_runs_root(tmp_path) / receipt["run_id"] / "receipt.json").read_text())
+    assert persisted["status"] == "failed"
+
+    payload2, rc2 = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="cleanup-boom", force=True)
+    assert rc2 == 1
+    assert payload2["runs"][0]["status"] == "failed"
+
+
+def test_run_one_exception_finalizes_scanner_receipt_as_failed(tmp_path, monkeypatch):
+    """#1207 round 2: an exception after the running receipt persists must finalize it failed."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "ok.py"
+    script.write_text("import sys\nsys.exit(0)\n")
+    scanner = {"id": "supervise-boom", "command": f"{sys.executable} {script}", "timeout": 20}
+
+    def raising_run(*args, **kwargs):
+        raise RuntimeError("child supervision exploded")
+
+    monkeypatch.setattr(scanners_mod.proc_mod, "run", raising_run)
+
+    with pytest.raises(RuntimeError, match="child supervision exploded"):
+        scanners_mod._scanner_run_one(tmp_path, scanner)
+
+    receipts = scanners_mod._scanner_receipts(tmp_path)
+    assert len(receipts) == 1
+    assert receipts[0]["status"] == "failed"
+    assert scanners_mod._scanner_running_receipts(tmp_path) == []
+    assert "child supervision exploded" in str(receipts[0].get("error"))
+
+
+# --- #1207 round 4: two-lock design (no inherited descriptors) -------------
+
+
+def test_run_and_writer_lock_files_are_distinct_adjacent_files(tmp_path):
+    """Round 4: the run window and each canonical write use separate lock files."""
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    run_path = inbox_lock_mod.inbox_lock_path(tmp_path)
+    writer_path = inbox_lock_mod.inbox_writer_lock_path(tmp_path)
+    assert run_path.name == "inbox.jsonl.lock"
+    assert writer_path.name == "inbox.jsonl.writer.lock"
+    assert run_path.parent == writer_path.parent
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path), inbox_lock_mod.inbox_writer_lock(tmp_path):
+        for path in (run_path, writer_path):
+            metadata = os.stat(path, follow_symlinks=False)
+            assert stat.S_ISREG(metadata.st_mode)
+            assert metadata.st_nlink == 1
+
+
+def test_writer_lock_is_reentrant_per_process_and_refuses_replacement(tmp_path):
+    """Round 4: nested writer sections do not self-deadlock; swaps fail closed."""
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+
+    writer_path = inbox_lock_mod.inbox_writer_lock_path(tmp_path)
+    with inbox_lock_mod.inbox_writer_lock(tmp_path):
+        with inbox_lock_mod.inbox_writer_lock(tmp_path):
+            inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+        held_identity = os.stat(writer_path, follow_symlinks=False)
+        replacement = tmp_path / "replacement.writer.lock"
+        replacement.write_bytes(b"")
+        os.replace(replacement, writer_path)
+        assert os.stat(writer_path, follow_symlinks=False).st_ino != held_identity.st_ino
+        with pytest.raises(OSError, match="lock"):
+            inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+
+
+def test_released_inbox_lock_registry_entry_is_removed_and_writers_refuse(tmp_path, monkeypatch):
+    """Round 5 (F1): a released lock leaves no registry entry behind."""
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import ledger as ledger_mod
+
+    monkeypatch.setenv(inbox_lock_mod.SCANNER_RUN_ENV, "marked-child")
+
+    with inbox_lock_mod.inbox_writer_lock(tmp_path):
+        inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+    with pytest.raises(OSError, match="not held"):
+        inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+    with pytest.raises(OSError, match="not held"):
+        inbox_lock_mod.verify_canonical_write_locks(tmp_path)
+
+    row = {"text": "unexcluded child row", "kind": "task", "source": "manual"}
+    with pytest.raises(OSError, match="not held"):
+        ledger_mod._append_import_records_locked(
+            target=tmp_path,
+            records=[row],
+            contain_provenance_errors=True,
+        )
+
+    from brigade.work_cmd import scanners as scanners_mod
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        inbox_lock_mod.verify_inbox_lock(tmp_path)
+    with pytest.raises(OSError, match="not held"):
+        inbox_lock_mod.verify_inbox_lock(tmp_path)
+
+
+def test_nested_inbox_lock_entry_persists_until_outermost_exit(tmp_path):
+    """Round 5 (F1): reentrant depth keeps the registry entry until outermost exit."""
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+
+    key = str(inbox_lock_mod.inbox_writer_lock_path(tmp_path))
+    with inbox_lock_mod.inbox_writer_lock(tmp_path):
+        with inbox_lock_mod.inbox_writer_lock(tmp_path):
+            assert key in inbox_lock_mod._ACTIVE_LOCKS
+        assert key in inbox_lock_mod._ACTIVE_LOCKS
+        inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+    assert key not in inbox_lock_mod._ACTIVE_LOCKS
+    with pytest.raises(OSError, match="not held"):
+        inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+
+
+def test_verify_inbox_lock_fstats_live_descriptor_and_refuses_closed_fd(tmp_path):
+    """Round 5 (F1): verify re-stats the live descriptor, not just the path."""
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+
+    with inbox_lock_mod.inbox_writer_lock(tmp_path) as held:
+        restored = os.dup(held.fd)
+        os.close(held.fd)
+        with pytest.raises(OSError):
+            inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+        os.dup2(restored, held.fd)
+        os.close(restored)
+    assert str(inbox_lock_mod.inbox_writer_lock_path(tmp_path)) not in inbox_lock_mod._ACTIVE_LOCKS
+
+
+def test_busy_writer_lock_deadline_bounds_launcher_stamping_and_releases_run_lock(tmp_path, monkeypatch):
+    """Round 5 (F3): an escaped holder gets a typed failure, never an endless hang."""
+    import subprocess
+    import time as time_mod
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(inbox_lock_mod, "DEFAULT_LOCK_DEADLINE_SECONDS", 0.5)
+    src_root = Path(__file__).parents[1] / "src"
+    acquired = tmp_path / "holder.acquired"
+    script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import inbox_lock\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"acquired = Path({str(acquired)!r})\n"
+        "with inbox_lock.inbox_writer_lock(target):\n"
+        "    acquired.write_text('1')\n"
+        "    time.sleep(30)\n"
+    )
+    child = subprocess.Popen([sys.executable, "-c", script])
+    try:
+        deadline = time_mod.monotonic() + 15
+        while not acquired.exists():
+            assert time_mod.monotonic() < deadline, "holder never acquired the writer lock"
+            time_mod.sleep(0.02)
+        started = time_mod.monotonic()
+        with pytest.raises(inbox_lock_mod.InboxLockTimeout):
+            with scanners_mod._scanner_inbox_run_lock(tmp_path):
+                scanners_mod._write_scanner_inbox_bytes(
+                    tmp_path, b'{"id":"stamped","kind":"task","source":"s","text":"t"}\n'
+                )
+        elapsed = time_mod.monotonic() - started
+        assert elapsed < 15, "launcher stamping hung past the lock deadline"
+
+        # Round 6 (H1): the probe below must run while an unrelated holder is
+        # still alive; killing the holder first made this probe vacuous.
+        released = tmp_path / "runlock.reacquired"
+        probe = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            f"sys.path.insert(0, {str(src_root)!r})\n"
+            "from brigade.work_cmd import scanners\n"
+            f"target = Path({str(tmp_path)!r})\n"
+            f"released = Path({str(released)!r})\n"
+            "with scanners._scanner_inbox_run_lock(target):\n"
+            "    released.write_text('1')\n"
+        )
+        subprocess.run([sys.executable, "-c", probe], timeout=30, check=True)
+        assert released.exists()
+        assert child.poll() is None, "holder died before the release probe"
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=15)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_scanner_run_reaps_silent_descendant_holding_writer_lock(tmp_path):
+    """Round 6 (H1): a descendant that closed the capture pipes and holds the
+    writer lock must not outlive a scanner run whose direct child exited 0."""
+    import subprocess
+    import time as time_mod
+
+    from brigade.work_cmd import scanners as scanners_mod
+
+    src_root = Path(__file__).parents[1] / "src"
+    descendant_pid_path = tmp_path / "descendant.pid"
+    descendant_code = (
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import inbox_lock\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"pid_path = Path({str(descendant_pid_path)!r})\n"
+        "with inbox_lock.inbox_writer_lock(target):\n"
+        "    pid_path.write_text(str(os.getpid()))\n"
+        "    time.sleep(120)\n"
+    )
+    script = tmp_path / "forker.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"pid_seen = Path({str(descendant_pid_path)!r})\n"
+        "subprocess.Popen(\n"
+        f"    [sys.executable, '-c', {descendant_code!r}],\n"
+        "    stdin=subprocess.DEVNULL,\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        # Only exit 0 once the silent descendant holds the writer lock.
+        "for _ in range(1500):\n"
+        "    if pid_seen.exists():\n"
+        "        break\n"
+        "    time.sleep(0.02)\n"
+        "print('child done', flush=True)\n"
+    )
+    _write_scanner_config(tmp_path, "lock-descendant", f"{sys.executable} {script}", timeout=20)
+
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="lock-descendant", force=True)
+    receipt = payload["runs"][0]
+
+    assert rc == 0, receipt
+    assert receipt["status"] == "completed", receipt
+    assert receipt.get("descendants_reaped") is True, receipt
+
+    deadline = time_mod.monotonic() + 10
+    while descendant_pid_path.is_file() and time_mod.monotonic() < deadline:
+        try:
+            os.kill(int(descendant_pid_path.read_text()), 0)
+        except (ProcessLookupError, ValueError):
+            break
+        time_mod.sleep(0.02)
+    descendant_pid = int(descendant_pid_path.read_text())
+    try:
+        os.kill(descendant_pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        state = Path(f"/proc/{descendant_pid}/stat").read_text().split()[2]
+        assert state == "Z", "escaped descendant survived the scanner run"
+
+    probe = tmp_path / "outside_writer.py"
+    outside_acquired = tmp_path / "outside.acquired"
+    probe.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import inbox_lock\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"acquired = Path({str(outside_acquired)!r})\n"
+        "try:\n"
+        "    with inbox_lock.inbox_writer_lock(target, deadline_seconds=5):\n"
+        "        acquired.write_text('1')\n"
+        "except Exception:\n"
+        "    sys.exit(2)\n"
+    )
+    started = time_mod.monotonic()
+    subprocess.run([sys.executable, str(probe)], timeout=30, check=True)
+    assert outside_acquired.exists()
+    assert time_mod.monotonic() - started < 15, "outside writer could not acquire the writer lock promptly"
+
+
+def test_ingestion_lock_timeout_marks_run_failed_and_returns_nonzero(tmp_path, monkeypatch):
+    """Round 6 (M1): a writer-lock timeout during ingestion must fail the run
+    and the command's exit code, not report rc 0 with every import rejected."""
+    import contextlib
+    import subprocess
+    import threading
+    import time as time_mod
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _init_git_repo(tmp_path)
+    script = tmp_path / "write_scanner_import.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+path = Path.cwd() / ".brigade" / "scanner-imports.jsonl"
+path.write_text(json.dumps({"text": "timeout ingest row", "kind": "task", "source": "scanner-output"}) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f'''
+[[scanner]]
+id = "output-import"
+source = "output-import"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/output-import.json"
+conflict_window = "02:00-02:10"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+'''
+    )
+
+    monkeypatch.setattr(inbox_lock_mod, "DEFAULT_LOCK_DEADLINE_SECONDS", 0.5)
+    src_root = Path(__file__).parents[1] / "src"
+    held_marker = tmp_path / "holder.held"
+    holder_script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import inbox_lock\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"held = Path({str(held_marker)!r})\n"
+        "with inbox_lock.inbox_writer_lock(target):\n"
+        "    held.write_text('1')\n"
+        "    time.sleep(30)\n"
+    )
+
+    real_writer_lock = scanners_mod._scanner_inbox_writer_lock
+    holders: list[subprocess.Popen] = []
+    run_lock_key = str(inbox_lock_mod.inbox_lock_path(tmp_path))
+
+    @contextlib.contextmanager
+    def busy_during_ingestion(target):
+        """Grab the writer lock from an outside process, but only for the
+        launcher's ingestion acquisition (stamping runs under the run lock and
+        must proceed untouched)."""
+        if run_lock_key in inbox_lock_mod._ACTIVE_LOCKS:
+            with real_writer_lock(target):
+                yield
+            return
+        holder = subprocess.Popen([sys.executable, "-c", holder_script])
+        holders.append(holder)
+        try:
+            deadline = time_mod.monotonic() + 15
+            while not held_marker.exists():
+                assert time_mod.monotonic() < deadline, "outside holder never took the writer lock"
+                time_mod.sleep(0.02)
+            with real_writer_lock(target):
+                yield
+        finally:
+            if holder.poll() is None:
+                holder.kill()
+                holder.wait(timeout=15)
+
+    monkeypatch.setattr(scanners_mod, "_scanner_inbox_writer_lock", busy_during_ingestion)
+
+    outcome: dict[str, object] = {}
+
+    def runner():
+        try:
+            outcome["rc"] = work_cmd.scanners_run(
+                target=tmp_path, scanner_id="output-import", force=True, ingest_output=True, json_output=True
+            )
+        except BaseException as exc:
+            outcome["exc"] = exc
+
+    worker = threading.Thread(target=runner)
+    worker.start()
+    worker.join(timeout=120)
+    assert not worker.is_alive(), "scanner run never finished"
+    assert "exc" not in outcome, outcome.get("exc")
+
+    rc = outcome["rc"]
+    assert rc != 0, f"ingestion lock timeout returned success: {rc}"
+    payload_runs = scanners_mod._scanner_receipts(tmp_path)
+    assert payload_runs, "no scanner receipts recorded"
+    receipt = [item for item in payload_runs if item.get("scanner_id") == "output-import"][0]
+    assert receipt["status"] == "failed", receipt
+    assert "writer lock" in str(receipt.get("error")), receipt
+
+
+def test_overlapping_thread_acquisitions_share_one_owner_close_once_and_stay_exclusive(tmp_path, monkeypatch):
+    """Round 6 (L1): depth and ownership live in one registry entry.
+
+    An inner thread context must stay protected when the outer context exits
+    first, the fd closes exactly once at outermost exit, and concurrent first
+    acquisitions serialize instead of exposing a half-initialized entry.
+    """
+    import threading
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+
+    key = str(inbox_lock_mod.inbox_writer_lock_path(tmp_path))
+    released_fds: list[int] = []
+    original_release = inbox_lock_mod._HeldInboxLock.release
+
+    def spying_release(self):
+        released_fds.append(self.fd)
+        original_release(self)
+
+    monkeypatch.setattr(inbox_lock_mod._HeldInboxLock, "release", spying_release)
+
+    outer_entered = threading.Event()
+    outer_exit = threading.Event()
+    inner_entered = threading.Event()
+    inner_exit = threading.Event()
+
+    def outer():
+        with inbox_lock_mod.inbox_writer_lock(tmp_path):
+            outer_entered.set()
+            assert outer_exit.wait(timeout=30)
+
+    def inner():
+        with inbox_lock_mod.inbox_writer_lock(tmp_path):
+            inner_entered.set()
+            assert inner_exit.wait(timeout=30)
+
+    thread_outer = threading.Thread(target=outer)
+    thread_inner = threading.Thread(target=inner)
+    thread_outer.start()
+    assert outer_entered.wait(timeout=30)
+    held_fd = inbox_lock_mod._ACTIVE_LOCKS[key].owner.fd
+    thread_inner.start()
+
+    deadline = __import__("time").monotonic() + 30
+    while not inner_entered.is_set() and __import__("time").monotonic() < deadline:
+        __import__("time").sleep(0.01)
+    assert inner_entered.is_set(), "inner acquisition never entered"
+
+    # The outer context exits FIRST while the inner one is still inside.
+    outer_exit.set()
+    thread_outer.join(timeout=30)
+
+    assert key in inbox_lock_mod._ACTIVE_LOCKS, "outer exit dropped the entry while an inner context held it"
+    inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+    assert inner_entered.is_set()
+
+    # Cross-process exclusion must still hold while the inner context runs.
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import errno, fcntl, os, sys\n"
+        f"lock = {str(inbox_lock_mod.inbox_writer_lock_path(tmp_path))!r}\n"
+        "fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except OSError as exc:\n"
+        "    sys.exit(0 if exc.errno in (errno.EACCES, errno.EAGAIN) else 1)\n"
+        "sys.exit(2)\n"
+    )
+    import subprocess
+
+    blocked = subprocess.run([sys.executable, str(probe)], timeout=30)
+    assert blocked.returncode == 0, "inner context lost cross-process exclusion after outer exit"
+
+    inner_exit.set()
+    thread_inner.join(timeout=30)
+    assert key not in inbox_lock_mod._ACTIVE_LOCKS
+    assert released_fds == [held_fd], f"fd closed {len(released_fds)} times: {released_fds}"
+
+    # Concurrent first acquisitions must serialize their initialization.
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(6)
+    # All racers must be inside their acquisition before any is allowed to
+    # leave; otherwise a fast thread can fully release before a slow one
+    # enters, yielding multiple ownership cycles instead of one shared owner.
+    inside_barrier = threading.Barrier(6)
+
+    def racer():
+        barrier.wait(timeout=30)
+        try:
+            with inbox_lock_mod.inbox_writer_lock(tmp_path):
+                inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+                inside_barrier.wait(timeout=30)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=racer) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not errors, errors
+    assert key not in inbox_lock_mod._ACTIVE_LOCKS
+    # Exactly one additional acquisition/release cycle came out of the race.
+    assert len(released_fds) == 2, released_fds
+
+
+def test_outside_canonical_writer_gets_typed_failure_when_writer_lock_busy(tmp_path, monkeypatch):
+    """Round 5 (F3): outside writers fail typed instead of blocking forever."""
+    import subprocess
+    import time as time_mod
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import ledger as ledger_mod
+
+    monkeypatch.setattr(inbox_lock_mod, "DEFAULT_LOCK_DEADLINE_SECONDS", 0.5)
+    src_root = Path(__file__).parents[1] / "src"
+    acquired = tmp_path / "holder.acquired"
+    script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import inbox_lock\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"acquired = Path({str(acquired)!r})\n"
+        "with inbox_lock.inbox_writer_lock(target):\n"
+        "    acquired.write_text('1')\n"
+        "    time.sleep(8)\n"
+    )
+    child = subprocess.Popen([sys.executable, "-c", script])
+    try:
+        deadline = time_mod.monotonic() + 15
+        while not acquired.exists():
+            assert time_mod.monotonic() < deadline, "holder never acquired the writer lock"
+            time_mod.sleep(0.02)
+        started = time_mod.monotonic()
+        with pytest.raises(inbox_lock_mod.InboxLockTimeout):
+            ledger_mod._append_import_records(
+                target=tmp_path,
+                records=[{"text": "blocked outsider row", "kind": "task", "source": "manual"}],
+            )
+        assert time_mod.monotonic() - started < 15, "outside writer hung past the lock deadline"
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=15)
+
+
+def test_stamping_takes_writer_lock_before_reading_and_keeps_child_rows(tmp_path, monkeypatch):
+    """Round 5 (F2): stamping snapshots under the writer lock; late child rows survive."""
+    import subprocess
+    import threading
+    import time as time_mod
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import ledger as ledger_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    scanner = _builtin_scanner("handoff-ingest")
+    run = _verified_builtin_scanner_run(scanner)
+    seeded = work_cmd.ledger._make_import("seed row", kind="finding", source="handoff-ingest")
+    ledger_mod._write_imports(tmp_path, [seeded])
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    before_raw = inbox.read_bytes()
+
+    src_root = Path(__file__).parents[1] / "src"
+    ready = tmp_path / "child.ready"
+    go = tmp_path / "child.go"
+    appended = tmp_path / "child.appended"
+    script = (
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import inbox_lock, ledger\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"ready = Path({str(ready)!r})\n"
+        f"go = Path({str(go)!r})\n"
+        f"appended = Path({str(appended)!r})\n"
+        f"os.environ[{inbox_lock_mod.SCANNER_RUN_ENV!r}] = 'race-child'\n"
+        "with inbox_lock.inbox_writer_lock(target):\n"
+        "    ready.write_text('1')\n"
+        "    for _ in range(750):\n"
+        "        if go.exists():\n"
+        "            break\n"
+        "        time.sleep(0.02)\n"
+        "imported, _s, _sd, rejected = ledger._append_import_records(\n"
+        "    target=target,\n"
+        "    records=[{'text': 'child race row', 'kind': 'task', 'source': 'manual'}],\n"
+        "    contain_provenance_errors=True,\n"
+        ")\n"
+        "appended.write_text('1' if imported and not rejected else '0')\n"
+    )
+    child = subprocess.Popen([sys.executable, "-c", script])
+    try:
+        deadline = time_mod.monotonic() + 15
+        while not ready.exists():
+            assert time_mod.monotonic() < deadline, "child never took the writer lock"
+            time_mod.sleep(0.02)
+
+        observed: list[bool] = []
+        original_read = scanners_mod._scanner_inbox_bytes
+        writer_key = str(inbox_lock_mod.inbox_writer_lock_path(tmp_path))
+
+        def spy_read(target):
+            observed.append(writer_key in inbox_lock_mod._ACTIVE_LOCKS)
+            return original_read(target)
+
+        monkeypatch.setattr(scanners_mod, "_scanner_inbox_bytes", spy_read)
+
+        outcome: dict[str, object] = {}
+
+        def stamp():
+            try:
+                outcome["stamped"] = scanners_mod._scanner_stamp_new_imports(
+                    target=tmp_path,
+                    scanner=scanner,
+                    run=run,
+                    before_ids={str(seeded["id"])},
+                    before_imports=[dict(seeded)],
+                    before_raw=before_raw,
+                )
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                outcome["exc"] = exc
+
+        worker = threading.Thread(target=stamp)
+        worker.start()
+        time_mod.sleep(0.5)
+        go.write_text("1")
+        child.wait(timeout=30)
+        worker.join(timeout=60)
+        assert not worker.is_alive(), "stamping never finished"
+        assert "exc" not in outcome, outcome.get("exc")
+        assert appended.read_text() == "1"
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=15)
+
+    assert observed, "stamping never read the inbox"
+    assert all(observed), f"canonical snapshot read outside the writer lock: {observed}"
+    final_texts = [json.loads(row).get("text") for row in inbox.read_bytes().splitlines() if row.strip()]
+    assert "seed row" in final_texts, final_texts
+    assert "child race row" in final_texts, f"concurrent child row overwritten: {final_texts!r}"
+    assert outcome["stamped"], "stamping produced no rows"
+
+
+def test_ingestion_pre_reads_under_writer_lock_and_concurrent_commit_survives_rollback(tmp_path, monkeypatch):
+    """Round 6 (M3): the writer lock spans snapshot through receipt rollback.
+
+    A trusted writer that commits while receipt publication fails must survive
+    the stale-snapshot rollback: either the lock is retained across the whole
+    window (fixed) or a commit in the release gap is deleted (the bug).
+    """
+    import threading
+    import time as time_mod
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _init_git_repo(tmp_path)
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b'{"id":"seed","text":"seed row","kind":"task","source":"manual"}\n')
+    script = tmp_path / "write_scanner_import.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+Path.cwd().joinpath(".brigade", "scanner.launched").write_text("1")
+path = Path.cwd() / ".brigade" / "scanner-imports.jsonl"
+path.write_text(json.dumps({"text": "ingest row", "kind": "task", "source": "scanner-output"}) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.write_text(
+        f'''
+[[scanner]]
+id = "output-import"
+source = "output-import"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/output-import.json"
+conflict_window = "02:00-02:10"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+'''
+    )
+
+    observed: list[bool] = []
+    writer_key = str(inbox_lock_mod.inbox_writer_lock_path(tmp_path))
+    launched = tmp_path / ".brigade" / "scanner.launched"
+    original_read = scanners_mod._scanner_inbox_bytes
+
+    def spy_read(target):
+        # The pre-run snapshot is legitimately run-lock-only; only reads after
+        # the scanner child launched (stamping, ingestion) must hold the writer
+        # lock.
+        if launched.exists():
+            observed.append(writer_key in inbox_lock_mod._ACTIVE_LOCKS)
+        return original_read(target)
+
+    monkeypatch.setattr(scanners_mod, "_scanner_inbox_bytes", spy_read)
+
+    state: dict[str, bool] = {"fail_next_receipt": False}
+    real_write_file = scanners_mod._write_scanner_run_file
+
+    def maybe_failing_write_file(authority, name, data, **kwargs):
+        if name == "receipt.json" and state.get("fail_next_receipt"):
+            state["fail_next_receipt"] = False
+            raise OSError("receipt boom")
+        return real_write_file(authority, name, data, **kwargs)
+
+    monkeypatch.setattr(scanners_mod, "_write_scanner_run_file", maybe_failing_write_file)
+
+    go = threading.Event()
+    committed = threading.Event()
+    real_receipt = scanners_mod._write_scanner_run_receipt
+
+    def coordinating_receipt(run):
+        if isinstance(run.get("ingest_output"), dict) and not go.is_set():
+            # The ingestion receipt is being published. Let an outside trusted
+            # writer race for the gap between the publication snapshot and this
+            # receipt's failure/rollback.
+            state["fail_next_receipt"] = True
+            go.set()
+            go_file.write_text("1")
+            committed.wait(timeout=3)
+        return real_receipt(run)
+
+    monkeypatch.setattr(scanners_mod, "_write_scanner_run_receipt", coordinating_receipt)
+
+    survivor_row = b'{"id":"survivor-1","text":"gap survivor","kind":"task","source":"trusted-peer"}\n'
+    # The racing peer is another process: within this process the writer lock
+    # is deliberately reentrant, so only an outside writer models a commit
+    # that must survive the launcher's publication window.
+    import subprocess
+
+    src_root = Path(__file__).parents[1] / "src"
+    go_file = tmp_path / "peer.go"
+    done_file = tmp_path / "peer.committed"
+    peer_script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import inbox_lock\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"go = Path({str(go_file)!r})\n"
+        f"done = Path({str(done_file)!r})\n"
+        f"row = {survivor_row!r}\n"
+        "while not go.exists():\n"
+        "    time.sleep(0.02)\n"
+        "inbox = target / '.brigade' / 'work' / 'imports' / 'inbox.jsonl'\n"
+        "deadline = time.monotonic() + 20\n"
+        "while time.monotonic() < deadline:\n"
+        "    try:\n"
+        "        with inbox_lock.inbox_writer_lock(target, deadline_seconds=0.5):\n"
+        "            with inbox.open('ab') as handle:\n"
+        "                handle.write(row)\n"
+        "            done.write_text('1')\n"
+        "            sys.exit(0)\n"
+        "    except inbox_lock.InboxLockTimeout:\n"
+        "        continue\n"
+        "sys.exit(3)\n"
+    )
+
+    peer = subprocess.Popen([sys.executable, "-c", peer_script])
+    outcome: dict[str, object] = {}
+
+    def runner():
+        try:
+            outcome["rc"] = work_cmd.scanners_run(
+                target=tmp_path, scanner_id="output-import", force=True, ingest_output=True, json_output=True
+            )
+        except BaseException as exc:
+            outcome["exc"] = exc
+
+    def peer_committed(timeout: float) -> bool:
+        deadline = time_mod.monotonic() + timeout
+        while time_mod.monotonic() < deadline:
+            if done_file.exists():
+                return True
+            time_mod.sleep(0.02)
+        return False
+
+    worker = threading.Thread(target=runner)
+    worker.start()
+
+    def go_signal():
+        assert go.wait(timeout=60)
+        assert peer_committed(60)
+
+    signal_thread = threading.Thread(target=go_signal)
+    signal_thread.start()
+    worker.join(timeout=120)
+    signal_thread.join(timeout=120)
+    assert not worker.is_alive(), "scanner run never finished"
+    try:
+        assert peer.wait(timeout=30) == 0, "trusted peer never committed"
+        assert done_file.exists()
+        assert isinstance(outcome.get("exc"), OSError), outcome
+        assert "receipt boom" in str(outcome["exc"])
+
+        assert observed, "ingestion never read the inbox"
+        assert all(observed), f"dedup/rollback snapshot read outside the writer lock: {observed}"
+        final_texts = [json.loads(row).get("text") for row in inbox.read_bytes().splitlines() if row.strip()]
+        assert "seed row" in final_texts, final_texts
+        # This transaction was rolled back after its append, so its own row is gone...
+        assert "ingest row" not in final_texts, final_texts
+        # ...but the peer's commit in the same window must never be deleted.
+        assert "gap survivor" in final_texts, f"concurrent commit deleted by rollback: {final_texts!r}"
+    finally:
+        if peer.poll() is None:
+            peer.kill()
+            peer.wait(timeout=15)
+
+
+def test_scanner_children_receive_capability_free_marker_and_no_descriptors(tmp_path, monkeypatch):
+    """Round 4 (F1/F2): children get a marker env var, never a lock descriptor."""
+    import inspect
+
+    from brigade import proc as proc_mod
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    source = Path(inbox_lock_mod.__file__).read_text()
+    assert "BRIGADE_INBOX_LOCK_FD" not in source
+    assert not hasattr(inbox_lock_mod, "_adopt_inherited_lock")
+    assert not hasattr(inbox_lock_mod, "child_lock_env")
+    assert not hasattr(inbox_lock_mod, "child_lock_pass_fds")
+    assert "pass_fds" not in inspect.getsource(proc_mod.run)
+
+    script = tmp_path / "ok.py"
+    script.write_text("import sys\nsys.exit(0)\n")
+    _write_scanner_config(tmp_path, "env-probe", f"{sys.executable} {script}", timeout=20)
+
+    captured: dict[str, object] = {}
+    real_run = scanners_mod.proc_mod.run
+
+    def spying_run(argv, *, timeout, env, cwd, **kwargs):
+        captured["env"] = dict(env or {})
+        captured["kwargs"] = kwargs
+        return real_run(argv, timeout=timeout, env=env, cwd=cwd, **kwargs)
+
+    monkeypatch.setattr(scanners_mod.proc_mod, "run", spying_run)
+    payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="env-probe", force=True)
+    assert rc == 0, payload.get("errors")
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert "BRIGADE_INBOX_LOCK_FD" not in child_env
+    assert child_env["BRIGADE_SCANNER_RUN_ID"] == payload["runs"][0]["run_id"]
+    assert "pass_fds" not in captured["kwargs"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX flock and fd passing")
+def test_unlocking_any_inherited_descriptor_cannot_release_launcher_run_lock(tmp_path):
+    """Round 4 (F1): LOCK_UN on an inherited fd must never drop the run window.
+
+    The launcher's exclusion lives on its own open file description of the run
+    lock, which is no longer shared with anyone. A hostile child that unlocks
+    whatever it is handed leaves the run lock held.
+    """
+    import subprocess
+
+    from brigade.work_cmd import scanners as scanners_mod
+
+    lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import errno, fcntl, os, sys\n"
+        f"lock = {str(lock_path)!r}\n"
+        "fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except OSError as exc:\n"
+        "    sys.exit(0 if exc.errno in (errno.EACCES, errno.EAGAIN) else 1)\n"
+        "sys.exit(2)\n"
+    )
+    unlocker = tmp_path / "unlocker.py"
+    unlocker.write_text(
+        "import fcntl, sys\n"
+        "try:\n"
+        "    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_UN)\n"
+        "except OSError:\n"
+        "    pass\n"
+        "sys.exit(0)\n"
+    )
+    dummy = os.open(os.devnull, os.O_RDWR)
+    try:
+        child = subprocess.Popen(
+            [sys.executable, str(unlocker), str(dummy)],
+            pass_fds=(dummy,),
+            env={**os.environ, "BRIGADE_INBOX_LOCK_FD": str(dummy)},
+        )
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            assert child.wait(timeout=15) == 0
+            blocked = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True)
+            assert blocked.returncode == 0, "child unlocked the launcher's run lock"
+        released = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True)
+        assert released.returncode == 2, "run lock still held after release"
+    finally:
+        os.close(dummy)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses POSIX flock probes for timing")
+def test_launcher_stamping_waits_for_child_writer_lock(tmp_path):
+    """Round 4 (F2): launcher writes serialize behind a self-importing child.
+
+    A child holding only the writer lock blocks the launcher's stamping write;
+    neither can touch the other's run-window state and siblings exclude each
+    other on their own open file descriptions.
+    """
+    import subprocess
+    import time as time_mod
+
+    from brigade.work_cmd import scanners as scanners_mod
+
+    src_root = Path(__file__).parents[1] / "src"
+    acquired = tmp_path / "writer.acquired.marker"
+    released = tmp_path / "writer.released.marker"
+    script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import inbox_lock\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"acquired = Path({str(acquired)!r})\n"
+        f"released = Path({str(released)!r})\n"
+        "with inbox_lock.inbox_writer_lock(target):\n"
+        "    acquired.write_text('1')\n"
+        "    time.sleep(1.2)\n"
+        "released.write_text('1')\n"
+    )
+    child = subprocess.Popen([sys.executable, "-c", script])
+    try:
+        deadline = time_mod.monotonic() + 15
+        while not acquired.exists():
+            assert time_mod.monotonic() < deadline, "child never acquired the writer lock"
+            time_mod.sleep(0.02)
+        started = time_mod.monotonic()
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            scanners_mod._write_scanner_inbox_bytes(
+                tmp_path, b'{"id":"stamped","kind":"task","source":"s","text":"t"}\n'
+            )
+        elapsed = time_mod.monotonic() - started
+        assert elapsed >= 1.0, "launcher stamping did not wait for the child writer lock"
+        child.wait(timeout=15)
+        assert released.exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=15)
+
+
+def test_every_canonical_writer_follows_task_then_run_then_writer_order(tmp_path, monkeypatch):
+    """Round 4 (F3): every caller takes task-ledger -> run -> writer, in order."""
+    import contextlib
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import ledger as ledger_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    order = {"task": 0, "run": 1, "writer": 2}
+    events: list[str] = []
+    held: dict[str, int] = {}
+
+    def wrap(name, original):
+        @contextlib.contextmanager
+        def wrapped(*args, **kwargs):
+            # Only acquisitions that could block count: re-entering a lock
+            # this process already holds can never wait on another writer.
+            if not held.get(name):
+                violations = sorted(n for n, depth in held.items() if depth and order[n] > order[name])
+                assert not violations, (
+                    f"lock order violation: {name} acquired while holding {violations}; recent={events[-8:]}"
+                )
+            events.append(name)
+            held[name] = held.get(name, 0) + 1
+            try:
+                with original(*args, **kwargs):
+                    yield
+            finally:
+                held[name] -= 1
+
+        return wrapped
+
+    monkeypatch.setattr(inbox_lock_mod, "scanner_inbox_run_lock", wrap("run", inbox_lock_mod.scanner_inbox_run_lock))
+    monkeypatch.setattr(inbox_lock_mod, "inbox_writer_lock", wrap("writer", inbox_lock_mod.inbox_writer_lock))
+    monkeypatch.setattr(scanners_mod, "_scanner_inbox_run_lock", wrap("run", scanners_mod._scanner_inbox_run_lock))
+    monkeypatch.setattr(ledger_mod, "_task_ledger_lock", wrap("task", ledger_mod._task_ledger_lock))
+
+    # Round 6 (M2): a canonical writer's inbox read must happen under the
+    # writer lock (or at least the run lock for the launcher's pre-run
+    # snapshot), never before its lock window opens.
+    real_read_imports = ledger_mod._read_imports
+
+    def checked_read_imports(target):
+        if not held.get("writer") and not held.get("run"):
+            raise AssertionError(f"inbox read outside canonical locks; recent={events[-8:]}")
+        return real_read_imports(target)
+
+    monkeypatch.setattr(ledger_mod, "_read_imports", checked_read_imports)
+
+    clean = work_cmd._make_import("order probe task", kind="task", source="manual")
+    imported, _skipped, _dismissed, rejected = ledger_mod._append_import_records(target=tmp_path, records=[clean])
+    assert imported and not rejected
+    summary = ledger_mod._backfill_import_provenance(tmp_path)
+    assert summary.get("stamped", 0) >= 0
+    promoted, failed = ledger_mod._promote_matching_imports(tmp_path, kind="task")
+    assert promoted and not failed
+    with ledger_mod._task_ledger_lock(tmp_path), ledger_mod._canonical_inbox_write(tmp_path):
+        kept = ledger_mod._read_imports(tmp_path)
+        ledger_mod._write_imports(tmp_path, kept)
+
+    with scanners_mod._scanner_inbox_run_lock(tmp_path):
+        scanners_mod._write_scanner_inbox_bytes(
+            tmp_path,
+            b"".join(json.dumps(item, sort_keys=True).encode("utf-8") + b"\n" for item in kept),
+        )
+
+    monkeypatch.setenv(inbox_lock_mod.SCANNER_RUN_ENV, "order-child")
+    imported_child, _s, _sd, rejected_child = ledger_mod._append_import_records(
+        target=tmp_path,
+        records=[{"text": "child row under marker", "kind": "task", "source": "manual"}],
+        contain_provenance_errors=True,
+    )
+    assert imported_child and not rejected_child
+    monkeypatch.delenv(inbox_lock_mod.SCANNER_RUN_ENV)
+
+    assert events.count("task") >= 1
+    assert events.count("run") >= 2
+    assert events.count("writer") >= 5

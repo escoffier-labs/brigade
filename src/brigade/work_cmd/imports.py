@@ -55,11 +55,16 @@ def import_add(
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    imports = ledger_mod._read_imports(target)
-    item = ledger_mod._make_import(rendered, kind=kind, source=source_text, metadata=parsed_metadata)
-    imports.append(item)
     try:
-        ledger_mod._write_imports(target, imports)
+        # Round 6 (M2): the read-modify-write window is covered by the
+        # canonical locks from the initial read through publication, so a
+        # scanner commit landing before this writer excludes cannot be
+        # deleted by a stale pre-read.
+        with ledger_mod._canonical_inbox_write(target):
+            imports = ledger_mod._read_imports(target)
+            item = ledger_mod._make_import(rendered, kind=kind, source=source_text, metadata=parsed_metadata)
+            imports.append(item)
+            ledger_mod._write_imports(target, imports)
     except OSError as exc:
         print(f"error: import inbox persistence failed: {exc}", file=sys.stderr)
         return 1
@@ -122,10 +127,12 @@ def import_context(
         print("error: invalid import source", file=sys.stderr)
         return 2
 
-    imports = ledger_mod._read_imports(target)
-    item = ledger_mod._make_import(framed, kind="context", source=source_text, metadata=metadata)
-    imports.append(item)
-    ledger_mod._write_imports(target, imports)
+    # Round 6 (M2): read under the canonical locks like every other writer.
+    with ledger_mod._canonical_inbox_write(target):
+        imports = ledger_mod._read_imports(target)
+        item = ledger_mod._make_import(framed, kind="context", source=source_text, metadata=metadata)
+        imports.append(item)
+        ledger_mod._write_imports(target, imports)
 
     if json_output:
         print(json.dumps(item, indent=2, sort_keys=True))
@@ -844,50 +851,65 @@ def import_promote_handoff(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    item, imports = ledger_mod._find_import(target, import_id)
-    if item is None:
-        print(f"error: import not found: {import_id}", file=sys.stderr)
-        return 1
-    if run_after:
-        if item.get("kind") != "task":
-            print(f"error: --run requires a task import: {item.get('id')}", file=sys.stderr)
+    # Round 6 (M2): hold the canonical writer locks from the initial read
+    # through publication so a scanner commit in between survives.
+    run_after_id: str | None = None
+    with ledger_mod._canonical_inbox_write(target):
+        item, _imports = ledger_mod._find_import(target, import_id)
+        if item is None:
+            print(f"error: import not found: {import_id}", file=sys.stderr)
+            return 1
+        if run_after:
+            if item.get("kind") != "task":
+                print(f"error: --run requires a task import: {item.get('id')}", file=sys.stderr)
+                return 2
+            # Delegate outside the inbox locks: promotion takes the task
+            # ledger first, and no lock holder may wait on it afterwards.
+            run_after_id = str(item.get("id"))
+    if run_after_id is not None:
+        return import_promote(target=target, import_id=run_after_id, run_after=True)
+    with ledger_mod._canonical_inbox_write(target):
+        item, imports = ledger_mod._find_import(target, import_id)
+        if item is None:
+            print(f"error: import not found: {import_id}", file=sys.stderr)
+            return 1
+        payload = ledger_mod._import_handoff_plan_payload(target, item)
+        if payload["blockers"]:
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                for blocker in payload["blockers"]:
+                    print(f"error: {blocker}", file=sys.stderr)
             return 2
-        return import_promote(target=target, import_id=str(item.get("id")), run_after=True)
-    payload = ledger_mod._import_handoff_plan_payload(target, item)
-    if payload["blockers"]:
-        if json_output:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        else:
-            for blocker in payload["blockers"]:
-                print(f"error: {blocker}", file=sys.stderr)
-        return 2
-    target_document = str(payload["target_document"])
-    handoff_path = ledger_mod._write_import_handoff(target, item, target_document)
-    from .. import handoff_cmd
+        target_document = str(payload["target_document"])
+        handoff_path = ledger_mod._write_import_handoff(target, item, target_document)
+        from .. import handoff_cmd
 
-    lint_result = handoff_cmd.lint_file(handoff_path)
-    if not lint_result.valid:
-        try:
-            handoff_path.unlink()
-        except OSError:
-            pass
-        failure_payload = dict(payload)
-        failure_payload.update(
-            {
-                "handoff_path": str(handoff_path),
-                "lint": lint_result.as_dict(),
-                "handoff_ready": False,
-                "blockers": [*payload["blockers"], *lint_result.errors],
-            }
+        lint_result = handoff_cmd.lint_file(handoff_path)
+        if not lint_result.valid:
+            try:
+                handoff_path.unlink()
+            except OSError:
+                pass
+            failure_payload = dict(payload)
+            failure_payload.update(
+                {
+                    "handoff_path": str(handoff_path),
+                    "lint": lint_result.as_dict(),
+                    "handoff_ready": False,
+                    "blockers": [*payload["blockers"], *lint_result.errors],
+                }
+            )
+            if json_output:
+                print(json.dumps(failure_payload, indent=2, sort_keys=True))
+            else:
+                for error in lint_result.errors:
+                    print(f"error: handoff lint failed: {error}", file=sys.stderr)
+            return 2
+        ledger_mod._mark_import_handoff_promoted(
+            target, item, handoff_path=handoff_path, target_document=target_document
         )
-        if json_output:
-            print(json.dumps(failure_payload, indent=2, sort_keys=True))
-        else:
-            for error in lint_result.errors:
-                print(f"error: handoff lint failed: {error}", file=sys.stderr)
-        return 2
-    ledger_mod._mark_import_handoff_promoted(target, item, handoff_path=handoff_path, target_document=target_document)
-    ledger_mod._write_imports(target, imports)
+        ledger_mod._write_imports(target, imports)
     output = dict(payload)
     output.update(
         {
@@ -965,29 +987,35 @@ def import_promote(
     if not import_id:
         print("error: import id is required unless --all is passed", file=sys.stderr)
         return 2
-    item, imports = ledger_mod._find_import(target, import_id)
-    if item is None:
-        print(f"error: import not found: {import_id}", file=sys.stderr)
-        return 1
-    if item.get("status", "pending") != "pending":
-        print(f"error: import is not pending: {item.get('id')} ({item.get('status')})", file=sys.stderr)
-        return 2
-    if run_after and item.get("kind") != "task":
-        print(f"error: --run requires a task import: {item.get('id')}", file=sys.stderr)
-        return 2
-    text = str(item.get("text") or "").strip()
-    if not text:
-        print(f"error: import has no text: {import_id}", file=sys.stderr)
-        return 2
+    # Round 6 (M2): task-ledger first, then the canonical writer locks spanning
+    # the initial read through publication, matching the batch promoter.
     try:
-        task, created = ledger_mod._mark_import_promoted(target, item)
+        with ledger_mod._task_ledger_lock(target), ledger_mod._canonical_inbox_write(target):
+            item, imports = ledger_mod._find_import(target, import_id)
+            if item is None:
+                print(f"error: import not found: {import_id}", file=sys.stderr)
+                return 1
+            if item.get("status", "pending") != "pending":
+                print(f"error: import is not pending: {item.get('id')} ({item.get('status')})", file=sys.stderr)
+                return 2
+            if run_after and item.get("kind") != "task":
+                print(f"error: --run requires a task import: {item.get('id')}", file=sys.stderr)
+                return 2
+            text = str(item.get("text") or "").strip()
+            if not text:
+                print(f"error: import has no text: {import_id}", file=sys.stderr)
+                return 2
+            ledger = ledger_mod._read_task_ledger(target)
+            task, created = ledger_mod._mark_import_promoted(target, item, ledger=ledger)
+            if created:
+                ledger_mod._write_task_ledger(target, ledger)
+            ledger_mod._write_imports(target, imports)
     except edges_mod.EdgeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except ledger_mod.TaskLedgerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    ledger_mod._write_imports(target, imports)
     print(f"import: {item.get('id')}")
     print(f"status: {item.get('status')}")
     print(f"task: {task['id']}")
@@ -1026,28 +1054,30 @@ def import_dismiss(
         print("error: pass an import id or --all, not both", file=sys.stderr)
         return 2
     if all_matching:
-        imports = ledger_mod._read_imports(target)
-        wanted_ids = {
-            item.get("id")
-            for item in ledger_mod._matching_pending_imports(
-                target,
-                kind=kind,
-                source=source,
-                metadata_filters=metadata_filters,
-            )
-        }
-        now = helpers._now().isoformat()
-        dismissed: list[dict[str, Any]] = []
-        for item in imports:
-            if item.get("id") not in wanted_ids:
-                continue
-            item["status"] = "dismissed"
-            item["updated_at"] = now
-            item["dismissed_at"] = now
-            if reason and reason.strip():
-                item["dismiss_reason"] = reason.strip()
-            dismissed.append(item)
-        ledger_mod._write_imports(target, imports)
+        # Round 6 (M2): read and publish inside one canonical lock window.
+        with ledger_mod._canonical_inbox_write(target):
+            imports = ledger_mod._read_imports(target)
+            wanted_ids = {
+                item.get("id")
+                for item in ledger_mod._matching_pending_imports(
+                    target,
+                    kind=kind,
+                    source=source,
+                    metadata_filters=metadata_filters,
+                )
+            }
+            now = helpers._now().isoformat()
+            dismissed: list[dict[str, Any]] = []
+            for item in imports:
+                if item.get("id") not in wanted_ids:
+                    continue
+                item["status"] = "dismissed"
+                item["updated_at"] = now
+                item["dismissed_at"] = now
+                if reason and reason.strip():
+                    item["dismiss_reason"] = reason.strip()
+                dismissed.append(item)
+            ledger_mod._write_imports(target, imports)
         print(f"dismissed: {len(dismissed)}")
         if reason and reason.strip():
             print(f"reason: {reason.strip()}")
@@ -1057,20 +1087,22 @@ def import_dismiss(
     if not import_id:
         print("error: import id is required unless --all is passed", file=sys.stderr)
         return 2
-    item, imports = ledger_mod._find_import(target, import_id)
-    if item is None:
-        print(f"error: import not found: {import_id}", file=sys.stderr)
-        return 1
-    if item.get("status", "pending") != "pending":
-        print(f"error: import is not pending: {item.get('id')} ({item.get('status')})", file=sys.stderr)
-        return 2
-    now = helpers._now().isoformat()
-    item["status"] = "dismissed"
-    item["updated_at"] = now
-    item["dismissed_at"] = now
-    if reason and reason.strip():
-        item["dismiss_reason"] = reason.strip()
-    ledger_mod._write_imports(target, imports)
+    # Round 6 (M2): read and publish inside one canonical lock window.
+    with ledger_mod._canonical_inbox_write(target):
+        item, imports = ledger_mod._find_import(target, import_id)
+        if item is None:
+            print(f"error: import not found: {import_id}", file=sys.stderr)
+            return 1
+        if item.get("status", "pending") != "pending":
+            print(f"error: import is not pending: {item.get('id')} ({item.get('status')})", file=sys.stderr)
+            return 2
+        now = helpers._now().isoformat()
+        item["status"] = "dismissed"
+        item["updated_at"] = now
+        item["dismissed_at"] = now
+        if reason and reason.strip():
+            item["dismiss_reason"] = reason.strip()
+        ledger_mod._write_imports(target, imports)
     print(f"import: {item.get('id')}")
     print("status: dismissed")
     if item.get("dismiss_reason"):
