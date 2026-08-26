@@ -64,11 +64,14 @@ Endpoints:
   ``lock_run_dir`` so that node's CLI can find the run and check its lock
   is dead before a token-less release (never to other callers).
   Each live row carries a monotonic ``generation``. Release writes a
-  per-(target, holder, node) tombstone for that generation so a late
-  acquire or renew whose generation, holder, or lease stamp predates the
-  tombstone is refused with ``reason: "stale-generation"`` instead of
-  resurrecting the row (issue #1189). Schema v4 databases gain the
-  column and tombstone table additively.
+  per-(target, holder, node) tombstone for that generation and raises a
+  durable per-target generation floor (schema v5) so a late acquire or
+  renew whose generation, holder, or lease stamp is stale is refused with
+  ``reason: "stale-generation"`` instead of resurrecting the row (issue
+  #1189). The floor outlives claim TTL. Holder tombstones are capped per
+  target and node so no-row release spam cannot grow the database without
+  bound; the newest tombstones — including an in-flight acquire's fence —
+  are kept. Schema v4 databases migrate forward to v5.
   Trust boundary: ``node_id`` is bound to the node token that presents it,
   so a member can only act as itself; ``lock``, ``supersede`` and ``scope``
   remain caller-asserted intent that keeps *honest* clients from stealing
@@ -117,9 +120,13 @@ from urllib.parse import parse_qs, urlencode
 
 from . import fleet_dashboard
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
+# Newest holder tombstones kept per (target, node). The in-flight no-row
+# release fence is the newest row, so it survives the cap; older spam is
+# dropped. The generation floor is stored separately and is not capped.
+CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE = 16
 
 # Dashboard cookie (issue #1124): a derived, read-only capability, not the token.
 DASHBOARD_COOKIE = "brigade_fleet_view"
@@ -224,9 +231,9 @@ CREATE TABLE IF NOT EXISTS claims (
     generation INTEGER NOT NULL DEFAULT 1
 );
 """
-# Release tombstones (issue #1189): survive the claim DELETE so a late
-# acquire/renew cannot recreate the row. One row per released holder on a
-# node; expired with the claim TTL. Additive on schema v4.
+# Release tombstones (issue #1189 / schema v5): survive the claim DELETE so
+# a late acquire/renew cannot recreate the row. One row per released holder
+# on a node. Capped per (target, node); not expired with claim TTL.
 _TOMBSTONES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS claim_tombstones (
     target TEXT NOT NULL,
@@ -237,6 +244,14 @@ CREATE TABLE IF NOT EXISTS claim_tombstones (
     released_at TEXT NOT NULL,
     expires_at REAL NOT NULL,
     PRIMARY KEY (target, holder_token, owner_node)
+);
+"""
+# Durable generation floor per target (schema v5). Survives claim TTL and
+# tombstone eviction so generation 1 cannot be reused after a release.
+_GENERATION_FLOORS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS claim_generation_floors (
+    target TEXT NOT NULL PRIMARY KEY,
+    generation INTEGER NOT NULL
 );
 """
 _CLAIMS_ADDITIVE_COLUMNS = (
@@ -393,6 +408,7 @@ def _migrate_claims_table(conn: sqlite3.Connection) -> None:
                     if "duplicate column" not in str(exc).lower():
                         raise
         conn.execute(_TOMBSTONES_SCHEMA)
+        conn.execute(_GENERATION_FLOORS_SCHEMA)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -464,8 +480,12 @@ def init_db(db_path: Path) -> sqlite3.Connection:
                 if _claims_table_needs_migration(_claims_columns(conn)):
                     _migrate_claims_table(conn)
         conn.execute(_TOMBSTONES_SCHEMA)
+        conn.execute(_GENERATION_FLOORS_SCHEMA)
+        _backfill_generation_floors(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
         # v3 -> v4 is one additive table; IF NOT EXISTS is the whole migration.
+        # v4 -> v5 adds generation floors (and tombstones if a v4-on-this-branch
+        # hub already created them) without dropping live claims.
         conn.execute(_NODES_SCHEMA)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
@@ -747,6 +767,45 @@ def _validate_lease(raw: Any, field: str) -> dict[str, str | None]:
     return lease
 
 
+def _backfill_generation_floors(conn: sqlite3.Connection) -> None:
+    """Raise each target's durable floor to the max generation already stored."""
+    conn.execute(
+        "INSERT INTO claim_generation_floors (target, generation) "
+        "SELECT target, MAX(generation) FROM claims GROUP BY target "
+        "ON CONFLICT(target) DO UPDATE SET "
+        "generation = MAX(claim_generation_floors.generation, excluded.generation)"
+    )
+    conn.execute(
+        "INSERT INTO claim_generation_floors (target, generation) "
+        "SELECT target, MAX(generation) FROM claim_tombstones GROUP BY target "
+        "ON CONFLICT(target) DO UPDATE SET "
+        "generation = MAX(claim_generation_floors.generation, excluded.generation)"
+    )
+
+
+def _generation_floor(conn: sqlite3.Connection, target: str) -> int:
+    row = conn.execute("SELECT generation FROM claim_generation_floors WHERE target = ?", (target,)).fetchone()
+    return _as_generation(row[0]) if row is not None else 0
+
+
+def _raise_generation_floor(conn: sqlite3.Connection, target: str, generation: int) -> None:
+    conn.execute(
+        "INSERT INTO claim_generation_floors (target, generation) VALUES (?, ?) "
+        "ON CONFLICT(target) DO UPDATE SET "
+        "generation = MAX(claim_generation_floors.generation, excluded.generation)",
+        (target, generation),
+    )
+
+
+def _prune_target_node_tombstones(conn: sqlite3.Connection, target: str, node: str) -> None:
+    conn.execute(
+        "DELETE FROM claim_tombstones WHERE rowid IN ("
+        "SELECT rowid FROM claim_tombstones WHERE target = ? AND owner_node = ? "
+        "ORDER BY released_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
+        (target, node, CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE),
+    )
+
+
 def _as_generation(value: Any) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
         return value
@@ -827,34 +886,32 @@ def _is_stale_against_tombstones(
     lease_stamp: str | None,
     prior: tuple[Any, ...] | None,
     tombstones: list[tuple[Any, ...]],
+    floor: int,
     now: float,
 ) -> bool:
-    live = [row for row in tombstones if row[6] > now]
-    if not live:
-        return False
     live_same_holder = (
         prior is not None and prior[10] > now and holder is not None and prior[12] == holder and prior[1] == node
     )
     if live_same_holder:
         return generation is not None and generation < _as_generation(prior[11])
-    max_gen = max(_as_generation(row[1]) for row in live)
-    if generation is not None and generation <= max_gen:
+    if generation is not None and generation <= floor:
         return True
-    if holder is not None and any(row[2] == holder and row[3] == node for row in live):
+    if holder is not None and any(row[2] == holder and row[3] == node for row in tombstones):
         return True
-    if lease_stamp and any(row[3] == node and row[4] == lease_stamp for row in live):
+    if lease_stamp and any(row[3] == node and row[4] == lease_stamp for row in tombstones):
         return True
     return False
 
 
-def _next_claim_generation(prior: tuple[Any, ...] | None, tombstones: list[tuple[Any, ...]], now: float) -> int:
-    floor = 0
-    live = [row for row in tombstones if row[6] > now]
-    if live:
-        floor = max(floor, max(_as_generation(row[1]) for row in live))
+def _next_claim_generation(
+    prior: tuple[Any, ...] | None, tombstones: list[tuple[Any, ...]], floor: int, now: float
+) -> int:
+    next_floor = floor
+    if tombstones:
+        next_floor = max(next_floor, max(_as_generation(row[1]) for row in tombstones))
     if prior is not None and prior[10] > now:
-        floor = max(floor, _as_generation(prior[11]))
-    return floor + 1
+        next_floor = max(next_floor, _as_generation(prior[11]))
+    return next_floor + 1
 
 
 def _row_lease_stamp(row: tuple[Any, ...]) -> str | None:
@@ -887,6 +944,8 @@ def _write_claim_tombstone(
         "expires_at = excluded.expires_at",
         (target, holder, node, generation, lease_stamp, now_iso, now + ttl),
     )
+    _raise_generation_floor(conn, target, generation)
+    _prune_target_node_tombstones(conn, target, node)
 
 
 def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None) -> tuple[int, dict[str, Any]]:
@@ -925,12 +984,13 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
     deleted (409 with the current row). Only ``force`` deletes unfenced.
 
     Release also writes a tombstone for the released (target, holder, node)
-    carrying that row's generation and lease stamp (issue #1189). A later
-    acquire or renew whose generation is not newer, whose holder matches the
-    tombstone, or whose lock ``acquired_at`` predates the tombstone stamp is
-    refused with ``reason: "stale-generation"``. A holder-scoped release
-    that finds no row still plants a tombstone so an in-flight acquire for
-    that holder cannot land after the release.
+    and raises the durable per-target generation floor (issue #1189). A
+    later acquire or renew whose generation is not newer than that floor,
+    whose holder matches a tombstone, or whose lock ``acquired_at`` matches
+    the released lease is refused with ``reason: "stale-generation"``. The
+    floor outlives claim TTL. A holder-scoped release that finds no row
+    still plants a tombstone (newest kept when the per-node cap is hit) so
+    an in-flight acquire for that holder cannot land after the release.
     """
     request = _validate_claim_request(raw)
     if caller_node is not None and request["node_id"] != caller_node:
@@ -960,9 +1020,9 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         # upsert see one state.
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM claims WHERE expires_at <= ?", (now,))
-        conn.execute("DELETE FROM claim_tombstones WHERE expires_at <= ?", (now,))
         prior = _fetch_claim(conn, target)
         tombstones = _fetch_tombstones(conn, target)
+        floor = _generation_floor(conn, target)
         if _is_stale_against_tombstones(
             node=node,
             holder=holder,
@@ -970,13 +1030,14 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             lease_stamp=_request_lease_stamp(request),
             prior=prior,
             tombstones=tombstones,
+            floor=floor,
             now=now,
         ):
             conn.commit()
             return 409, _stale_generation_payload("acquire", target)
         lock = request["lock"] or {"token": None, "acquired_at": None, "run_dir": None}
         supersede = request["supersede"] or {"token": None, "acquired_at": None}
-        next_generation = _next_claim_generation(prior, tombstones, now)
+        next_generation = _next_claim_generation(prior, tombstones, floor, now)
         cursor = conn.execute(
             "INSERT INTO claims "
             "(target, owner_node, owner_conductor, harness, role, job, session, holder_token, "
@@ -1035,6 +1096,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
                 supersede["acquired_at"],
             ),
         )
+        if cursor.rowcount == 1:
+            new_grant = prior is None or prior[10] <= now or prior[12] != holder or prior[1] != node
+            if new_grant:
+                _raise_generation_floor(conn, target, next_generation)
         conn.commit()
         if cursor.rowcount == 1:
             row = _fetch_claim(conn, target)
@@ -1072,6 +1137,7 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
             lease_stamp=_request_lease_stamp(request),
             prior=prior,
             tombstones=_fetch_tombstones(conn, target),
+            floor=_generation_floor(conn, target),
             now=now,
         ):
             return 409, _stale_generation_payload("renew", target)

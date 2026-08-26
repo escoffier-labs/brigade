@@ -503,7 +503,7 @@ class TestHubClaims:
         conn.close()
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 4
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 5
             assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
         finally:
             conn.close()
@@ -552,6 +552,24 @@ class TestHubClaims:
         assert status == 409 and payload["reason"] == "stale-generation"
         assert _post(url, token, _claim(holder="h-fresh"))[1]["granted"] is True
 
+    def test_released_holder_stays_stale_after_claim_ttl(self, hub, clock):
+        """Generation floor survives claim TTL: a released holder cannot
+        re-acquire as generation 1 after the tombstone's former expiry."""
+        url, token, _db = hub
+        first = _post(url, token, _claim(ttl_seconds=60))[1]["claim"]
+        assert first["generation"] == 1
+        assert _post(url, token, _claim("release"))[1]["released"] is True
+        clock["now"] += 61
+        status, payload = _post(url, token, _claim(ttl_seconds=60))
+        assert status == 409 and payload["reason"] == "stale-generation"
+        assert payload["granted"] is False
+        status, payload = _post(url, token, _claim(ttl_seconds=60, generation=1))
+        assert status == 409 and payload["reason"] == "stale-generation"
+        assert _get(url, "/claims", token)[1]["claims"] == []
+        status, payload = _post(url, token, _claim(holder="h2", ttl_seconds=60))
+        assert status == 200 and payload["granted"] is True
+        assert payload["claim"]["generation"] == 2
+
     def test_generation_is_only_valid_on_acquire_or_renew(self, hub):
         url, token, _db = hub
         assert _post(url, token, _claim("release", generation=1))[0] == 400
@@ -578,18 +596,56 @@ class TestHubClaims:
         conn.close()
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 5
             columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
             assert "generation" in columns
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             assert "claim_tombstones" in tables
+            assert "claim_generation_floors" in tables
             listed = fleet_hub.list_claims(conn)
             assert listed[0]["target"] == "repo-a"
             assert listed[0]["generation"] == 1
+            assert conn.execute(
+                "SELECT generation FROM claim_generation_floors WHERE target = 'repo-a'"
+            ).fetchone() == (1,)
             status, payload = fleet_hub.handle_claim(conn, _claim("renew", holder="h1"))
             assert status == 200 and payload["claim"]["generation"] == 1
         finally:
             conn.close()
+
+    def test_newer_schema_is_refused_by_init_and_open(self, tmp_path):
+        db = tmp_path / "future.db"
+        conn = fleet_hub.init_db(db)
+        conn.execute(f"PRAGMA user_version={fleet_hub.SCHEMA_VERSION + 1}")
+        conn.commit()
+        conn.close()
+        with pytest.raises(fleet_hub.FleetHubError, match="schema version"):
+            fleet_hub.init_db(db)
+        with pytest.raises(fleet_hub.FleetHubError, match="schema version"):
+            fleet_hub.open_db(db)
+
+    def test_tombstones_are_bounded_per_target_node(self, hub):
+        """No-row release spam cannot grow tombstones without limit; the
+        newest in-flight holder fence is kept."""
+        url, token, db = hub
+        limit = fleet_hub.CLAIM_TOMBSTONE_LIMIT_PER_TARGET_NODE
+        for i in range(limit + 8):
+            holder = f"h{i:02d}"
+            assert _post(url, token, _claim("release", holder=holder, target="repo-a"))[1]["released"] is False
+        conn = fleet_hub.init_db(db)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM claim_tombstones WHERE target = 'repo-a' AND owner_node = ?",
+                (NODE_A,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == limit
+        last = f"h{limit + 7:02d}"
+        status, payload = _post(url, token, _claim(holder=last, target="repo-a"))
+        assert status == 409 and payload["reason"] == "stale-generation"
+        status, payload = _post(url, token, _claim(holder="h-fresh", target="repo-a"))
+        assert status == 200 and payload["granted"] is True
 
     def test_pre_holder_token_claims_table_is_recreated(self, tmp_path):
         db = tmp_path / "early-v2.db"
@@ -655,6 +711,18 @@ class TestClientClaims:
         assert fleet_client.fetch_claims(include_all=True) == []
         fresh = fleet_client.acquire_claim("repo-a", node_id=NODE_A)
         assert fresh.granted is True and (fresh.claim or {}).get("generation") == 2
+
+    def test_client_released_holder_stays_stale_after_claim_ttl(self, hub, clock, monkeypatch):
+        url, token, _db = hub
+        self._env(monkeypatch, url, token)
+        won = fleet_client.acquire_claim("repo-a", node_id=NODE_A, ttl_seconds=60)
+        holder = won.holder
+        assert won.granted is True and (won.claim or {}).get("generation") == 1
+        assert fleet_client.release_claim("repo-a", node_id=NODE_A, holder=holder).granted is True
+        clock["now"] += 61
+        late = fleet_client.acquire_claim("repo-a", node_id=NODE_A, holder=holder, ttl_seconds=60, generation=1)
+        assert late.granted is False and late.reason == "stale-generation"
+        assert fleet_client.fetch_claims(include_all=True) == []
 
     def test_no_hub_and_unreachable_hub_reasons(self, monkeypatch):
         decision = fleet_client.acquire_claim("repo-a", node_id=NODE_A)
