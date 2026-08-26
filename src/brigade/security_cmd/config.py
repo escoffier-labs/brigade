@@ -259,8 +259,10 @@ def authority_store_isolation_state(target: Path) -> tuple[str, bool]:
     be read or parsed reports ``off`` with ``healthy=False`` so callers can
     refuse an attacker-normalized downgrade instead of trusting the failure
     as a genuine opt-out. Observing a genuine ``external-key`` mode records
-    the user-level isolation posture marker outside the workspace; a failure
-    to persist that marker is non-fatal (it is defense in depth).
+    the user-level isolation posture marker outside the workspace, bound to
+    the stable workspace root identity; a failure to read that identity or to
+    persist the marker raises ``OSError`` (#881 round 4) so callers fail
+    closed instead of proceeding on an unrecorded isolation decision.
     """
 
     from .. import authority_marker
@@ -272,10 +274,10 @@ def authority_store_isolation_state(target: Path) -> tuple[str, bool]:
     if loaded is None:
         return AUTHORITY_STORE_ISOLATION_OFF, True
     if loaded.authority_store_isolation == AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY:
-        try:
-            authority_marker.record_isolation_marker(target)
-        except OSError:
-            pass
+        from ..work_cmd.ledger import _workspace_directory_identity
+
+        identity = _workspace_directory_identity(target)
+        authority_marker.record_isolation_marker(target, workspace_identity=identity)
     return loaded.authority_store_isolation, True
 
 
@@ -329,7 +331,14 @@ def authority_store_doctor_check(target: Path) -> tuple[str, str, str]:
     """Doctor status for opt-in external-key HMAC. WARN when the flag is off."""
 
     name = "security: authority store"
-    mode = authority_store_isolation_mode(target)
+    try:
+        mode = authority_store_isolation_mode(target)
+    except OSError as exc:
+        return (
+            "FAIL",
+            name,
+            f"authority isolation posture could not be observed fail-closed: {exc}",
+        )
     residual = (
         "residual same-uid write class: scanner children share the operator uid "
         "and can rewrite the binding store by path; set "

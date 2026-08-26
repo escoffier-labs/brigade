@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence, cast
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
 from .. import component_paths, evidence_redaction, provenance, runguard, trust_gate
@@ -2407,6 +2407,18 @@ def _reanchor_external_directory_authority(
             or directories.get(scope) != identity
         ):
             continue
+        # Carry the verified isolation posture onto the relocated path before
+        # any unsigned state is evaluated (#881 round 4): the candidate record
+        # just proved it belongs to the same physical workspace (HMAC envelope,
+        # root identity, and directory identities verified above), so its
+        # posture marker is transferred and re-verified here, ahead of the
+        # store adoption. A transfer or verification failure refuses the
+        # reanchor instead of silently dropping the posture.
+        from .. import authority_marker
+
+        source_target = payload.get("target")
+        if isinstance(source_target, str) and source_target:
+            authority_marker.transfer_isolation_marker(Path(source_target), target, destination_identity=workspace)
         _record_external_directory_authority(target, components, directory, workspace=workspace)
         new_path, new_payload = _read_external_directory_authority(target)
         if new_payload is None:
@@ -3449,6 +3461,13 @@ def _authority_store_binding_is_verifier_signed(target: Path | None) -> bool:
     return _read_verified_authority_snapshot(target) is not None
 
 
+_APPEND_SNAPSHOT_ABSENT = cast("Mapping[str, Any]", object())
+"""Sentinel for append-path callers whose single snapshot acquisition already
+ran and legitimately found no signed record. Passing it instead of ``None``
+tells :func:`_authenticated_legacy_import_proof` never to re-acquire, so one
+append consumes exactly one acquisition (#881 round 4)."""
+
+
 def _authenticated_legacy_import_proof(
     item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
 ) -> bool:
@@ -3460,9 +3479,14 @@ def _authenticated_legacy_import_proof(
     ``record`` unset the single snapshot is acquired here after one
     reanchor pass; callers holding a snapshot must pass it back so the
     receipt, directory, and sidecar validators all consume that same record
-    instead of independently reopening the store.
+    instead of independently reopening the store. Append-path callers pass
+    :data:`_APPEND_SNAPSHOT_ABSENT` once their own acquisition has run and
+    legitimately returned nothing — treating that as unset here would reopen
+    the authority state mid-append.
     """
-    if record is None:
+    if record is _APPEND_SNAPSHOT_ABSENT:
+        record = None
+    elif record is None:
         record = _acquire_authenticated_authority_snapshot(target)
     if target is None or record is None:
         return False
@@ -3485,14 +3509,18 @@ def _unsigned_dedupe_proof_for_non_isolated_workspace(target: Path | None) -> bo
     record — receipt bytes are not revalidated on this fallback path. The
     first selection per process prints one warning naming that downgrade.
 
-    The repo-writable selector alone is not trusted (#881 round 3): the
-    fallback is also refused when the workspace configuration exists but
-    cannot be parsed (invalid input normalizes to ``off``), and when the
-    user-level isolation posture marker for this target exists — recorded
-    outside the workspace beside the other per-target authority state the
-    first time genuine ``external-key`` isolation was observed. Only the
-    explicit, audited ``brigade security authority downgrade`` command
-    clears that marker.
+    The repo-writable selector alone is not trusted (#881): the fallback is
+    also refused when the workspace configuration exists but cannot be parsed
+    (invalid input normalizes to ``off``), and whenever the user-level
+    isolation posture marker for this target is not positively confirmed
+    absent (#881 round 4). Marker reads are tri-state: only one positively
+    read healthy marker store that names no governing marker admits the
+    fallback; an unreadable or malformed marker store reports unknown, which
+    is treated like present. Markers bind the stable workspace root identity,
+    so a renamed workspace stays governed and an unrelated workspace at the
+    recycled path is not blocked by a stale path-keyed marker. Only the
+    explicit, audited ``brigade security authority downgrade`` command clears
+    that marker.
     """
     global _UNSIGNED_DEDUPE_DOWNGRADE_WARNED
     if target is None:
@@ -3501,10 +3529,20 @@ def _unsigned_dedupe_proof_for_non_isolated_workspace(target: Path | None) -> bo
     from ..security_cmd.config import authority_store_isolation_state
     from ..security_cmd.models import AUTHORITY_STORE_ISOLATION_OFF
 
-    mode, healthy = authority_store_isolation_state(target)
+    try:
+        mode, healthy = authority_store_isolation_state(target)
+    except OSError:
+        # Observation failed closed (posture persistence refused); never
+        # degrade to the unsigned grade over a broken posture channel.
+        return False
     if mode != AUTHORITY_STORE_ISOLATION_OFF or not healthy:
         return False
-    if authority_marker.isolation_marker_exists(target):
+    try:
+        live_identity = _workspace_directory_identity(target)
+    except OSError:
+        return False
+    status = authority_marker.isolation_marker_status(target, workspace_identity=live_identity)
+    if status != authority_marker.MARKER_STATUS_CONFIRMED_ABSENT:
         return False
     if not _UNSIGNED_DEDUPE_DOWNGRADE_WARNED:
         _UNSIGNED_DEDUPE_DOWNGRADE_WARNED = True
@@ -4400,6 +4438,10 @@ def _append_import_records(
     # process about the downgrade. Legacy identity grants below never take
     # that fallback: they stay signed-only.
     unsigned_dedupe_fallback = authority_record is None and _unsigned_dedupe_proof_for_non_isolated_workspace(target)
+    # Exactly one acquisition per append: downstream legacy validators receive
+    # the consumed snapshot, or the explicit absent-sentinel that forbids
+    # re-acquisition (#881 round 4).
+    snapshot_binding = authority_record if authority_record is not None else _APPEND_SNAPSHOT_ABSENT
     existing = {
         _import_record_key(item)
         for item in imports
@@ -4413,7 +4455,7 @@ def _append_import_records(
         identity = _import_source_identity(item)
         if identity is not None:
             existing_by_source[identity] = item
-        legacy_identity = _legacy_import_source_content_identity(item, target=target, record=authority_record)
+        legacy_identity = _legacy_import_source_content_identity(item, target=target, record=snapshot_binding)
         if legacy_identity is not None and not _has_canonical_untrusted_import_identity(item):
             legacy_by_source_content[legacy_identity] = item
     imported: list[dict[str, Any]] = []
@@ -4444,7 +4486,7 @@ def _append_import_records(
             canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row
             existing_migration_proof = (
                 authority_record is not None
-                and _authenticated_legacy_import_proof(existing_item, target=target, record=authority_record)
+                and _authenticated_legacy_import_proof(existing_item, target=target, record=snapshot_binding)
                 and _import_content_identity(existing_item) == _import_content_identity(record)
             )
             if canonical_existing_row and canonical_incoming_row and not canonical_existing_proof:
