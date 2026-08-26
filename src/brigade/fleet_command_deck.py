@@ -20,6 +20,22 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 TERMINAL_STATES = frozenset({"run.completed", "run.failed", "run.interrupted"})
 AWAITING_STATES = frozenset({"run.paused", "approval.requested", "approval.held"})
+TERMINAL_STATE_SUFFIXES = (
+    ".completed",
+    ".failed",
+    ".interrupted",
+    ".cancelled",
+    ".canceled",
+    ".timed_out",
+    ".timeout",
+)
+FAILURE_STATE_SUFFIXES = (
+    ".failed",
+    ".cancelled",
+    ".canceled",
+    ".timed_out",
+    ".timeout",
+)
 ACTIVE_LIMIT, OBSERVER_LIMIT, RAIL_FAILURE_LIMIT = 200, 8, 10
 BUCKET_RANK = {"failed": 0, "awaiting approval": 1, "stale": 2, "running": 3, "queued": 4}
 
@@ -167,10 +183,14 @@ def _strip_controls(value: str) -> str:
     return _CONTROL_RE.sub("", value).strip()
 
 
+def is_terminal_state(state: str) -> bool:
+    return state in TERMINAL_STATES or state.endswith(TERMINAL_STATE_SUFFIXES)
+
+
 def bucket_for(state: str, *, age_seconds: int | None, stale_after_seconds: int) -> str:
     if state in AWAITING_STATES:
         return "awaiting approval"
-    if state.endswith("failed"):
+    if state.endswith(FAILURE_STATE_SUFFIXES):
         return "failed"
     if age_seconds is not None and age_seconds > stale_after_seconds:
         return "stale"
@@ -197,15 +217,27 @@ _LATEST_ROWS = (
 
 _AWAITING_PLACEHOLDERS = ",".join("?" for _ in AWAITING_STATES)
 _TERMINAL_PLACEHOLDERS = ",".join("?" for _ in TERMINAL_STATES)
+_NOT_TERMINAL_SQL = f"state NOT IN ({_TERMINAL_PLACEHOLDERS})" + "".join(
+    f" AND state NOT LIKE '%{suffix}'" for suffix in TERMINAL_STATE_SUFFIXES
+)
+_IS_TERMINAL_SQL = f"({f'state IN ({_TERMINAL_PLACEHOLDERS})'})" + "".join(
+    f" OR state LIKE '%{suffix}'" for suffix in TERMINAL_STATE_SUFFIXES
+)
+_FAILURE_MATCH_SQL = " OR ".join(f"state LIKE '%{suffix}'" for suffix in FAILURE_STATE_SUFFIXES)
 
 
 def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seconds: int) -> list[LiveRun]:
-    rank_sql = f"CASE WHEN state LIKE '%failed' THEN 0 WHEN state IN ({_AWAITING_PLACEHOLDERS}) THEN 1 ELSE 3 END"
+    rank_sql = (
+        "CASE WHEN state LIKE '%failed' THEN 0"
+        + "".join(f" WHEN state LIKE '%{suffix}' THEN 0" for suffix in FAILURE_STATE_SUFFIXES[1:])
+        + f" WHEN state IN ({_AWAITING_PLACEHOLDERS}) THEN 1 ELSE 3 END"
+    )
+    cutoff = datetime.fromtimestamp(now.timestamp() - stale_after_seconds, tz=now.tzinfo or _UTC).isoformat()
     query = (
-        f"{_LATEST_ROWS} AND state NOT IN ({_TERMINAL_PLACEHOLDERS})"
+        f"{_LATEST_ROWS} AND {_NOT_TERMINAL_SQL} AND ts >= ?"
         f" ORDER BY {rank_sql}, ts DESC, node_id, run_id LIMIT {ACTIVE_LIMIT}"
     )
-    rows = conn.execute(query, (*TERMINAL_STATES, *AWAITING_STATES)).fetchall()
+    rows = conn.execute(query, (*TERMINAL_STATES, cutoff, *AWAITING_STATES)).fetchall()
     started = fetch_started_at(conn, [(row[0], row[1]) for row in rows])
     runs: list[LiveRun] = []
     for node_id, run_id, repo, seat, harness, state, ts in rows:
@@ -247,7 +279,7 @@ def fetch_started_at(conn: sqlite3.Connection, keys: Sequence[tuple[str, str]]) 
 
 def fetch_outcomes(conn: sqlite3.Connection, *, outcome_window: int) -> list[LiveRun]:
     rows = conn.execute(
-        f"{_LATEST_ROWS} AND state IN ({_TERMINAL_PLACEHOLDERS}) ORDER BY ts DESC LIMIT ?",
+        f"{_LATEST_ROWS} AND {_IS_TERMINAL_SQL} ORDER BY ts DESC LIMIT ?",
         (*TERMINAL_STATES, int(outcome_window)),
     ).fetchall()
     return [_live_run_from_row(row) for row in rows]
@@ -256,7 +288,7 @@ def fetch_outcomes(conn: sqlite3.Connection, *, outcome_window: int) -> list[Liv
 def fetch_failed_outcomes(conn: sqlite3.Connection, *, now: datetime, lookback_seconds: int) -> list[LiveRun]:
     cutoff = datetime.fromtimestamp(now.timestamp() - lookback_seconds, tz=now.tzinfo or _UTC).isoformat()
     rows = conn.execute(
-        f"{_LATEST_ROWS} AND state = 'run.failed' AND ts >= ? ORDER BY ts DESC LIMIT {RAIL_FAILURE_LIMIT}",
+        f"{_LATEST_ROWS} AND ({_FAILURE_MATCH_SQL}) AND ts >= ? ORDER BY ts DESC LIMIT {RAIL_FAILURE_LIMIT}",
         (cutoff,),
     ).fetchall()
     return [_live_run_from_row(row, bucket="failed") for row in rows]
@@ -343,10 +375,11 @@ def build_view(
     now: datetime,
 ) -> DeckView:
     del now
+    active_runs = tuple(run for run in live_runs if not is_terminal_state(run.state) and run.bucket != "stale")
     claims_by_target = {claim.target: claim for claim in claims}
     display_claims = {target: _display_claim(claim, enrolled_labels) for target, claim in claims_by_target.items()}
     collision_targets = {
-        target for target in {run.repo for run in live_runs} if collides(target, live_runs, claims_by_target)
+        target for target in {run.repo for run in active_runs} if collides(target, active_runs, claims_by_target)
     }
     stations: list[StationView] = []
     for station in config.stations:
@@ -354,8 +387,8 @@ def build_view(
             sorted(
                 (
                     Tile(run=run, claim=display_claims.get(run.repo), collision=run.repo in collision_targets)
-                    for run in live_runs
-                    if run.node_id == station.node_id and run.state not in TERMINAL_STATES
+                    for run in active_runs
+                    if run.node_id == station.node_id
                 ),
                 key=lambda tile: BUCKET_RANK.get(tile.run.bucket, len(BUCKET_RANK)),
             )
@@ -397,10 +430,10 @@ def build_view(
                 RepoRow(
                     target=target,
                     claim=display_claims.get(target),
-                    live=tuple(run for run in live_runs if run.repo == target),
+                    live=tuple(run for run in active_runs if run.repo == target),
                     collision=target in collision_targets,
                 )
-                for target in {run.repo for run in live_runs} | set(claims_by_target)
+                for target in {run.repo for run in active_runs} | set(claims_by_target)
             ),
             key=lambda row: (not row.collision, row.target),
         )

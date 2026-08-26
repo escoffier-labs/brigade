@@ -120,6 +120,116 @@ def test_capped_queries_select_latest_then_limit(conn):
     )
 
 
+def test_terminal_suffix_states_never_appear_in_live_reads_or_outcomes(conn):
+    states = (
+        "run.dispatch.completed",
+        "run.dispatch.interrupted",
+        "run.dispatch.failed",
+        "worker.cancelled",
+        "worker.canceled",
+        "run.timed_out",
+        "engine.timeout",
+    )
+    for index, state in enumerate(states):
+        _insert(conn, NODE_A, f"key-{index}", 1, "run.created", ts=_ts(600), repo=f"repo-{index}")
+        _insert(conn, NODE_A, f"key-{index}", 2, state, ts=_ts(60), repo=f"repo-{index}")
+    assert deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800) == []
+    failed = deck.fetch_failed_outcomes(conn, now=NOW, lookback_seconds=86400)
+    assert sorted(run.state for run in failed) == [
+        "engine.timeout",
+        "run.dispatch.failed",
+        "run.timed_out",
+        "worker.canceled",
+        "worker.cancelled",
+    ]
+    assert all(run.bucket == "failed" for run in failed)
+    outcomes = deck.fetch_outcomes(conn, outcome_window=20)
+    assert sorted(run.state for run in outcomes) == [
+        "engine.timeout",
+        "run.dispatch.completed",
+        "run.dispatch.failed",
+        "run.dispatch.interrupted",
+        "run.timed_out",
+        "worker.canceled",
+        "worker.cancelled",
+    ]
+    for state in states:
+        assert deck.is_terminal_state(state)
+    assert not deck.is_terminal_state("run.unfailed")
+
+
+def test_unfailed_latest_row_remains_live(conn):
+    _insert(conn, NODE_A, "unfailed", 1, "run.unfailed", ts=_ts(30), repo="repo-unfailed")
+    runs = deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800)
+    assert [run.run_id for run in runs] == ["unfailed"]
+
+
+def test_defensive_stale_runs_stay_in_rail_but_out_of_active_projections():
+    config = deck.DeckConfig(
+        stations=(deck.StationConfig(NODE_A, "Alpha", 2), deck.StationConfig(NODE_B, "Bravo", 2)),
+        stale_after_seconds=1800,
+    )
+    stale_run = deck.LiveRun(
+        node_id=NODE_B,
+        run_id="ghost",
+        repo="shared",
+        seat="seat",
+        harness="claude",
+        state="run.started",
+        bucket="stale",
+        age_seconds=3600,
+        elapsed_seconds=3600,
+    )
+    stale_only = deck.LiveRun(
+        node_id=NODE_A,
+        run_id="stale-only",
+        repo="stale-only",
+        seat="seat",
+        harness="claude",
+        state="run.started",
+        bucket="stale",
+        age_seconds=3600,
+        elapsed_seconds=3600,
+    )
+    fresh_run = deck.LiveRun(
+        node_id=NODE_A,
+        run_id="fresh",
+        repo="shared",
+        seat="seat",
+        harness="claude",
+        state="run.started",
+        bucket="running",
+        age_seconds=30,
+        elapsed_seconds=30,
+    )
+    view = deck.build_view(
+        config,
+        live_runs=[stale_run, stale_only, fresh_run],
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha", NODE_B: "Bravo"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+    )
+    alpha, bravo = view.stations
+    assert [tile.run.run_id for tile in alpha.tiles] == ["fresh"]
+    assert alpha.busy == 1
+    assert bravo.tiles == () and bravo.busy == 0
+    assert [entry.run_id for entry in view.rail] == ["ghost", "stale-only"]
+    assert [(row.target, tuple(run.run_id for run in row.live), row.collision) for row in view.repos] == [
+        ("shared", ("fresh",), False)
+    ]
+
+
+def test_fetch_live_runs_drops_old_nonterminal_latest_rows(conn):
+    _insert(conn, NODE_A, "ancient", 1, "run.started", ts=_ts(7200), repo="repo-old")
+    _insert(conn, NODE_A, "fresh", 1, "run.started", ts=_ts(30), repo="repo-new")
+    runs = deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800)
+    assert [run.run_id for run in runs] == ["fresh"]
+
+
 # --- HTTP integration: hub-served Command Deck (task 2) ----------------------
 
 TOKEN = "test-token-12345"
