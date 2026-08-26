@@ -4689,3 +4689,150 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
         if child.poll() is None:
             child.kill()
             child.wait(timeout=15)
+
+
+def _inject_scanner_commit_before_writer_lock(monkeypatch, tmp_path, row):
+    """Round 6 (M2): land a trusted scanner commit just before this writer's
+    canonical exclusion begins, simulating a commit between a pre-lock read
+    and the locked publication. A writer that read before locking deletes it."""
+    import contextlib
+
+    from brigade.work_cmd import ledger as ledger_mod
+
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    if not inbox.exists():
+        inbox.write_bytes(b"")
+    real = ledger_mod._canonical_inbox_write
+
+    @contextlib.contextmanager
+    def patched(target):
+        with inbox.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+        with real(target):
+            yield
+
+    monkeypatch.setattr(ledger_mod, "_canonical_inbox_write", patched)
+
+
+def test_import_add_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {"id": "scan-add-1", "text": "scanner add row", "kind": "task", "source": "scanner", "status": "pending"},
+    )
+    assert work_cmd.import_add(target=tmp_path, text="manual add row") == 0
+    texts = [item.get("text") for item in work_cmd._read_imports(tmp_path)]
+    assert "manual add row" in texts
+    assert "scanner add row" in texts
+
+
+def test_import_context_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {"id": "scan-ctx-1", "text": "scanner context row", "kind": "task", "source": "scanner", "status": "pending"},
+    )
+    assert work_cmd.import_context(target=tmp_path, text="manual context body") == 0
+    texts = [item.get("text") for item in work_cmd._read_imports(tmp_path)]
+    assert any("manual context body" in str(text) for text in texts)
+    assert "scanner context row" in texts
+
+
+def test_promote_handoff_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "handoff-race-import.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Record durable scanner race decision",
+                "kind": "decision",
+                "source": "chat-memory-sweep",
+                "metadata": {
+                    "source_item_key": "chat:decision:race",
+                    "source_fingerprint": "fingerprint-race",
+                    "scanner_id": "chat-surfaces",
+                    "scanner_run_id": "run-1",
+                    "sweep_id": "sweep-1",
+                    "evidence_summary": "Safe evidence at https://private.example/token=SECRET123456.",
+                    "local_evidence_path": ".brigade/evidence/chat-decision.json",
+                },
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    seeded = json.loads(work_cmd.helpers._imports_path(tmp_path).read_text())
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {"id": "scan-handoff-1", "text": "scanner handoff row", "kind": "task", "source": "scanner"},
+    )
+    assert work_cmd.import_promote_handoff(target=tmp_path, import_id=seeded["id"]) == 0
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    assert final[seeded["id"]]["status"] == "promoted"
+    assert "scan-handoff-1" in final, f"scanner commit deleted by handoff promotion: {sorted(final)}"
+
+
+def test_single_promote_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    seeded = work_cmd._make_import("promote race item", kind="task", source="manual")
+    work_cmd._write_imports(tmp_path, [seeded])
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {
+            "id": "scan-promote-1",
+            "text": "scanner promote row",
+            "kind": "task",
+            "source": "scanner",
+            "status": "pending",
+        },
+    )
+    assert work_cmd.import_promote(target=tmp_path, import_id=seeded["id"]) == 0
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    assert final[seeded["id"]]["status"] == "promoted"
+    assert final["scan-promote-1"]["status"] == "pending"
+    assert "scan-promote-1" in final, f"scanner commit deleted by promotion: {sorted(final)}"
+
+
+def test_dismiss_all_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    seeded = work_cmd._make_import("dismiss all race item", kind="task", source="repo-scan")
+    work_cmd._write_imports(tmp_path, [seeded])
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {"id": "scan-dismiss-1", "text": "scanner dismiss row", "kind": "task", "source": "scanner"},
+    )
+    assert work_cmd.import_dismiss(target=tmp_path, all_matching=True, reason="cleanup") == 0
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    # Both rows match the --all filter, so both are dismissed in place; the
+    # scanner row must survive as a row rather than be deleted by stale state.
+    assert final[seeded["id"]]["status"] == "dismissed"
+    assert "scan-dismiss-1" in final, f"scanner commit deleted by dismiss --all: {sorted(final)}"
+    assert final["scan-dismiss-1"]["status"] == "dismissed"
+
+
+def test_dismiss_single_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    seeded = work_cmd._make_import("dismiss race item", kind="task", source="repo-scan")
+    work_cmd._write_imports(tmp_path, [seeded])
+    _inject_scanner_commit_before_writer_lock(
+        monkeypatch,
+        tmp_path,
+        {
+            "id": "scan-one-1",
+            "text": "scanner single row",
+            "kind": "task",
+            "source": "scanner",
+            "status": "pending",
+        },
+    )
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=seeded["id"], reason="cleanup") == 0
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    assert final[seeded["id"]]["status"] == "dismissed"
+    assert final["scan-one-1"]["status"] == "pending"
+    assert "scan-one-1" in final, f"scanner commit deleted by dismiss: {sorted(final)}"

@@ -2150,12 +2150,16 @@ def _scanner_run_one(
             child_env[inbox_lock.SCANNER_RUN_ENV] = run_id
             # Bounded streaming capture in its own process group: output is
             # capped, and overflow or timeout reaps the whole group so a
-            # descendant holding the pipes cannot outlive the run.
+            # descendant holding the pipes cannot outlive the run. The run is
+            # also supervised: once the direct child exits, the owned group is
+            # reaped even when a descendant closed every capture pipe, so no
+            # descendant can outlive the run while holding workspace locks.
             result = proc_mod.run(
                 argv,
                 timeout=timeout_seconds,
                 env=child_env,
                 cwd=cwd,
+                supervise_group=True,
             )
         stdout = result.stdout
         stderr = result.stderr
@@ -2187,6 +2191,7 @@ def _scanner_run_one(
                 "timed_out": timed_out,
                 "output_limit_exceeded": result.output_limit_exceeded,
                 "incomplete_process_group": result.incomplete_process_group,
+                "descendants_reaped": result.descendants_reaped,
                 "error": error,
                 "stdout_summary": _scanner_run_summary(stdout),
                 "stderr_summary": _scanner_run_summary(stderr),
@@ -3137,7 +3142,38 @@ def _scanners_run_payload(
                         if _scanner_run_proof(scanner, run) is not None:
                             for item in imported:
                                 _record_scanner_import_proof(scanner, run, item)
+                        run["ingest_output"] = {
+                            "path": str(path),
+                            "created": len(imported),
+                            "skipped": len(skipped_records),
+                            "dismissed": len(skipped_dismissed),
+                            "rejected": len(rejected),
+                            "rejection_reasons": {rejected[0]: len(rejected)} if rejected else {},
+                            "records": len(records),
+                            "created_import_ids": [
+                                str(item.get("id")) for item in imported if isinstance(item.get("id"), str)
+                            ],
+                            "skipped_source_fingerprints": [
+                                fingerprint
+                                for record in skipped_records
+                                if (fingerprint := ledger_mod._import_fingerprint(record))
+                            ],
+                            "dismissed_source_fingerprints": [
+                                fingerprint
+                                for record in skipped_dismissed
+                                if (fingerprint := ledger_mod._import_fingerprint(record))
+                            ],
+                        }
+                        # Publish the run receipt while the writer lock is
+                        # still held: its failure path rolls the inbox back to
+                        # the pre-append snapshot, so a trusted commit must not
+                        # be able to land between snapshot and rollback.
+                        _write_scanner_run_receipt(run)
                 except inbox_lock.InboxLockTimeout as exc:
+                    # An escaped holder must fail this run with a recorded
+                    # reason instead of hanging the launcher (and, behind its
+                    # run lock, every outside writer).
+                    run["status"] = "failed"
                     run["ingest_output"] = {
                         "path": str(path),
                         "created": 0,
@@ -3153,27 +3189,6 @@ def _scanners_run_payload(
                     run["error"] = f"output ingestion could not take the inbox writer lock: {exc}"
                     _write_scanner_run_receipt(run)
                     continue
-                run["ingest_output"] = {
-                    "path": str(path),
-                    "created": len(imported),
-                    "skipped": len(skipped_records),
-                    "dismissed": len(skipped_dismissed),
-                    "rejected": len(rejected),
-                    "rejection_reasons": {rejected[0]: len(rejected)} if rejected else {},
-                    "records": len(records),
-                    "created_import_ids": [str(item.get("id")) for item in imported if isinstance(item.get("id"), str)],
-                    "skipped_source_fingerprints": [
-                        fingerprint
-                        for record in skipped_records
-                        if (fingerprint := ledger_mod._import_fingerprint(record))
-                    ],
-                    "dismissed_source_fingerprints": [
-                        fingerprint
-                        for record in skipped_dismissed
-                        if (fingerprint := ledger_mod._import_fingerprint(record))
-                    ],
-                }
-                _write_scanner_run_receipt(run)
         after_counts = _scanner_import_counts(target)
         payload = {
             "target": str(target),

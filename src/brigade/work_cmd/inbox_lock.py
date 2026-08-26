@@ -74,8 +74,25 @@ except ImportError:  # pragma: no cover - POSIX does not provide msvcrt.
 
 
 _PROCESS_LOCK = threading.Lock()
-_LOCK_DEPTH: dict[str, int] = {}
-_ACTIVE_LOCKS: dict[str, "_HeldInboxLock"] = {}
+_ACTIVE_LOCKS: dict[str, "_ActiveInboxLock"] = {}
+
+
+class _ActiveInboxLock:
+    """One process-wide registry entry: ownership and depth together.
+
+    Keeping the cross-process acquisition and the reentrancy count in a single
+    entry means an inner thread context can never lose the fd to an outer
+    context that exits first, the descriptor closes exactly once at outermost
+    exit, and concurrent first acquisitions serialize on ``ready`` instead of
+    observing a half-initialized entry.
+    """
+
+    def __init__(self) -> None:
+        self.owner: _HeldInboxLock | None = None
+        self.depth = 0
+        self.ready = threading.Event()
+        self.error: BaseException | None = None
+
 
 #: Default bounded window for one cross-process inbox lock acquisition. A
 #: holder that outlives its legitimacy (an escaped descendant keeping the
@@ -242,18 +259,18 @@ def verify_inbox_lock(target: Path) -> None:
     """
     with _PROCESS_LOCK:
         entry = _ACTIVE_LOCKS.get(str(inbox_lock_path(target)))
-    if entry is None:
+    if entry is None or entry.owner is None:
         raise OSError("import inbox run lock is not held by this process")
-    entry.verify()
+    entry.owner.verify()
 
 
 def verify_inbox_writer_lock(target: Path) -> None:
     """Re-check this process's held writer lock; refuse when it is not really held."""
     with _PROCESS_LOCK:
         entry = _ACTIVE_LOCKS.get(str(inbox_writer_lock_path(target)))
-    if entry is None:
+    if entry is None or entry.owner is None:
         raise OSError("import inbox writer lock is not held by this process")
-    entry.verify()
+    entry.owner.verify()
 
 
 def verify_canonical_write_locks(target: Path) -> None:
@@ -299,29 +316,52 @@ def inbox_writer_lock(target: Path, *, deadline_seconds: float | None = None) ->
 def _held_inbox_lock(key_path: Path, *, deadline_seconds: float | None = None) -> Iterator[_HeldInboxLock]:
     key = str(key_path)
     with _PROCESS_LOCK:
-        depth = _LOCK_DEPTH.get(key, 0) + 1
-        _LOCK_DEPTH[key] = depth
-    owned: _HeldInboxLock | None = None
+        entry = _ACTIVE_LOCKS.get(key)
+        fresh = entry is None
+        if fresh:
+            entry = _ActiveInboxLock()
+            _ACTIVE_LOCKS[key] = entry
+        assert entry is not None
+        entry.depth += 1
     try:
-        if depth == 1:
-            owned = _acquire_cross_process(key, deadline_seconds=deadline_seconds)
+        if fresh and entry is not None:
+            # Initialization runs outside the module lock (the cross-process
+            # acquisition blocks), but the entry exists and later joiners wait
+            # on ``ready``, so no one can observe a missing owner.
+            try:
+                owned = _acquire_cross_process(key, deadline_seconds=deadline_seconds)
+            except BaseException as exc:
+                with _PROCESS_LOCK:
+                    entry.error = exc
+                    if _ACTIVE_LOCKS.get(key) is entry:
+                        _ACTIVE_LOCKS.pop(key, None)
+                entry.ready.set()
+                raise
             with _PROCESS_LOCK:
-                _ACTIVE_LOCKS[key] = owned
-        yield _ACTIVE_LOCKS[key]
+                entry.owner = owned
+            entry.ready.set()
+            yield owned
+        else:
+            assert entry is not None
+            entry.ready.wait()
+            if entry.error is not None:
+                raise entry.error
+            assert entry.owner is not None
+            yield entry.owner
     finally:
-        release_owned = False
+        release_owned: _HeldInboxLock | None = None
+        drop = False
         with _PROCESS_LOCK:
-            remaining = _LOCK_DEPTH.pop(key, 1) - 1
-            if remaining > 0:
-                _LOCK_DEPTH[key] = remaining
-            else:
+            entry.depth -= 1
+            if entry.depth <= 0 and _ACTIVE_LOCKS.get(key) is entry:
                 # Drop the registry entry atomically with the decision to
                 # release: verify_* must never observe a lock this process no
                 # longer holds, and the entry must be gone before the fd closes.
-                release_owned = True
+                drop = True
+                release_owned = entry.owner
                 _ACTIVE_LOCKS.pop(key, None)
-        if release_owned and owned is not None:
-            owned.release()
+        if drop and release_owned is not None:
+            release_owned.release()
 
 
 def _open_lock_parent_posix(lock_path: Path) -> tuple[int, str]:

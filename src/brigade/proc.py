@@ -401,6 +401,7 @@ class Result:
     stderr_decode_error: str | None = None
     output_limit_exceeded: bool = False
     incomplete_process_group: bool = False
+    descendants_reaped: bool = False
     stdout_bytes: int = 0
     stderr_bytes: int = 0
 
@@ -741,6 +742,7 @@ def _collect_process_output(
     stdin: bytes | None,
     process_registry: ProcessRegistry | None,
     child_job: _WindowsChildJob | None = None,
+    supervise_group: bool = False,
 ) -> Result:
     collector = _BoundedCollector()
 
@@ -781,6 +783,7 @@ def _collect_process_output(
 
     timed_out = False
     incomplete_group = False
+    descendants_reaped = False
     cleanup_error: str | None = None
 
     def bounded_stop() -> None:
@@ -828,6 +831,14 @@ def _collect_process_output(
             pass
         raise
 
+    if supervise_group and not timed_out and not incomplete_group and process.poll() is not None:
+        # Supervised runs (scanner launches): once the direct child is gone,
+        # reap the owned group even when every capture pipe closed cleanly, so
+        # an escaped descendant cannot outlive the run while holding workspace
+        # locks. The direct child's exit status stands.
+        bounded_stop()
+        descendants_reaped = True
+
     if timed_out or collector.overflowed or incomplete_group:
         bounded_stop()
 
@@ -871,6 +882,7 @@ def _collect_process_output(
         output_limit_exceeded=collector.overflowed,
     )
     result.incomplete_process_group = incomplete_group
+    result.descendants_reaped = descendants_reaped
     extras: list[str] = []
     if collector.overflowed:
         extras.append(f"combined output exceeded {MAX_CAPTURE_BYTES} byte limit")
@@ -894,6 +906,7 @@ def _collect_process_output(
             stderr_decode_error=result.stderr_decode_error,
             output_limit_exceeded=result.output_limit_exceeded,
             incomplete_process_group=result.incomplete_process_group,
+            descendants_reaped=result.descendants_reaped,
             stdout_bytes=result.stdout_bytes,
             stderr_bytes=result.stderr_bytes,
         )
@@ -1030,6 +1043,7 @@ def run(
     cwd: Optional[Path] = None,
     stdin: bytes | None = None,
     process_registry: ProcessRegistry | None = None,
+    supervise_group: bool = False,
 ) -> Result:
     windows_launch = os.name == "nt"
     child_job: _WindowsChildJob | None = None
@@ -1077,6 +1091,7 @@ def run(
             stdin=stdin,
             process_registry=process_registry,
             child_job=child_job,
+            supervise_group=supervise_group,
         )
     finally:
         if child_job is not None:
