@@ -86,6 +86,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "route",
         "skill_route_policy",
         "seat_routing",
+        "retry_decisions",
         "health",
         "worker_failure_summary",
         "transport_routing",

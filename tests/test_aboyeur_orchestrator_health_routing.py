@@ -410,3 +410,88 @@ def test_direct_worker_run_ignores_unhealthy_orchestrator(monkeypatch, tmp_path,
     assert run_meta["status"] == "ok"
     for decision in run_meta.get("seat_routing", []):
         assert decision["requested_seat"] != "chef"
+
+
+def test_run_summary_line_names_reroute(monkeypatch, tmp_path, capsys):
+    _stub_run_phases(monkeypatch)
+    _install_probe(monkeypatch, PerSeatFakeAdapter(unhealthy=frozenset({"coder"})))
+    output_dir = tmp_path / "run-reroute-summary"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(worker_fallback=("coder-fallback",)),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    stderr = capsys.readouterr().err
+    assert "note: seat reroute: coder -> coder-fallback [auth-required]" in stderr
+
+
+def test_healthy_run_prints_no_reroute_summary(monkeypatch, tmp_path, capsys):
+    _stub_run_phases(monkeypatch)
+    _install_probe(monkeypatch, PerSeatFakeAdapter())
+    output_dir = tmp_path / "run-no-reroute-summary"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(worker_fallback=("coder-fallback",)),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    stderr = capsys.readouterr().err
+    assert "note: seat reroute:" not in stderr
+
+
+def test_retry_decisions_survive_simulated_resume(monkeypatch, tmp_path):
+    prior = {
+        "attempt": 1,
+        "seat": "coder",
+        "failure_kind": "network-unavailable",
+        "decision": "same-seat-once",
+        "reason": "seat coder may retry once after re-probe [network-unavailable]",
+    }
+    fresh = {
+        "attempt": 1,
+        "seat": "reviewer",
+        "failure_kind": "timeout",
+        "decision": "fallback",
+        "reason": "seat reviewer quarantined [timeout]; use a declared fallback only",
+    }
+    plan_calls = _stub_run_phases(monkeypatch)
+    _install_probe(monkeypatch, PerSeatFakeAdapter())
+    output_dir = tmp_path / "run-resume-retry-decisions"
+    output_dir.mkdir()
+    # Simulated resume: a prior attempt on this run dir already recorded one
+    # retry decision in the receipt.
+    (output_dir / "run.json").write_text(json.dumps({"status": "interrupted", "retry_decisions": [prior]}))
+
+    def capture_dispatch(assignments, roster, **kwargs):
+        kwargs["quarantine_state"].retry_decisions.append(dict(fresh))
+        return [aboyeur.WorkerResult(worker="coder", task="implement", text="done", ok=True)]
+
+    monkeypatch.setattr(aboyeur, "dispatch", capture_dispatch)
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(worker_fallback=("coder-fallback",)),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["retry_decisions"] == [prior, fresh]
+    assert plan_calls  # the resumed run actually dispatched

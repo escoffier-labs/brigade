@@ -29,6 +29,7 @@ class SeatQuarantineState:
 
     quarantined: set[str] = field(default_factory=set)
     same_seat_retries: dict[str, int] = field(default_factory=dict)
+    retry_decisions: list[dict[str, object]] = field(default_factory=list)
 
     def is_quarantined(self, seat: str) -> bool:
         return seat in self.quarantined
@@ -84,38 +85,49 @@ def decide_retry(
     state: SeatQuarantineState,
 ) -> RetryDecision:
     """Apply the closed retry dispositions for one persisted failed attempt."""
+    attempt = sum(1 for entry in state.retry_decisions if entry.get("seat") == seat) + 1
+
+    def record(action: str, failure_class: str, detail: str) -> RetryDecision:
+        state.retry_decisions.append(
+            {
+                "attempt": attempt,
+                "seat": seat,
+                "failure_kind": failure_class,
+                "decision": action,
+                "reason": detail,
+            }
+        )
+        return RetryDecision(action=action, retry=retry, failure_class=failure_class, detail=detail)
+
     if failure is None:
+        retry = RetryDisposition.NEVER
         state.quarantine(seat)
-        return RetryDecision(
-            action="never",
-            retry=RetryDisposition.NEVER,
-            failure_class=FailureClass.UNCLASSIFIED.value,
-            detail=f"seat {seat} failed without a typed failure; quarantined",
+        return record(
+            "never",
+            FailureClass.UNCLASSIFIED.value,
+            f"seat {seat} failed without a typed failure; quarantined",
         )
     retry = failure.retry
     failure_class = failure.failure_class.value
     if state.is_quarantined(seat):
-        return RetryDecision(
-            action="quarantine",
-            retry=retry,
-            failure_class=failure_class,
-            detail=f"seat {seat} is already quarantined for this run",
+        return record(
+            "quarantine",
+            failure_class,
+            f"seat {seat} is already quarantined for this run",
         )
     if retry is RetryDisposition.SAME_SEAT_ONCE:
         if state.same_seat_attempts(seat) >= 1:
             state.quarantine(seat)
-            return RetryDecision(
-                action="quarantine",
-                retry=retry,
-                failure_class=failure_class,
-                detail=f"seat {seat} already used its one same-seat retry; quarantined",
+            return record(
+                "quarantine",
+                failure_class,
+                f"seat {seat} already used its one same-seat retry; quarantined",
             )
         state.record_same_seat_retry(seat)
-        return RetryDecision(
-            action="same-seat-once",
-            retry=retry,
-            failure_class=failure_class,
-            detail=f"seat {seat} may retry once after re-probe [{failure_class}]",
+        return record(
+            "same-seat-once",
+            failure_class,
+            f"seat {seat} may retry once after re-probe [{failure_class}]",
         )
     state.quarantine(seat)
     if retry is RetryDisposition.FALLBACK:
@@ -127,7 +139,7 @@ def decide_retry(
     else:
         action = "never"
         detail = f"seat {seat} quarantined [{failure_class}]; no retry"
-    return RetryDecision(action=action, retry=retry, failure_class=failure_class, detail=detail)
+    return record(action, failure_class, detail)
 
 
 def seat_health_summary(
@@ -217,6 +229,25 @@ def format_incomplete_warning(
                 lines.append(f"declared fallback {effective} selected for {requested} [{cause}]")
     lines.append("receipt: worker-results.json")
     return "\n".join(lines)
+
+
+def format_reroute_summary(routing_decisions: Sequence[Mapping[str, Any]] | None) -> str | None:
+    """One-line run summary naming every admission reroute, or None."""
+    if not routing_decisions:
+        return None
+    parts: list[str] = []
+    for decision in routing_decisions:
+        requested = decision.get("requested_seat")
+        effective = decision.get("effective_seat")
+        cause = decision.get("typed_cause") or "unclassified"
+        outcome = decision.get("outcome") or "fallback"
+        if outcome == "fallback" and isinstance(requested, str) and isinstance(effective, str):
+            parts.append(f"{requested} -> {effective} [{cause}]")
+        elif isinstance(requested, str):
+            parts.append(f"{requested} skipped [{cause}]")
+    if not parts:
+        return None
+    return f"note: seat reroute: {'; '.join(parts)}"
 
 
 def format_worker_seat_resolution(*, requested: str, effective: str, typed_cause: str) -> str:
