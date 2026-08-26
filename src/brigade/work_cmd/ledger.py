@@ -2151,6 +2151,8 @@ def downgrade_external_directory_authority(
     fingerprint = authority_marker.target_fingerprint(workspace)
     marker_path = authority_marker.signed_marker_path(fingerprint, env=env)
     authority_marker.reject_unsafe_marker_path(marker_path, workspace, env=env)
+    posture_path = authority_marker.isolation_marker_path(fingerprint, env=env)
+    authority_marker.reject_unsafe_marker_path(posture_path, workspace, env=env)
     isolation_path = security_config_path(workspace)
 
     store_backup, raw_payload = _read_raw_authority_store(store_path)
@@ -2182,10 +2184,16 @@ def downgrade_external_directory_authority(
         marker_bytes = None
     except OSError as exc:
         raise OSError("authority signed marker is unreadable") from exc
+    try:
+        posture_bytes = posture_path.read_bytes()
+    except FileNotFoundError:
+        posture_bytes = None
+    except OSError as exc:
+        raise OSError("authority isolation posture marker is unreadable") from exc
 
     actor_value = actor if actor is not None else authority_marker.operator_identity(env=env)
     resolved = str(workspace)
-    if unsigned_record is None and marker_bytes is None:
+    if unsigned_record is None and marker_bytes is None and posture_bytes is None:
         return {
             "action": "authority-downgrade",
             "actor": actor_value,
@@ -2229,6 +2237,7 @@ def downgrade_external_directory_authority(
 
     changed: dict[Path, bytes] = {}
     marker_removed = False
+    posture_removed = False
 
     def _record_change(path: Path, backup: bytes | None) -> None:
         if backup is not None:
@@ -2240,6 +2249,8 @@ def downgrade_external_directory_authority(
             _restore_authority_file(path, backup)
         if marker_removed and marker_bytes is not None:
             _restore_authority_file(marker_path, marker_bytes)
+        if posture_removed and posture_bytes is not None:
+            _restore_authority_file(posture_path, posture_bytes)
 
     try:
         if unsigned_record is not None:
@@ -2269,6 +2280,14 @@ def downgrade_external_directory_authority(
             else:
                 marker_removed = True
                 _downgrade_durability_checkpoint(marker_path)
+        if posture_bytes is not None:
+            try:
+                posture_path.unlink()
+            except FileNotFoundError:
+                pass
+            else:
+                posture_removed = True
+                _downgrade_durability_checkpoint(posture_path)
     except OSError:
         try:
             _restore_all()
@@ -2282,6 +2301,7 @@ def downgrade_external_directory_authority(
         "created_at": utc_now_iso_z(),
         "phase": "complete",
         "removed": marker_removed,
+        "posture_marker_removed": posture_removed,
         "store_unwrapped": unsigned_record is not None,
         "target": resolved,
         "target_fingerprint": fingerprint,
@@ -3460,25 +3480,38 @@ def _unsigned_dedupe_proof_for_non_isolated_workspace(target: Path | None) -> bo
     Without ``authority_store.isolation = "external-key"`` no verifier-signed
     store can exist for this workspace, and a same-uid writer can already
     rewrite the import inbox directly (issue #1093 tracks that boundary), so
-    canonical dedupe suppression degrades to the pre-#881 evidence grade: a
-    persisted sidecar plus its reproducible receipt validated against the
-    workspace's own authority record. The first selection per process prints
-    one warning naming that downgrade; workspaces with external-key isolation
-    always keep the signed-snapshot requirement.
+    canonical dedupe suppression degrades to the pre-#881 evidence grade:
+    the persisted sidecar validated against the workspace's own authority
+    record — receipt bytes are not revalidated on this fallback path. The
+    first selection per process prints one warning naming that downgrade.
+
+    The repo-writable selector alone is not trusted (#881 round 3): the
+    fallback is also refused when the workspace configuration exists but
+    cannot be parsed (invalid input normalizes to ``off``), and when the
+    user-level isolation posture marker for this target exists — recorded
+    outside the workspace beside the other per-target authority state the
+    first time genuine ``external-key`` isolation was observed. Only the
+    explicit, audited ``brigade security authority downgrade`` command
+    clears that marker.
     """
     global _UNSIGNED_DEDUPE_DOWNGRADE_WARNED
     if target is None:
         return False
-    from .. import authority_key
+    from .. import authority_marker
+    from ..security_cmd.config import authority_store_isolation_state
+    from ..security_cmd.models import AUTHORITY_STORE_ISOLATION_OFF
 
-    if authority_key.hmac_enabled(target):
+    mode, healthy = authority_store_isolation_state(target)
+    if mode != AUTHORITY_STORE_ISOLATION_OFF or not healthy:
+        return False
+    if authority_marker.isolation_marker_exists(target):
         return False
     if not _UNSIGNED_DEDUPE_DOWNGRADE_WARNED:
         _UNSIGNED_DEDUPE_DOWNGRADE_WARNED = True
         print(
             'warning: authority_store.isolation is not "external-key"; canonical import'
             " dedupe suppression is downgraded to unsigned persisted-proof evidence"
-            " (persisted sidecar plus reproducible receipt) in this workspace",
+            " (persisted sidecar) in this workspace",
             file=sys.stderr,
         )
     return True

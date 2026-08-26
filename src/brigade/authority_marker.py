@@ -5,6 +5,13 @@ Once a workspace is HMAC-signed, a marker is recorded under the operator
 workspace. A raw, non-enveloped authority record for a marked target fails
 closed regardless of the repo-writable ``security.toml`` flag.
 
+The sibling ``authority-isolation`` directory records the per-target
+isolation posture (#881): the first time genuine ``external-key`` isolation
+is observed for a workspace, a marker is written here so the repo-writable
+flag alone never remains the only evidence of that decision. The unsigned
+dedupe fallback refuses while this marker exists; clearing requires the
+explicit ``brigade security authority downgrade`` command.
+
 This is defense in depth, not a hard boundary: a same-uid process that can
 also write the user-level Brigade directory can still remove the marker.
 ``brigade security authority downgrade`` is the explicit, logged, confirmed
@@ -26,6 +33,7 @@ from .localio import utc_now_iso_z
 
 USER_DIR_ENV = "BRIGADE_USER_DIR"
 SIGNED_MARKER_DIRNAME = "authority-signed"
+ISOLATION_MARKER_DIRNAME = "authority-isolation"
 AUDIT_NAME = "audit.jsonl"
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -45,6 +53,10 @@ def user_brigade_dir(*, env: Mapping[str, str] | None = None) -> Path:
 
 def signed_marker_root(*, env: Mapping[str, str] | None = None) -> Path:
     return user_brigade_dir(env=env) / SIGNED_MARKER_DIRNAME
+
+
+def isolation_marker_root(*, env: Mapping[str, str] | None = None) -> Path:
+    return user_brigade_dir(env=env) / ISOLATION_MARKER_DIRNAME
 
 
 def target_fingerprint(target: Path) -> str:
@@ -71,6 +83,10 @@ def _require_fingerprint(fingerprint: str) -> str:
 
 def signed_marker_path(fingerprint: str, *, env: Mapping[str, str] | None = None) -> Path:
     return signed_marker_root(env=env) / _require_fingerprint(fingerprint)
+
+
+def isolation_marker_path(fingerprint: str, *, env: Mapping[str, str] | None = None) -> Path:
+    return isolation_marker_root(env=env) / _require_fingerprint(fingerprint)
 
 
 def _fingerprint_for(
@@ -158,30 +174,44 @@ def marker_exists(
         return False
 
 
-def record_signed_marker(
-    target: Path,
+def isolation_marker_exists(
+    target: Path | None,
     *,
+    record: Mapping[str, Any] | None = None,
     env: Mapping[str, str] | None = None,
-) -> Path:
-    """Create the sticky marker after a signed envelope is written. Idempotent."""
+) -> bool:
+    """True when the user-level isolation posture marker exists for this target.
 
-    fingerprint = target_fingerprint(target)
-    path = signed_marker_path(fingerprint, env=env)
-    reject_unsafe_marker_path(path, target, env=env)
-    if path.is_file() and not path.is_symlink():
-        return path
+    Same location discipline as ``marker_exists``: only the configured
+    user-level ``authority-isolation`` directory is consulted, and a marker
+    whose path sits inside ``target`` does not count.
+    """
+
+    fingerprint = _fingerprint_for(target, record)
+    if fingerprint is None:
+        return False
+    try:
+        path = isolation_marker_path(fingerprint, env=env)
+    except OSError:
+        return False
+    if target is not None and _marker_enters_workspace(path, target):
+        return False
+    if not _marker_is_under_user_brigade_dir(path, env=env):
+        return False
+    try:
+        return path.is_file() and not path.is_symlink()
+    except OSError:
+        return False
+
+
+def _publish_private_marker(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically write a 0600 marker JSON payload, replacing any old bytes."""
+
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
-    payload = {
-        "schema_version": 1,
-        "target": str(target.expanduser().resolve()),
-        "target_fingerprint": fingerprint,
-        "signed_by": operator_identity(env=env),
-        "created_at": utc_now_iso_z(),
-    }
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -200,6 +230,58 @@ def record_signed_marker(
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def record_signed_marker(
+    target: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Create the sticky marker after a signed envelope is written. Idempotent."""
+
+    fingerprint = target_fingerprint(target)
+    path = signed_marker_path(fingerprint, env=env)
+    reject_unsafe_marker_path(path, target, env=env)
+    if path.is_file() and not path.is_symlink():
+        return path
+    payload = {
+        "schema_version": 1,
+        "target": str(target.expanduser().resolve()),
+        "target_fingerprint": fingerprint,
+        "signed_by": operator_identity(env=env),
+        "created_at": utc_now_iso_z(),
+    }
+    _publish_private_marker(path, payload)
+    return path
+
+
+def record_isolation_marker(
+    target: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Create the sticky isolation-posture marker for ``target``. Idempotent.
+
+    Recorded the first time genuine ``external-key`` isolation is observed so
+    the repo-writable ``security.toml`` flag alone never remains the only
+    record of that decision (#881). Raises ``OSError`` for unsafe paths;
+    read-path callers that cannot persist should treat that as best effort.
+    """
+
+    fingerprint = target_fingerprint(target)
+    path = isolation_marker_path(fingerprint, env=env)
+    reject_unsafe_marker_path(path, target, env=env)
+    if path.is_file() and not path.is_symlink():
+        return path
+    payload = {
+        "schema_version": 1,
+        "kind": "isolation-posture",
+        "target": str(target.expanduser().resolve()),
+        "target_fingerprint": fingerprint,
+        "recorded_by": operator_identity(env=env),
+        "created_at": utc_now_iso_z(),
+    }
+    _publish_private_marker(path, payload)
     return path
 
 

@@ -252,16 +252,38 @@ def _parse_authority_store_isolation(raw: object) -> str:
     return isolation
 
 
-def authority_store_isolation_mode(target: Path) -> str:
-    """Return the configured isolation mode. Missing or invalid config is off."""
+def authority_store_isolation_state(target: Path) -> tuple[str, bool]:
+    """Return ``(isolation mode, config health)`` for the workspace (#881).
+
+    A missing config is healthy and ``off``. A config that exists but cannot
+    be read or parsed reports ``off`` with ``healthy=False`` so callers can
+    refuse an attacker-normalized downgrade instead of trusting the failure
+    as a genuine opt-out. Observing a genuine ``external-key`` mode records
+    the user-level isolation posture marker outside the workspace; a failure
+    to persist that marker is non-fatal (it is defense in depth).
+    """
+
+    from .. import authority_marker
 
     try:
         loaded = load_config(target)
-    except ValueError:
-        return AUTHORITY_STORE_ISOLATION_OFF
+    except (ValueError, OSError):
+        return AUTHORITY_STORE_ISOLATION_OFF, False
     if loaded is None:
-        return AUTHORITY_STORE_ISOLATION_OFF
-    return loaded.authority_store_isolation
+        return AUTHORITY_STORE_ISOLATION_OFF, True
+    if loaded.authority_store_isolation == AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY:
+        try:
+            authority_marker.record_isolation_marker(target)
+        except OSError:
+            pass
+    return loaded.authority_store_isolation, True
+
+
+def authority_store_isolation_mode(target: Path) -> str:
+    """Return the configured isolation mode. Missing or invalid config is off."""
+
+    mode, _healthy = authority_store_isolation_state(target)
+    return mode
 
 
 _ISOLATION_EXTERNAL_KEY_LINE = re.compile(
