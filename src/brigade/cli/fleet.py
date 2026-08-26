@@ -602,7 +602,8 @@ def _dispatch_cloud(args: argparse.Namespace) -> int:
     if args.json:
         print(_json.dumps(snapshot, indent=2, sort_keys=True))
         return 0
-    leases = snapshot.get("leases") if isinstance(snapshot.get("leases"), list) else []
+    leases_raw = snapshot.get("leases")
+    leases = leases_raw if isinstance(leases_raw, list) else []
     headers = ("lease", "provider", "node", "state", "expires")
     rows = [
         [

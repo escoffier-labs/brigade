@@ -1290,6 +1290,8 @@ def handle_cloud(
                 ),
             )
             row = _fetch_cloud_lease(conn, lease_id)
+            if row is None:
+                raise FleetHubError(f"cloud lease {lease_id!r} was not inserted")
             conn.commit()
             return 200, {"admitted": True, "lease": _cloud_lease_payload(row, now=now)}
         except BaseException:
@@ -1304,7 +1306,10 @@ def handle_cloud(
         conn.commit()
         if cursor.rowcount != 1:
             return 409, {"bound": False, "error": "cloud lease is missing, expired, or fenced"}
-        return 200, {"bound": True, "lease": _cloud_lease_payload(_fetch_cloud_lease(conn, lease_id), now=now)}
+        row = _fetch_cloud_lease(conn, lease_id)
+        if row is None:
+            raise FleetHubError(f"cloud lease {lease_id!r} disappeared after bind")
+        return 200, {"bound": True, "lease": _cloud_lease_payload(row, now=now)}
     if action == "renew":
         cursor = conn.execute(
             "UPDATE cloud_leases SET renewed_at=?, ttl_seconds=?, expires_at=? "
@@ -1314,7 +1319,10 @@ def handle_cloud(
         conn.commit()
         if cursor.rowcount != 1:
             return 409, {"renewed": False, "error": "cloud lease is missing, expired, or fenced"}
-        return 200, {"renewed": True, "lease": _cloud_lease_payload(_fetch_cloud_lease(conn, lease_id), now=now)}
+        row = _fetch_cloud_lease(conn, lease_id)
+        if row is None:
+            raise FleetHubError(f"cloud lease {lease_id!r} disappeared after renew")
+        return 200, {"renewed": True, "lease": _cloud_lease_payload(row, now=now)}
     cursor = conn.execute(
         "UPDATE cloud_leases SET state=?, released_at=? WHERE lease_id=? AND owner_node=? AND holder_token=? AND released_at IS NULL",
         (request["state"], now_iso, lease_id, node, holder),
