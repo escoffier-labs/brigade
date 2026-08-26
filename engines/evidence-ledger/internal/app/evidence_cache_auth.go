@@ -2,7 +2,6 @@ package app
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -38,7 +37,22 @@ import (
 // with a typed error rather than degrading to a follow-the-symlink,
 // no-owner-check fallback. Tests simulate those platforms by overriding the
 // support seam below.
+//
+// Round 5 (#1201): after the safe directory-relative ENOENT, missing-key
+// creation used to return to the absolute pathname, so a data directory
+// swapped in between validation and creation received the fresh key material
+// — or an attacker-planted candidate file at that pathname was adopted as the
+// create-race "winner". One validated data-directory descriptor is now held
+// across the entire miss-or-create sequence: both the probe and the exclusive
+// creation are openat operations against that held descriptor and cannot be
+// redirected by renaming or replacing the pathname afterwards.
 var evidenceMACKeyPlatformSupported = defaultEvidenceMACKeyPlatformSupported
+
+// evidenceMACKeyAfterMissProbe runs after a directory-relative ENOENT and
+// before exclusive creation. Production leaves it nil; round-5 tests
+// interpose the data-directory swap exactly in that window (#1201).
+var evidenceMACKeyAfterMissProbe func()
+
 const (
 	evidenceBundleMACField   = "bundle_mac"
 	evidenceBundleMACDomain  = "miseledger.evidence.bundle-mac.v1\x00"
@@ -70,18 +84,24 @@ func evidenceBundleMACKeyPath() string {
 // loadOrCreateEvidenceBundleMACKey returns the validated key file contents,
 // creating it exclusively on first use. Every load re-validates the file
 // (regular, current uid, 0600, exactly 32 bytes) and refuses attacker-shaped
-// files with a typed error (#1201 round 2). Concurrent first use converges on
-// the O_EXCL winner; losers load the winner's key instead of generating a
-// competing one.
+// files with a typed error (#1201 round 2). The whole miss-or-create sequence
+// runs against one validated data-directory descriptor held for its duration
+// (#1201 round 5); concurrent first use converges on the openat O_EXCL
+// winner, and losers load the winner's key instead of generating a competing
+// one.
 func loadOrCreateEvidenceBundleMACKey() ([]byte, error) {
 	if !evidenceMACKeyPlatformSupported() {
 		return nil, &EvidenceMACKeyError{Reason: "key storage is not supported on this platform (no race-free no-follow open and no ownership check); refusing to seal or verify cached evidence bundles"}
 	}
-	path := evidenceBundleMACKeyPath()
-	if err := security.EnsurePrivateDir(filepath.Dir(path)); err != nil {
+	if err := security.EnsurePrivateDir(ResolvePaths().DataDir); err != nil {
 		return nil, err
 	}
-	key, err := readEvidenceBundleMACKeyFile(path)
+	dfd, err := openValidatedDataDirForAuth()
+	if err != nil {
+		return nil, &EvidenceMACKeyError{Reason: fmt.Sprintf("refusing to use data directory for key storage: %v", err)}
+	}
+	defer closeDescriptor(dfd)
+	key, err := readEvidenceBundleMACKeyAt(dfd)
 	if err == nil {
 		return key, nil
 	}
@@ -90,30 +110,35 @@ func loadOrCreateEvidenceBundleMACKey() ([]byte, error) {
 			// Another initializer claimed the file moments ago and is still
 			// writing it (#1201 round 2): wait out the write instead of
 			// failing or generating a competing key.
-			return loadEvidenceBundleMACKeyWinner(path)
+			return loadEvidenceBundleMACKeyWinner(dfd)
 		}
 		return nil, err
 	}
-	switch key, err := createEvidenceBundleMACKey(path); {
+	if evidenceMACKeyAfterMissProbe != nil {
+		evidenceMACKeyAfterMissProbe()
+	}
+	switch key, err := createEvidenceBundleMACKeyAt(dfd); {
 	case err == nil:
 		return key, nil
 	case errors.Is(err, fs.ErrExist):
 		// Lost the create race: seal against the winner's key.
-		return loadEvidenceBundleMACKeyWinner(path)
+		return loadEvidenceBundleMACKeyWinner(dfd)
 	default:
 		return nil, err
 	}
 }
 
-// loadEvidenceBundleMACKeyWinner loads the create-race winner's key,
-// tolerating the brief window in which the winner has claimed the file
-// (O_EXCL) but not yet finished writing all 32 bytes (#1201 round 2). Only
-// that transient size signature is retried; every other refusal — wrong
-// owner, mode, symlink, persistent damage — fails immediately.
-func loadEvidenceBundleMACKeyWinner(path string) ([]byte, error) {
+// loadEvidenceBundleMACKeyWinner loads the create-race winner's key from the
+// same held data-directory descriptor the creation attempt ran against
+// (#1201 round 5), tolerating the brief window in which the winner has
+// claimed the file (O_EXCL) but not yet finished writing all 32 bytes
+// (#1201 round 2). Only that transient size signature is retried; every
+// other refusal — wrong owner, mode, symlink, persistent damage — fails
+// immediately.
+func loadEvidenceBundleMACKeyWinner(dfd int) ([]byte, error) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		key, err := readEvidenceBundleMACKeyFile(path)
+		key, err := readEvidenceBundleMACKeyAt(dfd)
 		if err == nil {
 			return key, nil
 		}
@@ -129,22 +154,11 @@ func isTornKeyRead(err error) bool {
 	return errors.As(err, &keyErr) && strings.Contains(keyErr.Reason, "expected exactly 32 bytes")
 }
 
-// readEvidenceBundleMACKeyFile opens and validates the key file. The open is
-// directory-relative and no-follow on every hop (#1201 round 4): the data
-// directory itself must be a current-uid-owned directory, not a symlink, so a
-// redirected data directory cannot feed the loader an attacker-chosen
-// current-uid 0600 key. A missing file surfaces as fs.ErrNotExist so callers
-// can fall through to creation; every other refusal is a typed
+// validateEvidenceMACKeyContents validates an already-opened key handle:
+// regular file, current uid, mode 0600, bounded 33-byte read (#1201 round 2).
+// A missing file never reaches here; every other problem is a typed
 // *EvidenceMACKeyError.
-func readEvidenceBundleMACKeyFile(path string) ([]byte, error) {
-	f, err := openDataDirFile(filepath.Dir(path), filepath.Base(path))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, err
-		}
-		return nil, &EvidenceMACKeyError{Reason: fmt.Sprintf("refusing to open key file: %v", err)}
-	}
-	defer f.Close()
+func validateEvidenceMACKeyContents(f *os.File) ([]byte, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, &EvidenceMACKeyError{Reason: fmt.Sprintf("stat key file: %v", err)}
@@ -165,30 +179,6 @@ func readEvidenceBundleMACKeyFile(path string) ([]byte, error) {
 	}
 	key := make([]byte, 32)
 	copy(key, buf[:])
-	return key, nil
-}
-
-// createEvidenceBundleMACKey claims creation of the key file exclusively and
-// writes a fresh random key. Losing racers get fs.ErrExist and load the
-// winner (#1201 round 2).
-func createEvidenceBundleMACKey(path string) ([]byte, error) {
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|evidenceMACKeyCreateNoFollow, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := f.Write(key); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path) // ours alone: O_EXCL guaranteed we created it
-		return nil, err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
-		return nil, err
-	}
 	return key, nil
 }
 

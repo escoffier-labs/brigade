@@ -165,9 +165,20 @@ file.
 The engine resolves and opens `stationtrail` once per import or dry-run;
 probes, digest hashing, and execution all bind to those exact bytes: they
 are copied into an immutable private snapshot (0500 file in a 0700 directory
-under the data directory) whose digest is re-verified against the approved
-digest, and every exec runs the snapshot path. Swapping, replacing, or
-rewriting the installed binary after approval cannot change what executes.
+created relative to the validated data-directory descriptor) whose digest is
+re-verified from the held open descriptor immediately before every exec, and
+every exec runs through that descriptor (`/proc/self/fd/<fd>` on linux), so
+renaming, replacing, or rewriting either the installed binary or the snapshot
+entry after approval cannot change what executes. Platforms without
+descriptor-based execution refuse to stage the scanner at all, and there is
+deliberately no fallback to the OS temp directory.
+
+Trust boundary: these guarantees hold against processes that may tamper with
+the scanner's pathname, its PATH entry, or the snapshot entry — but a process
+running as the same uid **with write access to the data directory** is outside
+this engine's model: it can chmod files it owns, wait out validation windows,
+or displace the data directory between operations. Isolating scanners under a
+different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
 
 ## Smoke Test
 
@@ -475,7 +486,7 @@ miseledger explain "adapter contract" --source codex --json
 
 Evidence output includes a stable bundle `id`, a `miseledger://evidence/<id>` resource URI, the query, filters, generated timestamp, result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Evidence results dedupe repeated content hashes. Generated bundles are cached under MiseLedger's private cache directory and can be shown later with `miseledger evidence show`.
 
-Cached bundles carry an HMAC over their canonical reference (bundle ID, item IDs, filters, `generated_at`), keyed by a random 32-byte key at `<data-dir>/miseledger/evidence-bundle-mac.key`. The key file is validated on every load — regular file (no symlink; opened with `O_NOFOLLOW` where available), owned by the current uid, mode 0600, exactly 32 bytes — and first creation is exclusive (`O_CREATE|O_EXCL`), so concurrent initializers converge on one key. A refused key fails the operation closed. Residual: a process running as the same uid can still read or replace a valid key once validation passes; isolating scanners under a different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
+Cached bundles carry an HMAC over their canonical reference (bundle ID, item IDs, filters, `generated_at`), keyed by a random 32-byte key at `<data-dir>/miseledger/evidence-bundle-mac.key`. The key file is validated on every load — regular file (no symlink; opened with `O_NOFOLLOW` where available), owned by the current uid, mode 0600, exactly 32 bytes — and first creation is exclusive and descriptor-relative (`openat(O_CREAT|O_EXCL|O_NOFOLLOW, 0600)` against the validated data-directory handle held across the miss-or-create sequence), so concurrent initializers converge on one key and a data directory swapped in between cannot receive or interpose key material. A refused key fails the operation closed. Residual: a process running as the same uid can still read or replace a valid key once validation passes; isolating scanners under a different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
 
 The root `station.json` advertises bounded Brigade retrieval as
 `miseledger evidence <task> --markdown --limit 5`. That surface is stateful

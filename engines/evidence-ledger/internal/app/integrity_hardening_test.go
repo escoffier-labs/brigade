@@ -612,6 +612,12 @@ func TestScannerStderrIsCappedInProbeRunner(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("sh shim test requires a posix shell")
 	}
+	// Round 5 (#1201): snapshot creation no longer falls back to the OS temp
+	// directory, so the probe runner needs an initialized data directory.
+	withTempHome(t)
+	if err := security.EnsurePrivateDir(ResolvePaths().DataDir); err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	script := fmt.Sprintf("#!/bin/sh\nhead -c %d /dev/zero >&2\nexit 7\n", maxScannerStderrBytes*4)
 	if err := os.WriteFile(filepath.Join(dir, "stationtrail"), []byte(script), 0o755); err != nil {
