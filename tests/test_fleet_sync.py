@@ -550,6 +550,7 @@ class TestCli:
             "token_file": token_file,
             "allow_admin_writes": False,
             "deck_config_path": None,
+            "trust_tailscale_identity": False,
         }
 
     def test_status_json_and_table(self, hub, monkeypatch, capsys):
