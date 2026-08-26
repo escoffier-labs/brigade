@@ -11,14 +11,13 @@ import shutil
 import stat
 import subprocess
 import sys
-import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
-from . import constants, edges as edges_mod, helpers
-from .inbox_lock import scanner_inbox_run_lock, verify_inbox_lock
+from . import constants, edges as edges_mod, helpers, inbox_lock
+from .inbox_lock import verify_canonical_write_locks
 from .. import component_paths, evidence_redaction, provenance, runguard, trust_gate
 from ..untrusted import scan_handoff_injection_heuristics
 
@@ -28,18 +27,29 @@ def _task_ledger_lock_path(target: Path) -> Path:
     return path.with_name(f"{path.name}.lock")
 
 
+@contextmanager
+def _canonical_inbox_write(target: Path) -> Iterator[None]:
+    """Lock set for one canonical inbox read-modify-write (run then writer).
+
+    Inside a scanner run (``BRIGADE_SCANNER_RUN_ID``, a marker that carries no
+    capability) a self-importing child takes only the writer lock, which it
+    opens itself; outside writers take the run lock first and then the writer
+    lock. Resolved through the ``inbox_lock`` module so tests can instrument
+    either lock in one place.
+    """
+    if inbox_lock.inside_scanner_run():
+        with inbox_lock.inbox_writer_lock(target):
+            yield
+    else:
+        with inbox_lock.scanner_inbox_run_lock(target), inbox_lock.inbox_writer_lock(target):
+            yield
+
+
 def _acquire_task_ledger_lock(path: Path) -> runguard._LockOwnership:
-    deadline = time.monotonic() + 5.0
-    while True:
-        try:
-            return runguard._acquire_lock(path)
-        except runguard.RunLockError as exc:
-            if time.monotonic() >= deadline:
-                raise runguard.RunLockError(
-                    f"task ledger lock still held after waiting 5s: {path}. "
-                    "Another process may be updating .brigade/work/tasks.json; retry shortly."
-                ) from exc
-            time.sleep(0.01)
+    # Every caller takes the task-ledger lock first (task -> run -> writer), so
+    # no holder ever waits on an inbox lock here; the former bounded-retry
+    # wait/failure path only existed for the round-3 inherited-lock inversion.
+    return runguard._acquire_lock(path)
 
 
 @contextmanager
@@ -563,15 +573,15 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
 
 
 def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
-    """Publish the inbox under the run-wide writer exclusion.
+    """Publish the inbox under the canonical writer exclusion.
 
-    Every canonical writer holds the shared scanner-inbox lock so a
-    concurrent import, promote, or dismiss cannot interleave with scanner
-    stamping or rollback (reentrant, so callers already inside the lock are
-    unaffected).
+    Every canonical writer holds the writer lock (outsiders take the run lock
+    first) so a concurrent import, promote, dismiss, or scanner run cannot
+    interleave with scanner stamping or rollback (reentrant, so callers
+    already inside the lock are unaffected).
     """
-    with scanner_inbox_run_lock(target):
-        verify_inbox_lock(target)
+    with _canonical_inbox_write(target):
+        verify_canonical_write_locks(target)
         parent, name, previous_raw, previous_exists = _snapshot_import_inbox(target)
         rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
         try:
@@ -3885,14 +3895,14 @@ def _import_envelope_matches(item: dict[str, Any]) -> bool:
 
 
 def _backfill_import_provenance(target: Path) -> dict[str, Any]:
-    """Stamp inferred envelopes under the run-wide inbox writer exclusion."""
-    with scanner_inbox_run_lock(target):
+    """Stamp inferred envelopes under the canonical inbox writer exclusion."""
+    with _canonical_inbox_write(target):
         return _backfill_import_provenance_locked(target)
 
 
 def _backfill_import_provenance_locked(target: Path) -> dict[str, Any]:
     """Stamp inferred envelopes on inbox rows missing a valid matching envelope."""
-    verify_inbox_lock(target)
+    verify_canonical_write_locks(target)
     imports = _read_imports(target)
     now = helpers._now().isoformat()
     updated: list[dict[str, Any]] = []
@@ -4197,11 +4207,12 @@ def _append_import_records(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Append records as one locked inbox read-modify-write transaction.
 
-    The shared scanner-inbox lock spans the read through the publication so a
+    The canonical writer locks span the read through the publication so a
     concurrent import, promote, dismiss, or scanner run cannot interleave
-    (reentrant per process for callers already inside the lock).
+    (reentrant per process for callers already inside the lock; a marked
+    self-importing child takes only the writer lock).
     """
-    with scanner_inbox_run_lock(target):
+    with _canonical_inbox_write(target):
         return _append_import_records_locked(
             target,
             records,
@@ -4311,7 +4322,7 @@ def _append_import_records_locked(
         if identity is not None:
             existing_by_source[identity] = item
     if imported and not dry_run:
-        verify_inbox_lock(target)
+        verify_canonical_write_locks(target)
         inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
         published = False
         try:
@@ -4747,12 +4758,13 @@ def _promote_matching_imports(
 
     Each matching item is applied all-or-nothing in memory. The task ledger is
     flushed only after the late-window CAS succeeds, so a refused promote writes
-    no task files and a failed item cannot ride a later success. The task-ledger
-    lock is taken first, then the shared inbox writer lock spans the snapshot
-    through the final publication so scanner stamping or rollback cannot
-    interleave with the promote.
+    no task files and a failed item cannot ride a later success. Lock order is
+    task-ledger first, then the canonical writer locks (run then writer for an
+    outside promoter; writer only inside a run) spanning the snapshot through
+    the final publication so scanner stamping or rollback cannot interleave
+    with the promote.
     """
-    with _task_ledger_lock(target), scanner_inbox_run_lock(target):
+    with _task_ledger_lock(target), _canonical_inbox_write(target):
         return _promote_matching_imports_locked(
             target,
             kind=kind,
@@ -4768,7 +4780,7 @@ def _promote_matching_imports_locked(
     source: str | None = None,
     metadata_filters: dict[str, str] | None = None,
 ) -> tuple[list[tuple[dict[str, Any], dict[str, Any], bool]], list[tuple[dict[str, Any], Exception]]]:
-    verify_inbox_lock(target)
+    verify_canonical_write_locks(target)
     snapshot = _capture_reviewed_import_snapshot(target)
     reviewed_join = _import_snapshot_join_set(
         snapshot.items,

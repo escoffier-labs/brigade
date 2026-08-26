@@ -1051,3 +1051,10 @@ def test_stop_child_prefers_job_object_over_taskkill(monkeypatch):
     proc._stop_child(StubProcess(), None, child_job=job)
 
     assert job.calls == ["terminate"]
+
+
+def test_run_exposes_no_descriptor_passing_plumbing():
+    """#1207 round 4: scanner children inherit no descriptors (no lock adoption)."""
+    import inspect
+
+    assert "pass_fds" not in inspect.signature(proc.run).parameters

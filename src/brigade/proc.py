@@ -15,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Sequence
+from typing import Any, List, Optional
 
 _STREAM_ENCODING = "utf-8"
 MAX_CAPTURE_BYTES = 1_048_576
@@ -1001,7 +1001,6 @@ def run(
     cwd: Optional[Path] = None,
     stdin: bytes | None = None,
     process_registry: ProcessRegistry | None = None,
-    pass_fds: Sequence[int] = (),
 ) -> Result:
     windows_launch = os.name == "nt"
     child_job: _WindowsChildJob | None = None
@@ -1017,8 +1016,6 @@ def run(
             )
     try:
         popen_kwargs: dict[str, Any] = dict(_process_group_kwargs(suspend=windows_launch))
-        if not windows_launch:
-            popen_kwargs["pass_fds"] = list(pass_fds)
         process = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,

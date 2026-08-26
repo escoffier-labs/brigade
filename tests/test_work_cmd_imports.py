@@ -4523,3 +4523,169 @@ def test_read_import_inbox_raw_detects_mid_read_mutation(tmp_path, monkeypatch, 
 
     with pytest.raises(OSError, match="changed while snapshotting"):
         raw, identity, exists = ledger_mod._read_import_inbox_raw(tmp_path)
+
+
+# --- #1207 round 4: two-lock design (no inherited descriptors) -------------
+
+
+def _spawn_self_import_child(tmp_path, rows, run_id):
+    """Run one self-importing scanner child (marker env) in a second process."""
+    import os
+
+    src_root = Path(__file__).parents[1] / "src"
+    done = tmp_path / f"self-import-{run_id}.done.marker"
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade.work_cmd import ledger\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"rows = {rows!r}\n"
+        "ok = True\n"
+        "for row in rows:\n"
+        "    imported, _skipped, _dismissed, _rejected = ledger._append_import_records(\n"
+        "        target, [{'text': row, 'kind': 'task', 'source': 'manual'}],\n"
+        "        contain_provenance_errors=True)\n"
+        "    ok = ok and bool(imported)\n"
+        f"Path({str(done)!r}).write_text('done' if ok else 'failed')\n"
+        "sys.exit(0 if ok else 3)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env={**os.environ, "BRIGADE_SCANNER_RUN_ID": run_id},
+    )
+    return process, done
+
+
+def _inbox_texts(tmp_path):
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    if not inbox.exists():
+        return []
+    return [json.loads(row).get("text") for row in inbox.read_bytes().splitlines() if row.strip()]
+
+
+def test_two_concurrent_self_importing_children_serialize_on_writer_lock(tmp_path):
+    """Round 4 (F2): sibling self-imports serialize; no lost update; no run lock.
+
+    The launcher's run window is held for the whole test, and both children
+    still complete: a marked child takes only the writer lock (its own open
+    file description), so siblings exclude each other and the launcher's lock
+    is untouched.
+    """
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _seed_inbox(tmp_path, b'{"id":"seed","kind":"task","source":"seed","text":"seed row"}\n')
+    first_rows = [f"child-one row {index}" for index in range(6)]
+    second_rows = [f"child-two row {index}" for index in range(6)]
+    child_one, done_one = _spawn_self_import_child(tmp_path, first_rows, "run-one")
+    child_two, done_two = _spawn_self_import_child(tmp_path, second_rows, "run-two")
+    try:
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            deadline = time.monotonic() + 30
+            while not (done_one.exists() and done_two.exists()):
+                assert time.monotonic() < deadline, "marked children blocked on the launcher's run lock"
+                assert child_one.poll() in (None, 0), "child one failed"
+                assert child_two.poll() in (None, 0), "child two failed"
+                time.sleep(0.02)
+        assert child_one.wait(timeout=15) == 0
+        assert child_two.wait(timeout=15) == 0
+    finally:
+        for child in (child_one, child_two):
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=15)
+    texts = _inbox_texts(tmp_path)
+    for row in [*first_rows, *second_rows]:
+        assert row in texts
+    assert len(texts) >= 13
+
+
+def test_outside_writer_blocks_under_run_lock_then_proceeds_after_release(tmp_path):
+    """Round 4: an unmarked writer waits for run+writer, then completes."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    _seed_inbox(tmp_path, b'{"id":"seed","kind":"task","source":"seed","text":"seed row"}\n')
+    child, marker = _spawn_ledger_writer_child(tmp_path, "append")
+    try:
+        with scanners_mod._scanner_inbox_run_lock(tmp_path):
+            assert _marker_stays_absent(marker, 1.0), "outside writer ran through the held run lock"
+        assert child.wait(timeout=30) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=15)
+    assert marker.read_text() == "done"
+    assert "worker row" in _inbox_texts(tmp_path)
+
+
+def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_path):
+    """Round 4 (F3): writer-then-task overlap resolves without deadlock.
+
+    With the inherited-lock inversion gone, the task-ledger lock is taken
+    first by every legitimate caller, so holders never wait on inbox locks
+    and the former five-second wait/failure path is removed: a contended
+    acquisition fails closed immediately (typed ``RunLockError``, no spin),
+    and succeeds once the holder releases. The overlapping child therefore
+    neither hangs nor breaks exclusion.
+    """
+    import os
+
+    from brigade.work_cmd import ledger as ledger_mod
+
+    src_root = Path(__file__).parents[1] / "src"
+    acquired = tmp_path / "child.writer.acquired.marker"
+    parent_holding = tmp_path / "parent.task.held.marker"
+    parent_released = tmp_path / "parent.task.released.marker"
+    fast_failed = tmp_path / "child.task.fastfailed.marker"
+    done = tmp_path / "child.task.done.marker"
+    script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
+        "from brigade import runguard\n"
+        "from brigade.work_cmd import inbox_lock, ledger\n"
+        f"target = Path({str(tmp_path)!r})\n"
+        f"acquired = Path({str(acquired)!r})\n"
+        f"parent_holding = Path({str(parent_holding)!r})\n"
+        f"parent_released = Path({str(parent_released)!r})\n"
+        f"fast_failed = Path({str(fast_failed)!r})\n"
+        f"done = Path({str(done)!r})\n"
+        "def wait_for(marker):\n"
+        "    while not marker.exists():\n"
+        "        time.sleep(0.02)\n"
+        "with inbox_lock.inbox_writer_lock(target):\n"
+        "    acquired.write_text('1')\n"
+        "    wait_for(parent_holding)\n"
+        "    try:\n"
+        "        with ledger._task_ledger_lock(target):\n"
+        "            raise AssertionError('contended acquisition must fail')\n"
+        "    except runguard.RunLockError:\n"
+        "        fast_failed.write_text('1')\n"
+        "    wait_for(parent_released)\n"
+        "    with ledger._task_ledger_lock(target):\n"
+        "        done.write_text('done')\n"
+        "sys.exit(0)\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env={**os.environ, "BRIGADE_SCANNER_RUN_ID": "task-child"},
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not acquired.exists():
+            assert time.monotonic() < deadline, "child never acquired the writer lock"
+            time.sleep(0.02)
+        with ledger_mod._task_ledger_lock(tmp_path):
+            parent_holding.write_text("1")
+            deadline = time.monotonic() + 10
+            while not fast_failed.exists():
+                assert time.monotonic() < deadline, "child hung on the task lock instead of failing closed"
+                time.sleep(0.02)
+            assert not done.exists(), "child took the task ledger lock while we held it"
+        parent_released.write_text("1")
+        assert child.wait(timeout=30) == 0
+        assert done.exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=15)

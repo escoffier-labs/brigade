@@ -22,8 +22,10 @@ from .. import proc as proc_mod
 from ..install import apply_gitignore
 from . import constants, helpers, inbox_lock, ledger as ledger_mod, config as config_mod
 from . import sweeps as sweeps_mod
+from .inbox_lock import inbox_writer_lock as _scanner_inbox_writer_lock
 from .inbox_lock import scanner_inbox_run_lock as _scanner_inbox_run_lock
 from .inbox_lock import verify_inbox_lock as _verify_scanner_inbox_run_lock
+from .inbox_lock import verify_inbox_writer_lock as _verify_scanner_inbox_writer_lock
 
 # Historical name kept for the writer-exclusion surface's existing callers/tests.
 _scanner_inbox_lock_path = inbox_lock.inbox_lock_path
@@ -1258,13 +1260,14 @@ def _remove_scanner_inbox_at(parent: int, name: str) -> None:
 
 def _write_scanner_inbox_bytes(target: Path, data: bytes) -> None:
     """Atomically publish complete inbox bytes through a held no-follow parent."""
-    with _scanner_inbox_run_lock(target):
+    with _scanner_inbox_run_lock(target), _scanner_inbox_writer_lock(target):
         _write_scanner_inbox_bytes_locked(target, data)
 
 
 def _write_scanner_inbox_bytes_locked(target: Path, data: bytes) -> None:
-    """Publish complete inbox bytes while holding the run-wide inbox lock."""
+    """Publish complete inbox bytes while holding the run-wide and writer locks."""
     _verify_scanner_inbox_run_lock(target)
+    _verify_scanner_inbox_writer_lock(target)
     parent, name, identities = _open_scanner_inbox_parent(target, create=True)
     temporary_name = _scanner_inbox_temp_name()
     temporary = -1
@@ -1442,7 +1445,7 @@ def _bounded_jsonl_rows(raw: bytes) -> list[bytes]:
 
 def _append_scanner_inbox_bytes(target: Path, data: bytes) -> None:
     """Append scanner records by atomically publishing complete inbox bytes."""
-    with _scanner_inbox_run_lock(target):
+    with _scanner_inbox_run_lock(target), _scanner_inbox_writer_lock(target):
         existing = _scanner_inbox_bytes(target)
         separator = b"\n" if existing and not existing.endswith((b"\n", b"\r")) else b""
         _write_scanner_inbox_bytes(target, existing + separator + data)
@@ -1453,8 +1456,9 @@ def _restore_scanner_inbox_bytes(target: Path, data: bytes, exists: bool) -> Non
     if exists:
         _write_scanner_inbox_bytes(target, data)
         return
-    with _scanner_inbox_run_lock(target):
+    with _scanner_inbox_run_lock(target), _scanner_inbox_writer_lock(target):
         _verify_scanner_inbox_run_lock(target)
+        _verify_scanner_inbox_writer_lock(target)
         parent, name, identities = _open_scanner_inbox_parent(target, create=True)
         try:
             if not _scanner_inbox_parent_is_current(target, identities):
@@ -1496,8 +1500,9 @@ def _restore_scanner_inbox_snapshot_direct(
     missing and rollback refuses any inbox whose inode no longer matches the
     snapshotted one.
     """
-    with _scanner_inbox_run_lock(target):
+    with _scanner_inbox_run_lock(target), _scanner_inbox_writer_lock(target):
         _verify_scanner_inbox_run_lock(target)
+        _verify_scanner_inbox_writer_lock(target)
         parent, name, identities = _open_scanner_inbox_parent(target, create=True)
         try:
             if not _scanner_inbox_parent_is_current(target, identities):
@@ -2106,10 +2111,13 @@ def _scanner_run_one(
                 covers = scanner_isolation.prepare_isolation_covers(sandbox)
                 argv = scanner_isolation.isolated_argv(argv, covers)
             timeout_seconds = float(scanner.get("timeout") or 300)
-            # Hand the held inbox lock to the child so a self-importing
-            # scanner joins its own run's exclusion window (via
-            # BRIGADE_INBOX_LOCK_FD) instead of deadlocking against it.
-            child_env.update(inbox_lock.child_lock_env(target))
+            # Mark the child as inside-a-run so a self-importing scanner takes
+            # only the per-write writer lock (which it opens itself) instead of
+            # waiting on this launcher's run lock. The marker carries no
+            # capability: forging it yields writer-lock-only behavior and
+            # stripping it makes the child wait like an outsider, so exclusion
+            # holds either way, and no descriptor of ours is ever inherited.
+            child_env[inbox_lock.SCANNER_RUN_ENV] = run_id
             # Bounded streaming capture in its own process group: output is
             # capped, and overflow or timeout reaps the whole group so a
             # descendant holding the pipes cannot outlive the run.
@@ -2118,7 +2126,6 @@ def _scanner_run_one(
                 timeout=timeout_seconds,
                 env=child_env,
                 cwd=cwd,
-                pass_fds=inbox_lock.child_lock_pass_fds(target),
             )
         stdout = result.stdout
         stderr = result.stderr

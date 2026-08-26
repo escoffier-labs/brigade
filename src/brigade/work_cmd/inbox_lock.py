@@ -1,32 +1,51 @@
-"""Run-wide writer exclusion for the canonical import inbox.
+"""Writer exclusion for the canonical import inbox: two locks, one order.
 
-Scanner runs and every ``work_cmd`` inbox writer serialize on one adjacent
-lock file (``<target>/.brigade/work/imports/inbox.jsonl.lock``), so
-concurrent ``brigade import``, promote, dismiss, and scan transactions cannot
-interleave their read-modify-write windows with scanner stamping or rollback.
-The lock is reentrant per process so nested writer paths inside one run
-cannot self-deadlock.
+Canonical read-modify-write windows on ``.brigade/work/imports/inbox.jsonl``
+are serialized by two adjacent lock files with distinct lifetimes:
 
-The lock file itself is defended against same-UID tampering: on POSIX it is
-opened through a held no-follow directory descriptor with ``O_NOFOLLOW``
-(symlinks refused) and ``O_NONBLOCK``, then verified by ``fstat`` to be a
-regular file with exactly one link (FIFOs and hard links refused). The held
-device/inode identity is re-checked against the path before every protected
-write, so replacing the locked inode mid-run fails the holder loudly instead
-of letting later writers flock a different object. On Windows the same
-regular-file/single-link validation runs on the opened handle and exclusion
-uses an ``msvcrt`` byte-range lock; Windows cannot request no-follow at open
-time, so a symlink planted in the open-to-validation window remains a
-documented residual there. A same-UID attacker can additionally ignore the
-advisory lock entirely; launch-time inbox revalidation detects that case.
+``inbox.jsonl.lock`` (the *run lock*) is held by a scanner launcher only,
+across its whole run window (pre-run snapshot through stamping or rollback),
+so outside writers cannot interleave with the run.
 
-Self-importing scanner children are handed their launcher's held lock
-descriptor through ``BRIGADE_INBOX_LOCK_FD`` so they join the run's exclusion
-window instead of deadlocking against it. POSIX children adopt by taking a
-nonblocking ``flock`` on the inherited open file description; Windows cannot
-pass the descriptor this way, so a self-importing scanner child there still
-serializes behind the run window and must avoid canonical writer calls until
-the run releases it (documented residual).
+``inbox.jsonl.writer.lock`` (the *writer lock*) serializes each individual
+canonical write: imports, backfill, promote, dismiss, rollback, and scanner
+stamping each hold it for their critical section.
+
+Who takes what is selected by an environment marker that carries no
+capability: the launcher exports ``BRIGADE_SCANNER_RUN_ID`` to its children.
+A process that sees the marker is inside-a-run and takes ONLY the writer
+lock, which it opens itself; siblings therefore exclude each other on their
+own open file descriptions, and no child can release the launcher's run lock.
+A process without the marker acquires the run lock first (blocking flock /
+retrying msvcrt lock, so it waits while a run window is open) and then the
+writer lock. The marker is deliberately not a capability: a child that forges
+it takes only the writer lock like any other child, one that strips it waits
+on the run lock like any outsider, and neither breaks exclusion because the
+launcher's run-lock descriptor is never shared with anyone. The launcher
+itself holds the run lock and takes the writer lock around each of its own
+stamping/rollback sections.
+
+Global lock order everywhere: task-ledger lock, then run lock, then writer
+lock. Every canonical writer follows it, so no holder of an inbox lock ever
+waits on the task ledger.
+
+Both lock files are defended against same-UID tampering in exactly the same
+hardened way: on POSIX they are opened through a held no-follow directory
+descriptor with ``O_NOFOLLOW`` (symlinks refused) and ``O_NONBLOCK``, then
+verified by ``fstat`` to be a regular file with exactly one link (FIFOs and
+hard links refused). The held device/inode identity is re-checked against the
+path before every protected write, so replacing either locked inode mid-run
+fails the holder loudly instead of letting later writers flock a different
+object. On Windows both locks use the same validated regular-file/single-link
+open plus an ``msvcrt`` byte-range lock acquired on that handle; Windows
+cannot request no-follow at open time, so a symlink planted in the
+open-to-validation window remains a documented residual there. A same-UID
+attacker can additionally ignore the advisory locks entirely; launch-time
+inbox revalidation detects that case.
+
+Each lock is reentrant per process so nested writer paths inside one
+acquisition cannot self-deadlock; nested acquisitions share the outer
+cross-process acquisition.
 """
 
 from __future__ import annotations
@@ -55,36 +74,42 @@ _PROCESS_LOCK = threading.Lock()
 _LOCK_DEPTH: dict[str, int] = {}
 _ACTIVE_LOCKS: dict[str, "_HeldInboxLock"] = {}
 
-#: Environment variable used to hand the launcher's held lock to scanner
-#: children, so a self-importing scanner child joins its own run's exclusion
-#: window instead of deadlocking against it or racing it.
-INHERITED_LOCK_ENV = "BRIGADE_INBOX_LOCK_FD"
+#: Marker (not a capability) set by the scanner launcher for its children:
+#: a process that sees it is inside a scanner run and skips the run lock,
+#: taking only the writer lock for canonical writes. Forging or stripping it
+#: cannot break exclusion; see the module docstring.
+SCANNER_RUN_ENV = "BRIGADE_SCANNER_RUN_ID"
+
+
+def inside_scanner_run() -> bool:
+    """Whether this process carries the launcher's inside-a-run marker."""
+    return bool(os.environ.get(SCANNER_RUN_ENV))
 
 
 def inbox_lock_path(target: Path) -> Path:
-    """Return the lock file beside the canonical inbox."""
+    """Return the run-window lock file beside the canonical inbox."""
+    return _imports_sibling(target, "inbox.jsonl.lock")
+
+
+def inbox_writer_lock_path(target: Path) -> Path:
+    """Return the per-write serialization lock file beside the canonical inbox."""
+    return _imports_sibling(target, "inbox.jsonl.writer.lock")
+
+
+def _imports_sibling(target: Path, name: str) -> Path:
     target_root = target.expanduser().resolve()
     inbox = helpers._imports_path(target_root)
-    return inbox.with_name(inbox.name + ".lock")
+    return inbox.with_name(name)
 
 
 class _HeldInboxLock:
-    """One cross-process acquisition of the inbox lock file."""
+    """One cross-process acquisition of an inbox lock file."""
 
-    def __init__(self, key: str, parent: int | None, name: str, fd: int, *, adopted: bool = False) -> None:
+    def __init__(self, key: str, parent: int | None, name: str, fd: int) -> None:
         self.key = key
         self.parent = parent
         self.name = name
         self.fd = fd
-        self.adopted = adopted
-        self.child_fd: int | None = None
-        if not adopted and os.name == "posix":
-            try:
-                duplicate = os.dup(fd)
-                os.set_inheritable(duplicate, True)
-                self.child_fd = duplicate
-            except OSError:  # pragma: no cover - defensive; inheritance optional.
-                self.child_fd = None
         self.identity = self._identity(os.fstat(fd))
 
     @staticmethod
@@ -123,10 +148,6 @@ class _HeldInboxLock:
             raise OSError("import inbox lock was replaced while held")
 
     def release(self) -> None:
-        if self.adopted:
-            # The lock belongs to the launcher's open file description; a child
-            # must neither unlock it (shared OFD) nor close the inherited fd.
-            return
         try:
             if fcntl is not None:
                 fcntl.flock(self.fd, fcntl.LOCK_UN)
@@ -134,106 +155,73 @@ class _HeldInboxLock:
                 msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
         finally:
             os.close(self.fd)
-            if self.child_fd is not None:
-                try:
-                    os.close(self.child_fd)
-                except OSError:  # pragma: no cover - defensive.
-                    pass
             if self.parent is not None:
                 os.close(self.parent)
 
 
-def child_lock_env(target: Path) -> dict[str, str]:
-    """Environment exposing this process's held lock to scanner children."""
-    entry = _ACTIVE_LOCKS.get(str(inbox_lock_path(target)))
-    if entry is None or entry.child_fd is None:
-        return {}
-    return {INHERITED_LOCK_ENV: str(entry.child_fd)}
-
-
-def child_lock_pass_fds(target: Path) -> tuple[int, ...]:
-    """File descriptors to keep open across a scanner child exec."""
-    entry = _ACTIVE_LOCKS.get(str(inbox_lock_path(target)))
-    if entry is None or entry.child_fd is None:
-        return ()
-    return (entry.child_fd,)
-
-
-def _adopt_inherited_lock(key: str) -> _HeldInboxLock | None:
-    """Join an enclosing scanner run's lock window passed by our launcher.
-
-    Returns ``None`` when no usable inheritance exists; callers then take the
-    ordinary exclusive path. A mismatched or unusable inherited fd is ignored
-    rather than trusted, so a crafted environment can never bypass exclusion.
-    """
-    raw = os.environ.get(INHERITED_LOCK_ENV)
-    if not raw:
-        return None
-    try:
-        fd = int(raw)
-    except ValueError:
-        return None
-    try:
-        metadata = os.fstat(fd)
-    except OSError:
-        return None
-    mode = getattr(metadata, "st_mode", None)
-    nlink = getattr(metadata, "st_nlink", None)
-    if mode is None or not stat.S_ISREG(mode) or nlink != 1:
-        return None
-    held = _HeldInboxLock(key, None, str(Path(key)), fd, adopted=True)
-    try:
-        named = held._named_identity()
-    except OSError:
-        return None
-    if held.identity is not None and named != held.identity:
-        # The inherited fd names some other workspace's lock; ignore it and
-        # fall through to a normal acquisition for this target.
-        return None
-    if fcntl is not None:
-        try:
-            # Same open file description as the launcher's lock: succeeds
-            # instantly while the run holds it, and fails when it does not.
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return None
-    elif msvcrt is not None:  # pragma: no cover - Windows only.
-        # Byte-range locks are system-wide per region even for duplicated
-        # handles, so re-locking from the child would block on the launcher;
-        # trust the inherited window instead (documented residual).
-        pass
-    else:  # pragma: no cover - no locking primitive available.
-        return None
-    return held
-
-
 def verify_inbox_lock(target: Path) -> None:
-    """Re-check this process's held lock; refuse when the inode was replaced."""
+    """Re-check this process's held run lock; refuse when the inode was replaced."""
     entry = _ACTIVE_LOCKS.get(str(inbox_lock_path(target)))
     if entry is None:
         raise OSError("import inbox run lock is not held by this process")
     entry.verify()
 
 
+def verify_inbox_writer_lock(target: Path) -> None:
+    """Re-check this process's held writer lock; refuse when the inode was replaced."""
+    entry = _ACTIVE_LOCKS.get(str(inbox_writer_lock_path(target)))
+    if entry is None:
+        raise OSError("import inbox writer lock is not held by this process")
+    entry.verify()
+
+
+def verify_canonical_write_locks(target: Path) -> None:
+    """Re-check whichever locks this writer holds before protected writes.
+
+    Inside-a-run writers (marker present) hold only the writer lock, whose
+    dev/ino identity is re-checked here; outsiders hold run then writer and
+    get both re-checked.
+    """
+    if not inside_scanner_run():
+        verify_inbox_lock(target)
+    verify_inbox_writer_lock(target)
+
+
 @contextlib.contextmanager
 def scanner_inbox_run_lock(target: Path) -> Iterator[_HeldInboxLock]:
-    """Hold the workspace's inbox writer exclusion for the block.
+    """Hold the workspace's run-wide inbox exclusion for the block.
 
-    Honest Brigade writers in any process serialize on an adjacent
-    ``flock``/``msvcrt`` lock file (reentrant per process so nested writer
-    paths inside one run cannot self-deadlock). Nested acquisitions share the
-    outer cross-process acquisition.
+    Only a scanner launcher holds this across its run window; honest Brigade
+    writers in other processes serialize behind it (reentrant per process so
+    nested paths inside one holder cannot self-deadlock).
     """
-    key = str(inbox_lock_path(target))
+    with _held_inbox_lock(inbox_lock_path(target)) as held:
+        yield held
+
+
+@contextlib.contextmanager
+def inbox_writer_lock(target: Path) -> Iterator[_HeldInboxLock]:
+    """Hold the per-canonical-write inbox exclusion for the block.
+
+    Serializes one read-modify-write section across all writers: outside
+    writers (run lock first), self-importing scanner children (this lock
+    only), and the launcher's stamping/rollback sections (under its run lock).
+    Reentrant per process like the run lock.
+    """
+    with _held_inbox_lock(inbox_writer_lock_path(target)) as held:
+        yield held
+
+
+@contextlib.contextmanager
+def _held_inbox_lock(key_path: Path) -> Iterator[_HeldInboxLock]:
+    key = str(key_path)
     with _PROCESS_LOCK:
         depth = _LOCK_DEPTH.get(key, 0) + 1
         _LOCK_DEPTH[key] = depth
     owned: _HeldInboxLock | None = None
     try:
         if depth == 1:
-            owned = _adopt_inherited_lock(key)
-            if owned is None:
-                owned = _acquire_cross_process(key)
+            owned = _acquire_cross_process(key)
             _ACTIVE_LOCKS[key] = owned
         yield _ACTIVE_LOCKS[key]
     finally:
