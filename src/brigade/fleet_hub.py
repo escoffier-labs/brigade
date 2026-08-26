@@ -682,9 +682,7 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
         if field == "target":
             _reject_controls(value, field, kind="claim")
             if len(value.strip()) > CLAIM_TARGET_MAX_CHARS:
-                raise FleetHubError(
-                    f"claim field 'target' must be at most {CLAIM_TARGET_MAX_CHARS} characters"
-                )
+                raise FleetHubError(f"claim field 'target' must be at most {CLAIM_TARGET_MAX_CHARS} characters")
         request[field] = value.strip()
     for field in ("node_id", "holder"):
         if request[field] is None:
