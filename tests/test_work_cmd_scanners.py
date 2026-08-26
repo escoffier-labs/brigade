@@ -4862,12 +4862,17 @@ def test_overlapping_thread_acquisitions_share_one_owner_close_once_and_stay_exc
     # Concurrent first acquisitions must serialize their initialization.
     errors: list[BaseException] = []
     barrier = threading.Barrier(6)
+    # All racers must be inside their acquisition before any is allowed to
+    # leave; otherwise a fast thread can fully release before a slow one
+    # enters, yielding multiple ownership cycles instead of one shared owner.
+    inside_barrier = threading.Barrier(6)
 
     def racer():
         barrier.wait(timeout=30)
         try:
             with inbox_lock_mod.inbox_writer_lock(tmp_path):
                 inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
+                inside_barrier.wait(timeout=30)
         except BaseException as exc:  # pragma: no cover - surfaced below
             errors.append(exc)
 

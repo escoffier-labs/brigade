@@ -47,6 +47,15 @@ inbox revalidation detects that case.
 Each lock is reentrant per process so nested writer paths inside one
 acquisition cannot self-deadlock; nested acquisitions share the outer
 cross-process acquisition.
+
+Residuals tracked in escoffier-labs/brigade#1215: a descendant that calls
+``setsid()`` or double-forks escapes process-group reaping (``descendants_reaped``
+records that the group was reaped, not that no descendant survives); reentrancy
+is process-wide rather than thread-owned; canonical writers outside ``work_cmd``
+(operator migration, trust gate, session ops, issue ops, actions dispatch) still
+read the inbox before taking the locks; ``InboxLockTimeout`` escapes a few CLI
+paths as a traceback instead of a bounded nonzero result; and the Windows
+``LK_NBLCK`` deadline path has no native contention test yet.
 """
 
 from __future__ import annotations
