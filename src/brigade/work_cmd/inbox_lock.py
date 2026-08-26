@@ -16,9 +16,10 @@ capability: the launcher exports ``BRIGADE_SCANNER_RUN_ID`` to its children.
 A process that sees the marker is inside-a-run and takes ONLY the writer
 lock, which it opens itself; siblings therefore exclude each other on their
 own open file descriptions, and no child can release the launcher's run lock.
-A process without the marker acquires the run lock first (blocking flock /
-retrying msvcrt lock, so it waits while a run window is open) and then the
-writer lock. The marker is deliberately not a capability: a child that forges
+A process without the marker acquires the run lock first (deadline-bounded
+flock / msvcrt lock retry: it waits while a run window is open, but raises
+``InboxLockTimeout`` instead of hanging forever behind a stale holder) and
+then the writer lock under the same bound. The marker is deliberately not a capability: a child that forges
 it takes only the writer lock like any other child, one that strips it waits
 on the run lock like any outsider, and neither breaks exclusion because the
 launcher's run-lock descriptor is never shared with anyone. The launcher
@@ -51,9 +52,11 @@ cross-process acquisition.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import stat
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -67,18 +70,72 @@ except ImportError:  # pragma: no cover - Windows does not provide flock.
 try:
     import msvcrt
 except ImportError:  # pragma: no cover - POSIX does not provide msvcrt.
-    msvcrt = None  # type: ignore[assignment]
+    msvcrt = None  # type: ignore[assignment,attr-defined]
 
 
 _PROCESS_LOCK = threading.Lock()
 _LOCK_DEPTH: dict[str, int] = {}
 _ACTIVE_LOCKS: dict[str, "_HeldInboxLock"] = {}
 
+#: Default bounded window for one cross-process inbox lock acquisition. A
+#: holder that outlives its legitimacy (an escaped descendant keeping the
+#: writer lock after its direct child exited) must fail launchers and outside
+#: writers loudly instead of blocking them forever.
+DEFAULT_LOCK_DEADLINE_SECONDS = 30.0
+
+#: Poll interval while a bounded acquisition waits for a busy lock file.
+_LOCK_RETRY_INTERVAL_SECONDS = 0.05
+
 #: Marker (not a capability) set by the scanner launcher for its children:
 #: a process that sees it is inside a scanner run and skips the run lock,
 #: taking only the writer lock for canonical writes. Forging or stripping it
 #: cannot break exclusion; see the module docstring.
 SCANNER_RUN_ENV = "BRIGADE_SCANNER_RUN_ID"
+
+
+class InboxLockTimeout(TimeoutError):
+    """Typed failure when an inbox lock stayed busy past its acquisition deadline."""
+
+
+def _resolve_deadline(deadline_seconds: float | None) -> tuple[float, float]:
+    """Return ``(requested_seconds, absolute_monotonic_deadline)``."""
+    requested = DEFAULT_LOCK_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
+    return requested, time.monotonic() + requested
+
+
+def _wait_for_retry(key: str, deadline: float, requested_seconds: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise InboxLockTimeout(f"import inbox lock stayed busy for {requested_seconds:g}s: {key}")
+    time.sleep(min(_LOCK_RETRY_INTERVAL_SECONDS, remaining))
+
+
+def _flock_with_deadline(fd: int, key: str, deadline: float, requested_seconds: float) -> None:
+    if fcntl is None:  # pragma: no cover - callers guarantee availability.
+        raise OSError("fcntl is unavailable for the import inbox lock")
+    nonblocking = fcntl.LOCK_EX | getattr(fcntl, "LOCK_NB", 0)
+    while True:
+        try:
+            fcntl.flock(fd, nonblocking)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, getattr(errno, "EWOULDBLOCK", errno.EAGAIN)):
+                raise
+        _wait_for_retry(key, deadline, requested_seconds)
+
+
+def _msvcrt_lock_with_deadline(fd: int, key: str, deadline: float, requested_seconds: float) -> None:
+    if msvcrt is None:  # pragma: no cover - callers guarantee availability.
+        raise OSError("msvcrt is unavailable for the import inbox lock")
+    retryable = (errno.EACCES, errno.EAGAIN, errno.EDEADLOCK, getattr(errno, "EWOULDBLOCK", errno.EAGAIN))
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+            return
+        except OSError as exc:
+            if exc.errno not in retryable:
+                raise
+        _wait_for_retry(key, deadline, requested_seconds)
 
 
 def inside_scanner_run() -> bool:
@@ -129,6 +186,22 @@ class _HeldInboxLock:
             named = os.stat(self.key, follow_symlinks=False)
         return self._identity(named)
 
+    def _verify_live_descriptor(self) -> None:
+        """Refuse unless the held descriptor is still a valid single-link lock file.
+
+        ``fstat`` of the live descriptor fails closed on a closed or otherwise
+        stale entry and proves the descriptor still names the locked inode;
+        the path-only check below cannot see that difference.
+        """
+        metadata = os.fstat(self.fd)
+        mode = getattr(metadata, "st_mode", None)
+        nlink = getattr(metadata, "st_nlink", None)
+        if mode is None or not stat.S_ISREG(mode) or nlink != 1:
+            raise OSError("import inbox lock descriptor is not a single-link regular file")
+        live = self._identity(metadata)
+        if live is not None and live != self.identity:
+            raise OSError("import inbox lock descriptor no longer names the locked inode")
+
     def verify(self) -> None:
         """Refuse when the lock path no longer names the locked inode.
 
@@ -138,6 +211,7 @@ class _HeldInboxLock:
         """
         if self.identity is None:  # pragma: no cover - platforms without ids.
             return
+        self._verify_live_descriptor()
         try:
             named = self._named_identity()
         except FileNotFoundError as exc:
@@ -160,16 +234,23 @@ class _HeldInboxLock:
 
 
 def verify_inbox_lock(target: Path) -> None:
-    """Re-check this process's held run lock; refuse when the inode was replaced."""
-    entry = _ACTIVE_LOCKS.get(str(inbox_lock_path(target)))
+    """Re-check this process's held run lock; refuse when it is not really held.
+
+    The registry lookup happens under the module lock so an entry released by
+    an outermost exit is never observed, and the entry itself is re-validated
+    against its live descriptor.
+    """
+    with _PROCESS_LOCK:
+        entry = _ACTIVE_LOCKS.get(str(inbox_lock_path(target)))
     if entry is None:
         raise OSError("import inbox run lock is not held by this process")
     entry.verify()
 
 
 def verify_inbox_writer_lock(target: Path) -> None:
-    """Re-check this process's held writer lock; refuse when the inode was replaced."""
-    entry = _ACTIVE_LOCKS.get(str(inbox_writer_lock_path(target)))
+    """Re-check this process's held writer lock; refuse when it is not really held."""
+    with _PROCESS_LOCK:
+        entry = _ACTIVE_LOCKS.get(str(inbox_writer_lock_path(target)))
     if entry is None:
         raise OSError("import inbox writer lock is not held by this process")
     entry.verify()
@@ -188,32 +269,34 @@ def verify_canonical_write_locks(target: Path) -> None:
 
 
 @contextlib.contextmanager
-def scanner_inbox_run_lock(target: Path) -> Iterator[_HeldInboxLock]:
+def scanner_inbox_run_lock(target: Path, *, deadline_seconds: float | None = None) -> Iterator[_HeldInboxLock]:
     """Hold the workspace's run-wide inbox exclusion for the block.
 
     Only a scanner launcher holds this across its run window; honest Brigade
     writers in other processes serialize behind it (reentrant per process so
-    nested paths inside one holder cannot self-deadlock).
+    nested paths inside one holder cannot self-deadlock). Acquisition is
+    deadline-bounded: a lock held past ``deadline_seconds`` (default
+    :data:`DEFAULT_LOCK_DEADLINE_SECONDS`) raises :class:`InboxLockTimeout`.
     """
-    with _held_inbox_lock(inbox_lock_path(target)) as held:
+    with _held_inbox_lock(inbox_lock_path(target), deadline_seconds=deadline_seconds) as held:
         yield held
 
 
 @contextlib.contextmanager
-def inbox_writer_lock(target: Path) -> Iterator[_HeldInboxLock]:
+def inbox_writer_lock(target: Path, *, deadline_seconds: float | None = None) -> Iterator[_HeldInboxLock]:
     """Hold the per-canonical-write inbox exclusion for the block.
 
     Serializes one read-modify-write section across all writers: outside
     writers (run lock first), self-importing scanner children (this lock
     only), and the launcher's stamping/rollback sections (under its run lock).
-    Reentrant per process like the run lock.
+    Reentrant per process like the run lock, and deadline-bounded like it.
     """
-    with _held_inbox_lock(inbox_writer_lock_path(target)) as held:
+    with _held_inbox_lock(inbox_writer_lock_path(target), deadline_seconds=deadline_seconds) as held:
         yield held
 
 
 @contextlib.contextmanager
-def _held_inbox_lock(key_path: Path) -> Iterator[_HeldInboxLock]:
+def _held_inbox_lock(key_path: Path, *, deadline_seconds: float | None = None) -> Iterator[_HeldInboxLock]:
     key = str(key_path)
     with _PROCESS_LOCK:
         depth = _LOCK_DEPTH.get(key, 0) + 1
@@ -221,17 +304,22 @@ def _held_inbox_lock(key_path: Path) -> Iterator[_HeldInboxLock]:
     owned: _HeldInboxLock | None = None
     try:
         if depth == 1:
-            owned = _acquire_cross_process(key)
-            _ACTIVE_LOCKS[key] = owned
+            owned = _acquire_cross_process(key, deadline_seconds=deadline_seconds)
+            with _PROCESS_LOCK:
+                _ACTIVE_LOCKS[key] = owned
         yield _ACTIVE_LOCKS[key]
     finally:
+        release_owned = False
         with _PROCESS_LOCK:
             remaining = _LOCK_DEPTH.pop(key, 1) - 1
             if remaining > 0:
                 _LOCK_DEPTH[key] = remaining
-                release_owned = False
             else:
+                # Drop the registry entry atomically with the decision to
+                # release: verify_* must never observe a lock this process no
+                # longer holds, and the entry must be gone before the fd closes.
                 release_owned = True
+                _ACTIVE_LOCKS.pop(key, None)
         if release_owned and owned is not None:
             owned.release()
 
@@ -271,7 +359,7 @@ def _validate_lock_descriptor(fd: int) -> None:
         raise OSError("import inbox lock is not a single-link regular file")
 
 
-def _acquire_posix(key: str) -> tuple[int, str, int]:
+def _acquire_posix(key: str, deadline: float, requested_seconds: float) -> tuple[int, str, int]:
     parent, name = _open_lock_parent_posix(Path(key))
     try:
         fd = os.open(
@@ -288,7 +376,7 @@ def _acquire_posix(key: str) -> tuple[int, str, int]:
             _validate_lock_descriptor(fd)
             if fcntl is None:  # pragma: no cover - POSIX without flock.
                 raise OSError("flock is unavailable for the import inbox lock")
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            _flock_with_deadline(fd, key, deadline, requested_seconds)
         except BaseException:
             os.close(fd)
             raise
@@ -298,7 +386,7 @@ def _acquire_posix(key: str) -> tuple[int, str, int]:
     return parent, name, fd
 
 
-def _acquire_fallback(key: str) -> tuple[int | None, str, int]:
+def _acquire_fallback(key: str, deadline: float, requested_seconds: float) -> tuple[int | None, str, int]:
     """Acquire without dirfds; Windows residual documented in the module doc."""
     lock_path = Path(key)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -307,14 +395,9 @@ def _acquire_fallback(key: str) -> tuple[int | None, str, int]:
     try:
         _validate_lock_descriptor(fd)
         if msvcrt is not None:  # pragma: no cover - Windows only.
-            while True:
-                try:
-                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
-                    break
-                except OSError:
-                    continue
+            _msvcrt_lock_with_deadline(fd, key, deadline, requested_seconds)
         elif fcntl is not None:  # pragma: no cover - POSIX without dirfd.
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            _flock_with_deadline(fd, key, deadline, requested_seconds)
         else:  # pragma: no cover - neither primitive available.
             raise OSError("no cross-process lock primitive is available")
     except BaseException:
@@ -323,12 +406,13 @@ def _acquire_fallback(key: str) -> tuple[int | None, str, int]:
     return None, str(lock_path), fd
 
 
-def _acquire_cross_process(key: str) -> _HeldInboxLock:
+def _acquire_cross_process(key: str, *, deadline_seconds: float | None = None) -> _HeldInboxLock:
     parent_fd: int | None
+    requested_seconds, deadline = _resolve_deadline(deadline_seconds)
     if os.name == "posix" and os.open in getattr(os, "supports_dir_fd", set()):
-        parent_fd, name, fd = _acquire_posix(key)
+        parent_fd, name, fd = _acquire_posix(key, deadline, requested_seconds)
     else:
-        parent_fd, name, fd = _acquire_fallback(key)
+        parent_fd, name, fd = _acquire_fallback(key, deadline, requested_seconds)
     held = _HeldInboxLock(key, parent_fd, name, fd)
     try:
         named = held._named_identity()

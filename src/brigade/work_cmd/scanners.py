@@ -1607,6 +1607,36 @@ def _scanner_stamp_new_imports(
     before_raw: bytes | None = None,
     before_snapshot: _ScannerInboxSnapshot | None = None,
 ) -> list[str]:
+    """Stamp self-imports as one locked canonical transaction.
+
+    The writer lock spans the live inbox read through publication and
+    rollback-state capture: a concurrent marked child cannot commit into the
+    gap between the launcher's snapshot and its publication, so its row is
+    never overwritten and rollback never restores a stale pre-read state.
+    Nested acquisitions are reentrant per process.
+    """
+    with _scanner_inbox_writer_lock(target):
+        return _scanner_stamp_new_imports_locked(
+            target=target,
+            scanner=scanner,
+            run=run,
+            before_ids=before_ids,
+            before_imports=before_imports,
+            before_raw=before_raw,
+            before_snapshot=before_snapshot,
+        )
+
+
+def _scanner_stamp_new_imports_locked(
+    *,
+    target: Path,
+    scanner: dict[str, Any],
+    run: dict[str, Any],
+    before_ids: set[str],
+    before_imports: list[dict[str, Any]],
+    before_raw: bytes | None = None,
+    before_snapshot: _ScannerInboxSnapshot | None = None,
+) -> list[str]:
     if before_snapshot is not None:
         before_raw = before_snapshot.raw
     if before_raw is None:
@@ -2989,15 +3019,23 @@ def _scanners_run_payload(
                         "skipped": skipped_rows,
                     }, 1
                 _register_scanner_run_proof(scanner, run)
-                stamped_ids = _scanner_stamp_new_imports(
-                    target=target,
-                    scanner=scanner,
-                    run=run,
-                    before_ids=before_ids,
-                    before_imports=before_imports,
-                    before_raw=before_raw,
-                    before_snapshot=snapshot,
-                )
+                try:
+                    stamped_ids = _scanner_stamp_new_imports(
+                        target=target,
+                        scanner=scanner,
+                        run=run,
+                        before_ids=before_ids,
+                        before_imports=before_imports,
+                        before_raw=before_raw,
+                        before_snapshot=snapshot,
+                    )
+                except inbox_lock.InboxLockTimeout as exc:
+                    # An escaped holder must fail this run with a recorded
+                    # reason instead of hanging the launcher (and, behind its
+                    # run lock, every outside writer).
+                    run["status"] = "failed"
+                    run["error"] = f"scanner stamping could not take the inbox writer lock: {exc}"
+                    stamped_ids = []
                 run["provenance_imports_stamped"] = len(stamped_ids)
                 if stamped_ids:
                     run["stamped_import_ids"] = stamped_ids
@@ -3045,52 +3083,76 @@ def _scanners_run_payload(
             for scanner, run, path, records in ingest_payloads:
                 scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
                 try:
-                    existing_imports = _scanner_inbox_imports(target)
-                    inbox_snapshot = _scanner_inbox_bytes(target)
-                except OSError:
+                    with _scanner_inbox_writer_lock(target):
+                        # The dedup input and rollback snapshot are canonical
+                        # state: capture them under the writer lock so a
+                        # concurrent commit can neither be duplicated by the
+                        # append nor deleted by a later stale-snapshot rollback.
+                        try:
+                            existing_imports = _scanner_inbox_imports(target)
+                            inbox_snapshot = _scanner_inbox_bytes(target)
+                        except OSError:
+                            run["ingest_output"] = {
+                                "path": str(path),
+                                "created": 0,
+                                "skipped": 0,
+                                "dismissed": 0,
+                                "rejected": len(records),
+                                "rejection_reasons": {"inbox_persistence_failed": len(records)},
+                                "records": len(records),
+                                "created_import_ids": [],
+                                "skipped_source_fingerprints": [],
+                                "dismissed_source_fingerprints": [],
+                            }
+                            _write_scanner_run_receipt(run)
+                            continue
+                        inbox_exists = True
+                        try:
+                            existing_inbox = _open_scanner_inbox(target, os.O_RDONLY)
+                        except OSError:
+                            inbox_exists = False
+                        else:
+                            os.close(existing_inbox)
+                        before_files = ledger_mod._snapshot_external_file_authorities(target)
+                        imported, skipped_records, skipped_dismissed, rejected = ledger_mod._append_import_records(
+                            target,
+                            records,
+                            provenance_source=scanner_source,
+                            contain_provenance_errors=True,
+                            migrate_untrusted_identities=True,
+                            preserve_existing_raw=lambda data: _append_scanner_inbox_bytes(target, data),
+                            restore_existing_raw=lambda data, exists: _restore_scanner_inbox_bytes(
+                                target, data, exists
+                            ),
+                            existing_imports=existing_imports,
+                        )
+                        if imported:
+                            _SCANNER_RUN_PUBLICATION_SNAPSHOTS[id(run)] = {
+                                "target": target,
+                                "inbox": inbox_snapshot,
+                                "inbox_exists": inbox_exists,
+                                "proof_items": list(imported),
+                                "files": before_files,
+                            }
+                        if _scanner_run_proof(scanner, run) is not None:
+                            for item in imported:
+                                _record_scanner_import_proof(scanner, run, item)
+                except inbox_lock.InboxLockTimeout as exc:
                     run["ingest_output"] = {
                         "path": str(path),
                         "created": 0,
                         "skipped": 0,
                         "dismissed": 0,
                         "rejected": len(records),
-                        "rejection_reasons": {"inbox_persistence_failed": len(records)},
+                        "rejection_reasons": {"inbox_lock_busy": len(records)},
                         "records": len(records),
                         "created_import_ids": [],
                         "skipped_source_fingerprints": [],
                         "dismissed_source_fingerprints": [],
                     }
+                    run["error"] = f"output ingestion could not take the inbox writer lock: {exc}"
                     _write_scanner_run_receipt(run)
                     continue
-                inbox_exists = True
-                try:
-                    existing_inbox = _open_scanner_inbox(target, os.O_RDONLY)
-                except OSError:
-                    inbox_exists = False
-                else:
-                    os.close(existing_inbox)
-                before_files = ledger_mod._snapshot_external_file_authorities(target)
-                imported, skipped_records, skipped_dismissed, rejected = ledger_mod._append_import_records(
-                    target,
-                    records,
-                    provenance_source=scanner_source,
-                    contain_provenance_errors=True,
-                    migrate_untrusted_identities=True,
-                    preserve_existing_raw=lambda data: _append_scanner_inbox_bytes(target, data),
-                    restore_existing_raw=lambda data, exists: _restore_scanner_inbox_bytes(target, data, exists),
-                    existing_imports=existing_imports,
-                )
-                if imported:
-                    _SCANNER_RUN_PUBLICATION_SNAPSHOTS[id(run)] = {
-                        "target": target,
-                        "inbox": inbox_snapshot,
-                        "inbox_exists": inbox_exists,
-                        "proof_items": list(imported),
-                        "files": before_files,
-                    }
-                if _scanner_run_proof(scanner, run) is not None:
-                    for item in imported:
-                        _record_scanner_import_proof(scanner, run, item)
                 run["ingest_output"] = {
                     "path": str(path),
                     "created": len(imported),
