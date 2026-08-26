@@ -64,6 +64,7 @@ Thumbs.db
 !/scripts/verify-fast
 !/scripts/ci_pytest_shard.py
 !/scripts/verify_lock.py
+!/scripts/check_size_ratchet_baseline.py
 /skills/
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE

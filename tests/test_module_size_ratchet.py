@@ -1,4 +1,7 @@
-"""Entries may be lowered or removed, never added or raised. A new module over 2000 lines must be split before merge."""
+"""Entries may be lowered or removed, never added or raised. A new module over 2000 lines must be split before merge.
+
+CI enforces the shrink-only rule against the merge base with scripts/check_size_ratchet_baseline.py.
+"""
 
 from __future__ import annotations
 
@@ -33,8 +36,6 @@ def _production_module_sizes() -> dict[str, int]:
     sizes: dict[str, int] = {}
     for path in (REPO_ROOT / "src" / "brigade").rglob("*.py"):
         relative = path.relative_to(REPO_ROOT)
-        if "engines" in relative.parts:
-            continue
         sizes[relative.as_posix()] = _line_count(path)
     return sizes
 
@@ -65,13 +66,13 @@ def test_allowlisted_modules_never_grow() -> None:
 
 
 def test_allowlist_only_shrinks() -> None:
+    sizes = _production_module_sizes()
     stale = []
     for rel, cap in LEGACY_OVERSIZED.items():
-        path = REPO_ROOT / rel
-        if not path.is_file():
-            stale.append(f"{rel} is missing; delete its LEGACY_OVERSIZED entry (cap {cap})")
+        count = sizes.get(rel)
+        if count is None:
+            stale.append(f"{rel} is not a scanned src/brigade module; delete its LEGACY_OVERSIZED entry (cap {cap})")
             continue
-        count = _line_count(path)
         if count <= CEILING:
             stale.append(f"{rel} is {count} lines (<= {CEILING}); delete its LEGACY_OVERSIZED entry")
     assert not stale, "allowlist entries that no longer belong: " + "; ".join(stale)
