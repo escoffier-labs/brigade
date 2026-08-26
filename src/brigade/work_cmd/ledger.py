@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,37 @@ from ..untrusted import scan_handoff_injection_heuristics
 def _task_ledger_lock_path(target: Path) -> Path:
     path = helpers._tasks_path(target)
     return path.with_name(f"{path.name}.lock")
+
+
+#: Bounded window while an outside writer waits for the task-ledger lock.
+#: Patient by design so concurrent trusted writers serialize behind a brief
+#: holder instead of failing; bounded so a lost holder cannot block them
+#: forever (mirrors ``inbox_lock.DEFAULT_LOCK_DEADLINE_SECONDS``).
+TASK_LEDGER_LOCK_DEADLINE_SECONDS = inbox_lock.DEFAULT_LOCK_DEADLINE_SECONDS
+
+#: Shorter bound inside a scanner run: a marked child holding the writer lock
+#: must not pin the task-ledger lock behind another holder for long.
+SCANNER_CHILD_TASK_LEDGER_LOCK_DEADLINE_SECONDS = 5.0
+
+#: Poll interval while a bounded task-ledger acquisition waits for a busy lock.
+_TASK_LEDGER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
+
+
+class TaskLedgerLockTimeout(TimeoutError):
+    """Typed failure when the task-ledger lock stayed busy past its deadline."""
+
+
+def _task_ledger_lock_deadline_seconds() -> float:
+    """Return this process's bounded wait for the task-ledger lock.
+
+    Marked scanner children stay short so a child already holding the writer
+    lock cannot pin the task-ledger lock for a run window; outside writers get
+    the patient bounded window so concurrent trusted writers serialize instead
+    of failing immediately.
+    """
+    if inbox_lock.inside_scanner_run():
+        return SCANNER_CHILD_TASK_LEDGER_LOCK_DEADLINE_SECONDS
+    return TASK_LEDGER_LOCK_DEADLINE_SECONDS
 
 
 @contextmanager
@@ -46,10 +78,25 @@ def _canonical_inbox_write(target: Path) -> Iterator[None]:
 
 
 def _acquire_task_ledger_lock(path: Path) -> runguard._LockOwnership:
-    # Every caller takes the task-ledger lock first (task -> run -> writer), so
-    # no holder ever waits on an inbox lock here; the former bounded-retry
-    # wait/failure path only existed for the round-3 inherited-lock inversion.
-    return runguard._acquire_lock(path)
+    # Bounded retry so concurrent trusted writers serialize behind a brief
+    # holder instead of failing (the lock order task -> run -> writer means no
+    # holder ever waits on an inbox lock here). Inside a scanner run the bound
+    # is short and fails closed with ``RunLockError``: a marked child already
+    # holding the writer lock must never pin the task-ledger lock behind
+    # another holder for a long window. Outside writers are patient but still
+    # bounded, raising the typed timeout on expiry.
+    requested_seconds = _task_ledger_lock_deadline_seconds()
+    deadline = time.monotonic() + requested_seconds
+    while True:
+        try:
+            return runguard._acquire_lock(path)
+        except runguard.RunLockError as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if inbox_lock.inside_scanner_run():
+                    raise
+                raise TaskLedgerLockTimeout(f"task ledger lock stayed busy for {requested_seconds:g}s: {path}") from exc
+            time.sleep(min(_TASK_LEDGER_LOCK_RETRY_INTERVAL_SECONDS, remaining))
 
 
 @contextmanager
