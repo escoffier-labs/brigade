@@ -78,6 +78,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_feed.add_argument("--limit", type=int, default=1, help="Maximum newly created jobs (1-10). Defaults to 1.")
     p_feed.add_argument("--apply", action="store_true", help="Enqueue after validation. Default is validate only.")
 
+    p_scout_feed = grokbot_sub.add_parser(
+        "scout-feed", help="Select one approved GitHub issue for Grok Bot Repository Scout."
+    )
+    add_target(p_scout_feed)
+    p_scout_feed.add_argument("--policy", type=Path, required=True, help="Path to the approved private scout policy.")
+    p_scout_feed.add_argument("--apply", action="store_true", help="Enqueue after selection. Default is preview only.")
+
     for name, help_text in (("claim", "Claim a queued job."), ("renew", "Renew a current job lease.")):
         command = grokbot_sub.add_parser(name, help=help_text)
         add_target(command)
@@ -280,6 +287,8 @@ def _dispatch_grokbot(args, target: Path) -> int:
         return _dispatch_grokbot_ops(args, target)
     if command == "feed":
         return _dispatch_grokbot_feed(args, target)
+    if command == "scout-feed":
+        return _dispatch_grokbot_scout_feed(args, target)
     if command == "serve":
         from .. import grokbot_mcp
 
@@ -378,6 +387,37 @@ def _print_feed_result(result: dict) -> None:
     print("grokbot feed: " + " ".join(parts))
     for job in result.get("jobs", []):
         print(f"job {job['job_id']} state={job['state']}")
+
+
+def _dispatch_grokbot_scout_feed(args, target: Path) -> int:
+    """Preview or enqueue one approved scout without exposing policy content."""
+    from .. import grokbot_scout_feed
+
+    try:
+        if args.apply:
+            result = grokbot_scout_feed.apply(target, args.policy)
+        else:
+            result = grokbot_scout_feed.preflight(target, args.policy)
+    except grokbot_scout_feed.ScoutFeedError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    _print_scout_feed_result(result)
+    return 0
+
+
+def _print_scout_feed_result(result: dict) -> None:
+    """Render the safe scout selection projection without policy or issue contents."""
+    parts = [f"created={result['created']}", f"reason={result['reason']}"]
+    if result["issue_number"] is not None:
+        parts.append(f"issue={result['issue_number']}")
+    print("grokbot scout-feed: " + " ".join(parts))
+    handle = result.get("handle")
+    if handle is not None:
+        print(f"job {handle['job_id']} state={handle['state']}")
 
 
 def _dispatch_grokbot_ops(args, target: Path) -> int:

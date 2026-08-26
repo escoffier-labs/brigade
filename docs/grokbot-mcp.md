@@ -84,6 +84,40 @@ The first command validates only and writes no queue state. `--apply` is require
 
 The command does not schedule itself. systemd, cron, OpenClaw, or another operator may run an approved manifest later. Repeated runs are safe through the existing idempotency store.
 
+## Approved issue selector
+
+`scout-feed` finds one open GitHub issue for a Repository Scout job. The explicit GitHub approval label is the operator gate: the command only considers issues carrying the label named in the private policy. It does not read issue titles, bodies, or comments into queue state or command output.
+
+Store the policy as a regular file owned by the current user and readable only by that owner. Do not use a symlink. For example:
+
+```json
+{
+  "schema": "brigade.grokbot.scout-feed.v1",
+  "approved": true,
+  "repository": "example/brigade",
+  "approval_label": "grokbot-scout-approved",
+  "base_ref": "main",
+  "ownership_paths": ["src/brigade", "tests"],
+  "verification_commands": [".venv/bin/pytest -q tests/test_grokbot_scout_feed.py"],
+  "timeout_seconds": 7200,
+  "daily_limit": 3
+}
+```
+
+```bash
+chmod 600 /etc/brigade/grokbot-scout-feed.json
+brigade run cloud grokbot scout-feed --target . --policy /etc/brigade/grokbot-scout-feed.json
+brigade run cloud grokbot scout-feed --target . --policy /etc/brigade/grokbot-scout-feed.json --apply
+```
+
+The first command is preview-only. `--apply` may create at most one job per invocation. `daily_limit` includes every Repository Scout job created that UTC day, including failed and expired attempts. The adapter cannot infer the remaining Grok Bot quota percentage.
+
+An operator may run the apply command hourly with systemd. Replace the executable and policy paths with the local approved locations:
+
+```bash
+systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-scout-feed --collect /usr/local/bin/brigade run cloud grokbot scout-feed --target /srv/brigade --policy /etc/brigade/grokbot-scout-feed.json --apply
+```
+
 ## Current limits
 
 `setup` writes non-secret configuration and bearer references only. The operator still provisions Grok Bot routines and secrets. This work does not commission a Grok Bot and does not prove weekly quota attribution.
