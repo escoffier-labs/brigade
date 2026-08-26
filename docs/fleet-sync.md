@@ -133,22 +133,31 @@ after the journal write completes and the lock is released):
 - When a spool exists, new events are appended to it and the spool is flushed
   in order (100 per request) so the hub never sees a node's events out of
   sequence. `brigade fleet flush` drains it explicitly.
+- Hub traffic never uses a proxy (#1154): the client's opener is built with
+  an empty `ProxyHandler`, so `HTTP_PROXY`/`HTTPS_PROXY` can neither receive
+  the bearer token nor blackhole tailnet requests. Prefer HTTPS via Tailscale
+  Serve where possible. Redirects are followed only within the same origin,
+  compared with default ports normalized (`http://hub` and `http://hub:80`
+  are one origin); a cross-origin 302 is refused instead of replaying the
+  Authorization header to another host (#1157).
+- The spool is private (#1154): the spool directory is created 0700, spool,
+  lock, and temp files are created 0600 (existing files forced back to 0600
+  on every open), opens are no-follow (`O_NOFOLLOW`
+  where available) and refuse non-regular files and symlinked spool
+  directories, and atomic rewrites use
+  exclusive, unpredictable temp names in the spool directory. The
+  directory's privacy is enforced through a descriptor, not the path
+  (#1157 round 2): it is opened `O_DIRECTORY|O_NOFOLLOW`, forced to 0700
+  via `fchmod`, and re-stat'ed through the same descriptor; lock and spool
+  files are opened `dir_fd` against that validated descriptor. Atomic
+  rewrites are descriptor-scoped too (#1157 round 3): the temp file is
+  opened `O_CREAT|O_EXCL|O_NOFOLLOW` with an unpredictable name and the
+  replace is issued with `src_dir_fd`/`dst_dir_fd`, so both resolve inside
+  the validated directory and a concurrent directory swap under the old
+  path cannot redirect them. When 0700
+  cannot be applied or verified, writes are refused (an event stays
+  undelivered) rather than written to a possibly-readable directory.
 - `brigade fleet status [--all] [--json]`.
-
-## Phase 4 claims
-
-The claim key is the bare workspace directory name, matching the `repo` key
-on fleet events. Unrelated repositories with the same directory basename
-therefore arbitrate against each other. Separate worktrees of one repository
-have different directory names and do not arbitrate against each other when
-each resolves its own workspace identity. If they instead resolve the
-per-user `~/.brigade/node.toml` fallback, every such worktree under the home
-directory uses the home directory name and arbitrates on that shared key.
-
-Claims are best-effort protection layered over the local run lock. If the hub
-rejects the configured token with HTTP 401 or 403, the client logs one WARNING
-(carrying the hub's message) and continues under the local lock alone, just as
-it does when the hub is unreachable.
 
 ## Phase 3 surface
 
@@ -192,6 +201,67 @@ phone over Tailscale:
 - No token, cookie value, or claim holder token is ever rendered; the
   response carries the same CSP / no-store / no-referrer headers as
   `brigade center serve`.
+
+## Phase 4 claims
+
+The claim key is the bare workspace directory name, matching the `repo` key
+on fleet events. Unrelated repositories with the same directory basename
+therefore arbitrate against each other. Separate worktrees of one repository
+have different directory names and do not arbitrate against each other when
+each resolves its own workspace identity. If they instead resolve the
+per-user `~/.brigade/node.toml` fallback, every such worktree under the home
+directory uses the home directory name and arbitrates on that shared key.
+
+Claims are best-effort protection layered over the local run lock. If the hub
+rejects the configured token with HTTP 401 or 403, the client logs one WARNING
+(carrying the hub's message) and continues under the local lock alone, just as
+it does when the hub is unreachable.
+
+Lost ownership fails closed by default (#1152): when the mid-run heartbeat
+learns another owner holds the claim (a renew answered 409 held-by-another),
+the run is aborted — with no callback the main thread is interrupted through
+the same path as Ctrl-C and the loss is logged once — so two machines never
+keep working one repo unarbitrated. The abort does not depend on the
+callback behaving (#1157 round 2): a callback that blocks is cut off after a
+bounded grace period (`CLAIM_LOST_CALLBACK_GRACE_SECONDS`) and one that
+raises `SystemExit` or `KeyboardInterrupt` is logged; the interrupt fires
+either way, after the callback has had its chance to record state. The
+grace-boundary fire and the callback-completion fire share one atomic
+check-and-set, so the abort interrupts exactly once (#1157 round 3).
+`repo_claim` accepts `on_claim_lost` to react differently, and
+`BRIGADE_FLEET_CLAIM_LOSS=continue` (or
+`claim_loss_policy="continue"`) is the documented opt-out for solo machines,
+restoring the old log-and-continue behavior. `brigade run` records a mid-run
+claim-loss abort as a failed run with failure kind `fleet-claim-lost`, never
+as "canceled by user"; the receipt is classified and written on the main
+thread from the heartbeat's marker (#1157 round 2), so a heartbeat-side
+receipt-write failure cannot downgrade the abort to a user cancel. The CLI's
+abort callbacks record their classification markers before any stderr
+diagnostic and interrupt from a `finally` (#1157 round 3), so a failed
+stderr write can neither swallow a credential-refusal abort (kind
+`fleet-credentials-rejected`) nor downgrade a lost-claim abort to a user
+cancel.
+
+Off-main-thread owners (#1157 round 2): `_thread.interrupt_main()` targets
+the process main thread, so when `repo_claim` is entered from a worker
+thread the abort is delivered cooperatively instead — the yielded decision's
+`cancel_event` is set and a WARNING names it. Guarded work entered off the
+main thread MUST observe `decision.cancel_event` and unwind promptly; that
+check is the documented requirement for non-main-thread claim owners (the
+CLI always enters on the main thread and is unaffected).
+
+Orphan cleanup (#1157): a lost acquire response schedules a background
+release that attempts **immediately**, then backs off, so a short-lived run
+still frees the row before process exit kills its daemon threads. A
+"missing" answer inside one outstanding-request uncertainty window is
+retried rather than accepted as definitive, since the abandoned acquire can
+still commit its row afterwards. At exit,
+when a heartbeat re-acquire may have committed an orphan row, the release is
+retried inline not only while the hub answers "unavailable" but also after a
+definitive "missing" (the straggler may commit right after), each retry is
+spaced across one request deadline so back-to-back retries cannot all
+complete before the straggler lands, and exhaustion
+of those retries is logged as a WARNING naming the residual TTL exposure.
 
 ## Export and optional Dolt sink
 
