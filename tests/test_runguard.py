@@ -1126,6 +1126,8 @@ def test_snapshot_payload_shape(tmp_path):
         "tracked_dirty_fingerprints": {},
         "untracked_files": [],
         "untracked_fingerprints": {},
+        "tracked_dirty_files_total": 0,
+        "untracked_files_total": 0,
     }
     assert runguard.snapshot_payload(None) is None
 
@@ -1151,6 +1153,67 @@ def test_snapshot_payload_persists_content_sensitive_fingerprints(tmp_path):
     blob = json.dumps(payload)
     assert secret not in blob
     assert all(secret not in fp for fp in payload["tracked_dirty_fingerprints"].values())
+
+
+def test_untracked_files_streams_past_capture_cap(tmp_path):
+    # Issue #1165: a >1 MiB newline-delimited untracked listing died at the
+    # generic 1 MiB child-output cap and failed the pre-run snapshot before
+    # dispatch. NUL-delimited streaming enumeration must capture it.
+    # Paths stay short so the full Windows path remains well under MAX_PATH.
+    repo = _repo(tmp_path)
+    suffix = "x" * 64
+    created: list[str] = []
+    for d in range(100):
+        rel_dir = f"d{d:02d}"
+        (repo / rel_dir).mkdir()
+        for f in range(150):
+            rel = f"{rel_dir}/f{f:04d}{suffix}"
+            (repo / rel).write_text("content\n")
+            created.append(rel)
+    listed_bytes = sum(len(rel.encode()) + 1 for rel in created)
+    assert listed_bytes > proc.MAX_CAPTURE_BYTES
+
+    paths = runguard._untracked_files(repo)
+
+    assert len(paths) == len(created)
+    assert sorted(created) == paths
+
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+    assert snapshot is not None
+    assert len(snapshot.untracked_paths) == len(created)
+
+
+def test_untracked_files_keeps_newline_names_via_nul_delimiters(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "weird\nname.txt").write_text("x\n")
+
+    paths = runguard._untracked_files(repo)
+
+    assert paths == ["weird\nname.txt"]
+
+
+def test_untracked_files_names_path_list_when_budget_exceeded(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / ("long" * 20 + "-a.txt")).write_text("a\n")
+    (repo / ("long" * 20 + "-b.txt")).write_text("b\n")
+
+    with pytest.raises(runguard.RunGuardError, match=r"untracked-path list exceeded 32 byte enumeration limit"):
+        runguard._untracked_files(repo, max_bytes=32)
+
+
+def test_snapshot_payload_summarizes_large_path_sets(tmp_path):
+    repo = _repo(tmp_path)
+    count = runguard.SNAPSHOT_RECEIPT_PATH_CAP + 10
+    for i in range(count):
+        (repo / f"u{i:04d}.txt").write_text("x\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    payload = runguard.snapshot_payload(snapshot)
+
+    assert payload is not None
+    assert payload["untracked_files_total"] == count
+    assert len(payload["untracked_files"]) == runguard.SNAPSHOT_RECEIPT_PATH_CAP
+    assert set(payload["untracked_fingerprints"]) == set(payload["untracked_files"])
 
 
 def test_changes_relative_to_snapshot_attributes_only_worker_changes(tmp_path):
@@ -1341,17 +1404,13 @@ def test_changes_relative_to_snapshot_fails_closed_when_untracked_query_fails(tm
     repo = _repo(tmp_path)
     snapshot = runguard.capture_pre_run_snapshot(repo)
 
-    real_git = runguard._git
-    calls = {"n": 0}
+    def flaky(args, **kwargs):
+        # Enumeration streams via proc.run_delimited (issue #1165); simulate
+        # git failing there instead of through the _git wrapper.
+        assert "ls-files" in args
+        return proc.DelimitedResult(128, [], "fatal: loose object")
 
-    def flaky(cwd, *args, **kwargs):
-        calls["n"] += 1
-        # First call (tracked dirty paths) succeeds; second (ls-files) fails.
-        if "ls-files" in args:
-            return proc.Result(128, "", "fatal: loose object")
-        return real_git(cwd, *args, **kwargs)
-
-    monkeypatch.setattr(runguard, "_git", flaky)
+    monkeypatch.setattr(runguard.proc, "run_delimited", flaky)
 
     with pytest.raises(runguard.RunGuardError, match="could not re-read untracked files after run"):
         runguard.changes_relative_to_snapshot(repo, snapshot)

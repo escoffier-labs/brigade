@@ -1266,6 +1266,181 @@ def test_memory_care_status_archive_candidates_include_age_reviewed_and_evidence
     assert candidate["approval_required"] is True
 
 
+def _write_memory_care_closeout(tmp_path, closeout_id, payload):
+    root = tmp_path / ".brigade" / "memory-care" / "closeouts" / closeout_id
+    root.mkdir(parents=True)
+    (root / "closeout.json").write_text(json.dumps(payload))
+
+
+def test_memory_care_health_ignores_legacy_reviewed_closeout_with_candidates(tmp_path):
+    queue_path = tmp_path / ".brigade" / "memory-care" / "decay" / "refresh-queue.json"
+    queue_path.parent.mkdir(parents=True)
+    queue_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cards": [
+                    {
+                        "card_id": "card-one",
+                        "file": "memory/cards/card-one.md",
+                        "issue_type": "stale",
+                        "safe_summary": "One stale memory card",
+                        "source_fingerprint": "memory-fp-one",
+                    }
+                ],
+            }
+        )
+    )
+    _write_memory_care_closeout(
+        tmp_path,
+        "legacy-closeout",
+        {
+            "closeout_id": "legacy-closeout",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "status": "reviewed",
+            "reason": "",
+            "candidate_count": 3,
+            "source_fingerprints": ["memory-fp-one"],
+            "safe_summary": "3 memory-care candidate(s) reviewed",
+        },
+    )
+
+    payload = memory_cmd.health(tmp_path)
+    assert payload["queue_count"] == 1
+    assert payload["latest_closeout_ignored_reason"]
+    assert any(check["name"] == "memory_care_open_issues" and check["status"] == "warn" for check in payload["checks"])
+
+    # An explicit deferred closeout with a nonblank reason still quiets the match.
+    _write_memory_care_closeout(
+        tmp_path,
+        "deferred-closeout",
+        {
+            "closeout_id": "deferred-closeout",
+            "created_at": "2026-02-01T00:00:00+00:00",
+            "status": "deferred",
+            "reason": "waiting on card owner",
+            "candidate_count": 1,
+            "source_fingerprints": ["memory-fp-one"],
+            "safe_summary": "1 memory-care candidate(s) deferred",
+        },
+    )
+    payload = memory_cmd.health(tmp_path)
+    assert payload["queue_count"] == 0
+    assert payload["latest_closeout_ignored_reason"] is None
+    assert any(check["name"] == "memory_care_open_issues" and check["status"] == "ok" for check in payload["checks"])
+
+
+def _write_memory_care_queue(tmp_path, payload):
+    queue_path = tmp_path / ".brigade" / "memory-care" / "decay" / "refresh-queue.json"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    queue_path.write_text(json.dumps(payload))
+
+
+def _valid_memory_care_card(**overrides):
+    card = {
+        "card_id": "card-one",
+        "file": "memory/cards/card-one.md",
+        "issue_type": "stale",
+        "safe_summary": "One stale memory card",
+        "source_fingerprint": "memory-fp-one",
+    }
+    card.update(overrides)
+    return card
+
+
+def test_memory_care_closeout_refuses_missing_or_invalid_queue(tmp_path, capsys):
+    # Absent queue file: refuse without writing a closeout.
+    assert memory_cmd.closeout(target=tmp_path, reason="reviewed", json_output=True) == 1
+    blocked = json.loads(capsys.readouterr().out)
+    assert blocked["status"] == "blocked"
+    assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
+
+    # Queue object missing the cards field.
+    _write_memory_care_queue(tmp_path, {"version": 1})
+    assert memory_cmd.closeout(target=tmp_path, reason="reviewed", json_output=True) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+    assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
+
+    # Non-list cards field.
+    _write_memory_care_queue(tmp_path, {"version": 1, "cards": "not-a-list"})
+    assert memory_cmd.closeout(target=tmp_path, reason="reviewed", json_output=True) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+    assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
+
+    # Card failing schema validation.
+    _write_memory_care_queue(
+        tmp_path,
+        {"version": 1, "cards": [_valid_memory_care_card(safe_summary="   ")]},
+    )
+    assert memory_cmd.closeout(target=tmp_path, reason="reviewed", json_output=False) == 1
+    assert capsys.readouterr().err
+    assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
+
+    # Deferral must hit the same guards.
+    assert memory_cmd.closeout(target=tmp_path, defer=True, reason="waiting", json_output=True) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+    assert not (tmp_path / ".brigade" / "memory-care" / "closeouts").exists()
+
+
+def test_memory_care_health_ignores_malformed_closeout_receipts(tmp_path):
+    _write_memory_care_queue(tmp_path, {"version": 1, "cards": [_valid_memory_care_card()]})
+
+    # Scalar source_fingerprints is malformed: the receipt is ignored.
+    _write_memory_care_closeout(
+        tmp_path,
+        "scalar-closeout",
+        {
+            "closeout_id": "scalar-closeout",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "status": "deferred",
+            "reason": "waiting on card owner",
+            "candidate_count": 1,
+            "source_fingerprints": "memory-fp-one",
+            "safe_summary": "1 memory-care candidate(s) deferred",
+        },
+    )
+    payload = memory_cmd.health(tmp_path)
+    assert payload["queue_count"] == 1
+    assert payload["latest_closeout_ignored_reason"]
+    assert any(check["name"] == "memory_care_open_issues" and check["status"] == "warn" for check in payload["checks"])
+
+    # A truthy non-string reason does not satisfy the deferred contract.
+    _write_memory_care_closeout(
+        tmp_path,
+        "numeric-reason-closeout",
+        {
+            "closeout_id": "numeric-reason-closeout",
+            "created_at": "2026-02-01T00:00:00+00:00",
+            "status": "deferred",
+            "reason": 42,
+            "candidate_count": 1,
+            "source_fingerprints": ["memory-fp-one"],
+            "safe_summary": "1 memory-care candidate(s) deferred",
+        },
+    )
+    payload = memory_cmd.health(tmp_path)
+    assert payload["queue_count"] == 1
+    assert payload["latest_closeout_ignored_reason"]
+
+    # Fingerprints containing non-string entries are also ignored.
+    _write_memory_care_closeout(
+        tmp_path,
+        "mixed-fingerprint-closeout",
+        {
+            "closeout_id": "mixed-fingerprint-closeout",
+            "created_at": "2026-03-01T00:00:00+00:00",
+            "status": "deferred",
+            "reason": "waiting on card owner",
+            "candidate_count": 2,
+            "source_fingerprints": ["memory-fp-one", 7],
+            "safe_summary": "2 memory-care candidate(s) deferred",
+        },
+    )
+    payload = memory_cmd.health(tmp_path)
+    assert payload["queue_count"] == 1
+    assert payload["latest_closeout_ignored_reason"]
+
+
 def test_memory_care_status_archive_candidates_are_read_only(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     _write_archive_candidate_care_config(tmp_path, stale_after_days=30)

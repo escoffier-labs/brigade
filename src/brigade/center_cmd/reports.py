@@ -135,6 +135,25 @@ def _receipt_references(payload: dict[str, Any]) -> list[str]:
     return sorted(set(refs))
 
 
+def _bounded_report_ref(payload: dict[str, Any]) -> dict[str, Any]:
+    """Bounded reference to a stored report (id, timestamps, counts, digest).
+
+    Never embeds the prior report body, so consecutive builds cannot grow
+    with history.
+    """
+    reviews = payload.get("reviews") if isinstance(payload.get("reviews"), list) else []
+    activity = payload.get("activity") if isinstance(payload.get("activity"), list) else []
+    return {
+        "report_id": payload.get("report_id"),
+        "created_at": payload.get("created_at"),
+        "generated_at": payload.get("generated_at"),
+        "path": payload.get("path"),
+        "review_count": len(reviews),
+        "activity_count": len(activity),
+        "digest": _fingerprint_payload(payload),
+    }
+
+
 def _item_key(item: dict[str, Any]) -> str:
     return f"{item.get('subsystem')}:{item.get('local_id') or item.get('id')}"
 
@@ -541,7 +560,7 @@ def report_health(
                 }
             )
     return {
-        "latest": latest,
+        "latest": _bounded_report_ref(latest),
         "latest_diff": latest_diff,
         "checks": checks,
         "issue_count": len(checks),

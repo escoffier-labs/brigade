@@ -4,6 +4,8 @@ import json
 import hashlib
 import os
 import shutil
+import subprocess
+import time
 from pathlib import Path
 
 from brigade import cli, localio, runbook_cmd
@@ -592,3 +594,38 @@ def test_runbook_run_dry_run_does_not_execute_version_cmd(tmp_path, capsys):
     receipt = json.loads(capsys.readouterr().out)
     assert version_marker.read_text() == "ran"
     assert receipt["pin_checks"][0]["version_output"] == "tool 1.2.3"
+
+
+def test_runbook_step_timeout_reaps_descendants_and_records_receipt(tmp_path, capsys):
+    marker = f"brigade-1190-{os.getpid()}"
+    inner = f"import subprocess, time; subprocess.Popen(['sh', '-c', 'exec -a {marker} sleep 300']); time.sleep(300)"
+    runbook = tmp_path / "timeout.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "id": "timeout",
+                "steps": [
+                    {
+                        "id": "spawner",
+                        "run": f"python3 -c {json.dumps(inner)}",
+                        "timeout_seconds": 3,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 1
+    receipt = json.loads(capsys.readouterr().out)
+    step = receipt["steps"][0]
+    assert step["timed_out"] is True
+    assert step["exit_code"] == 124
+    receipt_path = tmp_path / ".brigade" / "runbooks" / "runs" / receipt["run_id"] / "receipt.json"
+    assert receipt_path.is_file()
+
+    probe = subprocess.run(["pgrep", "-f", marker], stdout=subprocess.PIPE, check=False)
+    deadline = time.time() + 5
+    while probe.returncode == 0 and time.time() < deadline:
+        time.sleep(0.2)
+        probe = subprocess.run(["pgrep", "-f", marker], stdout=subprocess.PIPE, check=False)
+    assert probe.returncode != 0, f"descendant survived timeout: {probe.stdout.decode()}"

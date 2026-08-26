@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import proc as brigade_proc
 from . import receipt_signing, verification_contract
 from .localio import (
     canonical_json_digest as _canonical_json_digest,
@@ -35,6 +36,8 @@ DANGEROUS_PATTERNS = (
     re.compile(r"\breboot\b"),
     re.compile(r":\s*\(\s*\)\s*\{"),
 )
+
+_TIMEOUT_DRAIN_SECONDS = 2.0
 
 # Interpreters that, with an inline-script flag, run an arbitrary embedded
 # command and so defeat a first-token (or even whole-command) allowlist.
@@ -378,35 +381,34 @@ def _shell_or_argv_command(
     cwd: Path,
     timeout: int,
 ) -> tuple[int, bool, str, str]:
-    """Run a contract verifier/rollback command. Returns exit_code, timed_out, stdout, stderr."""
+    """Run a contract verifier/rollback command. Returns exit_code, timed_out, stdout, stderr.
+
+    Timeouts go through the shared process-group cleanup path
+    (``brigade.proc.terminate_process_tree``) so descendant processes are
+    reaped exactly as they would be on a normal-exit cancellation.
+    """
     try:
-        if isinstance(command, list):
-            completed = subprocess.run(
-                command,
-                cwd=cwd,
-                shell=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                check=False,
-            )
-        else:
-            completed = subprocess.run(
-                command,
-                cwd=cwd,
-                shell=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                check=False,
-            )
-        return completed.returncode, False, completed.stdout, completed.stderr
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        return 124, True, stdout, stderr
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            shell=isinstance(command, str),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **brigade_proc.process_group_kwargs(),
+        )
+    except OSError:
+        return 127, False, "", "command launch failed"
+    try:
+        stdout, stderr = process.communicate(timeout=max(timeout, 0))
+        return process.returncode, False, stdout or "", stderr or ""
+    except subprocess.TimeoutExpired:
+        brigade_proc.terminate_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=_TIMEOUT_DRAIN_SECONDS)
+        except (subprocess.TimeoutExpired, ValueError):
+            stdout, stderr = "", ""
+        return 124, True, stdout or "", stderr or ""
 
 
 def _resolve_verifier_command(
@@ -621,25 +623,14 @@ def _execute_plan(
         stdout_path = run_dir / f"{step['index']:02d}-{step['id']}.stdout.log"
         stderr_path = run_dir / f"{step['index']:02d}-{step['id']}.stderr.log"
         try:
-            completed = subprocess.run(
+            exit_code, timed_out, stdout, stderr = _shell_or_argv_command(
                 step["run"],
                 cwd=step["cwd"],
-                shell=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
                 timeout=step["timeout_seconds"],
-                check=False,
             )
-            stdout = completed.stdout
-            stderr = completed.stderr
-            exit_code = completed.returncode
+        except OSError:
+            exit_code = 127
             timed_out = False
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            exit_code = 124
-            timed_out = True
         stdout_path.write_text(stdout)
         stderr_path.write_text(stderr)
         row = {

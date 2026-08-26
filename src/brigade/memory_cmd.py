@@ -1170,7 +1170,7 @@ def health(target: Path) -> dict[str, Any]:
     if queue_payload is None:
         checks.append({"status": "warn", "name": "memory_care_queue", "detail": f"missing at {queue_path}"})
     closeout = _latest_closeout(target)
-    closed = set(closeout.get("source_fingerprints", [])) if isinstance(closeout, dict) else set()
+    closed, closeout_ignored_reason = _closeout_quiet_set(closeout)
     top_issue = None
     queue_count = 0
     if isinstance(queue_payload, dict) and isinstance(queue_payload.get("cards"), list) and queue_payload["cards"]:
@@ -1271,6 +1271,7 @@ def health(target: Path) -> dict[str, Any]:
         },
         "archive_candidates": archive_candidates,
         "latest_closeout": closeout,
+        "latest_closeout_ignored_reason": closeout_ignored_reason,
         "search_recall": search_recall_status(target),
     }
 
@@ -1671,6 +1672,46 @@ def _latest_closeout(target: Path) -> dict[str, Any] | None:
     return payloads[0] if payloads else None
 
 
+def _closeout_quiet_set(closeout: dict[str, Any] | None) -> tuple[set[str], str | None]:
+    """Return (fingerprints to quiet, reason the receipt was ignored).
+
+    Closeouts could historically write status=reviewed with unresolved
+    candidates still in the queue (#1191). Such receipts are not honored:
+    only a reviewed closeout with no candidates/fingerprints, or a deferred
+    closeout with a nonblank string reason, may quiet matching queue
+    fingerprints. Malformed receipts are ignored with a reported reason.
+    """
+    if not isinstance(closeout, dict):
+        return set(), None
+    raw_fingerprints = closeout.get("source_fingerprints")
+    if not isinstance(raw_fingerprints, list) or any(
+        not isinstance(item, str) or not item.strip() for item in raw_fingerprints
+    ):
+        return set(), "closeout receipt has malformed source_fingerprints; not quieting queue fingerprints"
+    fingerprints = set(raw_fingerprints)
+    status = str(closeout.get("status") or "")
+    try:
+        candidate_count = int(closeout.get("candidate_count") or 0)
+    except (TypeError, ValueError):
+        candidate_count = 0
+    if status == "deferred":
+        reason_value = closeout.get("reason")
+        if isinstance(reason_value, str) and reason_value.strip():
+            return fingerprints, None
+        return set(), "deferred closeout has a blank or non-string reason; not quieting queue fingerprints"
+    if status == "reviewed" and candidate_count == 0 and not fingerprints:
+        return set(), None
+    if status == "reviewed":
+        return (
+            set(),
+            (
+                "legacy reviewed closeout carries "
+                f"{candidate_count} candidate(s) and {len(fingerprints)} fingerprint(s); not quieting"
+            ),
+        )
+    return set(), None
+
+
 def closeout(*, target: Path, reason: str | None = None, defer: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -1678,12 +1719,66 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
         return 2
     try:
         config = _config_or_default(target)
-        queue = _load_json_file(_queue_path(target, config))
+        queue_path = _queue_path(target, config)
+        queue = _load_json_file(queue_path)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"error: cannot read memory-care queue: {exc}", file=sys.stderr)
         return 2
-    cards_value = queue.get("cards") if isinstance(queue, dict) else None
+    if not isinstance(queue, dict):
+        message = f"error: memory-care queue is missing or not a JSON object at {queue_path}; closeout refused"
+        if json_output:
+            print(json.dumps({"status": "blocked", "error": message, "candidate_count": 0}, indent=2, sort_keys=True))
+        else:
+            print(message, file=sys.stderr)
+        return 1
+    validation_errors = _validate_queue(queue, path=queue_path)
+    if validation_errors:
+        summary = "; ".join(validation_errors[:5])
+        message = f"error: memory-care queue failed validation; closeout refused. {summary}"
+        cards_value = queue.get("cards")
+        candidate_count = len(cards_value) if isinstance(cards_value, list) else 0
+        if json_output:
+            print(
+                json.dumps(
+                    {"status": "blocked", "error": message, "candidate_count": candidate_count},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(message, file=sys.stderr)
+        return 1
+    cards_value = queue.get("cards")
     cards = cards_value if isinstance(cards_value, list) else []
+    reason_text = (reason or "").strip()
+    if defer and not reason_text:
+        message = "error: deferred memory-care closeout requires a nonblank --reason"
+        if json_output:
+            print(
+                json.dumps(
+                    {"status": "blocked", "error": message, "candidate_count": len(cards)}, indent=2, sort_keys=True
+                )
+            )
+        else:
+            print(message, file=sys.stderr)
+        return 1
+    if not defer and cards:
+        message = (
+            f"error: memory-care refresh queue has {len(cards)} unresolved candidate(s); "
+            "closeout cannot mark them reviewed. Use --defer with a nonblank --reason to "
+            "defer explicitly, or resolve the queue first."
+        )
+        if json_output:
+            print(
+                json.dumps(
+                    {"status": "blocked", "error": message, "candidate_count": len(cards)},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(message, file=sys.stderr)
+        return 1
     fingerprints = [
         str(card.get("source_fingerprint"))
         for card in cards
@@ -1694,7 +1789,7 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
         "closeout_id": closeout_id,
         "created_at": _utc_iso(),
         "status": "deferred" if defer else "reviewed",
-        "reason": reason or "",
+        "reason": reason_text,
         "candidate_count": len(cards),
         "source_fingerprints": fingerprints,
         "safe_summary": f"{len(cards)} memory-care candidate(s) {'deferred' if defer else 'reviewed'}",

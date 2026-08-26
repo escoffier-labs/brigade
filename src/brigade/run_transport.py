@@ -27,6 +27,11 @@ _GROK_CONTINUATION_PROMPT = (
     "Do not narrate progress or repeat the task."
 )
 INJECTION_QUARANTINE_KIND = "injection-quarantine"
+# Adapter kind emitted when the combined app-server output stream crossed the
+# capture cap (#1144). The cap is a Brigade transport artifact, not a seat
+# health signal: salvageable worker text is delivered bounded with the
+# truncation recorded, and the seat is never retried or quarantined for it.
+OUTPUT_LIMIT_FAILURE_KIND = "output-limit"
 # Provenance records endpoint hosts, never raw URL or secret-ref values.
 # Malformed / opaque *_BASE_URL(_REF) values use this marker instead.
 INVALID_ENDPOINT_HOST = "invalid-endpoint"
@@ -333,6 +338,16 @@ class WorkerResult:
     endpoint_host: str | None = None
     attempts: tuple[WorkerAttempt, ...] = ()
     provenance: dict[str, Any] | None = None
+    output_truncated: bool = False
+
+
+def _is_output_limit_failure(result: agents.AgentResult | WorkerResult) -> bool:
+    return getattr(result, "failure_kind", None) == OUTPUT_LIMIT_FAILURE_KIND
+
+
+def _is_appserver_output_limit(result: agents.AgentResult) -> bool:
+    """#1144 applies to the app-server turn stream; direct CLI overflow keeps its own contract."""
+    return _is_output_limit_failure(result) and getattr(result, "transport", None) == "codex-app-server"
 
 
 class PromptBuilder(Protocol):
@@ -835,6 +850,8 @@ def dispatch(
             attempts: list[WorkerAttempt] | None = None,
         ) -> WorkerResult:
             bounded_text = message_envelope.truncate_utf8(result.text)
+            over_cap = _is_output_limit_failure(result)
+            preserved = _is_appserver_output_limit(result) and bool(bounded_text.strip())
             captured = message_envelope.emit(
                 bounded_text,
                 kind="worker-result",
@@ -847,7 +864,7 @@ def dispatch(
                 session_harness=terminal_agent.cli,
             )
             delivered_text = bounded_text if captured.delivered else ""
-            delivered_ok = result.ok if captured.delivered else False
+            delivered_ok = (result.ok or preserved) if captured.delivered else False
             delivered_detail = result.detail if captured.delivered else (captured.reason or result.detail)
             return WorkerResult(
                 worker=assignment.worker,
@@ -887,6 +904,7 @@ def dispatch(
                 ),
                 attempts=tuple(attempts or ()),
                 provenance=captured.envelope,
+                output_truncated=over_cap,
             )
 
         initial_started = _attempt_timestamp()
@@ -897,6 +915,12 @@ def dispatch(
             if result.ok:
                 return finish(result, agent)
             finished = finish(result, agent)
+            if _is_appserver_output_limit(result):
+                # #1144: an over-cap capture is a transport artifact, not a
+                # seat-health signal. Preserved text was already delivered as
+                # ok above; an empty salvage must neither same-seat retry nor
+                # quarantine the seat.
+                return finished
             failure = failure_for_worker_result(finished)
             decision = decide_retry(failure, seat=assignment.worker, state=quarantine_state)
             if not decision.should_retry_same_seat:

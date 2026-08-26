@@ -31,6 +31,9 @@ SIGNED_OK = "SIGNED-OK"
 SIGNATURE_MISMATCH = "SIGNATURE-MISMATCH"
 UNVERIFIABLE_SIGNATURE = "UNVERIFIABLE-SIGNATURE"
 MISELEDGER_SCHEMA = "miseledger.adapter.v1"
+# Receipts are Brigade-written artifacts of workspace activity, not session
+# captures; classify them (and their redaction scope) as workspace origin.
+RECEIPT_ORIGIN = "workspace"
 MISELEDGER_SOURCE = {"kind": "brigade", "name": "Brigade", "version": __version__}
 MISELEDGER_ACTOR = {"external_id": "brigade:system", "type": "system", "name": "Brigade"}
 MISELEDGER_CURSOR_REL = Path(".brigade") / "work" / "miseledger-export-cursor.json"
@@ -1194,7 +1197,7 @@ def _stamp_receipt_provenance(
         source_system="receipts",
         source_kind=source_kind,
         source_producer=producer,
-        origin="agent-session",
+        origin=RECEIPT_ORIGIN,
         repository_id=repo_id,
         repository_revision=revision,
         session_id=session_id,
@@ -1221,7 +1224,7 @@ def _stamp_receipt_provenance(
 
 
 def _receipt_redact(text: str) -> tuple[str, dict[str, Any], bool]:
-    return evidence_redaction.apply_and_record(text, origin="agent-session")
+    return evidence_redaction.apply_and_record(text, origin=RECEIPT_ORIGIN)
 
 
 def _receipt_injection(text: str) -> tuple[str, int, list[str]]:

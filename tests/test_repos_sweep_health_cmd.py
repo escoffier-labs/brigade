@@ -402,3 +402,30 @@ def test_repos_sweep_integrates_with_report_center_work_and_release(tmp_path, mo
     release = json.loads(capsys.readouterr().out)
     assert release["evidence"]["repo_fleet"]["sweep"]["latest"]["sweep_id"] == sweep["sweep_id"]
     assert any("repo fleet sweep" in warning for warning in release["warnings"])
+
+
+def test_repos_fleet_health_latest_report_is_bounded_reference(tmp_path, capsys):
+    from brigade import repos_cmd
+
+    _init_repo(tmp_path)
+    repo = tmp_path / "repo-alpha"
+    _init_repo(repo)
+    _seed_workspace(tmp_path, repo)
+    for _ in range(3):
+        assert repos_cmd.report_build(target=tmp_path, json_output=True) == 0
+        capsys.readouterr()
+    health = repos_cmd.health(tmp_path)
+    latest_ref = health["report"]["latest"]
+    assert isinstance(latest_ref, dict)
+    assert latest_ref["report_id"]
+    assert latest_ref["digest"]
+    assert "repos" not in latest_ref
+    assert "warnings" not in latest_ref
+    fleet_reports = sorted((tmp_path / ".brigade" / "repos" / "reports").iterdir())
+    sizes = [
+        (path / "FLEET_EVIDENCE.json").stat().st_size
+        for path in fleet_reports
+        if (path / "FLEET_EVIDENCE.json").is_file()
+    ]
+    assert len(sizes) == 3
+    assert max(sizes) == min(sizes)

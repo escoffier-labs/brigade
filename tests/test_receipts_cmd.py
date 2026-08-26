@@ -245,7 +245,7 @@ def test_receipts_export_miseledger_emits_required_verify_fields_and_artifacts(t
         "kind": "verify-receipt",
         "producer": "receipts_cmd._verify_miseledger_item",
     }
-    assert env["origin"] == "agent-session"
+    assert env["origin"] == "workspace"
     assert env["modality"] == "tool-output"
     assert env["trust"]["label"] == "untrusted"
     assert env["trust"]["assigned_by"] == "ingest:receipts_cmd.index_miseledger_receipts"

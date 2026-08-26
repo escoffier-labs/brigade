@@ -315,7 +315,7 @@ git worktree) or the user roster at `~/.brigade/roster.toml`, because the
 minimal starter would shadow every seat that roster configures. Pass `--force`
 to scaffold a workspace roster anyway.
 
-Pass `--review-model <id>` to add a reviewer seat pinned to a different model than the coder (for example `brigade roster init --review-model gpt-5.3-codex-spark`). A same-model reviewer tends to agree with the coder's narration; pinning the review seat to another model makes that independence structural, and `roster doctor` validates the pin like any other seat.
+Pass `--review-model <id>` to add a reviewer seat pinned to a different model than the coder (for example `brigade roster init --review-model gpt-5.6-terra`). A same-model reviewer tends to agree with the coder's narration; pinning the review seat to another model makes that independence structural, and `roster doctor` validates the pin like any other seat.
 
 That writes `.brigade/roster.toml` with a Codex orchestrator, a Codex coder, and an optional Ollama local researcher:
 
@@ -1061,7 +1061,7 @@ Shared skill registry commands:
 - `brigade skills compatibility security-review` reports supported, installed, planned, and blocked harness targets for a skill, plus independent source, renderer, and local-copy drift, install history counts, trust score, and changelog status.
 - `brigade skills history security-review --harness codex` lists local install receipts for one skill and harness from `.brigade/skills/installs/history.jsonl`.
 - `brigade skills diff security-review --harness codex` compares the installed harness file against the bundled Brigade package template by default, even when a same-named registry entry exists. Pass `--against registry` to diff against the local `.brigade/skills/registry/` copy instead. Bundled skills report source, renderer, and local-edit drift separately. Receipts from older schemas report unknown provenance instead of guessing.
-- `brigade skills fleet status` reports installed skill copies across harnesses in stable order and prints one forced reinstall command for each supported stale or missing copy. Copies whose current metadata no longer supports their harness are listed separately as unsupported and get an uninstall command. Unknown legacy copies are listed without an automatic repair command.
+- `brigade skills fleet status` reports installed skill copies across harnesses in stable order and prints one forced reinstall command for each supported stale or missing copy. Copies whose current metadata no longer supports their harness are listed separately as unsupported and get an uninstall command. Unknown legacy copies are listed without an automatic repair command. Copies whose install path is a symlink resolving outside the workspace are reported as `external` and left untouched; the audit continues with the remaining copies, while install and update paths still refuse to write through such a symlink.
 - `brigade skills rollback security-review --target claude` restores the latest rollback snapshot captured before a forced reinstall.
 - `brigade skills inbox add ./some-skill`, `list`, `show`, `diff`, `accept`, and `reject` keep agent-proposed skills in review before they enter the registry.
 - Skill proposals created by `brigade learn propose-skill` use the same inbox. They remain unreviewed until accepted and are never installed automatically.

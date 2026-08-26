@@ -69,6 +69,21 @@ Migration is an operator-run comparison, not an automatic conversion.
 3. Confirm that the test bot receives the matching role-specific tool inventory, then run its passing non-mutating canary.
 4. Keep the old sidecar available until the comparison has passed. Remove it only after the operator decides to cut over.
 
+## Approved feed
+
+The listener only consumes jobs already in the local queue. To put approved work there, write a private manifest and run the local feed command. The command never invents tasks, reads chat, selects GitHub issues, or changes approval state. It is not added to any MCP inventory.
+
+The manifest is a regular file owned by the current user and not group- or world-writable. Schema `brigade.grokbot.feed.v1` requires `approved: true`, a non-empty operator label, and an `entries` array. Each entry has an `idempotency_key` plus the existing Grok Bot job `spec`.
+
+```bash
+brigade run cloud grokbot feed --target . --manifest /path/to/approved-feed.json
+brigade run cloud grokbot feed --target . --manifest /path/to/approved-feed.json --apply --limit 1
+```
+
+The first command validates only and writes no queue state. `--apply` is required to enqueue. `--limit` bounds newly created jobs from 1 through 10 and defaults to 1. Known idempotency records do not consume the limit. The feed stops on the first invalid entry and performs no enqueue when validation fails. Output is counts and safe job projections only.
+
+The command does not schedule itself. systemd, cron, OpenClaw, or another operator may run an approved manifest later. Repeated runs are safe through the existing idempotency store.
+
 ## Current limits
 
 `setup` writes non-secret configuration and bearer references only. The operator still provisions Grok Bot routines and secrets. This work does not commission a Grok Bot and does not prove weekly quota attribution.

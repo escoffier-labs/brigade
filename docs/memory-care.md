@@ -84,6 +84,19 @@ Before 0.9.1, scans wrote to `memory/cards/decay/`. Readers still fall back to t
 
 Queue entries include card identity, issue type, severity, priority, safe summary, evidence references, suggested refresh action, acceptance criteria, source item key, source fingerprint, and safe fix-plan metadata when available. `brigade memory care import-issues` imports those entries as source `memory-care` task imports with dedupe and dismissed-until-changed behavior.
 
+## Closeout
+
+`brigade memory care closeout` records review completion, but it cannot convert a partial or failed care chain into `reviewed`:
+
+- With a nonempty refresh queue and no `--defer`, closeout refuses (exit 1), writes nothing, and reports the unresolved candidate count. JSON mode emits a `status: blocked` payload; human mode prints the error to stderr.
+- Closeout also refuses (exit 1, nothing written) when the refresh queue file is absent or fails validation; it never treats a missing or malformed queue as empty.
+- `--defer` is the explicit escape hatch for unresolved work and requires a nonblank `--reason`; blank reasons are refused so automation cannot silently suppress work.
+- An empty queue may close `reviewed`.
+
+Only deferred closeouts record the queue's source fingerprints, so `memory care status` can tell open from quieted issues. Reviewed closeouts record an empty fingerprint list.
+
+Receipts with malformed fields are ignored rather than honored: only a `reviewed` closeout with zero candidates and no fingerprints, or a `deferred` closeout with well-formed fingerprints and a nonblank string reason, quiets matching queue entries (#1191). When the latest receipt is ignored, status JSON reports why in `latest_closeout_ignored_reason`.
+
 ## Boundary
 
 Memory care does not run a scheduler, mutate canonical memory, perform remote sync, or promote imports automatically. Card edits stay explicit: routine scan and plan commands never write card files. Only `brigade memory care backfill --apply` may add derived frontmatter, with a receipt. Refreshes stay explicit through reviewed work tasks or the existing Memory Handoff flow. Scheduling those care commands is the operator's job: see the [execution model](execution-model.md). Opt-in `brigade care install` can install target-namespaced systemd user timers on Linux or launchd agents on macOS without Brigade owning a daemon.
