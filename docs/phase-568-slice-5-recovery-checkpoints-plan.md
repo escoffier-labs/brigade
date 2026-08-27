@@ -15,7 +15,7 @@ names it and updates it in the same commit.
 Module ownership across the six tasks:
 
 - Task 1: `src/brigade/run_checkpoint.py` (new), `src/brigade/run_events.py`, `src/brigade/run_journal.py`. `tests/test_run_checkpoint.py` (new), `tests/test_run_events.py`, `tests/test_run_journal.py`.
-- Task 2: `src/brigade/run_lifecycle.py`, `src/brigade/run_checkpoint.py`, `src/brigade/aboyeur.py`. `tests/test_run_lifecycle.py` (lifecycle and aboyeur hook coverage), `tests/test_run_checkpoint.py`.
+- Task 2: `src/brigade/run_lifecycle.py`, `src/brigade/run_checkpoint.py`, `src/brigade/aboyeur/`. `tests/test_run_lifecycle.py` (lifecycle and aboyeur hook coverage), `tests/test_run_checkpoint.py`.
 - Task 3: `src/brigade/run_projector.py`, `src/brigade/run_shadow.py`. `tests/test_run_projector.py`, `tests/test_run_shadow.py`.
 - Task 4: `src/brigade/runguard.py`. `tests/test_runguard.py`.
 - Task 5: `src/brigade/runs_cmd.py`, `src/brigade/run_checkpoint.py`. `tests/test_runs_cmd.py`, `tests/test_run_checkpoint.py`.

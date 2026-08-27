@@ -23,7 +23,7 @@ Source contracts this spec builds on:
 - `src/brigade/run_lifecycle.py`: `STATUS_EVENT_TYPE`, the slice-2 status to
   event mapping, and the allowlisted payload construction in
   `_allowlisted_payload`.
-- `src/brigade/aboyeur.py`: the current `run.json` field contract
+- `src/brigade/aboyeur/`: the current `run.json` field contract
   (`_run_payload` plus the merge-write recorders) and the snapshot encoding
   in `_write_json` (`json.dumps(payload, indent=2, sort_keys=True) + "\n"`,
   UTF-8, atomic replace).
