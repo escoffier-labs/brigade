@@ -17,6 +17,7 @@ from . import envelope
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
 _TIMEOUT_JOURNAL_MAX_LINES = 16
+_TIMEOUT_JOURNAL_MAX_BYTES = 4096
 
 
 def _rt() -> Any:
@@ -71,10 +72,20 @@ def _journal_path_is_safe_without_nofollow(path: Path) -> bool:
     return not stat.S_ISLNK(info.st_mode) and not getattr(info, "st_reparse_tag", 0)
 
 
-def _journal_fd_is_safe(fd: int) -> bool:
-    """Accept only a single-link regular file for the timeout journal."""
-    info = os.fstat(fd)
-    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+def _journal_fd_is_safe(fd: int, path: Path) -> bool:
+    """Accept only the single-link regular file currently named by ``path``."""
+    try:
+        path_info = os.lstat(path)
+        fd_info = os.fstat(fd)
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(fd_info.st_mode)
+        and fd_info.st_nlink == 1
+        and not stat.S_ISLNK(path_info.st_mode)
+        and not getattr(path_info, "st_reparse_tag", 0)
+        and (path_info.st_ino, path_info.st_dev) == (fd_info.st_ino, fd_info.st_dev)
+    )
 
 
 def _journal_timeout_count(target: Path, session_id: str) -> int:
@@ -85,16 +96,14 @@ def _journal_timeout_count(target: Path, session_id: str) -> int:
             return 0
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         try:
-            if not _journal_fd_is_safe(fd):
+            if not _journal_fd_is_safe(fd, path):
                 return 0
-            chunks = []
-            while chunk := os.read(fd, 65_536):
-                chunks.append(chunk)
+            data = os.read(fd, _TIMEOUT_JOURNAL_MAX_BYTES)
         finally:
             os.close(fd)
     except OSError:
         return 0
-    return sum(1 for line in b"".join(chunks).splitlines() if line.strip())
+    return sum(1 for line in data.splitlines() if line.strip())
 
 
 def _append_timeout_marker(target: Path, session_id: str) -> int:
@@ -110,8 +119,10 @@ def _append_timeout_marker(target: Path, session_id: str) -> int:
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(path, flags, 0o600)
         try:
-            if not _journal_fd_is_safe(fd):
+            if not _journal_fd_is_safe(fd, path):
                 return 0
+            if os.fstat(fd).st_size >= _TIMEOUT_JOURNAL_MAX_BYTES:
+                return journal_lines
             os.write(fd, f"{localio.utc_now_iso()}\n".encode())
         finally:
             os.close(fd)

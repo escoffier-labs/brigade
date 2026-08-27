@@ -183,6 +183,41 @@ def test_journal_refuses_hardlink_and_caps_growth(tmp_path: Path) -> None:
     assert session_state._journal_timeout_count(target, "capped") == session_state._TIMEOUT_JOURNAL_MAX_LINES
 
 
+def test_journal_read_is_bounded_and_append_stops_at_byte_cap(tmp_path: Path) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    journal = session_state._journal_path(target, "byte-capped")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_bytes((b"x" * 19_999 + b"\n") * 10)
+
+    count = session_state._journal_timeout_count(target, "byte-capped")
+    assert count <= session_state._TIMEOUT_JOURNAL_MAX_BYTES
+
+    before = journal.stat().st_size
+    assert session_state._append_timeout_marker(target, "byte-capped") == count
+    assert journal.stat().st_size == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics required")
+def test_journal_refuses_symlink_after_open_identity_check(tmp_path: Path, monkeypatch) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    journal = session_state._journal_path(target, "symlink")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside-timeouts"
+    outside.write_bytes(b"outside\n")
+    journal.symlink_to(outside)
+    monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
+    # Simulate the path swap after the pre-open refusal check.
+    monkeypatch.setattr(session_state, "_journal_path_is_safe_without_nofollow", lambda _path: True)
+
+    assert session_state._journal_timeout_count(target, "symlink") == 0
+    assert session_state._append_timeout_marker(target, "symlink") == 0
+    assert outside.read_bytes() == b"outside\n"
+
+
 def test_clear_after_journal_latch_keeps_latch(tmp_path: Path) -> None:
     from brigade.claude_hooks import session_state
 
