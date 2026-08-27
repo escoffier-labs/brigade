@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from . import envelope
 
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
+_TIMEOUT_JOURNAL_MAX_LINES = 16
 
 
 def _rt() -> Any:
@@ -56,12 +58,35 @@ def _journal_path(target: Path, session_id: str) -> Path:
     return _timeouts_path(state_path)
 
 
+def _journal_path_is_safe_without_nofollow(path: Path) -> bool:
+    """Reject links before opening when the platform lacks ``O_NOFOLLOW``."""
+    if getattr(os, "O_NOFOLLOW", 0):
+        return True
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return not stat.S_ISLNK(info.st_mode) and not getattr(info, "st_reparse_tag", 0)
+
+
+def _journal_fd_is_safe(fd: int) -> bool:
+    """Accept only a single-link regular file for the timeout journal."""
+    info = os.fstat(fd)
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+
+
 def _journal_timeout_count(target: Path, session_id: str) -> int:
     """Return the number of non-empty timeout markers, or zero on read failure."""
     path = _journal_path(target, session_id)
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if not _journal_path_is_safe_without_nofollow(path):
+            return 0
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         try:
+            if not _journal_fd_is_safe(fd):
+                return 0
             chunks = []
             while chunk := os.read(fd, 65_536):
                 chunks.append(chunk)
@@ -75,11 +100,18 @@ def _journal_timeout_count(target: Path, session_id: str) -> int:
 def _append_timeout_marker(target: Path, session_id: str) -> int:
     """Append one timeout marker without taking the session-state lock."""
     path = _journal_path(target, session_id)
+    journal_lines = _journal_timeout_count(target, session_id)
+    if journal_lines >= _TIMEOUT_JOURNAL_MAX_LINES:
+        return journal_lines
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        if not _journal_path_is_safe_without_nofollow(path):
+            return 0
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(path, flags, 0o600)
         try:
+            if not _journal_fd_is_safe(fd):
+                return 0
             os.write(fd, f"{localio.utc_now_iso()}\n".encode())
         finally:
             os.close(fd)
@@ -88,14 +120,19 @@ def _append_timeout_marker(target: Path, session_id: str) -> int:
     return _journal_timeout_count(target, session_id)
 
 
-def _truncate_timeout_journal(target: Path, session_id: str) -> None:
-    """Discard recorded markers after their count has been folded into state."""
-    path = _journal_path(target, session_id)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
-        os.close(fd)
-    except OSError:
-        return
+def _timeout_state_count(state: dict[str, Any]) -> int:
+    count = state.get("hook_timeout_count")
+    return count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
+
+
+def _timeout_journal_folded(state: dict[str, Any]) -> int:
+    folded = state.get("hook_timeout_journal_folded")
+    return folded if isinstance(folded, int) and not isinstance(folded, bool) and folded >= 0 else 0
+
+
+def _effective_timeout_count(state: dict[str, Any], journal_lines: int) -> int:
+    """Return state count plus journal markers not yet folded into it."""
+    return _timeout_state_count(state) + max(journal_lines - _timeout_journal_folded(state), 0)
 
 
 @contextlib.contextmanager
@@ -128,10 +165,14 @@ def _session_state_lock(target: Path, session_id: str) -> Iterator[None]:
 
 
 def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
+    journal_lines = _journal_timeout_count(target, session_id)
     state = _rt().read_session_state(target, session_id)
-    state_latched = isinstance(state, dict) and state.get("hook_latched") is True
-    journal_latched = _journal_timeout_count(target, session_id) >= _rt().HOOK_TIMEOUT_LATCH_AFTER
-    if not state_latched and not journal_latched:
+    current_state = state if isinstance(state, dict) else {}
+    latched = (
+        current_state.get("hook_latched") is True
+        or _effective_timeout_count(current_state, journal_lines) >= _rt().HOOK_TIMEOUT_LATCH_AFTER
+    )
+    if not latched:
         return False, False
     return True, not isinstance(state, dict) or state.get("hook_latch_announced") is not True
 
@@ -158,6 +199,17 @@ def _write_session_state_preserving_latch(
                 updated["hook_timeout_count"] = max(counts)
             else:
                 updated.pop("hook_timeout_count", None)
+            current_folded = current_state.get("hook_timeout_journal_folded")
+            next_folded = updated.get("hook_timeout_journal_folded")
+            folded_counts = [
+                folded
+                for folded in (current_folded, next_folded)
+                if isinstance(folded, int) and not isinstance(folded, bool)
+            ]
+            if folded_counts:
+                updated["hook_timeout_journal_folded"] = max(folded_counts)
+            else:
+                updated.pop("hook_timeout_journal_folded", None)
             updated["hook_latched"] = current_state.get("hook_latched") is True or updated.get("hook_latched") is True
             updated["hook_latch_announced"] = (
                 current_state.get("hook_latch_announced") is True or updated.get("hook_latch_announced") is True
@@ -189,22 +241,21 @@ def _record_hook_timeout(target: Path, session_id: str) -> dict[str, Any]:
     fallback: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
     try:
         with _rt()._session_state_lock(target, session_id):
+            journal_lines = _journal_timeout_count(target, session_id)
             state = _rt().read_session_state(target, session_id)
             updated: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
-            count = updated.get("hook_timeout_count")
-            current_count = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
-            next_count = current_count + 1 + _journal_timeout_count(target, session_id)
+            next_count = _effective_timeout_count(updated, journal_lines) + 1
             updated["hook_timeout_count"] = next_count
+            updated["hook_timeout_journal_folded"] = journal_lines
             if updated.get("hook_latched") is True or next_count >= _rt().HOOK_TIMEOUT_LATCH_AFTER:
                 updated["hook_latched"] = True
             _rt().write_session_state(target, session_id, updated)
-            _truncate_timeout_journal(target, session_id)
             return updated
     except inbox_lock.InboxLockTimeout:
         journal_count = _append_timeout_marker(target, session_id)
-        count = fallback.get("hook_timeout_count")
-        fallback_count = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
-        next_count = max(fallback_count, journal_count)
+        next_count = (
+            _effective_timeout_count(fallback, journal_count) if journal_count else _timeout_state_count(fallback) + 1
+        )
         fallback["hook_timeout_count"] = next_count
         if fallback.get("hook_latched") is True or next_count >= _rt().HOOK_TIMEOUT_LATCH_AFTER:
             fallback["hook_latched"] = True
@@ -214,17 +265,17 @@ def _record_hook_timeout(target: Path, session_id: str) -> dict[str, Any]:
 def _clear_hook_timeouts(target: Path, session_id: str) -> None:
     try:
         with _rt()._session_state_lock(target, session_id):
+            journal_lines = _journal_timeout_count(target, session_id)
             state = _rt().read_session_state(target, session_id)
+            current_state = state if isinstance(state, dict) else {}
             if (
-                isinstance(state, dict)
-                and state.get("hook_latched") is True
-                or _journal_timeout_count(target, session_id) >= _rt().HOOK_TIMEOUT_LATCH_AFTER
+                current_state.get("hook_latched") is True
+                or _effective_timeout_count(current_state, journal_lines) >= _rt().HOOK_TIMEOUT_LATCH_AFTER
             ):
                 return
-            if isinstance(state, dict) and state.get("hook_timeout_count"):
-                updated = dict(state)
-                updated["hook_timeout_count"] = 0
-                _rt().write_session_state(target, session_id, updated)
-            _truncate_timeout_journal(target, session_id)
+            updated = dict(current_state) if current_state else {"session_id": session_id}
+            updated["hook_timeout_count"] = 0
+            updated["hook_timeout_journal_folded"] = journal_lines
+            _rt().write_session_state(target, session_id, updated)
     except inbox_lock.InboxLockTimeout:
         return

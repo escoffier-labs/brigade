@@ -86,8 +86,101 @@ def test_persistent_lock_timeout_still_latches(tmp_path: Path, monkeypatch) -> N
 
     recovered = runtime._record_hook_timeout(target, "s")
     assert recovered["hook_timeout_count"] == 3
+    assert recovered["hook_timeout_journal_folded"] == 2
     assert recovered["hook_latched"] is True
-    assert session_state._journal_timeout_count(target, "s") == 0
+    assert session_state._journal_timeout_count(target, "s") == 2
+
+
+def test_effective_count_sums_state_and_journal(tmp_path: Path) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    session_state._append_timeout_marker(target, "s")
+    runtime.write_session_state(target, "s", {"session_id": "s", "hook_timeout_count": 1})
+
+    assert runtime._read_hook_latch(target, "s")[0] is True
+
+    runtime.write_session_state(
+        target,
+        "s",
+        {"session_id": "s", "hook_timeout_count": 1, "hook_timeout_journal_folded": 1},
+    )
+    assert runtime._read_hook_latch(target, "s")[0] is False
+
+
+def test_marker_appended_during_fold_is_not_lost(tmp_path: Path) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_session_lock() -> None:
+        with runtime._session_state_lock(target, "s"):
+            acquired.set()
+            release.wait(timeout=10)
+
+    holder = threading.Thread(target=hold_session_lock)
+    holder.start()
+    assert acquired.wait(timeout=2)
+    try:
+        assert session_state._append_timeout_marker(target, "s") == 1
+        assert session_state._append_timeout_marker(target, "s") == 2
+    finally:
+        release.set()
+        holder.join(timeout=2)
+    assert not holder.is_alive()
+
+    first = runtime._record_hook_timeout(target, "s")
+    assert first["hook_timeout_count"] == 3
+    assert first["hook_timeout_journal_folded"] == 2
+
+    assert session_state._append_timeout_marker(target, "s") == 3
+    second = runtime._record_hook_timeout(target, "s")
+    assert second["hook_timeout_count"] == 5
+    assert second["hook_timeout_journal_folded"] == 3
+    assert session_state._journal_timeout_count(target, "s") == 3
+
+
+def test_clear_consumes_journal_without_truncating(tmp_path: Path) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    runtime.write_session_state(target, "s", {"session_id": "s", "hook_timeout_count": 0})
+    assert session_state._append_timeout_marker(target, "s") == 1
+
+    runtime._clear_hook_timeouts(target, "s")
+
+    cleared = runtime.read_session_state(target, "s")
+    assert cleared is not None
+    assert cleared["hook_timeout_count"] == 0
+    assert cleared["hook_timeout_journal_folded"] == 1
+    assert session_state._journal_timeout_count(target, "s") == 1
+
+    recorded = runtime._record_hook_timeout(target, "s")
+    assert recorded["hook_timeout_count"] == 1
+    assert recorded["hook_timeout_journal_folded"] == 1
+
+
+def test_journal_refuses_hardlink_and_caps_growth(tmp_path: Path) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    assert session_state._append_timeout_marker(target, "hardlink") == 1
+    journal = session_state._journal_path(target, "hardlink")
+    hardlink = journal.with_name("hardlink-copy")
+    try:
+        os.link(journal, hardlink)
+    except OSError:
+        if os.name != "nt":
+            raise
+    else:
+        assert session_state._journal_timeout_count(target, "hardlink") == 0
+        assert session_state._append_timeout_marker(target, "hardlink") == 0
+
+    for _ in range(session_state._TIMEOUT_JOURNAL_MAX_LINES + 5):
+        session_state._append_timeout_marker(target, "capped")
+    assert session_state._journal_timeout_count(target, "capped") == session_state._TIMEOUT_JOURNAL_MAX_LINES
 
 
 def test_clear_after_journal_latch_keeps_latch(tmp_path: Path) -> None:
@@ -253,7 +346,7 @@ def test_session_lock_timeout_preserves_latched_state(tmp_path: Path) -> None:
         thread.join(timeout=2)
         assert not thread.is_alive()
 
-    assert results == [initial]
+    assert results == [{**initial, "hook_timeout_count": 3}]
     assert runtime.read_session_state(target, "s") == initial
 
 
