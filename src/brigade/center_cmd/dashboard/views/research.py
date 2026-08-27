@@ -106,9 +106,9 @@ def fetch(target: Path, query: dict[str, str] | None = None) -> dict:
 
 
 def render(payload: dict, nonce: str) -> str:
-    status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
-    doctor = payload.get("doctor") if isinstance(payload.get("doctor"), dict) else {}
-    show = payload.get("show") if isinstance(payload.get("show"), dict) else None
+    status = _status if isinstance(_status := payload.get("status"), dict) else {}
+    doctor = _doctor if isinstance(_doctor := payload.get("doctor"), dict) else {}
+    show = _show if isinstance(_show := payload.get("show"), dict) else None
     selected = str(payload.get("selected_run") or "")
     now = datetime.now(timezone.utc)
     runs = _runs_from_status(status)
@@ -512,7 +512,7 @@ def _inspector_section(show: dict[str, Any] | None, selected: str, now: datetime
     problem = _schema_problem(show, SHOW_SCHEMAS)
     if problem is not None:
         return html.error_panel("Run inspector", problem)
-    rec = show.get("run") if isinstance(show.get("run"), Mapping) else {}
+    rec = _run if isinstance(_run := show.get("run"), Mapping) else {}
     state = run_tile_state(rec)
     if show.get("schema") == SHOW_V1_SCHEMA:
         parts = [
@@ -653,8 +653,8 @@ def _inspector_citations(show: Mapping[str, Any], state: str) -> str:
         )
         return _sub("Citations", f'<p class="rs-muted">{html.esc(message)}</p>')
     accepted = bool(audit.get("accepted"))
-    citations = audit.get("citations") if isinstance(audit.get("citations"), list) else []
-    unresolved = audit.get("unresolved") if isinstance(audit.get("unresolved"), list) else []
+    citations = _citations if isinstance(_citations := audit.get("citations"), list) else []
+    unresolved = _unresolved if isinstance(_unresolved := audit.get("unresolved"), list) else []
     chip = _state_chip("accepted" if accepted else "rejected", "good" if accepted else "serious")
     body = [
         f"<p>Citation audit {chip}: {html.esc(str(len(citations)))} citation(s), "
@@ -684,7 +684,7 @@ def _inspector_fallbacks(rec: Mapping[str, Any]) -> str:
 
 
 def _inspector_report(show: Mapping[str, Any]) -> str:
-    report = show.get("report") if isinstance(show.get("report"), Mapping) else {}
+    report = _report if isinstance(_report := show.get("report"), Mapping) else {}
     verification = str(report.get("verification") or "unknown")
     css = "good" if verification == "verified" else "warning"
     label = f'<p>Final report is <span class="rs-state rs-state-{html.esc(css)}">{html.esc(verification)}</span>.</p>'

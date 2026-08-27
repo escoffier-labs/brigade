@@ -43,9 +43,19 @@ from ..localio import (
 )
 from ..render import emit
 
-from . import schema_ops as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import core as _core_mod
+from . import report_review_ops as _report_review_ops_mod
+from . import reports as _reports_mod
+from .schema_ops import (
+    ACTION_ACTIVE_STALE_HOURS,
+    ACTION_DEFERRED_STALE_HOURS,
+    ACTION_DONE_ARCHIVE_HOURS,
+    ACTION_PENDING_STALE_HOURS,
+    ACTION_STATUSES,
+    SCHEMA_VERSION,
+    _action_schema,
+    _parse_time,
+)
 
 
 def _action_priority_rank(action: dict[str, Any]) -> tuple[int, int]:
@@ -59,13 +69,13 @@ def _action_priority_rank(action: dict[str, Any]) -> tuple[int, int]:
 
 
 def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
-    plan = _action_plan(report)
+    plan = _reports_mod._action_plan(report)
     report_id = str(report.get("report_id") or "planned")
     report_fingerprint = str(
         report.get("report_fingerprint")
-        or _fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")})
+        or _reports_mod._fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")})
     )
-    reviewed_at = _report_reviewed_at(report)
+    reviewed_at = _report_review_ops_mod._report_reviewed_at(report)
     created = _now().isoformat()
     actions: list[dict[str, Any]] = []
     seen_source_items: set[str] = set()
@@ -79,7 +89,7 @@ def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
             if source_item_id in seen_source_items:
                 continue
             seen_source_items.add(source_item_id)
-            source_fingerprint = _fingerprint_payload(
+            source_fingerprint = _reports_mod._fingerprint_payload(
                 {
                     "report_fingerprint": report_fingerprint,
                     "source_item_id": source_item_id,
@@ -97,8 +107,8 @@ def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
                     "source_subsystem": source_subsystem,
                     "source_local_id": source_local_id,
                     "status": "pending",
-                    "priority": item.get("priority") if isinstance(item.get("priority"), str) else None,
-                    "severity": item.get("severity") if isinstance(item.get("severity"), str) else None,
+                    "priority": _priority if isinstance(_priority := item.get("priority"), str) else None,
+                    "severity": _severity if isinstance(_severity := item.get("severity"), str) else None,
                     "safe_summary": str(item.get("safe_summary") or "operator action"),
                     "suggested_command": str(item.get("suggested_next_command") or ""),
                     "created_at": created,
@@ -118,7 +128,7 @@ def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _find_action(target: Path, action_id: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
-    actions = _read_actions(target)
+    actions = _core_mod._read_actions(target)
     action, error = actionqueue.find_action(actions, action_id, id_field="action_id", label="action")
     return actions, action, error
 
@@ -199,7 +209,7 @@ def _action_policy_issues(actions: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def actions_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    actions = _read_actions(target)
+    actions = _core_mod._read_actions(target)
     open_actions = [action for action in actions if action.get("status") in {"pending", "active", "deferred"}]
     open_actions.sort(key=_action_priority_rank)
     checks: list[dict[str, Any]] = []
@@ -216,7 +226,7 @@ def actions_health(target: Path) -> dict[str, Any]:
         )
     checks.extend(policy_issues)
     return {
-        "actions_path": str(_actions_path(target)),
+        "actions_path": str(_core_mod._actions_path(target)),
         "action_count": len(actions),
         "open_count": len(open_actions),
         "counts": _action_counts(actions),
@@ -237,15 +247,15 @@ def actions_health(target: Path) -> dict[str, Any]:
 
 def actions_doctor(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
+    health = actions_health(target)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _action_schema("center-actions-doctor"),
         "target": str(target),
-        "health": actions_health(target),
+        "health": health,
     }
     if json_output:
         return emit(payload, json_output, [], 0)
-    health = payload["health"]
     text_lines = [
         f"center actions doctor: {target}",
         f"actions: {health['action_count']}",
@@ -261,7 +271,7 @@ def _action_policy_import_record(issue: dict[str, Any], actions_by_id: dict[str,
     action_id = str(issue.get("action_id") or "")
     action = actions_by_id.get(action_id, {})
     source_key = f"center-action-policy:{issue.get('name')}:{action_id}"
-    fingerprint = _fingerprint_payload(
+    fingerprint = _reports_mod._fingerprint_payload(
         {
             "source_key": source_key,
             "source_fingerprint": action.get("source_fingerprint"),
@@ -298,7 +308,7 @@ def _action_policy_import_record(issue: dict[str, Any], actions_by_id: dict[str,
 
 def actions_import_issues(*, target: Path, dry_run: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    actions = _read_actions(target)
+    actions = _core_mod._read_actions(target)
     actions_by_id = {str(action.get("action_id") or ""): action for action in actions}
     issues = _action_policy_issues(actions)
     records = [_action_policy_import_record(issue, actions_by_id) for issue in issues]
@@ -332,7 +342,7 @@ def actions_import_issues(*, target: Path, dry_run: bool = False, json_output: b
 
 def actions_plan(*, target: Path, report_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    report, error = _resolve_report(target, report_id)
+    report, error = _reports_mod._resolve_report(target, report_id)
     if report is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -343,8 +353,8 @@ def actions_plan(*, target: Path, report_id: str = "latest", json_output: bool =
         "target": str(target),
         "report_id": report.get("report_id"),
         "report_path": report.get("path"),
-        "report_review_status": _report_review_status(report),
-        "actions_root": str(_actions_root(target)),
+        "report_review_status": _report_review_ops_mod._report_review_status(report),
+        "actions_root": str(_core_mod._actions_root(target)),
         "actions": actions,
         "action_count": len(actions),
         "write_required": False,
@@ -369,11 +379,11 @@ def actions_build(
     *, target: Path, report_id: str = "latest", allow_unreviewed: bool = False, json_output: bool = False
 ) -> int:
     target = target.expanduser().resolve()
-    report, error = _resolve_report(target, report_id)
+    report, error = _reports_mod._resolve_report(target, report_id)
     if report is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    review_status = _report_review_status(report)
+    review_status = _report_review_ops_mod._report_review_status(report)
     if review_status not in {"reviewed", "deferred"} and not allow_unreviewed:
         print(
             "error: source report must be closed out as reviewed or deferred before building actions",
@@ -381,9 +391,9 @@ def actions_build(
         )
         return 2
     planned = _planned_actions(report)
-    existing = _read_actions(target)
-    created, skipped = actionqueue.merge_planned(existing, _read_action_archive(target), planned)
-    _write_actions(target, existing)
+    existing = _core_mod._read_actions(target)
+    created, skipped = actionqueue.merge_planned(existing, _core_mod._read_action_archive(target), planned)
+    _core_mod._write_actions(target, existing)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _action_schema("center-actions-build"),
@@ -391,7 +401,7 @@ def actions_build(
         "report_id": report.get("report_id"),
         "report_path": report.get("path"),
         "report_review_status": review_status,
-        "actions_path": str(_actions_path(target)),
+        "actions_path": str(_core_mod._actions_path(target)),
         "created_count": len(created),
         "skipped_count": len(skipped),
         "created_actions": created,
@@ -403,7 +413,7 @@ def actions_build(
     print(f"center actions build: {report.get('report_id')}")
     print(f"created: {len(created)}")
     print(f"skipped: {len(skipped)}")
-    print(f"path: {_actions_path(target)}")
+    print(f"path: {_core_mod._actions_path(target)}")
     return 0
 
 
@@ -412,13 +422,13 @@ def actions_list(*, target: Path, json_output: bool = False, limit: int = 50) ->
         print("error: --limit must be a positive integer", file=sys.stderr)
         return 2
     target = target.expanduser().resolve()
-    actions = _read_actions(target)
+    actions = _core_mod._read_actions(target)
     actions.sort(key=lambda action: (_action_priority_rank(action), str(action.get("updated_at") or "")))
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _action_schema("center-actions-list"),
         "target": str(target),
-        "actions_path": str(_actions_path(target)),
+        "actions_path": str(_core_mod._actions_path(target)),
         "actions": actions[:limit],
         "action_count": len(actions),
         "counts": _action_counts(actions),
@@ -427,7 +437,7 @@ def actions_list(*, target: Path, json_output: bool = False, limit: int = 50) ->
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"center actions: {target}")
-    print(f"actions_path: {_actions_path(target)}")
+    print(f"actions_path: {_core_mod._actions_path(target)}")
     for action in actions[:limit]:
         print(
             f"- {action.get('action_id')} [{action.get('status')}] {action.get('source_group')} {action.get('source_local_id')}: {action.get('safe_summary')}"
@@ -478,7 +488,7 @@ def _set_action_status(
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
     actionqueue.stamp_status(action, status, now=_now().isoformat(), reason=reason)
-    _write_actions(target, actions)
+    _core_mod._write_actions(target, actions)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _action_schema(f"center-actions-{status}"),
@@ -512,17 +522,17 @@ def actions_defer(*, target: Path, action_id: str, reason: str, json_output: boo
 
 def actions_archive_completed(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    actions = _read_actions(target)
+    actions = _core_mod._read_actions(target)
     archived, remaining = actionqueue.split_archived_completed(actions, now=_now().isoformat())
-    _write_actions(target, remaining)
-    _append_action_archive(target, archived)
+    _core_mod._write_actions(target, remaining)
+    _core_mod._append_action_archive(target, archived)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _action_schema("center-actions-archive"),
         "target": str(target),
         "archived_count": len(archived),
-        "archive_path": str(_actions_archive_path(target)),
-        "actions_path": str(_actions_path(target)),
+        "archive_path": str(_core_mod._actions_archive_path(target)),
+        "actions_path": str(_core_mod._actions_path(target)),
         "archived_actions": archived,
     }
     if json_output:
@@ -530,5 +540,5 @@ def actions_archive_completed(*, target: Path, json_output: bool = False) -> int
         return 0
     print("center actions archive: completed")
     print(f"archived: {len(archived)}")
-    print(f"path: {_actions_archive_path(target)}")
+    print(f"path: {_core_mod._actions_archive_path(target)}")
     return 0

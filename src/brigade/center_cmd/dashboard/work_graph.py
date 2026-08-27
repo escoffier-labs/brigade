@@ -73,7 +73,7 @@ def footprint_of(task: dict[str, Any] | None) -> dict[str, Any] | None:
     if raw is None:
         return None
     # Preserve degrade markers from the stored object (normalize drops them).
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    metadata = _metadata if isinstance(_metadata := task.get("metadata"), dict) else {}
     stored = metadata.get("footprint") if isinstance(metadata, dict) else None
     if isinstance(stored, dict) and stored.get("degraded") is True:
         raw = dict(raw)

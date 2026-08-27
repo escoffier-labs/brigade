@@ -43,9 +43,9 @@ def fetch(target: Path) -> dict:
 
 
 def render(payload: dict, nonce: str) -> str:
-    ready = payload.get("ready") if isinstance(payload.get("ready"), dict) else {}
-    tasks = payload.get("tasks") if isinstance(payload.get("tasks"), dict) else {}
-    runs = payload.get("runs") if isinstance(payload.get("runs"), dict) else {}
+    ready = _ready if isinstance(_ready := payload.get("ready"), dict) else {}
+    tasks = _tasks if isinstance(_tasks := payload.get("tasks"), dict) else {}
+    runs = _runs if isinstance(_runs := payload.get("runs"), dict) else {}
     now = datetime.now(timezone.utc)
     return "".join(
         [
@@ -145,7 +145,7 @@ def _wave_tasks(wave: dict) -> list[dict[str, Any]]:
     tasks = wave.get("tasks")
     if isinstance(tasks, list) and tasks:
         return [item for item in tasks if isinstance(item, dict)]
-    ids = wave.get("task_ids") if isinstance(wave.get("task_ids"), list) else []
+    ids = _task_ids if isinstance(_task_ids := wave.get("task_ids"), list) else []
     return [{"id": task_id} for task_id in ids if isinstance(task_id, str)]
 
 

@@ -43,11 +43,16 @@ from ..localio import (
 )
 from ..render import emit
 
+from . import actions as _actions_mod
 from . import agent_activity
-
-from . import schema_ops as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import readiness as _readiness_mod
+from . import reports as _reports_mod
+from .schema_ops import (
+    SCHEMA_VERSION,
+    _action_schema,
+    _center_schema_manifest,
+    _schema,
+)
 
 
 def _git_value(target: Path, *args: str) -> str | None:
@@ -165,7 +170,7 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(payload.get("status") or "unknown"),
                 str(payload.get("title") or "work session"),
                 f"brigade work show {path.name}",
-                created_at=payload.get("started_at") if isinstance(payload.get("started_at"), str) else None,
+                created_at=_started_at if isinstance(_started_at := payload.get("started_at"), str) else None,
                 updated_at=payload.get("ended_at") or payload.get("started_at"),
                 receipt_path=str(path / "session.json"),
                 path=str(path),
@@ -180,12 +185,12 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(receipt.get("status") or "unknown"),
                 "work verification",
                 f"brigade work verify show {run_id}",
-                created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
+                created_at=_started_at if isinstance(_started_at := receipt.get("started_at"), str) else None,
                 updated_at=receipt.get("completed_at") or receipt.get("started_at"),
                 receipt_path=str(Path(str(receipt.get("path") or "")) / "receipt.json")
                 if receipt.get("path")
                 else None,
-                path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+                path=_path if isinstance(_path := receipt.get("path"), str) else None,
             )
         )
     for receipt in work_cmd._scanner_receipts(target)[:20]:
@@ -197,17 +202,17 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(receipt.get("status") or "unknown"),
                 str(receipt.get("scanner_id") or "scanner run"),
                 f"brigade work scanners run-show {run_id}",
-                created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
+                created_at=_started_at if isinstance(_started_at := receipt.get("started_at"), str) else None,
                 updated_at=receipt.get("completed_at") or receipt.get("started_at"),
                 receipt_path=str(Path(str(receipt.get("path") or "")) / "receipt.json")
                 if receipt.get("path")
                 else None,
-                path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+                path=_path if isinstance(_path := receipt.get("path"), str) else None,
             )
         )
     for sweep in work_cmd._scanner_sweeps(target)[:20]:
         sweep_id = str(sweep.get("sweep_id") or "")
-        path = str(Path(str(sweep.get("path") or "")) / "sweep.json") if sweep.get("path") else None
+        receipt_path = str(Path(str(sweep.get("path") or "")) / "sweep.json") if sweep.get("path") else None
         items.append(
             _item(
                 "scanner-sweep",
@@ -215,10 +220,10 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(sweep.get("status") or "unknown"),
                 "scanner sweep",
                 f"brigade work sweep-show {sweep_id}",
-                created_at=sweep.get("started_at") if isinstance(sweep.get("started_at"), str) else None,
+                created_at=_started_at if isinstance(_started_at := sweep.get("started_at"), str) else None,
                 updated_at=sweep.get("completed_at") or sweep.get("started_at"),
-                receipt_path=path,
-                path=sweep.get("path") if isinstance(sweep.get("path"), str) else None,
+                receipt_path=receipt_path,
+                path=_path if isinstance(_path := sweep.get("path"), str) else None,
             )
         )
     for receipt in work_cmd._review_receipts(target)[:20]:
@@ -230,12 +235,12 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(receipt.get("status") or "unknown"),
                 str(receipt.get("reviewer_id") or "review run"),
                 f"brigade work review show {run_id}",
-                created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
+                created_at=_started_at if isinstance(_started_at := receipt.get("started_at"), str) else None,
                 updated_at=receipt.get("completed_at") or receipt.get("started_at"),
                 receipt_path=str(Path(str(receipt.get("path") or "")) / "receipt.json")
                 if receipt.get("path")
                 else None,
-                path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+                path=_path if isinstance(_path := receipt.get("path"), str) else None,
             )
         )
     for draft in handoff_cmd.draft_queue_payload(target).get("drafts", [])[:20]:
@@ -249,9 +254,9 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(draft.get("status") or "pending"),
                 str(draft.get("title") or draft.get("target_document") or "handoff draft"),
                 f"brigade handoff show {draft_id}",
-                severity=draft.get("severity") if isinstance(draft.get("severity"), str) else None,
-                updated_at=draft.get("modified_at") if isinstance(draft.get("modified_at"), str) else None,
-                path=draft.get("path") if isinstance(draft.get("path"), str) else None,
+                severity=_severity if isinstance(_severity := draft.get("severity"), str) else None,
+                updated_at=_modified_at if isinstance(_modified_at := draft.get("modified_at"), str) else None,
+                path=_path if isinstance(_path := draft.get("path"), str) else None,
             )
         )
     for receipt in _iter_json_files(target / ".brigade" / "handoffs" / "ingest-runs", "*.json")[:20]:
@@ -263,24 +268,26 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(receipt.get("status") or "completed"),
                 "handoff ingest receipt",
                 f"brigade handoff run-show {run_id}",
-                created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
+                created_at=_started_at if isinstance(_started_at := receipt.get("started_at"), str) else None,
                 updated_at=receipt.get("completed_at") or receipt.get("started_at"),
-                receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+                receipt_path=_path if isinstance(_path := receipt.get("path"), str) else None,
             )
         )
-    for diff in _report_diffs(target)[:20]:
+    for diff in _reports_mod._report_diffs(target)[:20]:
         diff_id = str(diff.get("diff_id") or Path(str(diff.get("path") or "diff")).parent.name)
-        summary = diff.get("summary") if isinstance(diff.get("summary"), dict) else {}
+        summary = _summary if isinstance(_summary := diff.get("summary"), dict) else {}
+        new_count = summary.get("new_item_count", 0) if isinstance(summary, dict) else 0
+        resolved_count = summary.get("resolved_item_count", 0) if isinstance(summary, dict) else 0
         items.append(
             _item(
                 "center-report-diff",
                 diff_id,
                 str(diff.get("status") or "unknown"),
-                f"{summary.get('new_item_count', 0)} new, {summary.get('resolved_item_count', 0)} resolved",
+                f"{new_count} new, {resolved_count} resolved",
                 f"brigade center report diff {diff.get('base_report_id')} {diff.get('compare_report_id')}",
-                created_at=diff.get("created_at") if isinstance(diff.get("created_at"), str) else None,
-                updated_at=diff.get("created_at") if isinstance(diff.get("created_at"), str) else None,
-                receipt_path=diff.get("path") if isinstance(diff.get("path"), str) else None,
+                created_at=_created_at if isinstance(_created_at := diff.get("created_at"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := diff.get("created_at"), str) else None,
+                receipt_path=_path if isinstance(_path := diff.get("path"), str) else None,
             )
         )
     for call in _read_jsonl(tools_cmd.calls_path(target))[:20]:
@@ -292,8 +299,8 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(call.get("status") or "unknown"),
                 str(call.get("tool_id") or "tool call"),
                 f"brigade tools call show {call_id}",
-                severity=call.get("severity") if isinstance(call.get("severity"), str) else None,
-                created_at=call.get("created_at") if isinstance(call.get("created_at"), str) else None,
+                severity=_severity if isinstance(_severity := call.get("severity"), str) else None,
+                created_at=_created_at if isinstance(_created_at := call.get("created_at"), str) else None,
                 updated_at=call.get("reviewed_at") or call.get("created_at"),
                 receipt_path=str(tools_cmd.calls_path(target)),
             )
@@ -307,9 +314,9 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(receipt.get("status") or "unknown"),
                 str(receipt.get("tool_id") or "tool run"),
                 f"brigade tools run show {run_id}",
-                created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
+                created_at=_started_at if isinstance(_started_at := receipt.get("started_at"), str) else None,
                 updated_at=receipt.get("completed_at") or receipt.get("started_at"),
-                receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+                receipt_path=_path if isinstance(_path := receipt.get("path"), str) else None,
             )
         )
     for checkpoint in _iter_json_files(tools_cmd.checkpoints_path(target), "*.json")[:20]:
@@ -321,10 +328,10 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(checkpoint.get("status") or "waiting"),
                 str(checkpoint.get("reason") or "tool checkpoint"),
                 f"brigade tools checkpoint show {checkpoint_id}",
-                severity=checkpoint.get("severity") if isinstance(checkpoint.get("severity"), str) else None,
-                created_at=checkpoint.get("created_at") if isinstance(checkpoint.get("created_at"), str) else None,
+                severity=_severity if isinstance(_severity := checkpoint.get("severity"), str) else None,
+                created_at=_created_at if isinstance(_created_at := checkpoint.get("created_at"), str) else None,
                 updated_at=checkpoint.get("reviewed_at") or checkpoint.get("created_at"),
-                receipt_path=checkpoint.get("path") if isinstance(checkpoint.get("path"), str) else None,
+                receipt_path=_path if isinstance(_path := checkpoint.get("path"), str) else None,
             )
         )
     for pack in tools_cmd._tool_packs(target)[:20]:
@@ -336,10 +343,10 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(pack.get("status") or "built"),
                 "portable tool pack",
                 f"brigade tools pack show {pack_id}",
-                created_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None,
-                updated_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None,
+                created_at=_created_at if isinstance(_created_at := pack.get("created_at"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := pack.get("created_at"), str) else None,
                 receipt_path=str(Path(str(pack.get("path") or "")) / "tool-pack.json") if pack.get("path") else None,
-                path=pack.get("path") if isinstance(pack.get("path"), str) else None,
+                path=_path if isinstance(_path := pack.get("path"), str) else None,
             )
         )
     for pack in context_cmd._packs(target)[:20]:
@@ -351,10 +358,10 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(pack.get("status") or "built"),
                 str(pack.get("kind") or "context"),
                 f"brigade context show {pack_id}",
-                created_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None,
-                updated_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None,
+                created_at=_created_at if isinstance(_created_at := pack.get("created_at"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := pack.get("created_at"), str) else None,
                 receipt_path=str(Path(str(pack.get("path") or "")) / "context.json") if pack.get("path") else None,
-                path=pack.get("path") if isinstance(pack.get("path"), str) else None,
+                path=_path if isinstance(_path := pack.get("path"), str) else None,
             )
         )
     for receipt in _iter_json_files(target / ".brigade" / "context" / "sync-plans", "*/sync-plan.json")[:20]:
@@ -366,9 +373,9 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(receipt.get("status") or "planned"),
                 f"{receipt.get('destination_count', 0)} destination(s)",
                 f"brigade context sync plan {receipt.get('pack_id') or 'latest'}",
-                created_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None,
-                updated_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None,
-                receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+                created_at=_created_at if isinstance(_created_at := receipt.get("created_at"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := receipt.get("created_at"), str) else None,
+                receipt_path=_path if isinstance(_path := receipt.get("path"), str) else None,
             )
         )
     for replay in _iter_json_files(target / ".brigade" / "learn" / "replays", "*/replay.json")[:20]:
@@ -380,16 +387,14 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(replay.get("status") or "recorded"),
                 str(replay.get("scenario_id") or "learning replay"),
                 "brigade learn plan",
-                updated_at=replay.get("created_at") if isinstance(replay.get("created_at"), str) else None,
-                receipt_path=replay.get("path") if isinstance(replay.get("path"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := replay.get("created_at"), str) else None,
+                receipt_path=_path if isinstance(_path := replay.get("path"), str) else None,
             )
         )
     security_latest = target / ".brigade" / "security" / "latest" / "security-report.json"
     security_report = _read_json(security_latest)
     if security_report is not None:
-        generated = (
-            security_report.get("generated_at") if isinstance(security_report.get("generated_at"), str) else None
-        )
+        generated = _generated_at if isinstance(_generated_at := security_report.get("generated_at"), str) else None
         items.append(
             _item(
                 "security-report",
@@ -412,9 +417,9 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(closeout.get("status") or "reviewed"),
                 "security closeout",
                 "brigade security closeout",
-                created_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
-                updated_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
-                receipt_path=closeout.get("path") if isinstance(closeout.get("path"), str) else None,
+                created_at=_created_at if isinstance(_created_at := closeout.get("created_at"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := closeout.get("created_at"), str) else None,
+                receipt_path=_path if isinstance(_path := closeout.get("path"), str) else None,
             )
         )
     for closeout in _iter_json_files(target / ".brigade" / "backups" / "closeouts", "*/closeout.json")[:20]:
@@ -426,9 +431,9 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(closeout.get("status") or "reviewed"),
                 "backup closeout",
                 "brigade work backup closeout",
-                created_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
-                updated_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
-                receipt_path=closeout.get("path") if isinstance(closeout.get("path"), str) else None,
+                created_at=_created_at if isinstance(_created_at := closeout.get("created_at"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := closeout.get("created_at"), str) else None,
+                receipt_path=_path if isinstance(_path := closeout.get("path"), str) else None,
             )
         )
     for closeout in _iter_json_files(target / ".brigade" / "memory-care" / "closeouts", "*/closeout.json")[:20]:
@@ -440,9 +445,9 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(closeout.get("status") or "reviewed"),
                 "memory-care closeout",
                 "brigade memory care closeout",
-                created_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
-                updated_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
-                receipt_path=closeout.get("path") if isinstance(closeout.get("path"), str) else None,
+                created_at=_created_at if isinstance(_created_at := closeout.get("created_at"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := closeout.get("created_at"), str) else None,
+                receipt_path=_path if isinstance(_path := closeout.get("path"), str) else None,
             )
         )
     release = release_cmd._latest_release_receipt(target)
@@ -455,12 +460,12 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(release.get("status") or "unknown"),
                 "release readiness",
                 f"brigade release show {run_id}",
-                created_at=release.get("started_at") if isinstance(release.get("started_at"), str) else None,
+                created_at=_started_at if isinstance(_started_at := release.get("started_at"), str) else None,
                 updated_at=release.get("completed_at") or release.get("created_at") or release.get("started_at"),
                 receipt_path=str(Path(str(release.get("path") or "")) / "receipt.json")
                 if release.get("path")
                 else None,
-                path=release.get("path") if isinstance(release.get("path"), str) else None,
+                path=_path if isinstance(_path := release.get("path"), str) else None,
             )
         )
     candidate = release_cmd._latest_candidate(target)
@@ -473,12 +478,12 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(candidate.get("status") or "draft"),
                 "release candidate",
                 f"brigade release candidate show {candidate_id}",
-                created_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None,
-                updated_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None,
+                created_at=_created_at if isinstance(_created_at := candidate.get("created_at"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := candidate.get("created_at"), str) else None,
                 receipt_path=str(Path(str(candidate.get("path") or "")) / "EVIDENCE.json")
                 if candidate.get("path")
                 else None,
-                path=candidate.get("path") if isinstance(candidate.get("path"), str) else None,
+                path=_path if isinstance(_path := candidate.get("path"), str) else None,
             )
         )
     for receipt in release_cmd._read_install_smoke_receipts(target)[:20]:
@@ -490,7 +495,7 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(receipt.get("status") or "unknown"),
                 str(receipt.get("matrix_id") or "install smoke"),
                 f"brigade release smoke show {receipt_id}",
-                created_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None,
+                created_at=_created_at if isinstance(_created_at := receipt.get("created_at"), str) else None,
                 updated_at=receipt.get("completed_at") or receipt.get("created_at"),
                 receipt_path=str(release_cmd._install_smoke_receipts_path(target)),
             )
@@ -504,14 +509,14 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(action.get("status") or "pending"),
                 str(action.get("safe_summary") or "operator action"),
                 f"brigade center actions show {action_id}",
-                priority=action.get("priority") if isinstance(action.get("priority"), str) else None,
-                severity=action.get("severity") if isinstance(action.get("severity"), str) else None,
-                created_at=action.get("created_at") if isinstance(action.get("created_at"), str) else None,
-                updated_at=action.get("updated_at") if isinstance(action.get("updated_at"), str) else None,
+                priority=_priority if isinstance(_priority := action.get("priority"), str) else None,
+                severity=_severity if isinstance(_severity := action.get("severity"), str) else None,
+                created_at=_created_at if isinstance(_created_at := action.get("created_at"), str) else None,
+                updated_at=_updated_at if isinstance(_updated_at := action.get("updated_at"), str) else None,
                 receipt_path=str(_actions_path(target)),
             )
         )
-    readiness = _latest_readiness(target)
+    readiness = _readiness_mod._latest_readiness(target)
     if readiness:
         readiness_id = str(readiness.get("readiness_id") or "latest")
         items.append(
@@ -521,12 +526,12 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 str(readiness.get("status") or "unknown"),
                 "operator readiness closeout",
                 f"brigade center readiness show {readiness_id}",
-                created_at=readiness.get("created_at") if isinstance(readiness.get("created_at"), str) else None,
+                created_at=_created_at if isinstance(_created_at := readiness.get("created_at"), str) else None,
                 updated_at=readiness.get("completed_at") or readiness.get("created_at"),
                 receipt_path=str(Path(str(readiness.get("path") or "")) / "readiness.json")
                 if readiness.get("path")
                 else None,
-                path=readiness.get("path") if isinstance(readiness.get("path"), str) else None,
+                path=_path if isinstance(_path := readiness.get("path"), str) else None,
             )
         )
     items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
@@ -546,15 +551,15 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                 "pending",
                 str(item.get("text") or ""),
                 f"brigade work import plan {import_id}",
-                priority=item.get("priority") if isinstance(item.get("priority"), str) else None,
-                severity=item.get("severity") if isinstance(item.get("severity"), str) else None,
+                priority=_priority if isinstance(_priority := item.get("priority"), str) else None,
+                severity=_severity if isinstance(_severity := item.get("severity"), str) else None,
                 receipt_path=str(work_cmd._imports_path(target)),
                 updated_at=item.get("updated_at") or item.get("created_at"),
             )
         )
     review_health = work_cmd._review_health(target)
     for finding_key in ("top_pending_finding", "top_unresolved_finding"):
-        finding = review_health.get(finding_key) if isinstance(review_health.get(finding_key), dict) else None
+        finding = _finding_key if isinstance(_finding_key := review_health.get(finding_key), dict) else None
         if finding:
             finding_id = str(finding.get("id") or finding.get("import_id") or finding_key)
             items.append(
@@ -564,8 +569,8 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                     "pending",
                     str(finding.get("text") or finding.get("safe_detail") or "review finding"),
                     f"brigade work review finding-show {finding_id}",
-                    severity=finding.get("severity") if isinstance(finding.get("severity"), str) else None,
-                    updated_at=finding.get("created_at") if isinstance(finding.get("created_at"), str) else None,
+                    severity=_severity if isinstance(_severity := finding.get("severity"), str) else None,
+                    updated_at=_created_at if isinstance(_created_at := finding.get("created_at"), str) else None,
                 )
             )
     handoffs = handoff_cmd.draft_queue_payload(target)
@@ -579,9 +584,9 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                     str(draft.get("status") or "pending"),
                     str(draft.get("title") or draft.get("target_document") or "handoff draft"),
                     f"brigade handoff show {draft_id}",
-                    severity=draft.get("severity") if isinstance(draft.get("severity"), str) else None,
-                    updated_at=draft.get("modified_at") if isinstance(draft.get("modified_at"), str) else None,
-                    path=draft.get("path") if isinstance(draft.get("path"), str) else None,
+                    severity=_severity if isinstance(_severity := draft.get("severity"), str) else None,
+                    updated_at=_modified_at if isinstance(_modified_at := draft.get("modified_at"), str) else None,
+                    path=_path if isinstance(_path := draft.get("path"), str) else None,
                 )
             )
     research_handoffs = research_cmd.health(target)
@@ -604,8 +609,9 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
         ("run_history", "brigade tools run list"),
         ("checkpoints", "brigade tools checkpoint list"),
     ):
-        value = tool_health.get(bucket) if isinstance(tool_health.get(bucket), dict) else {}
-        top = value.get("top_issue") if isinstance(value.get("top_issue"), dict) else None
+        bucket_val = tool_health.get(bucket) if isinstance(tool_health, dict) else None
+        value = bucket_val if isinstance(bucket_val, dict) else {}
+        top = _top_issue if isinstance(_top_issue := value.get("top_issue"), dict) else None
         if top:
             items.append(
                 _item(
@@ -614,7 +620,7 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                     str(top.get("status") or "warn"),
                     str(top.get("detail") or top.get("issue_type") or bucket),
                     command,
-                    severity=top.get("severity") if isinstance(top.get("severity"), str) else None,
+                    severity=_severity if isinstance(_severity := top.get("severity"), str) else None,
                 )
             )
     for name, health, command in (
@@ -622,7 +628,7 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
         ("memory-care", memory_cmd.health(target), "brigade memory care status"),
         ("security", security_cmd.health(target), "brigade security findings"),
     ):
-        top = health.get("top_issue") or health.get("top_finding")
+        top = health.get("top_issue") or health.get("top_finding") if isinstance(health, dict) else None
         if isinstance(top, dict):
             items.append(
                 _item(
@@ -631,7 +637,7 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                     str(top.get("status") or "warn"),
                     str(top.get("detail") or top.get("title") or top.get("safe_summary") or name),
                     command,
-                    severity=top.get("severity") if isinstance(top.get("severity"), str) else None,
+                    severity=_severity if isinstance(_severity := top.get("severity"), str) else None,
                 )
             )
     for candidate in learn_cmd.candidates(target):
@@ -642,12 +648,12 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                 str(candidate.get("status") or "pending"),
                 str(candidate.get("safe_summary") or ""),
                 str(candidate.get("suggested_next_command") or "brigade learn plan"),
-                severity=candidate.get("severity") if isinstance(candidate.get("severity"), str) else None,
+                severity=_severity if isinstance(_severity := candidate.get("severity"), str) else None,
             )
         )
-    learning_health = learn_cmd.health(target)
-    replay = learning_health.get("replay") if isinstance(learning_health.get("replay"), dict) else {}
-    replay_issue = replay.get("top_issue") if isinstance(replay.get("top_issue"), dict) else None
+    learning_health = _health if isinstance(_health := learn_cmd.health(target), dict) else {}
+    replay = _replay if isinstance(_replay := learning_health.get("replay"), dict) else {}
+    replay_issue = _top_issue if isinstance(_top_issue := replay.get("top_issue"), dict) else None
     if replay_issue:
         items.append(
             _item(
@@ -670,18 +676,21 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                     "brigade projects audit",
                 )
             )
-    repo_health = repos_cmd.health(target)
-    repo_report = repo_health.get("report") if isinstance(repo_health.get("report"), dict) else {}
-    repo_actions = repo_health.get("actions") if isinstance(repo_health.get("actions"), dict) else {}
-    repo_sweep = repo_health.get("sweep") if isinstance(repo_health.get("sweep"), dict) else {}
-    repo_release = repo_health.get("release_train") if isinstance(repo_health.get("release_train"), dict) else {}
-    for bucket, command in (
+    repo_health: dict[str, Any] = _health if isinstance(_health := repos_cmd.health(target), dict) else {}
+    repo_report: dict[str, Any] = _report if isinstance(_report := repo_health.get("report"), dict) else {}
+    repo_actions: dict[str, Any] = _actions if isinstance(_actions := repo_health.get("actions"), dict) else {}
+    repo_sweep: dict[str, Any] = _sweep if isinstance(_sweep := repo_health.get("sweep"), dict) else {}
+    repo_release: dict[str, Any] = (
+        _release_train if isinstance(_release_train := repo_health.get("release_train"), dict) else {}
+    )
+    buckets: list[tuple[dict[str, Any], str]] = [
         (repo_report, "brigade repos report build"),
         (repo_actions, "brigade repos actions list"),
         (repo_sweep, "brigade repos sweep run"),
         (repo_release, "brigade repos release build"),
-    ):
-        top = bucket.get("top_issue") if isinstance(bucket.get("top_issue"), dict) else None
+    ]
+    for bucket_data, default_cmd in buckets:
+        top = _top_issue if isinstance(_top_issue := bucket_data.get("top_issue"), dict) else None
         if top:
             items.append(
                 _item(
@@ -689,7 +698,7 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                     str(top.get("name") or "repo-fleet"),
                     str(top.get("status") or "warn"),
                     str(top.get("detail") or "repo fleet issue"),
-                    str(top.get("suggested_next_command") or command),
+                    str(top.get("suggested_next_command") or default_cmd),
                 )
             )
     context_health = context_cmd.health(target)
@@ -713,8 +722,8 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                 str(candidate.get("status") or "draft"),
                 "release candidate awaits review",
                 f"brigade release candidate compare {candidate_id}",
-                updated_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None,
-                path=candidate.get("path") if isinstance(candidate.get("path"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := candidate.get("created_at"), str) else None,
+                path=_path if isinstance(_path := candidate.get("path"), str) else None,
             )
         )
     for action in _read_actions(target):
@@ -728,14 +737,14 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                 str(action.get("status") or "pending"),
                 str(action.get("safe_summary") or "operator action"),
                 f"brigade center actions show {action_id}",
-                priority=action.get("priority") if isinstance(action.get("priority"), str) else None,
-                severity=action.get("severity") if isinstance(action.get("severity"), str) else None,
-                updated_at=action.get("updated_at") if isinstance(action.get("updated_at"), str) else None,
+                priority=_priority if isinstance(_priority := action.get("priority"), str) else None,
+                severity=_severity if isinstance(_severity := action.get("severity"), str) else None,
+                updated_at=_updated_at if isinstance(_updated_at := action.get("updated_at"), str) else None,
                 receipt_path=str(_actions_path(target)),
             )
         )
-    readiness = readiness_health(target)
-    top_readiness = readiness.get("top_issue") if isinstance(readiness.get("top_issue"), dict) else None
+    readiness = _readiness_mod.readiness_health(target)
+    top_readiness = _top_issue if isinstance(_top_issue := readiness.get("top_issue"), dict) else None
     if top_readiness:
         items.append(
             _item(
@@ -746,9 +755,9 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                 "brigade center readiness plan",
             )
         )
-    daily_health = daily_cmd.health(target)
-    approvals = daily_health.get("approvals") if isinstance(daily_health.get("approvals"), dict) else {}
-    top_approval = approvals.get("top_pending") if isinstance(approvals.get("top_pending"), dict) else None
+    daily_health = _health if isinstance(_health := daily_cmd.health(target), dict) else {}
+    approvals = _approvals if isinstance(_approvals := daily_health.get("approvals"), dict) else {}
+    top_approval = _top_pending if isinstance(_top_pending := approvals.get("top_pending"), dict) else None
     if top_approval:
         approval_id = str(top_approval.get("approval_id") or "approval")
         items.append(
@@ -760,7 +769,7 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                 f"brigade daily approvals show {approval_id}",
             )
         )
-    top_daily = daily_health.get("top_issue") if isinstance(daily_health.get("top_issue"), dict) else None
+    top_daily = _top_issue if isinstance(_top_issue := daily_health.get("top_issue"), dict) else None
     if top_daily:
         items.append(
             _item(
@@ -772,7 +781,7 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
             )
         )
     phase_health = phases_cmd.health(target)
-    top_phase = phase_health.get("top_issue") if isinstance(phase_health.get("top_issue"), dict) else None
+    top_phase = _top_issue if isinstance(_top_issue := phase_health.get("top_issue"), dict) else None
     if top_phase:
         items.append(
             _item(
@@ -784,7 +793,7 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
             )
         )
     latest_phase_session = (
-        phase_health.get("latest_session") if isinstance(phase_health.get("latest_session"), dict) else None
+        _latest_session if isinstance(_latest_session := phase_health.get("latest_session"), dict) else None
     )
     if latest_phase_session and latest_phase_session.get("status") not in {"closed", "archived"}:
         items.append(
@@ -797,13 +806,13 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
             )
         )
     latest_checkpoint = (
-        phase_health.get("latest_session_checkpoint")
-        if isinstance(phase_health.get("latest_session_checkpoint"), dict)
+        _latest_session_checkpoint
+        if isinstance(_latest_session_checkpoint := phase_health.get("latest_session_checkpoint"), dict)
         else None
     )
     latest_checkpoint_compare = (
-        phase_health.get("latest_session_checkpoint_compare")
-        if isinstance(phase_health.get("latest_session_checkpoint_compare"), dict)
+        _latest_session_checkpoint_compare
+        if isinstance(_latest_session_checkpoint_compare := phase_health.get("latest_session_checkpoint_compare"), dict)
         else None
     )
     if latest_checkpoint and latest_checkpoint.get("status") == "blocked":
@@ -816,18 +825,14 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                 str(latest_checkpoint.get("summary") or "phase session checkpoint is blocked"),
                 f"brigade work phases session checkpoints show {checkpoint_id}",
                 severity="high",
-                updated_at=latest_checkpoint.get("created_at")
-                if isinstance(latest_checkpoint.get("created_at"), str)
-                else None,
-                receipt_path=latest_checkpoint.get("path") if isinstance(latest_checkpoint.get("path"), str) else None,
+                updated_at=_created_at if isinstance(_created_at := latest_checkpoint.get("created_at"), str) else None,
+                receipt_path=_path if isinstance(_path := latest_checkpoint.get("path"), str) else None,
             )
         )
     if latest_checkpoint_compare and int(latest_checkpoint_compare.get("issue_count") or 0) > 0:
         checkpoint_id = str(latest_checkpoint_compare.get("checkpoint_id") or "latest")
         top_checkpoint = (
-            latest_checkpoint_compare.get("top_issue")
-            if isinstance(latest_checkpoint_compare.get("top_issue"), dict)
-            else {}
+            _top_issue if isinstance(_top_issue := latest_checkpoint_compare.get("top_issue"), dict) else {}
         )
         items.append(
             _item(
@@ -878,9 +883,9 @@ def status_payload(target: Path) -> dict[str, Any]:
         "roadmap": roadmap_cmd.health(target),
         "projects": projects_cmd.health(target),
         "security": security_cmd.health(target),
-        "operator_readiness": readiness_health(target),
-        "operator_report": report_health(target),
-        "action_queue": actions_health(target),
+        "operator_readiness": _readiness_mod.readiness_health(target),
+        "operator_report": _reports_mod.report_health(target),
+        "action_queue": _actions_mod.actions_health(target),
         "daily_driver": daily_cmd.health(target),
         "cloud_tracker": cloud_tracker.health(target),
         "phase_ledger": phases_cmd.health(target),
@@ -900,19 +905,19 @@ def status(*, target: Path, json_output: bool = False) -> int:
         f"actions: {payload['action_queue']['open_count']}",
         f"context_packs: {payload['context']['pack_count']}",
     ]
-    pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
+    pantry = _pantry if isinstance(_pantry := payload.get("pantry"), dict) else {}
     if pantry:
         text_lines.append(f"pantry: {pantry.get('summary')}")
-    notifications = payload.get("notifications") if isinstance(payload.get("notifications"), dict) else {}
+    notifications = _notifications if isinstance(_notifications := payload.get("notifications"), dict) else {}
     if notifications:
         text_lines.append(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
-    phase_ledger = payload.get("phase_ledger") if isinstance(payload.get("phase_ledger"), dict) else {}
+    phase_ledger = _phase_ledger if isinstance(_phase_ledger := payload.get("phase_ledger"), dict) else {}
     if phase_ledger:
         text_lines.append(f"phase_records: {phase_ledger.get('record_count', 0)}")
         text_lines.append(f"phase_issues: {phase_ledger.get('issue_count', 0)}")
         text_lines.append(f"phase_actions: {phase_ledger.get('open_action_count', 0)}")
         latest_phase_session = (
-            phase_ledger.get("latest_session") if isinstance(phase_ledger.get("latest_session"), dict) else None
+            _latest_session if isinstance(_latest_session := phase_ledger.get("latest_session"), dict) else None
         )
         if latest_phase_session:
             text_lines.append(
