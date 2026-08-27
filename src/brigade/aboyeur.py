@@ -1156,7 +1156,7 @@ no-card
     path.write_text(body)
     if output_dir is not None or outcome_id:
         parent_kind = "outcome" if outcome_id else "run"
-        parent_id = outcome_id if outcome_id else output_dir.name
+        parent_id = outcome_id if outcome_id else output_dir.name if output_dir is not None else ""
         localio.write_json(
             causal_receipt.handoff_sidecar_path(path),
             causal_receipt.recorded_handoff(
@@ -1372,7 +1372,7 @@ def _run_orchestrator(
 ) -> agents.AgentResult:
     orchestrator = roster.agents[roster.orchestrator]
     transport = codex_transport or roster.codex_transport
-    if not is_cli_allowed(orchestrator.cli, roster):
+    if orchestrator.cli is None or not is_cli_allowed(orchestrator.cli, roster):
         return agents.AgentResult(
             text="",
             ok=False,
@@ -1491,7 +1491,7 @@ def _orchestrator_hides_write_tools(
 ) -> bool:
     """True when the orchestrator seat launches without any file-write tool."""
     orchestrator = roster.agents.get(roster.orchestrator)
-    if orchestrator is None:
+    if orchestrator is None or orchestrator.cli is None:
         return False
     # _run_orchestrator resolves read-only the same way before building argv.
     effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
@@ -1906,8 +1906,8 @@ def _worker_event_writer(
                 and _contains_event_marker(msg, correlation_marker)
                 and workspace is not None
             ):
-                thread_id = params.get("threadId")
-                turn_id = params.get("turnId")
+                thread_id = params.get("threadId") if isinstance(params, dict) else None
+                turn_id = params.get("turnId") if isinstance(params, dict) else None
                 if isinstance(thread_id, str) and isinstance(turn_id, str):
                     from . import runs_cmd
 
@@ -4300,7 +4300,7 @@ def run(
             if timed_out:
                 failure_kind = "timeout"
             if output_dir is not None:
-                finished_at = datetime.now(timezone.utc)
+                finished_at: datetime | None = datetime.now(timezone.utc)
                 _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
                 failure_phase = "planning"
                 if isinstance(final_attempt, dict):
@@ -4567,7 +4567,7 @@ def run(
                 control_socket = None
             if appserver is not None and output_dir is not None:
                 control_registry = run_control.LiveTurnRegistry()
-                control_server = run_control.ControlServer(control_socket, control_registry)
+                control_server = run_control.ControlServer(output_dir / "control.sock", control_registry)
                 try:
                     control_transport = control_server.start()
                 except run_control.ControlError as exc:

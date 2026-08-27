@@ -87,11 +87,9 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = [
-    "brigade.aboyeur",
     "brigade.center_cmd",
     "brigade.center_cmd.*",
     "brigade.cli.run",
-    "brigade.cli.work.*",
     "brigade.daily_cmd",
     "brigade.daily_cmd.*",
     "brigade.doctor",
@@ -114,10 +112,8 @@ module = [
     "brigade.release_cmd.*",
     "brigade.security_cmd",
     "brigade.security_cmd.*",
-    "brigade.skills_cmd",
     "brigade.work_cmd.backup",
     "brigade.work_cmd.imports",
-    "brigade.work_cmd.ledger",
     "brigade.work_cmd.reviews",
     "brigade.work_cmd.scanners",
     "brigade.work_cmd.services",
