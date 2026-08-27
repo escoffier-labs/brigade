@@ -4395,6 +4395,7 @@ def _seed_inbox(target, rows: bytes):
 
 def _spawn_ledger_writer_child(tmp_path, mode):
     """Run one ledger inbox writer in a real second process (cross-process lock)."""
+    src_root = Path(__file__).parents[1] / "src"
     marker = tmp_path / f"{mode}.done.marker"
     if mode == "append":
         body = (
@@ -4408,6 +4409,7 @@ def _spawn_ledger_writer_child(tmp_path, mode):
     script = (
         "import sys\n"
         "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(src_root)!r})\n"
         "from brigade.work_cmd import ledger\n"
         f"target = Path({str(tmp_path)!r})\n" + body + f"Path({str(marker)!r}).write_text('done' if ok else 'failed')\n"
         "sys.exit(0 if ok else 3)\n"

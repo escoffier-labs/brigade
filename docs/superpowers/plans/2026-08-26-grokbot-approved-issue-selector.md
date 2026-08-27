@@ -24,7 +24,7 @@ Smallest useful slice: one labeled GitHub issue source that can create one Repos
 
 Highest rung that holds: the existing Grok Bot queue, feed permission reader, job validator, `gh` CLI pattern, and systemd timer.
 
-Existing pattern to follow: `grokbot_feed.py`, `_read_github_issue()` in `work_cmd/ledger.py`, and `run_cloud._dispatch_grokbot_feed()`.
+Existing pattern to follow: `grokbot_feed.py`, `_read_github_issue()` in `work_cmd/ledger/`, and `run_cloud._dispatch_grokbot_feed()`.
 
 Cut from scope: Implementation Worker selection, quota-percentage inference, issue comments or labels, Fleet Hub APIs, campaigns, retries, merge, release, deploy, and new dependencies.
 

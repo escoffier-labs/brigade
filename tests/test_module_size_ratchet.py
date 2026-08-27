@@ -11,7 +11,6 @@ CEILING = 2000
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 LEGACY_OVERSIZED: dict[str, int] = {
-    "src/brigade/work_cmd/ledger.py": 6850,
     "src/brigade/aboyeur.py": 5362,
     "src/brigade/skills_cmd.py": 5305,
     "src/brigade/runs_cmd.py": 3584,
