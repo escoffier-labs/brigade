@@ -23,9 +23,23 @@ from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import reports as _reports_mod
+from . import scan_engine as _scan_engine_mod
+from . import suppression as _suppression_mod
+from . import template_audit_ops as _template_audit_ops_mod
+from .config import _effective_policy, load_config, write_config, write_default_config
+from .models import (
+    POLICIES,
+    SEVERITY_ORDER,
+    _closeouts_root,
+    _merge_fingerprint_migration_map,
+    _read_closeouts,
+    _read_fingerprint_migration_map,
+    _sanitize_finding_for_output,
+    config_path,
+    default_artifacts_dir,
+    inspect_evidence_bundle,
+)
 
 
 def show_config(*, target: Path, json_output: bool = False) -> int:
@@ -34,7 +48,7 @@ def show_config(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     try:
-        payload = _config_payload(target)
+        payload = _scan_engine_mod._config_payload(target)
     except ValueError as exc:
         print(f"error: invalid security config: {exc}", file=sys.stderr)
         return 2
@@ -78,7 +92,7 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
         else set()
     )
     if accepted_fingerprints:
-        accepted_fingerprints = _expand_suppression_fingerprints(accepted_fingerprints, migration_map)
+        accepted_fingerprints = _scan_engine_mod._expand_suppression_fingerprints(accepted_fingerprints, migration_map)
     config_ok = True
     try:
         loaded = load_config(target)
@@ -114,7 +128,7 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
         )
     else:
         checks.append({"status": "fail", "name": "security_evidence", "detail": str(bundle.get("reason"))})
-    template_audit_payload = template_privacy_payload(target)
+    template_audit_payload = _template_audit_ops_mod.template_privacy_payload(target)
     if template_audit_payload["finding_count"]:
         top_template = (
             template_audit_payload["top_finding"] if isinstance(template_audit_payload.get("top_finding"), dict) else {}
@@ -134,7 +148,7 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
                 "detail": f"{template_audit_payload['scanned_file_count']} public file(s) checked",
             }
         )
-    raw_harness_wiring = harness_wiring_payload(target)
+    raw_harness_wiring = _template_audit_ops_mod.harness_wiring_payload(target)
     raw_harness_findings = [item for item in raw_harness_wiring.get("findings", []) if isinstance(item, dict)]
     include_templates = (
         bool(
@@ -152,9 +166,9 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
         matched_harness_findings = [
             item
             for item in eligible_harness_findings
-            if _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
+            if _scan_engine_mod._finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
         ]
-        migrated_closeout = _migrate_closeout_fingerprints(latest_closeout, matched_harness_findings)
+        migrated_closeout = _scan_engine_mod._migrate_closeout_fingerprints(latest_closeout, matched_harness_findings)
         if migrated_closeout is not None:
             latest_closeout = migrated_closeout
             accepted_fingerprints = {
@@ -162,16 +176,18 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
                 for fingerprint in latest_closeout.get("source_fingerprints", [])
                 if isinstance(fingerprint, str) and fingerprint
             }
-            accepted_fingerprints = _expand_suppression_fingerprints(accepted_fingerprints, migration_map)
+            accepted_fingerprints = _scan_engine_mod._expand_suppression_fingerprints(
+                accepted_fingerprints, migration_map
+            )
     active_harness_findings = [
         item
         for item in eligible_harness_findings
-        if not _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
+        if not _scan_engine_mod._finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
     ]
     quieted_harness_findings = [
         item
         for item in eligible_harness_findings
-        if _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
+        if _scan_engine_mod._finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
     ]
     harness_wiring = {
         **raw_harness_wiring,
@@ -206,7 +222,7 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
     suppression_cache: dict[str, Any] | None = None
     try:
         if suppression_cache_only:
-            suppression_cache = suppression_health_cache(target)
+            suppression_cache = _suppression_mod.suppression_health_cache(target)
             if suppression_cache["status"] == "ok":
                 suppression = suppression_cache["health"]
             else:
@@ -220,7 +236,7 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
                 )
                 suppression = None
         else:
-            suppression = suppression_health(target)
+            suppression = _suppression_mod.suppression_health(target)
     except ValueError as exc:
         checks.append({"status": "fail", "name": "security_suppressions", "detail": str(exc)})
     else:
@@ -250,9 +266,11 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
     open_finding_count: int | None = None
     if bundle.get("ready"):
         try:
-            report = _load_report(default_artifacts_dir(target))
+            report = _reports_mod._load_report(default_artifacts_dir(target))
             raw_open_findings = [
-                item for item in _report_findings_for_review(target, report) if item.get("status") != "suppressed"
+                item
+                for item in _reports_mod._report_findings_for_review(target, report)
+                if item.get("status") != "suppressed"
             ]
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             checks.append(
@@ -267,10 +285,12 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
             quieted_findings = [
                 item
                 for item in raw_open_findings
-                if _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
+                if _scan_engine_mod._finding_matches_fingerprints(
+                    item, accepted_fingerprints, migration_map=migration_map
+                )
             ]
             if isinstance(latest_closeout, dict) and quieted_findings:
-                migrated_closeout = _migrate_closeout_fingerprints(latest_closeout, quieted_findings)
+                migrated_closeout = _scan_engine_mod._migrate_closeout_fingerprints(latest_closeout, quieted_findings)
                 if migrated_closeout is not None:
                     latest_closeout = migrated_closeout
                     accepted_fingerprints = {
@@ -278,11 +298,15 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
                         for fingerprint in latest_closeout.get("source_fingerprints", [])
                         if isinstance(fingerprint, str) and fingerprint
                     }
-                    accepted_fingerprints = _expand_suppression_fingerprints(accepted_fingerprints, migration_map)
+                    accepted_fingerprints = _scan_engine_mod._expand_suppression_fingerprints(
+                        accepted_fingerprints, migration_map
+                    )
             records = [
                 item
                 for item in raw_open_findings
-                if not _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
+                if not _scan_engine_mod._finding_matches_fingerprints(
+                    item, accepted_fingerprints, migration_map=migration_map
+                )
             ]
             open_finding_count = len(records)
             if records:
@@ -402,8 +426,8 @@ def closeout(
         return 2
     artifacts_dir = output_dir.expanduser().resolve() if output_dir is not None else default_artifacts_dir(target)
     try:
-        report = _load_report(artifacts_dir)
-        records = _report_findings_for_review(target, report)
+        report = _reports_mod._load_report(artifacts_dir)
+        records = _reports_mod._report_findings_for_review(target, report)
     except FileNotFoundError as exc:
         print(f"error: security report not found: {exc}", file=sys.stderr)
         return 2
@@ -461,7 +485,7 @@ def closeout(
         "findings": finding_records,
         "path": str(_closeouts_root(target) / closeout_id / "closeout.json"),
     }
-    _write_json(Path(payload["path"]), payload)
+    _write_json(Path(str(payload["path"])), payload)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -499,7 +523,7 @@ def scan(
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    report = scan_target(
+    report = _scan_engine_mod.scan_target(
         target,
         include_templates=effective.include_templates,
         suppressions=effective.suppressions,
@@ -512,7 +536,7 @@ def scan(
     if effective.config_loaded:
         loaded = load_config(target)
         if loaded is not None:
-            migrated_config, suppression_migrations = _migrate_legacy_suppressions(loaded, report)
+            migrated_config, suppression_migrations = _scan_engine_mod._migrate_legacy_suppressions(loaded, report)
             if suppression_migrations:
                 if _merge_fingerprint_migration_map(target, suppression_migrations):
                     write_config(target, migrated_config)
@@ -546,23 +570,23 @@ def scan(
         report["candidate_commit"] = candidate_commit.stdout.strip()
     if suppression_migrations:
         report["suppression_migrations"] = suppression_migrations
-    _write_suppression_health_cache_from_report(target, effective, report)
+    _suppression_mod._write_suppression_health_cache_from_report(target, effective, report)
     configured_output_dir = target / effective.output_path
     requested_output_dir = output_dir
     if requested_output_dir is None and (import_findings or effective.config_loaded):
         requested_output_dir = configured_output_dir
     if requested_output_dir is not None:
-        artifacts_dir = write_evidence_bundle(report, requested_output_dir)
+        artifacts_dir = _scan_engine_mod.write_evidence_bundle(report, requested_output_dir)
         report["artifacts"] = str(artifacts_dir)
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     if import_findings and report["findings"]:
         evidence_path = Path(report["artifacts"]) / "security-report.json" if report.get("artifacts") else None
-        imported, skipped = _import_findings(target, report["findings"], evidence_path=evidence_path)
+        imported, skipped = _scan_engine_mod._import_findings(target, report["findings"], evidence_path=evidence_path)
         report["imported_findings"] = len(imported)
         report["skipped_duplicate_imports"] = len(skipped)
         if requested_output_dir is not None:
-            artifacts_dir = write_evidence_bundle(report, requested_output_dir)
+            artifacts_dir = _scan_engine_mod.write_evidence_bundle(report, requested_output_dir)
             report["artifacts"] = str(artifacts_dir)
 
     if json_output:
@@ -597,7 +621,7 @@ def scan(
             for option in finding.get("response_options") or []:
                 print(f"  response_option: {option}")
 
-    return 1 if _should_fail(report["findings"], effective.fail_on) else 0
+    return 1 if _scan_engine_mod._should_fail(report["findings"], effective.fail_on) else 0
 
 
 def init(*, target: Path, force: bool = False) -> int:

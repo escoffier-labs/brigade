@@ -22,9 +22,18 @@ from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import reports as _reports_mod
+from . import scan_engine as _scan_engine_mod
+from .config import _clean_reason, _effective_policy, _load_config_or_default, load_config, write_config
+from .models import (
+    EffectivePolicy,
+    FINGERPRINT_RE,
+    SUPPRESSION_HEALTH_CACHE_VERSION,
+    SecurityConfig,
+    _read_fingerprint_migration_map,
+    default_artifacts_dir,
+    suppression_health_cache_path,
+)
 
 
 def suppress(*, target: Path, fingerprint: str, reason: str, json_output: bool = False) -> int:
@@ -36,7 +45,7 @@ def suppress(*, target: Path, fingerprint: str, reason: str, json_output: bool =
     cleaned_reason = _clean_reason(reason)
     finding: dict[str, Any] | None = None
     if not FINGERPRINT_RE.match(fingerprint):
-        finding, message = _resolve_finding_record(target, fingerprint)
+        finding, message = _reports_mod._resolve_finding_record(target, fingerprint)
         if finding is None or not FINGERPRINT_RE.match(str(finding.get("fingerprint") or "")):
             print(f"error: {message or 'finding id or fingerprint is invalid'}", file=sys.stderr)
             return 2
@@ -56,7 +65,7 @@ def suppress(*, target: Path, fingerprint: str, reason: str, json_output: bool =
     related_aliases = {legacy for legacy, primary in migration_map.items() if primary == fingerprint}
     if finding is not None:
         related_aliases.update(
-            _configured_suppression_aliases(
+            _scan_engine_mod._configured_suppression_aliases(
                 finding, suppressions=set(suppressions), reasons=reasons, migration_map=migration_map
             )
         )
@@ -115,7 +124,7 @@ def unsuppress(*, target: Path, fingerprint: str, json_output: bool = False) -> 
     fingerprint = fingerprint.strip()
     finding: dict[str, Any] | None = None
     if not FINGERPRINT_RE.match(fingerprint):
-        finding, message = _resolve_finding_record(target, fingerprint)
+        finding, message = _reports_mod._resolve_finding_record(target, fingerprint)
         if finding is None or not FINGERPRINT_RE.match(str(finding.get("fingerprint") or "")):
             print(f"error: {message or 'finding id or fingerprint is invalid'}", file=sys.stderr)
             return 2
@@ -129,14 +138,14 @@ def unsuppress(*, target: Path, fingerprint: str, json_output: bool = False) -> 
     fingerprint = migration_map.get(fingerprint, fingerprint)
     configured_aliases: tuple[str, ...]
     if finding is not None:
-        configured_aliases = _configured_suppression_aliases(
+        configured_aliases = _scan_engine_mod._configured_suppression_aliases(
             finding,
             suppressions=set(config.suppressions),
             reasons=config.suppression_reasons,
             migration_map=migration_map,
         )
     else:
-        configured = _expand_suppression_fingerprints(
+        configured = _scan_engine_mod._expand_suppression_fingerprints(
             set(config.suppressions) | set(config.suppression_reasons),
             migration_map,
         )
@@ -202,8 +211,10 @@ def _file_sha256(path: Path) -> str | None:
 
 def _candidate_file_records(target: Path, effective: EffectivePolicy) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for path in _iter_scan_files(target, include_paths=effective.include_paths, exclude_paths=effective.exclude_paths):
-        classification = _classification_for(path, target)
+    for path in _scan_engine_mod._iter_scan_files(
+        target, include_paths=effective.include_paths, exclude_paths=effective.exclude_paths
+    ):
+        classification = _scan_engine_mod._classification_for(path, target)
         if not effective.include_templates and classification.confidence == "template":
             continue
         try:
@@ -225,7 +236,7 @@ def _candidate_file_records(target: Path, effective: EffectivePolicy) -> list[di
             if path.name == "TEMPLATE.md":
                 continue
             rel = str(path.relative_to(target))
-            if not _scan_path_selected(
+            if not _scan_engine_mod._scan_path_selected(
                 rel,
                 include_paths=effective.include_paths,
                 exclude_paths=effective.exclude_paths,
@@ -280,7 +291,7 @@ def _active_fingerprint_aliases(report: dict[str, Any]) -> set[str]:
     for finding in list(report.get("findings") or []) + list(report.get("suppressed_findings") or []):
         if not isinstance(finding, dict):
             continue
-        active.update(_safe_fingerprint_aliases(finding))
+        active.update(_scan_engine_mod._safe_fingerprint_aliases(finding))
     return active
 
 
@@ -381,7 +392,7 @@ def suppression_health(target: Path) -> dict[str, Any]:
     if not config.suppressions:
         return {"suppression_count": 0, "missing_reasons": [], "stale": []}
     effective = _effective_policy(target, policy=None, fail_on=None, include_templates=None)
-    report = scan_target(
+    report = _scan_engine_mod.scan_target(
         target,
         include_templates=effective.include_templates,
         suppressions=(),

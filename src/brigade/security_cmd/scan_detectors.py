@@ -22,9 +22,32 @@ from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import scan_engine as _scan_engine_mod
+from . import template_audit_ops as _template_audit_ops_mod
+from .models import (
+    DESTRUCTIVE_RE,
+    ENV_DUMP_RE,
+    FileClassification,
+    GITHUB_ACTION_FLOATING_REFS,
+    HARNESS_ALLOWED_URL_RE,
+    HARNESS_COMMAND_KEYS,
+    HARNESS_PATH_KEYS,
+    HARNESS_ROOTS,
+    HARNESS_URL_KEYS,
+    MCP_BROAD_PATHS,
+    MCP_HIGH_RISK_COMMANDS,
+    MCP_SENSITIVE_ARG_RE,
+    MCP_SERVER_COUNT_WARN,
+    MCP_SHELL_META_RE,
+    PINNED_ACTION_RE,
+    PYTHON_URL_DEP_RE,
+    REMOTE_SHELL_RE,
+    TEMPLATE_PRIVATE_PATH_RE,
+    TEMPLATE_PRIVATE_URL_RE,
+    TOML_TABLE_RE,
+    UNPINNED_ACTION_RE,
+    UNPINNED_NPX_RE,
+)
 
 
 def _line_number_for(text: str, needle: str) -> int:
@@ -62,7 +85,7 @@ def _scan_mcp_document(
     if not isinstance(servers, dict):
         return
     if len(servers) > MCP_SERVER_COUNT_WARN:
-        _finding(
+        _scan_engine_mod._finding(
             findings,
             target=target,
             path=path,
@@ -83,7 +106,7 @@ def _scan_mcp_document(
         args = server.get("args", [])
         command_name = Path(command).name if isinstance(command, str) else None
         if command_name in MCP_HIGH_RISK_COMMANDS:
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -98,7 +121,7 @@ def _scan_mcp_document(
         if isinstance(command, str) and command == "npx" and isinstance(args, list):
             package = _first_npx_package(args)
             if package and "@" not in package:
-                _finding(
+                _scan_engine_mod._finding(
                     findings,
                     target=target,
                     path=path,
@@ -115,7 +138,7 @@ def _scan_mcp_document(
                 if not isinstance(arg, str):
                     continue
                 if MCP_SHELL_META_RE.search(arg):
-                    _finding(
+                    _scan_engine_mod._finding(
                         findings,
                         target=target,
                         path=path,
@@ -128,7 +151,7 @@ def _scan_mcp_document(
                         classification=classification,
                     )
                 if arg in MCP_BROAD_PATHS:
-                    _finding(
+                    _scan_engine_mod._finding(
                         findings,
                         target=target,
                         path=path,
@@ -141,7 +164,7 @@ def _scan_mcp_document(
                         classification=classification,
                     )
                 if MCP_SENSITIVE_ARG_RE.search(arg):
-                    _finding(
+                    _scan_engine_mod._finding(
                         findings,
                         target=target,
                         path=path,
@@ -158,8 +181,10 @@ def _scan_mcp_document(
             for key, value in env.items():
                 if not isinstance(key, str) or not isinstance(value, str):
                     continue
-                if re.search(r"(?i)(TOKEN|SECRET|PASSWORD|API_KEY)", key) and not _is_placeholder(value):
-                    _finding(
+                if re.search(
+                    r"(?i)(TOKEN|SECRET|PASSWORD|API_KEY)", key
+                ) and not _template_audit_ops_mod._is_placeholder(value):
+                    _scan_engine_mod._finding(
                         findings,
                         target=target,
                         path=path,
@@ -167,13 +192,13 @@ def _scan_mcp_document(
                         severity="high",
                         category="mcp",
                         title="MCP hardcoded environment secret",
-                        evidence=_redact_secret_evidence(f"{server_name}.env.{key}={value}"),
+                        evidence=_template_audit_ops_mod._redact_secret_evidence(f"{server_name}.env.{key}={value}"),
                         suggestion="Load MCP secrets from local environment or secret storage instead of checked-in config.",
                         classification=classification,
                     )
         url = server.get("url")
         if isinstance(url, str) and url.startswith(("http://", "https://")):
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -186,7 +211,7 @@ def _scan_mcp_document(
                 classification=classification,
             )
         if _server_timeout(server) is None:
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -295,7 +320,7 @@ def _scan_harness_string(
     key_path: tuple[str, ...],
     classification: FileClassification,
 ) -> None:
-    if _is_placeholder(value):
+    if _template_audit_ops_mod._is_placeholder(value):
         return
     key = _harness_semantic_key(key_path)
     if key in HARNESS_PATH_KEYS:
@@ -371,7 +396,7 @@ def _scan_harness_path_value(
     line_number = _harness_line_number(text, value, key_path)
     evidence = _harness_evidence(key_path, value)
     if value in {"~", "$HOME", "/", "/home", "/Users"}:
-        _finding(
+        _scan_engine_mod._finding(
             findings,
             target=target,
             path=path,
@@ -384,7 +409,7 @@ def _scan_harness_path_value(
             classification=classification,
         )
     if Path(value).is_absolute() or TEMPLATE_PRIVATE_PATH_RE.search(value):
-        _finding(
+        _scan_engine_mod._finding(
             findings,
             target=target,
             path=path,
@@ -397,7 +422,7 @@ def _scan_harness_path_value(
             classification=classification,
         )
     if ".." in parts:
-        _finding(
+        _scan_engine_mod._finding(
             findings,
             target=target,
             path=path,
@@ -422,7 +447,7 @@ def _scan_harness_command_value(
     classification: FileClassification,
 ) -> None:
     if REMOTE_SHELL_RE.search(value):
-        _finding(
+        _scan_engine_mod._finding(
             findings,
             target=target,
             path=path,
@@ -435,7 +460,7 @@ def _scan_harness_command_value(
             classification=classification,
         )
     elif MCP_SHELL_META_RE.search(value):
-        _finding(
+        _scan_engine_mod._finding(
             findings,
             target=target,
             path=path,
@@ -475,7 +500,7 @@ def _scan_harness_url_value(
     if TEMPLATE_PRIVATE_URL_RE.search(value):
         title = "Harness wiring contains private-looking URL"
         suggestion = "Replace private hostnames with placeholders before committing harness wiring."
-    _finding(
+    _scan_engine_mod._finding(
         findings,
         target=target,
         path=path,
@@ -528,7 +553,7 @@ def _scan_package_json(
         line_number = _line_number_for(text, f'"{name}"')
         evidence = f"scripts.{name}: {command}"
         if REMOTE_SHELL_RE.search(command):
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -541,7 +566,7 @@ def _scan_package_json(
                 classification=classification,
             )
         if DESTRUCTIVE_RE.search(command):
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -555,7 +580,7 @@ def _scan_package_json(
             )
         npx_match = UNPINNED_NPX_RE.search(command)
         if npx_match and "@" not in npx_match.group(1):
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -568,7 +593,7 @@ def _scan_package_json(
                 classification=classification,
             )
         if ENV_DUMP_RE.search(command):
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -591,7 +616,7 @@ def _scan_github_actions(
     for line_number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if stripped.startswith("pull_request_target:") or stripped == "- pull_request_target":
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -604,7 +629,7 @@ def _scan_github_actions(
                 classification=classification,
             )
         if stripped.startswith("permissions: write-all"):
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -618,7 +643,7 @@ def _scan_github_actions(
             )
         action_match = UNPINNED_ACTION_RE.search(stripped)
         if action_match:
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -636,7 +661,7 @@ def _scan_github_actions(
             if ref.lower() in GITHUB_ACTION_FLOATING_REFS or (
                 not ref.startswith("v") and not re.fullmatch(r"[a-fA-F0-9]{40}", ref)
             ):
-                _finding(
+                _scan_engine_mod._finding(
                     findings,
                     target=target,
                     path=path,
@@ -667,7 +692,7 @@ def _scan_python_project(
         if PYTHON_URL_DEP_RE.search(stripped) and _python_url_dependency_candidate(
             path.name, current_section, stripped
         ):
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
@@ -680,7 +705,7 @@ def _scan_python_project(
                 classification=classification,
             )
         if "setup_requires" in stripped or "dependency_links" in stripped:
-            _finding(
+            _scan_engine_mod._finding(
                 findings,
                 target=target,
                 path=path,
