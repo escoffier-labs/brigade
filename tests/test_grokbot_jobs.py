@@ -1159,6 +1159,21 @@ def test_metadata_only_report_completion_stays_compatible(tmp_path: Path):
     _assert_surfaces_omit_report_text(tmp_path, job_id)
 
 
+def test_metadata_only_complete_does_not_expose_orphan_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job_id = _leave_orphan_report_snapshot(tmp_path, monkeypatch, idempotency_key="request-orphan-completed")
+    completed = grokbot_jobs.transition(
+        tmp_path, job_id, "bot-a", "lease-a", "completed", artifact=_report_artifact(), now=NOW
+    )
+
+    assert completed["state"] == "completed"
+    assert not _snapshot_path(tmp_path, job_id).exists()
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^report-missing$") as exc:
+        grokbot_jobs.read_report(tmp_path, job_id)
+    assert exc.value.reason == "report-missing"
+    assert REPORT_TEXT not in str(exc.value)
+    _assert_surfaces_omit_report_text(tmp_path, job_id)
+
+
 @pytest.mark.parametrize("terminal", ["failed", "expired", "canceled"])
 def test_noncompleted_terminal_cleans_orphan_report_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: str

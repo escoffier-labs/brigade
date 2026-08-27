@@ -22,7 +22,7 @@ from . import fleet_client, grokbot_jobs
 
 
 DEFAULT_BIND = "127.0.0.1:8766"
-MAX_REQUEST_BYTES = 65_536
+MAX_REQUEST_BYTES = 80_000
 LEASE_SECONDS = 300
 MAX_LISTED_JOBS = 100
 SDK_LOOPBACK_ALLOWED_HOSTS = ("localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "::1", "[::1]:*")

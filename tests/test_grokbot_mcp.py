@@ -1020,6 +1020,87 @@ def test_mcp_raw_schema_accepts_report_text_only_on_complete(tmp_path: Path):
             }
 
 
+def _worst_case_escaped_complete_body(report_text: str) -> bytes:
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "grokbot_queue_complete",
+                "arguments": {
+                    "job_id": "grokbot-" + "a" * 24,
+                    "lease_id": "L" * 128,
+                    "artifact": {
+                        "kind": "report",
+                        "path": "p" * 512,
+                        "sha256": hashlib.sha256(report_text.encode("utf-8")).hexdigest(),
+                    },
+                    "report_text": report_text,
+                },
+            },
+        }
+    ).encode("utf-8")
+
+
+def test_asgi_admits_worst_case_json_escaped_max_report(tmp_path: Path):
+    adapter = _adapter(tmp_path, "repository-scout")
+    report_text = "\x01" * grokbot_jobs.MAX_REPORT_BYTES
+    body = _worst_case_escaped_complete_body(report_text)
+    reached: list[int] = []
+
+    async def downstream(scope, receive, send):
+        messages = []
+        while True:
+            message = await receive()
+            messages.append(message)
+            if not message.get("more_body", False) or message.get("type") != "http.request":
+                break
+        reached.append(sum(len(message.get("body", b"")) for message in messages))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def request() -> list[dict[str, object]]:
+        pending = iter(
+            [
+                {"type": "http.request", "body": body, "more_body": False},
+            ]
+        )
+        sent: list[dict[str, object]] = []
+
+        async def receive():
+            return next(pending, {"type": "http.disconnect"})
+
+        async def send(message):
+            sent.append(message)
+
+        await grokbot_mcp._GateASGI(downstream, grokbot_mcp.RequestGate(adapter.config), adapter)(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/mcp",
+                "headers": [
+                    (b"host", b"127.0.0.1:8766"),
+                    (b"authorization", b"Bearer not-a-real-token"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"content-type", b"application/json"),
+                ],
+            },
+            receive,
+            send,
+        )
+        return sent
+
+    assert grokbot_jobs.MAX_REPORT_BYTES == 12000
+    assert len(report_text.encode("utf-8")) == grokbot_jobs.MAX_REPORT_BYTES
+    assert grokbot_jobs._report_bytes(report_text) == report_text.encode("utf-8")
+    assert len(body) <= grokbot_mcp.MAX_REQUEST_BYTES
+    sent = asyncio.run(request())
+    assert sent[0]["status"] != 413
+    assert sent[0]["status"] == 200
+    assert reached == [len(body)]
+
+
 def test_asgi_replay_delegates_to_original_receive_after_buffer(tmp_path: Path):
     adapter = _adapter(tmp_path)
     released = asyncio.Event()

@@ -382,6 +382,7 @@ def transition(
                 raise GrokbotJobError("invalid-transition")
         else:
             record["result_artifact"] = _validated_completion(record, artifact)
+            _unlink_artifact_file(storage.artifacts, f"{record['job_id']}.md")
         record["state"] = state
         _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)

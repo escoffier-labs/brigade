@@ -37,8 +37,8 @@ The request gate will replay buffered request messages first, then delegate
 subsequent receives to the original ASGI receive callable. It will no longer
 invent a disconnect. Authentication, host checks, origin checks, and raw
 tool-schema checks stay unchanged. The overall request ceiling increases from
-16,384 to 65,536 bytes so a 12,000-byte UTF-8 report still fits when a JSON
-serializer escapes non-ASCII characters.
+16,384 to 80,000 bytes so a 12,000-byte UTF-8 report still fits when a JSON
+serializer escapes C0 control characters as six-byte `\u00XX` sequences.
 
 ## Storage boundary
 
@@ -66,8 +66,8 @@ serializer escapes non-ASCII characters.
 - Draft PR and branch completions reject `report_text`.
 - Operator inventory gains one read-only tool. Worker inventories keep their
   current names and gain only the optional completion argument.
-- The request ceiling is 65,536 bytes. The smaller report ceiling leaves room
-  for the JSON-RPC envelope, artifact metadata, and escaped Unicode.
+- The request ceiling is 80,000 bytes. The smaller report ceiling leaves room
+  for the JSON-RPC envelope, artifact metadata, and escaped C0 controls.
 
 ## Alternatives considered
 

@@ -62,7 +62,7 @@ The routine sequence for a worker is: list, claim, validate role and repository,
 
 Omitting `report_text` keeps the existing metadata-only completion. The job can still reach `completed`. No snapshot is stored, so later operator retrieval fails with the same public validation error as any other rejected tool input.
 
-The MCP HTTP request ceiling is 65,536 bytes. The smaller report cap leaves room for the JSON-RPC envelope, artifact metadata, and escaped Unicode.
+The MCP HTTP request ceiling is 80,000 bytes. The smaller report cap leaves room for the JSON-RPC envelope, artifact metadata, and escaped C0 controls.
 
 Verified snapshots live at `.brigade/cloud/grokbot/artifacts/<job-id>.md`, beside `jobs` and `idempotency`. The `artifacts` directory is mode `0700`. Each snapshot file is mode `0600`. The queue writes the snapshot before the completed job record.
 
@@ -142,4 +142,4 @@ systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-scout-feed --coll
 
 ## Current limits
 
-`setup` writes non-secret configuration and bearer references only. The operator still provisions Grok Bot routines and secrets. This work does not commission a Grok Bot and does not prove weekly quota attribution. A report snapshot is at most 12,000 UTF-8 bytes. The MCP request ceiling is 65,536 bytes.
+`setup` writes non-secret configuration and bearer references only. The operator still provisions Grok Bot routines and secrets. This work does not commission a Grok Bot and does not prove weekly quota attribution. A report snapshot is at most 12,000 UTF-8 bytes. The MCP request ceiling is 80,000 bytes.
