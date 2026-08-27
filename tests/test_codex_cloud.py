@@ -78,7 +78,8 @@ def test_run_agent_threads_process_registry_to_codex_cloud(monkeypatch):
 
 
 def test_run_agent_preserves_legacy_codex_cloud_call_shape(monkeypatch):
-    def fake_cloud_task(prompt, *, env_id, timeout, cwd=None, **kwargs):
+    def fake_cloud_task(prompt, *, env_id, timeout, cwd=None, process_registry=None):
+        del process_registry
         return agents.AgentResult(text=f"{env_id}: {prompt}", ok=True)
 
     monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)

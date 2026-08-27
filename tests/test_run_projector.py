@@ -538,7 +538,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 58
+    assert len(PRESERVED_FIELDS) == 59
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",

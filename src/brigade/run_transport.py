@@ -511,8 +511,13 @@ def dispatch(
         accepts_var_keyword = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
         accepts_registry = accepts_var_keyword or any(parameter.name == "process_registry" for parameter in parameters)
         accepts_env = accepts_var_keyword or any(parameter.name == "env" for parameter in parameters)
+        accepts_cloud_safe_mode = accepts_var_keyword or any(
+            parameter.name == "cloud_safe_mode" for parameter in parameters
+        )
         if not accepts_registry:
             kwargs.pop("process_registry", None)
+        if not accepts_cloud_safe_mode:
+            kwargs.pop("cloud_safe_mode", None)
         if orchestrator_run_id is not None:
             # Real agents.run_agent accepts env=; legacy fixed-signature test
             # doubles do not. Mirror the process_registry gate so BRIGADE_RUN_ID

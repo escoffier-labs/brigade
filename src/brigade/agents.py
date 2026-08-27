@@ -708,12 +708,34 @@ def detect(cli_ref: str, command: tuple[str, ...] | None = None) -> bool:
     return resolve_agent_executable(cli_ref, command=command).runnable
 
 
-def _accepts_process_registry(function: Callable[..., object]) -> bool:
+def _accepts_keyword(function: Callable[..., object], name: str) -> bool:
     parameters = inspect.signature(function).parameters.values()
-    return any(
-        parameter.name == "process_registry" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
+    return any(parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+
+
+def _accepts_process_registry(function: Callable[..., object]) -> bool:
+    return _accepts_keyword(function, "process_registry")
+
+
+def _call_run_cloud_task(
+    function: Callable[..., AgentResult],
+    prompt: str,
+    *,
+    env_id: str,
+    timeout: float,
+    cwd: Path | None,
+    environment_audit: dict[str, str],
+    register_target: Path,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> AgentResult:
+    kwargs: dict[str, object] = {}
+    if _accepts_keyword(function, "environment_audit"):
+        kwargs["environment_audit"] = environment_audit
+    if _accepts_keyword(function, "register_target"):
+        kwargs["register_target"] = register_target
+    if process_registry is not None and _accepts_process_registry(function):
+        kwargs["process_registry"] = process_registry
+    return function(prompt, env_id=env_id, timeout=timeout, cwd=cwd, **kwargs)
 
 
 def ollama_model_present(
@@ -1037,23 +1059,15 @@ def run_agent(
                 ok=False,
                 detail="codex-cloud does not take a model pin; the cloud environment sets the model",
             )
-        if process_registry is not None and _accepts_process_registry(codex_cloud.run_cloud_task):
-            return codex_cloud.run_cloud_task(
-                prompt,
-                env_id=env_id,
-                timeout=timeout,
-                cwd=cwd,
-                environment_audit=environment_audit,
-                register_target=config_root,
-                process_registry=process_registry,
-            )
-        return codex_cloud.run_cloud_task(
+        return _call_run_cloud_task(
+            codex_cloud.run_cloud_task,
             prompt,
             env_id=env_id,
             timeout=timeout,
             cwd=cwd,
             environment_audit=environment_audit,
             register_target=config_root,
+            process_registry=process_registry,
         )
 
     if cli_ref.startswith(_OLLAMA_PREFIX):

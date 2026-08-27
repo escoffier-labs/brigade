@@ -49,6 +49,26 @@ def _dispatch(monkeypatch, tmp_path, assignments, results_by_cli, **kwargs):
     return results, prompts
 
 
+def test_dispatch_preserves_legacy_run_agent_call_shape(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        del cli_ref, timeout, cwd, read_only
+        return agents.AgentResult(text=prompt, ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    results = run_transport.dispatch(
+        [Assignment(worker="coder", task="implement it")],
+        _roster(),
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+    )
+    assert results[0].ok is True
+    assert results[0].text == "implement it"
+
+
 def test_dispatch_stamps_worker_request_and_result(monkeypatch, tmp_path):
     results, prompts = _dispatch(
         monkeypatch,
