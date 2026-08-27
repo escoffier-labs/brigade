@@ -682,7 +682,7 @@ def test_detached_launch_kwargs_keep_posix_new_session(monkeypatch):
     assert proc.detached_launch_kwargs(job_breakaway=False) == {"start_new_session": True}
 
 
-def test_spawn_detached_retries_without_breakaway_when_the_job_forbids_it(monkeypatch):
+def test_spawn_detached_refuses_when_the_job_forbids_breakaway(monkeypatch):
     monkeypatch.setattr(os, "name", "nt")
     attempts = []
 
@@ -697,12 +697,10 @@ def test_spawn_detached_retries_without_breakaway_when_the_job_forbids_it(monkey
             raise error
         return FakeProcess()
 
-    process, mode = proc.spawn_detached(["child"], popen=fake_popen)
+    with pytest.raises(proc.DetachedLaunchError, match="breakaway"):
+        proc.spawn_detached(["child"], popen=fake_popen)
 
-    assert isinstance(process, FakeProcess)
-    assert mode == proc.DETACH_MODE_WINDOWS_NO_BREAKAWAY
-    assert len(attempts) == 2
-    assert attempts[1] & proc._WINDOWS_DETACHED_PROCESS
+    assert len(attempts) == 1
 
 
 def test_spawn_detached_propagates_non_breakaway_spawn_failures(monkeypatch):

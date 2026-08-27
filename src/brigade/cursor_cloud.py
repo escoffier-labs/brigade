@@ -22,6 +22,7 @@ DEFAULT_BASE_URL = "https://api.cursor.com"
 DEFAULT_DEADLINE = 10.0
 DEFAULT_MAX_PAGES = 5
 DEFAULT_MAX_ITEMS = 250
+_DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
 
 # Cursor Cloud Agents API v1 run states.
 _ACTIVE_STATES = frozenset({"creating", "running"})
@@ -82,7 +83,7 @@ def normalize_repo(repo: str | None) -> str | None:
 
 def _client_agent_id() -> str:
     """Return a stable per-launch client agent id in the Cursor ``bc-<uuid>`` form."""
-    return f"bc-{uuid4().hex}"
+    return f"bc-{uuid4()}"
 
 
 def _basic_auth_header(api_key: str) -> str:
@@ -137,7 +138,29 @@ def _call(opener, request: urllib.request.Request, deadline: float) -> dict[str,
 
 
 def _default_opener(request: urllib.request.Request, timeout: float | None = None):
-    return urllib.request.urlopen(request, timeout=timeout)
+    return _CURSOR_OPENER.open(request, timeout=timeout)
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    split = urllib.parse.urlsplit(url)
+    try:
+        port = split.port
+    except ValueError:
+        port = -1
+    scheme = split.scheme.lower()
+    return scheme, (split.hostname or "").lower(), _DEFAULT_SCHEME_PORTS.get(scheme) if port is None else port
+
+
+class _CursorRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Only follow redirects that retain the exact secure origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(req.full_url) != _origin(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_CURSOR_OPENER = urllib.request.build_opener(_CursorRedirectHandler(), urllib.request.ProxyHandler({}))
 
 
 _ISO_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z?$")

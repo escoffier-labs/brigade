@@ -14,6 +14,26 @@ import pytest
 
 from brigade import cloud_tracker, fleet_client, jules_cloud
 
+
+def test_jules_redirect_handler_refuses_cross_origin_and_https_downgrade():
+    handler = jules_cloud._JulesRedirectHandler()
+    request = jules_cloud._build_request("https://jules.googleapis.com/v1alpha/sessions", "secret")
+
+    assert handler.redirect_request(request, None, 302, "Found", {}, "https://evil.example/steal") is None
+    assert (
+        handler.redirect_request(request, None, 302, "Found", {}, "http://jules.googleapis.com/v1alpha/sessions")
+        is None
+    )
+
+
+def test_jules_source_sanitizer_preserves_official_nested_source_name():
+    source = _source()
+    source["name"] = "sources/github/owner/repo"
+    sanitized = jules_cloud.sanitize_source(source)
+    assert sanitized is not None
+    assert sanitized["name"] == "sources/github/owner/repo"
+
+
 _FAKE_KEY = "jules-api-key-deadbeef"
 
 

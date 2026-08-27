@@ -25,6 +25,7 @@ DEFAULT_DEADLINE = 10.0
 DEFAULT_PAGE_SIZE = 50
 DEFAULT_MAX_PAGES = 5
 DEFAULT_MAX_ITEMS = 250
+_DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
 
 # Strict paging bounds. A caller may tighten these but never loosen them.
 MAX_PAGE_SIZE = 100
@@ -86,7 +87,7 @@ _GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 _GITHUB_URL_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}/?$")
 _GITHUB_PR_URL_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}/pull/[0-9]{1,12}$")
 _JULES_SESSION_URL_RE = re.compile(r"^https://jules\.google\.com/[A-Za-z0-9/_-]{0,128}$")
-_SOURCE_NAME_RE = re.compile(r"^sources/[A-Za-z0-9_.-]{1,128}$")
+_SOURCE_NAME_RE = re.compile(r"^sources/(?:[A-Za-z0-9_.-]{1,64}/){0,3}[A-Za-z0-9_.-]{1,64}$")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$")
@@ -340,7 +341,29 @@ def _build_request(url: str, api_key: str, *, method: str = "GET", data: bytes |
 
 
 def _default_opener(request: urllib.request.Request, timeout: float | None = None):
-    return urllib.request.urlopen(request, timeout=timeout)
+    return _JULES_OPENER.open(request, timeout=timeout)
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    split = urllib.parse.urlsplit(url)
+    try:
+        port = split.port
+    except ValueError:
+        port = -1
+    scheme = split.scheme.lower()
+    return scheme, (split.hostname or "").lower(), _DEFAULT_SCHEME_PORTS.get(scheme) if port is None else port
+
+
+class _JulesRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Only follow redirects that retain the exact secure origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(req.full_url) != _origin(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_JULES_OPENER = urllib.request.build_opener(_JulesRedirectHandler(), urllib.request.ProxyHandler({}))
 
 
 def _read_response(

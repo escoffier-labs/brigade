@@ -641,6 +641,7 @@ def run_cloud_task(
                 branch=branch,
                 environment_audit=environment_audit,
                 expected_artifact=({"kind": "branch", "pattern": branch} if branch else {"kind": "diff"}),
+                lease_holder=holder if hub_configured else None,
             )
         except Exception:
             # Registry must not block cloud dispatch; adopt path covers misses.

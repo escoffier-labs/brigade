@@ -1042,6 +1042,14 @@ class CloudDecision:
     holder: str | None = None
 
 
+@dataclass(frozen=True)
+class ModelLeaseDecision:
+    granted: bool
+    reason: str
+    lease_id: str | None = None
+    holder: str | None = None
+
+
 _CLOUD_OK_KEYS = {"admit": "admitted", "bind": "bound", "renew": "renewed", "release": "released"}
 _CLOUD_LEASE_FIELDS = frozenset(
     {
@@ -1344,6 +1352,65 @@ def set_model_policy(
         return policy if policy else {}
     detail = payload.get("error") if isinstance(payload.get("error"), str) else None
     raise FleetClientError(f"fleet hub model policy update refused: HTTP {status}{': ' + detail if detail else ''}")
+
+
+def _model_lease_op(
+    action: str,
+    *,
+    seat: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    lease_id: str | None = None,
+    holder: str | None = None,
+    ttl_seconds: int = 3600,
+) -> ModelLeaseDecision:
+    lease = lease_id or uuid4().hex
+    fence = holder or uuid4().hex
+    try:
+        config = load_fleet_config()
+        if not config["hub_url"]:
+            return ModelLeaseDecision(True, "no-hub", lease, fence)
+        node = resolve_node_id()
+        if not _node_id_is_claimable(node):
+            return ModelLeaseDecision(False, "no-identity", lease, fence)
+        body: dict[str, Any] = {"action": action, "lease_id": lease, "node_id": node, "holder": fence}
+        if action == "acquire":
+            body.update(seat=seat, provider=provider, model=model, ttl_seconds=ttl_seconds)
+        status, payload = _run_with_deadline(
+            lambda: _post_model_policy_blocking(
+                config["hub_url"], config["token"], body, timeout=CLOUD_TIMEOUT_SECONDS
+            ),
+            timeout=CLOUD_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return ModelLeaseDecision(False, "hub-unavailable", lease, fence)
+    if status in (401, 403):
+        return ModelLeaseDecision(False, "auth-failed", lease, fence)
+    key = "acquired" if action == "acquire" else "released"
+    return ModelLeaseDecision(
+        status == 200 and isinstance(payload, dict) and payload.get(key) is True,
+        "ok" if status == 200 and isinstance(payload, dict) and payload.get(key) is True else "refused",
+        lease,
+        fence,
+    )
+
+
+def acquire_model_lease(
+    seat: str,
+    provider: str,
+    model: str,
+    *,
+    lease_id: str | None = None,
+    holder: str | None = None,
+    ttl_seconds: int = 3600,
+) -> ModelLeaseDecision:
+    return _model_lease_op(
+        "acquire", seat=seat, provider=provider, model=model, lease_id=lease_id, holder=holder, ttl_seconds=ttl_seconds
+    )
+
+
+def release_model_lease(lease_id: str, *, holder: str) -> ModelLeaseDecision:
+    return _model_lease_op("release", lease_id=lease_id, holder=holder)
 
 
 def resolve_claim_target(base_path: Path | None = None) -> str:

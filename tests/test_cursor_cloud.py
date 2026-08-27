@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -12,6 +13,20 @@ from urllib import request as urllib_request
 import pytest
 
 from brigade import cloud_tracker, cursor_cloud, fleet_client
+
+
+def test_cursor_redirect_handler_refuses_cross_origin_and_https_downgrade():
+    handler = cursor_cloud._CursorRedirectHandler()
+    request = cursor_cloud._build_request("https://api.cursor.com/v1/agents", "secret")
+
+    assert handler.redirect_request(request, None, 302, "Found", {}, "https://evil.example/steal") is None
+    assert handler.redirect_request(request, None, 302, "Found", {}, "http://api.cursor.com/v1/agents") is None
+
+
+def test_cursor_client_agent_id_uses_canonical_uuid():
+    assert re.fullmatch(
+        r"bc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", cursor_cloud._client_agent_id()
+    )
 
 
 _FAKE_KEY = "cursor-api-key-deadbeef"

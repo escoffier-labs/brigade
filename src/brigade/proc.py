@@ -149,6 +149,10 @@ DETACH_MODE_WINDOWS_NO_BREAKAWAY = "windows-detached-new-group"
 DETACH_MODE_INHERITED = "inherited"
 
 
+class DetachedLaunchError(RuntimeError):
+    """A requested durable detach cannot be guaranteed on this platform."""
+
+
 class _WindowsChildJob:
     """Owned kill-on-close job object binding one launched child process tree."""
 
@@ -701,10 +705,10 @@ def spawn_detached(
         except OSError as exc:
             if not _is_windows_breakaway_denied(exc):
                 raise
-        # The ambient job forbids breakaway. A console-less child in its own
-        # process group still beats inheriting the console, so keep going
-        # rather than failing the detach outright.
-        return launch(False), DETACH_MODE_WINDOWS_NO_BREAKAWAY
+        raise DetachedLaunchError(
+            "Windows refused CREATE_BREAKAWAY_FROM_JOB; detached runs cannot safely survive this session's "
+            "kill-on-close job. Run outside the restricted job or ask the administrator to allow breakaway."
+        )
     if os.name == "posix":
         return launch(True), DETACH_MODE_POSIX_SESSION
     return launch(True), DETACH_MODE_INHERITED

@@ -113,7 +113,7 @@ from urllib.parse import parse_qs, urlencode
 
 from . import fleet_command_deck, fleet_dashboard
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 ACTIVE_EVENT_TTL_SECONDS = 30 * 60
@@ -318,6 +318,17 @@ CREATE TABLE IF NOT EXISTS model_policy (
     updated_at TEXT NOT NULL
 );
 """
+_MODEL_LEASES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS model_leases (
+    lease_id TEXT NOT NULL PRIMARY KEY,
+    seat TEXT NOT NULL,
+    owner_node TEXT NOT NULL,
+    holder_token TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    released_at TEXT
+);
+"""
 _CLOUD_LEASE_COLUMNS = (
     "lease_id, provider, provider_task_id, repo, label, owner_node, owner_conductor, state, "
     "admitted_at, renewed_at, ttl_seconds, expires_at, artifact_ref, released_at"
@@ -328,7 +339,10 @@ _CLOUD_PROVIDER_COLUMNS = (
 )
 _POLICY_COLUMNS = "seat, provider, model, enabled, limit_count, notes"
 _MODEL_POLICY_SAFE_FIELDS = frozenset({"provider", "model", "seat", "enabled", "limit", "notes"})
-_MODEL_POLICY_REQUEST_FIELDS = frozenset({"action", "provider", "model", "seat", "enabled", "limit", "notes"})
+_MODEL_POLICY_REQUEST_FIELDS = frozenset(
+    {"action", "provider", "model", "seat", "enabled", "limit", "notes", "lease_id", "node_id", "holder", "ttl_seconds"}
+)
+MODEL_ACTIONS = frozenset({"set", "acquire", "release"})
 CLOUD_ACTIONS = frozenset({"admit", "bind", "renew", "release", "policy"})
 CLOUD_PROVIDER_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 CLOUD_PROVIDER_ALIASES = {
@@ -561,6 +575,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
         conn.execute(_NODES_SCHEMA)
         conn.execute(_CLOUD_LEASES_SCHEMA)
         conn.execute(_CLOUD_PROVIDER_STATE_SCHEMA)
+        conn.execute(_MODEL_LEASES_SCHEMA)
         _canonicalize_cloud_provider_rows(conn)
         with _migration_lock(db_path):
             if _model_policy_table_needs_recreation(conn):
@@ -577,6 +592,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
                 conn.execute("ALTER TABLE _model_policy_new RENAME TO model_policy")
             conn.execute(_MODEL_POLICY_SCHEMA)
         conn.execute("CREATE INDEX IF NOT EXISTS cloud_leases_active ON cloud_leases (provider, expires_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS model_leases_active ON model_leases (seat, expires_at)")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
     except BaseException:
@@ -1205,6 +1221,31 @@ def _validate_model_policy_request(raw: Any) -> dict[str, Any]:
     }
 
 
+def _validate_model_lease_request(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or raw.get("action") not in {"acquire", "release"}:
+        raise FleetHubError("model lease action must be acquire or release")
+    unknown = set(raw).difference(_MODEL_POLICY_REQUEST_FIELDS)
+    if unknown:
+        raise FleetHubError(f"unknown model lease field(s): {', '.join(sorted(unknown))}")
+    request = {
+        "action": raw["action"],
+        "lease_id": _cloud_lease_id(raw.get("lease_id")),
+        "node_id": _validate_node_id(raw.get("node_id")),
+        "holder": _safe_cloud_text(raw.get("holder"), "holder", required=True, limit=128),
+    }
+    if request["action"] == "acquire":
+        request.update(
+            seat=_model_policy_name(raw.get("seat"), "seat"),
+            provider=_cloud_provider(raw.get("provider")),
+            model=_model_policy_name(raw.get("model"), "model"),
+        )
+        ttl = raw.get("ttl_seconds", 3600)
+        if type(ttl) is not int or not 1 <= ttl <= CLOUD_TTL_MAX_SECONDS:
+            raise FleetHubError("model lease field 'ttl_seconds' must be an integer in 1..86400")
+        request["ttl_seconds"] = ttl
+    return request
+
+
 def _validate_cloud_request(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise FleetHubError("cloud request must be a JSON object")
@@ -1402,6 +1443,79 @@ def set_model_policy(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
         "limit": request["limit"],
         "notes": request["notes"],
     }
+
+
+def handle_model_policy(
+    conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None
+) -> tuple[int, dict[str, Any]]:
+    """Mutate policy as admin or atomically fence one policy-seat capacity lease."""
+    action = raw.get("action") if isinstance(raw, dict) else None
+    if action == "set":
+        if caller_node is not None:
+            raise FleetHubForbidden("node tokens may not mutate model policy")
+        return 200, {"updated": True, "policy": set_model_policy(conn, raw)}
+    request = _validate_model_lease_request(raw)
+    if caller_node is not None and request["node_id"] != caller_node:
+        raise FleetHubForbidden("model lease node_id does not match the caller's node token")
+    now = _now_epoch()
+    if request["action"] == "release":
+        cursor = conn.execute(
+            "UPDATE model_leases SET released_at=? WHERE lease_id=? AND owner_node=? AND holder_token=? AND released_at IS NULL",
+            (_epoch_to_iso(now), request["lease_id"], request["node_id"], request["holder"]),
+        )
+        conn.commit()
+        return (
+            (200, {"released": True})
+            if cursor.rowcount == 1
+            else (409, {"released": False, "error": "model lease is missing or fenced"})
+        )
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            "UPDATE model_leases SET released_at=? WHERE released_at IS NULL AND expires_at <= ?",
+            (_epoch_to_iso(now), now),
+        )
+        policy = conn.execute(
+            "SELECT provider, model, enabled, limit_count FROM model_policy WHERE seat=?", (request["seat"],)
+        ).fetchone()
+        if (
+            policy is None
+            or str(policy[0]) != request["provider"]
+            or str(policy[1]) != request["model"]
+            or not bool(policy[2])
+        ):
+            conn.commit()
+            return 409, {"acquired": False, "error": "model policy denied lease"}
+        limit = policy[3]
+        used = conn.execute(
+            "SELECT COUNT(*) FROM model_leases WHERE seat=? AND released_at IS NULL", (request["seat"],)
+        ).fetchone()[0]
+        if limit is not None and int(used) >= int(limit):
+            conn.commit()
+            return 409, {"acquired": False, "error": "model policy capacity is exhausted"}
+        conn.execute(
+            "INSERT INTO model_leases (lease_id, seat, owner_node, holder_token, acquired_at, expires_at, released_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            (
+                request["lease_id"],
+                request["seat"],
+                request["node_id"],
+                request["holder"],
+                _epoch_to_iso(now),
+                now + request["ttl_seconds"],
+            ),
+        )
+        conn.commit()
+        return 200, {
+            "acquired": True,
+            "lease": {
+                "lease_id": request["lease_id"],
+                "seat": request["seat"],
+                "expires_at": _epoch_to_iso(now + request["ttl_seconds"]),
+            },
+        }
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def handle_cloud(
@@ -2108,9 +2222,6 @@ def make_handler(
                     if not is_admin:
                         self._send_json(403, {"error": "the admin token is required to manage nodes"})
                         return
-                elif path == "/models" and not is_admin:
-                    self._send_json(403, {"error": "the admin token is required to mutate model policy"})
-                    return
                 elif path in ("/events", "/claims") and is_admin and not allow_admin_writes:
                     self._send_json(
                         403,
@@ -2156,7 +2267,7 @@ def make_handler(
                         return
                     status, body_payload = handle_cloud(conn, parsed, caller_node=caller_node, config=frozen_deck)
                 elif path == "/models":
-                    status, body_payload = 200, {"updated": True, "policy": set_model_policy(conn, parsed)}
+                    status, body_payload = handle_model_policy(conn, parsed, caller_node=caller_node)
                 else:
                     status, body_payload = handle_node_request(conn, parsed)
             except FleetHubForbidden as exc:

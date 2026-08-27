@@ -11,6 +11,16 @@ import pytest
 from brigade import cli, fleet_client, grokbot_jobs, grokbot_mcp
 
 
+def test_grokbot_hub_failures_are_permissive_only_without_a_configured_hub(monkeypatch):
+    unavailable = fleet_client.CloudDecision(False, "hub-unavailable")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "", "token": ""})
+    assert grokbot_mcp._cloud_refused(unavailable) is False
+
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example", "token": "node"})
+    assert grokbot_mcp._cloud_refused(unavailable) is True
+    assert grokbot_mcp._cloud_refused(None) is True
+
+
 def _spec(role: str) -> dict[str, object]:
     return {
         "label": f"{role} job",

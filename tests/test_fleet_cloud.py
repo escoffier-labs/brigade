@@ -210,7 +210,7 @@ def test_v4_migration_preserves_existing_rows(tmp_path):
     try:
         assert migrated.execute("SELECT run_id FROM events").fetchone()[0] == "run-a"
         assert migrated.execute("SELECT COUNT(*) FROM cloud_leases").fetchone()[0] == 0
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 9
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 10
     finally:
         migrated.close()
 
@@ -592,3 +592,44 @@ def test_idempotent_admit_refuses_released_and_expired_leases(conn, monkeypatch)
         conn, _admit(lease_id="expired", holder="holder-expired"), caller_node=NODE_A, config=config
     )
     assert status == 409 and expired["admitted"] is False
+
+
+def test_model_policy_limit_is_an_atomic_fenced_expiring_lease(conn, monkeypatch):
+    clock = {"now": 1_700_000_000.0}
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: clock["now"])
+    fleet_hub.set_model_policy(
+        conn,
+        {"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": True, "limit": 0},
+    )
+    first = {
+        "action": "acquire",
+        "lease_id": "model-a",
+        "node_id": NODE_A,
+        "holder": "fence-a",
+        "seat": "coder",
+        "provider": "openai",
+        "model": "gpt-5.6-terra",
+        "ttl_seconds": 2,
+    }
+    assert fleet_hub.handle_model_policy(conn, first, caller_node=NODE_A) == (
+        409,
+        {"acquired": False, "error": "model policy capacity is exhausted"},
+    )
+    fleet_hub.set_model_policy(
+        conn,
+        {"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": True, "limit": 1},
+    )
+    assert fleet_hub.handle_model_policy(conn, first, caller_node=NODE_A)[0] == 200
+    second = dict(first, lease_id="model-b", holder="fence-b")
+    assert fleet_hub.handle_model_policy(conn, second, caller_node=NODE_A) == (
+        409,
+        {"acquired": False, "error": "model policy capacity is exhausted"},
+    )
+    assert (
+        fleet_hub.handle_model_policy(
+            conn, {"action": "release", "lease_id": "model-a", "node_id": NODE_A, "holder": "wrong"}, caller_node=NODE_A
+        )[0]
+        == 409
+    )
+    clock["now"] += 3
+    assert fleet_hub.handle_model_policy(conn, second, caller_node=NODE_A)[0] == 200

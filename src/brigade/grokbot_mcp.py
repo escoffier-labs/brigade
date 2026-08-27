@@ -637,12 +637,22 @@ def fleet_session(job_id: str, lease_id: str) -> str:
 
 
 def _fleet_refused(decision: fleet_client.ClaimDecision) -> bool:
-    return not decision.granted and decision.reason not in _FLEET_BEST_EFFORT
+    return not decision.granted and (_fleet_hub_configured() or decision.reason not in _FLEET_BEST_EFFORT)
 
 
 def _cloud_refused(decision: fleet_client.CloudDecision | None) -> bool:
-    """Hard-refuse only explicit cloud denials; no-hub and outages stay best-effort."""
-    return decision is not None and not decision.granted and decision.reason not in _FLEET_BEST_EFFORT
+    """Only an absent hub permits queue work without a hub admission."""
+    if decision is None:
+        return _fleet_hub_configured()
+    return not decision.granted and (_fleet_hub_configured() or decision.reason not in _FLEET_BEST_EFFORT)
+
+
+def _fleet_hub_configured() -> bool:
+    """Configured hub failures deny claims instead of becoming local-only work."""
+    try:
+        return bool(fleet_client.load_fleet_config().get("hub_url"))
+    except Exception:
+        return True
 
 
 def _valid_tool_arguments(name: object, arguments: object) -> bool:

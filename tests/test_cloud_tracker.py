@@ -822,6 +822,68 @@ def test_sync_payload_releases_terminal_row_when_hub_lease_matches(tmp_path: Pat
     assert release_calls[0]["lease_id"] == "lease-1"
 
 
+def test_sync_payload_uses_private_holder_and_surfaces_release_refusal(tmp_path: Path, monkeypatch):
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task-fenced",
+        label="fenced-task",
+        prompt_hash="sha256:bb",
+        dispatched_at=_iso(NOW),
+        lease_holder="private-fence",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def refuse_release(lease_id: str, *, state: str | None = None, holder: str | None = None):
+        calls.append({"lease_id": lease_id, "state": state, "holder": holder})
+        return fleet_client.CloudDecision(False, "refused")
+
+    monkeypatch.setattr(fleet_client, "release_cloud", refuse_release)
+    payload = cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={"task-fenced": {"state": "completed"}},
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+        hub_leases=[{"lease_id": "lease-fenced", "provider_task_id": "task-fenced"}],
+    )
+
+    assert calls == [{"lease_id": "lease-fenced", "state": "ready-to-land", "holder": "private-fence"}]
+    assert payload["counts"]["released"] == 0
+    assert payload["counts"]["needs_you"] == 1
+    assert "lease_holder" not in payload["active"]
+
+
+def test_sync_payload_renews_active_fenced_lease(tmp_path: Path, monkeypatch):
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task-active",
+        label="active-task",
+        prompt_hash="sha256:bb",
+        dispatched_at=_iso(NOW),
+        lease_holder="private-fence",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def renew(lease_id: str, *, ttl_seconds: int = 900, holder: str | None = None):
+        calls.append({"lease_id": lease_id, "holder": holder})
+        return fleet_client.CloudDecision(True, "ok")
+
+    monkeypatch.setattr(fleet_client, "renew_cloud", renew)
+    payload = cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks={"task-active": {"state": "running"}},
+        github={"branches": [], "prs": []},
+        cursor_wired=False,
+        hub_leases=[{"lease_id": "lease-active", "provider_task_id": "task-active"}],
+    )
+
+    assert calls == [{"lease_id": "lease-active", "holder": "private-fence"}]
+    assert payload["counts"]["renewed"] == 1
+
+
 def test_sync_payload_does_not_invent_needs_you_when_no_hub_lease_matches(tmp_path: Path):
     cloud_tracker.register(
         tmp_path,

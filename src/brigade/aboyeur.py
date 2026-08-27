@@ -127,6 +127,39 @@ class FleetModelPolicyResolution:
     error: str | None = None
 
 
+def _model_lease_lifecycle(function: Callable[..., int]) -> Callable[..., int]:
+    """Acquire all admitted seat capacities from one startup snapshot, then release them."""
+
+    def wrapped(task: str, roster: Roster, *args: Any, **kwargs: Any) -> int:
+        worker = kwargs.get("worker")
+        model_override = kwargs.get("model_override")
+        snapshot = fleet_client.load_model_policy_snapshot()
+        resolution = resolve_fleet_model_policy(roster, worker=worker, model_override=model_override, snapshot=snapshot)
+        leases: list[fleet_client.ModelLeaseDecision] = []
+        lease_error: str | None = None
+        if resolution.error is None and snapshot.get("state") == "authoritative":
+            for seat, agent in resolution.roster.agents.items():
+                decision = fleet_client.acquire_model_lease(
+                    seat,
+                    agents.model_policy_provider(agent.cli or ""),
+                    agents.model_policy_model(agent.cli or "", agent.model),
+                )
+                if not decision.granted:
+                    lease_error = f"fleet model policy denied seat {seat!r}: {decision.reason}"
+                    break
+                leases.append(decision)
+        kwargs["model_policy_snapshot"] = snapshot
+        kwargs["model_lease_error"] = lease_error
+        try:
+            return function(task, roster, *args, **kwargs)
+        finally:
+            for decision in leases:
+                if decision.lease_id is not None and decision.holder is not None:
+                    fleet_client.release_model_lease(decision.lease_id, holder=decision.holder)
+
+    return wrapped
+
+
 def resolve_fleet_model_policy(
     roster: Roster,
     *,
@@ -4037,6 +4070,7 @@ def _write_run_seat_health_receipt(
 
 
 @_terminalize_run_lifecycle
+@_model_lease_lifecycle
 def run(
     task: str,
     roster: Roster,
@@ -4070,6 +4104,8 @@ def run(
     defer_artifact_collection: bool = False,
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
+    model_policy_snapshot: Mapping[str, Any] | None = None,
+    model_lease_error: str | None = None,
 ) -> int:
     if run_budget_payload is not None:
         run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
@@ -4103,6 +4139,7 @@ def run(
         roster,
         worker=worker,
         model_override=model_override,
+        snapshot=model_policy_snapshot,
     )
     roster = model_policy.roster
     if output_dir is not None:
@@ -4115,7 +4152,8 @@ def run(
                 seat_routing=[dict(decision) for decision in roster.seat_routing],
             )
         _write_json(output_dir / "roster.json", _roster_payload(roster))
-    if model_policy.error is not None:
+    if model_policy.error is not None or model_lease_error is not None:
+        policy_error = model_policy.error or model_lease_error
         if output_dir is not None and not (output_dir / "run.json").is_file():
             record_run_start(
                 output_dir,
@@ -4138,10 +4176,10 @@ def run(
                 status="failed",
                 failure_phase="preflight",
                 failure_kind="fleet-model-policy",
-                detail=model_policy.error,
+                detail=policy_error,
                 seat=worker or roster.orchestrator,
             )
-        print(f"error: {model_policy.error}", file=sys.stderr)
+        print(f"error: {policy_error}", file=sys.stderr)
         return 2
 
     def scheduler_resolved(used: str, fallback_reason: str | None) -> None:

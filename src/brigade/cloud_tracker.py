@@ -178,6 +178,7 @@ def register(
     dispatched_at: str | None = None,
     source: str = "dispatch",
     environment_audit: dict[str, str] | None = None,
+    lease_holder: str | None = None,
 ) -> dict[str, Any]:
     if provider not in TRACKER_PROVIDERS:
         raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud, jules")
@@ -204,6 +205,8 @@ def register(
             value = environment_audit.get(key)
             if isinstance(value, str) and value:
                 entry[key] = value
+    if isinstance(lease_holder, str) and lease_holder:
+        entry["lease_holder"] = lease_holder
     registry["entries"].append(entry)
     save_registry(target, registry)
     return entry
@@ -677,8 +680,25 @@ def sync_payload(
         elif is_terminal_state(state):
             terminal.append(row)
 
+    registry_entries = {entry.get("id"): entry for entry in load_registry(target)["entries"] if isinstance(entry, dict)}
+    renewed: list[dict[str, Any]] = []
     released: list[dict[str, Any]] = []
     needs_you: list[dict[str, Any]] = []
+    for row in active:
+        task_id = row.get("task_id")
+        if not isinstance(task_id, str):
+            continue
+        match = next((lease for lease in hub_leases if str(lease.get("provider_task_id")) == task_id), None)
+        holder = registry_entries.get(row.get("id"), {}).get("lease_holder")
+        if isinstance(match, dict) and match.get("lease_id") and isinstance(holder, str):
+            try:
+                decision = fleet_client.renew_cloud(str(match["lease_id"]), holder=holder)
+                if decision.granted:
+                    renewed.append({"id": row.get("id"), "task_id": task_id, "lease_id": match["lease_id"]})
+                else:
+                    needs_you.append({"id": row.get("id"), "detail": f"hub lease renewal refused: {decision.reason}"})
+            except Exception as exc:  # noqa: BLE001 - sync must stay bounded
+                needs_you.append({"id": row.get("id"), "detail": f"hub lease renewal failed: {type(exc).__name__}"})
     for row in terminal:
         # Release a matching hub lease when a terminal observation is known and a
         # lease id is present. Failures are recorded, not rethrown; no Needs You row
@@ -688,14 +708,20 @@ def sync_payload(
             continue
         match = next((lease for lease in hub_leases if str(lease.get("provider_task_id")) == task_id), None)
         if isinstance(match, dict) and match.get("lease_id"):
+            registry_entry = registry_entries.get(row.get("id"), {})
+            holder = registry_entry.get("lease_holder")
             try:
                 decision = fleet_client.release_cloud(
-                    str(match["lease_id"]), state=str(row.get("classification", "released"))
+                    str(match["lease_id"]),
+                    state=str(row.get("classification", "released")),
+                    holder=holder if isinstance(holder, str) else None,
                 )
                 if decision.granted:
                     released.append({"id": row.get("id"), "task_id": task_id, "lease_id": match["lease_id"]})
-            except Exception:  # noqa: BLE001 - sync must stay bounded
-                pass
+                else:
+                    needs_you.append({"id": row.get("id"), "detail": f"hub lease release refused: {decision.reason}"})
+            except Exception as exc:  # noqa: BLE001 - sync must stay bounded
+                needs_you.append({"id": row.get("id"), "detail": f"hub lease release failed: {type(exc).__name__}"})
 
     return {
         "schema": SYNC_SCHEMA,
@@ -705,10 +731,12 @@ def sync_payload(
         "stale_ready_hours": status.get("stale_ready_hours"),
         "sources": status.get("sources"),
         "active": active[:100],
+        "renewed": renewed[:100],
         "released": released[:100],
         "needs_you": needs_you[:10],
         "counts": {
             "active": len(active),
+            "renewed": len(renewed),
             "released": len(released),
             "needs_you": len(needs_you),
         },
