@@ -21,9 +21,42 @@ from ..selection import WRITER_INBOXES
 from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import scan_detectors as _scan_detectors_mod
+from . import template_audit_ops as _template_audit_ops_mod
+from .config import load_config
+from .models import (
+    AUTO_APPROVE_RE,
+    DESTRUCTIVE_RE,
+    ENV_ASSIGNMENT_RE,
+    ENV_DUMP_RE,
+    FileClassification,
+    HTTP_MCP_RE,
+    PLAINTEXT_PASSWORD_RE,
+    POLICIES,
+    REMOTE_SHELL_RE,
+    SECRET_VALUE_RE,
+    SECURITY_CHECKS,
+    SESSION_CHAT_PARTS,
+    SEVERITY_ORDER,
+    SKIP_DIRS,
+    SKIP_PREFIXES,
+    SecurityConfig,
+    TEXT_SUFFIXES,
+    UNPINNED_NPX_RE,
+    _coalesce_findings,
+    _env_assignment_value,
+    _escape_finding_markdown,
+    _is_attribute_secret_value,
+    _is_runtime_secret_value,
+    _is_secret_path_assignment,
+    _is_security_scanner_literal,
+    _match_value_is_quoted,
+    _read_fingerprint_migration_map,
+    _sanitize_finding_for_output,
+    _should_skip_harness_wiring_path,
+    _strip_internal_finding_keys,
+    config_path,
+)
 
 
 def _rule_id(category: str, title: str) -> str:
@@ -227,7 +260,7 @@ def _secret_response_options(path: Path, target: Path) -> list[str]:
 
 
 def _normalized_matched_content(evidence: str) -> str:
-    return _short(evidence, limit=96)
+    return _template_audit_ops_mod._short(evidence, limit=96)
 
 
 def _fingerprint(
@@ -246,7 +279,7 @@ def _fingerprint(
 
 
 def _legacy_fingerprint(*, category: str, title: str, rel_path: str, line: int, evidence: str) -> str:
-    stable = "\n".join([category, title, rel_path, str(line), _short(evidence, limit=96)])
+    stable = "\n".join([category, title, rel_path, str(line), _template_audit_ops_mod._short(evidence, limit=96)])
     return hashlib.sha256(stable.encode()).hexdigest()[:16]
 
 
@@ -595,7 +628,7 @@ def _finding(
 ) -> None:
     rel = path.relative_to(target)
     file_classification = classification or _classification_for(path, target)
-    safe_excerpt = _short(evidence)
+    safe_excerpt = _template_audit_ops_mod._short(evidence)
     matched_content = _normalized_matched_content(evidence)
     rule = _rule_id(category, title)
     findings.append(
@@ -628,7 +661,7 @@ def _first_committed_secret_match(pattern: re.Pattern[str], line: str) -> re.Mat
         value = match.group(2)
         if _is_secret_path_assignment(match):
             continue
-        if _is_placeholder(value):
+        if _template_audit_ops_mod._is_placeholder(value):
             continue
         if not _match_value_is_quoted(line, match) and _is_runtime_secret_value(value):
             continue
@@ -688,8 +721,10 @@ def _scan_line(
                 if session_chat
                 else "Move the value into local environment or secret storage and commit only a placeholder.",
             )
-        if _contains_private_key_material(line) or (
-            _first_committed_env_assignment(line) is not None and not password_emitted and not _is_placeholder(line)
+        if _template_audit_ops_mod._contains_private_key_material(line) or (
+            _first_committed_env_assignment(line) is not None
+            and not password_emitted
+            and not _template_audit_ops_mod._is_placeholder(line)
         ):
             consider_secret(
                 "Session chat contains exposed credential" if session_chat else "Possible sensitive secret material",
@@ -706,7 +741,7 @@ def _scan_line(
             severity="high",
             category="secrets",
             title=title,
-            evidence=_redact_secret_evidence(line),
+            evidence=_template_audit_ops_mod._redact_secret_evidence(line),
             suggestion=suggestion,
             classification=file_classification,
             response_options=_secret_response_options(path, target),
@@ -760,7 +795,7 @@ def _scan_line(
             severity="high",
             category="secrets",
             title="Environment dump or exfiltration pattern",
-            evidence=_redact_secret_evidence(line),
+            evidence=_template_audit_ops_mod._redact_secret_evidence(line),
             suggestion="Avoid dumping environment variables near file redirection or network commands.",
             classification=file_classification,
             response_options=_secret_response_options(path, target),
@@ -961,12 +996,22 @@ def scan_target(
                 line=line,
                 classification=classification,
             )
-        _scan_mcp_document(findings, target=target, path=path, text=text, classification=classification)
+        _scan_detectors_mod._scan_mcp_document(
+            findings, target=target, path=path, text=text, classification=classification
+        )
         if not _should_skip_harness_wiring_path(path, target):
-            _scan_harness_wiring_document(findings, target=target, path=path, text=text, classification=classification)
-        _scan_package_json(findings, target=target, path=path, text=text, classification=classification)
-        _scan_github_actions(findings, target=target, path=path, text=text, classification=classification)
-        _scan_python_project(findings, target=target, path=path, text=text, classification=classification)
+            _scan_detectors_mod._scan_harness_wiring_document(
+                findings, target=target, path=path, text=text, classification=classification
+            )
+        _scan_detectors_mod._scan_package_json(
+            findings, target=target, path=path, text=text, classification=classification
+        )
+        _scan_detectors_mod._scan_github_actions(
+            findings, target=target, path=path, text=text, classification=classification
+        )
+        _scan_detectors_mod._scan_python_project(
+            findings, target=target, path=path, text=text, classification=classification
+        )
     _assign_fingerprints(findings)
     findings = _filter_findings(
         findings,

@@ -22,9 +22,18 @@ from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import reports as _reports_mod
+from .config import load_config
+from .models import (
+    ENRICHMENT_MARKDOWN_END,
+    ENRICHMENT_MARKDOWN_START,
+    ENRICHMENT_PROVIDERS,
+    INDICATOR_GITHUB_ACTION_RE,
+    INDICATOR_NPX_RE,
+    INDICATOR_URL_RE,
+    SecurityEnrichmentConfig,
+    default_artifacts_dir,
+)
 
 
 def _load_enrichment_payload(output_dir: Path) -> dict[str, Any] | None:
@@ -380,7 +389,7 @@ def enrich(
             cache_path=config.cache_path,
         )
     try:
-        report = _load_report_file(report_file)
+        report = _reports_mod._load_report_file(report_file)
     except FileNotFoundError as exc:
         print(f"error: security report not found: {exc}", file=sys.stderr)
         return 2

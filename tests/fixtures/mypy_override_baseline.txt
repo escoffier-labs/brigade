@@ -13,8 +13,6 @@ brigade.phases_cmd.checks_actions
 brigade.phases_cmd.constants
 brigade.phases_cmd.session_lifecycle
 brigade.phases_cmd.session_ops
-brigade.security_cmd
-brigade.security_cmd.*
 brigade.work_cmd.backup
 brigade.work_cmd.imports
 brigade.work_cmd.reviews
