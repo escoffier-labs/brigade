@@ -1076,8 +1076,9 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--read-only")
     if args.worker is not None:
         argv.extend(["--worker", args.worker])
-    if args.model is not None:
-        argv.extend(["--model", args.model])
+    model_override = getattr(args, "model", None)
+    if model_override is not None:
+        argv.extend(["--model", model_override])
     if args.wait is not None:
         if math.isinf(args.wait):
             argv.append("--wait")
