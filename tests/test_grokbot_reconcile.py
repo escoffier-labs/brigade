@@ -219,7 +219,7 @@ def test_parent_symlink_swap_after_resolution_fails_closed(tmp_path: Path, monke
 def test_non_posix_apply_fails_closed_before_path_write(tmp_path: Path, monkeypatch):
     owner = tmp_path / "owner"
     owner.mkdir()
-    monkeypatch.setattr(grokbot_reconcile.os, "name", "nt")
+    monkeypatch.setattr(grokbot_reconcile, "SECURE_OWNER_WRITE_AVAILABLE", False)
 
     with pytest.raises(grokbot_reconcile.ReconcileError, match="^secure-owner-write-unavailable$"):
         grokbot_reconcile._write_handoff(

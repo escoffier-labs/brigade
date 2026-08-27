@@ -31,6 +31,7 @@ MARKER_MAX_BYTES = 4096
 HANDOFF_MAX_BYTES = grokbot_jobs.MAX_REPORT_BYTES + 16_384
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 TASK_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+SECURE_OWNER_WRITE_AVAILABLE = os.name == "posix"
 
 
 class ReconcileError(ValueError):
@@ -314,7 +315,7 @@ def _render_handoff(job: dict[str, Any], report: dict[str, Any]) -> str:
 
 
 def _write_handoff(owner: Path, inbox_rel: Path, name: str, text: str) -> str:
-    if os.name != "posix":  # pragma: no cover - exercised on Windows.
+    if not SECURE_OWNER_WRITE_AVAILABLE:  # pragma: no cover - exercised on Windows.
         raise ReconcileError("secure-owner-write-unavailable")
     if not handoff_cmd.lint_text(text).valid:
         raise ReconcileError("invalid-handoff")
