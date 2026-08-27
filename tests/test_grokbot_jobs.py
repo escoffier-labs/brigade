@@ -16,6 +16,7 @@ from brigade import cli
 
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+REPORT_TEXT = "PRIVATE_SCOUT_FINDING_TOKEN_alpha\nScout findings for example/brigade.\n"
 
 
 def _spec() -> dict[str, object]:
@@ -75,6 +76,60 @@ def _enqueue(tmp_path: Path, *, artifact: str = "draft-pr", idempotency_key: str
     return grokbot_jobs.enqueue(tmp_path, spec, idempotency_key or f"request-{artifact}", now=NOW)["job_id"]
 
 
+def _report_digest(text: str = REPORT_TEXT) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _report_artifact(text: str = REPORT_TEXT, path: str = "artifacts/report.md") -> dict[str, str]:
+    return {"kind": "report", "path": path, "sha256": _report_digest(text)}
+
+
+def _running_report(tmp_path: Path, *, idempotency_key: str = "request-report") -> str:
+    job_id = _enqueue(tmp_path, artifact="report", idempotency_key=idempotency_key)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW)
+    return job_id
+
+
+def _snapshot_path(tmp_path: Path, job_id: str) -> Path:
+    return tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts" / f"{job_id}.md"
+
+
+def _leave_orphan_report_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, idempotency_key: str) -> str:
+    job_id = _running_report(tmp_path, idempotency_key=idempotency_key)
+    original_replace = grokbot_jobs.os.replace
+
+    def fail_job_replace(source, destination, *args, **kwargs):
+        dest = destination if isinstance(destination, str) else str(destination)
+        if dest.endswith(".json"):
+            raise OSError("injected job write failure")
+        return original_replace(source, destination, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(grokbot_jobs.os, "replace", fail_job_replace)
+        with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
+            grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    assert _snapshot_path(tmp_path, job_id).is_file()
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    return job_id
+
+
+def _job_json(tmp_path: Path, job_id: str) -> str:
+    return (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{job_id}.json").read_text()
+
+
+def _assert_surfaces_omit_report_text(tmp_path: Path, job_id: str, text: str = REPORT_TEXT) -> None:
+    dumped_status = json.dumps(grokbot_jobs.status(tmp_path, job_id), sort_keys=True)
+    dumped_tracker = json.dumps(grokbot_jobs.tracker_rows(tmp_path), sort_keys=True)
+    raw_job = _job_json(tmp_path, job_id)
+    assert text not in dumped_status
+    assert text not in dumped_tracker
+    assert text not in raw_job
+    assert "PRIVATE_SCOUT_FINDING_TOKEN_alpha" not in dumped_status
+    assert "PRIVATE_SCOUT_FINDING_TOKEN_alpha" not in dumped_tracker
+    assert "PRIVATE_SCOUT_FINDING_TOKEN_alpha" not in raw_job
+
+
 def test_enqueue_returns_opaque_handle_and_private_projection(tmp_path: Path):
     handle = grokbot_jobs.enqueue(tmp_path, _spec(), "request-1", now=NOW)
 
@@ -106,6 +161,7 @@ def test_storage_is_private_and_keeps_the_full_envelope(tmp_path: Path):
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
     assert stat.S_IMODE((root / "jobs").stat().st_mode) == 0o700
     assert stat.S_IMODE((root / "idempotency").stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / "artifacts").stat().st_mode) == 0o700
     assert stat.S_IMODE((root / "queue.lock").stat().st_mode) == 0o600
     assert stat.S_IMODE(job_path.stat().st_mode) == 0o600
     assert len(idempotency_files) == 1
@@ -277,7 +333,7 @@ def test_get_job_rejects_malformed_handles(tmp_path: Path, name: str):
         grokbot_jobs.get_job(tmp_path, name)
 
 
-@pytest.mark.parametrize("component", ["grokbot", "jobs", "idempotency", "queue.lock"])
+@pytest.mark.parametrize("component", ["grokbot", "jobs", "idempotency", "artifacts", "queue.lock"])
 def test_storage_refuses_symlinked_queue_components(tmp_path: Path, component: str):
     root = tmp_path / ".brigade" / "cloud" / "grokbot"
     root.parent.mkdir(parents=True)
@@ -1175,3 +1231,333 @@ def test_hub_outage_projects_degraded_needs_you_marker(tmp_path: Path, monkeypat
     assert status["sources"]["grokbot-cloud"].get("degraded") is True or status["counts"]["needs-investigation"] >= 1
     assert "PRIVATE" not in json.dumps(status)
     assert "token" not in json.dumps(status["sources"]["grokbot-cloud"]).lower()
+
+
+def test_complete_report_roundtrip_keeps_snapshot_private(tmp_path: Path, caplog):
+    job_id = _running_report(tmp_path)
+    completed = grokbot_jobs.complete_report(
+        tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW
+    )
+    snapshot = _snapshot_path(tmp_path, job_id)
+    encoded = REPORT_TEXT.encode("utf-8")
+
+    assert grokbot_jobs.MAX_REPORT_BYTES == 12000
+    assert completed["state"] == "completed"
+    assert REPORT_TEXT not in json.dumps(completed)
+    assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
+    assert snapshot.read_bytes() == encoded
+    assert grokbot_jobs.read_report(tmp_path, job_id) == {
+        "job_id": job_id,
+        "text": REPORT_TEXT,
+        "bytes": len(encoded),
+        "sha256": _report_digest(),
+    }
+    _assert_surfaces_omit_report_text(tmp_path, job_id)
+    assert REPORT_TEXT not in caplog.text
+
+
+def test_complete_report_writes_snapshot_before_the_terminal_record(tmp_path: Path, monkeypatch):
+    job_id = _running_report(tmp_path)
+    original_replace = grokbot_jobs.os.replace
+
+    def fail_job_replace(source, destination, *args, **kwargs):
+        dest = destination if isinstance(destination, str) else str(destination)
+        if dest.endswith(".json"):
+            raise OSError("injected job write failure")
+        return original_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(grokbot_jobs.os, "replace", fail_job_replace)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$") as exc:
+        grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+
+    assert REPORT_TEXT not in str(exc.value)
+    assert _snapshot_path(tmp_path, job_id).read_text(encoding="utf-8") == REPORT_TEXT
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+
+
+def test_complete_report_rejects_digest_mismatch_without_writing(tmp_path: Path):
+    job_id = _running_report(tmp_path)
+    artifact = _report_artifact()
+    artifact["sha256"] = "0" * 64
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^digest-mismatch$") as exc:
+        grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", artifact, REPORT_TEXT, now=NOW)
+
+    assert exc.value.reason == "digest-mismatch"
+    assert REPORT_TEXT not in str(exc.value)
+    assert not _snapshot_path(tmp_path, job_id).exists()
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    _assert_surfaces_omit_report_text(tmp_path, job_id)
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("", "invalid-report"),
+        ("x" * 12001, "report-too-large"),
+        ("é" * 6000 + "!", "report-too-large"),
+    ],
+)
+def test_complete_report_rejects_empty_and_oversize_utf8(tmp_path: Path, text: str, reason: str):
+    job_id = _running_report(tmp_path)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest() if text else "a" * 64
+    artifact = {"kind": "report", "path": "artifacts/report.md", "sha256": digest}
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match=rf"^{reason}$") as exc:
+        grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", artifact, text, now=NOW)
+
+    assert exc.value.reason == reason
+    if text:
+        assert text not in str(exc.value)
+    assert not _snapshot_path(tmp_path, job_id).exists()
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+
+
+def test_complete_report_accepts_max_utf8_bytes(tmp_path: Path):
+    job_id = _running_report(tmp_path)
+    text = "é" * 6000
+    completed = grokbot_jobs.complete_report(
+        tmp_path, job_id, "bot-a", "lease-a", _report_artifact(text), text, now=NOW
+    )
+
+    assert completed["state"] == "completed"
+    report = grokbot_jobs.read_report(tmp_path, job_id)
+    assert report == {"job_id": job_id, "text": text, "bytes": 12000, "sha256": _report_digest(text)}
+    assert text not in json.dumps(completed)
+
+
+@pytest.mark.parametrize("artifact_kind", ["draft-pr", "branch"])
+def test_complete_report_rejects_wrong_role_or_kind(tmp_path: Path, artifact_kind: str):
+    job_id = _enqueue(tmp_path, artifact=artifact_kind, idempotency_key=f"request-{artifact_kind}-report")
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, now=NOW)
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-role$") as exc:
+        grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+
+    assert exc.value.reason == "invalid-role"
+    assert REPORT_TEXT not in str(exc.value)
+    assert not _snapshot_path(tmp_path, job_id).exists()
+
+
+def test_complete_report_shares_lease_state_cancel_and_artifact_rules(tmp_path: Path):
+    job_id = _enqueue(tmp_path, artifact="report")
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-state$"):
+        grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 30, now=NOW)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-transition$"):
+        grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-artifact$"):
+        grokbot_jobs.complete_report(
+            tmp_path,
+            job_id,
+            "bot-a",
+            "lease-a",
+            {"kind": "report", "path": "/report.md", "sha256": _report_digest()},
+            REPORT_TEXT,
+            now=NOW,
+        )
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-conflict$"):
+        grokbot_jobs.complete_report(tmp_path, job_id, "bot-b", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^lease-expired$"):
+        grokbot_jobs.complete_report(
+            tmp_path,
+            job_id,
+            "bot-a",
+            "lease-a",
+            _report_artifact(),
+            REPORT_TEXT,
+            now=NOW + timedelta(seconds=30),
+        )
+    grokbot_jobs.cancel(tmp_path, job_id, now=NOW)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^cancel-requested$"):
+        grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    assert not _snapshot_path(tmp_path, job_id).exists()
+
+
+def test_read_report_rejects_missing_legacy_snapshot(tmp_path: Path):
+    job_id = _running_report(tmp_path)
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "completed", artifact=_report_artifact(), now=NOW)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^report-missing$") as exc:
+        grokbot_jobs.read_report(tmp_path, job_id)
+
+    assert exc.value.reason == "report-missing"
+    assert REPORT_TEXT not in str(exc.value)
+    assert not _snapshot_path(tmp_path, job_id).exists()
+    _assert_surfaces_omit_report_text(tmp_path, job_id)
+
+
+def test_read_report_rejects_symlink_snapshot(tmp_path: Path):
+    job_id = _running_report(tmp_path)
+    grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    snapshot = _snapshot_path(tmp_path, job_id)
+    destination = tmp_path / "outside-report.md"
+    destination.write_text(REPORT_TEXT)
+    snapshot.unlink()
+    snapshot.symlink_to(destination)
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
+        grokbot_jobs.read_report(tmp_path, job_id)
+
+
+def test_read_report_rejects_oversize_invalid_utf8_and_digest_mismatch(tmp_path: Path):
+    oversize_job = _running_report(tmp_path, idempotency_key="request-oversize-read")
+    grokbot_jobs.complete_report(tmp_path, oversize_job, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    _snapshot_path(tmp_path, oversize_job).write_bytes(b"x" * 12001)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^report-too-large$"):
+        grokbot_jobs.read_report(tmp_path, oversize_job)
+
+    utf8_job = _running_report(tmp_path, idempotency_key="request-utf8-read")
+    grokbot_jobs.complete_report(tmp_path, utf8_job, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    _snapshot_path(tmp_path, utf8_job).write_bytes(b"\xff")
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-report$") as exc:
+        grokbot_jobs.read_report(tmp_path, utf8_job)
+    assert "PRIVATE_SCOUT_FINDING_TOKEN_alpha" not in str(exc.value)
+
+    digest_job = _running_report(tmp_path, idempotency_key="request-digest-read")
+    grokbot_jobs.complete_report(tmp_path, digest_job, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    _snapshot_path(tmp_path, digest_job).write_text("tampered snapshot", encoding="utf-8")
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^digest-mismatch$"):
+        grokbot_jobs.read_report(tmp_path, digest_job)
+
+
+def test_read_report_rejects_wrong_role_kind_and_incomplete_jobs(tmp_path: Path):
+    draft_job = _enqueue(tmp_path, artifact="draft-pr", idempotency_key="request-draft-read")
+    grokbot_jobs.claim(tmp_path, draft_job, "bot-a", "lease-a", 60, now=NOW)
+    grokbot_jobs.transition(tmp_path, draft_job, "bot-a", "lease-a", "running", now=NOW)
+    grokbot_jobs.transition(
+        tmp_path,
+        draft_job,
+        "bot-a",
+        "lease-a",
+        "completed",
+        artifact={
+            "kind": "draft-pr",
+            "url": "https://github.com/example/brigade/pull/9",
+            "branch": "grokbot/read",
+        },
+        now=NOW,
+    )
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-role$"):
+        grokbot_jobs.read_report(tmp_path, draft_job)
+
+    queued = _enqueue(tmp_path, artifact="report", idempotency_key="request-queued-read")
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-state$"):
+        grokbot_jobs.read_report(tmp_path, queued)
+
+
+def test_read_report_rejects_corrupted_completed_record(tmp_path: Path):
+    job_id = _running_report(tmp_path)
+    grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    path = tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{job_id}.json"
+    raw = json.loads(path.read_text())
+    raw["item_revision"] = 0
+    path.write_text(json.dumps(raw))
+
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^corrupt-storage$"):
+        grokbot_jobs.read_report(tmp_path, job_id)
+
+
+def test_metadata_only_report_completion_stays_compatible(tmp_path: Path):
+    job_id = _running_report(tmp_path)
+    completed = grokbot_jobs.transition(
+        tmp_path, job_id, "bot-a", "lease-a", "completed", artifact=_report_artifact(), now=NOW
+    )
+
+    assert completed["state"] == "completed"
+    assert completed["artifact"] == {"kind": "report"}
+    assert not _snapshot_path(tmp_path, job_id).exists()
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^report-missing$"):
+        grokbot_jobs.read_report(tmp_path, job_id)
+    _assert_surfaces_omit_report_text(tmp_path, job_id)
+
+
+def test_metadata_only_complete_does_not_expose_orphan_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job_id = _leave_orphan_report_snapshot(tmp_path, monkeypatch, idempotency_key="request-orphan-completed")
+    completed = grokbot_jobs.transition(
+        tmp_path, job_id, "bot-a", "lease-a", "completed", artifact=_report_artifact(), now=NOW
+    )
+
+    assert completed["state"] == "completed"
+    assert not _snapshot_path(tmp_path, job_id).exists()
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^report-missing$") as exc:
+        grokbot_jobs.read_report(tmp_path, job_id)
+    assert exc.value.reason == "report-missing"
+    assert REPORT_TEXT not in str(exc.value)
+    _assert_surfaces_omit_report_text(tmp_path, job_id)
+
+
+@pytest.mark.parametrize("terminal", ["failed", "expired", "canceled"])
+def test_noncompleted_terminal_cleans_orphan_report_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: str
+):
+    job_id = _leave_orphan_report_snapshot(tmp_path, monkeypatch, idempotency_key=f"request-orphan-{terminal}")
+    snapshot = _snapshot_path(tmp_path, job_id)
+
+    if terminal == "failed":
+        result = grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=NOW)
+    elif terminal == "expired":
+        result = grokbot_jobs.expire(tmp_path, job_id, now=NOW + timedelta(seconds=60))
+    else:
+        grokbot_jobs.cancel(tmp_path, job_id, now=NOW)
+        result = grokbot_jobs.acknowledge_cancel(tmp_path, job_id, "bot-a", "lease-a", now=NOW)
+
+    assert result["state"] == terminal
+    assert not snapshot.exists()
+    snapshot.write_text(REPORT_TEXT, encoding="utf-8")
+    grokbot_jobs.expire(tmp_path, job_id, now=NOW + timedelta(seconds=60))
+    grokbot_jobs.cancel(tmp_path, job_id, now=NOW)
+    assert not snapshot.exists()
+
+
+def test_completed_report_snapshot_survives_later_terminal_attempts(tmp_path: Path):
+    job_id = _running_report(tmp_path)
+    grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    snapshot = _snapshot_path(tmp_path, job_id)
+    encoded = snapshot.read_bytes()
+
+    assert grokbot_jobs.expire(tmp_path, job_id, now=NOW + timedelta(seconds=60))["state"] == "completed"
+    assert grokbot_jobs.cancel(tmp_path, job_id, now=NOW)["state"] == "completed"
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^terminal-state$"):
+        grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=NOW)
+
+    assert snapshot.read_bytes() == encoded
+    assert grokbot_jobs.read_report(tmp_path, job_id)["text"] == REPORT_TEXT
+
+
+def test_orphan_cleanup_failure_does_not_terminalize_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job_id = _leave_orphan_report_snapshot(tmp_path, monkeypatch, idempotency_key="request-orphan-unlink-fails")
+    real_unlink = grokbot_jobs.os.unlink
+
+    def fail_snapshot_unlink(path, *args, **kwargs):
+        if path == f"{job_id}.md":
+            raise OSError("injected artifact unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(grokbot_jobs.os, "unlink", fail_snapshot_unlink)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
+        grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=NOW)
+
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    assert _snapshot_path(tmp_path, job_id).is_file()
+
+
+def test_read_report_keeps_reading_after_legal_short_os_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job_id = _running_report(tmp_path)
+    grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    real_read = grokbot_jobs.os.read
+
+    def short_read(fd: int, n: int, *args: object, **kwargs: object) -> bytes:
+        return real_read(fd, 1 if n > 1 else n, *args, **kwargs)
+
+    monkeypatch.setattr(grokbot_jobs.os, "read", short_read)
+    report = grokbot_jobs.read_report(tmp_path, job_id)
+    encoded = REPORT_TEXT.encode("utf-8")
+    assert report == {
+        "job_id": job_id,
+        "text": REPORT_TEXT,
+        "bytes": len(encoded),
+        "sha256": _report_digest(),
+    }

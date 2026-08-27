@@ -184,7 +184,8 @@ def _display_session(path: Path, payload: dict[str, Any], *, target: Path | None
         print(f"  priority: {task.get('priority', '')}")
         if task.get("template"):
             print(f"  template: {task['template']}")
-        acceptance = task.get("acceptance") if isinstance(task.get("acceptance"), list) else []
+        raw_acceptance = task.get("acceptance")
+        acceptance: list[Any] = raw_acceptance if isinstance(raw_acceptance, list) else []
         print(f"  acceptance: {len(acceptance)}")
         issue = task.get("issue") if isinstance(task.get("issue"), dict) else None
         if issue:
@@ -197,7 +198,8 @@ def _display_session(path: Path, payload: dict[str, Any], *, target: Path | None
     if isinstance(git, dict) and git.get("available"):
         print("git:")
         print(f"  branch: {git.get('branch')}")
-        dirty = git.get("dirty_files") if isinstance(git.get("dirty_files"), list) else []
+        raw_dirty = git.get("dirty_files")
+        dirty: list[Any] = raw_dirty if isinstance(raw_dirty, list) else []
         print(f"  dirty_files: {len(dirty)}")
         for item in dirty[:20]:
             print(f"    {item}")

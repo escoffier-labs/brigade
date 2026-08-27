@@ -35,9 +35,14 @@ from .. import (
 from ..localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 from ..render import emit
 
-from . import config as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .config import (
+    SCHEMA_VERSION,
+    _bounded_status_call,
+    _fingerprint,
+    _load_config,
+    _safe_text,
+)
+from . import status_plan as _status_plan_mod
 
 
 def _priority_score(priority: object) -> int:
@@ -146,13 +151,13 @@ def _pending_import_candidates(target: Path) -> list[dict[str, Any]]:
         acceptance = (
             [str(value) for value in item.get("acceptance", [])] if isinstance(item.get("acceptance"), list) else []
         )
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        metadata = raw_meta if isinstance((raw_meta := item.get("metadata")), dict) else {}
         has_provenance = bool(
             metadata.get("source_fingerprint") or metadata.get("scanner_run_id") or item.get("source")
         )
         noisy_source = dismissed_by_source[source] >= max(3, promoted_by_source[source] * 3)
         deferred = bool(metadata.get("deferred") or metadata.get("deferred_at") or item.get("deferred_at"))
-        stale = _is_stale(item.get("created_at"), 72)
+        stale = _status_plan_mod._is_stale(item.get("created_at"), 72)
         quality_item = quality_by_id.get(import_id, {})
         quality_score = int(quality_item.get("quality_score") or 0) if isinstance(quality_item, dict) else 0
         score = 220 + _priority_score(item.get("priority")) + quality_score
@@ -268,7 +273,7 @@ def _daily_readiness_finding(
 def _daily_readiness_payload(target: Path) -> dict[str, Any]:
     from .. import release_cmd
 
-    status_data = _daily_center_status_payload(target)
+    status_data = _status_plan_mod._daily_center_status_payload(target)
     findings: list[dict[str, Any]] = []
     pending_tasks = int(status_data.get("pending_task_count") or 0)
     pending_imports = int(status_data.get("pending_import_count") or 0)
@@ -403,7 +408,7 @@ def _health_issue_candidates(target: Path) -> list[dict[str, Any]]:
     health_sources = [
         ("handoff", handoff_cmd.draft_queue_payload(target), "brigade handoff doctor", 150),
         ("memory-care", memory_cmd.health(target), "brigade memory care doctor", 140),
-        ("security", _daily_security_health(target), "brigade security doctor", 135),
+        ("security", _status_plan_mod._daily_security_health(target), "brigade security doctor", 135),
         ("tools", tools_cmd.health(target), "brigade tools doctor", 130),
     ]
     for subsystem, health, command, base_score in health_sources:
@@ -439,7 +444,7 @@ def _notification_candidates(target: Path) -> list[dict[str, Any]]:
     health = notifications_cmd.health(target)
     if int(health.get("issue_count") or 0) <= 0:
         return []
-    top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else {}
+    top = raw_top if isinstance((raw_top := health.get("top_issue")), dict) else {}
     command = str(health.get("suggested_next_command") or "brigade notifications setup plan")
     if command.startswith("agent-notify "):
         command = "brigade notifications setup plan"
@@ -571,12 +576,12 @@ def _phase_ledger_issues_captured_by_report(phase_health: dict[str, Any]) -> boo
     issue_count = int(phase_health.get("issue_count") or 0)
     if issue_count <= 0:
         return False
-    latest_report = phase_health.get("latest_report") if isinstance(phase_health.get("latest_report"), dict) else {}
-    latest_compare = (
-        phase_health.get("latest_report_compare") if isinstance(phase_health.get("latest_report_compare"), dict) else {}
-    )
+    latest_report = raw_rep if isinstance((raw_rep := phase_health.get("latest_report")), dict) else {}
+    latest_compare = raw_comp if isinstance((raw_comp := phase_health.get("latest_report_compare")), dict) else {}
     report_issue_count = latest_report.get("issue_count")
     compare_issue_count = latest_compare.get("issue_count")
+    if report_issue_count is None or compare_issue_count is None:
+        return False
     try:
         return int(report_issue_count) == issue_count and int(compare_issue_count) == 0
     except (TypeError, ValueError):
@@ -591,17 +596,17 @@ def _phase_session_candidates(target: Path) -> list[dict[str, Any]]:
         next_payload = phases_cmd._session_next_payload(target, session)
     except ValueError:
         return []
-    step = next_payload.get("next_step") if isinstance(next_payload.get("next_step"), dict) else {}
+    step = raw_step if isinstance((raw_step := next_payload.get("next_step")), dict) else {}
     step_type = str(step.get("step_type") or "session")
     if step_type == "session_reviewed":
         return []
     session_id = str(session.get("session_id") or "latest")
     candidates: list[dict[str, Any]] = []
-    checkpoint = next_payload.get("checkpoint") if isinstance(next_payload.get("checkpoint"), dict) else None
+    checkpoint = raw_cp if isinstance((raw_cp := next_payload.get("checkpoint")), dict) else None
     if checkpoint and int(checkpoint.get("issue_count") or 0) > 0:
-        latest = checkpoint.get("latest_checkpoint") if isinstance(checkpoint.get("latest_checkpoint"), dict) else {}
+        latest = raw_latest if isinstance((raw_latest := checkpoint.get("latest_checkpoint")), dict) else {}
         checkpoint_id = str(latest.get("checkpoint_id") or "latest")
-        top_issue = checkpoint.get("top_issue") if isinstance(checkpoint.get("top_issue"), dict) else {}
+        top_issue = raw_top if isinstance((raw_top := checkpoint.get("top_issue")), dict) else {}
         candidates.append(
             _candidate(
                 target=target,
@@ -799,8 +804,8 @@ def _candidate_blockers(target: Path, config: dict[str, Any], action: dict[str, 
     remote = _remote_mutation_reason(action.get("suggested_next_command"))
     if remote:
         safety.append(remote)
-    config_blockers = _config_blockers(config, action)
-    evidence_blockers = _evidence_blockers(target, action)
+    config_blockers = _status_plan_mod._config_blockers(config, action)
+    evidence_blockers = _status_plan_mod._evidence_blockers(target, action)
     quality: list[str] = []
     if not action.get("acceptance"):
         quality.append("missing acceptance criteria")

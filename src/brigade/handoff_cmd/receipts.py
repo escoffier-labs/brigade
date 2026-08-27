@@ -19,9 +19,9 @@ from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import drafts as _drafts_mod
+from . import sources as _sources_mod
+from .models import HandoffDraft
 
 
 def runs(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
@@ -32,12 +32,13 @@ def runs(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    receipts = _ingest_receipts(target)
-    payload = {
+    receipts = _drafts_mod._ingest_receipts(target)
+    runs_list = [_drafts_mod._receipt_summary(receipt) for receipt in receipts[:limit]]
+    payload: dict[str, Any] = {
         "target": str(target),
-        "runs_root": str(_handoff_ingest_runs_root(target)),
+        "runs_root": str(_drafts_mod._handoff_ingest_runs_root(target)),
         "count": len(receipts),
-        "runs": [_receipt_summary(receipt) for receipt in receipts[:limit]],
+        "runs": runs_list,
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -45,7 +46,7 @@ def runs(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
     print(f"handoff ingest runs: {target}")
     print(f"runs_root: {payload['runs_root']}")
     print(f"runs: {payload['count']}")
-    for item in payload["runs"]:
+    for item in runs_list:
         print(
             f"- {item.get('run_id')} completed={item.get('completed_at')} "
             f"processed={item.get('processed')} skipped={item.get('skipped')} "
@@ -61,7 +62,7 @@ def run_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
         return 2
     matches = [
         receipt
-        for receipt in _ingest_receipts(target)
+        for receipt in _drafts_mod._ingest_receipts(target)
         if str(receipt.get("run_id")) == run_id or str(receipt.get("run_id", "")).startswith(run_id)
     ]
     if not matches:
@@ -113,14 +114,14 @@ def _select_receipt_drafts(
     if not all_reviewed and not draft_ids:
         return [], "pass at least one draft id/path or --all-reviewed"
     if all_reviewed:
-        drafts, errors, _ = _drafts(target, sources=sources)
+        drafts, errors, _ = _drafts_mod._drafts(target, sources=sources)
         if errors:
             return [], "; ".join(errors)
         selected = [draft for draft in drafts if draft.lint.valid]
     else:
         selected = []
         for draft_id in draft_ids or []:
-            draft, error = _find_draft(target, draft_id, sources=sources)
+            draft, error = _drafts_mod._find_draft(target, draft_id, sources=sources)
             if draft is None:
                 return [], error or f"handoff draft not found: {draft_id}"
             selected.append(draft)
@@ -148,9 +149,10 @@ def _receipt_payload_for_drafts(
 ) -> dict[str, Any]:
     owner_label = _safe_label(owner)
     run_id = _safe_label(
-        run_id or f"{owner_label}-handoff-ingest-{_timestamp_id()}", fallback=f"handoff-ingest-{_timestamp_id()}"
+        run_id or f"{owner_label}-handoff-ingest-{_drafts_mod._timestamp_id()}",
+        fallback=f"handoff-ingest-{_drafts_mod._timestamp_id()}",
     )
-    now = _iso_from_timestamp()
+    now = _drafts_mod._iso_from_timestamp()
     inbox_paths = sorted({str(draft.path.parent) for draft in drafts})
     handoff_paths = [str(draft.path) for draft in drafts]
     payload: dict[str, Any] = {
@@ -185,7 +187,7 @@ def _receipt_payload_for_drafts(
                 payload["routed_document_targets"].append(
                     {"handoff_path": str(draft.path), "target": draft.target_document}
                 )
-    return _normalize_ingest_receipt(target, payload)
+    return _drafts_mod._normalize_ingest_receipt(target, payload)
 
 
 def _receipt_plan_payload(
@@ -217,7 +219,7 @@ def _receipt_plan_payload(
         safe_summary=safe_summary,
         log_path=log_path,
     )
-    path = _ingest_receipt_path(target, str(receipt["run_id"]))
+    path = _drafts_mod._ingest_receipt_path(target, str(receipt["run_id"]))
     return {
         "target": str(target),
         "status": status,
@@ -226,7 +228,7 @@ def _receipt_plan_payload(
         "receipt_path": str(path),
         "drafts": [draft.as_dict() for draft in drafts],
         "run": receipt,
-        "summary": _receipt_summary(receipt),
+        "summary": _drafts_mod._receipt_summary(receipt),
     }, None
 
 
@@ -314,7 +316,7 @@ def receipt_record(
         return 2
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload["run"], indent=2, sort_keys=True) + "\n")
-    archives = _refresh_archive_ingest_outcomes(target)
+    archives = _drafts_mod._refresh_archive_ingest_outcomes(target)
     written = dict(payload)
     written["would_write"] = True
     written["written"] = True
@@ -337,7 +339,7 @@ def reconcile(*, target: Path, sources: Path | None = None, json_output: bool = 
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    config, sources_path, errors, _ = _load_source_config_for_drafts(target, sources=sources)
+    config, sources_path, errors, _ = _drafts_mod._load_source_config_for_drafts(target, sources=sources)
     if errors:
         print(f"error: {'; '.join(errors)}", file=sys.stderr)
         return 2
@@ -353,11 +355,11 @@ def reconcile(*, target: Path, sources: Path | None = None, json_output: bool = 
     except OSError as exc:
         print(f"error: cannot read ingestor log: {exc}", file=sys.stderr)
         return 1
-    receipt = _parse_ingestor_log_receipt(target, config, log_path, text)
-    path = _ingest_receipt_path(target, str(receipt["run_id"]))
+    receipt = _sources_mod._parse_ingestor_log_receipt(target, config, log_path, text)
+    path = _drafts_mod._ingest_receipt_path(target, str(receipt["run_id"]))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-    archives = _refresh_archive_ingest_outcomes(target)
+    archives = _drafts_mod._refresh_archive_ingest_outcomes(target)
     payload = {
         "target": str(target),
         "sources_path": str(sources_path) if sources_path else None,

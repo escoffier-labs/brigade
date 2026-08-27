@@ -689,5 +689,5 @@ def test_new_grokbot_commands_appear_in_parser_derived_inventory():
     from brigade.roadmap_cmd import _cli_command_paths
 
     paths = _cli_command_paths()
-    for command in ("setup", "doctor", "canary", "install-service"):
+    for command in ("setup", "doctor", "canary", "install-service", "reconcile-reports"):
         assert f"brigade run-cloud grokbot {command}" in paths

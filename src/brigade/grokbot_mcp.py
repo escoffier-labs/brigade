@@ -245,7 +245,8 @@ class GrokbotAdapter:
             operation = grokbot_jobs.cancel if name.endswith("cancel") else grokbot_jobs.expire
             return operation(self.config.target, job_id)
         if name == "grokbot_queue_report":
-            return grokbot_jobs.read_report(self.config.target, _job_id(arguments))
+            job_id = _job_id(arguments)
+            return grokbot_jobs.read_report(self.config.target, job_id)
         if name == "grokbot_queue_claim":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
             lease_id = _lease_id(arguments)
@@ -326,21 +327,24 @@ class GrokbotAdapter:
             return result
         if name == "grokbot_queue_complete":
             allowed = {"job_id", "lease_id", "artifact"}
-            if "report_text" in arguments:
+            has_report = "report_text" in arguments
+            if has_report:
                 allowed = allowed | {"report_text"}
             job = self._eligible_job(arguments, allowed=allowed)
             artifact = arguments.get("artifact")
             if not isinstance(artifact, dict):
                 raise AdapterError()
+            job_id = job["job_id"]
             lease_id = _lease_id(arguments)
             report_text = arguments.get("report_text")
+            if has_report and not isinstance(report_text, str):
+                raise AdapterError()
             if grokbot_jobs.hub_authority(self.config.target):
-                if report_text is not None:
-                    if not isinstance(report_text, str):
-                        raise AdapterError()
+                if has_report:
+                    assert isinstance(report_text, str)
                     return self._hub_lifecycle(
                         grokbot_jobs.complete_report,
-                        job["job_id"],
+                        job_id,
                         self.config.bot_id,
                         lease_id,
                         artifact,
@@ -348,19 +352,18 @@ class GrokbotAdapter:
                     )
                 return self._hub_lifecycle(
                     grokbot_jobs.transition,
-                    job["job_id"],
+                    job_id,
                     self.config.bot_id,
                     lease_id,
                     "completed",
                     artifact=artifact,
                 )
-            holder, session = fleet_holder(job["job_id"], lease_id), fleet_session(job["job_id"], lease_id)
-            if report_text is not None:
-                if not isinstance(report_text, str):
-                    raise AdapterError()
+            holder, session = fleet_holder(job_id, lease_id), fleet_session(job_id, lease_id)
+            if has_report:
+                assert isinstance(report_text, str)
                 result = grokbot_jobs.complete_report(
                     self.config.target,
-                    job["job_id"],
+                    job_id,
                     self.config.bot_id,
                     lease_id,
                     artifact,
@@ -369,15 +372,15 @@ class GrokbotAdapter:
             else:
                 result = grokbot_jobs.transition(
                     self.config.target,
-                    job["job_id"],
+                    job_id,
                     self.config.bot_id,
                     lease_id,
                     "completed",
                     artifact=artifact,
                 )
+            self._fleet_event(job_id, session, "external.completed")
             self._fleet_release(holder)
-            self._fleet_event(job["job_id"], session, "external.completed")
-            self._release_hub_lease(job["job_id"], lease_id, result["state"])
+            self._release_hub_lease(job_id, lease_id, result["state"])
             return result
         raise AdapterError()
 
@@ -597,12 +600,15 @@ def _register_tool(server: Any, adapter: GrokbotAdapter, name: str) -> None:
     elif name == "grokbot_queue_complete":
 
         def invoke_complete(
-            job_id: str, lease_id: str, artifact: dict[str, Any], report_text: str | None = None
+            job_id: str,
+            lease_id: str,
+            artifact: dict[str, Any],
+            report_text: str | None = None,
         ) -> dict[str, Any]:
-            arguments = {"job_id": job_id, "lease_id": lease_id, "artifact": artifact}
+            payload: dict[str, Any] = {"job_id": job_id, "lease_id": lease_id, "artifact": artifact}
             if report_text is not None:
-                arguments["report_text"] = report_text
-            return _invoke_adapter(adapter, name, arguments)
+                payload["report_text"] = report_text
+            return _invoke_adapter(adapter, name, payload)
 
         handler = invoke_complete
     else:
@@ -802,15 +808,16 @@ def _valid_tool_arguments(name: object, arguments: object) -> bool:
         return True
     if expected is None or not isinstance(arguments, dict):
         return False
-    extra = set(arguments) - set(expected)
-    if name == "grokbot_queue_complete" and extra <= {"report_text"}:
-        if "report_text" in arguments and not isinstance(arguments["report_text"], str):
+    if name == "grokbot_queue_complete":
+        optional = {"report_text": str}
+        allowed = set(expected) | set(optional)
+        if not set(arguments).issubset(allowed) or not set(arguments).issuperset(set(expected)):
             return False
-        extra = set()
-    return (
-        extra == set()
-        and set(expected) <= set(arguments)
-        and all(isinstance(arguments[key], value_type) for key, value_type in expected.items())
+        return all(isinstance(arguments[key], value_type) for key, value_type in expected.items()) and all(
+            isinstance(arguments[key], value_type) for key, value_type in optional.items() if key in arguments
+        )
+    return set(arguments) == set(expected) and all(
+        isinstance(arguments[key], value_type) for key, value_type in expected.items()
     )
 
 
@@ -842,7 +849,7 @@ _TOOL_DESCRIPTIONS = {
     "grokbot_queue_status": "Read one safe Grok Bot queue projection.",
     "grokbot_queue_cancel": "Cancel a Grok Bot queue job.",
     "grokbot_queue_expire": "Expire an elapsed Grok Bot queue job.",
-    "grokbot_queue_report": "Retrieve a stored Repository Scout report snapshot.",
+    "grokbot_queue_report": "Read one verified Repository Scout report snapshot.",
     "grokbot_queue_claim": "Claim one job for this fixed worker identity.",
     "grokbot_queue_renew": "Renew this worker's current queue lease.",
     "grokbot_queue_start": "Mark this worker's claimed job as running.",

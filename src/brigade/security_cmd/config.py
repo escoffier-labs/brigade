@@ -23,9 +23,27 @@ from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .models import (
+    ARTIFACTS_REL_PATH,
+    AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY,
+    AUTHORITY_STORE_ISOLATION_OFF,
+    AUTHORITY_STORE_ISOLATION_VALUES,
+    CONFIG_AUTHORITY_STORE_KEYS,
+    CONFIG_ENRICHMENT_KEYS,
+    CONFIG_SUPPRESSIONS_KEYS,
+    CONFIG_TOP_LEVEL_KEYS,
+    DEFAULT_EXCLUDE_PATHS,
+    ENRICHMENT_PROVIDERS,
+    EffectivePolicy,
+    POLICIES,
+    SCAN_PROFILES,
+    SECURITY_CHECKS,
+    SEVERITY_ORDER,
+    SecurityConfig,
+    SecurityEnrichmentConfig,
+    config_path,
+    default_artifacts_dir,
+)
 
 
 def _parse_toml_value(raw: str) -> object:
@@ -81,9 +99,10 @@ def _read_toml_object(path: Path) -> _SecurityToml:
             if table not in {"suppressions", "suppression_reasons", "enrichment", "authority_store"}:
                 raise ValueError(f"invalid security config line {line_number}: unsupported table [{table}]")
             current_section = table
-            current = data.setdefault(table, {})
-            if not isinstance(current, dict):
+            section_data = data.setdefault(table, {})
+            if not isinstance(section_data, dict):
                 raise ValueError(f"invalid security config line {line_number}: {table} must be a table")
+            current = section_data
             continue
         if "=" not in line:
             raise ValueError(f"invalid security config line {line_number}: expected key = value")
@@ -476,10 +495,11 @@ def write_config(target: Path, config: SecurityConfig) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     fingerprints = ", ".join(_toml_string(item) for item in config.suppressions)
     enrichment = config.enrichment
+    fail_on_value = config.fail_on if config.fail_on is not None else str(POLICIES[config.policy]["fail_on"])
     lines = [
         f"policy = {_toml_string(config.policy)}",
         f"scan_profile = {_toml_string(config.scan_profile)}",
-        f"fail_on = {_toml_string(config.fail_on or POLICIES[config.policy]['fail_on'])}",
+        f"fail_on = {_toml_string(fail_on_value)}",
         f"include_templates = {str(config.include_templates if config.include_templates is not None else POLICIES[config.policy]['include_templates']).lower()}",
         f"enabled_checks = [{', '.join(_toml_string(item) for item in config.enabled_checks)}]",
         f"include_paths = [{', '.join(_toml_string(item) for item in config.include_paths)}]",
@@ -528,10 +548,10 @@ def _clean_reason(reason: str) -> str:
 
 
 def _gitignore_selection(target: Path):
-    from .config import load_config
+    from ..config import load_config as _load_workspace_config
     from ..selection import Selection
 
-    loaded = load_config(target)
+    loaded = _load_workspace_config(target)
     if loaded is not None:
         return loaded.selection
     return Selection(depth="repo", harnesses=[], owner="this-repo", includes=[])

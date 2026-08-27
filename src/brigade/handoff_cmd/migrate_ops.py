@@ -19,9 +19,9 @@ from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import drafts as _drafts_mod
+from . import linting as _linting_mod
+from .models import CARD_ACTIONS, WRITER_INBOXES
 
 
 def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json_output: bool = False) -> int:
@@ -40,7 +40,7 @@ def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     if inbox is not None:
-        inbox_paths = [_draft_inbox_path(target, inbox)[0]]
+        inbox_paths = [_drafts_mod._draft_inbox_path(target, inbox)[0]]
     else:
         inbox_paths = [target / rel for rel in WRITER_INBOXES if (target / rel).is_dir()]
     items: list[dict[str, Any]] = []
@@ -49,7 +49,7 @@ def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json
         for path in sorted(inbox_path.glob("*.md")):
             if path.name == "TEMPLATE.md":
                 continue
-            if lint_file(path).valid:
+            if _linting_mod.lint_file(path).valid:
                 continue
             rel = str(path.relative_to(target))
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -59,14 +59,14 @@ def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json
                 item["detail"] = "carries prompt-injection signals; review manually before any conversion"
                 items.append(item)
                 continue
-            extracted, missing = _migrate_extract(text)
+            extracted, missing = _linting_mod._migrate_extract(text)
             if missing:
                 item["status"] = "unmigratable"
                 item["missing"] = missing
                 items.append(item)
                 continue
             action = extracted["action"]
-            rendered = _render_handoff_draft(
+            rendered = _drafts_mod._render_handoff_draft(
                 handoff_type=extracted["type"],
                 title=extracted["title"],
                 summary=extracted["summary"],
@@ -86,7 +86,7 @@ def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json
                 originals.mkdir(parents=True, exist_ok=True)
                 (originals / path.name).write_text(text, encoding="utf-8")
                 path.write_text(rendered, encoding="utf-8")
-                converted = lint_file(path)
+                converted = _linting_mod.lint_file(path)
                 if not converted.valid:
                     path.write_text(text, encoding="utf-8")
                     (originals / path.name).unlink()
@@ -100,7 +100,7 @@ def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json
     if apply and migrated:
         from ..localio import utc_now, write_json
 
-        migrations_dir = _handoff_state_root(target) / "migrations"
+        migrations_dir = _drafts_mod._handoff_state_root(target) / "migrations"
         migrations_dir.mkdir(parents=True, exist_ok=True)
         receipt_path = migrations_dir / f"{utc_now().strftime('%Y%m%dT%H%M%S')}.json"
         write_json(receipt_path, {"target": str(target), "migrated_count": migrated, "items": items})

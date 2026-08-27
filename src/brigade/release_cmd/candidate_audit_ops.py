@@ -1,45 +1,23 @@
-"""Local release readiness receipts."""
-# ruff: noqa: E402,F401,F403,F811,F821
-
 from __future__ import annotations
 
 import json
-import os
-import re
-import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from .. import (
-    context_cmd,
-    handoff_cmd,
-    learn_cmd,
-    memory_cmd,
-    phases_cmd,
-    projects_cmd,
-    repos_cmd,
-    reportstore,
-    research_cmd,
-    roadmap_cmd,
-    scrub,
-    security_cmd,
-    tools_cmd,
-    work_cmd,
+from .. import phases_cmd, reportstore, security_cmd, work_cmd
+from ..localio import utc_now as _now
+from . import candidate as _candidate_mod
+from . import evidence as _evidence_mod
+from .paths import (
+    RELEASE_CANDIDATE_STALE_HOURS,
+    RELEASE_PRIVATE_PATH_RE,
+    RELEASE_PRIVATE_VALUE_RE,
+    WARN,
+    _git_state,
+    _git_value,
 )
-from ..selection import KNOWN_HARNESSES
-from ..localio import (
-    read_json_dict as _read_json,
-    read_jsonl_dicts as _read_jsonl,
-    utc_now as _now,
-    write_json as _write_json,
-)
-
-from . import paths as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
 
 
 def _candidate_bundle_files(candidate: dict[str, Any]) -> list[Path]:
@@ -47,7 +25,8 @@ def _candidate_bundle_files(candidate: dict[str, Any]) -> list[Path]:
     if not isinstance(path, str) or not path:
         return []
     root = Path(path)
-    names = candidate.get("bundle_files") if isinstance(candidate.get("bundle_files"), list) else []
+    bundle_files = candidate.get("bundle_files")
+    names = bundle_files if isinstance(bundle_files, list) else []
     return [root / str(name) for name in names if str(name)]
 
 
@@ -119,7 +98,7 @@ def _candidate_audit_payload(target: Path, candidate: dict[str, Any]) -> dict[st
         age_hours = (_now() - created).total_seconds() / 3600
         if age_hours > RELEASE_CANDIDATE_STALE_HOURS:
             issues.append({"status": WARN, "name": "candidate_stale", "detail": f"{age_hours:.1f}h"})
-    git = candidate.get("git") if isinstance(candidate.get("git"), dict) else {}
+    git = raw_git if isinstance((raw_git := candidate.get("git")), dict) else {}
     current_head = _git_value(target, "rev-parse", "HEAD")
     if git.get("head") and current_head and git.get("head") != current_head:
         issues.append(
@@ -129,10 +108,8 @@ def _candidate_audit_payload(target: Path, candidate: dict[str, Any]) -> dict[st
     docs_changed = _candidate_docs_changed_after_build(candidate)
     if docs_changed:
         issues.append({"status": WARN, "name": "candidate_docs_changed", "detail": ", ".join(docs_changed)})
-    current_contract = _command_contract_snapshot(target)
-    candidate_contract = (
-        candidate.get("command_contract") if isinstance(candidate.get("command_contract"), dict) else {}
-    )
+    current_contract = _candidate_mod._command_contract_snapshot(target)
+    candidate_contract = raw_contract if isinstance((raw_contract := candidate.get("command_contract")), dict) else {}
     if not candidate_contract.get("fingerprint"):
         issues.append(
             {
@@ -174,7 +151,7 @@ def candidate_audit(*, target: Path, candidate_id: str = "latest", json_output: 
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -197,7 +174,7 @@ def candidate_import_issues(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -262,17 +239,17 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
     candidate_created = work_cmd._parse_iso_datetime(candidate.get("created_at"))
     current_git = _git_state(target)
-    candidate_git = candidate.get("git") if isinstance(candidate.get("git"), dict) else {}
-    latest_release = _latest_release_receipt(target)
+    candidate_git = raw_git if isinstance((raw_git := candidate.get("git")), dict) else {}
+    latest_release = _evidence_mod._latest_release_receipt(target)
     latest_verify = work_cmd._latest_verify_receipt(target)
     review_health = work_cmd._review_health(target)
-    latest_review = review_health.get("latest_run") if isinstance(review_health.get("latest_run"), dict) else None
+    latest_review = raw_review if isinstance((raw_review := review_health.get("latest_run")), dict) else None
     latest_sweep = work_cmd._scanner_sweep_health(target).get("latest")
     latest_security = security_cmd.health(target).get("evidence")
     changed_docs_after_candidate = []
@@ -283,17 +260,19 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
         if evidence_mtime is not None and repo_file.exists() and repo_file.stat().st_mtime > evidence_mtime:
             changed_docs_after_candidate.append(path)
     issues: list[dict[str, Any]] = []
-    if candidate_git.get("head") and current_git.get("head") and candidate_git.get("head") != current_git.get("head"):
+    current_head = current_git.get("head")
+    candidate_head = candidate_git.get("head")
+    if candidate_head and current_head and candidate_head != current_head:
         issues.append(
             {"status": WARN, "name": "candidate_head_changed", "detail": "current HEAD differs from candidate HEAD"}
         )
-    if _receipt_newer_than_candidate(latest_release, candidate_created):
+    if latest_release and _receipt_newer_than_candidate(latest_release, candidate_created):
         issues.append({"status": WARN, "name": "newer_release_readiness", "detail": str(latest_release.get("run_id"))})
-    if _receipt_newer_than_candidate(latest_verify, candidate_created):
+    if latest_verify and _receipt_newer_than_candidate(latest_verify, candidate_created):
         issues.append({"status": WARN, "name": "newer_verification", "detail": str(latest_verify.get("run_id"))})
-    if _receipt_newer_than_candidate(latest_review, candidate_created):
+    if latest_review and _receipt_newer_than_candidate(latest_review, candidate_created):
         issues.append({"status": WARN, "name": "newer_review_run", "detail": str(latest_review.get("run_id"))})
-    if _receipt_newer_than_candidate(latest_sweep, candidate_created):
+    if isinstance(latest_sweep, dict) and _receipt_newer_than_candidate(latest_sweep, candidate_created):
         issues.append({"status": WARN, "name": "newer_scanner_sweep", "detail": str(latest_sweep.get("sweep_id"))})
     security_generated = work_cmd._parse_iso_datetime(
         (latest_security or {}).get("generated_at") if isinstance(latest_security, dict) else None
@@ -328,8 +307,8 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
         issues.append(
             {"status": WARN, "name": "docs_changed_after_candidate", "detail": ", ".join(changed_docs_after_candidate)}
         )
-    operator_report = candidate.get("operator_report") if isinstance(candidate.get("operator_report"), dict) else {}
-    candidate_report = operator_report.get("latest") if isinstance(operator_report.get("latest"), dict) else None
+    operator_report = raw_op if isinstance((raw_op := candidate.get("operator_report")), dict) else {}
+    candidate_report = raw_lat if isinstance((raw_lat := operator_report.get("latest")), dict) else None
     current_report = center_cmd.latest_report(target)
     if isinstance(candidate_report, dict) and isinstance(current_report, dict):
         if candidate_report.get("report_id") != current_report.get("report_id"):
@@ -352,19 +331,25 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
         issues.append({"status": WARN, "name": "operator_report_health", "detail": str(top_report_issue.get("detail"))})
     candidate_phase = candidate.get("phase_ledger") if isinstance(candidate.get("phase_ledger"), dict) else {}
     current_phase = phases_cmd.health(target)
-    if int(current_phase.get("issue_count") or 0) != int(candidate_phase.get("issue_count") or 0):
+    candidate_phase_issue_count = candidate_phase.get("issue_count") if isinstance(candidate_phase, dict) else None
+    current_phase_issue_count = current_phase.get("issue_count") if isinstance(current_phase, dict) else None
+    if int(current_phase_issue_count or 0) != int(candidate_phase_issue_count or 0):
         issues.append(
             {
                 "status": WARN,
                 "name": "phase_ledger_issue_count_changed",
-                "detail": f"{candidate_phase.get('issue_count')} -> {current_phase.get('issue_count')}",
+                "detail": f"{candidate_phase_issue_count} -> {current_phase_issue_count}",
             }
         )
     candidate_closeout = (
-        candidate_phase.get("latest_closeout") if isinstance(candidate_phase.get("latest_closeout"), dict) else None
+        candidate_phase.get("latest_closeout")
+        if isinstance(candidate_phase, dict) and isinstance(candidate_phase.get("latest_closeout"), dict)
+        else None
     )
     current_closeout = (
-        current_phase.get("latest_closeout") if isinstance(current_phase.get("latest_closeout"), dict) else None
+        current_phase.get("latest_closeout")
+        if isinstance(current_phase, dict) and isinstance(current_phase.get("latest_closeout"), dict)
+        else None
     )
     if isinstance(current_closeout, dict) and (
         not isinstance(candidate_closeout, dict)
@@ -374,10 +359,14 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
             {"status": WARN, "name": "newer_phase_closeout", "detail": str(current_closeout.get("closeout_id"))}
         )
     candidate_report = (
-        candidate_phase.get("latest_report") if isinstance(candidate_phase.get("latest_report"), dict) else None
+        candidate_phase.get("latest_report")
+        if isinstance(candidate_phase, dict) and isinstance(candidate_phase.get("latest_report"), dict)
+        else None
     )
     current_phase_report = (
-        current_phase.get("latest_report") if isinstance(current_phase.get("latest_report"), dict) else None
+        current_phase.get("latest_report")
+        if isinstance(current_phase, dict) and isinstance(current_phase.get("latest_report"), dict)
+        else None
     )
     if isinstance(current_phase_report, dict) and (
         not isinstance(candidate_report, dict)
@@ -387,10 +376,14 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
             {"status": WARN, "name": "newer_phase_report", "detail": str(current_phase_report.get("report_id"))}
         )
     candidate_session = (
-        candidate_phase.get("latest_session") if isinstance(candidate_phase.get("latest_session"), dict) else None
+        candidate_phase.get("latest_session")
+        if isinstance(candidate_phase, dict) and isinstance(candidate_phase.get("latest_session"), dict)
+        else None
     )
     current_session = (
-        current_phase.get("latest_session") if isinstance(current_phase.get("latest_session"), dict) else None
+        current_phase.get("latest_session")
+        if isinstance(current_phase, dict) and isinstance(current_phase.get("latest_session"), dict)
+        else None
     )
     if isinstance(current_session, dict) and (
         not isinstance(candidate_session, dict)
@@ -400,12 +393,12 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
         issues.append({"status": WARN, "name": "newer_phase_session", "detail": str(current_session.get("session_id"))})
     candidate_session_report = (
         candidate_phase.get("latest_session_report")
-        if isinstance(candidate_phase.get("latest_session_report"), dict)
+        if isinstance(candidate_phase, dict) and isinstance(candidate_phase.get("latest_session_report"), dict)
         else None
     )
     current_session_report = (
         current_phase.get("latest_session_report")
-        if isinstance(current_phase.get("latest_session_report"), dict)
+        if isinstance(current_phase, dict) and isinstance(current_phase.get("latest_session_report"), dict)
         else None
     )
     if isinstance(current_session_report, dict) and (
@@ -421,12 +414,12 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
         )
     candidate_session_checkpoint = (
         candidate_phase.get("latest_session_checkpoint")
-        if isinstance(candidate_phase.get("latest_session_checkpoint"), dict)
+        if isinstance(candidate_phase, dict) and isinstance(candidate_phase.get("latest_session_checkpoint"), dict)
         else None
     )
     current_session_checkpoint = (
         current_phase.get("latest_session_checkpoint")
-        if isinstance(current_phase.get("latest_session_checkpoint"), dict)
+        if isinstance(current_phase, dict) and isinstance(current_phase.get("latest_session_checkpoint"), dict)
         else None
     )
     if isinstance(candidate_session_checkpoint, dict) or isinstance(current_session_checkpoint, dict):
@@ -455,12 +448,13 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
             issues.append({"status": WARN, "name": "phase_session_checkpoint_changed", "detail": detail})
     candidate_checkpoint_compare = (
         candidate_phase.get("latest_session_checkpoint_compare")
-        if isinstance(candidate_phase.get("latest_session_checkpoint_compare"), dict)
+        if isinstance(candidate_phase, dict)
+        and isinstance(candidate_phase.get("latest_session_checkpoint_compare"), dict)
         else None
     )
     current_checkpoint_compare = (
         current_phase.get("latest_session_checkpoint_compare")
-        if isinstance(current_phase.get("latest_session_checkpoint_compare"), dict)
+        if isinstance(current_phase, dict) and isinstance(current_phase.get("latest_session_checkpoint_compare"), dict)
         else None
     )
     if isinstance(candidate_checkpoint_compare, dict) or isinstance(current_checkpoint_compare, dict):
@@ -496,11 +490,13 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
             )
     candidate_session_gate = (
         candidate_phase.get("latest_session_gate")
-        if isinstance(candidate_phase.get("latest_session_gate"), dict)
+        if isinstance(candidate_phase, dict) and isinstance(candidate_phase.get("latest_session_gate"), dict)
         else None
     )
     current_session_gate = (
-        current_phase.get("latest_session_gate") if isinstance(current_phase.get("latest_session_gate"), dict) else None
+        current_phase.get("latest_session_gate")
+        if isinstance(current_phase, dict) and isinstance(current_phase.get("latest_session_gate"), dict)
+        else None
     )
     if isinstance(candidate_session_gate, dict) or isinstance(current_session_gate, dict):
         candidate_gate_key = (
@@ -534,7 +530,7 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
                     "detail": f"{candidate_gate_key} -> {current_gate_key}",
                 }
             )
-    phase_checks = _phase_release_checks(target)
+    phase_checks = _evidence_mod._phase_release_checks(target)
     issues.extend(
         {"status": check.get("status", WARN), "name": f"release_{check.get('name')}", "detail": check.get("detail")}
         for check in phase_checks
@@ -581,7 +577,7 @@ def candidate_closeout(
     if status not in {"draft", "reviewed", "superseded", "archived"}:
         print("error: --status must be one of draft, reviewed, superseded, archived", file=sys.stderr)
         return 2
-    candidate, error = _resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2

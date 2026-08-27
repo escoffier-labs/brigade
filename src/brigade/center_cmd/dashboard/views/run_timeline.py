@@ -35,8 +35,8 @@ def fetch(target: Path) -> dict:
 
 
 def render(payload: dict, nonce: str) -> str:
-    brigade_payload = payload.get("brigade") if isinstance(payload.get("brigade"), dict) else {}
-    verify_payload = payload.get("verify") if isinstance(payload.get("verify"), dict) else {}
+    brigade_payload = _brigade if isinstance(_brigade := payload.get("brigade"), dict) else {}
+    verify_payload = _verify if isinstance(_verify := payload.get("verify"), dict) else {}
     strip = _summary_strip(brigade_payload, verify_payload)
     return strip + _render_brigade_panel(brigade_payload) + _render_verify_panel(verify_payload, nonce)
 
@@ -112,8 +112,10 @@ def _summary_strip(brigade_payload: dict, verify_payload: dict) -> str:
         if status:
             failed += 1
         parsed = _parse_ts(run.get("started_at"))
+        if parsed is None:
+            continue
         stamps.append((parsed, status))
-        if parsed is not None and parsed >= week_start:
+        if parsed >= week_start:
             this_week += 1
     last_run = "unknown age"
     known = [parsed for (parsed, _) in stamps if parsed is not None]

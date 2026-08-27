@@ -432,9 +432,11 @@ def _unsafe_reference(value: object) -> str | None:
 
 
 def _center_contract_health(target: Path) -> dict[str, Any]:
+    from . import core as _core_mod
+
     target = target.expanduser().resolve()
     manifest = _center_schema_manifest(target)
-    schemas = manifest.get("schemas") if isinstance(manifest.get("schemas"), list) else []
+    schemas = _schemas if isinstance(_schemas := manifest.get("schemas"), list) else []
     schema_ids = {str(item.get("id")) for item in schemas if isinstance(item, dict)}
     issues: list[dict[str, Any]] = []
     missing_schema_ids = sorted(CENTER_REQUIRED_SCHEMA_IDS - schema_ids)
@@ -450,31 +452,41 @@ def _center_contract_health(target: Path) -> dict[str, Any]:
         )
 
     outputs: dict[str, Any] = {
-        "activity": _activity(target)[:100],
-        "reviews": _reviews(target)[:100],
+        "activity": _core_mod._activity(target)[:100],
+        "reviews": _core_mod._reviews(target)[:100],
         "templates": [
-            _item("context", "task", "available", "Task context pack template", "brigade context plan --kind task"),
-            _item("context", "repo", "available", "Repo context pack template", "brigade context plan --kind repo"),
-            _item(
+            _core_mod._item(
+                "context", "task", "available", "Task context pack template", "brigade context plan --kind task"
+            ),
+            _core_mod._item(
+                "context", "repo", "available", "Repo context pack template", "brigade context plan --kind repo"
+            ),
+            _core_mod._item(
                 "context",
                 "release",
                 "available",
                 "Release context pack template",
                 "brigade context plan --kind release",
             ),
-            _item("tools", "tool-pack", "available", "Portable tool pack template", "brigade tools pack build"),
-            _item("projects", "audit-plan", "available", "Project audit plan template", "brigade projects audit"),
-            _item(
+            _core_mod._item(
+                "tools", "tool-pack", "available", "Portable tool pack template", "brigade tools pack build"
+            ),
+            _core_mod._item(
+                "projects", "audit-plan", "available", "Project audit plan template", "brigade projects audit"
+            ),
+            _core_mod._item(
                 "release",
                 "candidate",
                 "available",
                 "Release candidate checklist template",
                 "brigade release candidate plan",
             ),
-            _item("review", "closeout", "available", "Review closeout template", "brigade work review closeout latest"),
+            _core_mod._item(
+                "review", "closeout", "available", "Review closeout template", "brigade work review closeout latest"
+            ),
         ],
     }
-    status_data = status_payload(target)
+    status_data = _core_mod.status_payload(target)
     status_required = {
         "schema_version",
         "schema",

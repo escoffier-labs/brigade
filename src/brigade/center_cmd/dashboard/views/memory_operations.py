@@ -78,9 +78,9 @@ def fetch(target: Path) -> dict:
 
 
 def render(payload: dict, nonce: str) -> str:
-    topology = payload.get("topology") if isinstance(payload.get("topology"), dict) else {}
-    inventory = payload.get("inventory") if isinstance(payload.get("inventory"), dict) else {}
-    handoffs = payload.get("handoffs") if isinstance(payload.get("handoffs"), dict) else {}
+    topology = _topology if isinstance(_topology := payload.get("topology"), dict) else {}
+    inventory = _inventory if isinstance(_inventory := payload.get("inventory"), dict) else {}
+    handoffs = _handoffs if isinstance(_handoffs := payload.get("handoffs"), dict) else {}
 
     parts = [
         _stylesheet(nonce),
@@ -150,7 +150,7 @@ def _fetch_inventory(target: Path) -> dict:
         if master_index is None and isinstance(page.get("master_index"), dict):
             master_index = page["master_index"]
 
-        pagination = page.get("pagination") if isinstance(page.get("pagination"), dict) else {}
+        pagination = _pagination if isinstance(_pagination := page.get("pagination"), dict) else {}
         total_val = pagination.get("total")
         if isinstance(total_val, int):
             contract_total = total_val
@@ -220,11 +220,11 @@ def _render_topology(topology: dict, inventory: dict) -> str:
     if topology.get("error"):
         return html.error_panel("Topology", str(topology["error"]))
 
-    health = topology.get("health") if isinstance(topology.get("health"), dict) else {}
-    flags = topology.get("flags") if isinstance(topology.get("flags"), list) else []
-    paths = topology.get("paths") if isinstance(topology.get("paths"), list) else []
-    nodes = topology.get("nodes") if isinstance(topology.get("nodes"), list) else []
-    edges = topology.get("edges") if isinstance(topology.get("edges"), list) else []
+    health = _health if isinstance(_health := topology.get("health"), dict) else {}
+    flags = _flags if isinstance(_flags := topology.get("flags"), list) else []
+    paths = _paths if isinstance(_paths := topology.get("paths"), list) else []
+    nodes = _nodes if isinstance(_nodes := topology.get("nodes"), list) else []
+    edges = _edges if isinstance(_edges := topology.get("edges"), list) else []
 
     if not health and not flags and not paths and not nodes and not edges:
         return html.panel(html.esc("Topology"), f"<p>{html.esc('Nothing here.')}</p>")
@@ -242,7 +242,7 @@ def _render_topology(topology: dict, inventory: dict) -> str:
 
 def _destination_counts(inventory: dict) -> dict[str, int]:
     counts: dict[str, int] = {}
-    items = inventory.get("items") if isinstance(inventory.get("items"), list) else []
+    items = _items if isinstance(_items := inventory.get("items"), list) else []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -308,11 +308,13 @@ def _health_word(raw: object) -> str:
 
 def _summary_strip(health: dict, nodes: list, flags: list) -> str:
     sentences: list[str] = []
-    care = health.get("care_scan") if isinstance(health.get("care_scan"), dict) else {}
-    refresh = health.get("refresh_queue") if isinstance(health.get("refresh_queue"), dict) else {}
-    backlog = health.get("handoff_backlog") if isinstance(health.get("handoff_backlog"), dict) else {}
-    evidence = health.get("evidence_projection") if isinstance(health.get("evidence_projection"), dict) else {}
-    closeout = health.get("closeout") if isinstance(health.get("closeout"), dict) else {}
+    care = _care_scan if isinstance(_care_scan := health.get("care_scan"), dict) else {}
+    refresh = _refresh_queue if isinstance(_refresh_queue := health.get("refresh_queue"), dict) else {}
+    backlog = _handoff_backlog if isinstance(_handoff_backlog := health.get("handoff_backlog"), dict) else {}
+    evidence = (
+        _evidence_projection if isinstance(_evidence_projection := health.get("evidence_projection"), dict) else {}
+    )
+    closeout = _closeout if isinstance(_closeout := health.get("closeout"), dict) else {}
 
     issue_count = care.get("issue_count")
     queued = refresh.get("count")
@@ -333,7 +335,7 @@ def _summary_strip(health: dict, nodes: list, flags: list) -> str:
             inbox = by_id.get(f"inbox:{harness}")
             if not isinstance(inbox, dict):
                 continue
-            counts = inbox.get("counts") if isinstance(inbox.get("counts"), dict) else {}
+            counts = _counts if isinstance(_counts := inbox.get("counts"), dict) else {}
             value = counts.get("pending")
             if isinstance(value, int):
                 pending += value
@@ -411,7 +413,7 @@ def _health_meaning(key: str, block: dict) -> str:
 def _health_tiles(health: dict) -> str:
     tiles: list[str] = []
     for key, label in _HEALTH_KEYS:
-        block = health.get(key) if isinstance(health.get(key), dict) else {}
+        block = _key if isinstance(_key := health.get(key), dict) else {}
         status = block.get("status", "unknown")
         role, _word, icon, _ = _status_role(status)
         meaning = _health_meaning(key, block)
@@ -464,7 +466,7 @@ def _count_label(node: dict | None, dest_counts: dict[str, int], node_id: str) -
             return str(dest_counts[key])
     if not isinstance(node, dict):
         return ""
-    counts = node.get("counts") if isinstance(node.get("counts"), dict) else {}
+    counts = _counts if isinstance(_counts := node.get("counts"), dict) else {}
     for key in ("pending", "issue_count", "queued", "record_count", "processed"):
         if isinstance(counts.get(key), int):
             if key == "processed":
@@ -578,7 +580,7 @@ def _pipeline_svg(nodes: list, edges: list, paths: list, dest_counts: dict[str, 
     pending_total = 0
     for name in harnesses:
         inbox = by_id.get(f"inbox:{name}")
-        counts = (inbox or {}).get("counts") if isinstance((inbox or {}).get("counts"), dict) else {}
+        counts = _counts if isinstance(_counts := (inbox or {}).get("counts"), dict) else {}
         if isinstance(counts.get("pending"), int):
             pending_total += counts["pending"]
 
@@ -643,11 +645,11 @@ def _pipeline_svg(nodes: list, edges: list, paths: list, dest_counts: dict[str, 
     care_count = ""
     care_source = care_node or refresh_node
     if isinstance(care_node, dict):
-        c = care_node.get("counts") if isinstance(care_node.get("counts"), dict) else {}
+        c = _counts if isinstance(_counts := care_node.get("counts"), dict) else {}
         if isinstance(c.get("issue_count"), int):
             care_count = str(c["issue_count"])
     if not care_count and isinstance(refresh_node, dict):
-        c = refresh_node.get("counts") if isinstance(refresh_node.get("counts"), dict) else {}
+        c = _counts if isinstance(_counts := refresh_node.get("counts"), dict) else {}
         if isinstance(c.get("queued"), int):
             care_count = str(c["queued"])
     care_box, care_x, care_cy = place(5, care_source, care_label, "stage:care_scan", care_count)
@@ -759,8 +761,8 @@ def _debug_details(nodes: list, edges: list) -> str:
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        latest = node.get("latest_run") if isinstance(node.get("latest_run"), dict) else {}
-        counts = node.get("counts") if isinstance(node.get("counts"), dict) else {}
+        latest = _latest_run if isinstance(_latest_run := node.get("latest_run"), dict) else {}
+        counts = _counts if isinstance(_counts := node.get("counts"), dict) else {}
         schedule = node.get("schedule")
         if isinstance(schedule, dict):
             schedule_text = f"{schedule.get('source') or '-'} / {schedule.get('cadence') or '-'}"
@@ -789,7 +791,7 @@ def _debug_details(nodes: list, edges: list) -> str:
     for edge in edges:
         if not isinstance(edge, dict):
             continue
-        receipt = edge.get("latest_receipt") if isinstance(edge.get("latest_receipt"), dict) else {}
+        receipt = _latest_receipt if isinstance(_latest_receipt := edge.get("latest_receipt"), dict) else {}
         enabled = "yes" if edge.get("enabled") else "no"
         edge_rows.append(
             "<tr>"
@@ -877,80 +879,6 @@ def _display(value: Any) -> str:
     if value is None or value == "":
         return "-"
     return str(value)
-
-
-def _render_inventory(inventory: dict) -> str:
-    if inventory.get("error"):
-        return html.error_panel("Inventory", str(inventory["error"]))
-
-    items = inventory.get("items") if isinstance(inventory.get("items"), list) else []
-    warning = inventory.get("warning")
-    partial = bool(inventory.get("partial"))
-    loaded = len(items)
-    contract_total = inventory.get("contract_total")
-    if not isinstance(contract_total, int):
-        raw_total = inventory.get("total")
-        contract_total = raw_total if isinstance(raw_total, int) and not partial else None
-
-    if not items:
-        inner = f"<p>{html.esc('Nothing here.')}</p>"
-        if warning:
-            inner = f'<p class="error">{html.esc(warning)}</p>' + inner
-        return html.panel(html.esc("Inventory"), inner)
-
-    columns = _inventory_columns(items)
-    filter_bar = _inventory_filters(items)
-    rows: list[list[str]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        rows.append(_inventory_row(item, columns))
-
-    headers = [html.esc(col["label"]) for col in columns]
-    table = html.table(headers, rows)
-    parts = table.split("<tbody>", 1)
-    if len(parts) == 2:
-        head, rest = parts
-        body, tail = rest.split("</tbody>", 1)
-        body = body.replace("<tr>", '<tr data-mo-row="1">')
-        table = head + "<tbody>" + body + "</tbody>" + tail
-
-    if partial and isinstance(contract_total, int):
-        total_attr = str(contract_total)
-    elif not partial:
-        pager_total = inventory.get("total") if isinstance(inventory.get("total"), int) else loaded
-        total_attr = str(pager_total)
-    else:
-        total_attr = str(loaded)
-
-    pager = (
-        f'<div class="mo-pager" data-mo-page-size="{_CLIENT_PAGE_SIZE}" '
-        f'data-mo-total="{html.esc(total_attr)}">'
-        f'<button type="button" data-mo-page="prev" disabled>{html.esc("Prior")}</button>'
-        f"<span data-mo-page-status>{html.esc('Page 1')}</span>"
-        f'<button type="button" data-mo-page="next">{html.esc("Next")}</button>'
-        "</div>"
-    )
-    warn_bits: list[str] = []
-    if warning:
-        warn_bits.append(str(warning))
-    elif partial:
-        if isinstance(contract_total, int):
-            warn_bits.append(f"Inventory is partial: loaded {loaded} of {contract_total}.")
-        else:
-            warn_bits.append(f"Inventory is partial: loaded {loaded} item(s).")
-    warn_html = "".join(f'<p class="error">{html.esc(bit)}</p>' for bit in warn_bits)
-    meta = ""
-    if partial and isinstance(contract_total, int):
-        meta = f'<p class="mo-muted">{html.esc(f"Loaded {loaded} of {contract_total} (partial).")}</p>'
-    hidden_notes = _hidden_column_notes(items)
-    hidden_note = ""
-    if hidden_notes:
-        hidden_note = f'<p class="mo-muted">{html.esc("; ".join(hidden_notes))}</p>'
-    return html.panel(
-        html.esc("Inventory"),
-        warn_html + meta + hidden_note + filter_bar + pager + f'<div class="mo-scroll">{table}</div>',
-    )
 
 
 def _hidden_column_notes(items: list) -> list[str]:
@@ -1066,10 +994,10 @@ def _inventory_filters(items: list) -> str:
 
 
 def _mutation_text(item: dict) -> str:
-    mutation = item.get("last_mutation") if isinstance(item.get("last_mutation"), dict) else None
+    mutation = _last_mutation if isinstance(_last_mutation := item.get("last_mutation"), dict) else None
     if not mutation:
         return "-"
-    receipt = mutation.get("receipt") if isinstance(mutation.get("receipt"), dict) else {}
+    receipt = _receipt if isinstance(_receipt := mutation.get("receipt"), dict) else {}
     workflow = _display(mutation.get("workflow"))
     return (
         f"{workflow} / "
@@ -1099,8 +1027,8 @@ def _inventory_row(item: dict, columns: list[dict[str, Any]]) -> list[str]:
     else:
         tag_list = [] if tags in (None, "") else [str(tags)]
     mutation_text = _mutation_text(item)
-    care = item.get("care") if isinstance(item.get("care"), dict) else {}
-    issues = care.get("issues") if isinstance(care.get("issues"), list) else []
+    care = _care if isinstance(_care := item.get("care"), dict) else {}
+    issues = _issues if isinstance(_issues := care.get("issues"), list) else []
     issue_text = ", ".join(str(i) for i in issues) if issues else "-"
     queued = care.get("queued_action")
     care_text = f"{issue_text}; queued={queued or '-'}"

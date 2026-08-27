@@ -125,13 +125,13 @@ def _plural(n: int, one: str, many: str) -> str:
 
 
 def _top_issue_detail(section: dict) -> str:
-    top = section.get("top_issue") if isinstance(section.get("top_issue"), dict) else {}
+    top = _top_issue if isinstance(_top_issue := section.get("top_issue"), dict) else {}
     detail = str(top.get("detail") or "").strip()
     return detail
 
 
 def _scheduled_care_names(section: dict) -> str:
-    entries = section.get("entries") if isinstance(section.get("entries"), list) else []
+    entries = _entries if isinstance(_entries := section.get("entries"), list) else []
     names = [str(item.get("id")) for item in entries if isinstance(item, dict) and item.get("id")]
     return ", ".join(names[:5])
 

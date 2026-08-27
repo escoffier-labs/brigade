@@ -92,7 +92,7 @@ def _query_flag(query: dict[str, str], key: str, truthy: str) -> bool:
 
 
 def render(payload: dict, nonce: str) -> str:
-    export = payload.get("export") if isinstance(payload.get("export"), dict) else {}
+    export = _export if isinstance(_export := payload.get("export"), dict) else {}
     symbol = payload.get("symbol")
     show_full_map = payload.get("show_full_map") is True
     show_worktrees = payload.get("show_worktrees") is True
@@ -151,7 +151,7 @@ def _changed_module_ids(export: dict) -> list[str]:
     overlay = export.get("change_overlay")
     if not isinstance(overlay, dict):
         return []
-    raw = overlay.get("changed_modules") if isinstance(overlay.get("changed_modules"), list) else []
+    raw = _changed_modules if isinstance(_changed_modules := overlay.get("changed_modules"), list) else []
     ids: list[str] = []
     seen: set[str] = set()
     for item in raw:
@@ -248,15 +248,15 @@ def _summary_strip(
     overlay_active: bool,
     changed_ids: list[str],
 ) -> str:
-    stats = export.get("stats") if isinstance(export.get("stats"), dict) else {}
-    module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
-    insights = module_map.get("insights") if isinstance(module_map.get("insights"), dict) else {}
+    stats = _stats if isinstance(_stats := export.get("stats"), dict) else {}
+    module_map = _module_map if isinstance(_module_map := export.get("module_map"), dict) else {}
+    insights = _insights if isinstance(_insights := module_map.get("insights"), dict) else {}
     modules = shown if shown else [row for row in module_map.get("modules", []) if isinstance(row, dict)]
 
-    core = insights.get("core") if isinstance(insights.get("core"), dict) else {}
-    hub = insights.get("most_connected") if isinstance(insights.get("most_connected"), dict) else {}
-    change = insights.get("biggest_change") if isinstance(insights.get("biggest_change"), dict) else {}
-    largest = insights.get("largest") if isinstance(insights.get("largest"), dict) else {}
+    core = _core if isinstance(_core := insights.get("core"), dict) else {}
+    hub = _most_connected if isinstance(_most_connected := insights.get("most_connected"), dict) else {}
+    change = _biggest_change if isinstance(_biggest_change := insights.get("biggest_change"), dict) else {}
+    largest = _largest if isinstance(_largest := insights.get("largest"), dict) else {}
     isolated = insights.get("isolated_count")
 
     if overlay_active:
@@ -388,10 +388,10 @@ def _map_toggles(
 
 
 def _render_module_map(export: dict, *, show_full_map: bool, show_worktrees: bool) -> str:
-    module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
+    module_map = _module_map if isinstance(_module_map := export.get("module_map"), dict) else {}
     modules = [row for row in module_map.get("modules", []) if isinstance(row, dict)]
     edges = [row for row in module_map.get("edges", []) if isinstance(row, dict)]
-    trunc = module_map.get("truncation") if isinstance(module_map.get("truncation"), dict) else {}
+    trunc = _truncation if isinstance(_truncation := module_map.get("truncation"), dict) else {}
     changed_ids = _changed_module_ids(export)
     has_overlay_data = isinstance(export.get("change_overlay"), dict)
     has_noncanonical = any(_is_noncanonical_module(row) for row in modules)
@@ -442,8 +442,8 @@ def _render_module_map(export: dict, *, show_full_map: bool, show_worktrees: boo
         trunc_note = f'<p class="cg-muted" data-cg-overlay="1" id="cg-isolated">{html.esc(overlay_note)}</p>'
 
     hub_id = ""
-    insights = module_map.get("insights") if isinstance(module_map.get("insights"), dict) else {}
-    hub = insights.get("most_connected") if isinstance(insights.get("most_connected"), dict) else {}
+    insights = _insights if isinstance(_insights := module_map.get("insights"), dict) else {}
+    hub = _most_connected if isinstance(_most_connected := insights.get("most_connected"), dict) else {}
     if isinstance(hub.get("id"), str) and any(str(row.get("id") or "") == hub["id"] for row in shown):
         hub_id = hub["id"]
 
@@ -659,7 +659,7 @@ def _blast_payload(export: dict) -> dict[str, Any]:
 
 
 def _picker_module_choices(export: dict) -> list[tuple[str, str]]:
-    module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
+    module_map = _module_map if isinstance(_module_map := export.get("module_map"), dict) else {}
     choices: list[tuple[str, str]] = []
     seen: set[str] = set()
     for module_id in _changed_module_ids(export):
@@ -674,7 +674,7 @@ def _picker_module_choices(export: dict) -> list[tuple[str, str]]:
         seen.add(module_id)
         choices.append((module_id, str(row.get("label") or module_id)))
     blast = _blast_payload(export)
-    focus = blast.get("focus") if isinstance(blast.get("focus"), dict) else {}
+    focus = _focus if isinstance(_focus := blast.get("focus"), dict) else {}
     focus_id = str(focus.get("id") or "").strip()
     if focus_id and focus_id not in seen:
         choices.insert(0, (focus_id, str(focus.get("label") or focus_id)))
@@ -685,7 +685,7 @@ def _seed_focus_id(export: dict, requested: str | None) -> str:
     if requested and requested.strip():
         return requested.strip()
     blast = _blast_payload(export)
-    focus = blast.get("focus") if isinstance(blast.get("focus"), dict) else {}
+    focus = _focus if isinstance(_focus := blast.get("focus"), dict) else {}
     focus_id = str(focus.get("id") or "").strip()
     if focus_id and blast.get("resolved") is not False:
         return focus_id
@@ -938,7 +938,7 @@ def _render_blast_radius(
     if isinstance(blast.get("downstream_depth"), int):
         down_hops = code_export.parse_blast_hops(blast["downstream_depth"], down_hops)
     focus_id = _seed_focus_id(export, requested)
-    focus_meta = blast.get("focus") if isinstance(blast.get("focus"), dict) else {}
+    focus_meta = _focus if isinstance(_focus := blast.get("focus"), dict) else {}
     focus_label = str(focus_meta.get("label") or focus_id or "this module")
     picker = _blast_picker(
         export,
@@ -1065,7 +1065,7 @@ def _changed_module_shortcut(
     changed_ids = _changed_module_ids(export)
     if not changed_ids:
         return ""
-    module_map = export.get("module_map") if isinstance(export.get("module_map"), dict) else {}
+    module_map = _module_map if isinstance(_module_map := export.get("module_map"), dict) else {}
     labels = {
         str(row.get("id") or ""): str(row.get("label") or row.get("id") or "")
         for row in module_map.get("modules", [])
@@ -1106,7 +1106,7 @@ def _render_impact(
     )
     shortcut = _changed_module_shortcut(export, show_worktrees=show_worktrees, show_full_map=show_full_map)
 
-    impact = export.get("impact") if isinstance(export.get("impact"), dict) else None
+    impact = _impact if isinstance(_impact := export.get("impact"), dict) else None
     if not symbol:
         return html.panel(
             html.esc("Impact"),
@@ -1120,16 +1120,16 @@ def _render_impact(
             search_form + shortcut + f"<p>{html.esc('No impact data for that symbol.')}</p>",
         )
 
-    resolved = impact.get("resolved_symbol") if isinstance(impact.get("resolved_symbol"), dict) else {}
+    resolved = _resolved_symbol if isinstance(_resolved_symbol := impact.get("resolved_symbol"), dict) else {}
     plain_name = str(resolved.get("name") or resolved.get("qualified_name") or symbol)
     file_path = str(resolved.get("file_path") or "")
     intro = f"Blast radius for {plain_name}."
     if file_path:
         intro += f" Defined in {file_path}."
 
-    callers = impact.get("callers") if isinstance(impact.get("callers"), list) else []
-    edges = impact.get("edges") if isinstance(impact.get("edges"), list) else []
-    affected = impact.get("affected_tests") if isinstance(impact.get("affected_tests"), dict) else {}
+    callers = _callers if isinstance(_callers := impact.get("callers"), list) else []
+    edges = _edges if isinstance(_edges := impact.get("edges"), list) else []
+    affected = _affected_tests if isinstance(_affected_tests := impact.get("affected_tests"), dict) else {}
 
     sections = [
         search_form,
@@ -1225,7 +1225,7 @@ def _impact_table(title: str, rows: list, *, limit: int) -> str:
 
 
 def _affected_tests_table(affected: dict) -> str:
-    tests = affected.get("affected_tests") if isinstance(affected.get("affected_tests"), list) else []
+    tests = _affected_tests if isinstance(_affected_tests := affected.get("affected_tests"), list) else []
     if not tests:
         return f"<h3>{html.esc('Attributed tests')}</h3><p>{html.esc('No attributed tests.')}</p>"
     attr = affected.get("attribution")
@@ -1236,7 +1236,7 @@ def _affected_tests_table(affected: dict) -> str:
             continue
         path = str(row.get("file_path") or "-")
         hops = str(row.get("min_hops") if row.get("min_hops") is not None else "-")
-        via = row.get("via") if isinstance(row.get("via"), list) else []
+        via = _via if isinstance(_via := row.get("via"), list) else []
         via_text = ", ".join(str(item) for item in via[:5])
         rows.append([html.esc(path), html.esc(hops), html.esc(via_text or "-")])
     table = html.table([html.esc("Test file"), html.esc("Hops"), html.esc("Via")], rows)
@@ -1244,7 +1244,7 @@ def _affected_tests_table(affected: dict) -> str:
 
 
 def _impact_debug(impact: dict) -> str:
-    hits = impact.get("search_hits") if isinstance(impact.get("search_hits"), list) else []
+    hits = _search_hits if isinstance(_search_hits := impact.get("search_hits"), list) else []
     if not hits:
         return ""
     lines = []
@@ -1263,7 +1263,7 @@ def _impact_debug(impact: dict) -> str:
 
 
 def _debug_details(export: dict) -> str:
-    stats = export.get("stats") if isinstance(export.get("stats"), dict) else {}
+    stats = _stats if isinstance(_stats := export.get("stats"), dict) else {}
     if not stats:
         return ""
     bits = ", ".join(f"{key}={value}" for key, value in sorted(stats.items()))

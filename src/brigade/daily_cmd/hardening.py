@@ -35,9 +35,26 @@ from .. import (
 from ..localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 from ..render import emit
 
-from . import config as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .config import (
+    HARDENING_PHASE_TITLES,
+    HARDENING_WORKSTREAMS,
+    RUN_STATUSES,
+    SCHEMA_VERSION,
+    _approvals_root,
+    _config_path,
+    _fingerprint,
+    _hardening_closeouts_root,
+    _hardening_phases,
+    _load_config,
+    _plans_root,
+    _runs_root,
+    _slug,
+    _telemetry_root,
+)
+from . import approvals as _approvals_mod
+from . import run_loop as _run_loop_mod
+from . import status_plan as _status_plan_mod
+from . import telemetry_ops as _telemetry_ops_mod
 
 
 def hardening_plan_payload(target: Path) -> dict[str, Any]:
@@ -105,12 +122,14 @@ def _hardening_finding(
         "metadata": metadata or {},
     }
     payload["source_fingerprint"] = _fingerprint(payload)
-    payload["finding_id"] = f"daily-hardening-{_slug(workstream)}-{_slug(name)}-{payload['source_fingerprint'][:10]}"
+    payload["finding_id"] = (
+        f"daily-hardening-{_slug(workstream)}-{_slug(name)}-{str(payload['source_fingerprint'])[:10]}"
+    )
     return payload
 
 
 def _latest_hardening_closeout(target: Path) -> dict[str, Any] | None:
-    closeouts, _ = _iter_receipts(_hardening_closeouts_root(target), "closeout.json")
+    closeouts, _ = _run_loop_mod._iter_receipts(_hardening_closeouts_root(target), "closeout.json")
     return closeouts[0] if closeouts else None
 
 
@@ -173,11 +192,11 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     findings: list[dict[str, Any]] = []
     config, config_checks = _load_config(target)
-    runs, run_errors = _iter_receipts(_runs_root(target), "run.json")
-    plans, plan_errors = _iter_receipts(_plans_root(target), "plan.json")
+    runs, run_errors = _run_loop_mod._iter_receipts(_runs_root(target), "run.json")
+    plans, plan_errors = _run_loop_mod._iter_receipts(_plans_root(target), "plan.json")
     latest_run = runs[0] if runs else None
-    daily_health = health(target)
-    telemetry_data = telemetry_payload(target)
+    daily_health = _telemetry_ops_mod.health(target)
+    telemetry_data = _telemetry_ops_mod.telemetry_payload(target)
     config_issues = [check for check in config_checks if check.get("status") != "ok"]
     if any(check.get("status") == "fail" for check in config_checks):
         findings.append(
@@ -264,16 +283,17 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
                 },
             )
         )
-    approvals = daily_health.get("approvals") if isinstance(daily_health.get("approvals"), dict) else {}
-    approval_items, approval_errors = _read_approvals(target)
+    approvals = raw_app if isinstance((raw_app := daily_health.get("approvals")), dict) else {}
+    approval_items, approval_errors = _approvals_mod._read_approvals(target)
     approval_counts = Counter(str(item.get("status") or "unknown") for item in approval_items)
     stale_approvals = [
         item
         for item in approval_items
         if item.get("status") in {"pending", "approved"}
         and (
-            _age_hours(item.get("created_at")) is not None
-            and (_age_hours(item.get("created_at")) or 0) > int(config.get("stale_run_threshold_hours") or 24)
+            _status_plan_mod._age_hours(item.get("created_at")) is not None
+            and (_status_plan_mod._age_hours(item.get("created_at")) or 0)
+            > int(config.get("stale_run_threshold_hours") or 24)
         )
     ]
     if (
@@ -312,7 +332,7 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
                 metadata={"checks": telemetry_data.get("checks"), "metrics": telemetry_data.get("metrics")},
             )
         )
-    protocol_data = protocol_payload(target)
+    protocol_data = _telemetry_ops_mod.protocol_payload(target)
     protocol_steps = {str(item.get("step")) for item in protocol_data.get("steps", []) if isinstance(item, dict)}
     required_protocol_steps = {"status", "plan", "review", "approval", "run", "closeout", "recover"}
     if not required_protocol_steps <= protocol_steps:
@@ -407,7 +427,7 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
         item
         for item in pending_imports
         if not (
-            (item.get("metadata") if isinstance(item.get("metadata"), dict) else {}).get("source_fingerprint")
+            (raw_meta if isinstance((raw_meta := item.get("metadata")), dict) else {}).get("source_fingerprint")
             or item.get("source")
         )
     ]
@@ -438,7 +458,7 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
     inbox_hygiene = work_cmd._inbox_hygiene_payload(target)
     inbox_quality = work_cmd._inbox_quality_payload(target)
     if int(inbox_hygiene.get("issue_count") or 0) > 0:
-        top = inbox_hygiene.get("top_issue") if isinstance(inbox_hygiene.get("top_issue"), dict) else {}
+        top = raw_top if isinstance((raw_top := inbox_hygiene.get("top_issue")), dict) else {}
         findings.append(
             _hardening_finding(
                 workstream="inbox-evidence-quality",
@@ -450,7 +470,7 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
                 evidence_refs=[str(work_cmd._imports_path(target))],
             )
         )
-    quality_counts = inbox_quality.get("issue_counts") if isinstance(inbox_quality.get("issue_counts"), dict) else {}
+    quality_counts = raw_qc if isinstance((raw_qc := inbox_quality.get("issue_counts")), dict) else {}
     noisy_or_deferred = (
         int(quality_counts.get("noisy_source") or 0)
         + int(quality_counts.get("deferred") or 0)
@@ -515,7 +535,7 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
     repo_health = repos_cmd.health(target)
     repo_daily_use = repos_cmd.daily_use_health(target)
     if int(repo_health.get("issue_count") or 0) > 0:
-        top = repo_health.get("top_issue") if isinstance(repo_health.get("top_issue"), dict) else {}
+        top = raw_repo_top if isinstance((raw_repo_top := repo_health.get("top_issue")), dict) else {}
         findings.append(
             _hardening_finding(
                 workstream="repo-fleet-daily-use",

@@ -22,9 +22,17 @@ from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import enrichment as _enrichment_mod
+from . import scan_engine as _scan_engine_mod
+from .config import load_config
+from .models import (
+    FINGERPRINT_RE,
+    SEVERITY_ORDER,
+    SecurityConfig,
+    _read_fingerprint_migration_map,
+    _sanitize_finding_for_output,
+    default_artifacts_dir,
+)
 
 
 def _load_report(output_dir: Path) -> dict[str, Any]:
@@ -56,9 +64,11 @@ def _report_findings_for_review(target: Path, report: dict[str, Any]) -> list[di
             continue
         record = _sanitize_finding_for_output(finding)
         record["status"] = (
-            "suppressed" if _finding_matches_fingerprints(finding, suppressed, migration_map=migration_map) else "open"
+            "suppressed"
+            if _scan_engine_mod._finding_matches_fingerprints(finding, suppressed, migration_map=migration_map)
+            else "open"
         )
-        reason = _suppression_reason_for_finding(
+        reason = _scan_engine_mod._suppression_reason_for_finding(
             finding, suppressions=suppressed, reasons=reasons, migration_map=migration_map
         )
         if reason:
@@ -69,7 +79,7 @@ def _report_findings_for_review(target: Path, report: dict[str, Any]) -> list[di
             continue
         record = _sanitize_finding_for_output(finding)
         record["status"] = "suppressed"
-        reason = _suppression_reason_for_finding(
+        reason = _scan_engine_mod._suppression_reason_for_finding(
             finding, suppressions=suppressed, reasons=reasons, migration_map=migration_map
         )
         if reason:
@@ -111,7 +121,7 @@ def review(*, target: Path, output_dir: Path | None = None, json_output: bool = 
         "open_count": len([item for item in records if item.get("status") != "suppressed"]),
         "suppressed_count": len([item for item in records if item.get("status") == "suppressed"]),
     }
-    enrichment = _load_enrichment_payload(artifacts_dir)
+    enrichment = _enrichment_mod._load_enrichment_payload(artifacts_dir)
     if enrichment is not None:
         payload["enrichment"] = enrichment
     if json_output:
@@ -169,7 +179,7 @@ def _identifier_match_candidates(identifier: str, migration_map: dict[str, str] 
     if FINGERPRINT_RE.fullmatch(fingerprint):
         candidates.add(fingerprint)
     if migration_map and FINGERPRINT_RE.fullmatch(fingerprint):
-        aliases = _expand_suppression_fingerprints({fingerprint}, migration_map)
+        aliases = _scan_engine_mod._expand_suppression_fingerprints({fingerprint}, migration_map)
         candidates.update(aliases)
         candidates.update(f"security-{alias}" for alias in aliases)
     return candidates
@@ -190,7 +200,7 @@ def _diff_finding_alias_keys(
         if legacy:
             keys.add(legacy)
         if migration_map:
-            keys = _expand_suppression_fingerprints(keys, migration_map)
+            keys = _scan_engine_mod._expand_suppression_fingerprints(keys, migration_map)
     if keys:
         return keys
     return {_diff_finding_key(record)}
@@ -308,7 +318,7 @@ def sarif(
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"error: invalid security report: {exc}", file=sys.stderr)
         return 2
-    payload = _sarif_report(report)
+    payload = _scan_engine_mod._sarif_report(report)
     destination = (
         output_path.expanduser().resolve() if output_path is not None else artifacts_dir / "security-report.sarif"
     )

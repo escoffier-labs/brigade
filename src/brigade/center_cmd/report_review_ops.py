@@ -43,18 +43,24 @@ from ..localio import (
 )
 from ..render import emit
 
-from . import schema_ops as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import core as _core_mod
+from . import reports as _reports_mod
+from .schema_ops import (
+    SCHEMA_VERSION,
+    _parse_time,
+    _path_label,
+    _receipt_reference_exists,
+    _schema,
+)
 
 
 def report_review(*, target: Path, report_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    report, error = _resolve_report(target, report_id)
+    report, error = _reports_mod._resolve_report(target, report_id)
     if report is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    plan = _action_plan(report)
+    plan = _reports_mod._action_plan(report)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("center-report-review"),
@@ -93,14 +99,14 @@ def _receipt_newer_than_report(receipt: dict[str, Any] | None, report_created: d
 
 
 def _report_queue_changed(report: dict[str, Any], current_reviews: list[dict[str, Any]]) -> bool:
-    old = sorted(_item_key(item) for item in report.get("reviews", []) if isinstance(item, dict))
-    new = sorted(_item_key(item) for item in current_reviews if isinstance(item, dict))
+    old = sorted(_reports_mod._item_key(item) for item in report.get("reviews", []) if isinstance(item, dict))
+    new = sorted(_reports_mod._item_key(item) for item in current_reviews if isinstance(item, dict))
     return old != new
 
 
 def _report_review_map(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    reviews_data = report.get("reviews") if isinstance(report.get("reviews"), list) else []
-    return {_item_key(item): item for item in reviews_data if isinstance(item, dict)}
+    reviews_data = _reviews if isinstance(_reviews := report.get("reviews"), list) else []
+    return {_reports_mod._item_key(item): item for item in reviews_data if isinstance(item, dict)}
 
 
 def _is_blocker_item(item: dict[str, Any]) -> bool:
@@ -111,7 +117,7 @@ def _missing_receipt_refs(report: dict[str, Any]) -> list[dict[str, Any]]:
     report_id = str(report.get("report_id") or "unknown")
     stale: list[dict[str, Any]] = []
     target = Path(str(report.get("target") or ".")).expanduser().resolve()
-    for ref in report.get("receipt_references") if isinstance(report.get("receipt_references"), list) else []:
+    for ref in _receipt_references if isinstance(_receipt_references := report.get("receipt_references"), list) else []:
         if isinstance(ref, str) and ref and not _receipt_reference_exists(target, ref):
             stale.append({"report_id": report_id, "path": _path_label(target, ref)})
     return stale
@@ -138,7 +144,7 @@ def _report_diff_payload(
             "item_key": key,
         }
         for key in sorted(base_keys & compare_keys)
-        if _fingerprint_payload(base_map[key]) != _fingerprint_payload(compare_map[key])
+        if _reports_mod._fingerprint_payload(base_map[key]) != _reports_mod._fingerprint_payload(compare_map[key])
     ]
     new_blockers: list[dict[str, Any]] = []
     for key in sorted(compare_keys):
@@ -190,7 +196,7 @@ def _report_diff_payload(
         "new_blockers": new_blockers,
         "stale_references": stale_references,
         "issue_count": len(new_blockers) + len(stale_references),
-        "diff_fingerprint": _fingerprint_payload(fingerprint_payload),
+        "diff_fingerprint": _reports_mod._fingerprint_payload(fingerprint_payload),
         "path": str(path / "diff.json") if path is not None else None,
         "write_required": path is None,
     }
@@ -206,8 +212,8 @@ def report_diff(
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
-    base_report, base_error = _resolve_report(target, base_report_id)
-    compare_report, compare_error = _resolve_report(target, compare_report_id)
+    base_report, base_error = _reports_mod._resolve_report(target, base_report_id)
+    compare_report, compare_error = _reports_mod._resolve_report(target, compare_report_id)
     if base_report is None:
         print(f"error: {base_error}", file=sys.stderr)
         return 1 if base_error and "not found" in base_error else 2
@@ -222,7 +228,7 @@ def report_diff(
     if record:
         created = _now()
         diff_id = f"{created.strftime('%Y%m%d-%H%M%S')}-report-diff-{uuid4().hex[:6]}"
-        diff_dir = _report_diffs_root(target) / diff_id
+        diff_dir = _reports_mod._report_diffs_root(target) / diff_id
     payload = _report_diff_payload(
         target=target, base_report=base_report, compare_report=compare_report, diff_id=diff_id, path=diff_dir
     )
@@ -247,14 +253,14 @@ def report_diff(
 
 def report_compare(*, target: Path, report_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    report, error = _resolve_report(target, report_id)
+    report, error = _reports_mod._resolve_report(target, report_id)
     if report is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
     report_created = _parse_time(report.get("created_at") or report.get("generated_at"))
     issues: list[dict[str, Any]] = []
-    current_head = _git_value(target, "rev-parse", "HEAD")
-    report_git = report.get("git") if isinstance(report.get("git"), dict) else {}
+    current_head = _core_mod._git_value(target, "rev-parse", "HEAD")
+    report_git = _git if isinstance(_git := report.get("git"), dict) else {}
     if report_git.get("head") and current_head and report_git.get("head") != current_head:
         issues.append(
             {
@@ -263,7 +269,7 @@ def report_compare(*, target: Path, report_id: str = "latest", json_output: bool
                 "detail": "current HEAD differs from report HEAD",
             }
         )
-    for ref in report.get("receipt_references") if isinstance(report.get("receipt_references"), list) else []:
+    for ref in _receipt_references if isinstance(_receipt_references := report.get("receipt_references"), list) else []:
         if isinstance(ref, str) and ref and not _receipt_reference_exists(target, ref):
             issues.append(
                 {
@@ -273,8 +279,8 @@ def report_compare(*, target: Path, report_id: str = "latest", json_output: bool
                 }
             )
             break
-    current_activity = _activity(target)
-    report_activity = report.get("activity") if isinstance(report.get("activity"), list) else []
+    current_activity = _core_mod._activity(target)
+    report_activity = _activity if isinstance(_activity := report.get("activity"), list) else []
     current_activity_time = _parse_time(current_activity[0].get("updated_at")) if current_activity else None
     report_activity_time = _parse_time(report_activity[0].get("updated_at")) if report_activity else report_created
     if (
@@ -289,7 +295,7 @@ def report_compare(*, target: Path, report_id: str = "latest", json_output: bool
     latest_candidate = release_cmd._latest_candidate(target)
     latest_verify = work_cmd._latest_verify_receipt(target)
     review_health = work_cmd._review_health(target)
-    latest_review = review_health.get("latest_run") if isinstance(review_health.get("latest_run"), dict) else None
+    latest_review = _latest_run if isinstance(_latest_run := review_health.get("latest_run"), dict) else None
     latest_sweep = work_cmd._scanner_sweep_health(target).get("latest")
     latest_security = security_cmd.health(target).get("evidence")
     for name, receipt, key in (
@@ -308,7 +314,7 @@ def report_compare(*, target: Path, report_id: str = "latest", json_output: bool
         issues.append(
             {"status": "warn", "name": "newer_security_report", "detail": str((latest_security or {}).get("path"))}
         )
-    current_reviews = _reviews(target)
+    current_reviews = _core_mod._reviews(target)
     if _report_queue_changed(report, current_reviews):
         issues.append(
             {
@@ -357,7 +363,7 @@ def report_closeout(
     if status not in reportstore.CLOSEOUT_STATUSES:
         print("error: --status must be one of reviewed, deferred, superseded, archived", file=sys.stderr)
         return 2
-    report, error = _resolve_report(target, report_id)
+    report, error = _reports_mod._resolve_report(target, report_id)
     if report is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -365,7 +371,7 @@ def report_closeout(
     if not report_path.is_dir():
         print(f"error: operator report path is missing: {report.get('path')}", file=sys.stderr)
         return 2
-    plan = _action_plan(report)
+    plan = _reports_mod._action_plan(report)
     deferred = list(deferred_item_ids or [])
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -378,7 +384,7 @@ def report_closeout(
         "unresolved_item_count": plan["unresolved_item_count"],
         "deferred_item_ids": deferred,
         "report_fingerprint": report.get("report_fingerprint")
-        or _fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")}),
+        or _reports_mod._fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")}),
     }
     closeout_path = reportstore.write_closeout(report_path, payload)
     report["closeout"] = payload
@@ -394,12 +400,12 @@ def report_closeout(
 
 
 def _report_review_status(report: dict[str, Any]) -> str | None:
-    closeout = report.get("closeout") if isinstance(report.get("closeout"), dict) else None
+    closeout = _closeout if isinstance(_closeout := report.get("closeout"), dict) else None
     status = closeout.get("status") if isinstance(closeout, dict) else None
     return status if isinstance(status, str) else None
 
 
 def _report_reviewed_at(report: dict[str, Any]) -> str | None:
-    closeout = report.get("closeout") if isinstance(report.get("closeout"), dict) else None
+    closeout = _closeout if isinstance(_closeout := report.get("closeout"), dict) else None
     reviewed_at = closeout.get("reviewed_at") if isinstance(closeout, dict) else None
     return reviewed_at if isinstance(reviewed_at, str) else None
