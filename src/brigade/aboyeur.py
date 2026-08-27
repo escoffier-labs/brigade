@@ -24,6 +24,7 @@ from . import agents
 from . import codex_appserver
 from . import context_eval
 from . import evidence_brief as evidence_brief_mod
+from . import fleet_client
 from . import graphtrail_delta
 from . import causal_receipt
 from . import localio
@@ -117,6 +118,153 @@ class BriefSet:
     evidence: EvidenceBrief
     budget_bytes: int
     attached: tuple[dict[str, object], ...]
+
+
+@dataclass(frozen=True)
+class FleetModelPolicyResolution:
+    roster: Roster
+    receipt: dict[str, object]
+    error: str | None = None
+
+
+def resolve_fleet_model_policy(
+    roster: Roster,
+    *,
+    worker: str | None = None,
+    model_override: str | None = None,
+    snapshot: Mapping[str, Any] | None = None,
+) -> FleetModelPolicyResolution:
+    """Resolve one immutable Fleet Hub policy snapshot into an effective roster."""
+    effective = roster
+    if model_override is not None:
+        cleaned_override = model_override.strip()
+        if worker is None:
+            return FleetModelPolicyResolution(
+                roster=roster,
+                receipt={"state": "invalid", "authoritative": False, "models": [], "decisions": []},
+                error="--model requires --worker so the overridden seat is unambiguous",
+            )
+        agent = roster.agents.get(worker)
+        if agent is None:
+            return FleetModelPolicyResolution(
+                roster=roster,
+                receipt={"state": "invalid", "authoritative": False, "models": [], "decisions": []},
+                error=f"unknown worker: {worker}",
+            )
+        if not cleaned_override:
+            return FleetModelPolicyResolution(
+                roster=roster,
+                receipt={"state": "invalid", "authoritative": False, "models": [], "decisions": []},
+                error="--model must be a non-empty model identifier",
+            )
+        if agent.cli is None or not agents.supports_model_pinning(agent.cli):
+            cli = agent.cli or "unconfigured"
+            return FleetModelPolicyResolution(
+                roster=roster,
+                receipt={"state": "invalid", "authoritative": False, "models": [], "decisions": []},
+                error=f"seat {worker!r} uses {cli!r}, which does not support a per-run model override",
+            )
+        updated_agents = dict(roster.agents)
+        updated_agents[worker] = replace(agent, model=cleaned_override)
+        effective = replace(roster, agents=updated_agents)
+
+    raw_snapshot = dict(snapshot) if snapshot is not None else fleet_client.load_model_policy_snapshot()
+    state = raw_snapshot.get("state") if isinstance(raw_snapshot.get("state"), str) else "unavailable"
+    raw_models = raw_snapshot.get("models")
+    models = [dict(row) for row in raw_models if isinstance(row, Mapping)] if isinstance(raw_models, list) else []
+    receipt: dict[str, object] = {
+        "schema": "brigade.fleet_model_policy.v1",
+        "state": state,
+        "authoritative": state == "authoritative",
+        "models": models,
+        "decisions": [],
+    }
+    if model_override is not None:
+        receipt["model_override"] = model_override.strip()
+        receipt["model_override_seat"] = worker
+    if state in {"unconfigured", "unavailable"}:
+        return FleetModelPolicyResolution(roster=effective, receipt=receipt)
+    if state == "auth-failed":
+        return FleetModelPolicyResolution(
+            roster=effective,
+            receipt=receipt,
+            error="fleet model policy could not authenticate this node; refusing new dispatch",
+        )
+    if state != "authoritative":
+        return FleetModelPolicyResolution(roster=effective, receipt=receipt)
+
+    seat_rows = {row.get("seat"): row for row in models if isinstance(row.get("seat"), str) and row.get("seat")}
+    disabled_providers = {
+        row.get("provider")
+        for row in models
+        if row.get("seat") is None and row.get("enabled") is False and isinstance(row.get("provider"), str)
+    }
+    kept_agents = dict(effective.agents)
+    decisions: list[dict[str, object]] = []
+    denied: dict[str, str] = {}
+    for seat, agent in effective.agents.items():
+        provider = agents.model_policy_provider(agent.cli or "")
+        model = agents.model_policy_model(agent.cli or "", agent.model)
+        row = seat_rows.get(seat)
+        decision: dict[str, object] = {
+            "kind": "fleet-model-policy",
+            "seat": seat,
+            "requested_provider": provider,
+            "requested_model": model,
+        }
+        if provider in disabled_providers:
+            outcome = "provider-disabled"
+            detail = f"provider {provider!r} is disabled"
+        elif row is None:
+            outcome = "omitted"
+            detail = "seat is absent from the authoritative registry"
+        else:
+            policy_provider = row.get("provider")
+            policy_model = row.get("model")
+            decision["policy_provider"] = policy_provider
+            decision["policy_model"] = policy_model
+            decision["policy_enabled"] = row.get("enabled") is True
+            if policy_provider != provider or policy_model != model:
+                outcome = "mismatch"
+                detail = f"requested {provider}/{model}, registry allows {policy_provider}/{policy_model}"
+            elif row.get("enabled") is not True:
+                outcome = "disabled"
+                detail = "registry entry is disabled"
+            else:
+                outcome = "enabled"
+                detail = "exact seat/provider/model entry is enabled"
+        decision["outcome"] = outcome
+        decision["detail"] = detail
+        decisions.append(decision)
+        if outcome != "enabled":
+            denied[seat] = detail
+            if seat != effective.orchestrator:
+                kept_agents.pop(seat, None)
+
+    receipt["decisions"] = decisions
+    required_seat = worker or effective.orchestrator
+    if required_seat in denied:
+        detail = denied[required_seat]
+        return FleetModelPolicyResolution(
+            roster=replace(effective, agents=kept_agents),
+            receipt=receipt,
+            error=f"fleet model policy denied seat {required_seat!r}: {detail}",
+        )
+    routing = tuple(
+        {
+            "requested_seat": decision["seat"],
+            "effective_seat": decision["seat"] if decision["outcome"] == "enabled" else None,
+            "outcome": decision["outcome"],
+            "typed_cause": "fleet-model-policy",
+            "requested_provider": decision["requested_provider"],
+            "requested_model": decision["requested_model"],
+        }
+        for decision in decisions
+    )
+    return FleetModelPolicyResolution(
+        roster=replace(effective, agents=kept_agents, seat_routing=(*effective.seat_routing, *routing)),
+        receipt=receipt,
+    )
 
 
 def _brief_bytes(text: str) -> int:
@@ -3781,7 +3929,7 @@ def resolve_orchestrator_health_routing(
         roster,
         agents=effective_agents,
         orchestrator=effective_orchestrator,
-        seat_routing=tuple(decisions),
+        seat_routing=(*roster.seat_routing, *decisions),
     )
     receipt: dict[str, object] = {"schema": "brigade.seat_routing.v1", "decisions": decisions}
     if direct_worker:
@@ -3908,6 +4056,7 @@ def run(
     route_template: str | None = None,
     route_overrides: tuple[str, ...] = (),
     worker: str | None = None,
+    model_override: str | None = None,
     allow_shadow: bool = False,
     authorized_writable_worktree: bool = False,
     fail_fast: bool = True,
@@ -3943,6 +4092,51 @@ def run(
     transport_routing_payload: dict[str, object] | None = None
     quarantine_state = seat_health_policy.SeatQuarantineState()
     active_health_probe = seat_health.SeatHealthProbe(collect_executable_version=False)
+
+    model_policy = resolve_fleet_model_policy(
+        roster,
+        worker=worker,
+        model_override=model_override,
+    )
+    roster = model_policy.roster
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(output_dir / "model-policy.json", model_policy.receipt)
+        run_path = output_dir / "run.json"
+        if roster.seat_routing and run_path.is_file():
+            update_run_receipt(
+                output_dir,
+                seat_routing=[dict(decision) for decision in roster.seat_routing],
+            )
+        _write_json(output_dir / "roster.json", _roster_payload(roster))
+    if model_policy.error is not None:
+        if output_dir is not None and not (output_dir / "run.json").is_file():
+            record_run_start(
+                output_dir,
+                task=task,
+                cwd=cwd,
+                roster=roster,
+                read_only=read_only,
+                worker=worker,
+                dry_run=dry_run,
+                lock_workspace=lock_workspace,
+                codex_transport=transport_for_payload,
+                started_at=started_at,
+                scheduler=scheduler,
+                verification_contract_payload=verification_contract_payload,
+                run_budget_payload=run_budget_payload,
+            )
+        if output_dir is not None and (output_dir / "run.json").is_file():
+            record_run_termination(
+                output_dir,
+                status="failed",
+                failure_phase="preflight",
+                failure_kind="fleet-model-policy",
+                detail=model_policy.error,
+                seat=worker or roster.orchestrator,
+            )
+        print(f"error: {model_policy.error}", file=sys.stderr)
+        return 2
 
     def scheduler_resolved(used: str, fallback_reason: str | None) -> None:
         scheduler_resolution["used"] = used

@@ -1267,21 +1267,45 @@ def fetch_cloud(*, hub_url: str | None = None, include_all: bool = False) -> dic
 
 def fetch_model_policy(*, hub_url: str | None = None) -> list[dict[str, Any]]:
     """Return the bounded, sanitized model-policy rows from the hub."""
+    snapshot = load_model_policy_snapshot(hub_url=hub_url)
+    state = snapshot["state"]
+    if state == "unconfigured":
+        raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    if state == "auth-failed":
+        raise FleetClientError("fleet hub model policy read rejected this node's credentials")
+    if state != "authoritative":
+        raise FleetClientError("fleet hub model policy read failed")
+    return list(snapshot["models"])
+
+
+def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
+    """Classify one bounded model-policy read for run admission.
+
+    A missing hub preserves standalone Brigade behavior. A configured hub that
+    cannot be reached follows the existing local-run fleet fallback. Explicit
+    credential rejection is different: it cannot safely authorize a new run.
+    A successful read is authoritative even when the registry is empty.
+    """
     config = load_fleet_config()
     hub = hub_url or config["hub_url"]
     if not hub:
-        raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+        return {"state": "unconfigured", "models": []}
     try:
         payload = _run_with_deadline(
             lambda: _get_cloud_blocking(hub, "/models", config["token"], timeout=CLOUD_TIMEOUT_SECONDS),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
-    except Exception as exc:
-        raise FleetClientError("fleet hub model policy read failed") from exc
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return {"state": "auth-failed", "models": []}
+        return {"state": "unavailable", "models": []}
+    except Exception:
+        return {"state": "unavailable", "models": []}
     models = payload.get("models") if isinstance(payload, dict) else None
-    return (
+    safe_models = (
         [safe for item in models if (safe := _safe_model_policy(item)) is not None] if isinstance(models, list) else []
     )
+    return {"state": "authoritative", "models": safe_models}
 
 
 def set_model_policy(

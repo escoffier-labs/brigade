@@ -629,6 +629,34 @@ def supports_model_pinning(cli_ref: str) -> bool:
     return cli_ref in _MODEL_PIN
 
 
+_MODEL_POLICY_PROVIDER_ALIASES = {
+    "antigravity": "google",
+    "claude": "anthropic",
+    "codex": "openai",
+    "codex-cloud": "openai",
+    "gemini": "google",
+    "grok": "xai",
+    "jules-cloud": "google",
+}
+
+
+def model_policy_provider(cli_ref: str) -> str:
+    """Map a Brigade adapter to the provider slug used by Fleet Hub policy."""
+    base = cli_ref.split(":", 1)[0].strip().lower()
+    return _MODEL_POLICY_PROVIDER_ALIASES.get(base, base)
+
+
+def model_policy_model(cli_ref: str, model: str | None) -> str:
+    """Return the effective registry model, including embedded adapter pins."""
+    if model is not None and model.strip():
+        return model.strip()
+    if ":" in cli_ref:
+        embedded = cli_ref.split(":", 1)[1].strip()
+        if embedded:
+            return embedded
+    return "default"
+
+
 def supports_reasoning(cli_ref: str) -> bool:
     return cli_ref in _REASONING_ADAPTERS
 

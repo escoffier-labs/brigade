@@ -180,6 +180,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Dispatch the full task directly to one worker seat, skipping planning and synthesis.",
     )
     p_run.add_argument(
+        "--model",
+        default=None,
+        help="Override the selected --worker seat's model for this run, subject to Fleet Hub policy.",
+    )
+    p_run.add_argument(
         "--detach",
         action="store_true",
         help="Start the run in a detached child process and return after run metadata is written.",
@@ -356,6 +361,9 @@ def dispatch(args) -> int:
         return 2
     if args.detach and args.inspect:
         print("error: --detach cannot be used with --inspect", file=sys.stderr)
+        return 2
+    if args.model is not None and args.worker is None:
+        print("error: --model requires --worker so the overridden seat is unambiguous", file=sys.stderr)
         return 2
     if args.handoff and args.dry_run:
         print("error: --handoff cannot be used with --dry-run", file=sys.stderr)
@@ -672,6 +680,8 @@ def dispatch(args) -> int:
                 run_kwargs["defer_artifact_collection"] = True
             if args.worker is not None:
                 run_kwargs["worker"] = args.worker
+            if args.model is not None:
+                run_kwargs["model_override"] = args.model
             if args.codex_transport is not None:
                 run_kwargs["codex_transport"] = args.codex_transport
             if args.no_code_graph:
@@ -1061,6 +1071,8 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--read-only")
     if args.worker is not None:
         argv.extend(["--worker", args.worker])
+    if args.model is not None:
+        argv.extend(["--model", args.model])
     if args.wait is not None:
         if math.isinf(args.wait):
             argv.append("--wait")
