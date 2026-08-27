@@ -155,6 +155,26 @@ Idempotency markers live under `.brigade/cloud/grokbot/reconcile/` on the queue 
 
 The command does not schedule itself and does not add a tool to any MCP inventory. Apply currently requires POSIX descriptor primitives and fails closed on Windows; preview remains available there.
 
+## Automation findings
+
+Generic one-shot finding relay stays out of the listener. A producer writes a private manifest and Brigade delivers untrusted findings to the canonical owner's review inbox. The command never edits canonical memory, `MEMORY.md`, or memory cards, and it does not call Fleet Hub.
+
+The manifest is a regular file owned by the current user, mode `0600`, and not a symlink. Schema `brigade.grokbot.findings.v1` requires an `entries` array. Each entry has exactly `producer`, `finding_id`, `revision`, `observed_at`, `severity`, `title`, `body`, `source_ref`, `source_digest`, and `content_digest`. Unexpected fields, including secret-shaped keys, are rejected. Identity is `producer` plus `finding_id`. Severity is `info`, `low`, `medium`, `warning`, `high`, `critical`, or `unknown`. `observed_at` is either an empty string for a legacy unknown time or a timezone-aware ISO timestamp. `source_digest` is a `sha256:` lowercase hex digest and is not required to hash the body, so a live revision digest can be represented unchanged. `content_digest` must equal `sha256` of canonical UTF-8 title + NUL + body. `source_ref` is an opaque bounded reference: length and control characters are checked, and consecutive dots are allowed. `adapt_live_finding` converts a live fleet or backup normalized record (extra `trust` / `delivery` labels and a raw 64-hex `source_digest`) into this exact-key shape without rewriting live severity, time, digest, or body values. Live `reason` / `summary` values may be up to 16,384 UTF-8 bytes. The adapter derives `title` as `[UNTRUSTED] {producer} {finding_id}` sliced to 120 characters, matching the live relay `proposalTitle` rule, and preserves the full body. The private manifest may contain title and body; command output, delivery markers, Brigade receipts, and Fleet Hub projections must not.
+
+The supported batch conversion path is the CLI. Input schema `brigade.grokbot.live-findings.v1` is a regular owner-only mode-`0600` file with an `entries` array of at most 50 live normalized records. The command preflights every entry through `adapt_live_finding`, rejects duplicate identities, sorts by `producer`, `finding_id`, and `revision`, and writes schema `brigade.grokbot.findings.v1` atomically as mode `0600`. Any invalid later entry, unsafe permission, destination symlink, or symlink in any input or output parent component fails closed: the command does not read through the link and writes nothing. POSIX conversion walks every parent component with descriptor-relative `O_NOFOLLOW`. Windows writes fail closed; Windows reads use the same no-follow parent walk when available and fail closed otherwise. Command output prints counts and identity handles only.
+
+```bash
+brigade run cloud grokbot convert-findings --target /srv/brigade --input /path/to/live-findings.json --output /path/to/findings.json
+brigade run cloud grokbot reconcile-findings --target /srv/brigade --owner /srv/owner --manifest /path/to/findings.json
+brigade run cloud grokbot reconcile-findings --target /srv/brigade --owner /srv/owner --manifest /path/to/findings.json --apply --limit 1
+```
+
+The first command is preview-only and writes nothing. `--apply` preflights the entire manifest, then writes at most `--limit` deterministic drafts or recovery repairs to `memory/handoff-inbox`. `--limit` is 1 through 50 and defaults to 1. Recovery writes count against the same limit. Selection sorts by `producer`, `finding_id`, and `revision` before classification or delivery. A later revision may create a replacement draft with a non-colliding filename. Repeating the same revision is idempotent. Conflicting markers, existing drafts with different bytes, unsafe permissions, symlink traversal, digest mismatches, and malformed later entries fail closed before any write. Preview walks `.brigade`, `cloud`, and `grokbot` with `O_NOFOLLOW` and refuses those parent symlinks. Manifest input paths walk every parent component the same way.
+
+Each draft uses the standard Memory Handoff sections, marks the content as untrusted and review-only, and quotes every producer-controlled title and body line. Delivery markers live under `.brigade/cloud/grokbot/findings/` on the queue target, mode `0700`/`0600`. Marker JSON stores schema, identity, revision, source digest, content digest, draft relative path, draft SHA-256, and a timezone-aware `delivered_at` only.
+
+Concurrent apply serializes on the existing Grok Bot queue lock. Apply requires POSIX descriptor primitives and fails closed on Windows; preview remains available there. The command does not schedule itself and does not add a tool to any MCP inventory. Custom inbox paths are out of scope.
+
 ## Current limits
 
 `setup` writes non-secret configuration and bearer references only. The operator still provisions Grok Bot routines and secrets. This work does not commission a Grok Bot and does not prove weekly quota attribution. A report snapshot is at most 12,000 UTF-8 bytes. The MCP request ceiling is 80,000 bytes.

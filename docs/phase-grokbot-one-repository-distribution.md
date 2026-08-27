@@ -35,10 +35,22 @@ The Fleet Hub stays private and is never mounted behind a public connector.
 The canonical owner reviews all durable findings before memory ingestion.
 Rocinante remains the canonical memory owner.
 
-An automation producer may emit a bounded finding descriptor. The descriptor
-contains routing metadata, a stable source identifier, timestamps, a content
-digest, and a local artifact reference. It does not contain report text,
-instructions, credentials, tokens, or arbitrary environment data.
+An automation producer may emit a bounded finding descriptor. The private
+producer manifest (`brigade.grokbot.findings.v1`) carries routing metadata,
+identity, timestamps, a content digest, a local source reference, and may
+include title and body because it is the approved private producer artifact.
+The generic entry represents live fleet and backup values without weakening
+validation: severities include `warning` and `unknown`, `observed_at` may be
+empty, `source_digest` is a `sha256:` digest that is not forced to hash the
+body, and `content_digest` is the required title + NUL + body integrity check.
+Instructions, credentials, tokens, and arbitrary environment data stay out.
+Finding title and body never enter Brigade receipts, delivery markers, CLI
+output, or Fleet Hub projections. Live fleet `reason` and backup `summary`
+values may reach the live maximum; `adapt_live_finding` derives the generic
+title with the live relay `proposalTitle` rule and keeps the full body.
+`source_ref` is an opaque bounded reference and may contain consecutive dots.
+The supported batch conversion path is
+`brigade run cloud grokbot convert-findings --input <live.json> --output <findings.json>`.
 
 The relay verifies the descriptor and artifact, creates one deterministic
 Memory Handoff draft in the owner's review inbox, and records an idempotent
@@ -75,7 +87,8 @@ their processes or credentials.
    receipts, redacted output, and concurrent apply.
 2. Implement a preview-first local import and owner-delivery module.
 3. Add CLI parsing and safe JSON and text projections.
-4. Add service rendering and doctor checks without adding a daemon dependency.
+4. Do not add a new daemon or service-rendering command. The existing systemd
+   timer can call the one-shot command after cutover.
 5. Document producer and owner contracts.
 
 This slice does not migrate a live connector or disable the sidecar.
