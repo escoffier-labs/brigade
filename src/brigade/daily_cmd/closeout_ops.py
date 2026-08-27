@@ -35,9 +35,12 @@ from .. import (
 from ..localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 from ..render import emit
 
-from . import config as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .config import (
+    RUN_STATUSES,
+    _load_config,
+    _safe_text,
+)
+from . import run_loop as _run_loop_mod
 
 
 def _changed_files_summary(target: Path) -> dict[str, Any]:
@@ -74,7 +77,7 @@ def _changed_files_summary(target: Path) -> dict[str, Any]:
 
 
 def _verification_expectation(config: dict[str, Any], run_receipt: dict[str, Any]) -> dict[str, Any]:
-    action = run_receipt.get("selected_action") if isinstance(run_receipt.get("selected_action"), dict) else {}
+    action = raw_action if isinstance((raw_action := run_receipt.get("selected_action")), dict) else {}
     action_type = str(action.get("action_type") or "")
     required = False
     if action_type == "run-task":
@@ -147,7 +150,7 @@ def closeout(
         print(f"error: invalid daily closeout status: {status}", file=sys.stderr)
         return 2
     target = target.expanduser().resolve()
-    receipt = _latest_run(target)
+    receipt = _run_loop_mod._latest_run(target)
     if receipt is None:
         print("error: no daily run receipt found", file=sys.stderr)
         return 1
@@ -157,7 +160,11 @@ def closeout(
     verification_blockers: list[str] = []
     if verification_expectation["required"] and not latest_verification:
         verification_blockers.append("verification receipt required by daily config")
-    elif verification_expectation["required"] and latest_verification.get("status") != "completed":
+    elif (
+        verification_expectation["required"]
+        and latest_verification is not None
+        and latest_verification.get("status") != "completed"
+    ):
         verification_blockers.append(f"latest verification did not complete: {latest_verification.get('run_id')}")
     receipt["closeout_status"] = status
     receipt["closeout_reason"] = reason
@@ -185,8 +192,8 @@ def closeout(
             print(f"error: handoff lint failed: {exc}", file=sys.stderr)
             return 1
         receipt["handoff_path"] = str(handoff_path)
-    _record_run(target, receipt)
-    _record_telemetry_event(
+    _run_loop_mod._record_run(target, receipt)
+    _run_loop_mod._record_telemetry_event(
         target,
         {
             "type": "daily-closeout",

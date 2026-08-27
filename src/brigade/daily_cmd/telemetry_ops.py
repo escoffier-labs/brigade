@@ -35,14 +35,31 @@ from .. import (
 from ..localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 from ..render import emit
 
-from . import config as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .config import (
+    DEFAULT_CONFIG,
+    SCHEMA_VERSION,
+    _approvals_archive_root,
+    _approvals_root,
+    _config_path,
+    _fingerprint,
+    _load_config,
+    _plans_root,
+    _repairs_root,
+    _runs_root,
+    _schemas,
+    _telemetry_root,
+    _unblocks_root,
+    _write_config,
+)
+from . import approvals as _approvals_mod
+from . import candidates as _candidates_mod
+from . import run_loop as _run_loop_mod
+from . import status_plan as _status_plan_mod
 
 
 def approvals_payload(target: Path, *, limit: int = 50) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    approvals, errors = _read_approvals(target)
+    approvals, errors = _approvals_mod._read_approvals(target)
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": "daily-approvals", "version": SCHEMA_VERSION},
@@ -65,7 +82,7 @@ def approvals_list(*, target: Path, limit: int = 50, json_output: bool = False) 
 
 def approvals_show(*, target: Path, approval_id: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    approval = _find_approval(target, approval_id)
+    approval = _approvals_mod._find_approval(target, approval_id)
     if approval is None:
         print(f"error: approval not found: {approval_id}", file=sys.stderr)
         return 1
@@ -87,8 +104,8 @@ def _review_approval(
         print(f"error: invalid approval status: {status}", file=sys.stderr)
         return 2
     target = target.expanduser().resolve()
-    with _approval_store_lock(target, approval_id):
-        approval = _find_approval(target, approval_id)
+    with _approvals_mod._approval_store_lock(target, approval_id):
+        approval = _approvals_mod._find_approval(target, approval_id)
         if approval is None:
             print(f"error: approval not found: {approval_id}", file=sys.stderr)
             return 1
@@ -98,7 +115,7 @@ def _review_approval(
         approval["status"] = status
         approval["reviewed_at"] = _now().isoformat()
         approval["review_reason"] = reason
-        _write_approval_unlocked(target, approval)
+        _approvals_mod._write_approval_unlocked(target, approval)
     if json_output:
         print(json.dumps(approval, indent=2, sort_keys=True))
     else:
@@ -122,23 +139,23 @@ def approvals_hold(*, target: Path, approval_id: str, reason: str, json_output: 
 def approvals_compare_payload(target: Path, approval_id: str) -> dict[str, Any]:
     target = target.expanduser().resolve()
     config, _ = _load_config(target)
-    approval = _find_approval(target, approval_id)
+    approval = _approvals_mod._find_approval(target, approval_id)
     issues: list[dict[str, Any]] = []
     current = None
     if approval is None:
         issues.append({"status": "fail", "name": "approval_missing", "detail": approval_id})
     else:
-        current = _current_action_for_approval(target, approval)
-        if approval.get("config_fingerprint") != _config_fingerprint(config):
+        current = _approvals_mod._current_action_for_approval(target, approval)
+        if approval.get("config_fingerprint") != _approvals_mod._config_fingerprint(config):
             issues.append({"status": "warn", "name": "approval_config_changed", "detail": approval_id})
         if current is None:
             issues.append({"status": "warn", "name": "approval_missing_source_evidence", "detail": approval_id})
         elif current.get("source_fingerprint") != approval.get("source_fingerprint"):
             issues.append({"status": "warn", "name": "approval_source_fingerprint_changed", "detail": approval_id})
-        if current is not None and _adapter_for(current) != approval.get("selected_adapter"):
+        if current is not None and _candidates_mod._adapter_for(current) != approval.get("selected_adapter"):
             issues.append({"status": "warn", "name": "approval_adapter_changed", "detail": approval_id})
         selected_action = approval.get("selected_action") if isinstance(approval.get("selected_action"), dict) else {}
-        matches = _matching_approvals(target, selected_action, config) if selected_action else []
+        matches = _approvals_mod._matching_approvals(target, selected_action, config) if selected_action else []
         newer = [
             item
             for item in matches
@@ -178,15 +195,15 @@ def approvals_compare(*, target: Path, approval_id: str, json_output: bool = Fal
 
 def approvals_archive(*, target: Path, consumed: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    approvals, errors = _read_approvals(target)
+    approvals, errors = _approvals_mod._read_approvals(target)
     archiveable = {"consumed", "rejected", "superseded"} if consumed else set()
     archived: list[dict[str, Any]] = []
     for approval in approvals:
         if approval.get("status") not in archiveable:
             continue
         approval_id = str(approval.get("approval_id") or "")
-        with _approval_store_lock(target, approval_id):
-            current = _find_approval(target, approval_id)
+        with _approvals_mod._approval_store_lock(target, approval_id):
+            current = _approvals_mod._find_approval(target, approval_id)
             if current is None or current.get("status") not in archiveable:
                 continue
             source = _approvals_root(target) / approval_id
@@ -254,8 +271,8 @@ def schema(*, target: Path, json_output: bool = False) -> int:
 
 def history_payload(target: Path, *, limit: int = 20) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    runs, run_errors = _iter_receipts(_runs_root(target), "run.json")
-    plans, plan_errors = _iter_receipts(_plans_root(target), "plan.json")
+    runs, run_errors = _run_loop_mod._iter_receipts(_runs_root(target), "run.json")
+    plans, plan_errors = _run_loop_mod._iter_receipts(_plans_root(target), "plan.json")
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": "daily-history", "version": SCHEMA_VERSION},
@@ -282,7 +299,7 @@ def history(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
 def show(*, target: Path, run_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if run_id == "latest":
-        payload = _latest_run(target)
+        payload = _run_loop_mod._latest_run(target)
     else:
         payload = _read_json(_runs_root(target) / run_id / "run.json")
     if payload is None:
@@ -302,9 +319,9 @@ def health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     config, config_checks = _load_config(target)
     checks = list(config_checks)
-    runs, run_errors = _iter_receipts(_runs_root(target), "run.json")
-    plans, plan_errors = _iter_receipts(_plans_root(target), "plan.json")
-    approvals, approval_errors = _read_approvals(target)
+    runs, run_errors = _run_loop_mod._iter_receipts(_runs_root(target), "run.json")
+    plans, plan_errors = _run_loop_mod._iter_receipts(_plans_root(target), "plan.json")
+    approvals, approval_errors = _approvals_mod._read_approvals(target)
     telemetry_events, telemetry_errors = _telemetry_events(target)
     phase_health = phases_cmd.health(target)
     latest_phase_session = phases_cmd._latest_session(target)
@@ -322,22 +339,24 @@ def health(target: Path) -> dict[str, Any]:
     run_hours = int(config.get("stale_run_threshold_hours") or 12)
     latest_plan = plans[0] if plans else None
     latest_run = runs[0] if runs else None
-    if latest_plan and _is_stale(latest_plan.get("created_at"), plan_hours):
+    if latest_plan and _status_plan_mod._is_stale(latest_plan.get("created_at"), plan_hours):
         checks.append({"status": "warn", "name": "daily_stale_plan", "detail": str(latest_plan.get("plan_id"))})
     if latest_run:
-        if latest_run.get("status") in {"running", "planned"} and _is_stale(latest_run.get("started_at"), run_hours):
+        if latest_run.get("status") in {"running", "planned"} and _status_plan_mod._is_stale(
+            latest_run.get("started_at"), run_hours
+        ):
             checks.append({"status": "warn", "name": "daily_stale_run", "detail": str(latest_run.get("run_id"))})
         if latest_run.get("status") == "blocked":
             checks.append({"status": "warn", "name": "daily_blocked_run", "detail": str(latest_run.get("run_id"))})
         if (
             latest_run.get("status") in {"completed", "failed", "blocked"}
             and not latest_run.get("closeout_status")
-            and _is_stale(latest_run.get("completed_at") or latest_run.get("started_at"), run_hours)
+            and _status_plan_mod._is_stale(latest_run.get("completed_at") or latest_run.get("started_at"), run_hours)
         ):
             checks.append({"status": "warn", "name": "daily_unclosed_run", "detail": str(latest_run.get("run_id"))})
     for run_receipt in runs[:10]:
         action = run_receipt.get("selected_action") if isinstance(run_receipt.get("selected_action"), dict) else None
-        for blocker in _evidence_blockers(target, action):
+        for blocker in _status_plan_mod._evidence_blockers(target, action):
             checks.append({"status": "warn", "name": "daily_missing_evidence", "detail": blocker})
             break
     pending_approvals = [approval for approval in approvals if approval.get("status") == "pending"]
@@ -346,7 +365,7 @@ def health(target: Path) -> dict[str, Any]:
     rejected_approvals = [approval for approval in approvals if approval.get("status") == "rejected"]
     top_pending = pending_approvals[0] if pending_approvals else None
     for approval in pending_approvals:
-        if _is_stale(approval.get("created_at"), run_hours):
+        if _status_plan_mod._is_stale(approval.get("created_at"), run_hours):
             checks.append(
                 {"status": "warn", "name": "daily_stale_pending_approval", "detail": str(approval.get("approval_id"))}
             )
@@ -371,8 +390,8 @@ def health(target: Path) -> dict[str, Any]:
                 "detail": str(rejected_approvals[0].get("approval_id")),
             }
         )
-    if phase_health.get("issue_count") and not _phase_ledger_issues_captured_by_report(phase_health):
-        top_phase_issue = phase_health.get("top_issue") if isinstance(phase_health.get("top_issue"), dict) else {}
+    if phase_health.get("issue_count") and not _candidates_mod._phase_ledger_issues_captured_by_report(phase_health):
+        top_phase_issue = raw_top if isinstance((raw_top := phase_health.get("top_issue")), dict) else {}
         checks.append(
             {
                 "status": "warn",
@@ -385,7 +404,7 @@ def health(target: Path) -> dict[str, Any]:
             {"status": "warn", "name": "phase_session_active", "detail": str(latest_phase_session.get("session_id"))}
         )
     for approval in approvals:
-        current = _current_action_for_approval(target, approval)
+        current = _approvals_mod._current_action_for_approval(target, approval)
         if current is None and approval.get("status") in {"pending", "approved"}:
             checks.append(
                 {
@@ -439,19 +458,28 @@ def health(target: Path) -> dict[str, Any]:
 
 def doctor(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    payload = {
+    h = health(target)
+    payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": "daily-doctor", "version": SCHEMA_VERSION},
         "target": str(target),
-        "health": health(target),
+        "health": h,
     }
-    payload["checks"] = payload["health"]["checks"]
-    payload["issue_count"] = payload["health"]["issue_count"]
-    payload["top_issue"] = payload["health"]["top_issue"]
+    checks = raw_checks if isinstance((raw_checks := h.get("checks")), list) else []
+    payload["checks"] = checks
+    payload["issue_count"] = h.get("issue_count")
+    payload["top_issue"] = h.get("top_issue")
     lines: list[str] = [f"daily doctor: {target}"]
-    lines.extend(f"[{check.get('status')}] {check.get('name')}: {check.get('detail')}" for check in payload["checks"])
+    lines.extend(
+        f"[{check.get('status')}] {check.get('name')}: {check.get('detail')}"
+        for check in checks
+        if isinstance(check, dict)
+    )
     return emit(
-        payload, json_output, lines, 1 if any(check.get("status") == "fail" for check in payload["checks"]) else 0
+        payload,
+        json_output,
+        lines,
+        1 if any(isinstance(check, dict) and check.get("status") == "fail" for check in checks) else 0,
     )
 
 
@@ -554,7 +582,7 @@ def repair(*, target: Path, json_output: bool = False) -> int:
 
 def unblock_payload(target: Path, *, dry_run: bool = False) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    latest = _latest_run(target)
+    latest = _run_loop_mod._latest_run(target)
     config, _ = _load_config(target)
     created_imports: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -567,7 +595,7 @@ def unblock_payload(target: Path, *, dry_run: bool = False) -> dict[str, Any]:
     )
     if action and action.get("approval_required"):
         plan_data = {"plan_id": latest.get("plan_id") if isinstance(latest, dict) else None}
-        approval_request = _ensure_approval(target, plan_data, action, config)
+        approval_request = _approvals_mod._ensure_approval(target, plan_data, action, config)
     elif latest:
         records = [
             {
@@ -623,8 +651,8 @@ def unblock(*, target: Path, dry_run: bool = False, json_output: bool = False) -
 
 def resume(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    latest = _latest_run(target)
-    payload = {
+    latest = _run_loop_mod._latest_run(target)
+    payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": "daily-resume", "version": SCHEMA_VERSION},
         "target": str(target),
@@ -638,7 +666,7 @@ def resume(*, target: Path, json_output: bool = False) -> int:
         payload["blockers"].append("no daily run to resume")
     else:
         approval_id = latest.get("approval_id")
-        approval = _find_approval(target, str(approval_id)) if approval_id else None
+        approval = _approvals_mod._find_approval(target, str(approval_id)) if approval_id else None
         if isinstance(approval, dict) and approval.get("status") == "approved":
             payload["action_taken"] = "run-approved-approval"
             payload["next_recommended_command"] = f"brigade daily run --approval {approval_id}"
@@ -669,31 +697,31 @@ def resume(*, target: Path, json_output: bool = False) -> int:
 
 
 def _telemetry_events(target: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    return _iter_receipts(_telemetry_root(target) / "events", "event.json")
+    return _run_loop_mod._iter_receipts(_telemetry_root(target) / "events", "event.json")
 
 
 def telemetry_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     events, errors = _telemetry_events(target)
-    runs, _ = _iter_receipts(_runs_root(target), "run.json")
-    approvals, _ = _read_approvals(target)
+    runs, _ = _run_loop_mod._iter_receipts(_runs_root(target), "run.json")
+    approvals, _ = _approvals_mod._read_approvals(target)
     statuses = Counter(str(run.get("status") or "unknown") for run in runs)
     action_types = Counter(
         str((run.get("selected_action") or {}).get("action_type") or "unknown")
         for run in runs
         if isinstance(run.get("selected_action"), dict)
     )
-    blocker_counts = Counter()
+    blocker_counts: Counter[str] = Counter()
     for run in runs:
         for blocker in run.get("blockers", []) if isinstance(run.get("blockers"), list) else []:
             blocker_counts[str(blocker)] += 1
     closed_ages: list[float] = []
     for run in runs:
-        completed = _parse_time(run.get("completed_at"))
-        reviewed = _parse_time(run.get("reviewed_at"))
+        completed = _status_plan_mod._parse_time(run.get("completed_at"))
+        reviewed = _status_plan_mod._parse_time(run.get("reviewed_at"))
         if completed and reviewed:
             closed_ages.append((reviewed - completed).total_seconds() / 3600)
-    metrics = {
+    metrics: dict[str, Any] = {
         "event_count": len(events),
         "run_count": len(runs),
         "selected_action_types": dict(action_types),

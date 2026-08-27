@@ -35,9 +35,17 @@ from .. import (
 from ..localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 from ..render import emit
 
-from . import config as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .config import (
+    SCHEMA_VERSION,
+    _load_config,
+    _plans_root,
+    _runs_root,
+    _schema,
+    _telemetry_root,
+)
+from . import approvals as _approvals_mod
+from . import candidates as _candidates_mod
+from . import status_plan as _status_plan_mod
 
 
 def _latest_run(target: Path) -> dict[str, Any] | None:
@@ -137,9 +145,7 @@ def _invoke_context_build(target: Path, action: dict[str, Any]) -> tuple[str | N
                 if run.get("status") in {"failed", "blocked"}
             ][:5]
             excluded = (
-                context_payload.get("excluded_private_evidence")
-                if isinstance(context_payload.get("excluded_private_evidence"), list)
-                else []
+                raw_excl if isinstance((raw_excl := context_payload.get("excluded_private_evidence")), list) else []
             )
             for item in (
                 "raw scanner output",
@@ -171,11 +177,12 @@ def _blocked_run(
     receipt["completed_at"] = _now().isoformat()
     receipt["next_recommended_command"] = next_command
     receipt["blockers"].extend(blockers)
+    raw_adapter = receipt.get("adapter_result")
     adapter = (
-        receipt.get("adapter_result")
-        if isinstance(receipt.get("adapter_result"), dict)
-        else _adapter_result(
-            receipt.get("selected_action") if isinstance(receipt.get("selected_action"), dict) else None
+        raw_adapter
+        if isinstance(raw_adapter, dict)
+        else _candidates_mod._adapter_result(
+            raw_sel if isinstance((raw_sel := receipt.get("selected_action")), dict) else None
         )
     )
     adapter["status"] = "blocked"
@@ -220,8 +227,9 @@ def run(
     target = target.expanduser().resolve()
     config, _ = _load_config(target)
     approval: dict[str, Any] | None = None
+    plan_data: dict[str, Any]
     if approval_id:
-        approval = _find_approval(target, approval_id)
+        approval = _approvals_mod._find_approval(target, approval_id)
         if approval is not None and isinstance(approval.get("selected_action"), dict):
             plan_data = {
                 "plan_id": approval.get("source_plan_id"),
@@ -229,19 +237,20 @@ def run(
                 "path": None,
             }
         else:
-            plan_data = plan_payload(target, record=True)
+            plan_data = _status_plan_mod.plan_payload(target, record=True)
             plan_data["approval_load_error"] = f"approval not found: {approval_id}"
     elif plan_id and not replan:
-        plan_data = _resolve_plan(target, plan_id)
-        if plan_data is None:
-            plan_data = plan_payload(target, record=True)
+        if (resolved := _resolve_plan(target, plan_id)) is None:
+            plan_data = _status_plan_mod.plan_payload(target, record=True)
             plan_data["plan_load_error"] = f"plan not found: {plan_id}"
+        else:
+            plan_data = resolved
     else:
-        plan_data = plan_payload(target, record=True)
-    action = plan_data.get("selected_action") if isinstance(plan_data.get("selected_action"), dict) else None
+        plan_data = _status_plan_mod.plan_payload(target, record=True)
+    action = raw_action if isinstance((raw_action := plan_data.get("selected_action")), dict) else None
     run_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-daily-run-{uuid4().hex[:6]}"
     started = _now().isoformat()
-    receipt = {
+    receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("daily-run"),
         "target": str(target),
@@ -256,7 +265,7 @@ def run(
         "receipts_created": [str(Path(str(plan_data.get("path") or "")) / "plan.json")]
         if plan_data.get("path")
         else [],
-        "adapter_result": _adapter_result(action, status="running" if action else "blocked"),
+        "adapter_result": _candidates_mod._adapter_result(action, status="running" if action else "blocked"),
         "work_session_id": None,
         "task_id": None,
         "context_pack_id": None,
@@ -278,7 +287,7 @@ def run(
     if (
         plan_id
         and not replan
-        and _is_stale(plan_data.get("created_at"), int(config.get("stale_plan_threshold_hours") or 12))
+        and _status_plan_mod._is_stale(plan_data.get("created_at"), int(config.get("stale_plan_threshold_hours") or 12))
     ):
         return _blocked_run(
             target=target,
@@ -296,29 +305,29 @@ def run(
             next_command="brigade daily plan",
         )
     approval_granted = approved or approval is not None
-    config_blockers = _config_blockers(config, action, approved=approval_granted)
+    config_blockers = _status_plan_mod._config_blockers(config, action, approved=approval_granted)
     if approval is not None:
-        approval_blockers = _approval_blockers(target, approval, config)
+        approval_blockers = _approvals_mod._approval_blockers(target, approval, config)
         if config_blockers or approval_blockers:
             return _blocked_run(
                 target=target, receipt=receipt, blockers=[*config_blockers, *approval_blockers], json_output=json_output
             )
-    evidence_blockers = _evidence_blockers(target, action)
+    evidence_blockers = _status_plan_mod._evidence_blockers(target, action)
     if config_blockers or evidence_blockers:
         return _blocked_run(
             target=target, receipt=receipt, blockers=[*config_blockers, *evidence_blockers], json_output=json_output
         )
     if action.get("approval_required") and not approval_granted:
-        approval = _ensure_approval(target, plan_data, action, config)
+        approval = _approvals_mod._ensure_approval(target, plan_data, action, config)
         from .. import runs_cmd
 
         approval_id = str(approval.get("approval_id") or "")
-        with _approval_store_lock(target, approval_id):
-            current_approval = _find_approval(target, approval_id)
+        with _approvals_mod._approval_store_lock(target, approval_id):
+            current_approval = _approvals_mod._find_approval(target, approval_id)
             if current_approval is None:
-                raise ApprovalClaimError(f"daily approval not found: {approval_id}")
+                raise _approvals_mod.ApprovalClaimError(f"daily approval not found: {approval_id}")
             if runs_cmd._attach_approval_pause_request(target, "daily", current_approval):
-                _write_approval_unlocked(target, current_approval)
+                _approvals_mod._write_approval_unlocked(target, current_approval)
             approval = current_approval
         blockers = [str(action.get("approval_reason") or "explicit approval required")]
         if approval.get("status") not in {"pending", "approved"}:
@@ -339,7 +348,7 @@ def run(
             str(context_cmd._packs_root(target) / context_pack_id / "context.json")
         )
     if approval is not None:
-        _consume_approval(target, approval, run_id)
+        _approvals_mod._consume_approval(target, approval, run_id)
     rc = 0
     action_type = str(action.get("action_type"))
     if action_type == "run-task":
@@ -462,10 +471,10 @@ def run(
     receipt["next_recommended_command"] = "brigade daily closeout"
     _record_run(target, receipt)
     if rc == 0 and approval is not None:
-        record_redeemed_action_completed(
+        _approvals_mod.record_redeemed_action_completed(
             target,
             str(approval.get("approval_id") or ""),
-            _approval_claim_reference(approval),
+            _approvals_mod._approval_claim_reference(approval),
             receipt,
         )
     _record_telemetry_event(

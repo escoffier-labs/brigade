@@ -36,9 +36,18 @@ from .. import (
 from ..localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 from ..render import emit
 
-from . import config as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .config import (
+    RISK_LEVELS,
+    SCHEMA_VERSION,
+    _bounded_status_call,
+    _config_path,
+    _load_config,
+    _plans_root,
+    _schema,
+)
+from . import approvals as _approvals_mod
+from . import candidates as _candidates_mod
+from . import telemetry_ops as _telemetry_ops_mod
 
 
 def _config_blockers(config: dict[str, Any], action: dict[str, Any] | None, *, approved: bool = False) -> list[str]:
@@ -68,7 +77,7 @@ def _evidence_blockers(target: Path, action: dict[str, Any] | None) -> list[str]
         return ["no selected action"]
     action_type = str(action.get("action_type"))
     source_id = str(action.get("source_local_id") or "")
-    metadata = action.get("metadata") if isinstance(action.get("metadata"), dict) else {}
+    metadata = raw_meta if isinstance((raw_meta := action.get("metadata")), dict) else {}
     if action_type == "run-task":
         task_id = str(metadata.get("task_id") or source_id)
         if not any(str(task.get("id")) == task_id for task in work_cmd._pending_tasks(target)):
@@ -256,7 +265,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     center, check = _bounded_status_call("center-status", lambda: _daily_center_status_payload(target), {})
     status_section_checks.append(check)
     readiness, check = _bounded_status_call(
-        "center-readiness", lambda: _daily_readiness_payload(target), {"blockers": []}
+        "center-readiness", lambda: _candidates_mod._daily_readiness_payload(target), {"blockers": []}
     )
     status_section_checks.append(check)
     config, config_checks = _load_config(target)
@@ -277,12 +286,12 @@ def status_payload(target: Path) -> dict[str, Any]:
         if isinstance(operator_report_health, dict) and key in operator_report_health
     }
     del operator_report_health
-    candidates = _all_candidates(
+    candidates = _candidates_mod._all_candidates(
         target,
         diagnostics=status_section_checks,
         operator_report_health=slim_report_health,
     )
-    selected = _selected(candidates)
+    selected = _candidates_mod._selected(candidates)
     del candidates
     handoffs = center.get("handoff_drafts") if isinstance(center.get("handoff_drafts"), dict) else {}
     memory = center.get("memory_care") if isinstance(center.get("memory_care"), dict) else {}
@@ -304,7 +313,9 @@ def status_payload(target: Path) -> dict[str, Any]:
         "issue_count": 0,
         "top_issue": None,
     }
-    daily_health, check = _bounded_status_call("daily-health", lambda: health(target), daily_health_fallback)
+    daily_health, check = _bounded_status_call(
+        "daily-health", lambda: _telemetry_ops_mod.health(target), daily_health_fallback
+    )
     status_section_checks.append(check)
     phase_health, check = _bounded_status_call("phase-health", lambda: phases_cmd.health(target), {})
     status_section_checks.append(check)
@@ -400,12 +411,16 @@ def status(*, target: Path, json_output: bool = False) -> int:
 def plan_payload(target: Path, *, record: bool = False) -> dict[str, Any]:
     target = target.expanduser().resolve()
     config, config_checks = _load_config(target)
-    candidates = _all_candidates(target)
-    selected = _selected(candidates)
+    candidates = _candidates_mod._all_candidates(target)
+    selected = _candidates_mod._selected(candidates)
     selected_id = selected.get("action_id") if selected else None
-    candidate_explanations = [_candidate_explanation(target, config, action, selected_id) for action in candidates]
+    candidate_explanations = [
+        _candidates_mod._candidate_explanation(target, config, action, selected_id) for action in candidates
+    ]
     selection_blockers = (
-        _candidate_blockers(target, config, selected) if selected else _candidate_blockers(target, config, None)
+        _candidates_mod._candidate_blockers(target, config, selected)
+        if selected
+        else _candidates_mod._candidate_blockers(target, config, None)
     )
     created = _now().isoformat()
     plan_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-daily-plan-{uuid4().hex[:6]}"
@@ -478,9 +493,11 @@ def plan(*, target: Path, record: bool = False, json_output: bool = False) -> in
 def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dict[str, Any]:
     target = target.expanduser().resolve()
     config, config_checks = _load_config(target)
-    action = selected or _selected(_all_candidates(target))
+    action = selected or _candidates_mod._selected(_candidates_mod._all_candidates(target))
     explain = (
-        _candidate_explanation(target, config, action, action.get("action_id") if action else None) if action else None
+        _candidates_mod._candidate_explanation(target, config, action, action.get("action_id") if action else None)
+        if action
+        else None
     )
     context_plan = None
     context_would_build = bool(action and action.get("context_kind") and config.get("allow_context_pack_build", True))
@@ -489,7 +506,7 @@ def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dic
         approval_request = next(
             (
                 approval
-                for approval in _matching_approvals(target, action, config)
+                for approval in _approvals_mod._matching_approvals(target, action, config)
                 if approval.get("status") in {"pending", "approved"}
             ),
             None,
@@ -507,7 +524,7 @@ def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dic
         "config": config,
         "config_checks": config_checks,
         "selected_action": action,
-        "selected_adapter": _adapter_for(action),
+        "selected_adapter": _candidates_mod._adapter_for(action),
         "source_subsystem": action.get("source_subsystem") if action else None,
         "source_local_id": action.get("source_local_id") if action else None,
         "safe_summary": action.get("safe_summary") if action else None,

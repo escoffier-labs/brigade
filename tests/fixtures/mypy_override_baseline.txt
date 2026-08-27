@@ -1,6 +1,4 @@
 brigade.cli.run
-brigade.daily_cmd
-brigade.daily_cmd.*
 brigade.doctor
 brigade.learn_cmd
 brigade.mcp_adapters
