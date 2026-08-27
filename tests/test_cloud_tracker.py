@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 import pytest
 
 from brigade import cli, claude_cloud, cloud_tracker, codex_cloud, cursor_cloud, fleet_client, grokbot_jobs, jules_cloud
+from brigade.cli import run_cloud
 
 
 NOW = datetime(2026, 8, 12, 20, 0, 0, tzinfo=timezone.utc)
@@ -1774,6 +1776,7 @@ def test_cli_run_cloud_launch_cursor_json_omits_holder_and_prompt(tmp_path: Path
     prompt = "secret launch prompt text"
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
+    prompt_file.chmod(0o600)
     _isolate_hosted_providers(monkeypatch)
     monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
     captured: dict[str, Any] = {}
@@ -1837,6 +1840,7 @@ def test_cli_run_cloud_launch_cursor_json_omits_holder_and_prompt(tmp_path: Path
 def test_cli_run_cloud_launch_jules_forwards_provider_options(tmp_path: Path, capsys, monkeypatch):
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("jules prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
     monkeypatch.setenv("JULES_API_KEY", "jules-api-key-deadbeef")
     captured: dict[str, Any] = {}
 
@@ -1891,6 +1895,7 @@ def test_cli_run_cloud_launch_jules_forwards_provider_options(tmp_path: Path, ca
 def test_cli_run_cloud_launch_missing_key_makes_zero_provider_mutation(tmp_path: Path, capsys, monkeypatch):
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("unused prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
     _isolate_hosted_providers(monkeypatch)
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
@@ -1965,6 +1970,7 @@ def test_cli_run_cloud_launch_bad_prompt_file_makes_zero_provider_mutation(tmp_p
 def test_cli_run_cloud_launch_failure_does_not_register(tmp_path: Path, capsys, monkeypatch):
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("do not persist this", encoding="utf-8")
+    prompt_file.chmod(0o600)
     monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
     monkeypatch.setattr(
         cursor_cloud,
@@ -2002,6 +2008,7 @@ def test_cli_run_cloud_launch_failure_does_not_register(tmp_path: Path, capsys, 
 def test_cli_run_cloud_launch_rejects_api_key_argv(tmp_path: Path):
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("hi", encoding="utf-8")
+    prompt_file.chmod(0o600)
     with pytest.raises(SystemExit):
         cli.main(
             [
@@ -2023,6 +2030,447 @@ def test_cli_run_cloud_launch_rejects_api_key_argv(tmp_path: Path):
             ]
         )
     assert cloud_tracker.load_registry(tmp_path)["entries"] == []
+
+
+def test_cli_run_cloud_launch_cursor_tracking_failed_json_omits_secrets(tmp_path: Path, capsys, monkeypatch):
+    prompt = "secret launch prompt text"
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text(prompt, encoding="utf-8")
+    prompt_file.chmod(0o600)
+    _isolate_hosted_providers(monkeypatch)
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
+    monkeypatch.setattr(
+        fleet_client,
+        "admit_cloud",
+        lambda *a, **k: fleet_client.CloudDecision(True, "ok", lease={"lease_id": "lease-1"}, holder="secret-holder"),
+    )
+    monkeypatch.setattr(fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+    monkeypatch.setattr(fleet_client, "release_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+    monkeypatch.setattr(
+        cursor_cloud,
+        "_default_opener",
+        lambda req, timeout=None: _cursor_create_response(),
+    )
+    monkeypatch.setattr(
+        cloud_tracker,
+        "register",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "cursor-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "cli-track",
+            "--prompt-file",
+            str(prompt_file),
+            "--json",
+        ]
+    )
+    assert rc != 0
+    out = capsys.readouterr()
+    payload = json.loads(out.out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "tracking-failed"
+    assert payload["task_id"] == "agent-live"
+    assert payload["run_id"] == "run-live"
+    assert payload["label"] == "cli-track"
+    assert "holder" not in payload
+    assert "lease_holder" not in payload
+    assert "secret-holder" not in out.out
+    assert "secret-holder" not in out.err
+    assert "cursor-api-key-deadbeef" not in out.out
+    assert "cursor-api-key-deadbeef" not in out.err
+    assert prompt not in out.out
+    assert prompt not in out.err
+    assert cloud_tracker.load_registry(tmp_path)["entries"] == []
+
+
+def test_cli_run_cloud_launch_jules_tracking_failed_json_omits_secrets(tmp_path: Path, capsys, monkeypatch):
+    prompt = "secret jules prompt text"
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text(prompt, encoding="utf-8")
+    prompt_file.chmod(0o600)
+    monkeypatch.setenv("JULES_API_KEY", "jules-api-key-deadbeef")
+    monkeypatch.setattr(
+        fleet_client,
+        "admit_cloud",
+        lambda *a, **k: fleet_client.CloudDecision(True, "ok", lease={"lease_id": "lease-1"}, holder="secret-holder"),
+    )
+    monkeypatch.setattr(fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+    monkeypatch.setattr(fleet_client, "release_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+    monkeypatch.setattr(jules_cloud, "_default_opener", _JulesLaunchOpener().open)
+    monkeypatch.setattr(
+        cloud_tracker,
+        "register",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "jules",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "jules-track",
+            "--prompt-file",
+            str(prompt_file),
+            "--json",
+        ]
+    )
+    assert rc != 0
+    out = capsys.readouterr()
+    payload = json.loads(out.out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "tracking-failed"
+    assert payload["task_id"] == "sess-live"
+    assert payload["session_id"] == "sess-live"
+    assert "holder" not in payload
+    assert "lease_holder" not in payload
+    assert "secret-holder" not in out.out
+    assert "jules-api-key-deadbeef" not in out.out
+    assert prompt not in out.out
+    assert prompt not in out.err
+    assert cloud_tracker.load_registry(tmp_path)["entries"] == []
+
+
+def test_cli_run_cloud_launch_prompt_file_symlink_rejected(tmp_path: Path, capsys, monkeypatch):
+    real = tmp_path / "real.txt"
+    real.write_text("symlink target prompt", encoding="utf-8")
+    real.chmod(0o600)
+    link = tmp_path / "prompt.txt"
+    link.symlink_to(real)
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cursor_cloud,
+        "launch_agent",
+        lambda *a, **k: (
+            calls.append({"args": a, "kwargs": k}) or cursor_cloud.LaunchResult(ok=True, agent_id="nope", reason="ok")
+        ),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "cursor-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "symlink-file",
+            "--prompt-file",
+            str(link),
+            "--json",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "bad-prompt-file"
+    assert calls == []
+
+
+def test_cli_run_cloud_launch_prompt_file_group_writable_rejected(tmp_path: Path, capsys, monkeypatch):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("group writable prompt", encoding="utf-8")
+    prompt_file.chmod(0o660)
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cursor_cloud,
+        "launch_agent",
+        lambda *a, **k: (
+            calls.append({"args": a, "kwargs": k}) or cursor_cloud.LaunchResult(ok=True, agent_id="nope", reason="ok")
+        ),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "cursor-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "unsafe-mode",
+            "--prompt-file",
+            str(prompt_file),
+            "--json",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "bad-prompt-file"
+    assert calls == []
+
+
+def test_read_prompt_file_path_swap_keeps_opened_snapshot(tmp_path: Path, monkeypatch):
+    path = tmp_path / "prompt.txt"
+    path.write_text("snapshot-one", encoding="utf-8")
+    path.chmod(0o600)
+    opened = {"n": 0, "flags": 0}
+    real_open = os.open
+
+    def open_and_replace(target, flags, *args, **kwargs):
+        handle = real_open(target, flags, *args, **kwargs)
+        if kwargs.get("dir_fd") is not None:
+            return handle
+        opened["n"] += 1
+        opened["flags"] = flags
+        decoy = tmp_path / "decoy.txt"
+        decoy.write_text("snapshot-two", encoding="utf-8")
+        decoy.chmod(0o600)
+        os.replace(decoy, path)
+        return handle
+
+    monkeypatch.setattr(os, "open", open_and_replace)
+    assert run_cloud._read_prompt_file(path) == "snapshot-one"
+    assert opened["n"] >= 1
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        assert opened["flags"] & nofollow
+
+
+def test_cli_run_cloud_launch_label_canonicalized_in_json_and_registry(tmp_path: Path, capsys, monkeypatch):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("canonical label prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    _isolate_hosted_providers(monkeypatch)
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
+    captured: dict[str, Any] = {}
+
+    def fake_launch(api_key: str, **kwargs: Any):
+        captured.update(kwargs)
+        cloud_tracker.register(
+            kwargs["register_target"],
+            provider="cursor-cloud",
+            task_id="agent-label",
+            label=kwargs["label"],
+            prompt_hash=cloud_tracker.prompt_hash(kwargs["prompt"]),
+            expected_artifact={"kind": "diff"},
+            lease_holder="private-holder",
+        )
+        return cursor_cloud.LaunchResult(ok=True, agent_id="agent-label", run_id="run-label", reason="ok")
+
+    monkeypatch.setattr(cursor_cloud, "launch_agent", fake_launch)
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "cursor-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "  padded-label  ",
+            "--prompt-file",
+            str(prompt_file),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["label"] == "padded-label"
+    assert captured["label"] == "padded-label"
+    assert cloud_tracker.load_registry(tmp_path)["entries"][0]["label"] == "padded-label"
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["", "   ", "x" * 121, "ok\x00bad", "ok\nbad"],
+)
+def test_cli_run_cloud_launch_invalid_label_makes_zero_provider_calls(tmp_path: Path, capsys, monkeypatch, label: str):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("unused prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cursor_cloud,
+        "launch_agent",
+        lambda *a, **k: (
+            calls.append({"args": a, "kwargs": k}) or cursor_cloud.LaunchResult(ok=True, agent_id="nope", reason="ok")
+        ),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "cursor-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            label,
+            "--prompt-file",
+            str(prompt_file),
+            "--json",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "bad-label"
+    assert calls == []
+    assert cloud_tracker.load_registry(tmp_path)["entries"] == []
+
+
+def test_cli_run_cloud_launch_cursor_rejects_starting_branch_before_mutation(tmp_path: Path, capsys, monkeypatch):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("unused prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cursor_cloud,
+        "launch_agent",
+        lambda *a, **k: (
+            calls.append({"args": a, "kwargs": k}) or cursor_cloud.LaunchResult(ok=True, agent_id="nope", reason="ok")
+        ),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "cursor-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "cursor-flags",
+            "--prompt-file",
+            str(prompt_file),
+            "--starting-branch",
+            "dev",
+            "--json",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "unsupported-flag"
+    assert calls == []
+
+
+def test_cli_run_cloud_launch_cursor_rejects_title_before_mutation(tmp_path: Path, capsys, monkeypatch):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("unused prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-api-key-deadbeef")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cursor_cloud,
+        "launch_agent",
+        lambda *a, **k: (
+            calls.append({"args": a, "kwargs": k}) or cursor_cloud.LaunchResult(ok=True, agent_id="nope", reason="ok")
+        ),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "cursor-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "cursor-flags",
+            "--prompt-file",
+            str(prompt_file),
+            "--title",
+            "feature work",
+            "--json",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["reason"] == "unsupported-flag"
+    assert calls == []
+
+
+def _cursor_create_response():
+    from unittest.mock import MagicMock
+
+    response = MagicMock()
+    response.status = 200
+    response.__enter__ = MagicMock(return_value=response)
+    response.__exit__ = MagicMock(return_value=False)
+    response.read.return_value = json.dumps(
+        {
+            "agent": {"id": "agent-live", "latestRunId": "run-live"},
+            "run": {"id": "run-live", "status": "CREATING"},
+        }
+    ).encode("utf-8")
+    return response
+
+
+class _JulesLaunchOpener:
+    def __init__(self) -> None:
+        from unittest.mock import MagicMock
+
+        sources = MagicMock()
+        sources.status = 200
+        sources.__enter__ = MagicMock(return_value=sources)
+        sources.__exit__ = MagicMock(return_value=False)
+        sources.read.return_value = json.dumps(
+            {
+                "sources": [
+                    {
+                        "name": "sources/github-owner-repo",
+                        "id": "github-owner-repo",
+                        "githubRepo": {
+                            "owner": "owner",
+                            "repo": "repo",
+                            "branches": [{"displayName": "main"}],
+                            "defaultBranch": {"displayName": "main"},
+                        },
+                    }
+                ],
+                "nextPageToken": None,
+            }
+        ).encode("utf-8")
+        created = MagicMock()
+        created.status = 200
+        created.__enter__ = MagicMock(return_value=created)
+        created.__exit__ = MagicMock(return_value=False)
+        created.read.return_value = json.dumps({"id": "sess-live", "state": "QUEUED"}).encode("utf-8")
+        self._responses = [sources, created]
+
+    def open(self, req, timeout=None):
+        return self._responses.pop(0)
 
 
 def test_cli_run_cloud_compact_json_contract(tmp_path: Path, capsys, monkeypatch):

@@ -660,6 +660,95 @@ class TestLaunchGate:
         assert result.reason == "submit-failed"
         assert cloud_tracker.load_registry(tmp_path)["entries"] == []
 
+    def test_register_failure_after_bind_returns_tracking_failed_and_holds_lease(self, tmp_path: Path, monkeypatch):
+        opener = FakeOpener(
+            [
+                _json_response(
+                    {
+                        "agent": {"id": "agent-live", "latestRunId": "run-live"},
+                        "run": {"id": "run-live", "status": "CREATING"},
+                    }
+                ),
+            ]
+        )
+        release_calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            fleet_client,
+            "admit_cloud",
+            lambda *a, **k: fleet_client.CloudDecision(
+                True, "ok", lease={"lease_id": "lease-1"}, holder="secret-holder"
+            ),
+        )
+        monkeypatch.setattr(fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+        monkeypatch.setattr(
+            fleet_client,
+            "release_cloud",
+            lambda *a, **k: release_calls.append({"args": a, "kwargs": k}) or fleet_client.CloudDecision(True, "ok"),
+        )
+        monkeypatch.setattr(
+            cloud_tracker,
+            "register",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        result = cursor_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt="secret launch prompt",
+            opener=opener.open,
+            register_target=tmp_path,
+            label="cursor-track",
+        )
+        assert not result.ok
+        assert result.reason == "tracking-failed"
+        assert result.agent_id == "agent-live"
+        assert result.run_id == "run-live"
+        assert not hasattr(result, "holder")
+        assert "secret-holder" not in json.dumps(result.__dict__)
+        assert "secret launch prompt" not in json.dumps(result.__dict__)
+        assert _FAKE_KEY not in json.dumps(result.__dict__)
+        assert release_calls == []
+        assert cloud_tracker.load_registry(tmp_path)["entries"] == []
+
+    def test_unwritable_registry_makes_zero_provider_mutation(self, tmp_path: Path, monkeypatch):
+        opener = FakeOpener(
+            [
+                _json_response(
+                    {
+                        "agent": {"id": "agent-skip", "latestRunId": "run-skip"},
+                        "run": {"id": "run-skip", "status": "CREATING"},
+                    }
+                ),
+            ]
+        )
+        admit_calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            fleet_client,
+            "admit_cloud",
+            lambda *a, **k: (
+                admit_calls.append(k)
+                or fleet_client.CloudDecision(True, "ok", lease={"lease_id": "lease-1"}, holder="h1")
+            ),
+        )
+        monkeypatch.setattr(fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+        monkeypatch.setattr(fleet_client, "release_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+        monkeypatch.setattr(
+            cloud_tracker,
+            "save_registry",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("readonly")),
+        )
+        result = cursor_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt="hi",
+            opener=opener.open,
+            register_target=tmp_path,
+            label="cursor-readonly",
+        )
+        assert not result.ok
+        assert result.reason == "registry-unwritable"
+        assert opener.calls == []
+        assert admit_calls == []
+
 
 class TestRegistryContract:
     def test_cursor_cloud_register_and_adopt_accepted(self, tmp_path: Path):

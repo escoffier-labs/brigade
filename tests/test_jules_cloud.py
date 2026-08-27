@@ -800,6 +800,54 @@ class TestLaunchGate:
         assert result.reason == "submit-failed"
         assert cloud_tracker.load_registry(tmp_path)["entries"] == []
 
+    def test_register_failure_after_bind_returns_tracking_failed_and_holds_lease(self, tmp_path: Path, monkeypatch):
+        opener = _launch_opener(_json_response({"id": "sess-live", "state": "QUEUED"}))
+        recorded = _grant_hub(monkeypatch)
+        monkeypatch.setattr(
+            cloud_tracker,
+            "register",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        result = jules_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt="secret launch prompt",
+            opener=opener.open,
+            register_target=tmp_path,
+            label="jules-track",
+        )
+        assert not result.ok
+        assert result.reason == "tracking-failed"
+        assert result.session_id == "sess-live"
+        assert not hasattr(result, "holder")
+        assert "h1" not in json.dumps(result.__dict__)
+        assert "secret launch prompt" not in json.dumps(result.__dict__)
+        assert _FAKE_KEY not in json.dumps(result.__dict__)
+        assert recorded["release"] == []
+        assert cloud_tracker.load_registry(tmp_path)["entries"] == []
+
+    def test_unwritable_registry_makes_zero_provider_mutation(self, tmp_path: Path, monkeypatch):
+        opener = _launch_opener(_json_response({"id": "sess-skip", "state": "QUEUED"}))
+        recorded = _grant_hub(monkeypatch)
+        monkeypatch.setattr(
+            cloud_tracker,
+            "save_registry",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("readonly")),
+        )
+        result = jules_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt="hi",
+            opener=opener.open,
+            register_target=tmp_path,
+            label="jules-readonly",
+        )
+        assert not result.ok
+        assert result.reason == "registry-unwritable"
+        assert opener.calls == []
+        assert recorded["admit"] == []
+        assert recorded["bind"] == []
+
     def test_auto_create_pr_default_off(self, monkeypatch):
         opener = _launch_opener(_json_response({"id": "sess-pr", "state": "QUEUED"}))
         _grant_hub(monkeypatch)

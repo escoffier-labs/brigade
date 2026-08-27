@@ -706,6 +706,20 @@ def approve_plan(
     return {}
 
 
+def _preflight_registry(register_target: Path | None) -> bool:
+    """Confirm the registry can be rewritten before any provider or hub mutation."""
+    if register_target is None:
+        return True
+    from . import cloud_tracker
+
+    try:
+        target = Path(register_target)
+        cloud_tracker.save_registry(target, cloud_tracker.load_registry(target))
+    except Exception:
+        return False
+    return True
+
+
 def _register_bound_launch(
     register_target: Path | None,
     *,
@@ -714,10 +728,10 @@ def _register_bound_launch(
     prompt_hash: str,
     lease_holder: str | None,
     repo: str | None,
-) -> None:
+) -> bool:
     """Persist bound IDs and the private holder. Never raise back into launch."""
     if register_target is None:
-        return
+        return True
     from . import cloud_tracker
 
     if isinstance(label, str) and label.strip():
@@ -736,7 +750,8 @@ def _register_bound_launch(
             lease_holder=lease_holder,
         )
     except Exception:
-        return
+        return False
+    return True
 
 
 def launch_agent(
@@ -776,6 +791,8 @@ def launch_agent(
     canonical_repo = normalize_repo(repo)
     if not canonical_repo:
         return LaunchResult(ok=False, reason="bad-repo")
+    if not _preflight_registry(register_target):
+        return LaunchResult(ok=False, reason="registry-unwritable")
 
     # Read-only source resolution, before any admission or mutation.
     try:
@@ -855,14 +872,21 @@ def launch_agent(
             starting_branch=branch,
         )
 
-    _register_bound_launch(
+    if not _register_bound_launch(
         register_target,
         task_id=session_id,
         label=label,
         prompt_hash=prompt_hash,
         lease_holder=holder,
         repo=canonical_repo,
-    )
+    ):
+        return LaunchResult(
+            ok=False,
+            reason="tracking-failed",
+            session_id=session_id,
+            source_name=source["name"],
+            starting_branch=branch,
+        )
     return LaunchResult(
         ok=True,
         session_id=session_id,

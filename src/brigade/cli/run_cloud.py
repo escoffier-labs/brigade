@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import stat
 import sys
 from pathlib import Path
 from typing import Any
 
 _PROMPT_FILE_MAX_BYTES = 64 * 1024
+_LAUNCH_LABEL_MAX = 120
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -50,8 +52,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         required=True,
         help="Bounded private prompt file. Prompt text is never an argv value.",
     )
-    p_launch.add_argument("--starting-branch", default=None, help="Jules starting branch. Ignored for Cursor Cloud.")
-    p_launch.add_argument("--title", default=None, help="Jules session title. Ignored for Cursor Cloud.")
+    p_launch.add_argument(
+        "--starting-branch",
+        default=None,
+        help="Jules starting branch. Rejected for Cursor Cloud.",
+    )
+    p_launch.add_argument("--title", default=None, help="Jules session title. Rejected for Cursor Cloud.")
     p_launch.add_argument(
         "--auto-create-pr",
         action="store_true",
@@ -434,10 +440,24 @@ def _dispatch_launch(args, target: Path) -> int:
 
     provider = args.provider
     try:
+        label = _canonicalize_launch_label(args.label)
+    except ValueError:
+        return _emit_launch_payload(
+            {"ok": False, "provider": provider, "label": args.label, "reason": "bad-label"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    if provider == "cursor-cloud" and (args.starting_branch is not None or args.title is not None):
+        return _emit_launch_payload(
+            {"ok": False, "provider": provider, "label": label, "reason": "unsupported-flag"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    try:
         prompt = _read_prompt_file(Path(args.prompt_file))
     except ValueError:
         return _emit_launch_payload(
-            {"ok": False, "provider": provider, "label": args.label, "reason": "bad-prompt-file"},
+            {"ok": False, "provider": provider, "label": label, "reason": "bad-prompt-file"},
             as_json=args.json,
             exit_code=2,
         )
@@ -448,7 +468,7 @@ def _dispatch_launch(args, target: Path) -> int:
             {
                 "ok": False,
                 "provider": provider,
-                "label": args.label,
+                "label": label,
                 "prompt_hash": prompt_hash,
                 "reason": "missing-key",
             },
@@ -464,7 +484,7 @@ def _dispatch_launch(args, target: Path) -> int:
             prompt=prompt,
             auto_create_pr=bool(args.auto_create_pr),
             register_target=target,
-            label=args.label,
+            label=label,
         )
     else:
         launched = jules_cloud.launch_agent(
@@ -475,9 +495,9 @@ def _dispatch_launch(args, target: Path) -> int:
             starting_branch=args.starting_branch,
             auto_create_pr=bool(args.auto_create_pr),
             register_target=target,
-            label=args.label,
+            label=label,
         )
-    payload = _public_launch_payload(provider=provider, label=args.label, prompt_hash=prompt_hash, result=launched)
+    payload = _public_launch_payload(provider=provider, label=label, prompt_hash=prompt_hash, result=launched)
     return _emit_launch_payload(payload, as_json=args.json, exit_code=0 if launched.ok else 1)
 
 
@@ -492,24 +512,73 @@ def _resolve_launch_key(provider: str) -> str | None:
     return None
 
 
+def _canonicalize_launch_label(label: object) -> str:
+    """Strip and validate a launch label once before any provider or hub mutation."""
+    if not isinstance(label, str):
+        raise ValueError("bad-label")
+    canonical = label.strip()
+    if not 1 <= len(canonical) <= _LAUNCH_LABEL_MAX:
+        raise ValueError("bad-label")
+    if any(ord(ch) < 32 or ch == "\x7f" for ch in canonical):
+        raise ValueError("bad-label")
+    return canonical
+
+
 def _read_prompt_file(path: Path) -> str:
-    """Read a bounded regular prompt file. Failures never include file contents."""
+    """Read a bounded regular prompt file through one O_NOFOLLOW descriptor."""
     resolved = path.expanduser()
-    if resolved.is_symlink() or not resolved.is_file():
-        raise ValueError("bad-prompt-file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    else:
+        try:
+            preview = resolved.lstat()
+        except OSError as exc:
+            raise ValueError("bad-prompt-file") from exc
+        if stat.S_ISLNK(preview.st_mode) or not stat.S_ISREG(preview.st_mode):
+            raise ValueError("bad-prompt-file")
+    descriptor: int | None = None
     try:
-        info = resolved.stat()
+        descriptor = os.open(os.fspath(resolved), flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("bad-prompt-file")
+        owner_uid = getattr(os, "getuid", None)
+        if owner_uid is not None and info.st_uid != owner_uid():
+            raise ValueError("bad-prompt-file")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ValueError("bad-prompt-file")
+        if info.st_size < 1 or info.st_size > _PROMPT_FILE_MAX_BYTES:
+            raise ValueError("bad-prompt-file")
+        chunks: list[bytes] = []
+        remaining = _PROMPT_FILE_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if not 1 <= len(data) <= _PROMPT_FILE_MAX_BYTES:
+            raise ValueError("bad-prompt-file")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("bad-prompt-file") from exc
+        if not text.strip():
+            raise ValueError("bad-prompt-file")
+        return text
+    except ValueError:
+        raise
     except OSError as exc:
         raise ValueError("bad-prompt-file") from exc
-    if not stat.S_ISREG(info.st_mode) or info.st_size < 1 or info.st_size > _PROMPT_FILE_MAX_BYTES:
-        raise ValueError("bad-prompt-file")
-    try:
-        text = resolved.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError("bad-prompt-file") from exc
-    if not text.strip():
-        raise ValueError("bad-prompt-file")
-    return text
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                raise ValueError("bad-prompt-file") from exc
 
 
 def _public_launch_payload(*, provider: str, label: str, prompt_hash: str, result: Any) -> dict[str, Any]:
