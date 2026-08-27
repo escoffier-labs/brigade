@@ -133,6 +133,27 @@ class IngestorHealth:
         }
 
 
+def _handoff_issue_source_key(issue: HandoffIssue) -> str:
+    value = issue.metadata.get("source_item_key")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return f"handoff-ingest:{issue.category}:{issue.id}"
+
+
+def _handoff_issue_fingerprint(issue: HandoffIssue, metadata: dict[str, Any]) -> str:
+    payload = {
+        "category": issue.category,
+        "kind": issue.kind,
+        "text": issue.text,
+        "repair": issue.repair,
+        "evidence": issue.evidence,
+        "metadata": {
+            key: value for key, value in metadata.items() if key not in {"source_fingerprint", "handoff_issue_id"}
+        },
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
 @dataclass(frozen=True)
 class HandoffIssue:
     id: str

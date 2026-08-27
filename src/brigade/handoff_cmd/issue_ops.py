@@ -20,9 +20,24 @@ from ..handoff_content import normalize_suggested_card_content
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import drafts as _drafts_mod
+from . import inspect_ops as _inspect_ops_mod
+from . import sources as _sources_mod
+from .models import (
+    CARD_ACTIONS,
+    CARD_TARGET_PATTERN,
+    DEFAULT_STALE_AFTER_MINUTES,
+    DEFAULT_WARNING_PATTERNS,
+    DOCUMENT_TARGETS,
+    DOCUMENT_TARGET_PREFIXES,
+    HandoffIssue,
+    HandoffLintResult,
+    IGNORED_HANDOFF_NAMES,
+    ISSUE_SOURCE,
+    NO_CARD_ACTION,
+    WRITER_INBOXES,
+    default_sources_path,
+)
 
 
 def issues(
@@ -40,7 +55,7 @@ def issues(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    found = collect_issues(target, sources=sources, categories=categories)
+    found = _inspect_ops_mod.collect_issues(target, sources=sources, categories=categories)
     payload = _issues_payload(target, found)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -54,9 +69,9 @@ def issues(
         print(f"- {category}: {count}")
     print("items:")
     for issue in found[:limit]:
-        print(f"- {issue.id} [{issue.category}] {issue.kind}: {_short(issue.text)}")
-        print(f"  repair: {_short(issue.repair, 140)}")
-        print(f"  evidence: {_short(issue.evidence, 160)}")
+        print(f"- {issue.id} [{issue.category}] {issue.kind}: {_sources_mod._short(issue.text)}")
+        print(f"  repair: {_sources_mod._short(issue.repair, 140)}")
+        print(f"  evidence: {_sources_mod._short(issue.evidence, 160)}")
     if len(found) > limit:
         print(f"... {len(found) - limit} more")
     return 0
@@ -74,7 +89,7 @@ def import_issues(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    found = collect_issues(target, sources=sources, categories=categories)
+    found = _inspect_ops_mod.collect_issues(target, sources=sources, categories=categories)
     records = [issue.as_import_record() for issue in found]
     from .. import work_cmd
 
@@ -100,7 +115,7 @@ def import_issues(
     print(f"imported: {len(imported)}")
     print(f"skipped_duplicates: {len(skipped)}")
     for item in imported:
-        print(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
+        print(f"- {item.get('id')} [{item.get('kind')}] {_sources_mod._short(str(item.get('text', '')))}")
     return 0
 
 
@@ -117,7 +132,7 @@ def sync_issues(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    found = collect_issues(target, sources=sources, categories=categories)
+    found = _inspect_ops_mod.collect_issues(target, sources=sources, categories=categories)
     current_ids = {issue.id for issue in found}
     known_ids = _known_local_issue_ids(target)
     covered_summary_ids = _covered_warning_summary_ids(found, known_ids)
@@ -172,11 +187,11 @@ def sync_issues(
     print(f"stale_imports_closed: {len(stale['imports'])}")
     print(f"stale_tasks_closed: {len(stale['tasks'])}")
     for item in imported:
-        print(f"- imported {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
+        print(f"- imported {item.get('id')} [{item.get('kind')}] {_sources_mod._short(str(item.get('text', '')))}")
     for item in stale["imports"]:
-        print(f"- closed import {item.get('id')} {_short(str(item.get('text', '')))}")
+        print(f"- closed import {item.get('id')} {_sources_mod._short(str(item.get('text', '')))}")
     for task in stale["tasks"]:
-        print(f"- closed task {task.get('id')} {_short(str(task.get('text', '')))}")
+        print(f"- closed task {task.get('id')} {_sources_mod._short(str(task.get('text', '')))}")
     return 0
 
 
@@ -184,13 +199,13 @@ def doctor(*, target: Path, sources: Path | None = None, json_output: bool = Fal
     if not target.expanduser().exists():
         print(f"error: target does not exist: {target}", file=sys.stderr)
         return 2
-    health = inspect(target, sources=sources)
+    health = _inspect_ops_mod.inspect(target, sources=sources)
     if json_output:
         print(json.dumps(health.as_dict(), indent=2, sort_keys=True))
     else:
         print(f"handoff doctor: {health.target}")
         print(f"sources: {health.sources_path if health.sources_path else '(not configured)'}")
-        for status, name, detail in doctor_checks(health.target, sources=health.sources_path):
+        for status, name, detail in _inspect_ops_mod.doctor_checks(health.target, sources=health.sources_path):
             print(f"[{status}] {name}: {detail}")
     return 1 if health.failures else 0
 
@@ -306,7 +321,7 @@ def _resolve_lint_path(target: Path, path: Path) -> Path:
 def _pending_handoff_paths(target: Path, sources: Path | None = None) -> tuple[Path, ...]:
     paths: list[Path] = []
     seen: set[str] = set()
-    specs, _, _ = _draft_inbox_specs(target, sources=sources)
+    specs, _, _ = _drafts_mod._draft_inbox_specs(target, sources=sources)
     for inbox_path, _inbox, _watched in specs:
         if not inbox_path.is_dir():
             continue
@@ -652,13 +667,15 @@ def _close_stale_local_issue_work(
 
 
 def _handoff_issue_id(item: dict[str, Any]) -> str | None:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    raw_metadata = item.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
     issue_id = metadata.get("handoff_issue_id")
     return issue_id if isinstance(issue_id, str) and issue_id else None
 
 
 def _handoff_issue_category(item: dict[str, Any]) -> str | None:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    raw_metadata = item.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
     category = metadata.get("handoff_issue_category")
     return category if isinstance(category, str) and category else None
 
