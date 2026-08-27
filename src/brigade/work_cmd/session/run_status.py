@@ -17,9 +17,21 @@ from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
 from .. import scanners as scanners_mod, reviews as reviews_mod, edges as edges_mod
 
-from . import lifecycle as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .briefing import (
+    _doctor_ignore_level,
+    _print_bootstrap_line,
+    _workflow_rule_health,
+)
+from .lifecycle import (
+    _latest_completed_run_path,
+    _print_dirty,
+    _queue_latest_next,
+    _render_task_run_prompt,
+    _resolve_next_task,
+    end,
+    recap,
+    start,
+)
 
 
 def bootstrap(
@@ -249,32 +261,34 @@ def run(
         from ..claiming import ClaimError
 
         with ledger_mod._task_ledger_lock(target):
-            task, ledger = ledger_mod._find_task(target, consumed_task_id)
-            if task is not None:
+            consumed_task, ledger = ledger_mod._find_task(target, consumed_task_id)
+            if consumed_task is not None:
                 try:
-                    ledger_mod._evaluate_task_start_gates(target, ledger, task, require_pending=True)
+                    ledger_mod._evaluate_task_start_gates(target, ledger, consumed_task, require_pending=True)
                 except (ClaimError, ledger_mod.PlanDecisionError) as exc:
                     print(f"error: {exc}", file=sys.stderr)
                     return int(getattr(exc, "exit_code", 2))
                 now = helpers._now().isoformat()
-                task["status"] = "done"
-                task["updated_at"] = now
-                task["completed_at"] = now
-                task["completed_session_title"] = session_title
+                consumed_task["status"] = "done"
+                consumed_task["updated_at"] = now
+                consumed_task["completed_at"] = now
+                consumed_task["completed_session_title"] = session_title
                 if session_dir is not None:
-                    task["completed_session_path"] = str(session_dir)
+                    consumed_task["completed_session_path"] = str(session_dir)
                 completed_run_path = _latest_completed_run_path(target, output_dir)
                 if completed_run_path is not None:
-                    task["completed_run_path"] = completed_run_path
-                task["completed_acceptance"] = ledger_mod._task_acceptance(task)
+                    consumed_task["completed_run_path"] = completed_run_path
+                consumed_task["completed_acceptance"] = ledger_mod._task_acceptance(consumed_task)
                 from .. import footprint as footprint_mod
                 from .. import verification as verification_mod
 
                 receipt = verification_mod._latest_verify_receipt(target)
                 delta = footprint_mod.receipt_graph_delta(receipt)
                 footprint_mod.set_task_footprint(
-                    task,
-                    footprint_mod.reconcile_footprint(delta, prior=footprint_mod.task_footprint(task), target=target),
+                    consumed_task,
+                    footprint_mod.reconcile_footprint(
+                        delta, prior=footprint_mod.task_footprint(consumed_task), target=target
+                    ),
                 )
                 ledger_mod._write_task_ledger(target, ledger)
     if dogfood_rc == 0 and queue_next:
@@ -521,6 +535,7 @@ def doctor(*, target: Path) -> int:
     else:
         helpers._doctor_line(constants.OK, "active_session", "none")
 
+    ledger: dict[str, Any] | None
     try:
         ledger = ledger_mod._read_task_ledger(effective_target)
         pending_tasks = ledger_mod._pending_tasks(effective_target)
@@ -532,7 +547,9 @@ def doctor(*, target: Path) -> int:
     else:
         helpers._doctor_line(constants.OK, "task_ledger", helpers._tasks_path(effective_target))
         unknown_edges = [
-            edge for edge in edges_mod.normalize_edges(ledger.get("edges")) if edge["type"] not in edges_mod.EDGE_TYPES
+            edge
+            for edge in edges_mod.normalize_edges(ledger.get("edges") if isinstance(ledger, dict) else None)
+            if edge["type"] not in edges_mod.EDGE_TYPES
         ]
         if unknown_edges:
             types = ", ".join(sorted({edge["type"] for edge in unknown_edges}))
@@ -557,15 +574,18 @@ def doctor(*, target: Path) -> int:
         )
 
     if ledger is None:
-        plan_coverage = {"significant_without_plan": 0, "task_ids": []}
+        plan_coverage: dict[str, Any] = {"significant_without_plan": 0, "task_ids": []}
     else:
         plan_coverage = ledger_mod._plan_coverage_payload(effective_target)
-    if plan_coverage["significant_without_plan"] > 0:
-        plan_sample = ", ".join(plan_coverage["task_ids"][:5])
+    significant_count = int(plan_coverage.get("significant_without_plan", 0) or 0)
+    if significant_count > 0:
+        raw_task_ids = plan_coverage.get("task_ids")
+        task_ids_list: list[Any] = raw_task_ids if isinstance(raw_task_ids, list) else []
+        plan_sample = ", ".join(str(item) for item in task_ids_list[:5])
         helpers._doctor_line(
             constants.WARN,
             "plan_coverage",
-            f"{plan_coverage['significant_without_plan']} significant pending task(s) without a plan artifact: {plan_sample}",
+            f"{significant_count} significant pending task(s) without a plan artifact: {plan_sample}",
         )
     else:
         helpers._doctor_line(constants.OK, "plan_coverage", "significant pending tasks have plan artifacts")
@@ -747,7 +767,8 @@ def doctor(*, target: Path) -> int:
 
     learning_health = learn_cmd.health(effective_target)
     if learning_health.get("issue_count"):
-        top_learning = learning_health.get("top_issue") if isinstance(learning_health.get("top_issue"), dict) else {}
+        raw_top_learning = learning_health.get("top_issue")
+        top_learning: dict[str, Any] = raw_top_learning if isinstance(raw_top_learning, dict) else {}
         helpers._doctor_line(
             constants.WARN,
             "learning_candidates",
@@ -760,9 +781,8 @@ def doctor(*, target: Path) -> int:
     for check in center_report_health.get("checks", []):
         helpers._doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
     if not center_report_health.get("checks"):
-        latest_report = (
-            center_report_health.get("latest") if isinstance(center_report_health.get("latest"), dict) else {}
-        )
+        raw_latest_report = center_report_health.get("latest")
+        latest_report: dict[str, Any] = raw_latest_report if isinstance(raw_latest_report, dict) else {}
         helpers._doctor_line(constants.OK, "operator_report", latest_report.get("report_id") or "none")
 
     center_actions_health = center_cmd.actions_health(effective_target)

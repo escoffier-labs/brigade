@@ -28,7 +28,5 @@ brigade.work_cmd.imports
 brigade.work_cmd.reviews
 brigade.work_cmd.scanners
 brigade.work_cmd.services
-brigade.work_cmd.session
-brigade.work_cmd.session.*
 brigade.work_cmd.sweeps
 brigade.work_cmd.verification
