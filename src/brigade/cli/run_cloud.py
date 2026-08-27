@@ -292,6 +292,56 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_install.add_argument("--out", type=Path, default=None, help="Directory to render the unit into.")
     p_install.add_argument("--force", action="store_true", help="Allow overwriting this role's own unit file.")
 
+    from .. import grokbot_packs
+
+    pack_ids = tuple(pack["id"] for pack in grokbot_packs.list_packs())
+    p_pack = grokbot_sub.add_parser("pack", help="Inspect and manage first-party Grok Bot connector packs.")
+    pack_sub = p_pack.add_subparsers(dest="grokbot_pack_command", metavar="<pack-command>")
+    pack_sub.required = True
+
+    def add_pack_id(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--target", type=Path, default=Path("."))
+        command.add_argument("--id", required=True, choices=pack_ids, dest="pack_id")
+        command.add_argument("--json", action="store_true")
+
+    p_pack_list = pack_sub.add_parser("list", help="List packaged first-party connector packs.")
+    add_target(p_pack_list)
+
+    p_pack_show = pack_sub.add_parser("show", help="Show one packaged connector pack.")
+    add_pack_id(p_pack_show)
+
+    p_pack_setup = pack_sub.add_parser("setup", help="Preview or apply non-secret pack instance configuration.")
+    add_pack_id(p_pack_setup)
+    p_pack_setup.add_argument("--bind", default=None, help="Listener host:port. Defaults to the pack loopback port.")
+    p_pack_setup.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
+    p_pack_setup.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
+    pack_secret = p_pack_setup.add_mutually_exclusive_group(required=True)
+    pack_secret.add_argument("--bearer-file", type=Path, help="Path of a protected bearer file (reference only).")
+    pack_secret.add_argument("--bearer-env", help="Name of the environment variable holding the bearer.")
+    p_pack_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
+
+    p_pack_doctor = pack_sub.add_parser("doctor", help="Sanitized pack diagnostics.")
+    add_pack_id(p_pack_doctor)
+
+    p_pack_canary = pack_sub.add_parser("canary", help="Bounded non-mutating pack authentication and inventory check.")
+    add_pack_id(p_pack_canary)
+
+    p_pack_install = pack_sub.add_parser("install-service", help="Render or install a pack-scoped systemd unit.")
+    add_pack_id(p_pack_install)
+    p_pack_install.add_argument("--out", type=Path, default=None, help="Directory to render the unit into.")
+    p_pack_install.add_argument("--force", action="store_true", help="Allow overwriting this pack's own unit file.")
+
+    p_pack_update = pack_sub.add_parser("update", help="Preview or apply a compatible pack version update.")
+    add_pack_id(p_pack_update)
+    p_pack_update.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
+
+    p_pack_remove = pack_sub.add_parser("remove", help="Preview or apply removal of owned pack config and unit files.")
+    add_pack_id(p_pack_remove)
+    p_pack_remove.add_argument(
+        "--out", type=Path, default=None, help="Owned unit directory previously written by install-service."
+    )
+    p_pack_remove.add_argument("--apply", action="store_true", help="Delete owned files. Default is preview only.")
+
     p.set_defaults(func=dispatch)
 
 
@@ -690,6 +740,8 @@ def _dispatch_grokbot(args, target: Path) -> int:
     from .. import grokbot_jobs, grokbot_mcp
 
     command = args.grokbot_command
+    if command == "pack":
+        return _dispatch_grokbot_pack(args, target)
     if command in {"setup", "doctor", "canary", "install-service"}:
         return _dispatch_grokbot_ops(args, target)
     if command == "feed":
@@ -926,6 +978,86 @@ def _print_reconcile_result(result: dict) -> None:
     print("grokbot reconcile-reports: " + " ".join(parts))
     for job in result.get("jobs", []):
         print(f"job {job['job_id']} state={job['state']}")
+
+
+def _dispatch_grokbot_pack(args, target: Path) -> int:
+    """Preview-first connector-pack lifecycle without printing secret values."""
+    from .. import grokbot_mcp, grokbot_ops, grokbot_packs
+
+    command = args.grokbot_pack_command
+    try:
+        if command == "list":
+            result = {"packs": grokbot_packs.list_packs()}
+        elif command == "show":
+            result = grokbot_packs.show_pack(args.pack_id)
+        elif command == "setup":
+            setup_kwargs = {
+                "bind": args.bind,
+                "allowed_hosts": args.allow_host,
+                "allowed_origins": args.allow_origin,
+                "bearer_env": args.bearer_env,
+                "bearer_file": args.bearer_file,
+            }
+            result = (
+                grokbot_packs.apply_setup(target, args.pack_id, **setup_kwargs)
+                if args.apply
+                else grokbot_packs.preview_setup(target, args.pack_id, **setup_kwargs)
+            )
+        elif command == "doctor":
+            checks = grokbot_packs.doctor(target, args.pack_id)
+            if args.json:
+                print(json.dumps({"checks": checks}, indent=2, sort_keys=True))
+            else:
+                for check in checks:
+                    print(f"{check['check']}: {check['status']}")
+            return 1 if any(check["status"] != "ok" for check in checks) else 0
+        elif command == "canary":
+            result = grokbot_packs.canary(target, args.pack_id)
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(f"canary: {'ok' if result['ok'] else 'fail'}")
+                if not result["ok"]:
+                    print(f"reason: {result.get('reason', 'unknown')}")
+            return 0 if result["ok"] else 1
+        elif command == "install-service":
+            if args.out is None:
+                sys.stdout.write(grokbot_packs.render_install_service(target, args.pack_id))
+                return 0
+            result = grokbot_packs.apply_install_service(target, args.pack_id, out_dir=Path(args.out), force=args.force)
+        elif command == "update":
+            result = (
+                grokbot_packs.apply_update(target, args.pack_id)
+                if args.apply
+                else grokbot_packs.preview_update(target, args.pack_id)
+            )
+        elif command == "remove":
+            result = (
+                grokbot_packs.apply_remove(target, args.pack_id, unit_dir=args.out)
+                if args.apply
+                else grokbot_packs.preview_remove(target, args.pack_id, unit_dir=args.out)
+            )
+        else:
+            print(f"error: unknown Grok Bot pack command: {command}", file=sys.stderr)
+            return 2
+    except grokbot_packs.PackError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+    except grokbot_mcp.ConfigurationError:
+        print("error: Grok Bot configuration is invalid", file=sys.stderr)
+        return 2
+    except grokbot_ops.ServiceRenderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError):
+        print("error: Grok Bot pack operation failed", file=sys.stderr)
+        return 2
+
+    if args.json or command in {"list", "show"}:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"grokbot pack {command}: apply={result.get('apply', False)} pack={result.get('pack_id', args.pack_id)}")
+    return 0
 
 
 def _dispatch_grokbot_ops(args, target: Path) -> int:

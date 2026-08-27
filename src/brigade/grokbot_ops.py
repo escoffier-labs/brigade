@@ -284,6 +284,27 @@ def write_unit(
     return path
 
 
+def remove_regular_file(path: Path) -> None:
+    """Unlink one regular file without following a symlink or reparse point."""
+    parent = _open_parent_nofollow(path, create=False)
+    try:
+        if os.name == "posix":
+            existing = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            if stat.S_ISLNK(existing.st_mode):
+                raise OSError("output is a symlink")
+            if not stat.S_ISREG(existing.st_mode):
+                raise OSError("output is not a regular file")
+            os.unlink(path.name, dir_fd=parent)
+            return
+        if _path_is_symlink(path):
+            raise OSError("output is a reparse point")
+        from .work_cmd import nt_dirfd
+
+        nt_dirfd.unlink_child(parent, path.name)
+    finally:
+        os.close(parent)
+
+
 def _path_is_symlink(path: Path) -> bool:
     """Return whether a final path component is a link or Windows reparse point."""
     try:
