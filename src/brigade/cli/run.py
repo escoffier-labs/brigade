@@ -411,7 +411,13 @@ def dispatch(args) -> int:
     preference = run_preference.refresh_cache()
     loaded_roster = run_preference.apply_to_roster(loaded_roster, preference)
     if args.worker is None:
-        args.task = run_preference.apply_to_task(args.task, preference, worker=None)
+        args.worker = run_preference.resolve_worker(
+            preference,
+            loaded_roster,
+            worker=None,
+            task=args.task,
+        )
+    args.task = run_preference.apply_to_task(args.task, preference, worker=args.worker)
     preference_bits = [f"{key}={value}" for key, value in preference.payload().items() if key != "notes"]
     if preference_bits:
         print(f"run preference: {' '.join(preference_bits)} (cached)", file=sys.stderr)

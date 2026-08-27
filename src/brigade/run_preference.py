@@ -149,6 +149,39 @@ def apply_to_task(task: str, preference: RunPreference, *, worker: str | None) -
     return f"{prefix}{task}" if prefix else task
 
 
+def _spoken_seat_names(task: str, roster: Any) -> list[str]:
+    agents = getattr(roster, "agents", {}) or {}
+    found: list[str] = []
+    for name in sorted(agents, key=len, reverse=True):
+        pattern = rf"(?<![A-Za-z0-9._-]){re.escape(str(name))}(?![A-Za-z0-9._-])"
+        if re.search(pattern, task, re.IGNORECASE):
+            found.append(str(name))
+    return found
+
+
+def resolve_worker(
+    preference: RunPreference,
+    roster: Any,
+    *,
+    worker: str | None,
+    task: str,
+) -> str | None:
+    """Pick the worker seat. ``--worker`` wins, then one spoken roster name, then impl."""
+    if worker:
+        return worker
+    spoken = _spoken_seat_names(task, roster)
+    orchestrator = getattr(roster, "orchestrator", None)
+    if len(spoken) >= 2:
+        return None
+    if len(spoken) == 1 and spoken[0] != orchestrator:
+        return spoken[0]
+    impl = preference.impl
+    agents = getattr(roster, "agents", {}) or {}
+    if impl and impl in agents:
+        return impl
+    return None
+
+
 def refresh_cache(*, home: Path | None = None) -> RunPreference:
     """Best-effort hub pull. Never raises; hub down keeps the last cache."""
     cached = load_cached(home)

@@ -647,6 +647,31 @@ class TestCli:
         assert "repo-a" in out and "worker/claude" in out and "run.created" in out
         assert out.splitlines()[0].split()[-1] == "age"
 
+    def test_status_includes_run_preference(self, hub, monkeypatch, capsys):
+        from brigade import cli, fleet_hub
+
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        conn = sqlite3.connect(str(db))
+        try:
+            fleet_hub.set_run_preference(
+                conn,
+                {"impl": "cursor_grok", "review": "claude_standby"},
+                updated_by="admin",
+            )
+        finally:
+            conn.close()
+        assert cli.main(["fleet", "status", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["preference"]["impl"] == "cursor_grok"
+        assert payload["preference"]["review"] == "claude_standby"
+        assert cli.main(["fleet", "status"]) == 0
+        out = capsys.readouterr().out
+        assert out.splitlines()[0].split()[-1] == "age"
+        assert "run preference (hub)" in out
+        assert "impl: cursor_grok" in out
+
     def test_status_table_shows_verify_exit_without_receipt_body(self, hub, monkeypatch, capsys):
         from brigade import cli
 

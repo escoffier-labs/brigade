@@ -333,15 +333,27 @@ def _dispatch_sink(args: argparse.Namespace) -> int:
 def _dispatch_status(args: argparse.Namespace) -> int:
     import json as _json
 
-    from .. import fleet_client
+    from .. import fleet_client, run_preference
 
     try:
         runs = fleet_client.fetch_status(include_all=args.all)
     except fleet_client.FleetClientError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    preference_source = "hub"
+    try:
+        preference_payload = _preference_payload(fleet_client.fetch_run_preference())
+    except fleet_client.FleetClientError:
+        preference_payload = _preference_payload(run_preference.load_cached())
+        preference_source = "cached"
     if args.json:
-        print(_json.dumps({"runs": runs}, indent=2, sort_keys=True))
+        print(
+            _json.dumps(
+                {"preference": preference_payload, "runs": runs},
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     headers = ("node", "repo", "run_id", "seat/harness", "state", "exit", "age")
     rows = []
@@ -365,6 +377,8 @@ def _dispatch_status(args: argparse.Namespace) -> int:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
     if not rows:
         print("(no active fleet runs)")
+    print()
+    _print_preference(preference_payload, source=preference_source)
     return 0
 
 

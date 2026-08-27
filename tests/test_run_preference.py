@@ -39,6 +39,17 @@ def test_apply_to_task_skips_prefix_when_worker_is_set() -> None:
     assert run_preference.apply_to_task(task, pref, worker="coder") == task
 
 
+def test_resolve_worker_honors_impl_unless_overridden() -> None:
+    roster = _FakeRoster(orchestrator="chef", agents={"chef": object(), "cursor_grok": object(), "reviewer": object()})
+    pref = run_preference.RunPreference(impl="cursor_grok", review="claude_standby")
+    assert run_preference.resolve_worker(pref, roster, worker=None, task="fix the flaky test") == "cursor_grok"
+    assert run_preference.resolve_worker(pref, roster, worker="reviewer", task="fix the flaky test") == "reviewer"
+    assert run_preference.resolve_worker(pref, roster, worker=None, task="have reviewer inspect the diff") == "reviewer"
+    assert run_preference.resolve_worker(pref, roster, worker=None, task="ask chef and reviewer") is None
+    missing = run_preference.RunPreference(impl="absent")
+    assert run_preference.resolve_worker(missing, roster, worker=None, task="fix the flaky test") is None
+
+
 def test_cache_round_trip(tmp_path) -> None:
     pref = run_preference.RunPreference(impl="cursor_grok", review="claude_standby")
     path = run_preference.write_cached(pref, tmp_path)

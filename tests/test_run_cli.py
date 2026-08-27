@@ -188,6 +188,7 @@ role = "code"
 
     def fake_run(task, loaded_roster, **kwargs):
         seen["task"] = task
+        seen["worker"] = kwargs.get("worker")
         seen["orchestrator"] = loaded_roster.orchestrator
         return 0
 
@@ -205,7 +206,8 @@ role = "code"
         ]
     )
     assert rc == 0
-    assert "default impl: cursor_grok" in seen["task"]
+    assert seen["task"] == "fix the flaky test"
+    assert seen["worker"] == "cursor_grok"
     assert "run preference: impl=cursor_grok review=claude_standby (cached)" in capsys.readouterr().err
 
     rc = cli.main(
