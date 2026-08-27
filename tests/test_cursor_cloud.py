@@ -597,6 +597,69 @@ class TestLaunchGate:
         assert result.reason == "bad-repo"
         assert admit_calls == []
 
+    def test_successful_bind_registers_ids_hash_and_private_holder(self, tmp_path: Path, monkeypatch):
+        opener = FakeOpener(
+            [
+                _json_response(
+                    {
+                        "agent": {"id": "agent-new", "latestRunId": "run-new"},
+                        "run": {"id": "run-new", "status": "CREATING"},
+                    }
+                ),
+            ]
+        )
+        monkeypatch.setattr(
+            fleet_client,
+            "admit_cloud",
+            lambda *a, **k: fleet_client.CloudDecision(True, "ok", lease={"lease_id": "lease-1"}, holder="h1"),
+        )
+        monkeypatch.setattr(fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+        monkeypatch.setattr(fleet_client, "release_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+        prompt = "rotate the production credentials"
+        result = cursor_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt=prompt,
+            opener=opener.open,
+            register_target=tmp_path,
+            label="cursor-task",
+        )
+        assert result.ok
+        assert "holder" not in result.__dataclass_fields__
+        assert not hasattr(result, "holder")
+        entries = cloud_tracker.load_registry(tmp_path)["entries"]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["provider"] == "cursor-cloud"
+        assert entry["task_id"] == "agent-new"
+        assert entry["session_id"] == "run-new"
+        assert entry["label"] == "cursor-task"
+        assert entry["prompt_hash"] == cloud_tracker.prompt_hash(prompt)
+        assert entry["expected_artifact"] == {"kind": "diff"}
+        assert entry["lease_holder"] == "h1"
+        assert prompt not in json.dumps(entry)
+
+    def test_submit_failure_does_not_register(self, tmp_path: Path, monkeypatch):
+        opener = FakeOpener([_error_response(500, {"message": "boom"})])
+        monkeypatch.setattr(
+            fleet_client,
+            "admit_cloud",
+            lambda *a, **k: fleet_client.CloudDecision(True, "ok", lease={"lease_id": "lease-1"}, holder="h1"),
+        )
+        monkeypatch.setattr(fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+        monkeypatch.setattr(fleet_client, "release_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
+        result = cursor_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt="hi",
+            opener=opener.open,
+            register_target=tmp_path,
+            label="cursor-fail",
+        )
+        assert not result.ok
+        assert result.reason == "submit-failed"
+        assert cloud_tracker.load_registry(tmp_path)["entries"] == []
+
 
 class TestRegistryContract:
     def test_cursor_cloud_register_and_adopt_accepted(self, tmp_path: Path):

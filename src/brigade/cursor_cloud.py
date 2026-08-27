@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -369,6 +370,40 @@ def list_agents(
     return agents
 
 
+def _register_bound_launch(
+    register_target: Path | None,
+    *,
+    task_id: str,
+    label: str | None,
+    prompt_hash: str,
+    session_id: str | None,
+    lease_holder: str | None,
+    repo: str | None,
+) -> None:
+    """Persist bound IDs and the private holder. Never raise back into launch."""
+    if register_target is None:
+        return
+    from . import cloud_tracker
+
+    if isinstance(label, str) and label.strip():
+        resolved_label = label.strip()
+    else:
+        resolved_label = cloud_tracker.lease_label("cursor-cloud", repo, prompt_hash)
+    try:
+        cloud_tracker.register(
+            Path(register_target),
+            provider="cursor-cloud",
+            task_id=task_id,
+            label=resolved_label,
+            prompt_hash=prompt_hash,
+            session_id=session_id,
+            expected_artifact={"kind": "diff"},
+            lease_holder=lease_holder,
+        )
+    except Exception:
+        return
+
+
 def launch_agent(
     api_key: str,
     *,
@@ -378,6 +413,8 @@ def launch_agent(
     deadline: float = DEFAULT_DEADLINE,
     auto_create_pr: bool = False,
     opener=None,
+    register_target: Path | None = None,
+    label: str | None = None,
 ) -> LaunchResult:
     """Admit a lease, create a Cursor agent/run, and bind the returned IDs.
 
@@ -470,4 +507,13 @@ def launch_agent(
         # because the provider work is live and unbound.
         return LaunchResult(ok=False, reason="bind-failed", agent_id=agent_id, run_id=run_id)
 
+    _register_bound_launch(
+        register_target,
+        task_id=agent_id,
+        label=label,
+        prompt_hash=prompt_hash,
+        session_id=run_id,
+        lease_holder=holder,
+        repo=canonical_repo,
+    )
     return LaunchResult(ok=True, agent_id=agent_id, run_id=run_id, reason="ok")

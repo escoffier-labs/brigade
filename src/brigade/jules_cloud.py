@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 DEFAULT_BASE_URL = "https://jules.googleapis.com/v1alpha"
@@ -705,6 +706,39 @@ def approve_plan(
     return {}
 
 
+def _register_bound_launch(
+    register_target: Path | None,
+    *,
+    task_id: str,
+    label: str | None,
+    prompt_hash: str,
+    lease_holder: str | None,
+    repo: str | None,
+) -> None:
+    """Persist bound IDs and the private holder. Never raise back into launch."""
+    if register_target is None:
+        return
+    from . import cloud_tracker
+
+    if isinstance(label, str) and label.strip():
+        resolved_label = label.strip()
+    else:
+        resolved_label = cloud_tracker.lease_label("jules", repo, prompt_hash)
+    try:
+        cloud_tracker.register(
+            Path(register_target),
+            provider="jules",
+            task_id=task_id,
+            label=resolved_label,
+            prompt_hash=prompt_hash,
+            session_id=task_id,
+            expected_artifact={"kind": "diff"},
+            lease_holder=lease_holder,
+        )
+    except Exception:
+        return
+
+
 def launch_agent(
     api_key: str,
     *,
@@ -716,6 +750,8 @@ def launch_agent(
     base_url: str = DEFAULT_BASE_URL,
     opener=None,
     deadline: float = DEFAULT_DEADLINE,
+    register_target: Path | None = None,
+    label: str | None = None,
 ) -> LaunchResult:
     """Resolve the connected source, admit a lease, create a session, bind the id.
 
@@ -819,6 +855,14 @@ def launch_agent(
             starting_branch=branch,
         )
 
+    _register_bound_launch(
+        register_target,
+        task_id=session_id,
+        label=label,
+        prompt_hash=prompt_hash,
+        lease_holder=holder,
+        repo=canonical_repo,
+    )
     return LaunchResult(
         ok=True,
         session_id=session_id,

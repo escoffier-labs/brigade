@@ -381,7 +381,7 @@ class TestIdentifierValidation:
             )
         assert opener.calls == []
 
-    @pytest.mark.parametrize("source_name", ["", "USER", "owner/repo", "sources/", "sources/a/b", None])
+    @pytest.mark.parametrize("source_name", ["", "USER", "owner/repo", "sources/", "sources/a/b/c/d/e", None])
     def test_invalid_source_name_rejected_before_post(self, source_name):
         opener = FakeOpener([])
         with pytest.raises(jules_cloud.JulesCloudError):
@@ -751,6 +751,54 @@ class TestLaunchGate:
         assert opener.posts == []
         assert recorded["bind"] == []
         assert recorded["release"] == []
+
+    def test_successful_bind_registers_ids_hash_and_private_holder(self, tmp_path: Path, monkeypatch):
+        opener = _launch_opener(_json_response({"id": "sess-new", "state": "QUEUED"}))
+        _grant_hub(monkeypatch)
+        prompt = "implement the private feature"
+        result = jules_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt=prompt,
+            title="feature work",
+            starting_branch="dev",
+            opener=opener.open,
+            register_target=tmp_path,
+            label="jules-task",
+        )
+        assert result.ok
+        assert result.session_id == "sess-new"
+        assert "holder" not in result.__dataclass_fields__
+        assert not hasattr(result, "holder")
+        entries = cloud_tracker.load_registry(tmp_path)["entries"]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["provider"] == "jules"
+        assert entry["task_id"] == "sess-new"
+        assert entry["session_id"] == "sess-new"
+        assert entry["label"] == "jules-task"
+        assert entry["prompt_hash"] == cloud_tracker.prompt_hash(prompt)
+        assert entry["expected_artifact"] == {"kind": "diff"}
+        assert entry["lease_holder"] == "h1"
+        assert prompt not in json.dumps(entry)
+        body = json.loads(opener.posts[0].data)
+        assert body["title"] == "feature work"
+        assert body["sourceContext"]["githubRepoContext"]["startingBranch"] == "dev"
+
+    def test_submit_failure_does_not_register(self, tmp_path: Path, monkeypatch):
+        opener = _launch_opener(_error_response(500, {"message": "boom"}))
+        _grant_hub(monkeypatch)
+        result = jules_cloud.launch_agent(
+            _FAKE_KEY,
+            repo="owner/repo",
+            prompt="hi",
+            opener=opener.open,
+            register_target=tmp_path,
+            label="jules-fail",
+        )
+        assert not result.ok
+        assert result.reason == "submit-failed"
+        assert cloud_tracker.load_registry(tmp_path)["entries"] == []
 
     def test_auto_create_pr_default_off(self, monkeypatch):
         opener = _launch_opener(_json_response({"id": "sess-pr", "state": "QUEUED"}))

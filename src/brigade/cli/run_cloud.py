@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import stat
 import sys
 from pathlib import Path
 from typing import Any
+
+_PROMPT_FILE_MAX_BYTES = 64 * 1024
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -32,6 +35,29 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_sync.add_argument("--target", type=Path, default=Path("."))
     p_sync.add_argument("--json", action="store_true", help="Emit the sync JSON contract.")
+
+    p_launch = cloud_sub.add_parser(
+        "launch",
+        help="Launch a Cursor Cloud or Jules session from a private prompt file.",
+    )
+    p_launch.add_argument("--target", type=Path, default=Path("."), help="Workspace with .brigade/cloud state.")
+    p_launch.add_argument("--provider", required=True, choices=("cursor-cloud", "jules"))
+    p_launch.add_argument("--repo", required=True, help="GitHub owner/repo or https://github.com/owner/repo URL.")
+    p_launch.add_argument("--label", required=True, help="Registry label. Prompt text is never stored.")
+    p_launch.add_argument(
+        "--prompt-file",
+        type=Path,
+        required=True,
+        help="Bounded private prompt file. Prompt text is never an argv value.",
+    )
+    p_launch.add_argument("--starting-branch", default=None, help="Jules starting branch. Ignored for Cursor Cloud.")
+    p_launch.add_argument("--title", default=None, help="Jules session title. Ignored for Cursor Cloud.")
+    p_launch.add_argument(
+        "--auto-create-pr",
+        action="store_true",
+        help="Opt in to provider autoCreatePR. Default is off.",
+    )
+    p_launch.add_argument("--json", action="store_true", help="Emit the public launch JSON contract.")
 
     p_register = cloud_sub.add_parser("register", help="Register a dispatched cloud task.")
     p_register.add_argument("--target", type=Path, default=Path("."))
@@ -245,6 +271,9 @@ def dispatch(args) -> int:
 
     from .. import cloud_tracker
 
+    if command == "launch":
+        return _dispatch_launch(args, target)
+
     if command == "register":
         try:
             entry = cloud_tracker.register(
@@ -397,6 +426,123 @@ def dispatch(args) -> int:
 
     print(f"error: unknown cloud command: {command}", file=sys.stderr)
     return 2
+
+
+def _dispatch_launch(args, target: Path) -> int:
+    """Launch Cursor Cloud or Jules from a private prompt file, then register on bind."""
+    from .. import cloud_tracker, cursor_cloud, jules_cloud
+
+    provider = args.provider
+    try:
+        prompt = _read_prompt_file(Path(args.prompt_file))
+    except ValueError:
+        return _emit_launch_payload(
+            {"ok": False, "provider": provider, "label": args.label, "reason": "bad-prompt-file"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    prompt_hash = cloud_tracker.prompt_hash(prompt)
+    api_key = _resolve_launch_key(provider)
+    if not api_key:
+        return _emit_launch_payload(
+            {
+                "ok": False,
+                "provider": provider,
+                "label": args.label,
+                "prompt_hash": prompt_hash,
+                "reason": "missing-key",
+            },
+            as_json=args.json,
+            exit_code=2,
+        )
+
+    launched: Any
+    if provider == "cursor-cloud":
+        launched = cursor_cloud.launch_agent(
+            api_key,
+            repo=args.repo,
+            prompt=prompt,
+            auto_create_pr=bool(args.auto_create_pr),
+            register_target=target,
+            label=args.label,
+        )
+    else:
+        launched = jules_cloud.launch_agent(
+            api_key,
+            repo=args.repo,
+            prompt=prompt,
+            title=args.title,
+            starting_branch=args.starting_branch,
+            auto_create_pr=bool(args.auto_create_pr),
+            register_target=target,
+            label=args.label,
+        )
+    payload = _public_launch_payload(provider=provider, label=args.label, prompt_hash=prompt_hash, result=launched)
+    return _emit_launch_payload(payload, as_json=args.json, exit_code=0 if launched.ok else 1)
+
+
+def _resolve_launch_key(provider: str) -> str | None:
+    """Return the provider key from existing environment resolution, never argv."""
+    from .. import cloud_tracker
+
+    if provider == "cursor-cloud":
+        return cloud_tracker._cursor_api_key()
+    if provider == "jules":
+        return cloud_tracker._jules_api_key()
+    return None
+
+
+def _read_prompt_file(path: Path) -> str:
+    """Read a bounded regular prompt file. Failures never include file contents."""
+    resolved = path.expanduser()
+    if resolved.is_symlink() or not resolved.is_file():
+        raise ValueError("bad-prompt-file")
+    try:
+        info = resolved.stat()
+    except OSError as exc:
+        raise ValueError("bad-prompt-file") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_size < 1 or info.st_size > _PROMPT_FILE_MAX_BYTES:
+        raise ValueError("bad-prompt-file")
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError("bad-prompt-file") from exc
+    if not text.strip():
+        raise ValueError("bad-prompt-file")
+    return text
+
+
+def _public_launch_payload(*, provider: str, label: str, prompt_hash: str, result: Any) -> dict[str, Any]:
+    """Build the public launch contract. Holder and prompt text never appear."""
+    payload: dict[str, Any] = {
+        "ok": bool(result.ok),
+        "provider": provider,
+        "label": label,
+        "prompt_hash": prompt_hash,
+        "reason": result.reason,
+    }
+    if provider == "cursor-cloud":
+        payload["task_id"] = result.agent_id
+        payload["run_id"] = result.run_id
+    else:
+        payload["task_id"] = result.session_id
+        payload["session_id"] = result.session_id
+        payload["source_name"] = result.source_name
+        payload["starting_branch"] = result.starting_branch
+    return payload
+
+
+def _emit_launch_payload(payload: dict[str, Any], *, as_json: bool, exit_code: int) -> int:
+    """Print a holder-free result. Prompt text is never echoed."""
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return exit_code
+    if payload.get("ok"):
+        extra = f" run={payload['run_id']}" if payload.get("run_id") else ""
+        print(f"launched {payload.get('provider')} task={payload.get('task_id')}{extra}")
+        return exit_code
+    print(f"error: {payload.get('reason', 'launch-failed')}", file=sys.stderr)
+    return exit_code
 
 
 def _dispatch_codex_cloud_ops(args, target: Path) -> int:
