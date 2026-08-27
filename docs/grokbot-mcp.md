@@ -24,7 +24,7 @@ brigade run cloud grokbot serve --target . --instance operator --bind 127.0.0.1:
 brigade run cloud grokbot canary --target . --instance operator
 ```
 
-The operator listener exposes queue listing, status, cancellation, and expiry. It cannot claim or complete worker jobs.
+The operator listener exposes queue listing, status, cancellation, expiry, and operator-only report retrieval. It cannot claim or complete worker jobs.
 
 ### Repository scout
 
@@ -52,9 +52,31 @@ The implementation-worker listener has the same worker operations, constrained t
 
 A successful worker claim returns the bounded validated envelope (label, role, repository, base ref, owned paths, instructions, verification commands, artifact kind, and timeout) as the worker's execution context. List, status, operator, and CLI surfaces stay redacted: they never include the envelope's `instructions` or `verification_commands`.
 
-The routine sequence for a worker is: list, claim, validate role and repository, start, renew before expiry, then complete or fail.
+The routine sequence for a worker is: list, claim, validate role and repository, start, renew before expiry, then complete or fail. Repository Scout completion should send `report_text` so the operator can retrieve the snapshot.
 
 `doctor` reports sanitized dependency, configuration, permissions, queue, and endpoint checks. It returns nonzero after setup until the listener starts because the endpoint check cannot connect. Run it again after the listener starts. A canary needs the listener already running.
+
+## Report snapshots
+
+`grokbot_queue_complete` accepts an optional `report_text` string. Send it only for a Repository Scout job whose expected artifact kind is `report`. The text must be non-empty UTF-8 and at most 12,000 bytes. The completion `artifact` remains `{"kind": "report", "path": "<repo-relative path>", "sha256": "<hex>"}`, and `sha256` must be the SHA-256 of those exact UTF-8 bytes. Draft-PR and branch completions reject `report_text`.
+
+Omitting `report_text` keeps the existing metadata-only completion. The job can still reach `completed`. No snapshot is stored, so later operator retrieval fails with the same public validation error as any other rejected tool input.
+
+The MCP HTTP request ceiling is 65,536 bytes. The smaller report cap leaves room for the JSON-RPC envelope, artifact metadata, and escaped Unicode.
+
+Verified snapshots live at `.brigade/cloud/grokbot/artifacts/<job-id>.md`, beside `jobs` and `idempotency`. The `artifacts` directory is mode `0700`. Each snapshot file is mode `0600`. The queue writes the snapshot before the completed job record.
+
+Operator-only `grokbot_queue_report` takes a `job_id` and returns `job_id`, `text`, `bytes`, and `sha256` for one completed Repository Scout report. It does not return instructions, verification commands, ownership paths, leases, tokens, or other artifact kinds. A worker calling it receives the same public validation error as any hidden tool. Missing legacy snapshots, digest mismatches, oversize files, symlinks, and invalid UTF-8 also return that public error and never include report text.
+
+Report text does not appear in job JSON, list, status, tracker rows, Fleet Hub events, receipts, logs, or error projections.
+
+Update the Repository Scout Grok Bot routine so it sends the report bytes, then let the operator retrieve them:
+
+1. Keep the existing sequence: list, claim, validate role and repository, start, renew before expiry.
+2. On `grokbot_queue_complete`, pass `report_text` plus the matching report artifact (`kind`, `path`, and `sha256` of those exact UTF-8 bytes).
+3. After the job is `completed`, call `grokbot_queue_report` on the operator listener with that `job_id`.
+
+Do not put report text in chat, GitHub comments, or worker status calls. Metadata-only completion remains valid during rollout, but `grokbot_queue_report` cannot retrieve those jobs.
 
 ## Cloudflare boundary
 
@@ -120,4 +142,4 @@ systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-scout-feed --coll
 
 ## Current limits
 
-`setup` writes non-secret configuration and bearer references only. The operator still provisions Grok Bot routines and secrets. This work does not commission a Grok Bot and does not prove weekly quota attribution.
+`setup` writes non-secret configuration and bearer references only. The operator still provisions Grok Bot routines and secrets. This work does not commission a Grok Bot and does not prove weekly quota attribution. A report snapshot is at most 12,000 UTF-8 bytes. The MCP request ceiling is 65,536 bytes.
