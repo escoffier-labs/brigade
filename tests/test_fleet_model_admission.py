@@ -252,6 +252,58 @@ def test_direct_worker_acquires_only_its_invoked_seat_and_releases(monkeypatch, 
     assert released == [("direct-lease", "direct-holder")]
 
 
+def test_direct_worker_runs_with_only_its_authoritative_policy_seat(monkeypatch, tmp_path):
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan", fallback=("coder",)),
+            "coder": Agent("coder", "codex", "code"),
+            "reviewer": Agent("reviewer", "codex", "review"),
+            "cursor_grok": Agent("cursor_grok", "cursor", "code", model="cursor-grok-4.6-high-fast"),
+        },
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "load_model_policy_snapshot",
+        lambda: {"state": "authoritative", "models": [_row("cursor_grok", "cursor", "cursor-grok-4.6-high-fast")]},
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_model_lease",
+        lambda *args, **kwargs: fleet_client.ModelLeaseDecision(True, "ok", "direct-lease", "direct-holder"),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "release_model_lease",
+        lambda lease_id, *, holder: fleet_client.ModelLeaseDecision(True, "ok", lease_id, holder),
+    )
+    invocations: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        invocations.append(cli_ref)
+        return agents.AgentResult(text="implemented", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "run"
+
+    assert (
+        run_aboyeur_guarded(
+            "implement it",
+            roster,
+            worker="cursor_grok",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    effective = json.loads((output_dir / "roster.json").read_text())
+    assert "coder" not in effective["agents"]
+    assert "reviewer" not in effective["agents"]
+    assert invocations == ["cursor"]
+
+
 def test_orchestrated_run_leases_only_planner_worker_and_synthesis_seats(monkeypatch, tmp_path):
     roster = Roster(
         orchestrator="chef",

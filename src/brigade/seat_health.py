@@ -746,7 +746,10 @@ def _seat_chain_names(roster: Any) -> tuple[str, ...]:
         if root not in names:
             names.append(root)
         for fallback in roster.agents[root].fallback:
-            if fallback not in names:
+            # Fleet model admission can remove a denied fallback while keeping
+            # its enabled root. Health probes must use the effective roster,
+            # not reintroduce an unavailable seat from its declaration.
+            if fallback in roster.agents and fallback not in names:
                 names.append(fallback)
     return tuple(names)
 
