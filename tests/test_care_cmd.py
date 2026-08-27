@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -913,21 +916,74 @@ def test_care_systemd_aggregate_status_malformed_beats_missing(tmp_path, monkeyp
     assert status["backends"]["systemd"]["status"] == managed_block.STATUS_MALFORMED
 
 
-def test_care_crontab_block_passes_crontab_syntax_check(tmp_path):
-    import shutil
-    import subprocess
+def _crontab_dry_run_available() -> bool:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="brigade-care-",
+        suffix=".crontab",
+        delete=False,
+    ) as handle:
+        handle.write("0 0 * * * /usr/bin/true\n")
+        probe_file = Path(handle.name)
+    try:
+        probe = subprocess.run(
+            ["crontab", "-n", str(probe_file)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return True
+        diagnostic = (probe.stdout or "") + (probe.stderr or "")
+        lowered = diagnostic.lower()
+        if "invalid option" in lowered or ("mkstemp" in lowered and "permission denied" in lowered):
+            return False
+        raise AssertionError(f"crontab dry-run capability probe failed: {diagnostic}")
+    finally:
+        probe_file.unlink(missing_ok=True)
 
+
+def test_crontab_dry_run_capability_skips_mkstemp_permission_denied(monkeypatch):
+    seen: list[tuple[bool, str]] = []
+
+    def permission_denied(args, **_kwargs):
+        probe = Path(args[-1])
+        seen.append((probe.is_file(), probe.read_text(encoding="utf-8")))
+        return subprocess.CompletedProcess(args, 1, "", "mkstemp: Permission denied")
+
+    monkeypatch.setattr(subprocess, "run", permission_denied)
+
+    assert _crontab_dry_run_available() is False
+    assert seen == [(True, "0 0 * * * /usr/bin/true\n")]
+
+
+def test_crontab_dry_run_capability_fails_on_unexpected_probe_error(monkeypatch):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 1, "", "parse failure"),
+    )
+
+    with pytest.raises(AssertionError, match="parse failure"):
+        _crontab_dry_run_available()
+
+
+def test_crontab_dry_run_capability_accepts_success(monkeypatch):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    assert _crontab_dry_run_available() is True
+
+
+def test_care_crontab_block_passes_crontab_syntax_check(tmp_path):
     if shutil.which("crontab") is None:
         pytest.skip("crontab not available")
-
-    probe = subprocess.run(
-        ["crontab", "-n", "/dev/null"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if probe.returncode != 0 and "invalid option" in (probe.stderr or "").lower():
+    if not _crontab_dry_run_available():
         pytest.skip("crontab dry-run validation (-n) is unavailable on this host")
 
     host = "# neighbor\n0 2 * * * /usr/bin/true\n"
@@ -964,20 +1020,9 @@ def test_care_crontab_dollar_and_backtick_path_remains_literal(tmp_path):
 
 
 def test_care_crontab_percent_path_passes_crontab_syntax_check(tmp_path):
-    import shutil
-    import subprocess
-
     if shutil.which("crontab") is None:
         pytest.skip("crontab not available")
-
-    probe = subprocess.run(
-        ["crontab", "-n", "/dev/null"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if probe.returncode != 0 and "invalid option" in (probe.stderr or "").lower():
+    if not _crontab_dry_run_available():
         pytest.skip("crontab dry-run validation (-n) is unavailable on this host")
 
     workspace = tmp_path / "ws%pct"
