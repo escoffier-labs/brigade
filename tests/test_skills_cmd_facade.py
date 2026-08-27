@@ -100,3 +100,14 @@ def test_seam_named_public_functions_are_callables_not_modules() -> None:
         assert callable(exported)
         assert not isinstance(exported, ModuleType)
         assert exported.__module__ == f"{skills_cmd.__name__}.{name}"
+
+
+def test_wildcard_import_exports_every_public_owned_name() -> None:
+    namespace: dict[str, object] = {}
+    exec("from brigade.skills_cmd import *", namespace)  # noqa: S102 - the star import is the behavior under test
+    public = {name for name in skills_cmd._OWNERS if not name.startswith("_")}
+    assert set(skills_cmd.__all__) == public
+    for name in public:
+        assert namespace[name] is getattr(skills_cmd, name)
+    assert namespace["lint"] is skills_cmd.lint
+    assert namespace["inbox_add"] is skills_cmd.inbox_add

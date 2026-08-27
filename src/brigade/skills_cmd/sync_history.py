@@ -530,7 +530,7 @@ def sync(
 
 
 def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = False) -> int:
-    """Remove an installed skill from one or all harnesses, the inverse of _install_mod."""
+    """Remove an installed skill from one or all harnesses, the inverse of install."""
     workspace = workspace.expanduser().resolve()
     install_targets = _install_mod._install_targets(workspace)
     if harness not in (*install_targets, "all"):

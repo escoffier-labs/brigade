@@ -161,7 +161,7 @@ def _mcp_tool_specs() -> list[dict[str, Any]]:
     return [
         {
             "name": "search_skills",
-            "description": "Search the local reviewed skill _registry_mod.",
+            "description": "Search the local reviewed skill registry.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},

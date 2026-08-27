@@ -469,6 +469,11 @@ _OWNERS = {
 }
 
 
+# Star imports resolve names through the facade; without ``__all__`` they would
+# only see the seam modules and facade internals in the package dictionary.
+__all__ = sorted(name for name in _OWNERS if not name.startswith("_"))
+
+
 class _FacadeModule(ModuleType):
     def __getattribute__(self, name: str) -> _Any:
         # Owned names win over a same-named seam module (install.py vs install()).
