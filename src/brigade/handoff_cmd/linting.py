@@ -284,11 +284,6 @@ def lint_targets(
 
 def lint_file(path: Path) -> HandoffLintResult:
     path = path.expanduser().resolve()
-    errors: list[str] = []
-    warnings: list[str] = []
-    hints: list[str] = []
-    action: str | None = None
-    salvageable = False
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -299,6 +294,17 @@ def lint_file(path: Path) -> HandoffLintResult:
             errors=(f"cannot read handoff file: {exc}",),
             warnings=(),
         )
+    return lint_text(text, path=path)
+
+
+def lint_text(text: str, *, path: Path | None = None) -> HandoffLintResult:
+    """Lint an in-memory handoff without reopening an untrusted filesystem path."""
+    source_path = Path("<memory-handoff>") if path is None else path
+    errors: list[str] = []
+    warnings: list[str] = []
+    hints: list[str] = []
+    action: str | None = None
+    salvageable = False
 
     raw_sections = _issue_ops_mod._parse_markdown_sections(text)
     # Use the same structural boundary as ingest: a note with several populated
@@ -347,7 +353,7 @@ def lint_file(path: Path) -> HandoffLintResult:
     warnings.extend(_readability_warning(finding) for finding in readability)
 
     return HandoffLintResult(
-        path=path,
+        path=source_path,
         action=action,
         valid=not errors,
         errors=tuple(errors),

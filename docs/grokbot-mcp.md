@@ -140,6 +140,21 @@ An operator may run the apply command hourly with systemd. Replace the executabl
 systemd-run --user --on-calendar=hourly --unit=brigade-grokbot-scout-feed --collect /usr/local/bin/brigade run cloud grokbot scout-feed --target /srv/brigade --policy /etc/brigade/grokbot-scout-feed.json --apply
 ```
 
+## Report reconciliation
+
+Completed Repository Scout reports stay in the private queue snapshot until an operator asks Brigade to turn them into Memory Handoff drafts for canonical-owner review. The command never edits canonical memory, `MEMORY.md`, or memory cards.
+
+```bash
+brigade run cloud grokbot reconcile-reports --target /srv/brigade --owner /srv/owner
+brigade run cloud grokbot reconcile-reports --target /srv/brigade --owner /srv/owner --apply --limit 1
+```
+
+The first command is preview-only and writes nothing. `--apply` verifies each completed scout report through `read_report`, then creates at most `--limit` deterministic drafts in the owner workspace. The default destination is the canonical owner's review inbox (`memory/handoff-inbox`), so later ingest flags cannot auto-edit canonical memory. `--inbox grok` or another owner-relative writer inbox is available when an operator explicitly wants the normal handoff-ingest path. Absolute paths, parent traversal, and symlink escapes outside the owner workspace are rejected. Each draft names `job_id`, repository, task hash, report SHA-256, and completion time, marks the report as untrusted automation output, and quotes every report line so embedded markdown headings cannot change handoff sections.
+
+Idempotency markers live under `.brigade/cloud/grokbot/reconcile/` on the queue target, mode `0700`/`0600`. Repeated apply does not create a second draft. Corrupt snapshots and conflicting markers fail closed. Legacy completed jobs that predate report snapshots are counted as `unavailable` and left unmarked, so they do not block newer retrievable reports. Output is counts and safe job handles only: report text is never printed and never stored in job JSON, Fleet Hub events, receipts, or marker JSON.
+
+The command does not schedule itself and does not add a tool to any MCP inventory. Apply currently requires POSIX descriptor primitives and fails closed on Windows; preview remains available there.
+
 ## Current limits
 
 `setup` writes non-secret configuration and bearer references only. The operator still provisions Grok Bot routines and secrets. This work does not commission a Grok Bot and does not prove weekly quota attribution. A report snapshot is at most 12,000 UTF-8 bytes. The MCP request ceiling is 80,000 bytes.
