@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import threading
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -183,6 +184,30 @@ class TestHub:
         assert "Bearer leaked" not in dumped
         assert "NOPE" not in dumped
         assert "do not store" not in dumped
+
+    def test_status_active_view_excludes_terminal_suffixes_and_expired_heartbeats(self, hub):
+        url, token, db = hub
+        batch = [
+            _event(run_id="suffix-done", state="run.dispatch.completed", digest="done"),
+            _event(run_id="abandoned", state="run.started", digest="old"),
+            _event(run_id="fresh", state="run.started", digest="fresh"),
+        ]
+        assert _post(url, token, batch)[0] == 200
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "UPDATE events SET received_at = ? WHERE run_id = ?",
+                ((datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), "abandoned"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        active = {row["run_id"] for row in _get(url, "/status", token)[1]["runs"]}
+        history = {row["run_id"] for row in _get(url, "/status?all=1", token)[1]["runs"]}
+
+        assert active == {"fresh"}
+        assert history == {"suffix-done", "abandoned", "fresh"}
 
     def test_batch_with_one_bad_event_stores_nothing(self, hub):
         url, token, db = hub
@@ -654,10 +679,10 @@ class TestCli:
             conn.commit()
         finally:
             conn.close()
-        assert cli.main(["fleet", "status", "--json"]) == 0
+        assert cli.main(["fleet", "status", "--all", "--json"]) == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["runs"][0]["repo"] == "repo\x1b[31mred"
-        assert cli.main(["fleet", "status"]) == 0
+        assert cli.main(["fleet", "status", "--all"]) == 0
         out = capsys.readouterr().out
         assert "\x1b" not in out
         assert "\x9b" not in out

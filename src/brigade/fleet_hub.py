@@ -116,6 +116,7 @@ from . import fleet_command_deck, fleet_dashboard
 SCHEMA_VERSION = 9
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
+ACTIVE_EVENT_TTL_SECONDS = 30 * 60
 
 # Dashboard cookie (issue #1124): a derived, read-only capability, not the token.
 DASHBOARD_COOKIE = "brigade_fleet_view"
@@ -669,7 +670,25 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
     return {"accepted": accepted, "duplicate": duplicate}
 
 
-def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> list[dict[str, Any]]:
+def _received_at_is_active(value: object, *, now: datetime, ttl_seconds: int) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        received = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=timezone.utc)
+    return (now - received.astimezone(timezone.utc)).total_seconds() <= ttl_seconds
+
+
+def latest_status(
+    conn: sqlite3.Connection,
+    *,
+    include_all: bool = False,
+    now: datetime | None = None,
+    active_ttl_seconds: int = ACTIVE_EVENT_TTL_SECONDS,
+) -> list[dict[str, Any]]:
     """Latest event per (node_id, run_id); non-terminal runs unless include_all.
 
     Exactly one row per (node_id, run_id): ties on sequence (same sequence
@@ -677,15 +696,19 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
     larger digest, so the view never shows a run twice.
     """
     rows = conn.execute(
-        "SELECT node_id, run_id, repo, seat, harness, state, ts, sequence, digest, exit_status, capability_fingerprint FROM ("
+        "SELECT node_id, run_id, repo, seat, harness, state, ts, sequence, digest, exit_status, capability_fingerprint, received_at FROM ("
         "  SELECT e.*, ROW_NUMBER() OVER ("
         "    PARTITION BY node_id, run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
         "  ) AS rn FROM events e"
         ") WHERE rn = 1 ORDER BY node_id, run_id"
     ).fetchall()
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     result = []
     for row in rows:
-        if not include_all and row[5] in TERMINAL_STATES:
+        if not include_all and (
+            fleet_command_deck.is_terminal_state(row[5])
+            or not _received_at_is_active(row[11], now=current, ttl_seconds=active_ttl_seconds)
+        ):
             continue
         result.append(
             {
@@ -700,6 +723,7 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
                 "digest": row[8],
                 "exit_status": row[9],
                 "capability_fingerprint": row[10],
+                "received_at": row[11],
             }
         )
     return result

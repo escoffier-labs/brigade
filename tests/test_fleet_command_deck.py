@@ -47,6 +47,7 @@ def _insert(
     state: str,
     *,
     ts: str | None = None,
+    received_at: str | None = None,
     repo: str = "repo",
 ) -> None:
     conn.execute(
@@ -62,7 +63,7 @@ def _insert(
             "claude",
             state,
             ts if ts is not None else _ts(10),
-            _ts(5),
+            received_at if received_at is not None else _ts(5),
         ),
     )
 
@@ -109,6 +110,26 @@ def test_bucket_and_collision_rules():
         deck.LiveRun(NODE_B, "b", "repo", "", "", "run.created", "queued", 1, 1),
     ]
     assert deck.collides("repo", rows, {"repo": deck.Claim("repo", NODE_A, "", 60)}) is True
+
+
+def test_collision_requires_concurrent_live_nodes_not_claim_drift():
+    one_node = [deck.LiveRun(NODE_B, "a", "repo", "", "", "run.created", "queued", 1, 1)]
+    same_node = [
+        *one_node,
+        deck.LiveRun(NODE_B, "b", "repo", "", "", "run.started", "running", 1, 1),
+    ]
+    claims = {"repo": deck.Claim("repo", NODE_A, "", 60)}
+
+    assert deck.collides("repo", one_node, claims) is False
+    assert deck.collides("repo", same_node, claims) is False
+    assert (
+        deck.collides(
+            "repo",
+            [*same_node, deck.LiveRun(NODE_A, "c", "repo", "", "", "run.started", "running", 1, 1)],
+            claims,
+        )
+        is True
+    )
 
 
 def test_capped_queries_select_latest_then_limit(conn):
@@ -227,10 +248,28 @@ def test_defensive_stale_runs_stay_in_rail_but_out_of_active_projections():
 
 
 def test_fetch_live_runs_drops_old_nonterminal_latest_rows(conn):
-    _insert(conn, NODE_A, "ancient", 1, "run.started", ts=_ts(7200), repo="repo-old")
+    _insert(
+        conn,
+        NODE_A,
+        "ancient",
+        1,
+        "run.started",
+        ts=_ts(30),
+        received_at=_ts(7200),
+        repo="repo-old",
+    )
     _insert(conn, NODE_A, "fresh", 1, "run.started", ts=_ts(30), repo="repo-new")
     runs = deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800)
     assert [run.run_id for run in runs] == ["fresh"]
+
+
+def test_fetch_live_runs_uses_hub_receipt_time_not_skewed_host_clock(conn):
+    _insert(conn, NODE_A, "clock-behind", 1, "run.started", ts=_ts(7200), received_at=_ts(30), repo="repo-a")
+    _insert(conn, NODE_B, "clock-ahead", 1, "run.started", ts=_ts(-7200), received_at=_ts(40), repo="repo-b")
+
+    runs = deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800)
+
+    assert {run.run_id for run in runs} == {"clock-behind", "clock-ahead"}
 
 
 def test_outcomes_hide_internal_milestones_and_keep_distinct_run_ids(conn):

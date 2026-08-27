@@ -196,8 +196,9 @@ class TestBoards:
         repo_a = by_repo["repo-a"]
         assert "11111111-111" in repo_a and "worker/claude" in repo_a and "running" in repo_a
         assert "22222222-222 · orch ·" in repo_a and "left" in repo_a
-        assert "collision" in repo_a  # running on A, claimed by B
-        assert 'data-collision="1"' in repo_a
+        # Claim-owner drift is visible in the two columns, but only two
+        # concurrently active nodes qualify as a collision.
+        assert 'data-collision="0"' in repo_a
         repo_b = by_repo["repo-b"]
         assert "awaiting approval" in repo_b and 'data-collision="0"' in repo_b
         repo_c = by_repo["repo-c"]
@@ -230,12 +231,12 @@ class TestBoards:
         }
         status, _headers, text = _request(hub, "POST", "/claims", headers=_bearer(), body=claim)
         assert status == 200, text
-        _status, _headers, text = _request(hub, "GET", "/", headers=_bearer())
+        _status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert "repo-x" in text
         assert "grokbot" in text and "lease-x" in text
         assert "holder-secret" not in text
         assert "vr-1" not in text
-        _status, _headers, all_text = _request(hub, "GET", "/?all=1", headers=_bearer())
+        _status, _headers, all_text = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
         assert "vr-1" in all_text
         assert "succeeded" in all_text
         assert "holder-secret" not in all_text
@@ -254,7 +255,7 @@ class TestBoards:
         ]
         status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
         assert status == 200, text
-        _status, _headers, all_text = _request(hub, "GET", "/?all=1", headers=_bearer())
+        _status, _headers, all_text = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
         fail_row = next(row for row in all_text.split("<tr") if "vr-fail" in row)
         int_row = next(row for row in all_text.split("<tr") if "vr-int" in row)
         assert 'data-bucket="failed"' in fail_row
@@ -280,7 +281,7 @@ class TestSortAndFilter:
         assert "runbravo" in text and "runalpha" not in text
         _status, _headers, text = _request(hub, "GET", "/view/repos?attention=1", headers=_bearer())
         assert "repo-b" in text and "repo-c" not in text
-        assert "repo-a" in text  # collision counts as needing attention
+        assert "repo-a" not in text  # claim-owner drift alone is not a collision
 
     def test_state_and_seat_filters(self, hub):
         _seed(hub)
@@ -309,7 +310,7 @@ class TestSortAndFilter:
         _seed(hub)
         _status, _headers, text = _request(hub, "GET", "/view/repos", headers=_bearer())
         body = text.split("<tbody>")[1]
-        assert body.index("repo-a") < body.index("repo-b") < body.index("repo-c")  # collision, attention, idle
+        assert body.index("repo-b") < body.index("repo-a") < body.index("repo-c")  # attention, running, idle
         _status, _headers, text = _request(hub, "GET", "/view/repos?sort=repo", headers=_bearer())
         body = text.split("<tbody>")[1]
         assert body.index("repo-a") < body.index("repo-b") < body.index("repo-c")
@@ -469,6 +470,50 @@ class TestPureRendering:
         )
         assert rows[0].bucket == "stale"
         assert fleet_dashboard.filter_rows(rows, fleet_dashboard.DashboardQuery(attention_only=True)) == rows
+
+    def test_terminal_suffixes_and_abandoned_rows_are_not_active(self):
+        now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+        old = (now - timedelta(hours=2)).isoformat()
+        rows = fleet_dashboard.build_rows(
+            [
+                {"node_id": "n", "run_id": "done", "state": "run.dispatch.completed", "ts": now.isoformat()},
+                {"node_id": "n", "run_id": "timed", "state": "provider.timed_out", "ts": now.isoformat()},
+                {"node_id": "n", "run_id": "abandoned", "state": "run.started", "ts": old},
+            ],
+            {("n", "done"): old, ("n", "timed"): old, ("n", "abandoned"): old},
+            now=now,
+        )
+
+        by_id = {row.run_id: row for row in rows}
+        assert by_id["done"].live is False and by_id["done"].bucket == "succeeded"
+        assert by_id["timed"].live is False and by_id["timed"].bucket == "interrupted"
+        assert by_id["abandoned"].live is True and by_id["abandoned"].active is False
+        assert fleet_dashboard.filter_rows(rows, fleet_dashboard.DashboardQuery()) == []
+        assert fleet_dashboard.filter_rows(rows, fleet_dashboard.DashboardQuery(attention_only=True)) == [
+            by_id["abandoned"]
+        ]
+
+    def test_repo_collision_requires_two_concurrently_active_nodes(self):
+        now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+        fresh = fleet_dashboard.build_rows(
+            [{"node_id": "a", "run_id": "fresh", "repo": "repo", "state": "run.started", "ts": now.isoformat()}],
+            {("a", "fresh"): now.isoformat()},
+            now=now,
+        )[0]
+        old = (now - timedelta(hours=2)).isoformat()
+        abandoned = fleet_dashboard.build_rows(
+            [{"node_id": "b", "run_id": "old", "repo": "repo", "state": "run.started", "ts": old}],
+            {("b", "old"): old},
+            now=now,
+        )[0]
+        second = fleet_dashboard.build_rows(
+            [{"node_id": "b", "run_id": "fresh-b", "repo": "repo", "state": "run.started", "ts": now.isoformat()}],
+            {("b", "fresh-b"): now.isoformat()},
+            now=now,
+        )[0]
+
+        assert fleet_dashboard._RepoEntry("repo", [fresh], [fresh, abandoned], None, None).collision is False
+        assert fleet_dashboard._RepoEntry("repo", [fresh, second], [fresh, second], None, None).collision is True
 
     def test_format_duration(self):
         assert fleet_dashboard.format_duration(None) == "-"

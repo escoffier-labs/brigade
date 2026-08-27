@@ -286,15 +286,13 @@ def bucket_for(state: str, *, age_seconds: int | None, stale_after_seconds: int)
 
 
 def collides(target: str, live_runs: Sequence[LiveRun], claims: Mapping[str, Claim]) -> bool:
+    del claims
     nodes = {run.node_id for run in live_runs if run.repo == target}
-    claim = claims.get(target)
-    if len(nodes) >= 2:
-        return True
-    return bool(nodes) and claim is not None and claim.owner_node not in nodes
+    return len(nodes) >= 2
 
 
 _LATEST_ROWS = (
-    "SELECT node_id, run_id, repo, seat, harness, state, ts FROM ("
+    "SELECT node_id, run_id, repo, seat, harness, state, ts, received_at FROM ("
     "  SELECT e.*, ROW_NUMBER() OVER ("
     "    PARTITION BY node_id, run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
     "  ) AS rn FROM events e"
@@ -326,14 +324,14 @@ def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seco
     )
     cutoff = datetime.fromtimestamp(now.timestamp() - stale_after_seconds, tz=now.tzinfo or _UTC).isoformat()
     query = (
-        f"{_LATEST_ROWS} AND {_NOT_TERMINAL_SQL} AND ts >= ?"
+        f"{_LATEST_ROWS} AND {_NOT_TERMINAL_SQL} AND received_at >= ?"
         f" ORDER BY {rank_sql}, ts DESC, node_id, run_id LIMIT {ACTIVE_LIMIT}"
     )
     rows = conn.execute(query, (*TERMINAL_STATES, cutoff, *AWAITING_STATES)).fetchall()
     started = fetch_started_at(conn, [(row[0], row[1]) for row in rows])
     runs: list[LiveRun] = []
-    for node_id, run_id, repo, seat, harness, state, ts in rows:
-        age = _age_seconds(ts, now)
+    for node_id, run_id, repo, seat, harness, state, _ts, received_at in rows:
+        age = _age_seconds(received_at, now)
         runs.append(
             LiveRun(
                 node_id=node_id,
