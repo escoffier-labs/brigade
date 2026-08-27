@@ -19,10 +19,18 @@ from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
-from . import models as _family_base
+from . import issue_ops as _issue_ops_mod
+from . import sources as _sources_mod
+from .models import (
+    CARD_ACTIONS,
+    FAIL,
+    HANDOFF_ACTIONS,
+    HandoffLintResult,
+    NO_CARD_ACTION,
+    OK,
+    _LOOSE_FIELD_TEMPLATE,
+)
 from .readability import ReadabilityFinding, scan_standalone_readability
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
 
 
 def _readability_kind(category: str) -> str:
@@ -226,7 +234,8 @@ def lint(
     if content_guard:
         print(f"content_guard_policy: {guard_policy} (egress leak scan + injection heuristics)")
         for item in guard_results:
-            hits = item.get("injection_heuristics") or []
+            raw_hits = item.get("injection_heuristics")
+            hit_items: list[Any] = raw_hits if isinstance(raw_hits, list) else []
             egress_status = item.get("egress_verdict", OK)
             print(f"[{egress_status}] content_guard egress: {item.get('path')} {item.get('detail')}")
             injection_status = item.get("injection_verdict", OK)
@@ -236,18 +245,19 @@ def lint(
                 f"[{injection_status}] content_guard injection: {item.get('path')} "
                 f"{_injection_detail(warning_count=warning_count, unscanned=unscanned)}"
             )
-            for hit in hits:
-                if hit.get("severity") == "info":
-                    print(f"  line {hit['line']}: info: [{hit['rule']}] {hit['excerpt']}")
-                elif hit.get("severity") == "warning":
-                    print(f"  line {hit['line']}: warning: [{hit['rule']}] {hit['excerpt']}")
+            for hit in hit_items:
+                if isinstance(hit, dict):
+                    if hit.get("severity") == "info":
+                        print(f"  line {hit.get('line')}: info: [{hit.get('rule')}] {hit.get('excerpt')}")
+                    elif hit.get("severity") == "warning":
+                        print(f"  line {hit.get('line')}: warning: [{hit.get('rule')}] {hit.get('excerpt')}")
     return 0 if payload["valid"] else 1
 
 
 def _guard_handoff_path(path: Path, *, target: Path, policy: str) -> dict[str, Any]:
     result = scrub.run_scan(path, repo_target=target, policy=policy)
-    stdout_summary = _short(" ".join(str(result.get("stdout") or "").split()), 320)
-    stderr_summary = _short(" ".join(str(result.get("stderr") or "").split()), 320)
+    stdout_summary = _sources_mod._short(" ".join(str(result.get("stdout") or "").split()), 320)
+    stderr_summary = _sources_mod._short(" ".join(str(result.get("stderr") or "").split()), 320)
     return {
         "path": str(path),
         "policy": policy,
@@ -265,9 +275,9 @@ def lint_targets(
 ) -> tuple[HandoffLintResult, ...]:
     target = target.expanduser().resolve()
     candidates = (
-        tuple(_resolve_lint_path(target, path) for path in paths)
+        tuple(_issue_ops_mod._resolve_lint_path(target, path) for path in paths)
         if paths
-        else _pending_handoff_paths(target, sources=sources)
+        else _issue_ops_mod._pending_handoff_paths(target, sources=sources)
     )
     return tuple(lint_file(path) for path in candidates)
 
@@ -290,22 +300,22 @@ def lint_file(path: Path) -> HandoffLintResult:
             warnings=(),
         )
 
-    raw_sections = _parse_markdown_sections(text)
+    raw_sections = _issue_ops_mod._parse_markdown_sections(text)
     # Use the same structural boundary as ingest: a note with several populated
     # Markdown sections can be preserved for review, unlike unstructured text.
     from ..ingest import has_salvageable_structure
 
     salvageable = has_salvageable_structure(raw_sections)
-    sections, collision_errors, noncanonical_headings = _canonicalize_sections(raw_sections)
+    sections, collision_errors, noncanonical_headings = _issue_ops_mod._canonicalize_sections(raw_sections)
     errors.extend(collision_errors)
-    heading_warnings, heading_hints = _lint_noncanonical_heading_messages(noncanonical_headings)
+    heading_warnings, heading_hints = _issue_ops_mod._lint_noncanonical_heading_messages(noncanonical_headings)
     warnings.extend(heading_warnings)
     hints.extend(heading_hints)
-    order_warnings, order_hints = _lint_section_order_messages(raw_sections)
+    order_warnings, order_hints = _issue_ops_mod._lint_section_order_messages(raw_sections)
     warnings.extend(order_warnings)
     hints.extend(order_hints)
     for required in ("Type", "Title", "Summary", "Recommended memory action"):
-        if required not in sections or not _section_value(sections, required):
+        if required not in sections or not _issue_ops_mod._section_value(sections, required):
             errors.append(f"missing required section: {required}")
 
     if any(error.startswith("missing required section:") for error in errors):
@@ -319,19 +329,19 @@ def lint_file(path: Path) -> HandoffLintResult:
             from ..untrusted import scan_untrusted
 
             if not scan_untrusted(text).flagged:
-                expected = ", ".join(f"## {name}" for name in CANONICAL_HANDOFF_SECTION_HEADINGS)
+                expected = ", ".join(f"## {name}" for name in _issue_ops_mod.CANONICAL_HANDOFF_SECTION_HEADINGS)
                 hints.append(f"structured note detected; use Brigade handoff sections: {expected}")
 
-    action_value = _section_value(sections, "Recommended memory action")
+    action_value = _issue_ops_mod._section_value(sections, "Recommended memory action")
     if action_value:
         action = action_value.splitlines()[0].strip().casefold()
         if action not in HANDOFF_ACTIONS:
             errors.append("Recommended memory action must be one of: " + ", ".join(HANDOFF_ACTIONS))
 
     if action in CARD_ACTIONS:
-        _lint_card_action(sections, errors, warnings)
+        _issue_ops_mod._lint_card_action(sections, errors, warnings)
     elif action == NO_CARD_ACTION:
-        _lint_no_card_action(sections, errors)
+        _issue_ops_mod._lint_no_card_action(sections, errors)
 
     readability = scan_standalone_readability(text)
     warnings.extend(_readability_warning(finding) for finding in readability)
@@ -356,11 +366,11 @@ def _loose_field(text: str, name: str) -> str | None:
 
 def _migrate_extract(text: str) -> tuple[dict[str, str], list[str]]:
     """Merge proper `## Section` values with loose bullet metadata; report gaps."""
-    raw_sections = _parse_markdown_sections(text)
-    sections, _collision_errors, _ = _canonicalize_sections(raw_sections)
+    raw_sections = _issue_ops_mod._parse_markdown_sections(text)
+    sections, _collision_errors, _ = _issue_ops_mod._canonicalize_sections(raw_sections)
 
     def field(section_name: str) -> str:
-        return _section_value(sections, section_name) or _loose_field(text, section_name) or ""
+        return _issue_ops_mod._section_value(sections, section_name) or _loose_field(text, section_name) or ""
 
     action_raw = field("Recommended memory action")
     extracted = {
@@ -370,8 +380,8 @@ def _migrate_extract(text: str) -> tuple[dict[str, str], list[str]]:
         "action": (action_raw.splitlines() or [""])[0].strip().casefold(),
         "target_card": field("Target card"),
         "target_document": field("Target document"),
-        "card_content": _section_value(sections, "Suggested card content"),
-        "document_content": _section_value(sections, "Suggested document content"),
+        "card_content": _issue_ops_mod._section_value(sections, "Suggested card content"),
+        "document_content": _issue_ops_mod._section_value(sections, "Suggested document content"),
     }
     missing: list[str] = []
     for key in ("type", "title", "summary"):

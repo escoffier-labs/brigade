@@ -19,9 +19,24 @@ from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import issue_ops as _issue_ops_mod
+from . import linting as _linting_mod
+from . import sources as _sources_mod
+from .models import (
+    CARD_ACTIONS,
+    DEFAULT_DRAFT_DOCUMENT,
+    DEFAULT_DRAFT_INBOX,
+    HANDOFF_ACTIONS,
+    HANDOFF_DRAFT_STALE_HOURS,
+    HandoffDraft,
+    IGNORED_HANDOFF_NAMES,
+    NO_CARD_ACTION,
+    OK,
+    SourceConfig,
+    WARN,
+    WRITER_INBOXES,
+    default_sources_path,
+)
 
 
 def _handoff_state_root(target: Path) -> Path:
@@ -51,7 +66,7 @@ def _load_source_config_for_drafts(
     sources_path = sources.expanduser().resolve() if sources is not None else default_sources_path(target)
     if sources_path.is_file():
         try:
-            return _load_sources(target, sources_path), sources_path, [], True
+            return _sources_mod._load_sources(target, sources_path), sources_path, [], True
         except ValueError as exc:
             return (
                 SourceConfig(watched=(), ingestor=None),
@@ -77,7 +92,7 @@ def _draft_inbox_specs(
     specs: dict[tuple[str, str], tuple[Path, str, bool]] = {}
     for rel in WRITER_INBOXES:
         path = (target / rel).resolve()
-        specs[(str(path), rel)] = (path, rel, _is_watched(target, rel, config.watched))
+        specs[(str(path), rel)] = (path, rel, _sources_mod._is_watched(target, rel, config.watched))
     for watched in config.watched:
         path = (watched.root / watched.inbox).resolve()
         label = watched.inbox if watched.root == target.resolve() else str(path)
@@ -325,13 +340,24 @@ def _latest_ingest_outcome_for_path(
 
 
 def _receipt_summary(receipt: dict[str, Any]) -> dict[str, Any]:
-    outcomes = receipt.get("outcomes") if isinstance(receipt.get("outcomes"), list) else []
+    raw_outcomes = receipt.get("outcomes")
+    outcomes: list[Any] = raw_outcomes if isinstance(raw_outcomes, list) else []
     counts: dict[str, int] = {}
     for outcome in outcomes:
         if not isinstance(outcome, dict):
             continue
         status = str(outcome.get("status") or "unknown")
         counts[status] = counts.get(status, 0) + 1
+    raw_malformed = receipt.get("malformed_handoff_paths")
+    malformed_len = len(raw_malformed) if isinstance(raw_malformed, list) else 0
+    raw_unreachable = receipt.get("unreachable_sources")
+    unreachable_len = len(raw_unreachable) if isinstance(raw_unreachable, list) else 0
+    raw_processed = receipt.get("processed_handoff_paths")
+    processed_len = len(raw_processed) if isinstance(raw_processed, list) else 0
+    raw_skipped = receipt.get("skipped_handoff_paths")
+    skipped_len = len(raw_skipped) if isinstance(raw_skipped, list) else 0
+    raw_failed = receipt.get("failed_handoff_paths")
+    failed_len = len(raw_failed) if isinstance(raw_failed, list) else 0
     return {
         "run_id": receipt.get("run_id"),
         "started_at": receipt.get("started_at"),
@@ -340,15 +366,15 @@ def _receipt_summary(receipt: dict[str, Any]) -> dict[str, Any]:
         "inbox_paths": receipt.get("inbox_paths") or [],
         "warning_count": receipt.get("warning_count") or 0,
         "warning_events": receipt.get("warning_events") or [],
-        "malformed": len(receipt.get("malformed_handoff_paths") or []),
-        "unreachable_sources": len(receipt.get("unreachable_sources") or []),
+        "malformed": malformed_len,
+        "unreachable_sources": unreachable_len,
         "no_reply": bool(receipt.get("no_reply")),
         "safe_summary": receipt.get("safe_summary") or "",
         "log_path": receipt.get("log_path") or "",
         "outcome_counts": counts,
-        "processed": len(receipt.get("processed_handoff_paths") or []),
-        "skipped": len(receipt.get("skipped_handoff_paths") or []),
-        "failed": len(receipt.get("failed_handoff_paths") or []),
+        "processed": processed_len,
+        "skipped": skipped_len,
+        "failed": failed_len,
     }
 
 
@@ -381,18 +407,18 @@ def _draft_summary(
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         text = ""
-    raw_sections = _parse_markdown_sections(text)
-    sections, _collision_errors, _ = _canonicalize_sections(raw_sections)
-    lint_result = lint_file(path)
+    raw_sections = _issue_ops_mod._parse_markdown_sections(text)
+    sections, _collision_errors, _ = _issue_ops_mod._canonicalize_sections(raw_sections)
+    lint_result = _linting_mod.lint_file(path)
     action = lint_result.action
     target_card = (
-        _section_value(sections, "Target card").splitlines()[0].strip()
-        if _section_value(sections, "Target card")
+        _issue_ops_mod._section_value(sections, "Target card").splitlines()[0].strip()
+        if _issue_ops_mod._section_value(sections, "Target card")
         else None
     )
     target_document = (
-        _section_value(sections, "Target document").splitlines()[0].strip()
-        if _section_value(sections, "Target document")
+        _issue_ops_mod._section_value(sections, "Target document").splitlines()[0].strip()
+        if _issue_ops_mod._section_value(sections, "Target document")
         else None
     )
     key_values = _extract_handoff_key_values(text)
@@ -814,8 +840,8 @@ def draft(
     )
     inbox_path.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-    lint_result = lint_file(path)
-    guard_result = _guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
+    lint_result = _linting_mod.lint_file(path)
+    guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     payload = {
         "target": str(target),
         "created_at": created_at,
@@ -985,18 +1011,18 @@ def archive_draft(
         if errors:
             print(f"error: {'; '.join(errors)}", file=sys.stderr)
             return 2
-        for draft in drafts:
-            if draft.lint.valid:
-                archived.append(_archive_one(target, draft, reason=reason))
+        for item in drafts:
+            if item.lint.valid:
+                archived.append(_archive_one(target, item, reason=reason))
     else:
         if not draft_id:
             print("error: handoff id/path is required unless --all-reviewed is passed", file=sys.stderr)
             return 2
-        draft, error = _find_draft(target, draft_id, sources=sources)
-        if draft is None:
+        single_draft, error = _find_draft(target, draft_id, sources=sources)
+        if single_draft is None:
             print(f"error: {error}", file=sys.stderr)
             return 1 if error and "not found" in error else 2
-        archived.append(_archive_one(target, draft, reason=reason))
+        archived.append(_archive_one(target, single_draft, reason=reason))
     payload = {
         "target": str(target),
         "archive_path": str(_handoff_archive_records_path(target)),
@@ -1077,6 +1103,7 @@ def closeout(
                 "closeout_fingerprint": _draft_closeout_fingerprint(draft),
             }
         )
+    out_path = _handoff_closeouts_root(target) / closeout_id / "closeout.json"
     payload = {
         "target": str(target),
         "closeout_id": closeout_id,
@@ -1086,9 +1113,9 @@ def closeout(
         "draft_count": len(records),
         "drafts": records,
         "source_fingerprints": [item["closeout_fingerprint"] for item in records],
-        "path": str(_handoff_closeouts_root(target) / closeout_id / "closeout.json"),
+        "path": str(out_path),
     }
-    _write_json(Path(payload["path"]), payload)
+    _write_json(out_path, payload)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0

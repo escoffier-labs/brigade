@@ -19,9 +19,21 @@ from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import drafts as _drafts_mod
+from . import issue_ops as _issue_ops_mod
+from .models import (
+    DEFAULT_STALE_AFTER_MINUTES,
+    DEFAULT_WARNING_PATTERNS,
+    HandoffIssue,
+    IGNORED_HANDOFF_NAMES,
+    InboxHealth,
+    IngestorConfig,
+    IngestorHealth,
+    MAX_INGESTOR_WARNING_SIGNALS,
+    SourceConfig,
+    WRITER_INBOXES,
+    WatchedInbox,
+)
 
 
 def _source_config_for_checks(target: Path, sources_path: Path | None) -> SourceConfig | None:
@@ -38,7 +50,7 @@ def _parse_ingestor_log_issues(log_path: Path) -> list[HandoffIssue]:
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
         return [
-            _make_issue(
+            _issue_ops_mod._make_issue(
                 category="missing-log",
                 kind="incident",
                 text=f"Read handoff ingestor log at {log_path}",
@@ -75,7 +87,7 @@ def _parse_ingestor_log_issues(log_path: Path) -> list[HandoffIssue]:
             issues.append(_issue_from_log_line("source-unreachable", "incident", stripped, line_number, log_path))
     if has_warning_summary and has_no_reply_or_update:
         issues.append(
-            _make_issue(
+            _issue_ops_mod._make_issue(
                 category="hidden-warning",
                 kind="incident",
                 text="Fix handoff ingestor no-reply output that can hide warnings",
@@ -173,8 +185,8 @@ def _parse_ingestor_log_receipt(target: Path, config: SourceConfig, log_path: Pa
     )
     receipt = {
         "run_id": run_id,
-        "started_at": _iso_from_timestamp(timestamp),
-        "completed_at": _iso_from_timestamp(timestamp),
+        "started_at": _drafts_mod._iso_from_timestamp(timestamp),
+        "completed_at": _drafts_mod._iso_from_timestamp(timestamp),
         "source_root": str(target),
         "inbox_paths": inbox_paths,
         "processed_handoff_paths": processed,
@@ -190,7 +202,7 @@ def _parse_ingestor_log_receipt(target: Path, config: SourceConfig, log_path: Pa
         "safe_summary": safe_summary,
         "log_path": str(log_path),
     }
-    return _normalize_ingest_receipt(target, receipt)
+    return _drafts_mod._normalize_ingest_receipt(target, receipt)
 
 
 def _split_outcome_line(value: str) -> tuple[str | None, str | None]:
@@ -212,7 +224,7 @@ def _issue_from_log_line(category: str, kind: str, line: str, line_number: int, 
     subject, detail = _split_issue_line(line)
     repair = _repair_for_issue(category, line)
     text = _text_for_issue(category, subject, detail)
-    return _make_issue(
+    return _issue_ops_mod._make_issue(
         category=category,
         kind=kind,
         text=text,
