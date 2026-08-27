@@ -42,7 +42,7 @@ Source contracts this spec builds on:
   `encode_snapshot_bytes`, `PROJECTOR_VERSION`, the six `ProjectionError`
   subclasses with bounded `diagnostic` strings, the ownership map, and the
   slice-3 status-lag note.
-- `src/brigade/aboyeur.py`: `_write_json`, the single funnel for `run.json`
+- `src/brigade/aboyeur/`: `_write_json`, the single funnel for `run.json`
   writes (lifecycle append before, `localio.write_text_atomic` after).
 - `src/brigade/localio.py`: `write_text_atomic` (mkstemp 0o600 temp, fsync,
   `os.replace`), `utc_now_iso`.

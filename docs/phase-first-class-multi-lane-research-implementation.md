@@ -62,7 +62,7 @@ impact set to the implementation run.
 | `src/brigade/roster.py` | Parse seat capabilities and resolve capability matches deterministically. |
 | `src/brigade/run_seat.py` | Invoke one exact-prompt seat through `run_transport.dispatch`. |
 | `src/brigade/run_receipts.py` | Serialize each phase call into standard worker logs and receipt payloads. |
-| `src/brigade/aboyeur.py` | Start and update standard run receipts with a preserved run kind. |
+| `src/brigade/aboyeur/` | Start and update standard run receipts with a preserved run kind. |
 | `src/brigade/run_projector.py` | Preserve `kind` across lifecycle projection. |
 | `src/brigade/receipt_schema.py` | Stamp the three versioned research sidecar schemas. |
 | `src/brigade/research/types.py` | Define research profiles, phases, sources, findings, reviews, and typed failures. |
@@ -359,7 +359,7 @@ Expect both files to pass.
 - [x] Commit only Task 1 files:
 
 ```bash
-git add src/brigade/roster.py src/brigade/aboyeur.py src/brigade/research/types.py src/brigade/research/config.py tests/test_roster.py tests/test_research_config.py
+git add src/brigade/roster.py src/brigade/aboyeur/ src/brigade/research/types.py src/brigade/research/config.py tests/test_roster.py tests/test_research_config.py
 git commit -m "feat: resolve research seats by capability"
 ```
 
@@ -883,7 +883,7 @@ for the new `kind: "work"` field.
 - [x] Commit Task 3:
 
 ```bash
-git add src/brigade/receipt_schema.py src/brigade/aboyeur.py src/brigade/run_projector.py src/brigade/research/registry.py tests/test_run_projector.py tests/test_research_registry.py
+git add src/brigade/receipt_schema.py src/brigade/aboyeur/ src/brigade/run_projector.py src/brigade/research/registry.py tests/test_run_projector.py tests/test_research_registry.py
 git commit -m "feat: store research in standard runs"
 ```
 
