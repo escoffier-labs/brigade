@@ -460,6 +460,10 @@ def test_render_unit_is_role_scoped_with_protected_token_reference_only(tmp_path
     )
     assert "EnvironmentFile" not in env_unit
     assert "--bearer-env TEST_GROKBOT_BEARER" in env_unit
+    assert "BRIGADE_FLEET_NODE_TOKEN" not in unit
+    assert "BRIGADE_FLEET_TOKEN" not in unit
+    assert "node_token" not in unit
+    assert "BRIGADE_FLEET_NODE_TOKEN" not in env_unit
 
 
 def test_render_unit_quotes_space_and_quote_arguments_and_rejects_controls(tmp_path: Path):

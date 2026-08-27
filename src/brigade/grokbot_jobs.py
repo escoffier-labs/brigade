@@ -69,8 +69,13 @@ SENSITIVE_KEY_TOKENS = (
 )
 ROOT_MODE = 0o700
 FILE_MODE = 0o600
+MAX_REPORT_BYTES = 12000
 JOB_SCHEMA = "brigade.grokbot.job.v1"
 IDEMPOTENCY_SCHEMA = "brigade.grokbot.idempotency.v1"
+SNAPSHOT_SCHEMA = "brigade.grokbot.snapshot.v1"
+AUTHORITY_SCHEMA = "brigade.grokbot.authority.v1"
+AUTHORITY_MARKER_NAME = "authority.json"
+ACTIVE_LIFECYCLE_STATES = frozenset({"queued", "claimed", "running"})
 
 
 class GrokbotJobError(ValueError):
@@ -92,6 +97,81 @@ class _Storage:
     root: _Directory
     jobs: _Directory
     idempotency: _Directory
+    artifacts: _Directory
+    snapshots: _Directory
+
+
+def hub_authority(target: Path | None = None) -> bool:
+    """True when Fleet Hub is the sole queue authority.
+
+    A local authority marker is irreversible: once written, a hub outage or
+    missing URL cannot fall back to local lifecycle.
+    """
+    if target is not None and authority_marker_present(target):
+        return True
+    try:
+        from . import fleet_client_grokbot
+
+        return fleet_client_grokbot.hub_configured()
+    except Exception:
+        return True
+
+
+def authority_marker_path(target: Path) -> Path:
+    return Path(target).expanduser() / ".brigade" / "cloud" / "grokbot" / AUTHORITY_MARKER_NAME
+
+
+def authority_marker_present(target: Path) -> bool:
+    path = authority_marker_path(target)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return True
+    return isinstance(payload, dict) and payload.get("schema") == AUTHORITY_SCHEMA
+
+
+def admit_hub_authority(target: Path) -> dict[str, Any]:
+    """Write the irreversible hub-authority marker after a safe admission check.
+
+    Active local lifecycle rows are refused. The marker is not written on
+    conflict. Remaining operator migration of local history is an explicit
+    leftover, not automatic requeue.
+    """
+    if authority_marker_present(target):
+        return {"admitted": True, "idempotent": True, "legacy_blocked": False}
+    blocked = _active_legacy_job_ids(target)
+    if blocked:
+        raise GrokbotJobError("legacy-active-needs-reconcile")
+    _write_authority_marker(target)
+    return {"admitted": True, "idempotent": False, "legacy_blocked": False}
+
+
+def _write_authority_marker(target: Path) -> None:
+    payload = {"schema": AUTHORITY_SCHEMA, "admitted_at": _now_iso(None)}
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        _write_json_file(storage.root, AUTHORITY_MARKER_NAME, payload)
+
+
+def _active_legacy_job_ids(target: Path) -> list[str]:
+    root = Path(target).expanduser() / ".brigade" / "cloud" / "grokbot" / "jobs"
+    if not root.exists():
+        return []
+    blocked: list[str] = []
+    with _storage_paths(target) as storage:
+        for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
+            record = _read_json_file(storage.jobs, name)
+            if record is None:
+                continue
+            try:
+                validated = _validate_record(record)
+            except GrokbotJobError:
+                blocked.append(name)
+                continue
+            if validated["state"] in ACTIVE_LIFECYCLE_STATES:
+                blocked.append(validated["job_id"])
+    return blocked
 
 
 def enqueue(
@@ -101,6 +181,8 @@ def enqueue(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Queue a validated private envelope and return an opaque handle."""
+    if hub_authority(target):
+        return _enqueue_via_hub(target, spec, idempotency_key, now)
     envelope = _validate_spec(spec)
     key = _validate_idempotency_key(idempotency_key)
     with _storage_paths(target) as storage, _queue_lock(storage):
@@ -123,6 +205,8 @@ def enqueue_repository_scout(
     if type(daily_limit) is not int or daily_limit < 1:
         raise GrokbotJobError("invalid-daily-limit")
     _, instant = _timestamp(now)
+    if hub_authority(target):
+        return _enqueue_scout_via_hub(target, envelope, key, daily_limit, instant)
     with _storage_paths(target) as storage, _queue_lock(storage):
         scout_records = _repository_scout_records_locked(storage)
         created_today = sum(_parse_timestamp(record["created_at"]).date() == instant.date() for record in scout_records)
@@ -207,6 +291,8 @@ def _is_active_repository_scout(record: dict[str, Any]) -> bool:
 
 def get_job(target: Path, job_id: str) -> dict[str, Any]:
     """Return the safe projection for one job, never its private envelope."""
+    if hub_authority(target):
+        return _hub_job(job_id)
     with _storage_paths(target) as storage:
         return _projection(_load_record(storage.jobs, _validate_job_id(job_id)))
 
@@ -215,6 +301,8 @@ def status(target: Path, job_id: str | None = None) -> dict[str, Any]:
     """Return one job projection or all safe projections in deterministic order."""
     if job_id is not None:
         return get_job(target, job_id)
+    if hub_authority(target):
+        return {"jobs": _hub_jobs(include_all=True)}
     with _storage_paths(target) as storage:
         jobs: list[dict[str, Any]] = []
         for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
@@ -232,11 +320,38 @@ def tracker_rows(target: Path) -> list[dict[str, Any]]:
     completion artifact references to reconcile draft PRs, but it never needs
     the private envelope, lease holder, or verification commands.
     """
+    if hub_authority(target):
+        try:
+            hub_jobs = _hub_jobs(include_all=True)
+        except GrokbotJobError as exc:
+            if exc.reason == "hub-unavailable":
+                return [_hub_unavailable_row()]
+            raise
+        rows: list[dict[str, Any]] = []
+        for job in hub_jobs:
+            kind = job.get("artifact_kind", "report")
+            row: dict[str, Any] = {
+                "job_id": job["job_id"],
+                "label": job.get("label"),
+                "task_hash": job["task_hash"],
+                "state": job["state"],
+                "created_at": job["created_at"],
+                "updated_at": job["updated_at"],
+                "queued_at": job["queued_at"],
+                "artifact": {"kind": kind},
+            }
+            if "claimed_at" in job:
+                row["claimed_at"] = job["claimed_at"]
+            completed = _hub_tracker_artifact(job, kind)
+            if completed:
+                row["result_artifact"] = completed
+            rows.append(row)
+        return rows
     root = Path(target).expanduser() / ".brigade" / "cloud" / "grokbot"
     if not root.exists():
         return []
     with _storage_paths(target) as storage:
-        rows: list[dict[str, Any]] = []
+        local_rows: list[dict[str, Any]] = []
         for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
             record = _read_json_file(storage.jobs, name)
             if record is None:
@@ -244,7 +359,7 @@ def tracker_rows(target: Path) -> list[dict[str, Any]]:
             valid = _validate_record(record)
             spec = valid["spec"]
             assert isinstance(spec, dict)
-            row: dict[str, Any] = {
+            local_row: dict[str, Any] = {
                 "job_id": valid["job_id"],
                 "label": spec["label"],
                 "task_hash": valid["task_hash"],
@@ -256,9 +371,9 @@ def tracker_rows(target: Path) -> list[dict[str, Any]]:
             }
             for key in ("claimed_at", "result_artifact"):
                 if key in valid:
-                    row[key] = valid[key]
-            rows.append(row)
-        return rows
+                    local_row[key] = valid[key]
+            local_rows.append(local_row)
+        return local_rows
 
 
 def claim(
@@ -299,6 +414,8 @@ def _claim_job(
     bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
     lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
     lease_seconds = _validate_lease_seconds(lease_seconds)
+    if hub_authority(target):
+        return _claim_via_hub(target, job_id, bot_id, lease_id, lease_seconds, include_context=include_context)
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
@@ -338,6 +455,8 @@ def renew(
     bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
     lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
     lease_seconds = _validate_lease_seconds(lease_seconds)
+    if hub_authority(target):
+        return _renew_via_hub(job_id, bot_id, lease_id, lease_seconds)
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
@@ -365,6 +484,8 @@ def transition(
     lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
     if state not in {"running", "completed", "failed"}:
         raise GrokbotJobError("invalid-transition")
+    if hub_authority(target):
+        return _transition_via_hub(job_id, bot_id, lease_id, state, artifact=artifact)
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
@@ -384,14 +505,84 @@ def transition(
             if "cancel_requested_at" in record:
                 raise GrokbotJobError("cancel-requested")
             record["result_artifact"] = _validate_completion_artifact(artifact, record["spec"])
+            _unlink_artifact_file(storage.artifacts, f"{record['job_id']}.md")
         record["state"] = state
+        _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
+
+
+def complete_report(
+    target: Path,
+    job_id: str,
+    bot_id: str,
+    lease_id: str,
+    artifact: dict[str, Any],
+    report_text: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Store verified Repository Scout report bytes, then complete the job."""
+    job_id = _validate_job_id(job_id)
+    bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
+    lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
+    report_bytes = _report_bytes(report_text)
+    if hub_authority(target):
+        return _complete_report_via_hub(target, job_id, bot_id, lease_id, artifact, report_bytes)
+    timestamp, instant = _timestamp(now)
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        record = _load_record(storage.jobs, job_id)
+        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_report_job(record)
+        validated = _validate_completion_artifact(artifact, record["spec"])
+        if hashlib.sha256(report_bytes).hexdigest() != validated["sha256"]:
+            raise GrokbotJobError("digest-mismatch")
+        _write_bytes_file(storage.artifacts, f"{job_id}.md", report_bytes)
+        record["result_artifact"] = validated
+        record["state"] = "completed"
+        _commit_mutation(storage.jobs, record, timestamp)
+        return _projection(record)
+
+
+def read_report(target: Path, job_id: str) -> dict[str, Any]:
+    """Return verified snapshot bytes for one completed Repository Scout report."""
+    job_id = _validate_job_id(job_id)
+    if hub_authority(target):
+        job = _hub_job(job_id)
+        kind = job.get("artifact_kind") or (job.get("artifact") or {}).get("kind")
+        if job["state"] != "completed" or kind != "report":
+            raise GrokbotJobError("invalid-state")
+        expected = job.get("artifact_digest")
+        if not isinstance(expected, str) or not expected:
+            raise GrokbotJobError("missing-digest")
+        with _storage_paths(target) as storage:
+            data = _read_bytes_file(
+                storage.artifacts, f"{job_id}.md", maximum=MAX_REPORT_BYTES, missing_reason="report-missing"
+            )
+        return _verified_report(job_id, data, expected)
+    with _storage_paths(target) as storage:
+        record = _load_record(storage.jobs, job_id)
+        if record["state"] != "completed":
+            raise GrokbotJobError("invalid-state")
+        _require_report_job(record)
+        data = _read_bytes_file(
+            storage.artifacts, f"{job_id}.md", maximum=MAX_REPORT_BYTES, missing_reason="report-missing"
+        )
+        return _verified_report(job_id, data, record["result_artifact"]["sha256"])
 
 
 def cancel(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:
     """Cancel a queued job or request cooperative cancellation of a live lease."""
     job_id = _validate_job_id(job_id)
+    if hub_authority(target):
+        current = _hub_job(job_id)
+        return _hub_projection(
+            _require_hub(
+                "cancel",
+                job_id,
+                expected_item_revision=current["item_revision"],
+                operation_id=f"cancel:{job_id}:{current['item_revision']}",
+            )
+        )
     timestamp, _ = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
@@ -399,6 +590,7 @@ def cancel(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
             return _projection(record)
         if record["state"] == "queued":
             record["state"] = "canceled"
+            _discard_orphan_report_snapshot(storage, record)
             _commit_mutation(storage.jobs, record, timestamp)
             return _projection(record)
         if "cancel_requested_at" not in record:
@@ -418,6 +610,8 @@ def acknowledge_cancel(
     job_id = _validate_job_id(job_id)
     bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
     lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
+    if hub_authority(target):
+        return _hub_lease_op("ack_cancel", job_id, bot_id, lease_id)
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
@@ -425,6 +619,7 @@ def acknowledge_cancel(
         if "cancel_requested_at" not in record:
             raise GrokbotJobError("cancellation-not-requested")
         record["state"] = "canceled"
+        _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
 
@@ -432,6 +627,16 @@ def acknowledge_cancel(
 def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:
     """Terminalize jobs whose deadline or current lease has elapsed, never requeue."""
     job_id = _validate_job_id(job_id)
+    if hub_authority(target):
+        current = _hub_job(job_id)
+        return _hub_projection(
+            _require_hub(
+                "expire",
+                job_id,
+                expected_item_revision=current["item_revision"],
+                operation_id=f"expire:{job_id}:{current['item_revision']}",
+            )
+        )
     timestamp, instant = _timestamp(now)
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
@@ -444,6 +649,7 @@ def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
         if instant < expires_at:
             return _projection(record)
         record["state"] = "expired"
+        _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
 
@@ -459,10 +665,20 @@ def _storage_paths(target: Path) -> Iterator[_Storage]:
             _ensure_directory(root)
             jobs = root / "jobs"
             idempotency = root / "idempotency"
+            artifacts = root / "artifacts"
+            snapshots = root / "snapshots"
             _ensure_directory(jobs)
             _ensure_directory(idempotency)
+            _ensure_directory(artifacts)
+            _ensure_directory(snapshots)
             _assert_regular_or_missing(root / "queue.lock")
-            yield _Storage(_Directory(root, None), _Directory(jobs, None), _Directory(idempotency, None))
+            yield _Storage(
+                _Directory(root, None),
+                _Directory(jobs, None),
+                _Directory(idempotency, None),
+                _Directory(artifacts, None),
+                _Directory(snapshots, None),
+            )
             return
 
         base_fd = _open_directory_path(Path(target).expanduser().absolute())
@@ -477,10 +693,16 @@ def _storage_paths(target: Path) -> Iterator[_Storage]:
         descriptors.append(jobs_fd)
         idempotency_fd = _open_or_create_directory(root_fd, "idempotency")
         descriptors.append(idempotency_fd)
+        artifacts_fd = _open_or_create_directory(root_fd, "artifacts")
+        descriptors.append(artifacts_fd)
+        snapshots_fd = _open_or_create_directory(root_fd, "snapshots")
+        descriptors.append(snapshots_fd)
         yield _Storage(
             _Directory(Path(target) / ".brigade" / "cloud" / "grokbot", root_fd),
             _Directory(Path(target) / ".brigade" / "cloud" / "grokbot" / "jobs", jobs_fd),
             _Directory(Path(target) / ".brigade" / "cloud" / "grokbot" / "idempotency", idempotency_fd),
+            _Directory(Path(target) / ".brigade" / "cloud" / "grokbot" / "artifacts", artifacts_fd),
+            _Directory(Path(target) / ".brigade" / "cloud" / "grokbot" / "snapshots", snapshots_fd),
         )
     except GrokbotJobError:
         raise
@@ -1231,3 +1453,506 @@ def _validate_repo_relative_path(value: object) -> str:
     ):
         raise GrokbotJobError("invalid-artifact")
     return path
+
+
+def _write_bytes_file(directory: _Directory, name: str, data: bytes) -> None:
+    if directory.descriptor is None:  # pragma: no cover - exercised on Windows.
+        _write_json_file_windows(directory.path / name, data)
+        return
+    temporary = f".{name}.{secrets.token_hex(12)}.tmp"
+    descriptor: int | None = None
+    temporary_created = False
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            FILE_MODE,
+            dir_fd=directory.descriptor,
+        )
+        temporary_created = True
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise GrokbotJobError("unsafe-storage")
+        _chmod_file_descriptor(descriptor, None)
+        _write_all(descriptor, data)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, name, src_dir_fd=directory.descriptor, dst_dir_fd=directory.descriptor)
+        temporary_created = False
+        os.fsync(directory.descriptor)
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+    finally:
+        cleanup_error: OSError | None = None
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                cleanup_error = exc
+        if temporary_created:
+            try:
+                os.unlink(temporary, dir_fd=directory.descriptor)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                cleanup_error = exc
+        if cleanup_error is not None:
+            raise GrokbotJobError("unsafe-storage") from cleanup_error
+
+
+def _read_bytes_file(directory: _Directory, name: str, *, maximum: int, missing_reason: str) -> bytes:
+    if directory.descriptor is None:  # pragma: no cover - exercised on Windows.
+        path = directory.path / name
+        _assert_regular_or_missing(path)
+        if not path.exists():
+            raise GrokbotJobError(missing_reason)
+        data = path.read_bytes()
+        if len(data) > maximum:
+            raise GrokbotJobError("report-too-large")
+        return data
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=directory.descriptor
+        )
+    except FileNotFoundError:
+        raise GrokbotJobError(missing_reason) from None
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise GrokbotJobError("unsafe-storage")
+        chunks: list[bytes] = []
+        total = 0
+        limit = maximum + 1
+        while total < limit:
+            chunk = os.read(descriptor, limit - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > maximum:
+            raise GrokbotJobError("report-too-large")
+        return b"".join(chunks)
+    except GrokbotJobError:
+        raise
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                raise GrokbotJobError("unsafe-storage") from exc
+
+
+def _unlink_artifact_file(directory: _Directory, name: str) -> None:
+    if directory.descriptor is None:  # pragma: no cover - exercised on Windows.
+        path = directory.path / name
+        _assert_regular_or_missing(path)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise GrokbotJobError("unsafe-storage") from exc
+        return
+    try:
+        os.unlink(name, dir_fd=directory.descriptor)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+
+
+def _discard_orphan_report_snapshot(storage: _Storage, record: dict[str, Any]) -> None:
+    if record["state"] not in {"failed", "expired", "canceled"}:
+        return
+    _unlink_artifact_file(storage.artifacts, f"{record['job_id']}.md")
+
+
+def _report_bytes(report_text: object) -> bytes:
+    if not isinstance(report_text, str) or not report_text:
+        raise GrokbotJobError("invalid-report")
+    try:
+        data = report_text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise GrokbotJobError("invalid-report") from exc
+    if len(data) > MAX_REPORT_BYTES:
+        raise GrokbotJobError("report-too-large")
+    return data
+
+
+def _require_report_job(record: dict[str, Any]) -> None:
+    spec = record["spec"]
+    assert isinstance(spec, dict)
+    if spec["role"] != "repository-scout":
+        raise GrokbotJobError("invalid-role")
+    artifact = spec["artifact"]
+    if not isinstance(artifact, dict) or artifact.get("kind") != "report":
+        raise GrokbotJobError("invalid-artifact")
+
+
+def _verified_report(job_id: str, data: bytes, expected: object) -> dict[str, Any]:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GrokbotJobError("invalid-report") from exc
+    if not text:
+        raise GrokbotJobError("invalid-report")
+    digest = hashlib.sha256(data).hexdigest()
+    if expected is not None and digest != expected:
+        raise GrokbotJobError("digest-mismatch")
+    return {"job_id": job_id, "text": text, "bytes": len(data), "sha256": digest}
+
+
+def _store_task_snapshot(target: Path, job_id: str, envelope: dict[str, Any], key_hash: str) -> None:
+    payload = {
+        "schema": SNAPSHOT_SCHEMA,
+        "job_id": job_id,
+        "task_hash": _task_hash(envelope),
+        "idempotency_key_hash": key_hash,
+        "spec": envelope,
+    }
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        existing = _read_json_file(storage.snapshots, f"{job_id}.json", missing_ok=True)
+        if existing is None:
+            _write_json_file(storage.snapshots, f"{job_id}.json", payload)
+            return
+        if (
+            existing.get("schema") == SNAPSHOT_SCHEMA
+            and existing.get("job_id") == job_id
+            and existing.get("task_hash") == payload["task_hash"]
+            and existing.get("idempotency_key_hash") == key_hash
+            and existing.get("spec") == envelope
+        ):
+            return
+        raise GrokbotJobError("idempotency-conflict")
+
+
+def _load_task_snapshot(target: Path, job_id: str) -> dict[str, Any]:
+    with _storage_paths(target) as storage:
+        payload = _read_json_file(storage.snapshots, f"{job_id}.json", missing_ok=True)
+    if payload is None or payload.get("schema") != SNAPSHOT_SCHEMA:
+        raise GrokbotJobError("snapshot-missing")
+    spec = payload.get("spec")
+    if not isinstance(spec, dict):
+        raise GrokbotJobError("corrupt-storage")
+    return _validate_spec(spec)
+
+
+def _enqueue_via_hub(target: Path, spec: dict[str, Any], idempotency_key: str, now: datetime | None) -> dict[str, Any]:
+    del now
+    from . import fleet_client_grokbot
+
+    envelope = _validate_spec(spec)
+    key = _validate_idempotency_key(idempotency_key)
+    task_hash = _task_hash(envelope)
+    key_hash = _idempotency_key_hash(key)
+    if not authority_marker_present(target) and _active_legacy_job_ids(target):
+        raise GrokbotJobError("legacy-active-needs-reconcile")
+    job_id = f"grokbot-{key_hash.removeprefix('sha256:')[:24]}"
+    _store_task_snapshot(target, job_id, envelope, key_hash)
+    decision = fleet_client_grokbot.enqueue(
+        job_id=job_id,
+        role=envelope["role"],
+        repository=envelope["repository"],
+        label=envelope["label"],
+        task_digest=task_hash.removeprefix("sha256:"),
+        idempotency_key_hash=key_hash.removeprefix("sha256:"),
+        timeout_seconds=envelope["timeout_seconds"],
+        artifact_kind=envelope["artifact"]["kind"],
+        private_snapshot_id=job_id,
+        operation_id=f"enqueue:{job_id}",
+    )
+    if not decision.granted or decision.job is None:
+        raise GrokbotJobError(decision.reason)
+    if not authority_marker_present(target):
+        _write_authority_marker(target)
+    return {"job_id": decision.job["job_id"], "state": decision.job["state"], "idempotent": decision.idempotent}
+
+
+def _enqueue_scout_via_hub(
+    target: Path, envelope: dict[str, Any], key: str, daily_limit: int, instant: datetime
+) -> dict[str, Any]:
+    jobs = _hub_jobs(role="repository-scout", include_all=True)
+    created_today = sum(_parse_timestamp(job["created_at"]).date() == instant.date() for job in jobs)
+    if any(
+        job["state"] in WORK_STATES or "cancel_requested_at" in job
+        for job in jobs
+        if job["state"] not in TERMINAL_FOR_SCOUT
+    ):
+        return {"reason": "active-scout", "created_today": created_today, "handle": None}
+    if created_today >= daily_limit:
+        return {"reason": "daily-limit-reached", "created_today": created_today, "handle": None}
+    handle = _enqueue_via_hub(target, envelope, key, instant)
+    if handle["idempotent"]:
+        return {"reason": "all-known", "created_today": created_today, "handle": handle}
+    return {"reason": "created", "created_today": created_today, "handle": handle}
+
+
+WORK_STATES = frozenset({"queued", "claimed", "running"})
+TERMINAL_FOR_SCOUT = frozenset({"completed", "failed", "expired", "canceled"})
+
+
+def _hub_unavailable_row() -> dict[str, Any]:
+    return {
+        "job_id": "grokbot-hub-unavailable",
+        "label": "Grok Bot hub unavailable",
+        "task_hash": None,
+        "state": "unavailable",
+        "created_at": None,
+        "updated_at": None,
+        "queued_at": None,
+        "artifact": {"kind": "report"},
+        "degraded": True,
+        "classification": "needs-investigation",
+        "source": "grokbot-hub",
+    }
+
+
+def _hub_tracker_artifact(job: dict[str, Any], kind: object) -> dict[str, Any]:
+    artifact: dict[str, Any] = {"kind": kind}
+    if kind == "draft-pr" and job.get("artifact_ref"):
+        artifact["url"] = job["artifact_ref"]
+    elif kind == "branch":
+        if job.get("artifact_ref"):
+            artifact["branch"] = job["artifact_ref"]
+        if job.get("artifact_digest"):
+            artifact["commit"] = job["artifact_digest"]
+    elif kind == "report":
+        if job.get("artifact_digest"):
+            artifact["sha256"] = job["artifact_digest"]
+        if job.get("artifact_size") is not None:
+            artifact["size"] = job["artifact_size"]
+        if job.get("private_snapshot_id"):
+            artifact["private_snapshot_id"] = job["private_snapshot_id"]
+    else:
+        return {}
+    return artifact if len(artifact) > 1 else {}
+
+
+def _hub_job(job_id: str) -> dict[str, Any]:
+    return _hub_projection(_require_hub("status", job_id=job_id))
+
+
+def _hub_jobs(*, role: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
+    from . import fleet_client_grokbot
+
+    decision = fleet_client_grokbot.list_jobs(role=role, include_all=include_all)
+    if not decision.granted or decision.jobs is None:
+        raise GrokbotJobError(decision.reason)
+    return [_hub_projection_job(job) for job in decision.jobs]
+
+
+def _claim_via_hub(
+    target: Path, job_id: str, bot_id: str, lease_id: str, lease_seconds: int, *, include_context: bool
+) -> dict[str, Any]:
+    current = _hub_job(job_id)
+    decision = _require_hub(
+        "claim",
+        job_id,
+        lease_id=lease_id,
+        lease_seconds=lease_seconds,
+        expected_item_revision=current["item_revision"],
+        operation_id=f"claim:{job_id}:{current['item_revision']}",
+    )
+    result = _hub_projection(decision)
+    if include_context:
+        result["execution_context"] = _execution_context({"spec": _load_task_snapshot(target, job_id), **result})
+    return result
+
+
+def _renew_via_hub(job_id: str, bot_id: str, lease_id: str, lease_seconds: int) -> dict[str, Any]:
+    current = _hub_job(job_id)
+    return _hub_projection(
+        _require_hub(
+            "renew",
+            job_id,
+            lease_id=lease_id,
+            lease_seconds=lease_seconds,
+            expected_item_revision=current["item_revision"],
+            lease_generation=current.get("lease_generation"),
+            operation_id=f"renew:{job_id}:{current['item_revision']}",
+        )
+    )
+
+
+def _transition_via_hub(
+    job_id: str, bot_id: str, lease_id: str, state: str, *, artifact: dict[str, Any] | None
+) -> dict[str, Any]:
+    current = _hub_job(job_id)
+    if state == "running":
+        return _hub_lease_op(
+            "start",
+            job_id,
+            bot_id,
+            lease_id,
+            expected_item_revision=current["item_revision"],
+            lease_generation=current.get("lease_generation"),
+        )
+    if state == "failed":
+        return _hub_lease_op(
+            "fail",
+            job_id,
+            bot_id,
+            lease_id,
+            expected_item_revision=current["item_revision"],
+            lease_generation=current.get("lease_generation"),
+        )
+    if artifact is None:
+        raise GrokbotJobError("invalid-artifact")
+    metadata = _safe_artifact_metadata(artifact, current)
+    return _hub_projection(
+        _require_hub(
+            "complete",
+            job_id,
+            lease_id=lease_id,
+            expected_item_revision=current["item_revision"],
+            lease_generation=current.get("lease_generation"),
+            operation_id=f"complete:{job_id}:{current['item_revision']}",
+            artifact=metadata,
+        )
+    )
+
+
+def _complete_report_via_hub(
+    target: Path, job_id: str, bot_id: str, lease_id: str, artifact: dict[str, Any], report_bytes: bytes
+) -> dict[str, Any]:
+    snapshot = _load_task_snapshot(target, job_id)
+    validated = _validate_completion_artifact(artifact, snapshot)
+    if hashlib.sha256(report_bytes).hexdigest() != validated["sha256"]:
+        raise GrokbotJobError("digest-mismatch")
+    artifact_name = f"{job_id}.md"
+    preexisting: bytes | None = None
+    created_orphan = False
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        try:
+            preexisting = _read_bytes_file(
+                storage.artifacts, artifact_name, maximum=MAX_REPORT_BYTES, missing_reason="report-missing"
+            )
+        except GrokbotJobError as exc:
+            if exc.reason != "report-missing":
+                raise
+            preexisting = None
+        _write_bytes_file(storage.artifacts, artifact_name, report_bytes)
+        created_orphan = preexisting is None
+    try:
+        current = _hub_job(job_id)
+        metadata = _safe_artifact_metadata(validated, current)
+        metadata["size"] = len(report_bytes)
+        metadata["private_snapshot_id"] = job_id
+        return _hub_projection(
+            _require_hub(
+                "complete",
+                job_id,
+                lease_id=lease_id,
+                expected_item_revision=current["item_revision"],
+                lease_generation=current.get("lease_generation"),
+                operation_id=f"complete:{job_id}:{current['item_revision']}",
+                artifact=metadata,
+            )
+        )
+    except GrokbotJobError:
+        with _storage_paths(target) as storage, _queue_lock(storage):
+            if created_orphan:
+                _unlink_artifact_file(storage.artifacts, artifact_name)
+            elif preexisting is not None:
+                _write_bytes_file(storage.artifacts, artifact_name, preexisting)
+        raise
+
+
+def _hub_lease_op(action: str, job_id: str, bot_id: str, lease_id: str, **fields: Any) -> dict[str, Any]:
+    current = fields.pop("expected_item_revision", None)
+    if current is None:
+        current = _hub_job(job_id)["item_revision"]
+    return _hub_projection(
+        _require_hub(
+            action,
+            job_id,
+            lease_id=lease_id,
+            expected_item_revision=current,
+            lease_generation=fields.pop("lease_generation", None) or _hub_job(job_id).get("lease_generation"),
+            operation_id=fields.pop("operation_id", None) or f"{action}:{job_id}:{current}",
+            **fields,
+        )
+    )
+
+
+def _require_hub(action: str, job_id: str | None = None, **fields: Any) -> Any:
+    from . import fleet_client_grokbot
+
+    operation = getattr(fleet_client_grokbot, action)
+    decision = operation(job_id, **fields) if job_id is not None else operation(**fields)
+    if not decision.granted:
+        raise GrokbotJobError(decision.reason)
+    return decision
+
+
+def _hub_projection(decision: Any) -> dict[str, Any]:
+    if decision.job is None:
+        raise GrokbotJobError(decision.reason)
+    return _hub_projection_job(decision.job)
+
+
+def _hub_projection_job(job: dict[str, Any]) -> dict[str, Any]:
+    digest = job.get("task_digest")
+    projection = {
+        "job_id": job["job_id"],
+        "label": job.get("label"),
+        "role": job.get("role"),
+        "repository": job.get("repository"),
+        "task_hash": f"sha256:{digest}"
+        if isinstance(digest, str) and not str(digest).startswith("sha256:")
+        else digest,
+        "state": job["state"],
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "queued_at": job.get("queued_at"),
+        "timeout_seconds": job.get("timeout_seconds"),
+        "item_revision": job.get("item_revision"),
+        "sequence": job.get("sequence"),
+        "artifact": {"kind": job.get("artifact_kind")},
+        "artifact_kind": job.get("artifact_kind"),
+        "harness": "grokbot",
+    }
+    for key in (
+        "claimed_at",
+        "lease_expires_at",
+        "cancel_requested_at",
+        "private_snapshot_id",
+        "artifact_ref",
+        "artifact_digest",
+        "artifact_size",
+        "claimant_node",
+        "claimant_worker",
+        "lease_generation",
+        "queue_id",
+    ):
+        if key in job and job[key] is not None:
+            projection[key] = job[key]
+    return projection
+
+
+def _safe_artifact_metadata(artifact: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    kind = artifact.get("kind") or job.get("artifact_kind")
+    metadata: dict[str, Any] = {
+        "kind": kind,
+        "private_snapshot_id": job.get("private_snapshot_id") or job.get("job_id"),
+    }
+    if kind == "draft-pr":
+        metadata["ref"] = artifact.get("url")
+    elif kind == "branch":
+        metadata["ref"] = artifact.get("branch")
+        metadata["digest"] = artifact.get("commit")
+    elif kind == "report":
+        metadata["digest"] = artifact.get("sha256")
+        size = artifact.get("size")
+        if type(size) is int:
+            metadata["size"] = size
+    return metadata
+
+
+def load_task_snapshot(target: Path, job_id: str) -> dict[str, Any]:
+    """Return the immutable private envelope for a hub-authoritative job."""
+    return _load_task_snapshot(target, _validate_job_id(job_id))

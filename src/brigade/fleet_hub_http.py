@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
-from . import fleet_command_deck, fleet_dashboard
+from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot
 from . import fleet_hub as _hub
 from .fleet_hub import (
     DASHBOARD_COOKIE,
@@ -66,6 +66,10 @@ def handle_claim(*args: Any, **kwargs: Any) -> Any:
 
 def handle_cloud(*args: Any, **kwargs: Any) -> Any:
     return _hub.handle_cloud(*args, **kwargs)
+
+
+def handle_grokbot(*args: Any, **kwargs: Any) -> Any:
+    return fleet_hub_grokbot.handle_grokbot(*args, **kwargs)
 
 
 def cloud_snapshot(*args: Any, **kwargs: Any) -> Any:
@@ -459,7 +463,7 @@ def make_handler(
                     elif path == "/status":
                         payload = {"runs": latest_status(conn, include_all=include_all)}
                     elif path == "/cloud":
-                        payload = cloud_snapshot(conn, frozen_deck, include_all=include_all)
+                        payload = cloud_snapshot(conn, frozen_deck, include_all=include_all, include_grokbot=is_admin)
                     elif path == "/models":
                         payload = {"models": list_model_policy(conn)}
                     else:
@@ -475,7 +479,7 @@ def make_handler(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
             path = self.path.partition("?")[0]
-            if path not in ("/events", "/claims", "/nodes", "/cloud", "/models"):
+            if path not in ("/events", "/claims", "/nodes", "/cloud", "/models", "/grokbot"):
                 self._send_json(404, {"error": "not found"})
                 return
             if self._bearer() is None:
@@ -547,6 +551,25 @@ def make_handler(
                     status, body_payload = handle_cloud(conn, parsed, caller_node=caller_node, config=frozen_deck)
                 elif path == "/models":
                     status, body_payload = handle_model_policy(conn, parsed, caller_node=caller_node)
+                elif path == "/grokbot":
+                    if (
+                        is_admin
+                        and not allow_admin_writes
+                        and (
+                            not isinstance(parsed, dict)
+                            or parsed.get("action") not in {"list", "status", "report-metadata", "enroll-actor"}
+                        )
+                    ):
+                        self._send_json(
+                            403,
+                            {
+                                "error": "the admin token may not mutate the Grok Bot queue: enroll this "
+                                "node with 'brigade fleet nodes add' and configure its node token, or start the hub with "
+                                "--allow-admin-writes"
+                            },
+                        )
+                        return
+                    status, body_payload = handle_grokbot(conn, parsed, caller_node=caller_node, config=frozen_deck)
                 else:
                     status, body_payload = handle_node_request(conn, parsed)
             except FleetHubForbidden as exc:

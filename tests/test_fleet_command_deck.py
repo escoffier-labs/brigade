@@ -570,6 +570,88 @@ def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(
         assert HOLDER_TOKEN not in body and "a" * 64 not in body
 
 
+def test_command_deck_projects_hub_grokbot_rows_and_ignores_terminal_capacity(tmp_path):
+    from brigade import fleet_hub_grokbot
+
+    feed = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    worker = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    with _start_hub(tmp_path, CONFIG) as (hub, db_path):
+        conn = fleet_hub.open_db(db_path)
+        try:
+            for node, kind, role in (
+                (feed, "feed", None),
+                (worker, "implementation-worker", "implementation-worker"),
+            ):
+                body = {
+                    "action": "enroll-actor",
+                    "enroll_node_id": node,
+                    "queue_owner_node_id": feed,
+                    "queue_id": "grokbot-queue-main",
+                    "actor_kind": kind,
+                    "enabled": True,
+                }
+                if role:
+                    body["role"] = role
+                assert fleet_hub_grokbot.handle_grokbot(conn, body, caller_node=None)[0] == 200
+            job_id = "grokbot-" + "a" * 24
+            queued = fleet_hub_grokbot.handle_grokbot(
+                conn,
+                {
+                    "action": "enqueue",
+                    "job_id": job_id,
+                    "role": "implementation-worker",
+                    "repository": "example/brigade",
+                    "label": "deck job",
+                    "task_digest": "b" * 64,
+                    "idempotency_key_hash": "b" * 64,
+                    "timeout_seconds": 900,
+                    "artifact_kind": "draft-pr",
+                    "private_snapshot_id": job_id,
+                    "operation_id": "op-enq",
+                },
+                caller_node=feed,
+            )
+            assert queued[0] == 200
+            claimed = fleet_hub_grokbot.handle_grokbot(
+                conn,
+                {
+                    "action": "claim",
+                    "job_id": job_id,
+                    "lease_id": "lease-deck",
+                    "expected_item_revision": 1,
+                    "lease_seconds": 300,
+                    "operation_id": "op-claim",
+                },
+                caller_node=worker,
+            )
+            assert claimed[0] == 200
+        finally:
+            conn.close()
+        status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
+        assert status == 200
+        assert "<h3>grok-bot</h3>" in body and ">1/64<" in body
+        assert "lease-deck" not in body
+        conn = fleet_hub.open_db(db_path)
+        try:
+            fleet_hub_grokbot.handle_grokbot(
+                conn,
+                {
+                    "action": "fail",
+                    "job_id": job_id,
+                    "lease_id": "lease-deck",
+                    "expected_item_revision": 2,
+                    "lease_generation": 1,
+                    "operation_id": "op-fail",
+                },
+                caller_node=worker,
+            )
+        finally:
+            conn.close()
+        _status, _headers, after = _request(hub, "GET", "/deck", headers=_bearer())
+        assert ">0/64<" in after
+        assert "lease-deck" not in after
+
+
 def _asset_request(hub, path: str):
     """Raw bytes request for binary assets; does not decode as text."""
     host, port = hub

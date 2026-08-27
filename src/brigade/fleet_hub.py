@@ -109,7 +109,7 @@ from typing import Any
 
 from . import fleet_command_deck
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 12
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 ACTIVE_EVENT_TTL_SECONDS = 30 * 60
@@ -589,6 +589,9 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             conn.execute(_MODEL_POLICY_SCHEMA)
         conn.execute("CREATE INDEX IF NOT EXISTS cloud_leases_active ON cloud_leases (provider, expires_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS model_leases_active ON model_leases (seat, expires_at)")
+        from . import fleet_hub_grokbot
+
+        fleet_hub_grokbot.ensure_schema(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
     except BaseException:
@@ -1546,6 +1549,11 @@ def handle_cloud(
     action, lease_id, node, holder = request["action"], request["lease_id"], request["node_id"], request["holder"]
     now = _now_epoch()
     now_iso = _epoch_to_iso(now)
+    if action == "admit" and request["provider"] == "grok-bot":
+        raise FleetHubForbidden("grok-bot cloud leases are reserved for the Grok Bot hub path")
+    existing = _fetch_cloud_lease(conn, lease_id)
+    if existing is not None and existing[1] == "grok-bot":
+        raise FleetHubForbidden("grok-bot cloud leases are reserved for the Grok Bot hub path")
     if action == "admit":
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -1647,10 +1655,16 @@ def list_cloud_leases(conn: sqlite3.Connection, *, include_all: bool = False) ->
 
 
 def cloud_snapshot(
-    conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, *, include_all: bool = False
+    conn: sqlite3.Connection,
+    config: fleet_command_deck.DeckConfig,
+    *,
+    include_all: bool = False,
+    include_grokbot: bool = True,
 ) -> dict[str, Any]:
     policy = _cloud_policy(conn, config)
     leases = list_cloud_leases(conn, include_all=include_all)
+    if not include_grokbot:
+        leases = [lease for lease in leases if lease.get("provider") != "grok-bot"]
     counts: dict[str, int] = {}
     for lease in leases:
         if lease["released_at"] is None and not lease["expired"]:
@@ -1660,7 +1674,15 @@ def cloud_snapshot(
         item = dict(policy["providers"][name])
         item["used"] = counts.get(name, 0)
         providers.append(item)
-    return {"leases": leases, "policy": {"global_limit": policy["global_limit"], "providers": providers}}
+    snapshot: dict[str, Any] = {
+        "leases": leases,
+        "policy": {"global_limit": policy["global_limit"], "providers": providers},
+    }
+    if include_grokbot:
+        from . import fleet_hub_grokbot
+
+        snapshot["grokbot"] = fleet_hub_grokbot.deck_projection(conn)
+    return snapshot
 
 
 def list_model_policy(conn: sqlite3.Connection) -> list[dict[str, Any]]:

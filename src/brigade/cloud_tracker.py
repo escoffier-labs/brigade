@@ -473,7 +473,14 @@ def _grokbot_rows(
 
         queue_rows = grokbot_jobs.tracker_rows(target)
     except Exception:  # noqa: BLE001 - tracker remains available when queue storage is unavailable
+        from . import grokbot_jobs
+
+        if grokbot_jobs.hub_authority(target):
+            return [_grokbot_hub_unavailable_row()]
         return []
+
+    if any(isinstance(job, dict) and job.get("degraded") for job in queue_rows):
+        return [_grokbot_hub_unavailable_row()]
 
     rows: list[dict[str, Any]] = []
     for job in queue_rows:
@@ -505,7 +512,7 @@ def _grokbot_rows(
                 "label": job.get("label"),
                 "branch": branch,
                 "dispatched_at": job.get("queued_at"),
-                "source": "grokbot-queue",
+                "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
                 "expected_artifact": artifact,
             },
             provider_tasks={job_id: {"state": job.get("state"), "ready_at": job.get("updated_at")}},
@@ -523,13 +530,27 @@ def _grokbot_rows(
             "state": job.get("state"),
             "classification": classification_row["classification"],
             "artifact_refs": refs,
-            "source": "grokbot-queue",
+            "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
         }
         for key in ("created_at", "updated_at", "queued_at", "claimed_at"):
             if isinstance(job.get(key), str):
                 row[key] = job[key]
         rows.append(row)
     return rows
+
+
+def _grokbot_hub_unavailable_row() -> dict[str, Any]:
+    return {
+        "id": "grokbot:hub-unavailable",
+        "provider": "grokbot-cloud",
+        "job_id": "grokbot-hub-unavailable",
+        "label": "Grok Bot hub unavailable",
+        "state": "unavailable",
+        "classification": "needs-investigation",
+        "degraded": True,
+        "artifact_refs": {"kind": "report"},
+        "source": "grokbot-hub",
+    }
 
 
 def _grokbot_artifact_refs(
@@ -555,9 +576,14 @@ def _grokbot_artifact_refs(
     elif kind == "branch" and isinstance(completed.get("commit"), str):
         refs["head_sha"] = completed["commit"]
     elif kind == "report":
-        for key in ("path", "sha256"):
-            if isinstance(completed.get(key), str):
-                refs[key] = completed[key]
+        if isinstance(completed.get("sha256"), str):
+            refs["sha256"] = completed["sha256"]
+        if isinstance(completed.get("private_snapshot_id"), str):
+            refs["private_snapshot_id"] = completed["private_snapshot_id"]
+        if type(completed.get("size")) is int:
+            refs["size"] = completed["size"]
+        if isinstance(completed.get("path"), str) and not completed.get("private_snapshot_id"):
+            refs["path"] = completed["path"]
     return refs
 
 
@@ -569,6 +595,8 @@ def status_payload(
     github: dict[str, Any] | None = None,
     cursor_wired: bool = False,
 ) -> dict[str, Any]:
+    from . import grokbot_jobs
+
     observed = now or datetime.now(timezone.utc)
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
@@ -590,6 +618,7 @@ def status_payload(
         for entry in registry["entries"]
     ]
     grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
+    grokbot_degraded = any(row.get("degraded") for row in grokbot_rows)
     entries.extend(grokbot_rows)
     known_queue_branches = {
         refs["branch"]
@@ -627,7 +656,11 @@ def status_payload(
                 "authority": "alpha REST" if jules_wired else "unwired",
                 "detail": None if jules_wired else "JULES_API_KEY not set",
             },
-            "grokbot-cloud": {"wired": True, "authority": "local-queue"},
+            "grokbot-cloud": {
+                "wired": True,
+                "authority": "hub" if grokbot_jobs.hub_authority(target) else "local-queue",
+                **({"degraded": True, "detail": "hub unavailable"} if grokbot_degraded else {}),
+            },
             "github": {"wired": True, "authority": "ground-truth"},
         },
         "entries": entries,
