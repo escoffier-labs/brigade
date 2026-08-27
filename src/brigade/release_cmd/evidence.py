@@ -1,17 +1,8 @@
-"""Local release readiness receipts."""
-# ruff: noqa: E402,F401,F403,F811,F821
-
 from __future__ import annotations
 
-import json
-import os
-import re
-import subprocess
-import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from .. import (
     context_cmd,
@@ -20,27 +11,43 @@ from .. import (
     memory_cmd,
     phases_cmd,
     projects_cmd,
-    repos_cmd,
     reportstore,
+    repos_cmd,
     research_cmd,
     roadmap_cmd,
-    scrub,
-    security_cmd,
     tools_cmd,
     work_cmd,
 )
-from ..selection import KNOWN_HARNESSES
 from ..localio import (
     read_json_dict as _read_json,
-    read_jsonl_dicts as _read_jsonl,
     utc_now as _now,
-    write_json as _write_json,
 )
-
-from . import paths as _family_base
+from . import candidate as _candidate_mod
+from . import candidate_audit_ops as _candidate_audit_ops_mod
+from . import ci as _ci_mod
+from . import install_smoke as _install_smoke_mod
+from .paths import (
+    FAIL,
+    OK,
+    PHASE_REPORT_STALE_HOURS,
+    RELEASE_PRIVATE_PATH_RE,
+    RELEASE_PRIVATE_VALUE_RE,
+    WARN,
+    _changed_files,
+    _check_remediation_text,
+    _docs_warnings,
+    _format_readiness_check,
+    _git_state,
+    _latest_closeout_json,
+    _latest_review_closeout,
+    _latest_work_closeout,
+    _release_candidates_archive_root,
+    _release_candidates_root,
+    _release_report_safe_text,
+    _release_runs_root,
+    _security_summary,
+)
 from .version_guard import version_tag_check
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
 
 
 def _read_release_receipt(path: Path) -> dict[str, Any] | None:
@@ -249,6 +256,8 @@ def _resolve_candidate(target: Path, candidate_id: str) -> tuple[dict[str, Any] 
 
 def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     from .. import center_cmd, daily_cmd
+    from ..center_cmd import schema_ops as center_schema_ops
+    from ..daily_cmd import hardening as daily_hardening_ops, run_loop as daily_run_loop
 
     sweep = work_cmd._scanner_sweep_health(target)
     review = work_cmd._review_health(target)
@@ -260,7 +269,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     repo_health = repos_cmd.health(target)
     repo_daily_use = repos_cmd.daily_use_health(target)
     roadmap_health = roadmap_cmd.health(target)
-    dogfood_health = _release_dogfood_health(target)
+    dogfood_health = _candidate_mod._release_dogfood_health(target)
     tool_health = tools_cmd.health(target)
     memory_health = memory_cmd.health(target)
     backup_health = work_cmd._backup_health(target)
@@ -269,8 +278,8 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     phase_ledger = phases_cmd.health(target)
     operator_report_health = center_cmd.report_health(target)
     operator_actions_health = center_cmd.actions_health(target)
-    ci_platform = ci_platform_payload(target)
-    install_smoke = install_smoke_health(target)
+    ci_platform = _ci_mod.ci_platform_payload(target)
+    install_smoke = _install_smoke_mod.install_smoke_health(target)
     return {
         "git": _git_state(target),
         "latest_work_closeout": _latest_work_closeout(target),
@@ -439,7 +448,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
         },
         "operator_center_contract": {
             key: value
-            for key, value in center_cmd._center_contract_health(target).items()
+            for key, value in center_schema_ops._center_contract_health(target).items()
             if key
             in {
                 "schema_version",
@@ -464,8 +473,8 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
         },
         "daily_driver": {
             "health": daily_cmd.health(target),
-            "latest_run": daily_cmd._latest_run(target),
-            "latest_plan": daily_cmd._latest_plan(target),
+            "latest_run": daily_run_loop._latest_run(target),
+            "latest_plan": daily_run_loop._latest_plan(target),
             "telemetry": daily_cmd.telemetry_payload(target).get("metrics"),
         },
         "daily_hardening": {
@@ -484,7 +493,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
                     "workstreams",
                 }
             },
-            "latest_closeout": daily_cmd._latest_hardening_closeout(target),
+            "latest_closeout": daily_hardening_ops._latest_hardening_closeout(target),
         },
         "release_dogfood": {
             "issue_count": dogfood_health.get("issue_count"),
@@ -506,37 +515,37 @@ def _assess(
 ) -> tuple[list[str], list[str]]:
     blockers: list[str] = []
     warnings = list(docs_warnings)
-    git = evidence.get("git") if isinstance(evidence.get("git"), dict) else {}
+    git = raw_git if isinstance((raw_git := evidence.get("git")), dict) else {}
     if git.get("tracked_dirty_count"):
         blockers.append(f"tracked files are dirty: {git.get('tracked_dirty_count')}")
-    closeout = evidence.get("latest_work_closeout") if isinstance(evidence.get("latest_work_closeout"), dict) else None
+    closeout = raw_closeout if isinstance((raw_closeout := evidence.get("latest_work_closeout")), dict) else None
     if closeout is None:
         blockers.append("missing work closeout")
     elif not closeout.get("ready"):
         blockers.append(f"latest work closeout is not ready: {closeout.get('closeout_id')}")
-    verify = evidence.get("latest_verification") if isinstance(evidence.get("latest_verification"), dict) else None
+    verify = raw_verify if isinstance((raw_verify := evidence.get("latest_verification")), dict) else None
     if verify is None:
         blockers.append("missing verification receipt")
     elif verify.get("status") != "completed":
         blockers.append(f"latest verification did not complete: {verify.get('run_id')}")
-    review = evidence.get("code_review") if isinstance(evidence.get("code_review"), dict) else {}
+    review = raw_rev if isinstance((raw_rev := evidence.get("code_review")), dict) else {}
     if review.get("latest_unclosed_run"):
         run = review["latest_unclosed_run"]
         blockers.append(f"review run is not closed out: {run.get('run_id') if isinstance(run, dict) else run}")
     if int(review.get("unresolved_finding_count") or 0) > 0:
         blockers.append(f"code review has unresolved finding(s): {review.get('unresolved_finding_count')}")
-    task_acceptance = evidence.get("task_acceptance") if isinstance(evidence.get("task_acceptance"), dict) else {}
+    task_acceptance = raw_acc if isinstance((raw_acc := evidence.get("task_acceptance")), dict) else {}
     if int(task_acceptance.get("issue_count") or 0) > 0:
-        top_acceptance = task_acceptance.get("top_issue") if isinstance(task_acceptance.get("top_issue"), dict) else {}
+        top_acceptance = raw_top_acc if isinstance((raw_top_acc := task_acceptance.get("top_issue")), dict) else {}
         blockers.append(
             f"task acceptance has issue(s): {top_acceptance.get('detail') or task_acceptance.get('issue_count')}"
         )
-    sweep = evidence.get("scanner_sweep") if isinstance(evidence.get("scanner_sweep"), dict) else {}
-    sweep_review = sweep.get("review") if isinstance(sweep.get("review"), dict) else {}
+    sweep = raw_sw if isinstance((raw_sw := evidence.get("scanner_sweep")), dict) else {}
+    sweep_review = raw_sw_rev if isinstance((raw_sw_rev := sweep.get("review")), dict) else {}
     if int(sweep_review.get("issue_count") or 0) > 0:
         blockers.append(f"scanner sweep has unresolved issue(s): {sweep_review.get('issue_count')}")
-    security = evidence.get("security") if isinstance(evidence.get("security"), dict) else {}
-    security_evidence = security.get("evidence") if isinstance(security.get("evidence"), dict) else {}
+    security = raw_sec if isinstance((raw_sec := evidence.get("security")), dict) else {}
+    security_evidence = raw_sec_ev if isinstance((raw_sec_ev := security.get("evidence")), dict) else {}
     candidate_commit = git.get("head")
     evidence_commit = security_evidence.get("candidate_commit")
     if not candidate_commit or evidence_commit != candidate_commit:
@@ -551,7 +560,7 @@ def _assess(
     security_health_checks = [
         item for item in security_checks if item.get("name") != "security_open_findings" and item.get("status") != OK
     ]
-    top_finding = security.get("top_finding") if isinstance(security.get("top_finding"), dict) else None
+    top_finding = raw_top_find if isinstance((raw_top_find := security.get("top_finding")), dict) else None
     reported_open_finding_count = security.get("open_finding_count")
     open_finding_count = (
         reported_open_finding_count
@@ -594,53 +603,51 @@ def _assess(
             blockers.append(message)
         else:
             warnings.append(message)
-    ci_platform = evidence.get("ci_platform") if isinstance(evidence.get("ci_platform"), dict) else {}
+    ci_platform = raw_ci if isinstance((raw_ci := evidence.get("ci_platform")), dict) else {}
     if int(ci_platform.get("issue_count") or 0) > 0:
-        top_ci = ci_platform.get("top_issue") if isinstance(ci_platform.get("top_issue"), dict) else {}
+        top_ci = raw_top_ci if isinstance((raw_top_ci := ci_platform.get("top_issue")), dict) else {}
         warnings.append(
             f"ci platform deprecation warning(s): {top_ci.get('safe_excerpt') or ci_platform.get('issue_count')}"
         )
-    install_smoke = evidence.get("install_smoke") if isinstance(evidence.get("install_smoke"), dict) else {}
+    install_smoke = raw_smk if isinstance((raw_smk := evidence.get("install_smoke")), dict) else {}
     if int(install_smoke.get("issue_count") or 0) > 0:
-        top_smoke = install_smoke.get("top_issue") if isinstance(install_smoke.get("top_issue"), dict) else {}
+        top_smoke = raw_top_smk if isinstance((raw_top_smk := install_smoke.get("top_issue")), dict) else {}
         warnings.append(f"install smoke matrix issue(s): {top_smoke.get('detail') or install_smoke.get('issue_count')}")
-    handoffs = evidence.get("handoff_drafts") if isinstance(evidence.get("handoff_drafts"), dict) else {}
+    handoffs = raw_ho if isinstance((raw_ho := evidence.get("handoff_drafts")), dict) else {}
     if int(handoffs.get("issue_count") or 0) > 0:
         blockers.append(f"handoff draft queue has issue(s): {handoffs.get('issue_count')}")
-    research_handoffs = evidence.get("research_handoffs") if isinstance(evidence.get("research_handoffs"), dict) else {}
+    research_handoffs = raw_rho if isinstance((raw_rho := evidence.get("research_handoffs")), dict) else {}
     if int(research_handoffs.get("issue_count") or 0) > 0:
-        top_research = (
-            research_handoffs.get("top_issue") if isinstance(research_handoffs.get("top_issue"), dict) else {}
-        )
+        top_research = raw_top_res if isinstance((raw_top_res := research_handoffs.get("top_issue")), dict) else {}
         warnings.append(
             f"research handoff export issue(s): {top_research.get('run_id') or research_handoffs.get('issue_count')}"
         )
-    operator_report = evidence.get("operator_report") if isinstance(evidence.get("operator_report"), dict) else {}
+    operator_report = raw_or if isinstance((raw_or := evidence.get("operator_report")), dict) else {}
     if int(operator_report.get("issue_count") or 0) > 0:
-        top_report = operator_report.get("top_issue") if isinstance(operator_report.get("top_issue"), dict) else {}
+        top_report = raw_top_rep if isinstance((raw_top_rep := operator_report.get("top_issue")), dict) else {}
         warnings.append(
             f"operator report has issue(s): {top_report.get('detail') or operator_report.get('issue_count')}"
         )
-    operator_actions = evidence.get("operator_actions") if isinstance(evidence.get("operator_actions"), dict) else {}
+    operator_actions = raw_oa if isinstance((raw_oa := evidence.get("operator_actions")), dict) else {}
     if int(operator_actions.get("open_count") or 0) > 0:
-        top_action = operator_actions.get("top_action") if isinstance(operator_actions.get("top_action"), dict) else {}
+        top_action = raw_top_act if isinstance((raw_top_act := operator_actions.get("top_action")), dict) else {}
         warnings.append(
             f"operator action queue has open action(s): {top_action.get('action_id') or operator_actions.get('open_count')}"
         )
-    repo_fleet = evidence.get("repo_fleet") if isinstance(evidence.get("repo_fleet"), dict) else {}
-    repo_actions = repo_fleet.get("actions") if isinstance(repo_fleet.get("actions"), dict) else {}
+    repo_fleet = raw_rf if isinstance((raw_rf := evidence.get("repo_fleet")), dict) else {}
+    repo_actions = raw_ra if isinstance((raw_ra := repo_fleet.get("actions")), dict) else {}
     if int(repo_actions.get("open_count") or 0) > 0:
-        top_action = repo_actions.get("top_action") if isinstance(repo_actions.get("top_action"), dict) else {}
+        top_action = raw_top_ract if isinstance((raw_top_ract := repo_actions.get("top_action")), dict) else {}
         warnings.append(
             f"repo fleet action queue has open action(s): {top_action.get('fleet_action_id') or repo_actions.get('open_count')}"
         )
-    repo_sweep = repo_fleet.get("sweep") if isinstance(repo_fleet.get("sweep"), dict) else {}
+    repo_sweep = raw_rsw if isinstance((raw_rsw := repo_fleet.get("sweep")), dict) else {}
     if int(repo_sweep.get("issue_count") or 0) > 0:
-        top_sweep = repo_sweep.get("top_issue") if isinstance(repo_sweep.get("top_issue"), dict) else {}
+        top_sweep = raw_top_rsw if isinstance((raw_top_rsw := repo_sweep.get("top_issue")), dict) else {}
         warnings.append(f"repo fleet sweep has issue(s): {top_sweep.get('detail') or repo_sweep.get('issue_count')}")
-    repo_release = repo_fleet.get("release_train") if isinstance(repo_fleet.get("release_train"), dict) else {}
+    repo_release = raw_rrel if isinstance((raw_rrel := repo_fleet.get("release_train")), dict) else {}
     if int(repo_release.get("issue_count") or 0) > 0:
-        top_release = repo_release.get("top_issue") if isinstance(repo_release.get("top_issue"), dict) else {}
+        top_release = raw_top_rrel if isinstance((raw_top_rrel := repo_release.get("top_issue")), dict) else {}
         warnings.append(
             f"repo fleet release train has issue(s): {top_release.get('detail') or repo_release.get('issue_count')}"
         )
@@ -656,11 +663,11 @@ def _payload(target: Path, *, base_ref: str | None, run_checks: bool, policy: st
     evidence = _evidence(target, base_ref=base_ref)
     checks: list[dict[str, Any]] = []
     if run_checks:
-        checks.append(_run_content_guard_check(target, name="tip", policy=policy, base_ref=base_ref))
+        checks.append(_ci_mod._run_content_guard_check(target, name="tip", policy=policy, base_ref=base_ref))
         if base_ref:
-            checks.append(_run_content_guard_check(target, name="introduced", policy=policy, base_ref=base_ref))
+            checks.append(_ci_mod._run_content_guard_check(target, name="introduced", policy=policy, base_ref=base_ref))
         checks.append(version_tag_check(target))
-    elif not _content_guard_available(target):
+    elif not _ci_mod._content_guard_available(target):
         checks.append(
             {"name": "content_guard", "status": WARN, "detail": "content-guard not available", "available": False}
         )
@@ -680,23 +687,27 @@ def _payload(target: Path, *, base_ref: str | None, run_checks: bool, policy: st
 
 
 def _payload_with_candidate_health(payload: dict[str, Any], target: Path) -> dict[str, Any]:
-    candidate_health = _candidate_health(target)
-    checks = list(payload.get("checks") if isinstance(payload.get("checks"), list) else [])
-    checks.extend(candidate_health.get("checks") if isinstance(candidate_health.get("checks"), list) else [])
+    candidate_health = _candidate_mod._candidate_health(target)
+    checks: list[dict[str, Any]] = list(raw_chk if isinstance((raw_chk := payload.get("checks")), list) else [])
+    checks.extend(raw_c_chk if isinstance((raw_c_chk := candidate_health.get("checks")), list) else [])
     checks.extend(_phase_release_checks(target))
     latest_candidate = candidate_health.get("latest") if isinstance(candidate_health.get("latest"), dict) else None
     if latest_candidate is not None:
-        audit = _candidate_audit_payload(target, latest_candidate)
+        audit = _candidate_audit_ops_mod._candidate_audit_payload(target, latest_candidate)
+        raw_issues = audit.get("issues")
+        issues = raw_issues if isinstance(raw_issues, list) else []
         checks.extend(
             {
                 "status": issue.get("status", WARN),
                 "name": f"release_candidate_audit_{issue.get('name')}",
                 "detail": issue.get("detail"),
             }
-            for issue in audit.get("issues", [])
+            for issue in issues
+            if isinstance(issue, dict)
         )
+    evidence = raw_ev if isinstance((raw_ev := payload.get("evidence")), dict) else {}
     blockers, warnings = _assess(
-        payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {},
+        evidence,
         checks,
         _docs_warnings(target, payload.get("base_ref") if isinstance(payload.get("base_ref"), str) else None),
     )
