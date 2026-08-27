@@ -9,7 +9,7 @@ from ..localio import (
     utc_now as _now,
     write_json as _write_json,
 )
-from . import evidence as _evidence
+from . import evidence as _evidence_mod
 from .paths import _release_runs_root
 
 
@@ -20,7 +20,7 @@ def run(*, target: Path, base_ref: str | None = "origin/main", json_output: bool
         return 2
     started = _now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-release-{uuid4().hex[:6]}"
-    payload = _evidence._payload(target, base_ref=base_ref, run_checks=True)
+    payload = _evidence_mod._payload(target, base_ref=base_ref, run_checks=True)
     completed = _now()
     receipt = {
         **payload,
@@ -32,7 +32,7 @@ def run(*, target: Path, base_ref: str | None = "origin/main", json_output: bool
     }
     receipt_path = _release_runs_root(target) / run_id / "receipt.json"
     _write_json(receipt_path, receipt)
-    _evidence._write_release_markdown(receipt_path, receipt)
+    _evidence_mod._write_release_markdown(receipt_path, receipt)
     if json_output:
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return 0 if receipt["ready"] else 1
@@ -53,7 +53,7 @@ def runs(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    items = _evidence._release_receipts(target)[:limit]
+    items = _evidence_mod._release_receipts(target)[:limit]
     payload = {"target": str(target), "release_runs_root": str(_release_runs_root(target)), "runs": items}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -75,7 +75,7 @@ def show(*, target: Path, run_id: str, json_output: bool = False) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    receipt, error = _evidence._resolve_release_receipt(target, run_id)
+    receipt, error = _evidence_mod._resolve_release_receipt(target, run_id)
     if receipt is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2

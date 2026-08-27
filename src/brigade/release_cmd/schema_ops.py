@@ -5,8 +5,8 @@ from typing import Any
 
 from .. import repos_cmd
 from ..localio import utc_now as _now
-from . import candidate as _candidate
-from . import evidence as _evidence
+from . import candidate as _candidate_mod
+from . import evidence as _evidence_mod
 from .paths import (
     OK,
     SCHEMA_MANIFEST_VERSION,
@@ -135,8 +135,8 @@ def _latest_fleet_release_train(target: Path) -> dict[str, Any] | None:
 
 
 def _schema_manifest(target: Path) -> dict[str, Any]:
-    latest_readiness = _evidence._latest_release_receipt(target)
-    latest_candidate = _evidence._latest_candidate(target)
+    latest_readiness = _evidence_mod._latest_release_receipt(target)
+    latest_candidate = _evidence_mod._latest_candidate(target)
     latest_train = _latest_fleet_release_train(target)
     waivers_path = target / ".brigade" / "repos" / "releases" / "waivers.jsonl"
     manual_evidence_path = target / ".brigade" / "repos" / "releases" / "evidence.jsonl"
@@ -155,7 +155,7 @@ def _schema_manifest(target: Path) -> dict[str, Any]:
             "detail": str(latest_candidate.get("path")) if latest_candidate else "no release candidate evidence found",
         }
     )
-    candidate_health = _candidate._candidate_health(target)
+    candidate_health = _candidate_mod._candidate_health(target)
     checks.extend(
         candidate_health_checks if isinstance((candidate_health_checks := candidate_health.get("checks")), list) else []
     )
@@ -189,9 +189,9 @@ def _schema_manifest(target: Path) -> dict[str, Any]:
         "schema_count": len(_schema_manifest_schemas()),
         "schemas": _schema_manifest_schemas(),
         "latest": {
-            "release_readiness": _candidate._receipt_ref(latest_readiness, "run_id"),
-            "release_candidate": _candidate._receipt_ref(latest_candidate, "candidate_id"),
-            "fleet_release_train": _candidate._receipt_ref(latest_train, "train_id"),
+            "release_readiness": _candidate_mod._receipt_ref(latest_readiness, "run_id"),
+            "release_candidate": _candidate_mod._receipt_ref(latest_candidate, "candidate_id"),
+            "fleet_release_train": _candidate_mod._receipt_ref(latest_train, "train_id"),
         },
         "checks": checks,
         "issue_count": len([check for check in checks if check.get("status") != OK]),

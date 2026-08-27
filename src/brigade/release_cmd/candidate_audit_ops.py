@@ -8,8 +8,8 @@ from typing import Any
 
 from .. import phases_cmd, reportstore, security_cmd, work_cmd
 from ..localio import utc_now as _now
-from . import candidate as _candidate
-from . import evidence as _evidence
+from . import candidate as _candidate_mod
+from . import evidence as _evidence_mod
 from .paths import (
     RELEASE_CANDIDATE_STALE_HOURS,
     RELEASE_PRIVATE_PATH_RE,
@@ -108,7 +108,7 @@ def _candidate_audit_payload(target: Path, candidate: dict[str, Any]) -> dict[st
     docs_changed = _candidate_docs_changed_after_build(candidate)
     if docs_changed:
         issues.append({"status": WARN, "name": "candidate_docs_changed", "detail": ", ".join(docs_changed)})
-    current_contract = _candidate._command_contract_snapshot(target)
+    current_contract = _candidate_mod._command_contract_snapshot(target)
     candidate_contract = raw_contract if isinstance((raw_contract := candidate.get("command_contract")), dict) else {}
     if not candidate_contract.get("fingerprint"):
         issues.append(
@@ -151,7 +151,7 @@ def candidate_audit(*, target: Path, candidate_id: str = "latest", json_output: 
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _evidence._resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -174,7 +174,7 @@ def candidate_import_issues(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _evidence._resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -239,14 +239,14 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _evidence._resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
     candidate_created = work_cmd._parse_iso_datetime(candidate.get("created_at"))
     current_git = _git_state(target)
     candidate_git = raw_git if isinstance((raw_git := candidate.get("git")), dict) else {}
-    latest_release = _evidence._latest_release_receipt(target)
+    latest_release = _evidence_mod._latest_release_receipt(target)
     latest_verify = work_cmd._latest_verify_receipt(target)
     review_health = work_cmd._review_health(target)
     latest_review = raw_review if isinstance((raw_review := review_health.get("latest_run")), dict) else None
@@ -530,7 +530,7 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
                     "detail": f"{candidate_gate_key} -> {current_gate_key}",
                 }
             )
-    phase_checks = _evidence._phase_release_checks(target)
+    phase_checks = _evidence_mod._phase_release_checks(target)
     issues.extend(
         {"status": check.get("status", WARN), "name": f"release_{check.get('name')}", "detail": check.get("detail")}
         for check in phase_checks
@@ -577,7 +577,7 @@ def candidate_closeout(
     if status not in {"draft", "reviewed", "superseded", "archived"}:
         print("error: --status must be one of draft, reviewed, superseded, archived", file=sys.stderr)
         return 2
-    candidate, error = _evidence._resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2

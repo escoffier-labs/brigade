@@ -11,7 +11,7 @@ from typing import Any
 from .. import scrub, security_cmd, work_cmd
 from ..guard.audit import run_audit
 from ..guard.policy import load_policy
-from . import evidence as _evidence
+from . import evidence as _evidence_mod
 from .paths import (
     CI_ACTION_REF_RE,
     CI_DEPRECATED_ACTION_MAJORS,
@@ -30,7 +30,7 @@ def _safe_path_label(target: Path, path: Path) -> str:
 
 
 def _ci_safe_excerpt(text: str) -> str:
-    excerpt = _evidence._release_safe_text(text.strip())
+    excerpt = _evidence_mod._release_safe_text(text.strip())
     excerpt = security_cmd._redact_secret_evidence(excerpt)
     if len(excerpt) > 220:
         return excerpt[:217].rstrip() + "..."

@@ -10,8 +10,8 @@ from .. import reportstore, roadmap_cmd, work_cmd
 from ..guard.engine import scan_text
 from ..guard.policy import Policy, default_policy, load_policy
 from ..localio import utc_now as _now
-from . import evidence as _evidence
-from . import schema_ops as _schema_ops
+from . import evidence as _evidence_mod
+from . import schema_ops as _schema_ops_mod
 from .paths import (
     RELEASE_CANDIDATE_STALE_HOURS,
     RELEASE_PRIVATE_PATH_RE,
@@ -40,7 +40,7 @@ def _commit_subjects(target: Path, base_ref: str | None) -> list[str]:
     result = _git(target, *args)
     if result.returncode != 0:
         return []
-    return [_evidence._release_safe_text(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+    return [_evidence_mod._release_safe_text(line.strip()) for line in result.stdout.splitlines() if line.strip()]
 
 
 def _commit_messages(target: Path, base_ref: str | None, *, guard_policy: Policy) -> list[str]:
@@ -61,7 +61,7 @@ def _commit_messages(target: Path, base_ref: str | None, *, guard_policy: Policy
 
 
 def _release_safe_commit_text(message: str, *, guard_policy: Policy) -> str:
-    cleaned = _evidence._release_safe_text(message.strip())
+    cleaned = _evidence_mod._release_safe_text(message.strip())
     return scan_text(cleaned, policy=guard_policy).redacted_text.strip()
 
 
@@ -149,10 +149,10 @@ def _release_receipt_matches_head(receipt: dict[str, Any], target: Path, *, base
 
 
 def _latest_release_or_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
-    latest = _evidence._latest_release_receipt(target)
+    latest = _evidence_mod._latest_release_receipt(target)
     if latest is not None and _release_receipt_matches_head(latest, target, base_ref=base_ref):
         return latest
-    payload = _evidence._payload(target, base_ref=base_ref, run_checks=True)
+    payload = _evidence_mod._payload(target, base_ref=base_ref, run_checks=True)
     return {
         **payload,
         "run_id": "inline-readiness",
@@ -232,7 +232,7 @@ def _candidate_payload(target: Path, *, base_ref: str | None, guard_policy: str 
         "phase_ledger": evidence.get("phase_ledger"),
         "git": git,
         "changed_files": changed_files,
-        "docs_touch_status": _evidence._candidate_docs_touch([str(item) for item in changed_files]),
+        "docs_touch_status": _evidence_mod._candidate_docs_touch([str(item) for item in changed_files]),
         "content_guard": {
             str(check.get("name")): check
             for check in readiness.get("checks", [])
@@ -274,7 +274,7 @@ def _command_contract_snapshot(target: Path) -> dict[str, Any]:
 
 def _candidate_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    latest = _evidence._latest_candidate(target)
+    latest = _evidence_mod._latest_candidate(target)
     checks: list[dict[str, Any]] = []
     if latest is None:
         checks.append(
@@ -348,8 +348,8 @@ def _release_dogfood_health(target: Path) -> dict[str, Any]:
         }
 
     checks: list[dict[str, Any]] = []
-    latest_readiness = _evidence._latest_release_receipt(target)
-    latest_candidate = _evidence._latest_candidate(target)
+    latest_readiness = _evidence_mod._latest_release_receipt(target)
+    latest_candidate = _evidence_mod._latest_candidate(target)
     latest_daily_run = daily_run_loop._latest_run(target)
     if latest_readiness is None:
         checks.append(
@@ -433,7 +433,7 @@ def _release_dogfood_health(target: Path) -> dict[str, Any]:
                     "suggested_next_command": "brigade daily closeout --json",
                 }
             )
-    schema_ids = {schema["id"] for schema in _schema_ops._schema_manifest_schemas()}
+    schema_ids = {schema["id"] for schema in _schema_ops_mod._schema_manifest_schemas()}
     if "release-dogfood-health" not in schema_ids:
         checks.append(
             {
@@ -558,7 +558,7 @@ def plan(*, target: Path, base_ref: str | None = "origin/main", json_output: boo
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = _evidence._payload(target, base_ref=base_ref, run_checks=False)
+    payload = _evidence_mod._payload(target, base_ref=base_ref, run_checks=False)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -579,8 +579,8 @@ def doctor(*, target: Path, base_ref: str | None = "origin/main", json_output: b
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = _evidence._payload_with_candidate_health(
-        _evidence._payload(target, base_ref=base_ref, run_checks=True), target
+    payload = _evidence_mod._payload_with_candidate_health(
+        _evidence_mod._payload(target, base_ref=base_ref, run_checks=True), target
     )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -601,7 +601,7 @@ def schema(*, target: Path, json_output: bool = False) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = _schema_ops._schema_manifest(target)
+    payload = _schema_ops_mod._schema_manifest(target)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -697,7 +697,7 @@ def candidate_list(*, target: Path, limit: int = 20, json_output: bool = False) 
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidates = _evidence._release_candidates(target)[:limit]
+    candidates = _evidence_mod._release_candidates(target)[:limit]
     payload = {"target": str(target), "candidate_root": str(_release_candidates_root(target)), "candidates": candidates}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -719,7 +719,7 @@ def candidate_show(*, target: Path, candidate_id: str, json_output: bool = False
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _evidence._resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -742,7 +742,7 @@ def candidate_archive(*, target: Path, candidate_id: str, json_output: bool = Fa
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _evidence._resolve_candidate(target, candidate_id)
+    candidate, error = _evidence_mod._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2

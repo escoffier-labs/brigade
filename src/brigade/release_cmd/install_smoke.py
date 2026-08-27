@@ -12,7 +12,7 @@ from ..localio import (
     utc_now as _now,
 )
 from ..selection import KNOWN_HARNESSES
-from . import evidence as _evidence
+from . import evidence as _evidence_mod
 from .paths import (
     INSTALL_SMOKE_MATRIX,
     INSTALL_SMOKE_STALE_HOURS,
@@ -85,17 +85,17 @@ def _install_smoke_record_from_payload(payload: dict[str, Any]) -> dict[str, Any
         "depth": depth,
         "harnesses": harnesses,
         "status": status,
-        "command_label": _evidence._release_safe_text(
+        "command_label": _evidence_mod._release_safe_text(
             str(
                 payload.get("command_label")
                 or f"brigade init --depth {depth} --harnesses {','.join(harnesses) or 'none'}"
             )
         ),
-        "safe_summary": _evidence._release_safe_text(
+        "safe_summary": _evidence_mod._release_safe_text(
             str(payload.get("safe_summary") or payload.get("summary") or f"install smoke {status}")
         ),
-        "stdout_summary": _evidence._release_safe_text(str(payload.get("stdout_summary") or "")),
-        "stderr_summary": _evidence._release_safe_text(str(payload.get("stderr_summary") or "")),
+        "stdout_summary": _evidence_mod._release_safe_text(str(payload.get("stdout_summary") or "")),
+        "stderr_summary": _evidence_mod._release_safe_text(str(payload.get("stderr_summary") or "")),
         "duration_seconds": payload.get("duration_seconds"),
         "created_at": completed_at,
         "completed_at": completed_at,

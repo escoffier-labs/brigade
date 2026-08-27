@@ -22,10 +22,10 @@ from ..localio import (
     read_json_dict as _read_json,
     utc_now as _now,
 )
-from . import candidate as _candidate
-from . import candidate_audit_ops as _candidate_audit_ops
-from . import ci as _ci
-from . import install_smoke as _install_smoke
+from . import candidate as _candidate_mod
+from . import candidate_audit_ops as _candidate_audit_ops_mod
+from . import ci as _ci_mod
+from . import install_smoke as _install_smoke_mod
 from .paths import (
     FAIL,
     OK,
@@ -269,7 +269,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     repo_health = repos_cmd.health(target)
     repo_daily_use = repos_cmd.daily_use_health(target)
     roadmap_health = roadmap_cmd.health(target)
-    dogfood_health = _candidate._release_dogfood_health(target)
+    dogfood_health = _candidate_mod._release_dogfood_health(target)
     tool_health = tools_cmd.health(target)
     memory_health = memory_cmd.health(target)
     backup_health = work_cmd._backup_health(target)
@@ -278,8 +278,8 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     phase_ledger = phases_cmd.health(target)
     operator_report_health = center_cmd.report_health(target)
     operator_actions_health = center_cmd.actions_health(target)
-    ci_platform = _ci.ci_platform_payload(target)
-    install_smoke = _install_smoke.install_smoke_health(target)
+    ci_platform = _ci_mod.ci_platform_payload(target)
+    install_smoke = _install_smoke_mod.install_smoke_health(target)
     return {
         "git": _git_state(target),
         "latest_work_closeout": _latest_work_closeout(target),
@@ -663,11 +663,11 @@ def _payload(target: Path, *, base_ref: str | None, run_checks: bool, policy: st
     evidence = _evidence(target, base_ref=base_ref)
     checks: list[dict[str, Any]] = []
     if run_checks:
-        checks.append(_ci._run_content_guard_check(target, name="tip", policy=policy, base_ref=base_ref))
+        checks.append(_ci_mod._run_content_guard_check(target, name="tip", policy=policy, base_ref=base_ref))
         if base_ref:
-            checks.append(_ci._run_content_guard_check(target, name="introduced", policy=policy, base_ref=base_ref))
+            checks.append(_ci_mod._run_content_guard_check(target, name="introduced", policy=policy, base_ref=base_ref))
         checks.append(version_tag_check(target))
-    elif not _ci._content_guard_available(target):
+    elif not _ci_mod._content_guard_available(target):
         checks.append(
             {"name": "content_guard", "status": WARN, "detail": "content-guard not available", "available": False}
         )
@@ -687,13 +687,13 @@ def _payload(target: Path, *, base_ref: str | None, run_checks: bool, policy: st
 
 
 def _payload_with_candidate_health(payload: dict[str, Any], target: Path) -> dict[str, Any]:
-    candidate_health = _candidate._candidate_health(target)
+    candidate_health = _candidate_mod._candidate_health(target)
     checks: list[dict[str, Any]] = list(raw_chk if isinstance((raw_chk := payload.get("checks")), list) else [])
     checks.extend(raw_c_chk if isinstance((raw_c_chk := candidate_health.get("checks")), list) else [])
     checks.extend(_phase_release_checks(target))
     latest_candidate = candidate_health.get("latest") if isinstance(candidate_health.get("latest"), dict) else None
     if latest_candidate is not None:
-        audit = _candidate_audit_ops._candidate_audit_payload(target, latest_candidate)
+        audit = _candidate_audit_ops_mod._candidate_audit_payload(target, latest_candidate)
         raw_issues = audit.get("issues")
         issues = raw_issues if isinstance(raw_issues, list) else []
         checks.extend(
