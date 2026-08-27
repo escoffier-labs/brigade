@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
@@ -137,6 +138,15 @@ _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_CLASS = 9
 _WINDOWS_CREATE_SUSPENDED = 0x00000004
 _THREAD_SUSPEND_RESUME = 0x0002
+_WINDOWS_DETACHED_PROCESS = 0x00000008
+_WINDOWS_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+# CreateProcess refuses CREATE_BREAKAWAY_FROM_JOB with ERROR_ACCESS_DENIED when
+# the ambient job object was not opened with JOB_OBJECT_LIMIT_BREAKAWAY_OK.
+_WINDOWS_BREAKAWAY_DENIED_WINERROR = 5
+DETACH_MODE_POSIX_SESSION = "posix-new-session"
+DETACH_MODE_WINDOWS_JOB_BREAKAWAY = "windows-detached-new-group-job-breakaway"
+DETACH_MODE_WINDOWS_NO_BREAKAWAY = "windows-detached-new-group"
+DETACH_MODE_INHERITED = "inherited"
 
 
 class _WindowsChildJob:
@@ -623,6 +633,81 @@ def _process_group_kwargs(*, suspend: bool = False) -> dict[str, Any]:
 def process_group_kwargs() -> dict[str, Any]:
     """Public launcher kwargs so callers start children in their own group."""
     return _process_group_kwargs()
+
+
+def detached_launch_kwargs(*, job_breakaway: bool = True) -> dict[str, Any]:
+    """Launcher kwargs for a child that must outlive its parent's session.
+
+    ``process_group_kwargs`` only isolates signal delivery while the parent
+    lives. Detaching needs more: the child must survive the parent's session,
+    controlling terminal, console, and job object going away.
+    """
+
+    if os.name == "posix":
+        # setsid() drops the controlling terminal, so the SIGHUP an SSH
+        # disconnect delivers to the session stops at the parent.
+        return {"start_new_session": True}
+    if os.name == "nt":
+        # start_new_session is accepted and then silently discarded on Windows
+        # (CPython binds it as unused_start_new_session in the Windows
+        # _execute_child). Without explicit creation flags the child keeps the
+        # parent's console, so the ConPTY teardown that follows an SSH session
+        # exit sends it CTRL_CLOSE_EVENT and kills it. DETACHED_PROCESS gives
+        # it no console at all, CREATE_NEW_PROCESS_GROUP keeps console control
+        # events off it, and CREATE_BREAKAWAY_FROM_JOB escapes a kill-on-close
+        # job object when the ambient job permits breakaway.
+        flags = _WINDOWS_DETACHED_PROCESS | _WINDOWS_NEW_PROCESS_GROUP
+        if job_breakaway:
+            flags |= _WINDOWS_CREATE_BREAKAWAY_FROM_JOB
+        return {"creationflags": flags}
+    return {}
+
+
+def _is_windows_breakaway_denied(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) == _WINDOWS_BREAKAWAY_DENIED_WINERROR
+
+
+def spawn_detached(
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    stdin: Any = subprocess.DEVNULL,
+    stdout: Any = subprocess.DEVNULL,
+    stderr: Any = subprocess.STDOUT,
+    popen: Any = None,
+) -> tuple[subprocess.Popen[Any], str]:
+    """Start ``argv`` so it survives the parent's session, console, and job.
+
+    Returns the process and a short, secret-free mode label naming the detach
+    mechanism actually used, so a run receipt or log can say why a child did or
+    did not outlive its parent without echoing argv or environment.
+    """
+
+    launcher = subprocess.Popen if popen is None else popen
+
+    def launch(job_breakaway: bool) -> subprocess.Popen[Any]:
+        return launcher(  # type: ignore[no-any-return]
+            argv,
+            cwd=cwd,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            **detached_launch_kwargs(job_breakaway=job_breakaway),
+        )
+
+    if os.name == "nt":
+        try:
+            return launch(True), DETACH_MODE_WINDOWS_JOB_BREAKAWAY
+        except OSError as exc:
+            if not _is_windows_breakaway_denied(exc):
+                raise
+        # The ambient job forbids breakaway. A console-less child in its own
+        # process group still beats inheriting the console, so keep going
+        # rather than failing the detach outright.
+        return launch(False), DETACH_MODE_WINDOWS_NO_BREAKAWAY
+    if os.name == "posix":
+        return launch(True), DETACH_MODE_POSIX_SESSION
+    return launch(True), DETACH_MODE_INHERITED
 
 
 def terminate_process_tree(

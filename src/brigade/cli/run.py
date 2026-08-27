@@ -947,16 +947,21 @@ def _dispatch_detached(
                 roster_resolution=roster_resolution,
                 output_dir=output_dir,
             )
+            detach_mode = proc_mod.DETACH_MODE_INHERITED
             try:
                 with log_path.open("a", encoding="utf-8") as log:
-                    child = Popen(
+                    child, detach_mode = proc_mod.spawn_detached(
                         argv,
                         cwd=run_cwd,
                         stdin=DEVNULL,
                         stdout=log,
                         stderr=STDOUT,
-                        start_new_session=True,
+                        popen=Popen,
                     )
+                    # Mode name only: no argv, environment, or task text, so the
+                    # log stays safe to hand to an operator verbatim.
+                    log.write(f"brigade detach: {detach_mode}\n")
+                    log.flush()
                     startup_registry.register(child)
             except OSError as exc:
                 if child is not None:
@@ -1028,7 +1033,7 @@ def _dispatch_detached(
                     file=sys.stderr,
                 )
             print(f"run: {output_dir.name}")
-            print(f"detached: pid {child.pid}", file=sys.stderr)
+            print(f"detached: pid {child.pid} ({detach_mode})", file=sys.stderr)
             print(f"artifacts: {output_dir}", file=sys.stderr)
             print(f"log: {log_path}", file=sys.stderr)
             return 0
