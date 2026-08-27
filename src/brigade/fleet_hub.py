@@ -1457,7 +1457,7 @@ def handle_model_policy(
     action = raw.get("action") if isinstance(raw, dict) else None
     if action == "set":
         if caller_node is not None:
-            raise FleetHubForbidden("node tokens may not mutate model policy")
+            raise FleetHubForbidden("the admin token is required to mutate model policy")
         return 200, {"updated": True, "policy": set_model_policy(conn, raw)}
     request = _validate_model_lease_request(raw)
     if caller_node is not None and request["node_id"] != caller_node:
