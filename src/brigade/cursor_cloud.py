@@ -140,6 +140,47 @@ def _default_opener(request: urllib.request.Request, timeout: float | None = Non
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+_ISO_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z?$")
+_USAGE_KEYS = (
+    ("inputTokens", "input_tokens"),
+    ("outputTokens", "output_tokens"),
+    ("cacheWriteTokens", "cache_write_tokens"),
+    ("cacheReadTokens", "cache_read_tokens"),
+    ("totalTokens", "total_tokens"),
+)
+_MAX_DURATION_MS = 7 * 24 * 3600 * 1000
+_MAX_TOKEN_COUNT = 1_000_000_000
+
+
+def _safe_timestamp(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text if text and _ISO_TS_RE.fullmatch(text) else None
+
+
+def _safe_duration_ms(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if 0 <= value <= _MAX_DURATION_MS:
+        return value
+    return None
+
+
+def sanitize_token_usage(raw: object) -> dict[str, int] | None:
+    """Keep only non-negative token counts. Drop URLs, ids, and unknown keys."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, int] = {}
+    for camel, snake in _USAGE_KEYS:
+        value = raw.get(camel, raw.get(snake))
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        if 0 <= value <= _MAX_TOKEN_COUNT:
+            out[snake] = value
+    return out or None
+
+
 def get_run(
     agent_id: str,
     run_id: str,
@@ -149,13 +190,75 @@ def get_run(
     deadline: float = DEFAULT_DEADLINE,
     opener=None,
 ) -> dict[str, Any]:
-    """GET /v1/agents/{agent_id}/runs/{run_id}."""
+    """GET /v1/agents/{agent_id}/runs/{run_id}.
+
+    Returns sanitized identity and status metadata. Prompt text, assistant
+    replies, git URLs, and artifact URLs are discarded.
+    """
     url = f"{base_url.rstrip('/')}/v1/agents/{agent_id}/runs/{run_id}"
     payload = _call(opener or _default_opener, _build_request(url, api_key), deadline=deadline)
-    return {
-        "id": payload.get("id") if isinstance(payload.get("id"), str) else run_id,
+    raw_id = payload.get("id")
+    raw_agent = payload.get("agentId")
+    row: dict[str, Any] = {
+        "id": raw_id if isinstance(raw_id, str) else run_id,
+        "agent_id": raw_agent if isinstance(raw_agent, str) else agent_id,
         "state": normalize_state(payload.get("status") or payload.get("state")),
     }
+    updated = _safe_timestamp(payload.get("updatedAt") or payload.get("updated_at"))
+    if updated:
+        row["updated_at"] = updated
+    created = _safe_timestamp(payload.get("createdAt") or payload.get("created_at"))
+    if created:
+        row["created_at"] = created
+    duration = _safe_duration_ms(payload.get("durationMs", payload.get("duration_ms")))
+    if duration is not None:
+        row["duration_ms"] = duration
+    return row
+
+
+def get_agent_usage(
+    agent_id: str,
+    api_key: str,
+    *,
+    run_id: str | None = None,
+    base_url: str = DEFAULT_BASE_URL,
+    deadline: float = DEFAULT_DEADLINE,
+    opener=None,
+) -> dict[str, int] | None:
+    """GET /v1/agents/{agent_id}/usage. Returns sanitized token counts or None.
+
+    403 (feature unavailable) and 404 (unknown run) are non-events. Other
+    provider failures raise ``CursorCloudError`` without bodies or secrets.
+    """
+    url = f"{base_url.rstrip('/')}/v1/agents/{agent_id}/usage"
+    if isinstance(run_id, str) and run_id:
+        url += f"?runId={urllib.parse.quote(run_id)}"
+    try:
+        payload = _read_response(opener or _default_opener, _build_request(url, api_key), deadline=deadline)
+    except urllib.error.HTTPError as exc:
+        if exc.code in {403, 404}:
+            return None
+        raise CursorCloudError("Cursor Cloud request failed") from exc
+    except urllib.error.URLError as exc:
+        raise CursorCloudError("Cursor Cloud request failed") from exc
+    except CursorCloudError:
+        raise
+    except Exception as exc:
+        raise CursorCloudError("Cursor Cloud request failed") from exc
+    usage = sanitize_token_usage(payload.get("totalUsage") or payload.get("usage"))
+    if usage:
+        return usage
+    runs = payload.get("runs")
+    if isinstance(runs, list):
+        for item in runs:
+            if not isinstance(item, dict):
+                continue
+            if run_id and item.get("id") not in {run_id, None}:
+                continue
+            found = sanitize_token_usage(item.get("usage"))
+            if found:
+                return found
+    return None
 
 
 def list_agents(
@@ -166,6 +269,7 @@ def list_agents(
     max_pages: int = DEFAULT_MAX_PAGES,
     max_items: int = DEFAULT_MAX_ITEMS,
     active_only: bool = False,
+    include_usage: bool = False,
     opener=None,
 ) -> list[dict[str, Any]]:
     """GET /v1/agents with bounded pagination, resolving latestRunId via the run endpoint.
@@ -206,9 +310,28 @@ def list_agents(
                         agent_id, row["latestRunId"], api_key, base_url=base_url, deadline=deadline, opener=opener
                     )
                     row["latestRunState"] = run.get("state")
+                    if isinstance(run.get("duration_ms"), int):
+                        row["duration_ms"] = run["duration_ms"]
+                    if isinstance(run.get("updated_at"), str):
+                        row["updated_at"] = run["updated_at"]
                 except CursorCloudError:
                     # Preserve the agent row even if the run fetch fails.
                     pass
+                else:
+                    if include_usage:
+                        try:
+                            usage = get_agent_usage(
+                                agent_id,
+                                api_key,
+                                run_id=row["latestRunId"],
+                                base_url=base_url,
+                                deadline=deadline,
+                                opener=opener,
+                            )
+                        except (CursorCloudError, Exception):  # noqa: BLE001 - usage is best-effort
+                            usage = None
+                        if usage:
+                            row["usage"] = usage
             agents.append(row)
             items_seen += 1
             if items_seen >= max_items:

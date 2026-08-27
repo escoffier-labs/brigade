@@ -17,6 +17,10 @@ REGISTRY_SCHEMA = "brigade.run.cloud.registry.v1"
 STATUS_SCHEMA = "brigade.run.cloud.status.v1"
 SWEEP_SCHEMA = "brigade.run.cloud.sweep.v1"
 SYNC_SCHEMA = "brigade.run.cloud.sync.v1"
+MAINTENANCE_SCHEMA = "brigade.run.cloud.maintenance.v1"
+DEFAULT_TERMINAL_KEEP = 50
+DEFAULT_TERMINAL_MAX_AGE_HOURS = 168
+PRESERVED_RETENTION_REASONS = ("active", "ambiguous", "orphaned", "needs-investigation")
 
 DEFAULT_STALE_READY_HOURS = 6
 CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/", "claude/", "jules/")
@@ -130,12 +134,16 @@ def load_registry(target: Path) -> dict[str, Any]:
         stale_ready_hours = int(data.get("stale_ready_hours", DEFAULT_STALE_READY_HOURS))
     except (TypeError, ValueError):
         stale_ready_hours = DEFAULT_STALE_READY_HOURS
-    return {
+    loaded = {
         "schema": REGISTRY_SCHEMA,
         "version": 1,
         "stale_ready_hours": stale_ready_hours,
         "entries": [e for e in entries if isinstance(e, dict)],
     }
+    retention = data.get("retention")
+    if isinstance(retention, dict):
+        loaded["retention"] = retention
+    return loaded
 
 
 def save_registry(target: Path, registry: dict[str, Any]) -> None:
@@ -147,6 +155,9 @@ def save_registry(target: Path, registry: dict[str, Any]) -> None:
         "stale_ready_hours": int(registry.get("stale_ready_hours", DEFAULT_STALE_READY_HOURS)),
         "entries": [e for e in (registry.get("entries") or []) if isinstance(e, dict)],
     }
+    retention = registry.get("retention")
+    if isinstance(retention, dict):
+        payload["retention"] = retention
     localio.write_json(path, payload)
 
 
@@ -769,6 +780,130 @@ def sweep(target: Path, *, now: datetime | None = None, status: dict[str, Any] |
     return report
 
 
+def default_retention_policy(
+    *,
+    keep_terminal: int | None = None,
+    max_age_hours: int | None = None,
+) -> dict[str, Any]:
+    """Return the auditable registry retention contract."""
+    return {
+        "preserve": list(PRESERVED_RETENTION_REASONS),
+        "bound": ["landed", "terminal"],
+        "keep_terminal": DEFAULT_TERMINAL_KEEP if keep_terminal is None else int(keep_terminal),
+        "max_age_hours": DEFAULT_TERMINAL_MAX_AGE_HOURS if max_age_hours is None else int(max_age_hours),
+        "sort": ["dispatched_at_desc", "id_desc"],
+    }
+
+
+def _row_is_preserved(row: dict[str, Any]) -> bool:
+    """Keep active, ambiguous, orphaned, needs-investigation, and current work."""
+    classification = row.get("classification")
+    state = row.get("provider_state")
+    if classification in {"orphaned", "needs-investigation", "pending", "ready-to-land", "stale"}:
+        return True
+    if is_active_state(state):
+        return True
+    if not is_terminal_state(state):
+        return True
+    return False
+
+
+def compact_registry(
+    target: Path,
+    *,
+    now: datetime | None = None,
+    keep_terminal: int | None = None,
+    max_age_hours: int | None = None,
+    provider_tasks: dict[str, Any] | None = None,
+    github: dict[str, Any] | None = None,
+    cursor_wired: bool = False,
+    status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Explicit maintenance: bound landed/terminal history and write atomically.
+
+    Read-only status never calls this. Active, ambiguous, orphaned, and
+    needs-investigation rows are always preserved. Missing timestamps are
+    treated as ambiguous and kept.
+    """
+    observed = now or datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    policy = default_retention_policy(keep_terminal=keep_terminal, max_age_hours=max_age_hours)
+    if policy["keep_terminal"] < 0:
+        raise ValueError("keep_terminal must be >= 0")
+    if policy["max_age_hours"] < 1:
+        raise ValueError("max_age_hours must be >= 1")
+
+    registry = load_registry(target)
+    payload = (
+        status
+        if isinstance(status, dict)
+        else status_payload(
+            target,
+            now=observed,
+            provider_tasks=provider_tasks,
+            github=github,
+            cursor_wired=cursor_wired,
+        )
+    )
+    rows_by_id = {
+        row.get("id"): row for row in payload.get("entries", []) if isinstance(row, dict) and row.get("id") is not None
+    }
+
+    preserved: list[dict[str, Any]] = []
+    eligible: list[tuple[datetime, str, dict[str, Any]]] = []
+    for entry in registry["entries"]:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = entry.get("id")
+        row = rows_by_id.get(entry_id, {})
+        if not isinstance(row, dict) or not row or _row_is_preserved(row):
+            preserved.append(entry)
+            continue
+        dispatched = _parse_time(entry.get("dispatched_at"))
+        if dispatched is None:
+            preserved.append(entry)
+            continue
+        eligible.append((dispatched, str(entry_id or ""), entry))
+
+    eligible.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    kept_terminal: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for dispatched, _entry_id, entry in eligible:
+        age = _hours_since(dispatched, observed)
+        over_age = age is not None and age >= policy["max_age_hours"]
+        over_count = len(kept_terminal) >= policy["keep_terminal"]
+        if over_age or over_count:
+            dropped.append(entry)
+        else:
+            kept_terminal.append(entry)
+
+    kept_ids = {item.get("id") for item in (*preserved, *kept_terminal)}
+    registry["entries"] = [
+        entry for entry in registry["entries"] if isinstance(entry, dict) and entry.get("id") in kept_ids
+    ]
+    registry["retention"] = {**policy, "compacted_at": _now_iso(observed)}
+    save_registry(target, registry)
+
+    maintenance_id = f"{observed.strftime('%Y%m%d-%H%M%S')}-cloud-compact-{uuid4().hex[:6]}"
+    report = {
+        "schema": MAINTENANCE_SCHEMA,
+        "maintenance_id": maintenance_id,
+        "action": "compact",
+        "target": str(target.expanduser().resolve()),
+        "observed_at": _now_iso(observed),
+        "policy": policy,
+        "kept": len(registry["entries"]),
+        "dropped_ids": [entry.get("id") for entry in dropped],
+        "counts": {"kept": len(registry["entries"]), "dropped": len(dropped)},
+        "atomic": True,
+    }
+    receipt_dir = _root(target) / "maintenance" / maintenance_id
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    localio.write_json(receipt_dir / "compact.json", report)
+    return report
+
+
 def _run_text(command: list[str], *, cwd: Path | None = None, timeout: float = 30.0) -> tuple[int, str, str]:
     try:
         completed = subprocess.run(
@@ -963,7 +1098,7 @@ def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
     try:
         from . import cursor_cloud
 
-        agents = cursor_cloud.list_agents(api_key, max_pages=2, max_items=100)
+        agents = cursor_cloud.list_agents(api_key, max_pages=2, max_items=100, include_usage=True)
     except Exception:  # noqa: BLE001 - observation must stay bounded
         return {}
     tasks: dict[str, Any] = {}
@@ -973,8 +1108,23 @@ def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
         agent_id = agent.get("id")
         if not isinstance(agent_id, str):
             continue
-        state = cursor_cloud.normalize_state(agent.get("latestRunState"))
-        tasks[agent_id] = {"state": state}
+        row: dict[str, Any] = {
+            "state": cursor_cloud.normalize_state(agent.get("latestRunState")),
+            "agent_id": agent_id,
+        }
+        run_id = agent.get("latestRunId")
+        if isinstance(run_id, str) and run_id:
+            row["run_id"] = run_id
+        duration = agent.get("duration_ms")
+        if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0:
+            row["duration_ms"] = duration
+        updated = agent.get("updated_at")
+        if isinstance(updated, str) and updated:
+            row["updated_at"] = updated
+        usage = cursor_cloud.sanitize_token_usage(agent.get("usage"))
+        if usage:
+            row["usage"] = usage
+        tasks[agent_id] = row
     return tasks
 
 

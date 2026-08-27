@@ -640,3 +640,128 @@ class TestLeaseLabelPrivacy:
         for word in prompt.split():
             assert word not in label
         assert prompt not in json.dumps(admit_calls)
+
+
+class TestObservationMetadata:
+    def test_get_run_retains_safe_status_and_omits_reply_and_secret_urls(self):
+        opener = FakeOpener(
+            [
+                _json_response(
+                    {
+                        "id": "run-1",
+                        "agentId": "agent-1",
+                        "status": "FINISHED",
+                        "createdAt": "2026-08-26T11:00:00.000Z",
+                        "updatedAt": "2026-08-26T12:00:00.000Z",
+                        "durationMs": 12357,
+                        "result": "Added README.md with the secret prompt reply",
+                        "git": {
+                            "prUrl": "https://github.com/owner/repo/pull/9?token=secret",
+                        },
+                    }
+                )
+            ]
+        )
+        run = cursor_cloud.get_run("agent-1", "run-1", _FAKE_KEY, opener=opener.open)
+        assert run["id"] == "run-1"
+        assert run["agent_id"] == "agent-1"
+        assert run["state"] == "finished"
+        assert run["duration_ms"] == 12357
+        assert run["updated_at"] == "2026-08-26T12:00:00.000Z"
+        blob = json.dumps(run)
+        assert "secret prompt reply" not in blob
+        assert "token=secret" not in blob
+        assert "prUrl" not in blob
+        assert "result" not in run
+        assert _FAKE_KEY not in blob
+
+    def test_get_agent_usage_keeps_token_counts_and_drops_secret_fields(self):
+        opener = FakeOpener(
+            [
+                _json_response(
+                    {
+                        "totalUsage": {
+                            "inputTokens": 10,
+                            "outputTokens": 4,
+                            "cacheWriteTokens": 1,
+                            "cacheReadTokens": 2,
+                            "totalTokens": 17,
+                        },
+                        "runs": [
+                            {
+                                "id": "run-1",
+                                "usageUuid": "00000000-0000-0000-0000-000000000001",
+                                "usage": {
+                                    "inputTokens": 10,
+                                    "outputTokens": 4,
+                                    "cacheWriteTokens": 1,
+                                    "cacheReadTokens": 2,
+                                    "totalTokens": 17,
+                                },
+                                "presignedArtifactUrl": "https://secret.example/x",
+                            }
+                        ],
+                    }
+                )
+            ]
+        )
+        usage = cursor_cloud.get_agent_usage("agent-1", _FAKE_KEY, run_id="run-1", opener=opener.open)
+        assert usage == {
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "cache_write_tokens": 1,
+            "cache_read_tokens": 2,
+            "total_tokens": 17,
+        }
+        request = opener.calls[0]
+        assert request.full_url.endswith("/v1/agents/agent-1/usage?runId=run-1")
+        blob = json.dumps(usage)
+        assert "presignedArtifactUrl" not in blob
+        assert "usageUuid" not in blob
+        assert _FAKE_KEY not in blob
+
+    def test_list_agents_attaches_run_identity_and_usage_when_available(self):
+        opener = FakeOpener(
+            [
+                _json_response({"items": [{"id": "agent-1", "name": "derived from prompt", "latestRunId": "run-1"}]}),
+                _json_response(
+                    {
+                        "id": "run-1",
+                        "agentId": "agent-1",
+                        "status": "RUNNING",
+                        "updatedAt": "2026-08-26T12:00:00Z",
+                        "durationMs": 50,
+                    }
+                ),
+                _json_response(
+                    {
+                        "totalUsage": {
+                            "inputTokens": 8,
+                            "outputTokens": 2,
+                            "cacheWriteTokens": 0,
+                            "cacheReadTokens": 0,
+                            "totalTokens": 10,
+                        },
+                        "runs": [],
+                    }
+                ),
+            ]
+        )
+        agents = cursor_cloud.list_agents(_FAKE_KEY, opener=opener.open, max_pages=1, max_items=10, include_usage=True)
+        assert agents[0]["id"] == "agent-1"
+        assert agents[0]["latestRunId"] == "run-1"
+        assert agents[0]["latestRunState"] == "running"
+        assert agents[0]["duration_ms"] == 50
+        assert agents[0]["updated_at"] == "2026-08-26T12:00:00Z"
+        assert agents[0]["usage"] == {
+            "input_tokens": 8,
+            "output_tokens": 2,
+            "cache_write_tokens": 0,
+            "cache_read_tokens": 0,
+            "total_tokens": 10,
+        }
+        assert "derived from prompt" not in json.dumps(agents[0]["usage"])
+
+    def test_get_agent_usage_feature_unavailable_is_none(self):
+        opener = FakeOpener([_error_response(403, {"error": "feature_unavailable"})])
+        assert cursor_cloud.get_agent_usage("agent-1", _FAKE_KEY, opener=opener.open) is None

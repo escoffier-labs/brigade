@@ -861,8 +861,8 @@ def test_observe_cursor_cloud_tasks_maps_sanitized_inventory(monkeypatch, tmp_pa
     )
     tasks = cloud_tracker.observe_cursor_cloud_tasks(tmp_path)
     assert tasks == {
-        "agent-c1": {"state": "running"},
-        "agent-c2": {"state": "finished"},
+        "agent-c1": {"state": "running", "agent_id": "agent-c1", "run_id": "r1"},
+        "agent-c2": {"state": "finished", "agent_id": "agent-c2", "run_id": "r2"},
     }
 
 
@@ -1260,3 +1260,482 @@ def test_lease_label_rejects_unsafe_inputs(provider, repo, digest, expected):
 def test_lease_label_truncates_pathological_input():
     label = cloud_tracker.lease_label("x" * 400, "owner/repo", "sha256:aa")
     assert len(label) == cloud_tracker.LEASE_LABEL_MAX
+
+
+def _seed_mixed_registry(tmp_path: Path) -> dict[str, str]:
+    """Seed one row per classification plus an ambiguous active row."""
+    ids = {
+        "pending": "e-pending-keep",
+        "ready": "e-ready-keep",
+        "stale": "e-stale-keep",
+        "orphaned": "e-orphan-keep",
+        "needs": "e-needs-keep",
+        "ambiguous": "e-ambiguous-keep",
+        "landed-new": "e-landed-new",
+        "landed-mid": "e-landed-mid",
+        "landed-old": "e-landed-old",
+        "landed-oldest": "e-landed-oldest",
+    }
+    cloud_tracker.save_registry(
+        tmp_path,
+        {
+            "schema": cloud_tracker.REGISTRY_SCHEMA,
+            "version": 1,
+            "stale_ready_hours": 6,
+            "entries": [
+                {
+                    "id": ids["pending"],
+                    "provider": "codex-cloud",
+                    "task_id": "t-pending",
+                    "label": "pending-row",
+                    "prompt_hash": "sha256:aa",
+                    "dispatched_at": _iso(NOW - timedelta(hours=1)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "diff"},
+                },
+                {
+                    "id": ids["ready"],
+                    "provider": "codex-cloud",
+                    "task_id": "t-ready",
+                    "label": "ready-row",
+                    "prompt_hash": "sha256:bb",
+                    "dispatched_at": _iso(NOW - timedelta(hours=2)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "branch", "pattern": "codex/*"},
+                    "branch": "codex/ready-keep",
+                },
+                {
+                    "id": ids["stale"],
+                    "provider": "codex-cloud",
+                    "task_id": "t-stale",
+                    "label": "stale-row",
+                    "prompt_hash": "sha256:cc",
+                    "dispatched_at": _iso(NOW - timedelta(hours=30)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "diff"},
+                },
+                {
+                    "id": ids["orphaned"],
+                    "provider": "codex-cloud",
+                    "task_id": "t-orphan",
+                    "label": "orphan-row",
+                    "prompt_hash": "sha256:dd",
+                    "dispatched_at": _iso(NOW - timedelta(hours=40)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "branch", "pattern": "codex/*"},
+                    "branch": "codex/orphan-keep",
+                },
+                {
+                    "id": ids["needs"],
+                    "provider": "codex-cloud",
+                    "task_id": "t-needs",
+                    "label": "needs-row",
+                    "prompt_hash": "sha256:ee",
+                    "dispatched_at": _iso(NOW - timedelta(hours=50)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "branch", "pattern": "codex/*"},
+                    "branch": "codex/missing-keep",
+                },
+                {
+                    "id": ids["ambiguous"],
+                    "provider": "cursor-cloud",
+                    "task_id": "t-ambiguous",
+                    "label": "ambiguous-row",
+                    "prompt_hash": "sha256:ff",
+                    "dispatched_at": _iso(NOW - timedelta(hours=80)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "diff"},
+                },
+                {
+                    "id": ids["landed-new"],
+                    "provider": "codex-cloud",
+                    "task_id": "t-landed-new",
+                    "label": "landed-new",
+                    "prompt_hash": "sha256:11",
+                    "dispatched_at": _iso(NOW - timedelta(hours=3)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "branch", "pattern": "codex/*"},
+                    "branch": "codex/landed-new",
+                },
+                {
+                    "id": ids["landed-mid"],
+                    "provider": "codex-cloud",
+                    "task_id": "t-landed-mid",
+                    "label": "landed-mid",
+                    "prompt_hash": "sha256:22",
+                    "dispatched_at": _iso(NOW - timedelta(hours=10)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "branch", "pattern": "codex/*"},
+                    "branch": "codex/landed-mid",
+                },
+                {
+                    "id": ids["landed-old"],
+                    "provider": "codex-cloud",
+                    "task_id": "t-landed-old",
+                    "label": "landed-old",
+                    "prompt_hash": "sha256:33",
+                    "dispatched_at": _iso(NOW - timedelta(hours=200)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "branch", "pattern": "codex/*"},
+                    "branch": "codex/landed-old",
+                },
+                {
+                    "id": ids["landed-oldest"],
+                    "provider": "codex-cloud",
+                    "task_id": "t-landed-oldest",
+                    "label": "landed-oldest",
+                    "prompt_hash": "sha256:44",
+                    "dispatched_at": _iso(NOW - timedelta(hours=400)),
+                    "source": "dispatch",
+                    "expected_artifact": {"kind": "branch", "pattern": "codex/*"},
+                    "branch": "codex/landed-oldest",
+                },
+            ],
+        },
+    )
+    return ids
+
+
+def _mixed_provider_and_github() -> tuple[dict[str, Any], dict[str, Any]]:
+    provider_tasks = {
+        "t-pending": {"state": "running"},
+        "t-ready": {"state": "ready", "ready_at": _iso(NOW - timedelta(hours=1))},
+        "t-stale": {"state": "ready", "ready_at": _iso(NOW - timedelta(hours=24))},
+        "t-orphan": {"state": "failed"},
+        "t-needs": {"state": "finished"},
+        "t-landed-new": {"state": "completed"},
+        "t-landed-mid": {"state": "completed"},
+        "t-landed-old": {"state": "completed"},
+        "t-landed-oldest": {"state": "completed"},
+    }
+    github = {
+        "branches": [
+            {"name": "codex/ready-keep"},
+            {"name": "codex/orphan-keep"},
+        ],
+        "prs": [
+            {"head": "codex/ready-keep", "state": "OPEN", "number": 1},
+            {"head": "codex/landed-new", "state": "MERGED", "number": 2},
+            {"head": "codex/landed-mid", "state": "MERGED", "number": 3},
+            {"head": "codex/landed-old", "state": "MERGED", "number": 4},
+            {"head": "codex/landed-oldest", "state": "MERGED", "number": 5},
+        ],
+    }
+    return provider_tasks, github
+
+
+def test_status_never_compacts_or_rewrites_registry(tmp_path: Path):
+    ids = _seed_mixed_registry(tmp_path)
+    provider_tasks, github = _mixed_provider_and_github()
+    path = cloud_tracker.registry_path(tmp_path)
+    before = path.read_bytes()
+    checksum = hashlib.sha256(before).hexdigest()
+    mtime = path.stat().st_mtime_ns
+
+    status = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks=provider_tasks,
+        github=github,
+        cursor_wired=False,
+    )
+
+    assert status["schema"] == cloud_tracker.STATUS_SCHEMA
+    assert path.read_bytes() == before
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == checksum
+    assert path.stat().st_mtime_ns == mtime
+    stored_ids = {entry["id"] for entry in cloud_tracker.load_registry(tmp_path)["entries"]}
+    assert stored_ids == set(ids.values())
+
+
+def test_compact_preserves_active_ambiguous_orphaned_and_needs_investigation(tmp_path: Path):
+    ids = _seed_mixed_registry(tmp_path)
+    provider_tasks, github = _mixed_provider_and_github()
+    report = cloud_tracker.compact_registry(
+        tmp_path,
+        now=NOW,
+        keep_terminal=1,
+        max_age_hours=24,
+        provider_tasks=provider_tasks,
+        github=github,
+        cursor_wired=False,
+    )
+    kept_ids = {entry["id"] for entry in cloud_tracker.load_registry(tmp_path)["entries"]}
+    assert ids["pending"] in kept_ids
+    assert ids["ready"] in kept_ids
+    assert ids["stale"] in kept_ids
+    assert ids["orphaned"] in kept_ids
+    assert ids["needs"] in kept_ids
+    assert ids["ambiguous"] in kept_ids
+    assert report["schema"] == cloud_tracker.MAINTENANCE_SCHEMA
+    assert report["action"] == "compact"
+    assert report["policy"]["preserve"] == [
+        "active",
+        "ambiguous",
+        "orphaned",
+        "needs-investigation",
+    ]
+
+
+def test_compact_bounds_terminal_landed_history_deterministically(tmp_path: Path):
+    ids = _seed_mixed_registry(tmp_path)
+    provider_tasks, github = _mixed_provider_and_github()
+    report = cloud_tracker.compact_registry(
+        tmp_path,
+        now=NOW,
+        keep_terminal=1,
+        max_age_hours=24,
+        provider_tasks=provider_tasks,
+        github=github,
+        cursor_wired=False,
+    )
+    kept_ids = {entry["id"] for entry in cloud_tracker.load_registry(tmp_path)["entries"]}
+    assert ids["landed-new"] in kept_ids
+    assert ids["landed-mid"] not in kept_ids
+    assert ids["landed-old"] not in kept_ids
+    assert ids["landed-oldest"] not in kept_ids
+    assert report["counts"]["dropped"] == 3
+    assert report["dropped_ids"] == [ids["landed-mid"], ids["landed-old"], ids["landed-oldest"]]
+    assert report["policy"]["keep_terminal"] == 1
+    assert report["policy"]["max_age_hours"] == 24
+    assert report["policy"]["sort"] == ["dispatched_at_desc", "id_desc"]
+
+
+def test_compact_writes_auditable_receipt_and_uses_atomic_write(tmp_path: Path, monkeypatch):
+    _seed_mixed_registry(tmp_path)
+    provider_tasks, github = _mixed_provider_and_github()
+    writes: list[Path] = []
+    real_write = cloud_tracker.localio.write_json
+
+    def capture_write(path, payload):
+        writes.append(Path(path))
+        return real_write(path, payload)
+
+    monkeypatch.setattr(cloud_tracker.localio, "write_json", capture_write)
+    report = cloud_tracker.compact_registry(
+        tmp_path,
+        now=NOW,
+        keep_terminal=1,
+        max_age_hours=24,
+        provider_tasks=provider_tasks,
+        github=github,
+        cursor_wired=False,
+    )
+    receipt = tmp_path / ".brigade" / "cloud" / "maintenance" / report["maintenance_id"] / "compact.json"
+    assert receipt.is_file()
+    stored = json.loads(receipt.read_text())
+    assert stored["schema"] == cloud_tracker.MAINTENANCE_SCHEMA
+    assert stored["policy"] == report["policy"]
+    assert stored["atomic"] is True
+    assert cloud_tracker.registry_path(tmp_path) in writes
+    assert receipt in writes
+
+
+def test_cloud_dispatch_and_status_leave_checkout_registry_checksum_and_mtime_unchanged(
+    tmp_path: Path, capsys, monkeypatch
+):
+    checkout = Path(__file__).resolve().parents[1]
+    checkout_registry = checkout / ".brigade" / "cloud" / "registry.json"
+    existed = checkout_registry.is_file()
+    checksum = hashlib.sha256(checkout_registry.read_bytes()).hexdigest() if existed else None
+    mtime = checkout_registry.stat().st_mtime_ns if existed else None
+
+    monkeypatch.setattr(
+        cloud_tracker,
+        "observe_providers",
+        lambda target, **kwargs: ({"task-isolated": {"state": "running"}}, {"branches": [], "prs": []}, False),
+    )
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task-isolated",
+        label="isolated-dispatch",
+        prompt_hash=_prompt_hash("never write this prompt to checkout"),
+        dispatched_at=_iso(NOW),
+    )
+    assert cli.main(["run", "cloud", "status", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["entries"][0]["task_id"] == "task-isolated"
+    assert cli.main(["run", "cloud", "compact", "--target", str(tmp_path), "--json"]) == 0
+
+    if existed:
+        assert hashlib.sha256(checkout_registry.read_bytes()).hexdigest() == checksum
+        assert checkout_registry.stat().st_mtime_ns == mtime
+        assert "never write this prompt to checkout" not in checkout_registry.read_text()
+    else:
+        assert not checkout_registry.exists()
+
+
+def test_observe_cursor_retains_agent_run_identity_and_safe_usage(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CURSOR_API_KEY", "fake-cursor-key")
+    monkeypatch.setattr(
+        cursor_cloud,
+        "list_agents",
+        lambda *a, **k: [
+            {
+                "id": "agent-c1",
+                "name": "secret prompt title",
+                "latestRunId": "run-c1",
+                "latestRunState": "RUNNING",
+                "duration_ms": 12357,
+                "updated_at": "2026-08-26T12:00:00Z",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "cache_write_tokens": 1,
+                    "cache_read_tokens": 2,
+                    "total_tokens": 17,
+                },
+            }
+        ],
+    )
+    tasks = cloud_tracker.observe_cursor_cloud_tasks(tmp_path)
+    assert tasks == {
+        "agent-c1": {
+            "state": "running",
+            "agent_id": "agent-c1",
+            "run_id": "run-c1",
+            "duration_ms": 12357,
+            "updated_at": "2026-08-26T12:00:00Z",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cache_write_tokens": 1,
+                "cache_read_tokens": 2,
+                "total_tokens": 17,
+            },
+        }
+    }
+    blob = json.dumps(tasks)
+    assert "secret prompt title" not in blob
+    assert "fake-cursor-key" not in blob
+
+
+def test_observe_cursor_drops_prompts_credentials_and_secret_urls(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-live-secret")
+    monkeypatch.setattr(
+        cursor_cloud,
+        "list_agents",
+        lambda *a, **k: [
+            {
+                "id": "agent-c9",
+                "name": "rotate production credentials",
+                "latestRunId": "run-c9",
+                "latestRunState": "FINISHED",
+                "result": "Added the secret prompt reply",
+                "artifact_url": "https://cloud-agent-artifacts.s3.us-east-1.amazonaws.com/x?X-Amz-Signature=deadbeef",
+                "usage": {
+                    "input_tokens": 3,
+                    "output_tokens": 1,
+                    "cache_write_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "total_tokens": 4,
+                    "presignedArtifactUrl": "https://secret.example/token",
+                },
+            }
+        ],
+    )
+    tasks = cloud_tracker.observe_cursor_cloud_tasks(tmp_path)
+    blob = json.dumps(tasks)
+    assert "rotate production credentials" not in blob
+    assert "secret prompt reply" not in blob
+    assert "X-Amz-Signature" not in blob
+    assert "cursor-live-secret" not in blob
+    assert "presignedArtifactUrl" not in blob
+    assert tasks["agent-c9"]["agent_id"] == "agent-c9"
+    assert tasks["agent-c9"]["run_id"] == "run-c9"
+    assert tasks["agent-c9"]["usage"] == {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 0,
+        "total_tokens": 4,
+    }
+
+
+def test_truncated_cursor_inventory_never_infers_terminal_from_absence(monkeypatch, tmp_path: Path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="cursor-cloud",
+        task_id="agent-seen",
+        label="cursor:owner/repo@001122334455",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    cloud_tracker.register(
+        tmp_path,
+        provider="cursor-cloud",
+        task_id="agent-unseen",
+        label="cursor:owner/repo@aabbccddeeff",
+        prompt_hash=_prompt_hash("x"),
+        dispatched_at=_iso(NOW),
+    )
+    monkeypatch.setenv("CURSOR_API_KEY", "fake-cursor-key")
+    monkeypatch.setattr(
+        cursor_cloud,
+        "list_agents",
+        lambda *a, **k: [{"id": "agent-seen", "latestRunId": "run-seen", "latestRunState": "RUNNING"}],
+    )
+    release_calls: list[str] = []
+
+    def capture_release(lease_id: str, *, state: str | None = None, holder: str | None = None):
+        release_calls.append(lease_id)
+        return fleet_client.CloudDecision(True, "ok")
+
+    monkeypatch.setattr(fleet_client, "release_cloud", capture_release)
+    payload = cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks=cloud_tracker.observe_cursor_cloud_tasks(tmp_path),
+        github={"branches": [], "prs": []},
+        cursor_wired=True,
+        hub_leases=[
+            {"lease_id": "lease-seen", "provider_task_id": "agent-seen"},
+            {"lease_id": "lease-unseen", "provider_task_id": "agent-unseen"},
+        ],
+    )
+    assert release_calls == []
+    assert payload["counts"]["released"] == 0
+    status = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        provider_tasks=cloud_tracker.observe_cursor_cloud_tasks(tmp_path),
+        github={"branches": [], "prs": []},
+        cursor_wired=True,
+    )
+    unseen_row = next(row for row in status["entries"] if row["task_id"] == "agent-unseen")
+    assert unseen_row["provider_state"] is None
+    assert unseen_row["classification"] == "pending"
+
+
+def test_cli_run_cloud_compact_json_contract(tmp_path: Path, capsys, monkeypatch):
+    ids = _seed_mixed_registry(tmp_path)
+    provider_tasks, github = _mixed_provider_and_github()
+    monkeypatch.setattr(
+        cloud_tracker,
+        "observe_providers",
+        lambda target, **kwargs: (provider_tasks, github, False),
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "compact",
+            "--target",
+            str(tmp_path),
+            "--keep-terminal",
+            "1",
+            "--max-age-hours",
+            "24",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == cloud_tracker.MAINTENANCE_SCHEMA
+    assert payload["action"] == "compact"
+    assert payload["policy"]["keep_terminal"] == 1
+    kept_ids = {entry["id"] for entry in cloud_tracker.load_registry(tmp_path)["entries"]}
+    assert ids["orphaned"] in kept_ids
+    assert ids["needs"] in kept_ids
+    assert ids["landed-old"] not in kept_ids

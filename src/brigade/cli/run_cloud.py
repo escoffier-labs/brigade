@@ -70,6 +70,25 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_sweep.add_argument("--target", type=Path, default=Path("."))
     p_sweep.add_argument("--json", action="store_true")
 
+    p_compact = cloud_sub.add_parser(
+        "compact",
+        help="Explicit registry maintenance. Never runs as a side effect of status.",
+    )
+    p_compact.add_argument("--target", type=Path, default=Path("."))
+    p_compact.add_argument("--json", action="store_true")
+    p_compact.add_argument(
+        "--keep-terminal",
+        type=int,
+        default=None,
+        help="Newest landed/terminal rows to keep (default 50).",
+    )
+    p_compact.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=None,
+        help="Drop landed/terminal rows older than this many hours (default 168).",
+    )
+
     p_setup = cloud_sub.add_parser("setup", help="Write local Codex Cloud environment configuration (no live task).")
     p_setup.add_argument("--target", type=Path, default=Path("."))
     p_setup.add_argument(
@@ -350,6 +369,30 @@ def dispatch(args) -> int:
         print(f"recoverable: {len(report['recoverable'])}")
         print(f"deletable: {len(report['deletable'])}")
         print(report["note"])
+        return 0
+
+    if command == "compact":
+        provider_tasks, github, cursor_wired = cloud_tracker.observe_providers(target)
+        try:
+            report = cloud_tracker.compact_registry(
+                target,
+                keep_terminal=args.keep_terminal,
+                max_age_hours=args.max_age_hours,
+                provider_tasks=provider_tasks,
+                github=github,
+                cursor_wired=cursor_wired,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0
+        print(f"cloud compact: {report['maintenance_id']} dropped={report['counts']['dropped']}")
+        print(
+            "policy: keep_terminal="
+            f"{report['policy']['keep_terminal']} max_age_hours={report['policy']['max_age_hours']}"
+        )
         return 0
 
     print(f"error: unknown cloud command: {command}", file=sys.stderr)

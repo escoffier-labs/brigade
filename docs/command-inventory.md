@@ -473,6 +473,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade route`
 - `brigade run`
 - `brigade run-cloud adopt`
+- `brigade run-cloud compact`
 - `brigade run-cloud grokbot ack-cancel`
 - `brigade run-cloud grokbot canary`
 - `brigade run-cloud grokbot cancel`
