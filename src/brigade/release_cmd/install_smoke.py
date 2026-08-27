@@ -1,45 +1,25 @@
-"""Local release readiness receipts."""
-# ruff: noqa: E402,F401,F403,F811,F821
-
 from __future__ import annotations
 
 import json
-import os
-import re
-import subprocess
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from .. import (
-    context_cmd,
-    handoff_cmd,
-    learn_cmd,
-    memory_cmd,
-    phases_cmd,
-    projects_cmd,
-    repos_cmd,
-    reportstore,
-    research_cmd,
-    roadmap_cmd,
-    scrub,
-    security_cmd,
-    tools_cmd,
-    work_cmd,
-)
-from ..selection import KNOWN_HARNESSES
+from .. import work_cmd
 from ..localio import (
     read_json_dict as _read_json,
     read_jsonl_dicts as _read_jsonl,
     utc_now as _now,
-    write_json as _write_json,
 )
-
-from . import paths as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from ..selection import KNOWN_HARNESSES
+from . import evidence as _evidence
+from .paths import (
+    INSTALL_SMOKE_MATRIX,
+    INSTALL_SMOKE_STALE_HOURS,
+    INSTALL_SMOKE_STATUSES,
+    WARN,
+    _release_root,
+)
 
 
 def _install_smoke_root(target: Path) -> Path:
@@ -105,17 +85,17 @@ def _install_smoke_record_from_payload(payload: dict[str, Any]) -> dict[str, Any
         "depth": depth,
         "harnesses": harnesses,
         "status": status,
-        "command_label": _release_safe_text(
+        "command_label": _evidence._release_safe_text(
             str(
                 payload.get("command_label")
                 or f"brigade init --depth {depth} --harnesses {','.join(harnesses) or 'none'}"
             )
         ),
-        "safe_summary": _release_safe_text(
+        "safe_summary": _evidence._release_safe_text(
             str(payload.get("safe_summary") or payload.get("summary") or f"install smoke {status}")
         ),
-        "stdout_summary": _release_safe_text(str(payload.get("stdout_summary") or "")),
-        "stderr_summary": _release_safe_text(str(payload.get("stderr_summary") or "")),
+        "stdout_summary": _evidence._release_safe_text(str(payload.get("stdout_summary") or "")),
+        "stderr_summary": _evidence._release_safe_text(str(payload.get("stderr_summary") or "")),
         "duration_seconds": payload.get("duration_seconds"),
         "created_at": completed_at,
         "completed_at": completed_at,

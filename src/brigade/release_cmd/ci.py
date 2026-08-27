@@ -1,6 +1,3 @@
-"""Local release readiness receipts."""
-# ruff: noqa: E402,F401,F403,F811,F821
-
 from __future__ import annotations
 
 import json
@@ -8,40 +5,21 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from .. import (
-    context_cmd,
-    handoff_cmd,
-    learn_cmd,
-    memory_cmd,
-    phases_cmd,
-    projects_cmd,
-    repos_cmd,
-    reportstore,
-    research_cmd,
-    roadmap_cmd,
-    scrub,
-    security_cmd,
-    tools_cmd,
-    work_cmd,
-)
-from ..selection import KNOWN_HARNESSES
+from .. import scrub, security_cmd, work_cmd
 from ..guard.audit import run_audit
 from ..guard.policy import load_policy
-from ..localio import (
-    read_json_dict as _read_json,
-    read_jsonl_dicts as _read_jsonl,
-    utc_now as _now,
-    write_json as _write_json,
+from . import evidence as _evidence
+from .paths import (
+    CI_ACTION_REF_RE,
+    CI_DEPRECATED_ACTION_MAJORS,
+    CI_DEPRECATION_PATTERNS,
+    FAIL,
+    OK,
+    WARN,
 )
-
-from . import paths as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
 
 
 def _safe_path_label(target: Path, path: Path) -> str:
@@ -52,7 +30,7 @@ def _safe_path_label(target: Path, path: Path) -> str:
 
 
 def _ci_safe_excerpt(text: str) -> str:
-    excerpt = _release_safe_text(text.strip())
+    excerpt = _evidence._release_safe_text(text.strip())
     excerpt = security_cmd._redact_secret_evidence(excerpt)
     if len(excerpt) > 220:
         return excerpt[:217].rstrip() + "..."
@@ -213,7 +191,8 @@ def ci_doctor(*, target: Path, summary_path: Path | None = None, json_output: bo
 
 def _ci_import_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for finding in payload.get("findings") if isinstance(payload.get("findings"), list) else []:
+    findings = payload.get("findings")
+    for finding in findings if isinstance(findings, list) else []:
         if not isinstance(finding, dict):
             continue
         records.append(

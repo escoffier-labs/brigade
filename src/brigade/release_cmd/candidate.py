@@ -1,47 +1,34 @@
-"""Local release readiness receipts."""
-# ruff: noqa: E402,F401,F403,F811,F821
-
 from __future__ import annotations
 
 import json
-import os
-import re
-import subprocess
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .. import (
-    context_cmd,
-    handoff_cmd,
-    learn_cmd,
-    memory_cmd,
-    phases_cmd,
-    projects_cmd,
-    repos_cmd,
-    reportstore,
-    research_cmd,
-    roadmap_cmd,
-    scrub,
-    security_cmd,
-    tools_cmd,
-    work_cmd,
-)
+from .. import reportstore, roadmap_cmd, work_cmd
 from ..guard.engine import scan_text
 from ..guard.policy import Policy, default_policy, load_policy
-from ..selection import KNOWN_HARNESSES
-from ..localio import (
-    read_json_dict as _read_json,
-    read_jsonl_dicts as _read_jsonl,
-    utc_now as _now,
-    write_json as _write_json,
+from ..localio import utc_now as _now
+from . import evidence as _evidence
+from . import schema_ops as _schema_ops
+from .paths import (
+    RELEASE_CANDIDATE_STALE_HOURS,
+    RELEASE_PRIVATE_PATH_RE,
+    RELEASE_PRIVATE_VALUE_RE,
+    RELEASE_REPORT_CONTROL_RE,
+    RELEASE_REPORT_TOKEN_RE,
+    RELEASE_REPORT_URL_RE,
+    SCHEMA_MANIFEST_VERSION,
+    WARN,
+    _changed_files,
+    _git,
+    _git_state,
+    _git_value,
+    _release_candidates_archive_root,
+    _release_candidates_root,
+    _release_report_safe_text,
 )
-
-from . import paths as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
 
 
 def _commit_subjects(target: Path, base_ref: str | None) -> list[str]:
@@ -53,7 +40,7 @@ def _commit_subjects(target: Path, base_ref: str | None) -> list[str]:
     result = _git(target, *args)
     if result.returncode != 0:
         return []
-    return [_release_safe_text(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+    return [_evidence._release_safe_text(line.strip()) for line in result.stdout.splitlines() if line.strip()]
 
 
 def _commit_messages(target: Path, base_ref: str | None, *, guard_policy: Policy) -> list[str]:
@@ -74,7 +61,7 @@ def _commit_messages(target: Path, base_ref: str | None, *, guard_policy: Policy
 
 
 def _release_safe_commit_text(message: str, *, guard_policy: Policy) -> str:
-    cleaned = _release_safe_text(message.strip())
+    cleaned = _evidence._release_safe_text(message.strip())
     return scan_text(cleaned, policy=guard_policy).redacted_text.strip()
 
 
@@ -139,8 +126,8 @@ def _changelog_unreleased(path: Path) -> list[str]:
 
 
 def _release_receipt_matches_head(receipt: dict[str, Any], target: Path, *, base_ref: str | None) -> bool:
-    evidence = receipt.get("evidence") if isinstance(receipt.get("evidence"), dict) else {}
-    git = evidence.get("git") if isinstance(evidence.get("git"), dict) else {}
+    evidence = raw_ev if isinstance((raw_ev := receipt.get("evidence")), dict) else {}
+    git = raw_git if isinstance((raw_git := evidence.get("git")), dict) else {}
     receipt_head = git.get("head")
     current_head = _git_value(target, "rev-parse", "HEAD")
     # Require an explicit top-level base_ref; legacy receipts omit it and must refresh.
@@ -162,10 +149,10 @@ def _release_receipt_matches_head(receipt: dict[str, Any], target: Path, *, base
 
 
 def _latest_release_or_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
-    latest = _latest_release_receipt(target)
+    latest = _evidence._latest_release_receipt(target)
     if latest is not None and _release_receipt_matches_head(latest, target, base_ref=base_ref):
         return latest
-    payload = _payload(target, base_ref=base_ref, run_checks=True)
+    payload = _evidence._payload(target, base_ref=base_ref, run_checks=True)
     return {
         **payload,
         "run_id": "inline-readiness",
@@ -175,11 +162,28 @@ def _latest_release_or_payload(target: Path, *, base_ref: str | None) -> dict[st
     }
 
 
+def _candidate_metadata(target: Path, candidate_id: str, candidate_dir: Path) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "target": str(target),
+        "path": str(candidate_dir),
+        "manifest_path": str(candidate_dir / "CANDIDATE.json"),
+        "archive_path": str(candidate_dir / "CANDIDATE.tar.gz"),
+        "evidence_path": str(candidate_dir / "EVIDENCE.json"),
+        "release_notes_path": str(candidate_dir / "RELEASE_NOTES_DRAFT.md"),
+        "publish_plan_path": str(candidate_dir / "PUBLISH_PLAN.md"),
+        "summary_path": str(candidate_dir / "RELEASE_CANDIDATE.md"),
+        "schema_manifest_path": str(candidate_dir / "SCHEMA_MANIFEST.json"),
+        "created_at": _now().isoformat(),
+        "completed_at": _now().isoformat(),
+    }
+
+
 def _candidate_payload(target: Path, *, base_ref: str | None, guard_policy: str | Path | None = None) -> dict[str, Any]:
     readiness = _latest_release_or_payload(target, base_ref=base_ref)
-    evidence = readiness.get("evidence") if isinstance(readiness.get("evidence"), dict) else {}
-    git = evidence.get("git") if isinstance(evidence.get("git"), dict) else _git_state(target)
-    changed_files = evidence.get("docs", {}).get("changed_files") if isinstance(evidence.get("docs"), dict) else None
+    evidence = raw_ev if isinstance((raw_ev := readiness.get("evidence")), dict) else {}
+    git = raw_git if isinstance((raw_git := evidence.get("git")), dict) else _git_state(target)
+    changed_files = raw_docs.get("changed_files") if isinstance((raw_docs := evidence.get("docs")), dict) else None
     if not isinstance(changed_files, list):
         changed_files = _changed_files(target, base_ref)
     active_guard_policy = _load_guard_policy(guard_policy)
@@ -228,7 +232,7 @@ def _candidate_payload(target: Path, *, base_ref: str | None, guard_policy: str 
         "phase_ledger": evidence.get("phase_ledger"),
         "git": git,
         "changed_files": changed_files,
-        "docs_touch_status": _candidate_docs_touch([str(item) for item in changed_files]),
+        "docs_touch_status": _evidence._candidate_docs_touch([str(item) for item in changed_files]),
         "content_guard": {
             str(check.get("name")): check
             for check in readiness.get("checks", [])
@@ -256,13 +260,11 @@ def _candidate_payload(target: Path, *, base_ref: str | None, guard_policy: str 
 
 def _command_contract_snapshot(target: Path) -> dict[str, Any]:
     payload = roadmap_cmd.command_contract_payload(target)
+    cli_cmds = raw_cli if isinstance((raw_cli := payload.get("cli_commands")), list) else []
+    doc_cmds = raw_doc if isinstance((raw_doc := payload.get("normalized_documented_commands")), list) else []
     snapshot = {
-        "cli_command_count": len(payload.get("cli_commands") if isinstance(payload.get("cli_commands"), list) else []),
-        "documented_command_count": len(
-            payload.get("normalized_documented_commands")
-            if isinstance(payload.get("normalized_documented_commands"), list)
-            else []
-        ),
+        "cli_command_count": len(cli_cmds),
+        "documented_command_count": len(doc_cmds),
         "issue_count": payload.get("issue_count"),
         "top_issue": payload.get("top_issue"),
     }
@@ -271,10 +273,20 @@ def _command_contract_snapshot(target: Path) -> dict[str, Any]:
 
 
 def _candidate_health(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    latest = _evidence._latest_candidate(target)
     checks: list[dict[str, Any]] = []
-    latest = _latest_candidate(target)
     if latest is None:
-        return {"latest": None, "checks": checks, "issue_count": 0, "top_issue": None}
+        checks.append(
+            {
+                "status": WARN,
+                "name": "release_candidate_missing",
+                "detail": "no release candidate found",
+                "phase": 155,
+                "suggested_next_command": "brigade release candidate build",
+            }
+        )
+        return {"latest": None, "checks": checks, "issue_count": len(checks), "top_issue": checks[0]}
     created = work_cmd._parse_iso_datetime(latest.get("created_at"))
     if created is not None:
         age_hours = (_now() - created).total_seconds() / 3600
@@ -286,7 +298,7 @@ def _candidate_health(target: Path) -> dict[str, Any]:
                     "detail": f"{latest.get('candidate_id')}={age_hours:.1f}h",
                 }
             )
-    git = latest.get("git") if isinstance(latest.get("git"), dict) else {}
+    git = raw_git if isinstance((raw_git := latest.get("git")), dict) else {}
     current_head = _git_value(target, "rev-parse", "HEAD")
     if git.get("head") and current_head and git.get("head") != current_head:
         checks.append(
@@ -296,7 +308,7 @@ def _candidate_health(target: Path) -> dict[str, Any]:
                 "detail": f"{latest.get('candidate_id')} head changed",
             }
         )
-    readiness = latest.get("release_readiness") if isinstance(latest.get("release_readiness"), dict) else {}
+    readiness = raw_rd if isinstance((raw_rd := latest.get("release_readiness")), dict) else {}
     if readiness.get("ready") is False:
         checks.append(
             {
@@ -322,7 +334,7 @@ def _candidate_health(target: Path) -> dict[str, Any]:
 
 
 def _release_dogfood_health(target: Path) -> dict[str, Any]:
-    from .. import daily_cmd
+    from ..daily_cmd import run_loop as daily_run_loop
 
     target = target.expanduser().resolve()
 
@@ -336,9 +348,9 @@ def _release_dogfood_health(target: Path) -> dict[str, Any]:
         }
 
     checks: list[dict[str, Any]] = []
-    latest_readiness = _latest_release_receipt(target)
-    latest_candidate = _latest_candidate(target)
-    latest_daily_run = daily_cmd._latest_run(target)
+    latest_readiness = _evidence._latest_release_receipt(target)
+    latest_candidate = _evidence._latest_candidate(target)
+    latest_daily_run = daily_run_loop._latest_run(target)
     if latest_readiness is None:
         checks.append(
             {
@@ -421,7 +433,7 @@ def _release_dogfood_health(target: Path) -> dict[str, Any]:
                     "suggested_next_command": "brigade daily closeout --json",
                 }
             )
-    schema_ids = {schema["id"] for schema in _schema_manifest_schemas()}
+    schema_ids = {schema["id"] for schema in _schema_ops._schema_manifest_schemas()}
     if "release-dogfood-health" not in schema_ids:
         checks.append(
             {
@@ -456,11 +468,11 @@ def _receipt_ref(payload: dict[str, Any] | None, id_field: str) -> dict[str, Any
 
 
 def _candidate_release_notes(candidate: dict[str, Any]) -> str:
-    inputs = candidate.get("release_notes_inputs") if isinstance(candidate.get("release_notes_inputs"), dict) else {}
+    inputs = raw_inp if isinstance((raw_inp := candidate.get("release_notes_inputs")), dict) else {}
     changelog = inputs.get("changelog_unreleased") if isinstance(inputs.get("changelog_unreleased"), list) else []
     commits = inputs.get("commit_subjects") if isinstance(inputs.get("commit_subjects"), list) else []
     docs = inputs.get("touched_docs") if isinstance(inputs.get("touched_docs"), list) else []
-    redactions = inputs.get("changelog_redactions") if isinstance(inputs.get("changelog_redactions"), dict) else {}
+    redactions = raw_red if isinstance((raw_red := inputs.get("changelog_redactions")), dict) else {}
     lines = ["# Release Notes Draft", "", "## Highlights", ""]
     if changelog:
         lines.extend(f"- {item}" for item in changelog[:10])
@@ -468,7 +480,7 @@ def _candidate_release_notes(candidate: dict[str, Any]) -> str:
         lines.append("- review-needed: summarize user-visible changes.")
     redaction_count = int(redactions.get("count") or 0)
     if redaction_count:
-        reasons = redactions.get("reasons") if isinstance(redactions.get("reasons"), dict) else {}
+        reasons = raw_reas if isinstance((raw_reas := redactions.get("reasons")), dict) else {}
         reason_summary = ", ".join(f"{name}={count}" for name, count in sorted(reasons.items()))
         detail = f" ({reason_summary})" if reason_summary else ""
         lines.append(f"- {redaction_count} Unreleased changelog entries redacted{detail}.")
@@ -484,8 +496,9 @@ def _candidate_release_notes(candidate: dict[str, Any]) -> str:
 
 
 def _candidate_publish_plan(candidate: dict[str, Any]) -> str:
-    head = candidate.get("git", {}).get("short_head") if isinstance(candidate.get("git"), dict) else None
-    branch = candidate.get("git", {}).get("branch") if isinstance(candidate.get("git"), dict) else None
+    git = raw_git if isinstance((raw_git := candidate.get("git")), dict) else {}
+    head = git.get("short_head")
+    branch = git.get("branch")
     lines = [
         "# Publish Plan",
         "",
@@ -503,7 +516,7 @@ def _candidate_publish_plan(candidate: dict[str, Any]) -> str:
 
 
 def _candidate_summary(candidate: dict[str, Any]) -> str:
-    readiness = candidate.get("release_readiness") if isinstance(candidate.get("release_readiness"), dict) else {}
+    readiness = raw_rd if isinstance((raw_rd := candidate.get("release_readiness")), dict) else {}
     lines = [
         "# Release Candidate",
         "",
@@ -545,7 +558,7 @@ def plan(*, target: Path, base_ref: str | None = "origin/main", json_output: boo
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = _payload(target, base_ref=base_ref, run_checks=False)
+    payload = _evidence._payload(target, base_ref=base_ref, run_checks=False)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -566,7 +579,9 @@ def doctor(*, target: Path, base_ref: str | None = "origin/main", json_output: b
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = _payload_with_candidate_health(_payload(target, base_ref=base_ref, run_checks=True), target)
+    payload = _evidence._payload_with_candidate_health(
+        _evidence._payload(target, base_ref=base_ref, run_checks=True), target
+    )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["ready"] else 1
@@ -586,7 +601,7 @@ def schema(*, target: Path, json_output: bool = False) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = _schema_manifest(target)
+    payload = _schema_ops._schema_manifest(target)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -682,7 +697,7 @@ def candidate_list(*, target: Path, limit: int = 20, json_output: bool = False) 
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidates = _release_candidates(target)[:limit]
+    candidates = _evidence._release_candidates(target)[:limit]
     payload = {"target": str(target), "candidate_root": str(_release_candidates_root(target)), "candidates": candidates}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -704,7 +719,7 @@ def candidate_show(*, target: Path, candidate_id: str, json_output: bool = False
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _resolve_candidate(target, candidate_id)
+    candidate, error = _evidence._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -727,7 +742,7 @@ def candidate_archive(*, target: Path, candidate_id: str, json_output: bool = Fa
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate, error = _resolve_candidate(target, candidate_id)
+    candidate, error = _evidence._resolve_candidate(target, candidate_id)
     if candidate is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
