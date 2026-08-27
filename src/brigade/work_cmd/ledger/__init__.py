@@ -8,10 +8,11 @@ module-reference callers.
 
 from __future__ import annotations
 
-import importlib
-import sys
+import importlib as _importlib
+import sys as _sys
 from types import ModuleType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+from typing import Any as _Any
 
 _MODULE_NAMES = (
     "locking",
@@ -690,46 +691,46 @@ _OWNERS = {
 
 
 class _FacadeModule(ModuleType):
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> _Any:
         owner = _OWNERS.get(name)
         if owner is not None:
-            return getattr(sys.modules[f"{self.__name__}.{owner}"], name)
+            return getattr(_sys.modules[f"{self.__name__}.{owner}"], name)
         shared_modules = _SHARED_IMPORTS.get(name)
         if shared_modules:
-            return getattr(sys.modules[f"{self.__name__}.{shared_modules[0]}"], name)
+            return getattr(_sys.modules[f"{self.__name__}.{shared_modules[0]}"], name)
         raise AttributeError(f"module {self.__name__!r} has no attribute {name!r}")
 
-    def __setattr__(self, name: str, value: Any) -> None:
+    def __setattr__(self, name: str, value: _Any) -> None:
         owner = _OWNERS.get(name)
         if owner is not None:
-            setattr(sys.modules[f"{self.__name__}.{owner}"], name, value)
+            setattr(_sys.modules[f"{self.__name__}.{owner}"], name, value)
             return
         shared_modules = _SHARED_IMPORTS.get(name)
         if shared_modules:
             for module_name in shared_modules:
-                setattr(sys.modules[f"{self.__name__}.{module_name}"], name, value)
+                setattr(_sys.modules[f"{self.__name__}.{module_name}"], name, value)
             return
         super().__setattr__(name, value)
 
     def __delattr__(self, name: str) -> None:
         owner = _OWNERS.get(name)
         if owner is not None:
-            delattr(sys.modules[f"{self.__name__}.{owner}"], name)
+            delattr(_sys.modules[f"{self.__name__}.{owner}"], name)
             return
         shared_modules = _SHARED_IMPORTS.get(name)
         if shared_modules:
             for module_name in shared_modules:
-                delattr(sys.modules[f"{self.__name__}.{module_name}"], name)
+                delattr(_sys.modules[f"{self.__name__}.{module_name}"], name)
             return
         super().__delattr__(name)
 
 
 for _module_name in _MODULE_NAMES:
-    importlib.import_module(f"{__name__}.{_module_name}")
+    _importlib.import_module(f"{__name__}.{_module_name}")
 
 _SHARED_IMPORTS: dict[str, tuple[str, ...]] = {
-    name: tuple(module_name for module_name in _MODULE_NAMES if name in vars(sys.modules[f"{__name__}.{module_name}"]))
+    name: tuple(module_name for module_name in _MODULE_NAMES if name in vars(_sys.modules[f"{__name__}.{module_name}"]))
     for name in _SHARED_IMPORT_NAMES
 }
 
-sys.modules[__name__].__class__ = _FacadeModule
+_sys.modules[__name__].__class__ = _FacadeModule

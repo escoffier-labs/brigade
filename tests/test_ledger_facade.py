@@ -77,3 +77,18 @@ def test_cross_module_calls_read_live_owner_attributes(monkeypatch: pytest.Monke
 
     with pytest.raises(OSError, match="descriptor-relative import inbox operations are unavailable"):
         _owner_module("_open_import_inbox_parent")._open_import_inbox_parent(tmp_path, create=False)
+
+
+def test_facade_shared_import_assignment_reads_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The facade must not shadow a shared import with its own binding: after
+    # assignment, the facade and every seam that binds the name agree.
+    for name in ("sys", "Any", "os"):
+        sentinel = object()
+        monkeypatch.setattr(ledger, name, sentinel)
+        assert getattr(ledger, name) is sentinel
+        for module_name in ledger._SHARED_IMPORTS[name]:
+            assert getattr(importlib.import_module(f"{ledger.__name__}.{module_name}"), name) is sentinel
+    monkeypatch.undo()
+    import sys as real_sys
+
+    assert ledger.sys is real_sys
