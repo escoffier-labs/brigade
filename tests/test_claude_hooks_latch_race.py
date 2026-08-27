@@ -48,6 +48,61 @@ def test_session_state_helpers_resolve_runtime_primitives_at_call_time(tmp_path:
     assert calls == [(tmp_path, "s")]
 
 
+def test_lock_gap_does_not_leak_process_lock(tmp_path: Path, monkeypatch) -> None:
+    from brigade.claude_hooks import session_state
+
+    @contextlib.contextmanager
+    def failing_file_lock(*_args, **_kwargs):
+        raise RuntimeError("file lock entry failed")
+        yield
+
+    monkeypatch.setattr(inbox_lock, "held_file_lock", failing_file_lock)
+
+    with pytest.raises(RuntimeError, match="file lock entry failed"):
+        with session_state._session_state_lock(tmp_path, "s"):
+            pass
+
+    state_path = runtime._state_path(tmp_path.expanduser().resolve(), "s")
+    assert session_state._session_state_process_lock(state_path).locked() is False
+
+
+def test_persistent_lock_timeout_still_latches(tmp_path: Path, monkeypatch) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+
+    @contextlib.contextmanager
+    def timeout_lock(_target: Path, _session_id: str):
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "_session_state_lock", timeout_lock)
+        runtime._record_hook_timeout(target, "s")
+        second = runtime._record_hook_timeout(target, "s")
+
+        assert second["hook_latched"] is True
+        assert runtime._read_hook_latch(target, "s")[0] is True
+
+    recovered = runtime._record_hook_timeout(target, "s")
+    assert recovered["hook_timeout_count"] == 3
+    assert recovered["hook_latched"] is True
+    assert session_state._journal_timeout_count(target, "s") == 0
+
+
+def test_clear_after_journal_latch_keeps_latch(tmp_path: Path) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    session_state._append_timeout_marker(target, "s")
+    session_state._append_timeout_marker(target, "s")
+
+    runtime._clear_hook_timeouts(target, "s")
+
+    assert runtime.read_session_state(target, "s") is None
+    assert session_state._journal_timeout_count(target, "s") == 2
+
+
 def test_slow_timeout_writes_eventually_latch_and_hold(tmp_path: Path, monkeypatch, capsys) -> None:
     """Slow state writes still converge on a held latch (consistency check; passes on main too)."""
     target = _wired_claude(tmp_path)
