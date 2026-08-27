@@ -940,6 +940,25 @@ def test_complete_with_report_text_retrieves_via_operator_without_leaking(tmp_pa
     assert REPORT_TEXT not in json.dumps(error.value.public_error())
 
 
+def test_metadata_only_scout_completion_operator_report_is_public_validation(tmp_path: Path):
+    job_id = _running_scout_job(tmp_path)
+    scout = _adapter(tmp_path, "repository-scout")
+    operator = _adapter(tmp_path, "operator")
+
+    completed = scout.call_tool(
+        "grokbot_queue_complete",
+        {"job_id": job_id, "lease_id": "lease-a", "artifact": _report_artifact()},
+    )
+    assert completed["state"] == "completed"
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "completed"
+
+    with pytest.raises(grokbot_mcp.AdapterError) as error:
+        operator.call_tool("grokbot_queue_report", {"job_id": job_id})
+    assert error.value.public_error() == {
+        "error": {"code": "invalid_request", "message": "Tool input failed validation"}
+    }
+
+
 @pytest.mark.parametrize("report_text", [None, [], 42])
 def test_direct_complete_rejects_present_non_string_report_text(tmp_path: Path, report_text: object):
     job_id = _running_scout_job(tmp_path)

@@ -49,7 +49,9 @@ serializer escapes non-ASCII characters.
 - Write snapshot bytes before the completed job record. A crash can leave an
   invisible orphan, but cannot produce a completed record that points to a
   missing snapshot.
-- Read only through a no-follow descriptor, enforce the 12,000-byte ceiling,
+- Read through a no-follow descriptor on POSIX (`O_NOFOLLOW` relative to the
+  artifacts directory fd). On Windows, refuse a symlink or non-regular path
+  with an `lstat` pre-check before opening. Enforce the 12,000-byte ceiling,
   decode strict UTF-8, recompute SHA-256, and compare it with the completed
   result artifact.
 - Do not add report content to job JSON, status projections, tracker rows,

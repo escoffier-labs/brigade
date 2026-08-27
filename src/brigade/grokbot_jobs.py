@@ -383,6 +383,7 @@ def transition(
         else:
             record["result_artifact"] = _validated_completion(record, artifact)
         record["state"] = state
+        _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
 
@@ -446,9 +447,11 @@ def cancel(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
         if record["state"] in {"completed", "failed", "expired", "canceled"}:
+            _discard_orphan_report_snapshot(storage, record)
             return _projection(record)
         if record["state"] == "queued":
             record["state"] = "canceled"
+            _discard_orphan_report_snapshot(storage, record)
             _commit_mutation(storage.jobs, record, timestamp)
             return _projection(record)
         if "cancel_requested_at" not in record:
@@ -475,6 +478,7 @@ def acknowledge_cancel(
         if "cancel_requested_at" not in record:
             raise GrokbotJobError("cancellation-not-requested")
         record["state"] = "canceled"
+        _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
 
@@ -486,6 +490,7 @@ def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
         if record["state"] in {"completed", "failed", "expired", "canceled"}:
+            _discard_orphan_report_snapshot(storage, record)
             return _projection(record)
         deadline = _deadline(record)
         expires_at = (
@@ -494,6 +499,7 @@ def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
         if instant < expires_at:
             return _projection(record)
         record["state"] = "expired"
+        _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
 
@@ -862,11 +868,7 @@ def _read_bytes_file(directory: _Directory, name: str, *, maximum: int, missing_
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise GrokbotJobError("unsafe-storage")
-        data = os.read(descriptor, maximum + 1)
-        extra = os.read(descriptor, 1)
-        if extra or len(data) > maximum:
-            raise GrokbotJobError("report-too-large")
-        return data
+        return _read_bounded_bytes(descriptor, maximum)
     except GrokbotJobError:
         raise
     except OSError as exc:
@@ -890,11 +892,7 @@ def _read_bytes_file_windows(
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise GrokbotJobError("unsafe-storage")
-        data = os.read(descriptor, maximum + 1)
-        extra = os.read(descriptor, 1)
-        if extra or len(data) > maximum:
-            raise GrokbotJobError("report-too-large")
-        return data
+        return _read_bounded_bytes(descriptor, maximum)
     except GrokbotJobError:
         raise
     except FileNotFoundError:
@@ -904,6 +902,46 @@ def _read_bytes_file_windows(
     finally:
         if descriptor is not None:
             os.close(descriptor)
+
+
+def _read_bounded_bytes(descriptor: int, maximum: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    limit = maximum + 1
+    while total < limit:
+        chunk = os.read(descriptor, limit - total)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > maximum:
+        raise GrokbotJobError("report-too-large")
+    return b"".join(chunks)
+
+
+def _unlink_artifact_file(directory: _Directory, name: str) -> None:
+    if directory.descriptor is None:  # pragma: no cover - exercised on Windows.
+        path = directory.path / name
+        _assert_regular_or_missing(path)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise GrokbotJobError("unsafe-storage") from exc
+        return
+    try:
+        os.unlink(name, dir_fd=directory.descriptor)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+
+
+def _discard_orphan_report_snapshot(storage: _Storage, record: dict[str, Any]) -> None:
+    if record["state"] not in {"failed", "expired", "canceled"}:
+        return
+    _unlink_artifact_file(storage.artifacts, f"{record['job_id']}.md")
 
 
 def _chmod_file_descriptor(descriptor: int, path: Path | None) -> None:

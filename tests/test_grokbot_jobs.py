@@ -95,6 +95,25 @@ def _snapshot_path(tmp_path: Path, job_id: str) -> Path:
     return tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts" / f"{job_id}.md"
 
 
+def _leave_orphan_report_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, idempotency_key: str) -> str:
+    job_id = _running_report(tmp_path, idempotency_key=idempotency_key)
+    original_replace = grokbot_jobs.os.replace
+
+    def fail_job_replace(source, destination, *args, **kwargs):
+        dest = destination if isinstance(destination, str) else str(destination)
+        if dest.endswith(".json"):
+            raise OSError("injected job write failure")
+        return original_replace(source, destination, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(grokbot_jobs.os, "replace", fail_job_replace)
+        with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
+            grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    assert _snapshot_path(tmp_path, job_id).is_file()
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    return job_id
+
+
 def _job_json(tmp_path: Path, job_id: str) -> str:
     return (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{job_id}.json").read_text()
 
@@ -1138,3 +1157,77 @@ def test_metadata_only_report_completion_stays_compatible(tmp_path: Path):
     with pytest.raises(grokbot_jobs.GrokbotJobError, match="^report-missing$"):
         grokbot_jobs.read_report(tmp_path, job_id)
     _assert_surfaces_omit_report_text(tmp_path, job_id)
+
+
+@pytest.mark.parametrize("terminal", ["failed", "expired", "canceled"])
+def test_noncompleted_terminal_cleans_orphan_report_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: str
+):
+    job_id = _leave_orphan_report_snapshot(tmp_path, monkeypatch, idempotency_key=f"request-orphan-{terminal}")
+    snapshot = _snapshot_path(tmp_path, job_id)
+
+    if terminal == "failed":
+        result = grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=NOW)
+    elif terminal == "expired":
+        result = grokbot_jobs.expire(tmp_path, job_id, now=NOW + timedelta(seconds=60))
+    else:
+        grokbot_jobs.cancel(tmp_path, job_id, now=NOW)
+        result = grokbot_jobs.acknowledge_cancel(tmp_path, job_id, "bot-a", "lease-a", now=NOW)
+
+    assert result["state"] == terminal
+    assert not snapshot.exists()
+    snapshot.write_text(REPORT_TEXT, encoding="utf-8")
+    grokbot_jobs.expire(tmp_path, job_id, now=NOW + timedelta(seconds=60))
+    grokbot_jobs.cancel(tmp_path, job_id, now=NOW)
+    assert not snapshot.exists()
+
+
+def test_completed_report_snapshot_survives_later_terminal_attempts(tmp_path: Path):
+    job_id = _running_report(tmp_path)
+    grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    snapshot = _snapshot_path(tmp_path, job_id)
+    encoded = snapshot.read_bytes()
+
+    assert grokbot_jobs.expire(tmp_path, job_id, now=NOW + timedelta(seconds=60))["state"] == "completed"
+    assert grokbot_jobs.cancel(tmp_path, job_id, now=NOW)["state"] == "completed"
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^terminal-state$"):
+        grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=NOW)
+
+    assert snapshot.read_bytes() == encoded
+    assert grokbot_jobs.read_report(tmp_path, job_id)["text"] == REPORT_TEXT
+
+
+def test_orphan_cleanup_failure_does_not_terminalize_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job_id = _leave_orphan_report_snapshot(tmp_path, monkeypatch, idempotency_key="request-orphan-unlink-fails")
+    real_unlink = grokbot_jobs.os.unlink
+
+    def fail_snapshot_unlink(path, *args, **kwargs):
+        if path == f"{job_id}.md":
+            raise OSError("injected artifact unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(grokbot_jobs.os, "unlink", fail_snapshot_unlink)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^unsafe-storage$"):
+        grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "failed", now=NOW)
+
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+    assert _snapshot_path(tmp_path, job_id).is_file()
+
+
+def test_read_report_keeps_reading_after_legal_short_os_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job_id = _running_report(tmp_path)
+    grokbot_jobs.complete_report(tmp_path, job_id, "bot-a", "lease-a", _report_artifact(), REPORT_TEXT, now=NOW)
+    real_read = grokbot_jobs.os.read
+
+    def short_read(fd: int, n: int, *args: object, **kwargs: object) -> bytes:
+        return real_read(fd, 1 if n > 1 else n, *args, **kwargs)
+
+    monkeypatch.setattr(grokbot_jobs.os, "read", short_read)
+    report = grokbot_jobs.read_report(tmp_path, job_id)
+    encoded = REPORT_TEXT.encode("utf-8")
+    assert report == {
+        "job_id": job_id,
+        "text": REPORT_TEXT,
+        "bytes": len(encoded),
+        "sha256": _report_digest(),
+    }
