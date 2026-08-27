@@ -12,31 +12,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import receipt_schema, runguard, run_checkpoint, run_lifecycle
-from . import aboyeur as _aboyeur
+
+
+def _aboyeur():
+    """Resolve the facade lazily to permit direct helper imports."""
+    from . import aboyeur
+
+    return aboyeur
 
 
 def _one_line(text: str) -> str:
-    return _aboyeur._one_line(text)
+    return _aboyeur()._one_line(text)
 
 
 def _parse_iso_datetime(value: object) -> datetime | None:
-    return _aboyeur._parse_iso_datetime(value)
+    return _aboyeur()._parse_iso_datetime(value)
 
 
 def _utc_iso(value: datetime) -> str:
-    return _aboyeur._utc_iso(value)
+    return _aboyeur()._utc_iso(value)
 
 
 def _with_patch_ref(ground_truth: object, patch_ref: str) -> object:
-    return _aboyeur._with_patch_ref(ground_truth, patch_ref)
+    return _aboyeur()._with_patch_ref(ground_truth, patch_ref)
 
 
 def _write_json(path: Path, payload: object) -> None:
-    _aboyeur._write_json(path, payload)
+    _aboyeur()._write_json(path, payload)
 
 
 def write_sidecar_revision(run_dir: Path, filename: str, payload: object) -> None:
-    _aboyeur.write_sidecar_revision(run_dir, filename, payload)
+    _aboyeur().write_sidecar_revision(run_dir, filename, payload)
 
 
 def set_artifact_patch_ref(output_dir: Path, patch_ref: str = "changes.patch") -> None:

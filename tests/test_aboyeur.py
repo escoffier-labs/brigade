@@ -38,6 +38,16 @@ def _sidecar_revisions(run_dir: Path, sidecar: str) -> list[Path]:
     return sorted((run_dir / "revisions" / sidecar).glob("*.json"))
 
 
+def test_artifact_helper_imports_before_aboyeur_facade() -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", "import brigade.aboyeur_artifacts"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_approval_handoff_selects_completed_requester_not_unrelated_workers(tmp_path):
     results = [
         aboyeur.WorkerResult(
