@@ -103,6 +103,15 @@ class ListenerConfig:
         return f"grokbot-{self.instance}"
 
 
+def tools_for_instance(instance: str) -> frozenset[str]:
+    """Return the exact runtime allowlist for one packaged queue role."""
+    if instance == "operator":
+        return OPERATOR_TOOLS
+    if instance in INSTANCES:
+        return WORKER_TOOLS
+    raise ConfigurationError("invalid")
+
+
 def parse_bind(value: str) -> tuple[str, int]:
     """Parse a deliberately small host:port surface without IPv6 ambiguity."""
     if not isinstance(value, str) or value.count(":") != 1:
@@ -175,7 +184,7 @@ class GrokbotAdapter:
             raise AdapterError() from None
 
     def _tools(self) -> frozenset[str]:
-        return OPERATOR_TOOLS if self.config.instance == "operator" else WORKER_TOOLS
+        return tools_for_instance(self.config.instance)
 
     def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "grokbot_queue_list":

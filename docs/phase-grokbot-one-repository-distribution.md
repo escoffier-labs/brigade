@@ -63,10 +63,9 @@ connector bearer values.
 
 ## CLI direction
 
-The current queue commands remain under `brigade run cloud grokbot`. Later
-slices extend that namespace with first-party lifecycle commands. Exact parser
-names are finalized in their implementation PRs, but the supported operations
-are fixed:
+The current queue commands remain under `brigade run cloud grokbot`. Connector
+packs use the same namespace under `brigade run cloud grokbot pack`. The
+supported operations are fixed:
 
 - configure a role or connector without storing secret values
 - inspect configuration and endpoint health
@@ -95,11 +94,20 @@ This slice does not migrate a live connector or disable the sidecar.
 
 ### PR 2: connector-pack registry and lifecycle
 
-1. Define a versioned first-party pack manifest.
-2. Add setup, doctor, service rendering, canary, update, and removal operations.
-3. Reject duplicate ports, overlapping public routes, unsafe binds, weak file
-   permissions, missing secret references, and tool inventory drift.
-4. Keep secrets outside Brigade state and repository content.
+1. Define a versioned first-party pack manifest
+   (`brigade.grokbot.connector-pack.v1`) and local instance config
+   (`brigade.grokbot.connector-instance.v1`).
+2. Add preview-first `brigade run cloud grokbot pack` commands for list, show,
+   setup, doctor, canary, install-service, update, and remove.
+3. Reject duplicate pack IDs, duplicate ports, overlapping non-empty public
+   routes, unsafe or non-loopback default binds, invalid versions, missing or
+   weak secret references, and declared tool inventory that differs from the
+   runtime allowlist.
+4. Keep secrets outside Brigade state and repository content. The first
+   packaged packs are the existing queue roles, with isolated default ports
+   8766, 8767, and 8768. Legacy `setup` / `doctor` / `canary` /
+   `install-service` remain compatible. This slice does not start, stop, or
+   reload services.
 
 ### PR 3: first-party connector packs
 

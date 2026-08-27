@@ -56,6 +56,24 @@ The routine sequence for a worker is: list, claim, validate role and repository,
 
 `doctor` reports sanitized dependency, configuration, permissions, queue, and endpoint checks. It returns nonzero after setup until the listener starts because the endpoint check cannot connect. Run it again after the listener starts. A canary needs the listener already running.
 
+## Connector packs
+
+The three queue roles are also packaged as first-party connector packs. The registry is closed: Brigade does not load user-supplied pack manifests. Pack commands default to preview. `--apply` may write only private local config and an explicitly selected unit file. Pack commands do not start, stop, or reload services, and they never store bearer values.
+
+```bash
+brigade run cloud grokbot pack list
+brigade run cloud grokbot pack show --id operator
+brigade run cloud grokbot pack setup --id operator --bearer-file /run/brigade/grokbot-operator.token
+brigade run cloud grokbot pack setup --id operator --bearer-file /run/brigade/grokbot-operator.token --apply
+brigade run cloud grokbot pack doctor --id operator
+brigade run cloud grokbot pack install-service --id operator
+brigade run cloud grokbot pack canary --id operator
+brigade run cloud grokbot pack update --id operator
+brigade run cloud grokbot pack remove --id operator
+```
+
+Default pack binds do not collide: operator `127.0.0.1:8766`, repository-scout `127.0.0.1:8767`, and implementation-worker `127.0.0.1:8768`. Custom `--bind` values that reuse another pack's packaged default or installed port are refused without printing config contents. Apply writes the pack instance store and the legacy role store together; a failed second write restores both to their prior bytes and modes, or to absent on first install, and only after each restored target is verified. A failed restore or verification raises `rollback-failed` without printing config contents. Each pack keeps the same exact tool inventory and credential reference as its legacy role. The existing `--instance` commands remain supported.
+
 ## Report snapshots
 
 `grokbot_queue_complete` accepts an optional `report_text` string. Send it only for a Repository Scout job whose expected artifact kind is `report`. The text must be non-empty UTF-8 and at most 12,000 bytes. The completion `artifact` remains `{"kind": "report", "path": "<repo-relative path>", "sha256": "<hex>"}`, and `sha256` must be the SHA-256 of those exact UTF-8 bytes. Draft-PR and branch completions reject `report_text`.
