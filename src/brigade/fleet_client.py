@@ -1282,9 +1282,10 @@ def load_model_policy_snapshot(*, hub_url: str | None = None) -> dict[str, Any]:
     """Classify one bounded model-policy read for run admission.
 
     A missing hub preserves standalone Brigade behavior. A configured hub that
-    cannot be reached follows the existing local-run fleet fallback. Explicit
-    credential rejection is different: it cannot safely authorize a new run.
-    A successful read is authoritative even when the registry is empty.
+    cannot be reached is classified separately so new-run admission can fail
+    closed without affecting work already in flight. Explicit credential
+    rejection is also distinct. A successful read is authoritative even when
+    the registry is empty.
     """
     config = load_fleet_config()
     hub = hub_url or config["hub_url"]

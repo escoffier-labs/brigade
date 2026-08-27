@@ -93,13 +93,26 @@ def test_direct_worker_model_override_fails_closed_when_registry_model_differs()
     )
 
 
-def test_unconfigured_and_unavailable_hubs_preserve_local_roster_behavior():
-    for state in ("unconfigured", "unavailable"):
-        resolution = aboyeur.resolve_fleet_model_policy(_roster(), snapshot={"state": state, "models": []})
-        assert resolution.error is None
-        assert resolution.roster == _roster()
-        assert resolution.receipt["authoritative"] is False
-        assert resolution.receipt["state"] == state
+def test_unconfigured_hub_preserves_local_roster_behavior():
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        snapshot={"state": "unconfigured", "models": []},
+    )
+
+    assert resolution.error is None
+    assert resolution.roster == _roster()
+    assert resolution.receipt["authoritative"] is False
+    assert resolution.receipt["state"] == "unconfigured"
+
+
+def test_configured_unavailable_hub_denies_new_dispatch():
+    resolution = aboyeur.resolve_fleet_model_policy(
+        _roster(),
+        worker="cursor_grok",
+        snapshot={"state": "unavailable", "models": []},
+    )
+
+    assert resolution.error == "fleet model policy hub is unavailable; refusing new dispatch"
 
 
 def test_hub_auth_failure_denies_new_dispatch():
@@ -200,3 +213,34 @@ def test_run_cli_requires_worker_for_model_override(tmp_path, capsys):
 
     assert rc == 2
     assert "--model requires --worker" in capsys.readouterr().err
+
+
+def test_run_terminalizes_configured_hub_outage_as_model_policy_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        fleet_client,
+        "load_model_policy_snapshot",
+        lambda: {"state": "unavailable", "models": []},
+    )
+    output_dir = tmp_path / "run"
+
+    assert (
+        run_aboyeur_guarded(
+            "inspect",
+            _roster(),
+            worker="cursor_grok",
+            dry_run=True,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 2
+    )
+
+    run = json.loads((output_dir / "run.json").read_text())
+    assert run["status"] == "failed"
+    assert run["failure"] == {
+        "phase": "preflight",
+        "kind": "fleet-model-policy",
+        "detail": "fleet model policy hub is unavailable; refusing new dispatch",
+        "seat": "cursor_grok",
+    }

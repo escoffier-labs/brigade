@@ -182,8 +182,14 @@ def resolve_fleet_model_policy(
     if model_override is not None:
         receipt["model_override"] = model_override.strip()
         receipt["model_override_seat"] = worker
-    if state in {"unconfigured", "unavailable"}:
+    if state == "unconfigured":
         return FleetModelPolicyResolution(roster=effective, receipt=receipt)
+    if state == "unavailable":
+        return FleetModelPolicyResolution(
+            roster=effective,
+            receipt=receipt,
+            error="fleet model policy hub is unavailable; refusing new dispatch",
+        )
     if state == "auth-failed":
         return FleetModelPolicyResolution(
             roster=effective,
