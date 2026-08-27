@@ -377,7 +377,7 @@ def test_build_plan_prompt_describes_stage_contract():
 def test_build_plan_prompt_exposes_read_only_capability():
     prompt = aboyeur.build_plan_prompt("inspect feature", _roster_with_incapable_worker(), read_only=True)
 
-    assert "coder: cli=cursor; read_only_capable=false; role=write code" in prompt
+    assert "coder: cli=cursor; model=composer-2.5; read_only_capable=false; role=write code" in prompt
     assert "Assign only workers with read_only_capable=true" in prompt
 
 
@@ -385,6 +385,34 @@ def test_build_plan_prompt_hides_read_only_capability_for_writable_runs():
     prompt = aboyeur.build_plan_prompt("build feature", _roster_with_incapable_worker())
 
     assert "read_only_capable" not in prompt
+
+
+def test_build_plan_prompt_exposes_model_purpose_and_caveats():
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan and synthesize"),
+            "coder": Agent(
+                "coder",
+                "cursor",
+                "write code",
+                model="cursor-grok-4.6-high-fast",
+                purpose="Primary Cursor Grok implementation seat",
+                caveats=("do not use the spent Other Models pool",),
+                fallback=("reviewer",),
+            ),
+        },
+        max_workers=1,
+    )
+
+    prompt = aboyeur.build_plan_prompt("build feature", roster)
+
+    assert (
+        "coder: cli=cursor; model=cursor-grok-4.6-high-fast; "
+        "purpose=Primary Cursor Grok implementation seat; "
+        "caveats=do not use the spent Other Models pool; fallback=reviewer; "
+        "role=write code"
+    ) in prompt
 
 
 def test_worker_prompt_without_prior_context_keeps_original_contract():

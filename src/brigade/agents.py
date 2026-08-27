@@ -216,11 +216,12 @@ def _pi_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None
 def _cursor_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
     # Headless `cursor-agent -p` refuses to run in a workspace it has not
     # trusted yet, and the refusal exits 0, so an untrusted directory no-ops
-    # while looking like success. `--trust` clears the gate for plan runs;
-    # write runs also need `-f` so command approvals do not stall the worker.
+    # while looking like success. `--trust` clears that gate for plan and
+    # write runs. Write runs also need `-f` so command approvals do not
+    # stall the worker.
     if read_only or sandbox == "read-only":
         return ["cursor-agent", "-p", "--mode", "plan", "--output-format", "text", "--trust", prompt]
-    return ["cursor-agent", "-p", "--output-format", "text", "-f", prompt]
+    return ["cursor-agent", "-p", "--output-format", "text", "-f", "--trust", prompt]
 
 
 def _read_only_prompt(prompt: str) -> str:

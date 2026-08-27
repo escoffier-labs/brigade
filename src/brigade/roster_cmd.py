@@ -332,6 +332,16 @@ def init(
     return 0
 
 
+def _doctor_health_status(result: seat_health.SeatHealthResult) -> str:
+    """Healthy seats stay OK. Expected incomplete probes stay INFO; real failures stay WARN."""
+    if result.status == "healthy":
+        return doctor_mod.OK
+    incomplete_only = all(check.status == "passed" or check.cause_code == "probe-incomplete" for check in result.checks)
+    if result.status == "degraded" and incomplete_only:
+        return doctor_mod.INFO
+    return doctor_mod.WARN
+
+
 def doctor(
     target: Path,
     *,
@@ -378,7 +388,7 @@ def doctor(
         loaded, workspace=target, allow_model_smoke=False
     )
     for result in shared_health:
-        status = doctor_mod.OK if result.status == "healthy" else doctor_mod.WARN
+        status = _doctor_health_status(result)
         detail = (
             "; ".join(f"{check.name}={check.status}" for check in result.checks if check.status != "passed")
             or "all applicable checks passed"

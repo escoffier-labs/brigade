@@ -428,7 +428,12 @@ class SeatHealthProbe:
                 if auth.state == "unauthenticated":
                     return SeatHealthCheck(name, "failed", auth.detail, cause_code="auth-required")
                 return SeatHealthCheck(name, "degraded", auth.detail, cause_code="auth-status-unavailable")
-            return SeatHealthCheck(name, "degraded", "adapter has no prompt-free authentication status check")
+            return SeatHealthCheck(
+                name,
+                "degraded",
+                "adapter has no prompt-free authentication status check",
+                cause_code="probe-incomplete",
+            )
         if name == "transport-liveness":
             return self._transport_check(seat, roster, workspace, timeout_seconds)
         if name == "version-gates":
@@ -442,7 +447,9 @@ class SeatHealthProbe:
                     f"requires {seat.transport_version}; found {version or detail}",
                     cause_code="version-mismatch",
                 )
-            return SeatHealthCheck(name, "degraded", "adapter has no reviewed version gate")
+            return SeatHealthCheck(
+                name, "degraded", "adapter has no reviewed version gate", cause_code="probe-incomplete"
+            )
         if name == "model-reachability":
             return self._model_check(seat, roster, workspace, timeout_seconds, allow_model_smoke)
         if name == "isolation-compatibility":
@@ -462,7 +469,10 @@ class SeatHealthProbe:
                     cause_code="unsafe-isolation",
                 )
             return SeatHealthCheck(
-                name, "degraded", f"declared read-only enforcement is {enforcement}; postflight is deferred"
+                name,
+                "degraded",
+                f"declared read-only enforcement is {enforcement}; postflight is deferred",
+                cause_code="probe-incomplete",
             )
         raise AssertionError(name)
 
@@ -508,7 +518,12 @@ class SeatHealthProbe:
         # provider inventory call, and it deliberately never sends a smoke
         # request while merely inspecting a workspace.
         if not allow_model_smoke:
-            return SeatHealthCheck("model-reachability", "degraded", "model check is owned by roster doctor inventory")
+            return SeatHealthCheck(
+                "model-reachability",
+                "degraded",
+                "model check is owned by roster doctor inventory",
+                cause_code="probe-incomplete",
+            )
         if seat.transport == "direct" and seat.cli is not None:
             inspected = model_inventory.ModelInventoryInspector().inspect(
                 seat.cli, seat.model, getattr(seat, "command", None)

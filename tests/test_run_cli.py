@@ -22,6 +22,13 @@ from tests import thread_sync
 from tests.run_test_helpers import HEALTHY_SEAT_HEALTH_CHILD_SETUP
 
 
+@pytest.fixture(autouse=True)
+def _isolate_run_preference_home(tmp_path, monkeypatch):
+    home = tmp_path / "brigade-home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+
+
 def test_run_cli_missing_roster_errors(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
@@ -157,6 +164,66 @@ role = "code"
         "scheduler": "waves",
     }
     assert seen["fail_fast"] is True
+
+
+def test_run_cli_applies_cached_preference_unless_worker_is_set(tmp_path, monkeypatch, capsys):
+    from brigade import run_preference
+
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.cursor_grok]
+cli = "cursor"
+role = "code"
+"""
+    )
+    run_preference.write_cached(run_preference.RunPreference(impl="cursor_grok", review="claude_standby"))
+    seen = {}
+
+    def fake_run(task, loaded_roster, **kwargs):
+        seen["task"] = task
+        seen["orchestrator"] = loaded_roster.orchestrator
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "fix the flaky test",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "runs" / "pref"),
+        ]
+    )
+    assert rc == 0
+    assert "default impl: cursor_grok" in seen["task"]
+    assert "run preference: impl=cursor_grok review=claude_standby (cached)" in capsys.readouterr().err
+
+    rc = cli.main(
+        [
+            "run",
+            "fix the flaky test",
+            "--roster",
+            str(roster_path),
+            "--worker",
+            "cursor_grok",
+            "--cwd",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "runs" / "pref-worker"),
+        ]
+    )
+    assert rc == 0
+    assert seen["task"] == "fix the flaky test"
 
 
 def test_run_cli_forwards_explicit_budget_file_before_dispatch(tmp_path, monkeypatch):

@@ -930,6 +930,52 @@ def fetch_status(*, hub_url: str | None = None, include_all: bool = False) -> li
     return list(runs) if isinstance(runs, list) else []
 
 
+def fetch_run_preference(*, hub_url: str | None = None) -> dict[str, Any]:
+    """GET /preference from the hub; raises FleetClientError when unreachable."""
+    config = load_fleet_config()
+    hub = hub_url or config["hub_url"]
+    if not hub:
+        raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    request = urllib.request.Request(
+        hub.rstrip("/") + "/preference",
+        headers={"Authorization": f"Bearer {config['token']}"},
+    )
+    try:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise FleetClientError(f"fleet hub preference get failed: {exc}") from exc
+    preference = payload.get("preference") if isinstance(payload, dict) else None
+    return dict(preference) if isinstance(preference, dict) else {}
+
+
+def put_run_preference(preference: dict[str, Any], *, hub_url: str | None = None) -> dict[str, Any]:
+    """PUT /preference with the admin token; raises FleetClientError on failure."""
+    settings = load_fleet_settings()
+    hub = hub_url or settings["hub_url"]
+    if not hub:
+        raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    token = settings["admin_token"]
+    if not token:
+        raise FleetClientError(
+            "no fleet admin token configured (~/.brigade/fleet.toml [fleet] token_file or BRIGADE_FLEET_TOKEN)"
+        )
+    body = json.dumps({"preference": preference}).encode("utf-8")
+    request = urllib.request.Request(
+        hub.rstrip("/") + "/preference",
+        data=body,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="PUT",
+    )
+    try:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise FleetClientError(f"fleet hub preference set failed: {exc}") from exc
+    stored = payload.get("preference") if isinstance(payload, dict) else None
+    return dict(stored) if isinstance(stored, dict) else {}
+
+
 # --- hub-arbitrated claims (issue #1125, phase 4) ----------------------------
 
 

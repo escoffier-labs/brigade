@@ -406,6 +406,15 @@ def dispatch(args) -> int:
     except ValueError as exc:
         print(f"error: invalid roster at {roster_path}: {exc}", file=sys.stderr)
         return 2
+    from .. import run_preference
+
+    preference = run_preference.refresh_cache()
+    loaded_roster = run_preference.apply_to_roster(loaded_roster, preference)
+    if args.worker is None:
+        args.task = run_preference.apply_to_task(args.task, preference, worker=None)
+    preference_bits = [f"{key}={value}" for key, value in preference.payload().items() if key != "notes"]
+    if preference_bits:
+        print(f"run preference: {' '.join(preference_bits)} (cached)", file=sys.stderr)
     print(f"roster: {roster_resolution.path} ({roster_resolution.source})", file=sys.stderr)
     # A worktree-parent roster shadowing the user roster is the designed
     # outcome for worktrees of a wired repo, so only a workspace roster warns.

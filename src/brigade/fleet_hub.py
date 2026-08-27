@@ -29,7 +29,11 @@ Endpoints:
   carrying the caller's ``node_id``. Dedupe on UNIQUE(node_id, run_id,
   sequence, digest). Responds ``{"accepted": n, "duplicate": m}``.
 - ``GET /status`` — admin or node token; latest state per (node_id, run_id)
-  for non-terminal runs. ``?all=1`` includes terminal runs.
+  for non-terminal runs. ``?all=1`` includes terminal runs. A terminal event
+  that omitted ``seat`` keeps the last non-empty seat from earlier events.
+- ``GET /preference`` — admin or node token; current fleet run preference.
+- ``PUT /preference`` — admin token; replace the one-row run preference pin
+  (seat names only; secret or path material is rejected).
 - ``GET /nodes`` / ``POST /nodes`` — admin token only; list enrolled nodes,
   ``{"action": "add", "node_id", "label"?}`` mints a token (returned once,
   in that response only; an enrolled, unrevoked node answers 409),
@@ -111,7 +115,7 @@ from urllib.parse import parse_qs, urlencode
 
 from . import fleet_dashboard
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -239,6 +243,18 @@ CREATE TABLE IF NOT EXISTS nodes (
     label TEXT,
     created_at TEXT NOT NULL,
     revoked_at TEXT
+);
+"""
+# v5 (#1223): one-row fleet run preference. Seat names only; never secrets.
+_RUN_PREFERENCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_preference (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    impl TEXT,
+    review TEXT,
+    chef TEXT,
+    notes TEXT,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
 );
 """
 # Bounded so a hostile client cannot bloat the row; a lease token is a uuid4
@@ -435,6 +451,8 @@ def init_db(db_path: Path) -> sqlite3.Connection:
         conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
         # v3 -> v4 is one additive table; IF NOT EXISTS is the whole migration.
         conn.execute(_NODES_SCHEMA)
+        # v4 -> v5: one-row run preference pin (#1223).
+        conn.execute(_RUN_PREFERENCE_SCHEMA)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
     except BaseException:
@@ -551,7 +569,7 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
                 "node_id": row[0],
                 "run_id": row[1],
                 "repo": row[2],
-                "seat": row[3],
+                "seat": _last_known_seat(conn, row[0], row[1], row[3]),
                 "harness": row[4],
                 "state": row[5],
                 "ts": row[6],
@@ -562,6 +580,55 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
             }
         )
     return result
+
+
+def _last_known_seat(conn: sqlite3.Connection, node_id: str, run_id: str, latest: Any) -> Any:
+    """Keep the last non-empty seat when a terminal event drops it."""
+    if isinstance(latest, str) and latest.strip() and latest.strip() != "-":
+        return latest
+    row = conn.execute(
+        "SELECT seat FROM events WHERE node_id = ? AND run_id = ? "
+        "AND seat IS NOT NULL AND trim(seat) != '' AND seat != '-' "
+        "ORDER BY sequence DESC, received_at DESC, digest DESC LIMIT 1",
+        (node_id, run_id),
+    ).fetchone()
+    return row[0] if row else latest
+
+
+def get_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return the one-row fleet run preference, or empty fields when unset."""
+    row = conn.execute("SELECT impl, review, chef, notes FROM run_preference WHERE id = 1").fetchone()
+    if row is None:
+        return {"impl": None, "review": None, "chef": None, "notes": None}
+    return {"impl": row[0], "review": row[1], "chef": row[2], "notes": row[3]}
+
+
+def set_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | None = None) -> dict[str, Any]:
+    """Replace the fleet run preference. Rejects secret or path material."""
+    from . import run_preference
+
+    try:
+        parsed = run_preference.parse_preference(raw)
+    except run_preference.RunPreferenceError as exc:
+        raise FleetHubError(str(exc)) from exc
+    payload = parsed.payload()
+    conn.execute(
+        "INSERT INTO run_preference (id, impl, review, chef, notes, updated_at, updated_by) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET impl=excluded.impl, review=excluded.review, "
+        "chef=excluded.chef, notes=excluded.notes, updated_at=excluded.updated_at, "
+        "updated_by=excluded.updated_by",
+        (
+            payload.get("impl"),
+            payload.get("review"),
+            payload.get("chef"),
+            payload.get("notes"),
+            _utc_now(),
+            updated_by,
+        ),
+    )
+    conn.commit()
+    return get_run_preference(conn)
 
 
 def run_started_at(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
@@ -1256,7 +1323,7 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
             if path == "/" or path.startswith(_DASHBOARD_PREFIX):
                 self._serve_dashboard(path, query)
                 return
-            if path in ("/status", "/claims", "/nodes"):
+            if path in ("/status", "/claims", "/nodes", "/preference"):
                 if self._bearer() is None:
                     self._send_json(401, {"error": "unauthorized"})
                     return
@@ -1279,6 +1346,8 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
                         payload = {"nodes": list_nodes(conn)}
                     elif path == "/status":
                         payload = {"runs": latest_status(conn, include_all=include_all)}
+                    elif path == "/preference":
+                        payload = {"preference": get_run_preference(conn)}
                     else:
                         payload = {"claims": list_claims(conn, include_all=include_all)}
                 except sqlite3.Error as exc:
@@ -1289,6 +1358,53 @@ def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False)
                 self._send_json(200, payload)
                 return
             self._send_json(404, {"error": "not found"})
+
+        def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
+            path = self.path.partition("?")[0]
+            if path != "/preference":
+                self._send_json(404, {"error": "not found"})
+                return
+            if self._bearer() is None:
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            try:
+                conn = open_db(Path(db_path))
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_json(500, {"error": f"hub database error: {exc}"})
+                return
+            try:
+                caller = self._caller(conn)
+                if caller is None:
+                    return
+                is_admin, _node = caller
+                if not is_admin:
+                    self._send_json(403, {"error": "the admin token is required to set run preference"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self._send_json(400, {"error": "bad Content-Length"})
+                    return
+                if length <= 0 or length > MAX_BODY_BYTES:
+                    self._send_json(400, {"error": "missing or oversized body"})
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_json(400, {"error": "body is not valid JSON"})
+                    return
+                body = parsed.get("preference") if isinstance(parsed, dict) and "preference" in parsed else parsed
+                payload = {"preference": set_run_preference(conn, body, updated_by="admin")}
+            except FleetHubError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            except sqlite3.Error as exc:
+                self._send_json(500, {"error": f"hub database error: {exc}"})
+                return
+            finally:
+                conn.close()
+            self._send_json(200, payload)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
             path = self.path.partition("?")[0]

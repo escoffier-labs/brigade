@@ -96,19 +96,30 @@ Hub (`src/brigade/fleet_hub.py`):
   invalid event is rejected whole; responds `{"accepted": n, "duplicate": m}`.
 - `GET /status` — admin or node token; latest event per `(node_id, run_id)`
   for runs whose latest state is not terminal (`run.completed`,
-  `run.failed`, `run.interrupted`); `?all=1` includes terminal runs.
+  `run.failed`, `run.interrupted`); `?all=1` includes terminal runs. A
+  terminal event that omitted `seat` keeps the last non-empty seat from
+  earlier events on that run.
+- `GET /preference` — admin or node token; the one-row fleet run preference
+  pin (`impl`, `review`, `chef`, `notes`). This is a routing overlay, not
+  roster sync. `--worker` and a spoken seat name always win.
+- `PUT /preference` — admin token only; replace the pin. Seat names only;
+  tokens, env values, and home paths are rejected.
 - `GET /nodes`, `POST /nodes` — admin token only; list enrolled nodes,
   `{"action": "add", "node_id", "label"?}` (the token is in that response
   and nowhere else; an enrolled, unrevoked node answers 409),
   `{"action": "revoke", "node_id"}`.
 - SQLite in WAL mode, `PRAGMA user_version` = schema version (v4 adds the
-  `nodes` table in place); a database from a newer hub is refused rather
-  than reinterpreted.
+  `nodes` table; v5 adds the one-row `run_preference` table); a database
+  from a newer hub is refused rather than reinterpreted.
 - `brigade fleet serve --host <ip> [--port 3774] [--db PATH] [--token-file PATH] [--allow-admin-writes]`;
   `--host` is required so the hub never binds all interfaces by accident.
 - `brigade fleet nodes add <node_id> [--label L] [--json]`, `nodes list
   [--json]`, `nodes revoke <node_id> [--json]` — the control plane, using
   the admin token from `[fleet] token_file` / `BRIGADE_FLEET_TOKEN`.
+- `brigade fleet preference get|set|pull` — read or replace the hub pin
+  and refresh `~/.brigade/run-preference.toml`. `brigade run` prefixes the
+  planner-visible default from that cache when `--worker` is omitted. The
+  hub is the pin, not the source of truth: a down hub keeps the last cache.
 
 Client (`src/brigade/fleet_client.py`, hooked from `run_journal.append_event`
 after the journal write completes and the lock is released):

@@ -140,6 +140,44 @@ class TestHub:
             conn.close()
         assert rows == 1
 
+    def test_terminal_event_keeps_last_known_seat(self, hub):
+        url, token, _db = hub
+        started = {**_event(run_id="seat-run", seq=1, digest="ds1"), "seat": "cursor_grok"}
+        finished = {
+            **_event(run_id="seat-run", seq=2, digest="ds2", state="run.completed"),
+            "seat": "",
+        }
+        assert _post(url, token, [started, finished])[1] == {"accepted": 2, "duplicate": 0}
+        rows = _get(url, "/status?all=1", token)[1]["runs"]
+        match = next(row for row in rows if row["run_id"] == "seat-run")
+        assert match["state"] == "run.completed"
+        assert match["seat"] == "cursor_grok"
+
+    def test_preference_get_put_and_rejects_secrets(self, hub):
+        url, token, _db = hub
+        status, payload = _get(url, "/preference", token)
+        assert status == 200
+        assert payload["preference"] == {"impl": None, "review": None, "chef": None, "notes": None}
+        request = urllib.request.Request(
+            url + "/preference",
+            data=json.dumps({"preference": {"impl": "cursor_grok", "review": "claude_standby"}}).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            method="PUT",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            stored = json.loads(response.read())
+        assert stored["preference"]["impl"] == "cursor_grok"
+        assert _get(url, "/preference", token)[1]["preference"]["review"] == "claude_standby"
+        bad = urllib.request.Request(
+            url + "/preference",
+            data=json.dumps({"token": "leak"}).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            method="PUT",
+        )
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(bad, timeout=5)
+        assert excinfo.value.code == 400
+
     def test_batch_and_terminal_filter(self, hub):
         url, token, _db = hub
         batch = [
