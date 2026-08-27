@@ -218,13 +218,18 @@ def status(target: Path, job_id: str | None = None) -> dict[str, Any]:
     if job_id is not None:
         return get_job(target, job_id)
     with _storage_paths(target) as storage:
-        jobs: list[dict[str, Any]] = []
-        for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
-            record = _read_json_file(storage.jobs, name)
-            if record is None:
-                raise GrokbotJobError("corrupt-storage")
-            jobs.append(_projection(_validate_record(record)))
-        return {"jobs": jobs}
+        return _status_from_storage(storage)
+
+
+def _status_from_storage(storage: _Storage) -> dict[str, Any]:
+    """Return safe job projections through one already-anchored queue storage."""
+    jobs: list[dict[str, Any]] = []
+    for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
+        record = _read_json_file(storage.jobs, name)
+        if record is None:
+            raise GrokbotJobError("corrupt-storage")
+        jobs.append(_projection(_validate_record(record)))
+    return {"jobs": jobs}
 
 
 def tracker_rows(target: Path) -> list[dict[str, Any]]:
@@ -422,23 +427,29 @@ def read_report(target: Path, job_id: str) -> dict[str, Any]:
     """Return verified snapshot bytes for one completed Repository Scout report."""
     job_id = _validate_job_id(job_id)
     with _storage_paths(target) as storage:
-        record = _load_record(storage.jobs, job_id)
-        if record["state"] != "completed":
-            raise GrokbotJobError("invalid-state")
-        _require_report_job(record)
-        data = _read_bytes_file(
-            storage.artifacts, f"{job_id}.md", maximum=MAX_REPORT_BYTES, missing_reason="report-missing"
-        )
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise GrokbotJobError("invalid-report") from exc
-        if not text:
-            raise GrokbotJobError("invalid-report")
-        digest = hashlib.sha256(data).hexdigest()
-        if digest != record["result_artifact"]["sha256"]:
-            raise GrokbotJobError("digest-mismatch")
-        return {"job_id": job_id, "text": text, "bytes": len(data), "sha256": digest}
+        return _read_report_from_storage(storage, job_id)
+
+
+def _read_report_from_storage(storage: _Storage, job_id: str) -> dict[str, Any]:
+    """Return one verified report through an already-anchored queue storage."""
+    job_id = _validate_job_id(job_id)
+    record = _load_record(storage.jobs, job_id)
+    if record["state"] != "completed":
+        raise GrokbotJobError("invalid-state")
+    _require_report_job(record)
+    data = _read_bytes_file(
+        storage.artifacts, f"{job_id}.md", maximum=MAX_REPORT_BYTES, missing_reason="report-missing"
+    )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GrokbotJobError("invalid-report") from exc
+    if not text:
+        raise GrokbotJobError("invalid-report")
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != record["result_artifact"]["sha256"]:
+        raise GrokbotJobError("digest-mismatch")
+    return {"job_id": job_id, "text": text, "bytes": len(data), "sha256": digest}
 
 
 def cancel(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:
@@ -564,6 +575,64 @@ def _storage_paths(target: Path) -> Iterator[_Storage]:
             raise GrokbotJobError("unsafe-storage") from close_error
 
 
+@contextmanager
+def _storage_paths_readonly(target: Path) -> Iterator[_Storage]:
+    """Open an existing queue without creating directories or changing modes."""
+    descriptors: list[int] = []
+    try:
+        if os.name != "posix":  # pragma: no cover - exercised on Windows.
+            root = Path(target).expanduser().absolute() / ".brigade" / "cloud" / "grokbot"
+            jobs = root / "jobs"
+            idempotency = root / "idempotency"
+            artifacts = root / "artifacts"
+            for path in (root, jobs, idempotency, artifacts):
+                current = path.lstat()
+                if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
+                    raise GrokbotJobError("unsafe-storage")
+            yield _Storage(
+                _Directory(root, None),
+                _Directory(jobs, None),
+                _Directory(idempotency, None),
+                _Directory(artifacts, None),
+            )
+            return
+
+        base_fd = _open_directory_path(Path(target).expanduser().absolute())
+        descriptors.append(base_fd)
+        brigade_fd = _open_existing_directory(base_fd, ".brigade")
+        descriptors.append(brigade_fd)
+        cloud_fd = _open_existing_directory(brigade_fd, "cloud")
+        descriptors.append(cloud_fd)
+        root_fd = _open_existing_directory(cloud_fd, "grokbot")
+        descriptors.append(root_fd)
+        jobs_fd = _open_existing_directory(root_fd, "jobs")
+        descriptors.append(jobs_fd)
+        idempotency_fd = _open_existing_directory(root_fd, "idempotency")
+        descriptors.append(idempotency_fd)
+        artifacts_fd = _open_existing_directory(root_fd, "artifacts")
+        descriptors.append(artifacts_fd)
+        root = Path(target) / ".brigade" / "cloud" / "grokbot"
+        yield _Storage(
+            _Directory(root, root_fd),
+            _Directory(root / "jobs", jobs_fd),
+            _Directory(root / "idempotency", idempotency_fd),
+            _Directory(root / "artifacts", artifacts_fd),
+        )
+    except GrokbotJobError:
+        raise
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+    finally:
+        close_error: OSError | None = None
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                close_error = exc
+        if close_error is not None:
+            raise GrokbotJobError("unsafe-storage") from close_error
+
+
 def _directory_flags() -> int:
     return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
@@ -583,6 +652,16 @@ def _open_or_create_directory(parent: int, name: str) -> int:
     try:
         _assert_directory_descriptor(descriptor)
         os.fchmod(descriptor, ROOT_MODE)
+    except OSError:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_existing_directory(parent: int, name: str) -> int:
+    descriptor = os.open(name, _directory_flags(), dir_fd=parent)
+    try:
+        _assert_directory_descriptor(descriptor)
     except OSError:
         os.close(descriptor)
         raise

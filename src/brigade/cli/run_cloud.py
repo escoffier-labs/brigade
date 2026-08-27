@@ -85,6 +85,20 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_scout_feed.add_argument("--policy", type=Path, required=True, help="Path to the approved private scout policy.")
     p_scout_feed.add_argument("--apply", action="store_true", help="Enqueue after selection. Default is preview only.")
 
+    p_reconcile = grokbot_sub.add_parser(
+        "reconcile-reports",
+        help="Preview or draft canonical-owner Memory Handoffs from completed scout reports.",
+    )
+    add_target(p_reconcile)
+    p_reconcile.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
+    p_reconcile.add_argument(
+        "--inbox",
+        default="review",
+        help="Owner-relative review or writer inbox. Defaults to the owner's review inbox.",
+    )
+    p_reconcile.add_argument("--limit", type=int, default=1, help="Maximum new drafts (1-50). Defaults to 1.")
+    p_reconcile.add_argument("--apply", action="store_true", help="Write drafts and markers. Default is preview only.")
+
     for name, help_text in (("claim", "Claim a queued job."), ("renew", "Renew a current job lease.")):
         command = grokbot_sub.add_parser(name, help=help_text)
         add_target(command)
@@ -289,6 +303,8 @@ def _dispatch_grokbot(args, target: Path) -> int:
         return _dispatch_grokbot_feed(args, target)
     if command == "scout-feed":
         return _dispatch_grokbot_scout_feed(args, target)
+    if command == "reconcile-reports":
+        return _dispatch_grokbot_reconcile(args, target)
     if command == "serve":
         from .. import grokbot_mcp
 
@@ -418,6 +434,42 @@ def _print_scout_feed_result(result: dict) -> None:
     handle = result.get("handle")
     if handle is not None:
         print(f"job {handle['job_id']} state={handle['state']}")
+
+
+def _dispatch_grokbot_reconcile(args, target: Path) -> int:
+    """Preview or draft canonical-owner handoffs without printing report text."""
+    from .. import grokbot_reconcile
+
+    try:
+        if args.apply:
+            result = grokbot_reconcile.apply(target, args.owner, inbox=args.inbox, limit=args.limit)
+        else:
+            result = grokbot_reconcile.preview(target, args.owner, inbox=args.inbox, limit=args.limit)
+    except grokbot_reconcile.ReconcileError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    _print_reconcile_result(result)
+    return 0
+
+
+def _print_reconcile_result(result: dict) -> None:
+    """Render reconcile counts and safe job handles only."""
+    parts = [
+        f"eligible={result['eligible']}",
+        f"known={result['known']}",
+        f"unavailable={result['unavailable']}",
+        f"created={result['created']}",
+        f"limit={result['limit']}",
+    ]
+    if "skipped" in result:
+        parts.insert(3, f"skipped={result['skipped']}")
+    print("grokbot reconcile-reports: " + " ".join(parts))
+    for job in result.get("jobs", []):
+        print(f"job {job['job_id']} state={job['state']}")
 
 
 def _dispatch_grokbot_ops(args, target: Path) -> int:
