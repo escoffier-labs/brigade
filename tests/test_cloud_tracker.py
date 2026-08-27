@@ -2251,6 +2251,32 @@ def test_read_prompt_file_path_swap_keeps_opened_snapshot(tmp_path: Path, monkey
         assert opened["flags"] & nofollow
 
 
+def test_read_prompt_file_fails_closed_before_a_forced_nofollow_fallback_race(tmp_path: Path, monkeypatch):
+    path = tmp_path / "prompt.txt"
+    path.write_text("snapshot-one", encoding="utf-8")
+    path.chmod(0o600)
+    decoy = tmp_path / "decoy.txt"
+    decoy.write_text("snapshot-two", encoding="utf-8")
+    decoy.chmod(0o600)
+    opened = False
+    real_open = os.open
+
+    def raced_open(target, flags, *args, **kwargs):
+        nonlocal opened
+        opened = True
+        os.replace(decoy, path)
+        return real_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(run_cloud.os, "O_NOFOLLOW", 0)
+    monkeypatch.setattr(run_cloud.os, "open", raced_open)
+
+    with pytest.raises(ValueError, match="bad-prompt-file"):
+        run_cloud._read_prompt_file(path)
+
+    assert opened is False
+    assert path.read_text(encoding="utf-8") == "snapshot-one"
+
+
 def test_cli_run_cloud_launch_label_canonicalized_in_json_and_registry(tmp_path: Path, capsys, monkeypatch):
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("canonical label prompt", encoding="utf-8")

@@ -529,15 +529,9 @@ def _read_prompt_file(path: Path) -> str:
     resolved = path.expanduser()
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    if nofollow:
-        flags |= nofollow
-    else:
-        try:
-            preview = resolved.lstat()
-        except OSError as exc:
-            raise ValueError("bad-prompt-file") from exc
-        if stat.S_ISLNK(preview.st_mode) or not stat.S_ISREG(preview.st_mode):
-            raise ValueError("bad-prompt-file")
+    if not nofollow:
+        raise ValueError("bad-prompt-file")
+    flags |= nofollow
     descriptor: int | None = None
     try:
         descriptor = os.open(os.fspath(resolved), flags)

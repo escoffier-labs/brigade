@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import urllib.error
 import urllib.parse
@@ -371,16 +372,44 @@ def list_agents(
 
 
 def _preflight_registry(register_target: Path | None) -> bool:
-    """Confirm the registry can be rewritten before any provider or hub mutation."""
+    """Confirm registry-directory durability without reading or rewriting its live file."""
     if register_target is None:
         return True
     from . import cloud_tracker
 
+    descriptor: int | None = None
+    created_sidecar: Path | None = None
     try:
-        target = Path(register_target)
-        cloud_tracker.save_registry(target, cloud_tracker.load_registry(target))
+        registry_dir = cloud_tracker.registry_path(Path(register_target)).parent
+        registry_dir.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        for _ in range(4):
+            candidate = registry_dir / f".registry-preflight-{uuid4().hex}"
+            try:
+                descriptor = os.open(os.fspath(candidate), flags, 0o600)
+            except FileExistsError:
+                continue
+            created_sidecar = candidate
+            break
+        if descriptor is None:
+            return False
+        written = os.write(descriptor, b"brigade-registry-preflight\n")
+        if written != len(b"brigade-registry-preflight\n"):
+            return False
+        os.fsync(descriptor)
     except Exception:
         return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                return False
+        if created_sidecar is not None:
+            try:
+                created_sidecar.unlink()
+            except OSError:
+                return False
     return True
 
 

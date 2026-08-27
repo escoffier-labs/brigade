@@ -732,8 +732,8 @@ class TestLaunchGate:
         monkeypatch.setattr(fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
         monkeypatch.setattr(fleet_client, "release_cloud", lambda *a, **k: fleet_client.CloudDecision(True, "ok"))
         monkeypatch.setattr(
-            cloud_tracker,
-            "save_registry",
+            cursor_cloud.os,
+            "open",
             lambda *a, **k: (_ for _ in ()).throw(OSError("readonly")),
         )
         result = cursor_cloud.launch_agent(
@@ -748,6 +748,40 @@ class TestLaunchGate:
         assert result.reason == "registry-unwritable"
         assert opener.calls == []
         assert admit_calls == []
+
+    @pytest.mark.parametrize("live_bytes", [b"{not-json", b'{"legacy": true}\n'])
+    def test_registry_preflight_leaves_live_registry_bytes_unchanged(self, tmp_path: Path, live_bytes: bytes):
+        registry = cloud_tracker.registry_path(tmp_path)
+        registry.parent.mkdir(parents=True)
+        registry.write_bytes(live_bytes)
+
+        assert cursor_cloud._preflight_registry(tmp_path)
+        assert registry.read_bytes() == live_bytes
+
+    def test_registry_preflight_does_not_clobber_concurrent_entry(self, tmp_path: Path, monkeypatch):
+        registry = cloud_tracker.registry_path(tmp_path)
+        registry.parent.mkdir(parents=True)
+        concurrent_bytes = b'{"concurrent": true}\n'
+        real_fsync = cursor_cloud.os.fsync
+
+        def write_concurrent_then_sync(descriptor: int) -> None:
+            registry.write_bytes(concurrent_bytes)
+            real_fsync(descriptor)
+
+        monkeypatch.setattr(cursor_cloud.os, "fsync", write_concurrent_then_sync)
+
+        assert cursor_cloud._preflight_registry(tmp_path)
+        assert registry.read_bytes() == concurrent_bytes
+
+    def test_registry_preflight_does_not_unlink_a_colliding_sidecar(self, tmp_path: Path, monkeypatch):
+        registry_dir = cloud_tracker.registry_path(tmp_path).parent
+        registry_dir.mkdir(parents=True)
+        sidecar = registry_dir / ".registry-preflight-collision"
+        sidecar.write_bytes(b"concurrent sidecar")
+        monkeypatch.setattr(cursor_cloud, "uuid4", lambda: type("FixedUuid", (), {"hex": "collision"})())
+
+        assert not cursor_cloud._preflight_registry(tmp_path)
+        assert sidecar.read_bytes() == b"concurrent sidecar"
 
 
 class TestRegistryContract:
