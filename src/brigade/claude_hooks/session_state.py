@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -50,15 +51,24 @@ def _session_state_lock(target: Path, session_id: str) -> Iterator[None]:
 
     ``held_file_lock`` creates the state directory as needed, matching the
     parent creation performed by ``write_session_state`` through ``localio``.
+    Both the process-local lock and the file lock share one budget
+    (``_TIMEOUT_FOLLOWUP_SECONDS``); running out raises ``InboxLockTimeout``
+    and the caller writes nothing.
     """
     state_path = _rt()._state_path(target.expanduser().resolve(), session_id)
     process_lock = _session_state_process_lock(state_path)
-    with process_lock:
-        with inbox_lock.held_file_lock(
-            Path(f"{state_path}.lock"),
-            deadline_seconds=_rt()._TIMEOUT_FOLLOWUP_SECONDS,
-        ):
+    budget = float(_rt()._TIMEOUT_FOLLOWUP_SECONDS)
+    deadline = time.monotonic() + budget
+    # One monotonic budget covers both stages so a stalled follow-up holding
+    # the process lock cannot park later follow-ups past the file-lock deadline.
+    if not process_lock.acquire(timeout=max(budget, 0.0)):
+        raise inbox_lock.InboxLockTimeout(f"session state lock busy past {budget:.3f}s: {state_path}")
+    try:
+        remaining = max(deadline - time.monotonic(), 0.0)
+        with inbox_lock.held_file_lock(Path(f"{state_path}.lock"), deadline_seconds=remaining):
             yield
+    finally:
+        process_lock.release()
 
 
 def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:

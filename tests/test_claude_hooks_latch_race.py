@@ -208,8 +208,9 @@ def test_stale_clear_cannot_clobber_latch(tmp_path: Path, monkeypatch) -> None:
     On main the clear thread's write is held until both timeout records have
     landed, so its stale state (count 0, no latch) is written last and the
     latch is lost. With the per-session lock the clear holds the lock through
-    its read-modify-write, the gate times out, and the records that follow
-    re-derive the latch.
+    its read-modify-write, the 0.3 s gate (inside the 0.5 s lock budget) times
+    out, and the records that were waiting on the lock then re-derive the
+    latch.
     """
     target = _wired_claude(tmp_path)
     runtime.write_session_state(target, "s", {"session_id": "s", "hook_timeout_count": 1})
@@ -220,7 +221,7 @@ def test_stale_clear_cannot_clobber_latch(tmp_path: Path, monkeypatch) -> None:
     def gated_write(target_: Path, session_id: str, state: dict) -> None:
         if state.get("hook_timeout_count") == 0 and state.get("hook_latched") is not True:
             clear_started.set()
-            records_done.wait(timeout=2)
+            records_done.wait(timeout=0.3)
         original_write(target_, session_id, state)
 
     monkeypatch.setattr(runtime, "write_session_state", gated_write)
