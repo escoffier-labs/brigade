@@ -142,6 +142,8 @@ brigade run cloud grokbot claim \
 brigade run cloud grokbot status --target . --json
 ```
 
+`brigade run cloud grokbot reconcile-reports --target QUEUE --owner OWNER` previews completed Repository Scout report jobs. `--apply` writes at most `--limit` deterministic Memory Handoff drafts directly into the canonical owner's `memory/handoff-inbox` for review. Preview writes nothing. Report text is never printed. See [Grok Bot MCP listener](grokbot-mcp.md#report-reconciliation).
+
 For a remote T3 controller journal already available locally, configure an alias and a repo-relative journal path in `.brigade/center/agent-activity-sources.json`:
 
 ```json

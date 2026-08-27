@@ -22,7 +22,7 @@ from . import fleet_client, grokbot_jobs
 
 
 DEFAULT_BIND = "127.0.0.1:8766"
-MAX_REQUEST_BYTES = 16_384
+MAX_REQUEST_BYTES = 80_000
 LEASE_SECONDS = 300
 MAX_LISTED_JOBS = 100
 SDK_LOOPBACK_ALLOWED_HOSTS = ("localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "::1", "[::1]:*")
@@ -33,7 +33,13 @@ _FLEET_BEST_EFFORT = frozenset({"no-hub", "no-identity", "hub-unavailable"})
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 
 OPERATOR_TOOLS = frozenset(
-    {"grokbot_queue_list", "grokbot_queue_status", "grokbot_queue_cancel", "grokbot_queue_expire"}
+    {
+        "grokbot_queue_list",
+        "grokbot_queue_status",
+        "grokbot_queue_cancel",
+        "grokbot_queue_expire",
+        "grokbot_queue_report",
+    }
 )
 WORKER_TOOLS = frozenset(
     {
@@ -185,6 +191,9 @@ class GrokbotAdapter:
             job_id = _job_id(arguments)
             operation = grokbot_jobs.cancel if name.endswith("cancel") else grokbot_jobs.expire
             return operation(self.config.target, job_id)
+        if name == "grokbot_queue_report":
+            job_id = _job_id(arguments)
+            return grokbot_jobs.read_report(self.config.target, job_id)
         if name == "grokbot_queue_claim":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
             lease_id = _lease_id(arguments)
@@ -235,21 +244,42 @@ class GrokbotAdapter:
             self._fleet_release(holder)
             return result
         if name == "grokbot_queue_complete":
-            job = self._eligible_job(arguments, allowed={"job_id", "lease_id", "artifact"})
+            allowed = {"job_id", "lease_id", "artifact"}
+            if "report_text" in arguments:
+                allowed = allowed | {"report_text"}
+            if set(arguments) != allowed:
+                raise AdapterError()
             artifact = arguments.get("artifact")
             if not isinstance(artifact, dict):
                 raise AdapterError()
+            job_id = _job_id(arguments, allowed)
+            job = grokbot_jobs.get_job(self.config.target, job_id)
+            if self.config.instance != "operator" and job["role"] != self.config.instance:
+                raise AdapterError()
             lease_id = _lease_id(arguments)
-            holder, session = fleet_holder(job["job_id"], lease_id), fleet_session(job["job_id"], lease_id)
-            result = grokbot_jobs.transition(
-                self.config.target,
-                job["job_id"],
-                self.config.bot_id,
-                lease_id,
-                "completed",
-                artifact=artifact,
-            )
-            self._fleet_event(job["job_id"], session, "external.completed")
+            holder, session = fleet_holder(job_id, lease_id), fleet_session(job_id, lease_id)
+            if "report_text" in arguments:
+                report_text = arguments["report_text"]
+                if not isinstance(report_text, str):
+                    raise AdapterError()
+                result = grokbot_jobs.complete_report(
+                    self.config.target,
+                    job_id,
+                    self.config.bot_id,
+                    lease_id,
+                    artifact,
+                    report_text,
+                )
+            else:
+                result = grokbot_jobs.transition(
+                    self.config.target,
+                    job_id,
+                    self.config.bot_id,
+                    lease_id,
+                    "completed",
+                    artifact=artifact,
+                )
+            self._fleet_event(job_id, session, "external.completed")
             self._fleet_release(holder)
             return result
         raise AdapterError()
@@ -403,7 +433,7 @@ def _register_tool(server: Any, adapter: GrokbotAdapter, name: str) -> None:
             return _invoke_adapter(adapter, name, {})
 
         handler: Callable[..., Any] = invoke_list
-    elif name in {"grokbot_queue_status", "grokbot_queue_cancel", "grokbot_queue_expire"}:
+    elif name in {"grokbot_queue_status", "grokbot_queue_cancel", "grokbot_queue_expire", "grokbot_queue_report"}:
 
         def invoke_job_id(job_id: str) -> dict[str, Any]:
             return _invoke_adapter(adapter, name, {"job_id": job_id})
@@ -411,8 +441,16 @@ def _register_tool(server: Any, adapter: GrokbotAdapter, name: str) -> None:
         handler = invoke_job_id
     elif name == "grokbot_queue_complete":
 
-        def invoke_complete(job_id: str, lease_id: str, artifact: dict[str, Any]) -> dict[str, Any]:
-            return _invoke_adapter(adapter, name, {"job_id": job_id, "lease_id": lease_id, "artifact": artifact})
+        def invoke_complete(
+            job_id: str,
+            lease_id: str,
+            artifact: dict[str, Any],
+            report_text: str | None = None,
+        ) -> dict[str, Any]:
+            payload: dict[str, Any] = {"job_id": job_id, "lease_id": lease_id, "artifact": artifact}
+            if report_text is not None:
+                payload["report_text"] = report_text
+            return _invoke_adapter(adapter, name, payload)
 
         handler = invoke_complete
     else:
@@ -468,7 +506,7 @@ class _GateASGI:
         if scope.get("path") == "/mcp" and _invalid_tool_request(body, self.adapter):
             await _reject_tool(send, body)
             return
-        await self.app(scope, _replay_messages(messages), send)
+        await self.app(scope, _replay_messages(messages, receive), send)
 
 
 async def _read_bounded_body(receive: Callable[..., Any], maximum: int) -> tuple[bytes, list[dict[str, Any]], bool]:
@@ -486,11 +524,14 @@ async def _read_bounded_body(receive: Callable[..., Any], maximum: int) -> tuple
             return bytes(body), messages, False
 
 
-def _replay_messages(messages: list[dict[str, Any]]) -> Callable[..., Any]:
+def _replay_messages(messages: list[dict[str, Any]], receive: Callable[..., Any]) -> Callable[..., Any]:
     pending = iter(messages)
 
     async def replay() -> dict[str, Any]:
-        return next(pending, {"type": "http.disconnect"})
+        try:
+            return next(pending)
+        except StopIteration:
+            return await receive()
 
     return replay
 
@@ -579,6 +620,7 @@ def _valid_tool_arguments(name: object, arguments: object) -> bool:
         "grokbot_queue_status": {"job_id": str},
         "grokbot_queue_cancel": {"job_id": str},
         "grokbot_queue_expire": {"job_id": str},
+        "grokbot_queue_report": {"job_id": str},
         "grokbot_queue_claim": {"job_id": str, "lease_id": str},
         "grokbot_queue_renew": {"job_id": str, "lease_id": str},
         "grokbot_queue_start": {"job_id": str, "lease_id": str},
@@ -591,11 +633,18 @@ def _valid_tool_arguments(name: object, arguments: object) -> bool:
     expected = schemas.get(name)
     if expected == {} and arguments is None:
         return True
-    return (
-        expected is not None
-        and isinstance(arguments, dict)
-        and set(arguments) == set(expected)
-        and all(isinstance(arguments[key], value_type) for key, value_type in expected.items())
+    if expected is None or not isinstance(arguments, dict):
+        return False
+    if name == "grokbot_queue_complete":
+        optional = {"report_text": str}
+        allowed = set(expected) | set(optional)
+        if not set(arguments).issubset(allowed) or not set(arguments).issuperset(set(expected)):
+            return False
+        return all(isinstance(arguments[key], value_type) for key, value_type in expected.items()) and all(
+            isinstance(arguments[key], value_type) for key, value_type in optional.items() if key in arguments
+        )
+    return set(arguments) == set(expected) and all(
+        isinstance(arguments[key], value_type) for key, value_type in expected.items()
     )
 
 
@@ -627,6 +676,7 @@ _TOOL_DESCRIPTIONS = {
     "grokbot_queue_status": "Read one safe Grok Bot queue projection.",
     "grokbot_queue_cancel": "Cancel a Grok Bot queue job.",
     "grokbot_queue_expire": "Expire an elapsed Grok Bot queue job.",
+    "grokbot_queue_report": "Read one verified Repository Scout report snapshot.",
     "grokbot_queue_claim": "Claim one job for this fixed worker identity.",
     "grokbot_queue_renew": "Renew this worker's current queue lease.",
     "grokbot_queue_start": "Mark this worker's claimed job as running.",

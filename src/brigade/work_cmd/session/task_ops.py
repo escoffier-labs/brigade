@@ -17,9 +17,11 @@ from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
 from .. import scanners as scanners_mod, reviews as reviews_mod, edges as edges_mod
 
-from . import lifecycle as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .briefing import _next_payload
+from .lifecycle import (
+    _latest_run_next_metadata,
+    _task_plan_payload,
+)
 
 
 def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -> int:
@@ -75,7 +77,8 @@ def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -
         issue = ledger_mod._task_issue_metadata(task)
         if issue:
             print(f"  issue: {issue.get('url') or issue.get('number')}")
-        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        raw_metadata = task.get("metadata")
+        metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
         if metadata.get("run_path"):
             print(f"  run: {metadata['run_path']}")
         if metadata.get("session_path"):
@@ -392,7 +395,8 @@ def task_show(*, target: Path, task_id: str, json_output: bool = False) -> int:
         labels = issue.get("labels")
         if isinstance(labels, list) and labels:
             print(f"  labels: {', '.join(str(label) for label in labels)}")
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    raw_metadata = task.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     if metadata:
         print("metadata:")
         for key in sorted(metadata):
@@ -692,16 +696,16 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
             return 2
         open_children = edges_mod.open_children_for_parent(ledger, resolved_id)
         if open_children and not force:
-            payload = {
+            err_payload = {
                 "error": "parent has open children",
                 "reason": edges_mod.REASON_OPEN_CHILDREN,
                 "task_id": resolved_id,
                 "open_children": open_children,
             }
             if json_output:
-                print(json.dumps(payload, indent=2, sort_keys=True))
+                print(json.dumps(err_payload, indent=2, sort_keys=True))
             else:
-                print(f"error: {payload['error']}", file=sys.stderr)
+                print(f"error: {err_payload['error']}", file=sys.stderr)
                 for child in open_children:
                     print(f"  - {child['id']} [{child['status']}] {child.get('title', '')}", file=sys.stderr)
             return 2
@@ -721,11 +725,15 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
         side_effects = edges_mod.close_side_effects(ledger, resolved_id)
         ledger_mod._write_task_ledger(target, ledger)
     footprint = task.get("metadata", {}).get("footprint") if isinstance(task.get("metadata"), dict) else None
+    raw_unblocked = side_effects.get("newly_unblocked")
+    newly_unblocked: list[dict[str, Any]] = raw_unblocked if isinstance(raw_unblocked, list) else []
+    raw_parents = side_effects.get("completable_parents")
+    completable_parents: list[dict[str, Any]] = raw_parents if isinstance(raw_parents, list) else []
     payload = {
         "task": task.get("id"),
         "status": "done",
-        "newly_unblocked": side_effects["newly_unblocked"],
-        "completable_parents": side_effects["completable_parents"],
+        "newly_unblocked": newly_unblocked,
+        "completable_parents": completable_parents,
         "forced": bool(open_children and force),
         "footprint": footprint,
     }
@@ -736,11 +744,11 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
     print("status: done")
     if payload["forced"]:
         print("forced: true")
-    print(f"newly_unblocked: {len(payload['newly_unblocked'])}")
-    for item in payload["newly_unblocked"]:
+    print(f"newly_unblocked: {len(newly_unblocked)}")
+    for item in newly_unblocked:
         print(f"  - {item['id']} {helpers._short(str(item.get('text') or ''))}")
-    print(f"completable_parents: {len(payload['completable_parents'])}")
-    for item in payload["completable_parents"]:
+    print(f"completable_parents: {len(completable_parents)}")
+    for item in completable_parents:
         print(f"  - {item['id']} {helpers._short(str(item.get('title') or ''))}")
     if isinstance(footprint, dict):
         print(f"footprint.phase: {footprint.get('phase')}")
@@ -1048,7 +1056,8 @@ def claim(
     print(f"task: {result.get('task_id')}")
     print(f"status: {result.get('status')}")
     print(f"assignee: {result.get('assignee')}")
-    claim_info = result.get("claim") if isinstance(result.get("claim"), dict) else {}
+    raw_claim = result.get("claim")
+    claim_info: dict[str, Any] = raw_claim if isinstance(raw_claim, dict) else {}
     print(f"claim_id: {claim_info.get('claim_id')}")
     print(f"claimed_at: {claim_info.get('claimed_at')}")
     print(f"created: {result.get('created')}")
@@ -1093,7 +1102,8 @@ def release(
         return 0
     print(f"released: {result['released_count']}")
     for item in result["released"]:
-        released = item.get("released") if isinstance(item.get("released"), dict) else {}
+        raw_rel = item.get("released")
+        released = raw_rel if isinstance(raw_rel, dict) else {}
         print(f"- {item.get('task_id')} was {released.get('actor')} ({released.get('claim_id')})")
     if result["skipped"]:
         print(f"skipped: {len(result['skipped'])}")
@@ -1140,9 +1150,11 @@ def reassign(
     print(f"task: {result.get('task_id')}")
     print(f"status: {result.get('status')}")
     print(f"assignee: {result.get('assignee')}")
-    claim_info = result.get("claim") if isinstance(result.get("claim"), dict) else {}
+    raw_claim = result.get("claim")
+    claim_info: dict[str, Any] = raw_claim if isinstance(raw_claim, dict) else {}
     print(f"claim_id: {claim_info.get('claim_id')}")
-    previous = result.get("previous") if isinstance(result.get("previous"), dict) else {}
+    raw_prev = result.get("previous")
+    previous = raw_prev if isinstance(raw_prev, dict) else {}
     if previous:
         print(f"previous_actor: {previous.get('actor')}")
         print(f"previous_claim_id: {previous.get('claim_id')}")

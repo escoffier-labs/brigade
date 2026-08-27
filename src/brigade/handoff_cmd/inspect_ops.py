@@ -19,35 +19,46 @@ from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import drafts as _drafts_mod
+from . import issue_ops as _issue_ops_mod
+from . import linting as _linting_mod
+from . import sources as _sources_mod
+from .models import (
+    BACKLOG_STALE_SECONDS,
+    FAIL,
+    HandoffHealth,
+    HandoffIssue,
+    OK,
+    SourceConfig,
+    WARN,
+    default_sources_path,
+)
 
 
 def inspect(target: Path, sources: Path | None = None) -> HandoffHealth:
     target = target.expanduser().resolve()
-    sources_path = sources.expanduser().resolve() if sources is not None else default_sources_path(target)
+    configured_path = sources.expanduser().resolve() if sources is not None else default_sources_path(target)
+    sources_path: Path | None = configured_path
     source_config = SourceConfig(watched=(), ingestor=None)
     failures: list[str] = []
     sources_loaded = False
 
-    if sources_path.is_file():
+    if configured_path.is_file():
         try:
-            source_config = _load_sources(target, sources_path)
+            source_config = _sources_mod._load_sources(target, configured_path)
         except ValueError as exc:
-            failures.append(f"invalid handoff source config {sources_path}: {exc}")
+            failures.append(f"invalid handoff source config {configured_path}: {exc}")
         else:
             sources_loaded = True
     elif sources is not None:
         failures.append(f"handoff source config not found: {sources_path}")
-        sources_path = sources_path
     else:
         sources_path = None
 
     watched = source_config.watched
-    inboxes = _collect_inbox_health(target, watched)
-    ingestor = _inspect_ingestor(source_config.ingestor)
-    lint_results = lint_targets(target, sources=sources)
+    inboxes = _sources_mod._collect_inbox_health(target, watched)
+    ingestor = _sources_mod._inspect_ingestor(source_config.ingestor)
+    lint_results = _linting_mod.lint_targets(target, sources=sources)
     warnings: list[str] = []
     pending_total = sum(inbox.pending for inbox in inboxes)
     if pending_total and not sources_loaded and not failures:
@@ -144,7 +155,7 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
             )
         )
 
-    if source_config := _source_config_for_checks(health.target, health.sources_path):
+    if source_config := _sources_mod._source_config_for_checks(health.target, health.sources_path):
         for watched_inbox in source_config.watched:
             watched_path = watched_inbox.root / watched_inbox.inbox
             if not watched_path.exists():
@@ -158,15 +169,15 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
             level = WARN
             detail = (
                 f"{health.ingestor.log_path} "
-                f"(age={_format_seconds(health.ingestor.age_seconds)}, "
-                f"stale_after={_format_seconds(health.ingestor.stale_after_seconds)})"
+                f"(age={_sources_mod._format_seconds(health.ingestor.age_seconds)}, "
+                f"stale_after={_sources_mod._format_seconds(health.ingestor.stale_after_seconds)})"
             )
         elif health.ingestor.warnings:
             level = WARN
             detail = f"{health.ingestor.log_path} ({len(health.ingestor.warnings)} warning signal{'s' if len(health.ingestor.warnings) != 1 else ''})"
         else:
             level = OK
-            detail = f"{health.ingestor.log_path} (age={_format_seconds(health.ingestor.age_seconds)})"
+            detail = f"{health.ingestor.log_path} (age={_sources_mod._format_seconds(health.ingestor.age_seconds)})"
         checks.append((level, "handoff_ingestor", detail))
     else:
         checks.append((OK, "handoff_ingestor", "log not configured"))
@@ -188,7 +199,7 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
 
     for warning in health.warnings:
         checks.append((WARN, "handoff_warning", warning))
-    draft_payload = draft_queue_payload(target, sources=sources)
+    draft_payload = _drafts_mod.draft_queue_payload(target, sources=sources)
     for check in draft_payload["checks"]:
         checks.append((str(check.get("status")), str(check.get("name")), str(check.get("detail"))))
     return checks
@@ -204,7 +215,7 @@ def collect_issues(
     wanted_categories = {category for category in categories or [] if category}
     for failure in health.failures:
         issues.append(
-            _make_issue(
+            _issue_ops_mod._make_issue(
                 category="source-config-invalid",
                 kind="task",
                 text=f"Repair handoff source config: {failure}",
@@ -219,7 +230,7 @@ def collect_issues(
     pending_total = sum(inbox.pending for inbox in health.inboxes)
     if pending_total and not health.sources_loaded and not health.failures:
         issues.append(
-            _make_issue(
+            _issue_ops_mod._make_issue(
                 category="source-config-missing",
                 kind="task",
                 text="Configure handoff source coverage for pending writer inboxes",
@@ -231,14 +242,14 @@ def collect_issues(
                 },
             )
         )
-    source_config = _source_config_for_checks(health.target, health.sources_path)
+    source_config = _sources_mod._source_config_for_checks(health.target, health.sources_path)
     if source_config is not None and "source-inbox-missing" in wanted_categories:
         for watched_inbox in source_config.watched:
             watched_path = watched_inbox.root / watched_inbox.inbox
             if watched_path.exists():
                 continue
             issues.append(
-                _make_issue(
+                _issue_ops_mod._make_issue(
                     category="source-inbox-missing",
                     kind="task",
                     text=f"Repair missing configured handoff inbox {watched_inbox.inbox}",
@@ -254,7 +265,7 @@ def collect_issues(
     for inbox in health.inboxes:
         if inbox.pending and not inbox.watched:
             issues.append(
-                _make_issue(
+                _issue_ops_mod._make_issue(
                     category="untracked-inbox",
                     kind="task",
                     text=(
@@ -281,11 +292,11 @@ def collect_issues(
             continue
         first_error = result.errors[0] if result.errors else "invalid handoff"
         issues.append(
-            _make_issue(
+            _issue_ops_mod._make_issue(
                 category="lint",
                 kind="task",
                 text=f"Fix pending handoff lint error in {result.path.name}: {first_error}",
-                repair=_lint_repair_for_result(result),
+                repair=_issue_ops_mod._lint_repair_for_result(result),
                 evidence=str(result.path),
                 metadata={
                     "path": str(result.path),
@@ -299,7 +310,7 @@ def collect_issues(
     if ingestor.configured:
         if not ingestor.exists:
             issues.append(
-                _make_issue(
+                _issue_ops_mod._make_issue(
                     category="missing-log",
                     kind="incident",
                     text=f"Restore handoff ingestor latest-run log at {ingestor.log_path}",
@@ -313,12 +324,12 @@ def collect_issues(
             )
         elif ingestor.stale:
             issues.append(
-                _make_issue(
+                _issue_ops_mod._make_issue(
                     category="stale-log",
                     kind="incident",
                     text=f"Investigate stale handoff ingestor run log at {ingestor.log_path}",
                     repair="Run the handoff ingestor, then fix the scheduler or wrapper if the log does not refresh.",
-                    evidence=f"age={_format_seconds(ingestor.age_seconds)}, stale_after={_format_seconds(ingestor.stale_after_seconds)}",
+                    evidence=f"age={_sources_mod._format_seconds(ingestor.age_seconds)}, stale_after={_sources_mod._format_seconds(ingestor.stale_after_seconds)}",
                     metadata={
                         "log_path": str(ingestor.log_path),
                         "age_seconds": ingestor.age_seconds,
@@ -327,5 +338,5 @@ def collect_issues(
                 )
             )
         if ingestor.exists and ingestor.log_path is not None:
-            issues.extend(_parse_ingestor_log_issues(ingestor.log_path))
-    return _filter_issues_by_category(_dedupe_issues(issues), categories)
+            issues.extend(_sources_mod._parse_ingestor_log_issues(ingestor.log_path))
+    return _issue_ops_mod._filter_issues_by_category(_issue_ops_mod._dedupe_issues(issues), categories)

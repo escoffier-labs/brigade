@@ -43,9 +43,13 @@ from ..localio import (
 )
 from ..render import emit
 
-from . import schema_ops as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import core as _core_mod
+from . import reports as _reports_mod
+from .schema_ops import (
+    READINESS_STATUSES,
+    SCHEMA_VERSION,
+    _schema,
+)
 
 
 def _readiness_root(target: Path) -> Path:
@@ -82,7 +86,9 @@ def _active_readiness_waivers(target: Path) -> dict[str, dict[str, Any]]:
 def _readiness_finding(
     subsystem: str, name: str, severity: str, summary: str, command: str, *, status: str = "warn"
 ) -> dict[str, Any]:
-    fingerprint = _fingerprint_payload({"subsystem": subsystem, "name": name, "severity": severity, "summary": summary})
+    fingerprint = _reports_mod._fingerprint_payload(
+        {"subsystem": subsystem, "name": name, "severity": severity, "summary": summary}
+    )
     return {
         "finding_id": f"readiness-{fingerprint[:16]}",
         "subsystem": subsystem,
@@ -133,9 +139,9 @@ def _readiness_findings(target: Path, status_data: dict[str, Any]) -> list[dict[
                 "brigade center reviews",
             )
         )
-    cloud = status_data.get("cloud_tracker") if isinstance(status_data.get("cloud_tracker"), dict) else {}
+    cloud = _cloud_tracker if isinstance(_cloud_tracker := status_data.get("cloud_tracker"), dict) else {}
     if int(cloud.get("issue_count") or 0) > 0:
-        top = cloud.get("top_issue") if isinstance(cloud.get("top_issue"), dict) else {}
+        top = _top_issue if isinstance(_top_issue := cloud.get("top_issue"), dict) else {}
         findings.append(
             _readiness_finding(
                 "cloud_tracker",
@@ -145,7 +151,9 @@ def _readiness_findings(target: Path, status_data: dict[str, Any]) -> list[dict[
                 "brigade run cloud status --json",
             )
         )
-    release = status_data.get("release_readiness") if isinstance(status_data.get("release_readiness"), dict) else None
+    release = (
+        _release_readiness if isinstance(_release_readiness := status_data.get("release_readiness"), dict) else None
+    )
     if not release:
         findings.append(
             _readiness_finding(
@@ -185,19 +193,19 @@ def _readiness_findings(target: Path, status_data: dict[str, Any]) -> list[dict[
         if not isinstance(health, dict):
             continue
         issue_count = int(health.get("issue_count") or health.get("open_count") or 0)
-        top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else None
-        if issue_count <= 0 and not top:
+        top_issue = _top_issue if isinstance(_top_issue := health.get("top_issue"), dict) else None
+        if issue_count <= 0 and not top_issue:
             continue
         detail = _readiness_safe_text(
             target,
             str(
-                (top or {}).get("detail")
-                or (top or {}).get("safe_summary")
+                (top_issue or {}).get("detail")
+                or (top_issue or {}).get("safe_summary")
                 or f"{subsystem} has unresolved health issue(s)"
             ),
         )
         findings.append(
-            _readiness_finding(subsystem, str((top or {}).get("name") or "health"), "warning", detail, command)
+            _readiness_finding(subsystem, str((top_issue or {}).get("name") or "health"), "warning", detail, command)
         )
     command_health = roadmap_cmd.command_contract_payload(target)
     if not command_health.get("inventory_current"):
@@ -216,9 +224,9 @@ def _readiness_findings(target: Path, status_data: dict[str, Any]) -> list[dict[
 
 def _readiness_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    status_data = status_payload(target)
+    status_data = _core_mod.status_payload(target)
     status_data["review_queue_count"] = len(
-        [item for item in _reviews(target) if item.get("subsystem") != "center-readiness"]
+        [item for item in _core_mod._reviews(target) if item.get("subsystem") != "center-readiness"]
     )
     findings = _readiness_findings(target, status_data)
     waivers = _active_readiness_waivers(target)
@@ -273,7 +281,7 @@ def _readiness_payload(target: Path) -> dict[str, Any]:
         "warnings": warnings,
         "waivers": list(waivers.values()),
         "manual_publish_checklist": manual_checklist,
-        "source_fingerprint": _fingerprint_payload({"findings": findings, "checklist": manual_checklist}),
+        "source_fingerprint": _reports_mod._fingerprint_payload({"findings": findings, "checklist": manual_checklist}),
     }
     return payload
 
@@ -369,7 +377,7 @@ def readiness_closeout(
         if finding is None:
             print(f"error: readiness finding not found: {finding_id}", file=sys.stderr)
             return 1
-        waiver_id = f"readiness-waiver-{_fingerprint_payload({'finding_id': finding_id, 'source': finding.get('source_fingerprint')})[:16]}"
+        waiver_id = f"readiness-waiver-{_reports_mod._fingerprint_payload({'finding_id': finding_id, 'source': finding.get('source_fingerprint')})[:16]}"
         waivers = [waiver for waiver in waivers if waiver.get("waiver_id") != waiver_id]
         waivers.append(
             {

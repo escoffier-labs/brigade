@@ -84,6 +84,24 @@ except ImportError:  # pragma: no cover - POSIX does not provide msvcrt.
 
 _PROCESS_LOCK = threading.Lock()
 _ACTIVE_LOCKS: dict[str, "_ActiveInboxLock"] = {}
+_HELD_FILE_LOCK_FDS_GUARD = threading.Lock()
+_HELD_FILE_LOCK_FDS: set[int] = set()
+
+
+def _close_held_file_locks_after_fork() -> None:
+    """Close child copies of adjacent state-file locks after a fork."""
+    global _HELD_FILE_LOCK_FDS_GUARD, _HELD_FILE_LOCK_FDS
+    for fd in _HELD_FILE_LOCK_FDS:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _HELD_FILE_LOCK_FDS_GUARD = threading.Lock()
+    _HELD_FILE_LOCK_FDS = set()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_close_held_file_locks_after_fork)
 
 
 class _ActiveInboxLock:
@@ -121,6 +139,26 @@ SCANNER_RUN_ENV = "BRIGADE_SCANNER_RUN_ID"
 
 class InboxLockTimeout(TimeoutError):
     """Typed failure when an inbox lock stayed busy past its acquisition deadline."""
+
+
+@contextlib.contextmanager
+def held_file_lock(path: Path, *, deadline_seconds: float) -> Iterator[None]:
+    """Hold one cross-platform advisory lock file for the block.
+
+    This public primitive uses the same hardened open and deadline-bounded
+    ``flock`` / ``msvcrt`` acquisition as the inbox locks, without joining
+    their process-wide reentrancy registry.  It is suitable for adjacent
+    state-file locks that need independent cross-process exclusion.
+    """
+    held = _acquire_cross_process(str(path), deadline_seconds=deadline_seconds)
+    with _HELD_FILE_LOCK_FDS_GUARD:
+        _HELD_FILE_LOCK_FDS.add(held.fd)
+    try:
+        yield
+    finally:
+        with _HELD_FILE_LOCK_FDS_GUARD:
+            _HELD_FILE_LOCK_FDS.discard(held.fd)
+        held.release()
 
 
 def _resolve_deadline(deadline_seconds: float | None) -> tuple[float, float]:
@@ -385,7 +423,12 @@ def _open_lock_parent_posix(lock_path: Path) -> tuple[int, str]:
             try:
                 child = os.open(component, directory_flags, dir_fd=parent)
             except FileNotFoundError:
-                os.mkdir(component, 0o700, dir_fd=parent)
+                try:
+                    os.mkdir(component, 0o700, dir_fd=parent)
+                except FileExistsError:
+                    # A concurrent lock opener created the same component.
+                    # Re-open it below with the normal no-follow validation.
+                    pass
                 child = os.open(component, directory_flags, dir_fd=parent)
             os.close(parent)
             parent = child

@@ -69,6 +69,7 @@ SENSITIVE_KEY_TOKENS = (
 )
 ROOT_MODE = 0o700
 FILE_MODE = 0o600
+MAX_REPORT_BYTES = 12000
 JOB_SCHEMA = "brigade.grokbot.job.v1"
 IDEMPOTENCY_SCHEMA = "brigade.grokbot.idempotency.v1"
 
@@ -92,6 +93,7 @@ class _Storage:
     root: _Directory
     jobs: _Directory
     idempotency: _Directory
+    artifacts: _Directory
 
 
 def enqueue(
@@ -103,54 +105,106 @@ def enqueue(
     """Queue a validated private envelope and return an opaque handle."""
     envelope = _validate_spec(spec)
     key = _validate_idempotency_key(idempotency_key)
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        return _enqueue_locked(storage, envelope, key, now)
+
+
+def enqueue_repository_scout(
+    target: Path,
+    spec: dict[str, Any],
+    idempotency_key: str,
+    *,
+    daily_limit: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Atomically admit one Repository Scout under its active and daily limits."""
+    envelope = _validate_spec(spec)
+    if envelope["role"] != "repository-scout":
+        raise GrokbotJobError("invalid-role")
+    key = _validate_idempotency_key(idempotency_key)
+    if type(daily_limit) is not int or daily_limit < 1:
+        raise GrokbotJobError("invalid-daily-limit")
+    _, instant = _timestamp(now)
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        scout_records = _repository_scout_records_locked(storage)
+        created_today = sum(_parse_timestamp(record["created_at"]).date() == instant.date() for record in scout_records)
+        if any(_is_active_repository_scout(record) for record in scout_records):
+            return {"reason": "active-scout", "created_today": created_today, "handle": None}
+        if created_today >= daily_limit:
+            return {"reason": "daily-limit-reached", "created_today": created_today, "handle": None}
+        handle = _enqueue_locked(storage, envelope, key, instant)
+        if handle["idempotent"]:
+            return {"reason": "all-known", "created_today": created_today, "handle": handle}
+        return {"reason": "created", "created_today": created_today, "handle": handle}
+
+
+def _enqueue_locked(storage: _Storage, envelope: dict[str, Any], key: str, now: datetime | None) -> dict[str, Any]:
+    """Persist one validated queue envelope while the caller holds the queue lock."""
     task_hash = _task_hash(envelope)
     key_hash = _idempotency_key_hash(key)
-    with _storage_paths(target) as storage, _queue_lock(storage):
-        idempotency_name = f"{key_hash.removeprefix('sha256:')}.json"
-        existing = _read_json_file(storage.idempotency, idempotency_name, missing_ok=True)
-        if existing is not None:
-            idempotency = _validate_idempotency_record(existing)
-            if idempotency["task_hash"] != task_hash:
-                raise GrokbotJobError("idempotency-conflict")
-            job_id = idempotency["job_id"]
-            record = _load_record(storage.jobs, job_id)
-            if record["task_hash"] != task_hash:
-                raise GrokbotJobError("corrupt-storage")
-            return _handle(record, idempotent=True)
+    idempotency_name = f"{key_hash.removeprefix('sha256:')}.json"
+    existing = _read_json_file(storage.idempotency, idempotency_name, missing_ok=True)
+    if existing is not None:
+        idempotency = _validate_idempotency_record(existing)
+        if idempotency["task_hash"] != task_hash:
+            raise GrokbotJobError("idempotency-conflict")
+        job_id = idempotency["job_id"]
+        record = _load_record(storage.jobs, job_id)
+        if record["task_hash"] != task_hash:
+            raise GrokbotJobError("corrupt-storage")
+        return _handle(record, idempotent=True)
 
-        recovered = _find_record_by_idempotency_hash(storage.jobs, key_hash)
-        if recovered is not None:
-            if recovered["task_hash"] != task_hash:
-                raise GrokbotJobError("idempotency-conflict")
-            _write_json_file(
-                storage.idempotency,
-                idempotency_name,
-                {"schema": IDEMPOTENCY_SCHEMA, "job_id": recovered["job_id"], "task_hash": task_hash},
-            )
-            return _handle(recovered, idempotent=True)
-
-        timestamp = _now_iso(now)
-        job_id = f"grokbot-{secrets.token_hex(12)}"
-        record = {
-            "schema": JOB_SCHEMA,
-            "job_id": job_id,
-            "task_hash": task_hash,
-            "idempotency_key_hash": key_hash,
-            "state": "queued",
-            "created_at": timestamp,
-            "updated_at": timestamp,
-            "queued_at": timestamp,
-            "timeout_seconds": envelope["timeout_seconds"],
-            "item_revision": 1,
-            "spec": envelope,
-        }
-        _write_json_file(storage.jobs, f"{job_id}.json", record)
+    recovered = _find_record_by_idempotency_hash(storage.jobs, key_hash)
+    if recovered is not None:
+        if recovered["task_hash"] != task_hash:
+            raise GrokbotJobError("idempotency-conflict")
         _write_json_file(
             storage.idempotency,
             idempotency_name,
-            {"schema": IDEMPOTENCY_SCHEMA, "job_id": job_id, "task_hash": task_hash},
+            {"schema": IDEMPOTENCY_SCHEMA, "job_id": recovered["job_id"], "task_hash": task_hash},
         )
-        return _handle(record, idempotent=False)
+        return _handle(recovered, idempotent=True)
+
+    timestamp = _now_iso(now)
+    job_id = f"grokbot-{secrets.token_hex(12)}"
+    record = {
+        "schema": JOB_SCHEMA,
+        "job_id": job_id,
+        "task_hash": task_hash,
+        "idempotency_key_hash": key_hash,
+        "state": "queued",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "queued_at": timestamp,
+        "timeout_seconds": envelope["timeout_seconds"],
+        "item_revision": 1,
+        "spec": envelope,
+    }
+    _write_json_file(storage.jobs, f"{job_id}.json", record)
+    _write_json_file(
+        storage.idempotency,
+        idempotency_name,
+        {"schema": IDEMPOTENCY_SCHEMA, "job_id": job_id, "task_hash": task_hash},
+    )
+    return _handle(record, idempotent=False)
+
+
+def _repository_scout_records_locked(storage: _Storage) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
+        payload = _read_json_file(storage.jobs, name)
+        if payload is None:
+            raise GrokbotJobError("corrupt-storage")
+        record = _validate_record(payload)
+        if record["spec"]["role"] == "repository-scout":
+            records.append(record)
+    return records
+
+
+def _is_active_repository_scout(record: dict[str, Any]) -> bool:
+    return record["state"] in {"queued", "claimed", "running"} or (
+        "cancel_requested_at" in record and record["state"] not in {"completed", "failed", "expired", "canceled"}
+    )
 
 
 def get_job(target: Path, job_id: str) -> dict[str, Any]:
@@ -164,13 +218,18 @@ def status(target: Path, job_id: str | None = None) -> dict[str, Any]:
     if job_id is not None:
         return get_job(target, job_id)
     with _storage_paths(target) as storage:
-        jobs: list[dict[str, Any]] = []
-        for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
-            record = _read_json_file(storage.jobs, name)
-            if record is None:
-                raise GrokbotJobError("corrupt-storage")
-            jobs.append(_projection(_validate_record(record)))
-        return {"jobs": jobs}
+        return _status_from_storage(storage)
+
+
+def _status_from_storage(storage: _Storage) -> dict[str, Any]:
+    """Return safe job projections through one already-anchored queue storage."""
+    jobs: list[dict[str, Any]] = []
+    for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
+        record = _read_json_file(storage.jobs, name)
+        if record is None:
+            raise GrokbotJobError("corrupt-storage")
+        jobs.append(_projection(_validate_record(record)))
+    return {"jobs": jobs}
 
 
 def tracker_rows(target: Path) -> list[dict[str, Any]]:
@@ -327,14 +386,70 @@ def transition(
             if current not in {"claimed", "running"} or artifact is not None:
                 raise GrokbotJobError("invalid-transition")
         else:
-            if current != "running":
-                raise GrokbotJobError("invalid-transition")
-            if "cancel_requested_at" in record:
-                raise GrokbotJobError("cancel-requested")
-            record["result_artifact"] = _validate_completion_artifact(artifact, record["spec"])
+            record["result_artifact"] = _validated_completion(record, artifact)
+            _unlink_artifact_file(storage.artifacts, f"{record['job_id']}.md")
         record["state"] = state
+        _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
+
+
+def complete_report(
+    target: Path,
+    job_id: str,
+    bot_id: str,
+    lease_id: str,
+    artifact: dict[str, Any],
+    report_text: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Store verified Repository Scout report bytes, then complete the job."""
+    job_id = _validate_job_id(job_id)
+    bot_id = _validate_opaque_id(bot_id, "invalid-bot-id")
+    lease_id = _validate_opaque_id(lease_id, "invalid-lease-id")
+    report_bytes = _report_bytes(report_text)
+    timestamp, instant = _timestamp(now)
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        record = _load_record(storage.jobs, job_id)
+        _require_current_lease(record, bot_id, lease_id, instant)
+        _require_report_job(record)
+        validated = _validated_completion(record, artifact)
+        if hashlib.sha256(report_bytes).hexdigest() != validated["sha256"]:
+            raise GrokbotJobError("digest-mismatch")
+        _write_bytes_file(storage.artifacts, f"{job_id}.md", report_bytes)
+        record["result_artifact"] = validated
+        record["state"] = "completed"
+        _commit_mutation(storage.jobs, record, timestamp)
+        return _projection(record)
+
+
+def read_report(target: Path, job_id: str) -> dict[str, Any]:
+    """Return verified snapshot bytes for one completed Repository Scout report."""
+    job_id = _validate_job_id(job_id)
+    with _storage_paths(target) as storage:
+        return _read_report_from_storage(storage, job_id)
+
+
+def _read_report_from_storage(storage: _Storage, job_id: str) -> dict[str, Any]:
+    """Return one verified report through an already-anchored queue storage."""
+    job_id = _validate_job_id(job_id)
+    record = _load_record(storage.jobs, job_id)
+    if record["state"] != "completed":
+        raise GrokbotJobError("invalid-state")
+    _require_report_job(record)
+    data = _read_bytes_file(
+        storage.artifacts, f"{job_id}.md", maximum=MAX_REPORT_BYTES, missing_reason="report-missing"
+    )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GrokbotJobError("invalid-report") from exc
+    if not text:
+        raise GrokbotJobError("invalid-report")
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != record["result_artifact"]["sha256"]:
+        raise GrokbotJobError("digest-mismatch")
+    return {"job_id": job_id, "text": text, "bytes": len(data), "sha256": digest}
 
 
 def cancel(target: Path, job_id: str, now: datetime | None = None) -> dict[str, Any]:
@@ -344,9 +459,11 @@ def cancel(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
         if record["state"] in {"completed", "failed", "expired", "canceled"}:
+            _discard_orphan_report_snapshot(storage, record)
             return _projection(record)
         if record["state"] == "queued":
             record["state"] = "canceled"
+            _discard_orphan_report_snapshot(storage, record)
             _commit_mutation(storage.jobs, record, timestamp)
             return _projection(record)
         if "cancel_requested_at" not in record:
@@ -373,6 +490,7 @@ def acknowledge_cancel(
         if "cancel_requested_at" not in record:
             raise GrokbotJobError("cancellation-not-requested")
         record["state"] = "canceled"
+        _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
 
@@ -384,6 +502,7 @@ def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
     with _storage_paths(target) as storage, _queue_lock(storage):
         record = _load_record(storage.jobs, job_id)
         if record["state"] in {"completed", "failed", "expired", "canceled"}:
+            _discard_orphan_report_snapshot(storage, record)
             return _projection(record)
         deadline = _deadline(record)
         expires_at = (
@@ -392,6 +511,7 @@ def expire(target: Path, job_id: str, now: datetime | None = None) -> dict[str, 
         if instant < expires_at:
             return _projection(record)
         record["state"] = "expired"
+        _discard_orphan_report_snapshot(storage, record)
         _commit_mutation(storage.jobs, record, timestamp)
         return _projection(record)
 
@@ -407,10 +527,17 @@ def _storage_paths(target: Path) -> Iterator[_Storage]:
             _ensure_directory(root)
             jobs = root / "jobs"
             idempotency = root / "idempotency"
+            artifacts = root / "artifacts"
             _ensure_directory(jobs)
             _ensure_directory(idempotency)
+            _ensure_directory(artifacts)
             _assert_regular_or_missing(root / "queue.lock")
-            yield _Storage(_Directory(root, None), _Directory(jobs, None), _Directory(idempotency, None))
+            yield _Storage(
+                _Directory(root, None),
+                _Directory(jobs, None),
+                _Directory(idempotency, None),
+                _Directory(artifacts, None),
+            )
             return
 
         base_fd = _open_directory_path(Path(target).expanduser().absolute())
@@ -425,10 +552,71 @@ def _storage_paths(target: Path) -> Iterator[_Storage]:
         descriptors.append(jobs_fd)
         idempotency_fd = _open_or_create_directory(root_fd, "idempotency")
         descriptors.append(idempotency_fd)
+        artifacts_fd = _open_or_create_directory(root_fd, "artifacts")
+        descriptors.append(artifacts_fd)
         yield _Storage(
             _Directory(Path(target) / ".brigade" / "cloud" / "grokbot", root_fd),
             _Directory(Path(target) / ".brigade" / "cloud" / "grokbot" / "jobs", jobs_fd),
             _Directory(Path(target) / ".brigade" / "cloud" / "grokbot" / "idempotency", idempotency_fd),
+            _Directory(Path(target) / ".brigade" / "cloud" / "grokbot" / "artifacts", artifacts_fd),
+        )
+    except GrokbotJobError:
+        raise
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+    finally:
+        close_error: OSError | None = None
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                close_error = exc
+        if close_error is not None:
+            raise GrokbotJobError("unsafe-storage") from close_error
+
+
+@contextmanager
+def _storage_paths_readonly(target: Path) -> Iterator[_Storage]:
+    """Open an existing queue without creating directories or changing modes."""
+    descriptors: list[int] = []
+    try:
+        if os.name != "posix":  # pragma: no cover - exercised on Windows.
+            root = Path(target).expanduser().absolute() / ".brigade" / "cloud" / "grokbot"
+            jobs = root / "jobs"
+            idempotency = root / "idempotency"
+            artifacts = root / "artifacts"
+            for path in (root, jobs, idempotency, artifacts):
+                current = path.lstat()
+                if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
+                    raise GrokbotJobError("unsafe-storage")
+            yield _Storage(
+                _Directory(root, None),
+                _Directory(jobs, None),
+                _Directory(idempotency, None),
+                _Directory(artifacts, None),
+            )
+            return
+
+        base_fd = _open_directory_path(Path(target).expanduser().absolute())
+        descriptors.append(base_fd)
+        brigade_fd = _open_existing_directory(base_fd, ".brigade")
+        descriptors.append(brigade_fd)
+        cloud_fd = _open_existing_directory(brigade_fd, "cloud")
+        descriptors.append(cloud_fd)
+        root_fd = _open_existing_directory(cloud_fd, "grokbot")
+        descriptors.append(root_fd)
+        jobs_fd = _open_existing_directory(root_fd, "jobs")
+        descriptors.append(jobs_fd)
+        idempotency_fd = _open_existing_directory(root_fd, "idempotency")
+        descriptors.append(idempotency_fd)
+        artifacts_fd = _open_existing_directory(root_fd, "artifacts")
+        descriptors.append(artifacts_fd)
+        root = Path(target) / ".brigade" / "cloud" / "grokbot"
+        yield _Storage(
+            _Directory(root, root_fd),
+            _Directory(root / "jobs", jobs_fd),
+            _Directory(root / "idempotency", idempotency_fd),
+            _Directory(root / "artifacts", artifacts_fd),
         )
     except GrokbotJobError:
         raise
@@ -464,6 +652,16 @@ def _open_or_create_directory(parent: int, name: str) -> int:
     try:
         _assert_directory_descriptor(descriptor)
         os.fchmod(descriptor, ROOT_MODE)
+    except OSError:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_existing_directory(parent: int, name: str) -> int:
+    descriptor = os.open(name, _directory_flags(), dir_fd=parent)
+    try:
+        _assert_directory_descriptor(descriptor)
     except OSError:
         os.close(descriptor)
         raise
@@ -592,8 +790,12 @@ def _queue_lock_windows(root: Path, lock_path: Path) -> Iterator[None]:  # pragm
 
 def _write_json_file(directory: _Directory, name: str, payload: dict[str, Any]) -> None:
     data = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    _write_bytes_file(directory, name, data)
+
+
+def _write_bytes_file(directory: _Directory, name: str, data: bytes) -> None:
     if directory.descriptor is None:  # pragma: no cover - exercised on Windows.
-        _write_json_file_windows(directory.path / name, data)
+        _write_bytes_file_windows(directory.path / name, data)
         return
     temporary = f".{name}.{secrets.token_hex(12)}.tmp"
     descriptor: int | None = None
@@ -636,7 +838,7 @@ def _write_json_file(directory: _Directory, name: str, payload: dict[str, Any]) 
             raise GrokbotJobError("unsafe-storage") from cleanup_error
 
 
-def _write_json_file_windows(path: Path, data: bytes) -> None:  # pragma: no cover - Windows only.
+def _write_bytes_file_windows(path: Path, data: bytes) -> None:  # pragma: no cover - Windows only.
     _ensure_directory(path.parent)
     _assert_regular_or_missing(path)
     descriptor: int | None = None
@@ -729,6 +931,97 @@ def _read_json_file_windows(
     if not isinstance(payload, dict):
         raise GrokbotJobError("corrupt-storage")
     return payload
+
+
+def _read_bytes_file(directory: _Directory, name: str, *, maximum: int, missing_reason: str) -> bytes:
+    if directory.descriptor is None:  # pragma: no cover - exercised on Windows.
+        return _read_bytes_file_windows(directory.path / name, maximum=maximum, missing_reason=missing_reason)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=directory.descriptor
+        )
+    except FileNotFoundError:
+        raise GrokbotJobError(missing_reason) from None
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise GrokbotJobError("unsafe-storage")
+        return _read_bounded_bytes(descriptor, maximum)
+    except GrokbotJobError:
+        raise
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                raise GrokbotJobError("unsafe-storage") from exc
+
+
+def _read_bytes_file_windows(
+    path: Path, *, maximum: int, missing_reason: str
+) -> bytes:  # pragma: no cover - Windows only.
+    _assert_regular_or_missing(path)
+    if not path.exists():
+        raise GrokbotJobError(missing_reason)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise GrokbotJobError("unsafe-storage")
+        return _read_bounded_bytes(descriptor, maximum)
+    except GrokbotJobError:
+        raise
+    except FileNotFoundError:
+        raise GrokbotJobError(missing_reason) from None
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _read_bounded_bytes(descriptor: int, maximum: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    limit = maximum + 1
+    while total < limit:
+        chunk = os.read(descriptor, limit - total)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > maximum:
+        raise GrokbotJobError("report-too-large")
+    return b"".join(chunks)
+
+
+def _unlink_artifact_file(directory: _Directory, name: str) -> None:
+    if directory.descriptor is None:  # pragma: no cover - exercised on Windows.
+        path = directory.path / name
+        _assert_regular_or_missing(path)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise GrokbotJobError("unsafe-storage") from exc
+        return
+    try:
+        os.unlink(name, dir_fd=directory.descriptor)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise GrokbotJobError("unsafe-storage") from exc
+
+
+def _discard_orphan_report_snapshot(storage: _Storage, record: dict[str, Any]) -> None:
+    if record["state"] not in {"failed", "expired", "canceled"}:
+        return
+    _unlink_artifact_file(storage.artifacts, f"{record['job_id']}.md")
 
 
 def _chmod_file_descriptor(descriptor: int, path: Path | None) -> None:
@@ -897,6 +1190,36 @@ def _require_current_lease(record: dict[str, Any], bot_id: str, lease_id: str, i
 def _require_live_lease(record: dict[str, Any], instant: datetime) -> None:
     if instant >= min(_parse_timestamp(record["lease_expires_at"]), _deadline(record)):
         raise GrokbotJobError("lease-expired")
+
+
+def _report_bytes(report_text: object) -> bytes:
+    if not isinstance(report_text, str) or not report_text:
+        raise GrokbotJobError("invalid-report")
+    try:
+        data = report_text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise GrokbotJobError("invalid-report") from exc
+    if len(data) > MAX_REPORT_BYTES:
+        raise GrokbotJobError("report-too-large")
+    return data
+
+
+def _require_report_job(record: dict[str, Any]) -> None:
+    spec = record["spec"]
+    assert isinstance(spec, dict)
+    if spec["role"] != "repository-scout":
+        raise GrokbotJobError("invalid-role")
+    artifact = spec["artifact"]
+    if not isinstance(artifact, dict) or artifact.get("kind") != "report":
+        raise GrokbotJobError("invalid-artifact")
+
+
+def _validated_completion(record: dict[str, Any], artifact: object) -> dict[str, Any]:
+    if record["state"] != "running":
+        raise GrokbotJobError("invalid-transition")
+    if "cancel_requested_at" in record:
+        raise GrokbotJobError("cancel-requested")
+    return _validate_completion_artifact(artifact, record["spec"])
 
 
 def _deadline(record: dict[str, Any]) -> datetime:

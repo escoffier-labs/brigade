@@ -4,7 +4,7 @@ Goal: implement the approved spec at `docs/phase-568-slice-3-run-projector.md` b
 
 Architecture: `project_run_snapshot(base_snapshot, events, *, journal_present)` re-validates every envelope through `run_events.validate_event`, re-verifies the chain (contiguous sequence from 1, digest linkage, single `run_id`), then derives exactly five fields (`status`, `projector_version`, `journal_present`, `journal_last_sequence`, `journal_last_event_digest`) while deep-copying the 44 preserved fields verbatim from the base. Output bytes come from the single encoding path `(json.dumps(snapshot, indent=2, sort_keys=True) + "\n").encode("utf-8")`, matching `aboyeur._write_json` byte for byte. The module performs no I/O, reads no clock or environment, and nothing in the runtime calls it in this slice.
 
-The spec is the authority. This plan quotes the spec's API and the real source contracts in `src/brigade/run_events.py`, `src/brigade/run_journal.py`, `src/brigade/run_lifecycle.py`, `src/brigade/aboyeur.py`, `src/brigade/run_resume.py`, and `src/brigade/runguard.py` as of the base commit. If any quoted contract disagrees with the checked-out code, stop and re-read the code. Do not improvise.
+The spec is the authority. This plan quotes the spec's API and the real source contracts in `src/brigade/run_events.py`, `src/brigade/run_journal.py`, `src/brigade/run_lifecycle.py`, `src/brigade/aboyeur/`, `src/brigade/run_resume.py`, and `src/brigade/runguard.py` as of the base commit. If any quoted contract disagrees with the checked-out code, stop and re-read the code. Do not improvise.
 
 ## File map
 
@@ -15,7 +15,7 @@ The spec is the authority. This plan quotes the spec's API and the real source c
 | `tests/fixtures/run-lifecycle/golden-projection.base.json` | Create. Hand-authored base snapshot carrying all 44 preserved fields |
 | `tests/fixtures/run-lifecycle/golden-projection.expected.json` | Create. Generated once by the implementation, reviewed by hand before commit |
 
-Do not edit `src/brigade/aboyeur.py`, `src/brigade/run_lifecycle.py`, `src/brigade/run_journal.py`, `src/brigade/run_events.py`, any CLI module, `pyproject.toml`, or any other existing file. The existing fixture `tests/fixtures/run-lifecycle/golden-lifecycle.jsonl` is read, never modified.
+Do not edit `src/brigade/aboyeur/`, `src/brigade/run_lifecycle.py`, `src/brigade/run_journal.py`, `src/brigade/run_events.py`, any CLI module, `pyproject.toml`, or any other existing file. The existing fixture `tests/fixtures/run-lifecycle/golden-lifecycle.jsonl` is read, never modified.
 
 ## Repository conventions used below
 

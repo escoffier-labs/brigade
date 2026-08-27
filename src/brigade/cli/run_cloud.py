@@ -78,6 +78,45 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_feed.add_argument("--limit", type=int, default=1, help="Maximum newly created jobs (1-10). Defaults to 1.")
     p_feed.add_argument("--apply", action="store_true", help="Enqueue after validation. Default is validate only.")
 
+    p_scout_feed = grokbot_sub.add_parser(
+        "scout-feed", help="Select one approved GitHub issue for Grok Bot Repository Scout."
+    )
+    add_target(p_scout_feed)
+    p_scout_feed.add_argument("--policy", type=Path, required=True, help="Path to the approved private scout policy.")
+    p_scout_feed.add_argument("--apply", action="store_true", help="Enqueue after selection. Default is preview only.")
+
+    p_reconcile = grokbot_sub.add_parser(
+        "reconcile-reports",
+        help="Preview or draft canonical-owner Memory Handoffs from completed scout reports.",
+    )
+    add_target(p_reconcile)
+    p_reconcile.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
+    p_reconcile.add_argument(
+        "--inbox",
+        default="review",
+        help="Owner-relative review or writer inbox. Defaults to the owner's review inbox.",
+    )
+    p_reconcile.add_argument("--limit", type=int, default=1, help="Maximum new drafts (1-50). Defaults to 1.")
+    p_reconcile.add_argument("--apply", action="store_true", help="Write drafts and markers. Default is preview only.")
+
+    p_findings = grokbot_sub.add_parser(
+        "reconcile-findings",
+        help="Preview or draft canonical-owner Memory Handoffs from a private findings manifest.",
+    )
+    add_target(p_findings)
+    p_findings.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
+    p_findings.add_argument("--manifest", type=Path, required=True, help="Path to the private findings manifest.")
+    p_findings.add_argument("--limit", type=int, default=1, help="Maximum new drafts (1-50). Defaults to 1.")
+    p_findings.add_argument("--apply", action="store_true", help="Write drafts and markers. Default is preview only.")
+
+    p_convert = grokbot_sub.add_parser(
+        "convert-findings",
+        help="Convert live normalized findings into a private generic manifest.",
+    )
+    add_target(p_convert)
+    p_convert.add_argument("--input", type=Path, required=True, help="Path to the live normalized findings file.")
+    p_convert.add_argument("--output", type=Path, required=True, help="Path to write the generic findings manifest.")
+
     for name, help_text in (("claim", "Claim a queued job."), ("renew", "Renew a current job lease.")):
         command = grokbot_sub.add_parser(name, help=help_text)
         add_target(command)
@@ -280,6 +319,14 @@ def _dispatch_grokbot(args, target: Path) -> int:
         return _dispatch_grokbot_ops(args, target)
     if command == "feed":
         return _dispatch_grokbot_feed(args, target)
+    if command == "scout-feed":
+        return _dispatch_grokbot_scout_feed(args, target)
+    if command == "reconcile-reports":
+        return _dispatch_grokbot_reconcile(args, target)
+    if command == "reconcile-findings":
+        return _dispatch_grokbot_findings(args, target)
+    if command == "convert-findings":
+        return _dispatch_grokbot_convert_findings(args)
     if command == "serve":
         from .. import grokbot_mcp
 
@@ -376,6 +423,132 @@ def _print_feed_result(result: dict) -> None:
         parts.insert(2, f"created={result['created']}")
         parts.insert(3, f"skipped={result['skipped']}")
     print("grokbot feed: " + " ".join(parts))
+    for job in result.get("jobs", []):
+        print(f"job {job['job_id']} state={job['state']}")
+
+
+def _dispatch_grokbot_scout_feed(args, target: Path) -> int:
+    """Preview or enqueue one approved scout without exposing policy content."""
+    from .. import grokbot_scout_feed
+
+    try:
+        if args.apply:
+            result = grokbot_scout_feed.apply(target, args.policy)
+        else:
+            result = grokbot_scout_feed.preflight(target, args.policy)
+    except grokbot_scout_feed.ScoutFeedError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    _print_scout_feed_result(result)
+    return 0
+
+
+def _print_scout_feed_result(result: dict) -> None:
+    """Render the safe scout selection projection without policy or issue contents."""
+    parts = [f"created={result['created']}", f"reason={result['reason']}"]
+    if result["issue_number"] is not None:
+        parts.append(f"issue={result['issue_number']}")
+    print("grokbot scout-feed: " + " ".join(parts))
+    handle = result.get("handle")
+    if handle is not None:
+        print(f"job {handle['job_id']} state={handle['state']}")
+
+
+def _dispatch_grokbot_reconcile(args, target: Path) -> int:
+    """Preview or draft canonical-owner handoffs without printing report text."""
+    from .. import grokbot_reconcile
+
+    try:
+        if args.apply:
+            result = grokbot_reconcile.apply(target, args.owner, inbox=args.inbox, limit=args.limit)
+        else:
+            result = grokbot_reconcile.preview(target, args.owner, inbox=args.inbox, limit=args.limit)
+    except grokbot_reconcile.ReconcileError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    _print_reconcile_result(result)
+    return 0
+
+
+def _dispatch_grokbot_findings(args, target: Path) -> int:
+    """Preview or draft canonical-owner handoffs without printing finding text."""
+    from .. import grokbot_findings
+
+    try:
+        if args.apply:
+            result = grokbot_findings.apply(target, args.owner, args.manifest, limit=args.limit)
+        else:
+            result = grokbot_findings.preview(target, args.owner, args.manifest, limit=args.limit)
+    except grokbot_findings.FindingsError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    _print_findings_result(result)
+    return 0
+
+
+def _dispatch_grokbot_convert_findings(args) -> int:
+    """Convert live records into a generic manifest without printing finding text."""
+    from .. import grokbot_findings
+
+    try:
+        result = grokbot_findings.convert_live_findings(args.input, args.output)
+    except grokbot_findings.FindingsError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    _print_convert_findings_result(result)
+    return 0
+
+
+def _print_convert_findings_result(result: dict) -> None:
+    """Render conversion counts and safe identity handles only."""
+    print(f"grokbot convert-findings: converted={result['converted']}")
+    for finding in result.get("findings", []):
+        print(f"finding {finding['producer']} {finding['finding_id']} revision={finding['revision']}")
+
+
+def _print_findings_result(result: dict) -> None:
+    """Render findings counts and safe identity handles only."""
+    parts = [
+        f"eligible={result['eligible']}",
+        f"known={result['known']}",
+        f"created={result['created']}",
+        f"limit={result['limit']}",
+    ]
+    if "skipped" in result:
+        parts.insert(2, f"skipped={result['skipped']}")
+    print("grokbot reconcile-findings: " + " ".join(parts))
+    for finding in result.get("findings", []):
+        print(f"finding {finding['producer']} {finding['finding_id']} revision={finding['revision']}")
+
+
+def _print_reconcile_result(result: dict) -> None:
+    """Render reconcile counts and safe job handles only."""
+    parts = [
+        f"eligible={result['eligible']}",
+        f"known={result['known']}",
+        f"unavailable={result['unavailable']}",
+        f"created={result['created']}",
+        f"limit={result['limit']}",
+    ]
+    if "skipped" in result:
+        parts.insert(3, f"skipped={result['skipped']}")
+    print("grokbot reconcile-reports: " + " ".join(parts))
     for job in result.get("jobs", []):
         print(f"job {job['job_id']} state={job['state']}")
 

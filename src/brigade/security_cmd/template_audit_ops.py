@@ -22,9 +22,21 @@ from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
-from . import models as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import scan_detectors as _scan_detectors_mod
+from . import scan_engine as _scan_engine_mod
+from .models import (
+    ENV_ASSIGNMENT_RE,
+    PLAINTEXT_PASSWORD_RE,
+    PRIVATE_KEY_RE,
+    SECRET_VALUE_RE,
+    SECURITY_CHECKS,
+    TEMPLATE_ALLOWLIST_RE,
+    TEMPLATE_AUDIT_ROOTS,
+    TEMPLATE_PRIVATE_PATH_RE,
+    TEMPLATE_PRIVATE_URL_RE,
+    TEXT_SUFFIXES,
+    _should_skip_harness_wiring_path,
+)
 
 
 def _short(text: str, limit: int = 160) -> str:
@@ -98,7 +110,7 @@ def _template_audit_finding(
         "title": title,
         "severity": "high" if category == "secret" else "medium",
         "safe_excerpt": evidence,
-        "surface": _surface_for(path, target),
+        "surface": _scan_engine_mod._surface_for(path, target),
         "confidence": "template" if "templates" in path.parts else "docs",
     }
     payload["fingerprint"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
@@ -190,25 +202,25 @@ def harness_wiring_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     findings: list[dict[str, Any]] = []
     scanned_files: list[str] = []
-    for path in _iter_scan_files(target):
+    for path in _scan_engine_mod._iter_scan_files(target):
         if _should_skip_harness_wiring_path(path, target):
             continue
-        if not _is_harness_wiring_document(path, target):
+        if not _scan_detectors_mod._is_harness_wiring_document(path, target):
             continue
         try:
             text = path.read_text(errors="replace")
         except OSError:
             continue
         scanned_files.append(str(path.relative_to(target)))
-        _scan_harness_wiring_document(
+        _scan_detectors_mod._scan_harness_wiring_document(
             findings,
             target=target,
             path=path,
             text=text,
-            classification=_classification_for(path, target),
+            classification=_scan_engine_mod._classification_for(path, target),
         )
-    _assign_fingerprints(findings)
-    findings = _filter_findings(
+    _scan_engine_mod._assign_fingerprints(findings)
+    findings = _scan_engine_mod._filter_findings(
         findings,
         enabled_checks=SECURITY_CHECKS,
         include_paths=(),

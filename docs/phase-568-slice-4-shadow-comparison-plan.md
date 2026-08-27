@@ -298,7 +298,7 @@ Run (RED: the hook is not wired, so no artifact is created):
 
 Expected: `AssertionError` on `artifact.is_file()`.
 
-Wire the hook in `src/brigade/aboyeur.py::_write_json`, immediately after the
+Wire the hook in `src/brigade/aboyeur/run_io.py::_write_json`, immediately after the
 existing `localio.write_text_atomic` call (around line 504):
 
 ```python
@@ -459,7 +459,7 @@ Expected: `test_no_journal_file_until_lock_held` fails (it asserts the
 Commit:
 
 ```bash
-git add src/brigade/aboyeur.py src/brigade/run_shadow.py tests/test_run_shadow.py
+git add src/brigade/aboyeur/ src/brigade/run_shadow.py tests/test_run_shadow.py
 git commit -m "$(cat <<'EOF'
 feat(runs): wire shadow comparison hook and first-match record
 
@@ -1921,7 +1921,7 @@ bytes are unchanged).
 Commit:
 
 ```bash
-git add tests/test_run_shadow.py src/brigade/aboyeur.py
+git add tests/test_run_shadow.py src/brigade/aboyeur/
 git commit -m "$(cat <<'EOF'
 test(runs): non-run.json writes do not trigger shadow comparison
 

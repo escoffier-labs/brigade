@@ -37,7 +37,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal, cast
 
 from . import __version__ as BRIGADE_VERSION
 from . import mcp_server
@@ -415,7 +415,7 @@ def _trust_score_payload(
     elif trust_level not in {"team", "public"}:
         score -= 20
         signals.append(f"unknown trust_level: {trust_level}")
-    tests = metadata.get("tests") if isinstance(metadata.get("tests"), list) else []
+    tests = raw_tests if isinstance((raw_tests := metadata.get("tests")), list) else []
     if not tests:
         score -= 15
         signals.append("no tests declared")
@@ -424,9 +424,9 @@ def _trust_score_payload(
         score -= 5
         signals.append("no changelog found")
     if lint_payload is not None:
-        warnings = lint_payload.get("warnings") if isinstance(lint_payload.get("warnings"), list) else []
-        errors = lint_payload.get("errors") if isinstance(lint_payload.get("errors"), list) else []
-        injection = lint_payload.get("injection") if isinstance(lint_payload.get("injection"), dict) else {}
+        warnings = raw_warnings if isinstance((raw_warnings := lint_payload.get("warnings")), list) else []
+        errors = raw_errors if isinstance((raw_errors := lint_payload.get("errors")), list) else []
+        injection = raw_injection if isinstance((raw_injection := lint_payload.get("injection")), dict) else {}
         score -= min(len(warnings) * 5, 20)
         score -= min(len(errors) * 20, 60)
         if injection.get("flagged"):
@@ -719,9 +719,9 @@ def _finalize_staged_registry_lint(
         nested = trust_score["changelog"]
         if isinstance(nested.get("path"), str):
             nested["path"] = _repoint(nested["path"])
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    metadata = raw_metadata if isinstance((raw_metadata := payload.get("metadata")), dict) else {}
     resolved_id = _slug(str(metadata.get("id") or display_dir.name))
-    staged_source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    staged_source = raw_staged_source if isinstance((raw_staged_source := payload.get("source")), dict) else {}
     source = _source_identity(skill_dir=display_dir, skill_id=resolved_id, kind="registry", reviewed=False)
     source["skill_version"] = staged_source.get("skill_version")
     source["fingerprint"] = staged_source.get("fingerprint")
@@ -1393,7 +1393,7 @@ def _is_reparse_point(path: Path) -> bool:
         st = os.lstat(path)
     except OSError:
         return False
-    return bool(getattr(st, "st_reparse_tag", 0))
+    return bool(getattr(st, "st_reparse_tag", False))
 
 
 def _fallback_prepare_parent(anchor: _StateRootAnchor, *relative_dirs: str, create: bool = True) -> Path | None:
@@ -1735,7 +1735,7 @@ def _read_state_file_bytes(anchor: _StateRootAnchor, *relative: str) -> bytes | 
             return None
         except OSError as exc:
             raise SkillsStatePathError(f"skills state file could not be inspected safely: {display}") from exc
-        if stat_module.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0):
+        if stat_module.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", False):
             raise SkillsStatePathError(f"skills state file must not be a symlink or reparse point: {display}")
         if not stat_module.S_ISREG(st.st_mode) or st.st_nlink != 1:
             raise SkillsStatePathError(f"skills state file must be a plain single-link regular file: {display}")
@@ -1820,9 +1820,9 @@ def _read_tree_from_anchor(
     result.
     """
     if not _HAS_DESCRIPTOR_ANCHOR:
-        base = (anchor.workspace / ".brigade").joinpath(*relative)
-        return _collect_source_tree(base)
+        return _collect_source_tree((anchor.workspace / ".brigade").joinpath(*relative))
     dir_fd, opened = _anchor_open_chain(anchor, *relative)
+    assert dir_fd is not None
     try:
         return _collect_fd_tree(dir_fd, (), (anchor.workspace / ".brigade").joinpath(*relative), "skills state")
     finally:
@@ -2261,8 +2261,8 @@ def _drift_payload(
     snapshot_dirs, snapshot_files = _installed_tree_snapshot(target, installed_dir)
     installed_raw = snapshot_files.get(("SKILL.md",))
     installed_present = installed_raw is not None
-    installed_text = installed_raw.decode("utf-8", errors="replace") if installed_present else ""
-    current_source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+    installed_text = installed_raw.decode("utf-8", errors="replace") if installed_raw is not None else ""
+    current_source = raw_current_source if isinstance((raw_current_source := lint_payload.get("source")), dict) else {}
     current_render = _renderer_contract(target, harness)
     current_render_fingerprint = _text_fingerprint(rendered)
     installed_skill_fingerprint = _text_fingerprint(installed_text) if installed_present else None
@@ -2441,7 +2441,7 @@ def install(
             print(f"error: skill lint failed: {skill}", file=sys.stderr)
         return 1
     skill_id = _slug(str(lint_payload["skill_id"]))
-    metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
+    metadata = raw_metadata if isinstance((raw_metadata := lint_payload.get("metadata")), dict) else {}
     source_identity = dict(resolved_source)
     source_identity["skill_version"] = str(metadata.get("version") or "0.1.0")
     version = str(metadata.get("version") or "0.1.0")
@@ -2651,12 +2651,12 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
         registry_metadata = registry_row["metadata"]
         skill_id = _slug(str(registry_metadata.get("id") or Path(str(registry_row["skill_dir"])).name))
         lint_payload = _lint_payload(workspace, f"registry:{skill_id}")
-        metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else registry_metadata
-        trust_score = lint_payload.get("trust_score") if isinstance(lint_payload.get("trust_score"), dict) else {}
+        metadata = raw if isinstance((raw := lint_payload.get("metadata")), dict) else registry_metadata
+        trust_score = raw_trust_score if isinstance((raw_trust_score := lint_payload.get("trust_score")), dict) else {}
         actual_trust = str(trust_score.get("trust_level") or "unreviewed")
         supported = metadata.get("supported_harnesses")
         supported_harnesses = set(supported) if isinstance(supported, list) else set()
-        source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+        source = raw_source if isinstance((raw_source := lint_payload.get("source")), dict) else {}
         for install_target in targets:
             item: dict[str, Any] = {
                 "skill_id": skill_id,
@@ -2672,7 +2672,7 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 "error": None,
             }
             if not lint_payload.get("valid"):
-                errors = lint_payload.get("errors") if isinstance(lint_payload.get("errors"), list) else []
+                errors = raw_errors if isinstance((raw_errors := lint_payload.get("errors")), list) else []
                 item["reason"] = "; ".join(str(error) for error in errors) or "skill lint failed"
                 items.append(item)
                 continue
@@ -2799,10 +2799,10 @@ def _user_profile_package(
     lint_payload = _lint_payload(workspace, f"registry:{skill_id}", harness=harness)
     if not lint_payload.get("valid"):
         return None
-    metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else registry_metadata
+    metadata = raw_metadata if isinstance((raw_metadata := lint_payload.get("metadata")), dict) else registry_metadata
     if metadata.get("enabled", True) is False:
         return None
-    trust_score = lint_payload.get("trust_score") if isinstance(lint_payload.get("trust_score"), dict) else {}
+    trust_score = raw_trust_score if isinstance((raw_trust_score := lint_payload.get("trust_score")), dict) else {}
     actual_trust = str(trust_score.get("trust_level") or "unreviewed")
     if not _trust_at_least(actual_trust, minimum_trust):
         return None
@@ -2810,7 +2810,7 @@ def _user_profile_package(
     supported_harnesses = set(supported) if isinstance(supported, list) else set()
     if supported_harnesses and harness not in supported_harnesses:
         return None
-    source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+    source = raw_source if isinstance((raw_source := lint_payload.get("source")), dict) else {}
     source_identity = source.get("identity")
     if not (isinstance(source_identity, str) and source_identity):
         return None
@@ -2937,7 +2937,7 @@ def _sync_file_mutations(
             projection.mutation(
                 destination=destination,
                 display_path=f"{display_prefix}/{relative}",
-                mutation=mutation_type,
+                mutation=cast(Literal["create", "replace", "remove"], mutation_type),
                 expected_before=projection.content_digest(old[0] if old else None),
                 desired_after=projection.content_digest(new[0] if new else None),
                 staged_bytes=new[0] if new else None,
@@ -2954,7 +2954,7 @@ def _sync_single_file_mutation(path: Path, before: bytes | None, after: bytes | 
     return projection.mutation(
         destination=path,
         display_path=projection.safe_display_path(path, target=path.parent),
-        mutation=mutation_type,
+        mutation=cast(Literal["create", "replace", "remove"], mutation_type),
         expected_before=projection.content_digest(before),
         desired_after=projection.content_digest(after),
         staged_bytes=after,
@@ -3003,12 +3003,12 @@ def _sync_projection_plan(
             _finalize_staged_registry_lint(lint, workspace, _skill_path(workspace, skill_id), staged_dir)
             if not lint.get("valid"):
                 return None, items, f"skill lint failed during sync planning: {skill_id}"
-            metadata = lint.get("metadata") if isinstance(lint.get("metadata"), dict) else {}
+            metadata = raw_metadata if isinstance((raw_metadata := lint.get("metadata")), dict) else {}
             # Every eligibility gate repeats on THIS snapshot's generation:
             # planning evaluated an earlier registry read, so a generation
             # swapped in between must be re-checked here, never installed on
             # the strength of the plan-phase decision.
-            trust_score = lint.get("trust_score") if isinstance(lint.get("trust_score"), dict) else {}
+            trust_score = raw_trust_score if isinstance((raw_trust_score := lint.get("trust_score")), dict) else {}
             actual_trust = str(trust_score.get("trust_level") or "unreviewed")
             minimum_trust = str(item.get("minimum_trust") or "unreviewed")
             supported = metadata.get("supported_harnesses")
@@ -3076,7 +3076,7 @@ def _sync_projection_plan(
                         display_prefix=f"rollback:{skill_id}:{harness}",
                     )
                 )
-            source = lint.get("source") if isinstance(lint.get("source"), dict) else {}
+            source = raw_source if isinstance((raw_source := lint.get("source")), dict) else {}
             render = _renderer_contract(workspace, harness)
             skill_content = desired_files.get("SKILL.md", (b"", 0))[0].decode("utf-8", errors="replace")
             receipt_path = _installs_root(workspace) / f"{skill_id}-{harness}.json"
@@ -3174,9 +3174,9 @@ def sync(
         if mutable_items:
             recovery = _sync_recovery_records(workspace)
             if recovery:
-                payload = {"workspace": str(workspace), "recovery": recovery, "terminal_state": "recovery-required"}
+                blocked = {"workspace": str(workspace), "recovery": recovery, "terminal_state": "recovery-required"}
                 print(
-                    json.dumps(payload, indent=2, sort_keys=True)
+                    json.dumps(blocked, indent=2, sort_keys=True)
                     if json_output
                     else f"error: recovery required: {recovery[0]['recovery_command']}"
                 )
@@ -3215,7 +3215,7 @@ def sync(
         state: sum(item["state"] == state for item in items)
         for state in ("current", "missing", "changed", "blocked", "excluded")
     }
-    payload = {
+    payload: dict[str, Any] = {
         "schema_version": 1,
         "workspace": str(workspace),
         "target": harness,
@@ -3512,7 +3512,7 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
         print(f"error: unknown skill install target: {harness}", file=sys.stderr)
         return 2
     source_dir = Path(str(lint_payload["skill_dir"]))
-    metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
+    metadata = raw_metadata if isinstance((raw_metadata := lint_payload.get("metadata")), dict) else {}
     if baseline_skill.startswith("registry:"):
         # The registry side of the diff is served through the state-root
         # anchor, never re-read by pathname after the lint.
@@ -3528,9 +3528,9 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
     _snapshot_dirs, snapshot_files = _installed_tree_snapshot(target, installed_dir)
     installed_raw = snapshot_files.get(("SKILL.md",))
     installed_present = installed_raw is not None
-    installed_text = installed_raw.decode("utf-8", errors="replace") if installed_present else ""
+    installed_text = installed_raw.decode("utf-8", errors="replace") if installed_raw is not None else ""
     installed_skill = _skill_md_path(installed_dir)
-    source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+    source = raw_source if isinstance((raw_source := lint_payload.get("source")), dict) else {}
     diff_lines = list(
         difflib.unified_diff(
             installed_text.splitlines(),
@@ -3930,17 +3930,17 @@ def _pack_import_from_dir(
         skill_id = _slug(str(metadata.get("id") or skill_path.name))
         # Provenance keeps the displayed pack location; imports from an
         # anchored snapshot staging copy never record the staging path.
-        payload, error, rc = _registry_import_payload(
+        row, error, rc = _registry_import_payload(
             target=target,
             source=skill_path,
             skill_id=skill_id,
             force=force,
             source_provenance=display_dir / "skills" / skill_path.name,
         )
-        if payload is None:
+        if row is None:
             errors.append(str(error))
             continue
-        imported.append({"skill_id": payload["skill_id"], "skill_dir": payload["skill_dir"], "returncode": rc})
+        imported.append({"skill_id": row["skill_id"], "skill_dir": row["skill_dir"], "returncode": rc})
     result = {
         "target": str(target),
         "pack": str(display_dir),
@@ -4330,8 +4330,8 @@ def adapters_show(*, target: Path = Path("."), adapter_id: str, json_output: boo
 
 def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
     lint_payload = _lint_payload(target, skill)
-    metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
-    supported = metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else []
+    metadata = raw_metadata if isinstance((raw_metadata := lint_payload.get("metadata")), dict) else {}
+    supported = raw_supported if isinstance((raw_supported := metadata.get("supported_harnesses")), list) else []
     skill_id = _slug(str(lint_payload.get("skill_id") or skill))
     current_version = str(metadata.get("version") or "0.1.0")
     source_text = ""
@@ -4586,7 +4586,7 @@ def _fleet_copy_keys(target: Path) -> list[tuple[str, str]]:
 def _fleet_source_selector(skill_id: str, receipt: dict[str, Any]) -> str | None:
     if not receipt:
         return skill_id
-    source = receipt.get("source") if isinstance(receipt.get("source"), dict) else {}
+    source = raw_source if isinstance((raw_source := receipt.get("source")), dict) else {}
     kind = source.get("kind")
     identity = source.get("identity")
     if kind == "brigade-bundle" and identity == f"{BUNDLED_SOURCE_PREFIX}{skill_id}":
@@ -4693,14 +4693,14 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
             )
             continue
         source_dir = Path(str(lint_payload["skill_dir"]))
-        metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
-        if selector.startswith("registry:"):
+        metadata = raw_metadata if isinstance((raw_metadata := lint_payload.get("metadata")), dict) else {}
+        if selector is not None and selector.startswith("registry:"):
             # Registry rendering text comes from the anchored read.
             source_text = _anchored_registry_text(target, _slug(selector.removeprefix("registry:")), "SKILL.md") or ""
         else:
             source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
-        supported = metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else []
-        source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+        supported = raw_supported if isinstance((raw_supported := metadata.get("supported_harnesses")), list) else []
+        source = raw_source if isinstance((raw_source := lint_payload.get("source")), dict) else {}
         supported_state = harness in supported or not supported
         installed_dir = install_dir
         rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, harness)
@@ -4831,7 +4831,7 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
                     "fingerprint": lint_payload.get("fingerprint"),
                 }
             )
-        trust_score = lint_payload.get("trust_score") if isinstance(lint_payload.get("trust_score"), dict) else {}
+        trust_score = raw_trust_score if isinstance((raw_trust_score := lint_payload.get("trust_score")), dict) else {}
         if trust_score.get("trust_level") == "unreviewed":
             issues.append(
                 {
@@ -4854,7 +4854,7 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
                     "fingerprint": lint_payload.get("fingerprint"),
                 }
             )
-        changelog = lint_payload.get("changelog") if isinstance(lint_payload.get("changelog"), dict) else {}
+        changelog = raw_changelog if isinstance((raw_changelog := lint_payload.get("changelog")), dict) else {}
         if not changelog.get("present"):
             issues.append(
                 {
@@ -5040,7 +5040,7 @@ def _anchored_proposals(target: Path) -> list[tuple[str, dict[str, Any]]]:
                         st = os.lstat(meta)
                     except OSError:
                         continue
-                    if stat_module.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0):
+                    if stat_module.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", False):
                         continue
                     if not stat_module.S_ISREG(st.st_mode):
                         continue

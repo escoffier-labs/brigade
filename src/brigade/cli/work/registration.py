@@ -12,6 +12,8 @@ from ...claude_hooks.package import MANAGED_EVENTS as _CLAUDE_HOOK_EVENTS
 from ...dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
 from ...work_cmd import TASK_PRIORITIES, TASK_SEAT_CLASSES, TASK_TYPES
 from .. import extras as _extras_cli
+from .dispatching import dispatch
+from .phases import _register_phases
 
 
 def register(sub: argparse._SubParsersAction) -> None:

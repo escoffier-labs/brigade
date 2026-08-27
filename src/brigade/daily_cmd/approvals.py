@@ -38,9 +38,18 @@ from .. import runguard
 from ..localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 from ..render import emit
 
-from . import config as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from .config import (
+    DEFAULT_CONFIG,
+    SCHEMA_VERSION,
+    _approvals_root,
+    _fingerprint,
+    _load_config,
+    _runs_root,
+    _slug,
+)
+from . import candidates as _candidates_mod
+from . import run_loop as _run_loop_mod
+from . import status_plan as _status_plan_mod
 
 _APPROVAL_REFERENCE_FIELDS = (
     "approval_id",
@@ -112,7 +121,7 @@ def _approval_store_lock(target: Path, approval_id: str) -> Iterator[None]:
 
 
 def _read_approvals(target: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    return _iter_receipts(_approvals_root(target), "approval.json")
+    return _run_loop_mod._iter_receipts(_approvals_root(target), "approval.json")
 
 
 def _write_approval_unlocked(target: Path, approval: dict[str, Any]) -> dict[str, Any]:
@@ -163,7 +172,7 @@ def _ensure_approval(
             "source_plan_id": plan_data.get("plan_id"),
             "selected_action_id": action.get("action_id"),
             "selected_action": action,
-            "selected_adapter": _adapter_for(action),
+            "selected_adapter": _candidates_mod._adapter_for(action),
             "source_subsystem": action.get("source_subsystem"),
             "source_local_id": action.get("source_local_id"),
             "source_fingerprint": action.get("source_fingerprint"),
@@ -183,20 +192,24 @@ def _ensure_approval(
 
 
 def _current_action_for_approval(target: Path, approval: dict[str, Any]) -> dict[str, Any] | None:
-    selected_action = approval.get("selected_action") if isinstance(approval.get("selected_action"), dict) else {}
+    selected_action = raw_action if isinstance((raw_action := approval.get("selected_action")), dict) else {}
     action_type = str(selected_action.get("action_type") or "")
     source_id = str(approval.get("source_local_id") or selected_action.get("source_local_id") or "")
     candidate_builders = {
-        "run-task": _pending_task_candidates,
-        "promote-import": _pending_import_candidates,
-        "start-center-action": _center_action_candidates,
-        "import-readiness-issues": _readiness_candidates,
-        "import-handoff-issues": _handoff_ingest_candidates,
-        "build-operator-report": _report_candidate,
+        "run-task": _candidates_mod._pending_task_candidates,
+        "promote-import": _candidates_mod._pending_import_candidates,
+        "start-center-action": _candidates_mod._center_action_candidates,
+        "import-readiness-issues": _candidates_mod._readiness_candidates,
+        "import-handoff-issues": _candidates_mod._handoff_ingest_candidates,
+        "build-operator-report": _candidates_mod._report_candidate,
     }
     builder = candidate_builders.get(action_type)
     if builder is None:
-        return selected_action if selected_action and not _evidence_blockers(target, selected_action) else None
+        return (
+            selected_action
+            if selected_action and not _status_plan_mod._evidence_blockers(target, selected_action)
+            else None
+        )
     for action in builder(target):
         if action.get("source_local_id") == source_id:
             return action
@@ -213,7 +226,7 @@ def _approval_blockers(target: Path, approval: dict[str, Any], config: dict[str,
     if approval.get("config_fingerprint") != _config_fingerprint(config):
         blockers.append("daily config changed since approval")
     action = approval.get("selected_action") if isinstance(approval.get("selected_action"), dict) else None
-    blockers.extend(_evidence_blockers(target, action))
+    blockers.extend(_status_plan_mod._evidence_blockers(target, action))
     current = _current_action_for_approval(target, approval)
     if current is None:
         blockers.append("selected action is no longer available")
@@ -413,9 +426,7 @@ def record_redeemed_action_completed(
         daily_run_id = run_receipt.get("run_id")
         completed_at = run_receipt.get("completed_at")
         action_id = approval.get("selected_action_id")
-        selected_action = (
-            run_receipt.get("selected_action") if isinstance(run_receipt.get("selected_action"), Mapping) else {}
-        )
+        selected_action = raw_action if isinstance((raw_action := run_receipt.get("selected_action")), Mapping) else {}
         if (
             run_receipt.get("status") != "completed"
             or run_receipt.get("approval_id") != approval_id
@@ -454,7 +465,7 @@ def _redeemed_reconciliation_blockers(
     selected_action = approval.get("selected_action")
     if not isinstance(selected_action, dict) or not selected_action:
         blockers.append("daily approval selected action is malformed")
-    elif approval.get("selected_adapter") != _adapter_for(selected_action):
+    elif approval.get("selected_adapter") != _candidates_mod._adapter_for(selected_action):
         blockers.append("daily approval adapter changed since approval")
     return blockers
 
@@ -493,8 +504,8 @@ def _validate_redeemed_for_run_unlocked(
     if not isinstance(action_receipt, Mapping) or action_receipt.get("state") != "completed":
         raise ApprovalClaimError("daily approval has no completed action receipt to reconcile")
     if action_receipt.get("owner_run_id") != run_id:
-        owner = action_receipt.get("owner_run_id")
-        owner_text = owner if isinstance(owner, str) and owner else "another run"
+        raw_owner = action_receipt.get("owner_run_id")
+        owner_text = str(raw_owner) if raw_owner else "another run"
         raise ApprovalClaimError(f"daily approval completed action receipt belongs to {owner_text}")
     daily_run_id = action_receipt.get("daily_run_id")
     completed_at = action_receipt.get("completed_at")
@@ -508,14 +519,13 @@ def _validate_redeemed_for_run_unlocked(
     ):
         raise ApprovalClaimError("daily approval completed action receipt is malformed")
     run_receipt = _read_json(_runs_root(target) / daily_run_id / "run.json")
+    if not isinstance(run_receipt, Mapping):
+        raise ApprovalClaimError("daily approval completed action receipt no longer matches its run")
     selected_action = (
-        run_receipt.get("selected_action")
-        if isinstance(run_receipt, Mapping) and isinstance(run_receipt.get("selected_action"), Mapping)
-        else {}
+        raw_sel_action if isinstance((raw_sel_action := run_receipt.get("selected_action")), Mapping) else {}
     )
     if (
-        not isinstance(run_receipt, Mapping)
-        or run_receipt.get("status") != "completed"
+        run_receipt.get("status") != "completed"
         or run_receipt.get("run_id") != daily_run_id
         or run_receipt.get("approval_id") != approval_id
         or run_receipt.get("selected_action_id") != approval.get("selected_action_id")

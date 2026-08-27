@@ -23,11 +23,20 @@ from ..wiring import resolve_wired_target
 from . import compaction_marker, envelope
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
+from .session_state import (
+    _clear_hook_timeouts,
+    _mark_hook_latch_announced,
+    _read_hook_latch,
+    _record_hook_timeout,
+    _session_state_lock,  # noqa: F401 - runtime compatibility alias
+    _write_session_state_preserving_latch,
+)
 
 BRIEF_TIMEOUT_SECONDS = 10
 HOOK_TIMEOUT_LATCH_AFTER = 2
 _TIMEOUT_FOLLOWUP_SECONDS = 0.5
 _HOOK_OUTCOME_KINDS = frozenset({"ok", "latched", "latched_silent"})
+
 MAX_RECENT_SESSION_STATES = 512
 MAX_HOOK_STDIN_BYTES = 1_048_576
 MAX_HOOK_STDIN_STRING_CHARS = 262_144
@@ -672,7 +681,7 @@ def _link_session_targets(session_id: str, *targets: Path, task_epoch: str | Non
             continue
         updated = dict(state)
         updated["session_repos"] = sorted_repos
-        write_session_state(target, session_id, updated)
+        _write_session_state_preserving_latch(target, session_id, updated)
 
 
 def _touch_session_targets(
@@ -2356,7 +2365,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
     persisted_state = read_session_state(target, session_id)
     state = _normalize_state(target, session_id, persisted_state, task_epoch=task_epoch)
     if persisted_state != state:
-        write_session_state(target, session_id, state)
+        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
     if event != "Stop":
         _touch_session_targets(session_id, target, payload, task_epoch=task_epoch)
     if event == "SessionStart":
@@ -2373,7 +2382,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             brief_text = _run_brief(target)
             recall_text = _run_recall(target, payload)
             state["briefed"] = True
-            write_session_state(target, session_id, state)
+            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
             records = _restore_brief_records(brief_text)
             if recall_text.strip():
                 records.extend(_brief_records(recall_text))
@@ -2390,7 +2399,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         brief_text = _run_brief(target)
         recall_text = _run_recall(target, payload)
         state["briefed"] = True
-        write_session_state(target, session_id, state)
+        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
         records = _brief_records(brief_text)
         if recall_text.strip():
             records.extend(_brief_records(recall_text))
@@ -2408,7 +2417,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             # Heartbeat so a concurrent session can attribute the coming write
             # to this session instead of a shared worktree delta (#959).
             state["pending_write_at"] = localio.utc_now_iso()
-            write_session_state(target, session_id, state)
+            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
             return None
         if tool_name != "Bash":
             return None
@@ -2418,11 +2427,11 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         baseline = repo_worktree_fingerprint(target)
         state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
         state["pending_bash_started_at"] = localio.utc_now_iso()
-        write_session_state(target, session_id, state)
+        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
         if not is_raw_verification(command):
             return None
         state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
-        write_session_state(target, session_id, state)
+        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
         capture_artifact_id = state.get("exercised_artifact_id")
         if not isinstance(capture_artifact_id, str):
             capture_artifact_id = None
@@ -2462,14 +2471,14 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         if tool_name == "Read":
             skill_id = _skill_id_from_skill_path(target, post_tool_input.get("file_path"))
             if _record_exercised_artifact(state, skill_id):
-                write_session_state(target, session_id, state)
+                _write_session_state_preserving_latch(target, session_id, state, log_target=target)
             return None
         if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
             if _is_routed_verify(command):
                 _record_exercised_artifact(state, _parse_capture_flag(command))
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
-            write_session_state(target, session_id, state)
+            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
             return None
         wrote = tool_name in _WRITE_TOOLS or (
             tool_name == "Bash"
@@ -2499,11 +2508,11 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
             state.pop("pending_write_at", None)
-            write_session_state(target, session_id, state)
+            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
         elif state.get("pending_bash_fingerprint") is not None:
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
-            write_session_state(target, session_id, state)
+            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
         return None
 
     if event == "PostToolUseFailure":
@@ -3140,50 +3149,6 @@ def _resolve_log_target(payload: dict[str, Any] | None, *, pin: Path | None = No
 
 def _is_timeout_degraded(exc: BaseException) -> bool:
     return "timed out" in str(exc)
-
-
-def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
-    state = read_session_state(target, session_id)
-    if not isinstance(state, dict) or state.get("hook_latched") is not True:
-        return False, False
-    return True, state.get("hook_latch_announced") is not True
-
-
-def _mark_hook_latch_announced(target: Path, session_id: str) -> None:
-    state = read_session_state(target, session_id)
-    if not isinstance(state, dict):
-        return
-    if state.get("hook_latch_announced") is True:
-        return
-    updated = dict(state)
-    updated["hook_latched"] = True
-    updated["hook_latch_announced"] = True
-    write_session_state(target, session_id, updated)
-
-
-def _record_hook_timeout(target: Path, session_id: str) -> dict[str, Any]:
-    state = read_session_state(target, session_id)
-    updated: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
-    count = updated.get("hook_timeout_count")
-    next_count = count + 1 if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 1
-    updated["hook_timeout_count"] = next_count
-    if next_count >= HOOK_TIMEOUT_LATCH_AFTER:
-        updated["hook_latched"] = True
-    write_session_state(target, session_id, updated)
-    return updated
-
-
-def _clear_hook_timeouts(target: Path, session_id: str) -> None:
-    state = read_session_state(target, session_id)
-    if not isinstance(state, dict):
-        return
-    if state.get("hook_latched") is True:
-        return
-    if not state.get("hook_timeout_count"):
-        return
-    updated = dict(state)
-    updated["hook_timeout_count"] = 0
-    write_session_state(target, session_id, updated)
 
 
 def _run_best_effort_bounded(

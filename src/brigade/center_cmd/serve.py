@@ -10,7 +10,7 @@ import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, cast
 from urllib.parse import parse_qs, urlparse
 
 from brigade.center_cmd.dashboard import render
@@ -61,7 +61,7 @@ def _is_loopback(host: str) -> bool:
         return False
     for family, _, _, _, sockaddr in infos:
         ip_str = sockaddr[0]
-        if family == socket.AF_INET6 and "%" in ip_str:
+        if isinstance(ip_str, str) and family == socket.AF_INET6 and "%" in ip_str:
             ip_str = ip_str.split("%", 1)[0]
         try:
             addr = ipaddress.ip_address(ip_str)
@@ -360,7 +360,8 @@ def serve(
         print(f"brigade center serve: cannot bind {host}:{port}: {exc}", file=sys.stderr)
         return 2
 
-    actual_host, actual_port = server.server_address[0], server.server_address[1]
+    actual_host = cast(str, server.server_address[0])
+    actual_port = server.server_address[1]
     print(f"http://{actual_host}:{actual_port}/", flush=True)
     print("Read-only dashboard. Press ctrl-c to stop.", flush=True)
     try:

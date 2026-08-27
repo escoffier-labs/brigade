@@ -43,9 +43,15 @@ from ..localio import (
 )
 from ..render import emit
 
-from . import schema_ops as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+from . import core as _core_mod
+from .schema_ops import (
+    REPORT_STALE_HOURS,
+    SCHEMA_VERSION,
+    _parse_time,
+    _path_label,
+    _receipt_reference_exists,
+    _schema,
+)
 
 
 def _reports_root(target: Path) -> Path:
@@ -101,7 +107,7 @@ def latest_report(target: Path) -> dict[str, Any] | None:
 
 
 def _report_diffs(target: Path) -> list[dict[str, Any]]:
-    return _iter_json_files(_report_diffs_root(target), "*/diff.json")
+    return _core_mod._iter_json_files(_report_diffs_root(target), "*/diff.json")
 
 
 def latest_report_diff(target: Path) -> dict[str, Any] | None:
@@ -141,8 +147,8 @@ def _bounded_report_ref(payload: dict[str, Any]) -> dict[str, Any]:
     Never embeds the prior report body, so consecutive builds cannot grow
     with history.
     """
-    reviews = payload.get("reviews") if isinstance(payload.get("reviews"), list) else []
-    activity = payload.get("activity") if isinstance(payload.get("activity"), list) else []
+    reviews = _reviews if isinstance(_reviews := payload.get("reviews"), list) else []
+    activity = _activity if isinstance(_activity := payload.get("activity"), list) else []
     return {
         "report_id": payload.get("report_id"),
         "created_at": payload.get("created_at"),
@@ -165,9 +171,9 @@ def _fingerprint_payload(value: Any) -> str:
 
 def _report_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    status_data = status_payload(target)
-    activity_data = _activity(target)[:100]
-    review_data = _reviews(target)[:100]
+    status_data = _core_mod.status_payload(target)
+    activity_data = _core_mod._activity(target)[:100]
+    review_data = _core_mod._reviews(target)[:100]
     release_ready = release_cmd._latest_release_receipt(target)
     release_candidate = release_cmd._latest_candidate(target)
     payload = {
@@ -175,7 +181,7 @@ def _report_payload(target: Path) -> dict[str, Any]:
         "schema": _schema("center-report"),
         "target": str(target),
         "generated_at": _now().isoformat(),
-        "git": _git_snapshot(target),
+        "git": _core_mod._git_snapshot(target),
         "status": status_data,
         "activity": activity_data,
         "reviews": review_data,
@@ -230,9 +236,9 @@ def _suggested_report_commands(status_data: dict[str, Any], reviews_data: list[d
             else:
                 next_steps.append(command)
     report_health_data = (
-        status_data.get("operator_report") if isinstance(status_data.get("operator_report"), dict) else {}
+        _operator_report if isinstance(_operator_report := status_data.get("operator_report"), dict) else {}
     )
-    top = report_health_data.get("top_issue") if isinstance(report_health_data.get("top_issue"), dict) else None
+    top = _top_issue if isinstance(_top_issue := report_health_data.get("top_issue"), dict) else None
     if top:
         maintenance.insert(0, str(top.get("suggested_next_command") or "brigade center report build"))
     return {
@@ -243,9 +249,11 @@ def _suggested_report_commands(status_data: dict[str, Any], reviews_data: list[d
 
 
 def _report_markdown(payload: dict[str, Any]) -> str:
-    status_data = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+    status_data = _status if isinstance(_status := payload.get("status"), dict) else {}
     commands = (
-        payload.get("suggested_next_commands") if isinstance(payload.get("suggested_next_commands"), dict) else {}
+        _suggested_next_commands
+        if isinstance(_suggested_next_commands := payload.get("suggested_next_commands"), dict)
+        else {}
     )
     lines = [
         "# Operator Report",
@@ -259,19 +267,19 @@ def _report_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- Pending tasks: {status_data.get('pending_task_count')}",
         f"- Pending imports: {status_data.get('pending_import_count')}",
-        f"- Pending reviews: {len(payload.get('reviews') if isinstance(payload.get('reviews'), list) else [])}",
+        f"- Pending reviews: {len(_reviews if isinstance(_reviews := payload.get('reviews'), list) else [])}",
         "",
         "## Suggested Commands",
         "",
     ]
     for label in ("urgent", "next", "maintenance"):
-        values = commands.get(label) if isinstance(commands.get(label), list) else []
+        values = _label if isinstance(_label := commands.get(label), list) else []
         lines.append(f"### {label.title()}")
         lines.append("")
         lines.extend(f"- `{value}`" for value in values) if values else lines.append("- none")
         lines.append("")
     lines.extend(["## Review Queue", ""])
-    reviews_data = payload.get("reviews") if isinstance(payload.get("reviews"), list) else []
+    reviews_data = _reviews if isinstance(_reviews := payload.get("reviews"), list) else []
     for item in reviews_data[:25]:
         lines.append(
             f"- `{item.get('subsystem')}` `{item.get('id')}` [{item.get('status')}] {item.get('safe_summary')}"
@@ -281,7 +289,7 @@ def _report_markdown(payload: dict[str, Any]) -> str:
     if not reviews_data:
         lines.append("- none")
     lines.extend(["", "## Activity", ""])
-    activity_data = payload.get("activity") if isinstance(payload.get("activity"), list) else []
+    activity_data = _activity if isinstance(_activity := payload.get("activity"), list) else []
     for item in activity_data[:25]:
         lines.append(
             f"- `{item.get('subsystem')}` `{item.get('id')}` [{item.get('status')}] {item.get('safe_summary')}"
@@ -304,10 +312,10 @@ def _report_markdown(payload: dict[str, Any]) -> str:
 
 
 def _review_groups(report: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    reviews_data = report.get("reviews") if isinstance(report.get("reviews"), list) else []
-    status_data = report.get("status") if isinstance(report.get("status"), dict) else {}
-    summaries = report.get("summaries") if isinstance(report.get("summaries"), dict) else {}
-    release_data = report.get("release") if isinstance(report.get("release"), dict) else {}
+    reviews_data = _reviews if isinstance(_reviews := report.get("reviews"), list) else []
+    status_data = _status if isinstance(_status := report.get("status"), dict) else {}
+    summaries = _summaries if isinstance(_summaries := report.get("summaries"), dict) else {}
+    release_data = _release if isinstance(_release := report.get("release"), dict) else {}
     groups: dict[str, list[dict[str, Any]]] = {
         "urgent_blockers": [],
         "pending_work_imports": [],
@@ -349,12 +357,10 @@ def _review_groups(report: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         else status_data.get("scanner_sweeps")
     )
     if isinstance(sweep_review, dict):
-        top = (sweep_review.get("review") if isinstance(sweep_review.get("review"), dict) else {}).get(
-            "top_pending_import"
-        )
+        top = (_review if isinstance(_review := sweep_review.get("review"), dict) else {}).get("top_pending_import")
         if isinstance(top, dict):
             groups["scanner_sweep_issues"].append(
-                _item(
+                _core_mod._item(
                     "scanner-sweep",
                     str(top.get("id") or "pending-import"),
                     "pending",
@@ -367,25 +373,25 @@ def _review_groups(report: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         ("security", "brigade security findings"),
         ("memory_care", "brigade memory care status"),
     ):
-        value = summaries.get(name) if isinstance(summaries.get(name), dict) else None
+        value = _name if isinstance(_name := summaries.get(name), dict) else None
         top = value.get("top_issue") or value.get("top_finding") if isinstance(value, dict) else None
         if isinstance(top, dict):
             groups["backup_security_memory_care_issues"].append(
-                _item(
+                _core_mod._item(
                     name.replace("_", "-"),
                     str(top.get("id") or top.get("name") or top.get("issue_type") or name),
                     str(top.get("status") or "warn"),
                     str(top.get("detail") or top.get("title") or name),
                     command,
-                    severity=top.get("severity") if isinstance(top.get("severity"), str) else None,
+                    severity=_severity if isinstance(_severity := top.get("severity"), str) else None,
                 )
             )
-    readiness = release_data.get("readiness") if isinstance(release_data.get("readiness"), dict) else None
-    candidate = release_data.get("candidate") if isinstance(release_data.get("candidate"), dict) else None
+    readiness = _readiness if isinstance(_readiness := release_data.get("readiness"), dict) else None
+    candidate = _candidate if isinstance(_candidate := release_data.get("candidate"), dict) else None
     if isinstance(readiness, dict) and readiness.get("ready") is False:
         run_id = str(readiness.get("run_id") or "latest")
         groups["release_readiness_candidate_issues"].append(
-            _item(
+            _core_mod._item(
                 "release-readiness",
                 run_id,
                 str(readiness.get("status") or "blocked"),
@@ -396,7 +402,7 @@ def _review_groups(report: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     if isinstance(candidate, dict) and candidate.get("status") not in {None, "reviewed", "archived"}:
         candidate_id = str(candidate.get("candidate_id") or "latest")
         groups["release_readiness_candidate_issues"].append(
-            _item(
+            _core_mod._item(
                 "release-candidate",
                 candidate_id,
                 str(candidate.get("status") or "draft"),
@@ -465,7 +471,7 @@ def report_health(
             }
         )
         return {"latest": None, "checks": checks, "issue_count": len(checks), "top_issue": checks[0]}
-    closeout = latest.get("closeout") if isinstance(latest.get("closeout"), dict) else None
+    closeout = _closeout if isinstance(_closeout := latest.get("closeout"), dict) else None
     closeout_status = str(closeout.get("status") or "") if closeout else ""
     if closeout_status not in {"reviewed", "deferred", "superseded", "archived"}:
         checks.append(
@@ -488,8 +494,8 @@ def report_health(
                     "suggested_next_command": "brigade center report build",
                 }
             )
-    current_head = _git_value(target, "rev-parse", "HEAD")
-    git = latest.get("git") if isinstance(latest.get("git"), dict) else {}
+    current_head = _core_mod._git_value(target, "rev-parse", "HEAD")
+    git = _git if isinstance(_git := latest.get("git"), dict) else {}
     if git.get("head") and current_head and git.get("head") != current_head:
         checks.append(
             {
@@ -499,7 +505,7 @@ def report_health(
                 "suggested_next_command": "brigade center report build",
             }
         )
-    for ref in latest.get("receipt_references") if isinstance(latest.get("receipt_references"), list) else []:
+    for ref in _receipt_references if isinstance(_receipt_references := latest.get("receipt_references"), list) else []:
         if isinstance(ref, str) and ref and not _receipt_reference_exists(target, ref):
             checks.append(
                 {
@@ -510,8 +516,8 @@ def report_health(
                 }
             )
             break
-    latest_activity = [item for item in _activity(target) if item.get("subsystem") != "center-report-diff"]
-    report_activity = latest.get("activity") if isinstance(latest.get("activity"), list) else []
+    latest_activity = [item for item in _core_mod._activity(target) if item.get("subsystem") != "center-report-diff"]
+    report_activity = _activity if isinstance(_activity := latest.get("activity"), list) else []
     latest_time = _parse_time(latest_activity[0].get("updated_at")) if latest_activity else None
     report_time = _parse_time(report_activity[0].get("updated_at")) if report_activity else created
     if latest_time is not None and report_time is not None and latest_time > report_time:
@@ -641,7 +647,7 @@ def report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> 
     print(f"reports_root: {payload['reports_root']}")
     for item in reports:
         print(
-            f"- {item.get('report_id')} reviews={len(item.get('reviews') if isinstance(item.get('reviews'), list) else [])} {item.get('created_at')}"
+            f"- {item.get('report_id')} reviews={len(_reviews if isinstance(_reviews := item.get('reviews'), list) else [])} {item.get('created_at')}"
         )
     return 0
 
@@ -669,8 +675,8 @@ def report_show(*, target: Path, report_id: str, json_output: bool = False) -> i
     print(f"operator report: {report.get('report_id')}")
     print(f"path: {report.get('path')}")
     print(f"created_at: {report.get('created_at')}")
-    print(f"reviews: {len(report.get('reviews') if isinstance(report.get('reviews'), list) else [])}")
-    print(f"activity: {len(report.get('activity') if isinstance(report.get('activity'), list) else [])}")
+    print(f"reviews: {len(_reviews if isinstance(_reviews := report.get('reviews'), list) else [])}")
+    print(f"activity: {len(_activity if isinstance(_activity := report.get('activity'), list) else [])}")
     return 0
 
 

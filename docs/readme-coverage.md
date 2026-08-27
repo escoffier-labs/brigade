@@ -1,6 +1,7 @@
 # README coverage map
 
 Migration date: 2026-08-13
+README cells refreshed: 2026-08-27
 
 The root README is a short landing page. Every topic that left the previous README has a durable home below. Claims intentionally retired from the front page are listed at the end.
 
@@ -40,7 +41,7 @@ The root README is a short landing page. Every topic that left the previous READ
 - Product art, terminal demo, and memory-workflow illustrations as README chrome
 - Code fences, JSON receipt dumps, and YAML/TOML samples in README
 - Autonomous or "reflective memory learning" claims
-- Framing Brigade as a daemon, hosted memory service, distributed task database, or full autonomous fleet runtime
+- Framing Brigade as a required daemon, hosted memory service, distributed task database, or full autonomous fleet runtime
 - Claiming every Brigade command writes a receipt
 - One-checkout performance snapshots, source line numbers, and outcome scores that become stale as the repository changes
 - The volatile memory-card count from the origin story
