@@ -88,8 +88,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "brigade.cli.run",
-    "brigade.daily_cmd",
-    "brigade.daily_cmd.*",
     "brigade.doctor",
     "brigade.handoff_cmd",
     "brigade.handoff_cmd.*",
