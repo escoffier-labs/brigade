@@ -251,7 +251,7 @@ def _session_task_hints(path: Path, provider: str) -> tuple[str, str | None]:
                 cwd_folder = parts[index + 1]
     for item in _head_json_objects(path):
         item_type = item.get("type")
-        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        payload = _payload if isinstance(_payload := item.get("payload"), dict) else {}
         if item_type == "session_meta" and not cwd_folder:
             cwd = payload.get("cwd")
             if isinstance(cwd, str) and cwd:
@@ -395,7 +395,7 @@ def _worker_records(
     lock_state: str,
 ) -> list[dict[str, Any]]:
     plan = _read_json(run_dir / "plan.json") or {}
-    assignments = plan.get("assignments") if isinstance(plan.get("assignments"), list) else []
+    assignments = _assignments if isinstance(_assignments := plan.get("assignments"), list) else []
     results = _read_json(run_dir / "worker-results.json") or {}
     result_by_worker = {
         str(item.get("worker")): item
@@ -443,7 +443,7 @@ def _worker_records(
 
 def _configured_sources(target: Path, now: datetime) -> list[dict[str, Any]]:
     config = _read_json(target / ".brigade" / "center" / "agent-activity-sources.json") or {}
-    sources = config.get("sources") if isinstance(config.get("sources"), list) else []
+    sources = _sources if isinstance(_sources := config.get("sources"), list) else []
     records: list[dict[str, Any]] = []
     for index, source_config in enumerate(sources[:50]):
         if not isinstance(source_config, dict):
