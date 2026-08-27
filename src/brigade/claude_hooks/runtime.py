@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import multiprocessing as mp
 import os
@@ -18,6 +19,7 @@ from typing import Any, BinaryIO, Callable, Iterator
 
 from .. import localio
 from ..component_paths import cache_root
+from ..work_cmd import inbox_lock
 from ..work_cmd.verification import _tree_fingerprint
 from ..wiring import resolve_wired_target
 from . import compaction_marker, envelope
@@ -28,6 +30,8 @@ BRIEF_TIMEOUT_SECONDS = 10
 HOOK_TIMEOUT_LATCH_AFTER = 2
 _TIMEOUT_FOLLOWUP_SECONDS = 0.5
 _HOOK_OUTCOME_KINDS = frozenset({"ok", "latched", "latched_silent"})
+_SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
+_SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
 MAX_RECENT_SESSION_STATES = 512
 MAX_HOOK_STDIN_BYTES = 1_048_576
 MAX_HOOK_STDIN_STRING_CHARS = 262_144
@@ -3149,41 +3153,77 @@ def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
     return True, state.get("hook_latch_announced") is not True
 
 
+def _session_state_process_lock(state_path: Path) -> threading.Lock:
+    """Return this process's serializer for one session-state lock path."""
+    key = str(state_path)
+    with _SESSION_STATE_PROCESS_LOCKS_GUARD:
+        lock = _SESSION_STATE_PROCESS_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SESSION_STATE_PROCESS_LOCKS[key] = lock
+        return lock
+
+
+@contextlib.contextmanager
+def _session_state_lock(target: Path, session_id: str) -> Iterator[None]:
+    """Serialize one session state's read-modify-write window.
+
+    ``held_file_lock`` creates the state directory as needed, matching the
+    parent creation performed by ``write_session_state`` through ``localio``.
+    """
+    state_path = _state_path(target.expanduser().resolve(), session_id)
+    process_lock = _session_state_process_lock(state_path)
+    with process_lock:
+        with inbox_lock.held_file_lock(
+            Path(f"{state_path}.lock"),
+            deadline_seconds=_TIMEOUT_FOLLOWUP_SECONDS,
+        ):
+            yield
+
+
 def _mark_hook_latch_announced(target: Path, session_id: str) -> None:
-    state = read_session_state(target, session_id)
-    if not isinstance(state, dict):
+    try:
+        with _session_state_lock(target, session_id):
+            state = read_session_state(target, session_id)
+            if not isinstance(state, dict) or state.get("hook_latch_announced") is True:
+                return
+            updated = dict(state)
+            updated["hook_latched"] = True
+            updated["hook_latch_announced"] = True
+            write_session_state(target, session_id, updated)
+    except inbox_lock.InboxLockTimeout:
         return
-    if state.get("hook_latch_announced") is True:
-        return
-    updated = dict(state)
-    updated["hook_latched"] = True
-    updated["hook_latch_announced"] = True
-    write_session_state(target, session_id, updated)
 
 
 def _record_hook_timeout(target: Path, session_id: str) -> dict[str, Any]:
     state = read_session_state(target, session_id)
-    updated: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
-    count = updated.get("hook_timeout_count")
-    next_count = count + 1 if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 1
-    updated["hook_timeout_count"] = next_count
-    if next_count >= HOOK_TIMEOUT_LATCH_AFTER:
-        updated["hook_latched"] = True
-    write_session_state(target, session_id, updated)
-    return updated
+    fallback: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
+    try:
+        with _session_state_lock(target, session_id):
+            state = read_session_state(target, session_id)
+            updated: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
+            count = updated.get("hook_timeout_count")
+            next_count = count + 1 if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 1
+            updated["hook_timeout_count"] = next_count
+            if updated.get("hook_latched") is True or next_count >= HOOK_TIMEOUT_LATCH_AFTER:
+                updated["hook_latched"] = True
+            write_session_state(target, session_id, updated)
+            return updated
+    except inbox_lock.InboxLockTimeout:
+        return fallback
 
 
 def _clear_hook_timeouts(target: Path, session_id: str) -> None:
-    state = read_session_state(target, session_id)
-    if not isinstance(state, dict):
+    try:
+        with _session_state_lock(target, session_id):
+            state = read_session_state(target, session_id)
+            if not isinstance(state, dict) or state.get("hook_latched") is True or not state.get("hook_timeout_count"):
+                return
+            updated = dict(state)
+            updated["hook_timeout_count"] = 0
+            write_session_state(target, session_id, updated)
+    except inbox_lock.InboxLockTimeout:
         return
-    if state.get("hook_latched") is True:
-        return
-    if not state.get("hook_timeout_count"):
-        return
-    updated = dict(state)
-    updated["hook_timeout_count"] = 0
-    write_session_state(target, session_id, updated)
 
 
 def _run_best_effort_bounded(

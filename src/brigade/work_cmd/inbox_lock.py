@@ -123,6 +123,22 @@ class InboxLockTimeout(TimeoutError):
     """Typed failure when an inbox lock stayed busy past its acquisition deadline."""
 
 
+@contextlib.contextmanager
+def held_file_lock(path: Path, *, deadline_seconds: float) -> Iterator[None]:
+    """Hold one cross-platform advisory lock file for the block.
+
+    This public primitive uses the same hardened open and deadline-bounded
+    ``flock`` / ``msvcrt`` acquisition as the inbox locks, without joining
+    their process-wide reentrancy registry.  It is suitable for adjacent
+    state-file locks that need independent cross-process exclusion.
+    """
+    held = _acquire_cross_process(str(path), deadline_seconds=deadline_seconds)
+    try:
+        yield
+    finally:
+        held.release()
+
+
 def _resolve_deadline(deadline_seconds: float | None) -> tuple[float, float]:
     """Return ``(requested_seconds, absolute_monotonic_deadline)``."""
     requested = DEFAULT_LOCK_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
@@ -385,7 +401,12 @@ def _open_lock_parent_posix(lock_path: Path) -> tuple[int, str]:
             try:
                 child = os.open(component, directory_flags, dir_fd=parent)
             except FileNotFoundError:
-                os.mkdir(component, 0o700, dir_fd=parent)
+                try:
+                    os.mkdir(component, 0o700, dir_fd=parent)
+                except FileExistsError:
+                    # A concurrent lock opener created the same component.
+                    # Re-open it below with the normal no-follow validation.
+                    pass
                 child = os.open(component, directory_flags, dir_fd=parent)
             os.close(parent)
             parent = child
