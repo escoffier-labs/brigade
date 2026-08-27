@@ -1,6 +1,6 @@
 # Brigade comparison notes
 
-Date: 2026-08-26
+Date: 2026-08-27
 
 This page backs the four README matrices. Cells use "Not documented" when the capability was not found in that project's official README or docs on the dated source pass. That is not proof of absence.
 
@@ -22,7 +22,7 @@ Learning columns also differ. Brigade scores captured verification receipts, the
 
 | Project | Ready work | Claim safety | Parallel and run control | Task-store boundary | Verification | Official source |
 | --- | --- | --- | --- | --- | --- | --- |
-| Brigade | Stable ready set | Fail-closed compare-and-set claims. 0.27: optional hub-arbitrated repo claims | 0.27: per-repo waves, campaign-composed waves, declared wall-clock and worker-dispatch limits, fleet board | Machine-local JSON under `.brigade/`. Optional hub for events and claims, not a task DB | Verify receipts (command, exit code, Git state) | [README](https://github.com/escoffier-labs/brigade) |
+| Brigade | Stable ready set | Fail-closed compare-and-set claims. 0.27: optional hub-arbitrated repo claims | 0.27: per-repo waves, campaign-composed waves, declared wall-clock and worker-dispatch limits, named retry/reroute, fleet board | Machine-local JSON under `.brigade/`. Optional hub for events and claims, not a task DB | Verify receipts (command, exit code, Git state) | [README](https://github.com/escoffier-labs/brigade) |
 | Beads | Built-in ready / dependency graph | Atomic claim | Agent workflow plus Dolt sync | Dolt-backed distributed store (`bd dolt push` / `pull`) | Task history | [README](https://github.com/gastownhall/beads) |
 | Gas Town | Beads-backed work | Not documented | Multi-agent runtime (Mayor, rigs, polecats, convoys) | Beads ledger | Operational state | [README](https://github.com/gastownhall/gastown) |
 | nWave | Artifacts across 7 waves | Not documented | Human approval between waves plus TDD gates | Git-tracked artifacts | Phase validation and audit logs | [README](https://github.com/nWave-ai/nWave) |
@@ -63,7 +63,7 @@ On 2026-08-13 the GitHub repository named in the `aiconfigsync` package metadata
 
 | Project | Receipts | Code impact | Agent activity | Cloud state | Learning / replay | Official source |
 | --- | --- | --- | --- | --- | --- | --- |
-| Brigade | Command, exit code, Git state, optional graph delta. 0.27: causal lineage receipts | Stable `brigade code` impact. 0.27: Center code-graph views and blast radius | 0.27: Center activity and hub-served fleet board | 0.27: registered cloud status (best-effort) | Score, promote, rollback. 0.27: run child, diff, resume | [README](https://github.com/escoffier-labs/brigade) |
+| Brigade | Command, exit code, Git state, optional graph delta. 0.27: causal lineage receipts | Stable `brigade code` impact. 0.27: Center code-graph views and blast radius | 0.27: Center activity, hub-served fleet board, and external harness sessions | 0.27: registered cloud status and approved Grok Bot scout feed (best-effort) | Score, promote, rollback. 0.27: run child, diff, resume | [README](https://github.com/escoffier-labs/brigade) |
 | ActiveGraph | Event trace | Not documented | Reactive behaviors | Not documented | Replay, fork, and diff | [README](https://github.com/yoheinakajima/activegraph) |
 | CocoIndex | Source-to-target data lineage | Not documented | Not documented | Not documented | Incremental recompute | [README](https://github.com/cocoindex-io/cocoindex) |
 | Graphiti | Episode provenance and validity windows | Not documented | Not documented | Not documented | Temporal fact updates | [README](https://github.com/getzep/graphiti) |
@@ -75,7 +75,8 @@ On 2026-08-13 the GitHub repository named in the `aiconfigsync` package metadata
 - Local file-first control plane. No required daemon. Optional foreground serve commands cover Center, Run View, and the fleet hub.
 - Scheduling is external, except optional operator-owned, target-scoped care registrations.
 - Work ledger is machine-local JSON, not a distributed Beads/Dolt store.
-- An optional fleet hub aggregates run events and arbitrates repo claims. Local journals stay authoritative. An optional Dolt sink exports hub history. It is not the work ledger.
+- An optional fleet hub aggregates run events and arbitrates repo claims. The fleet board can show external harness sessions. Local journals stay authoritative. An optional Dolt sink exports hub history. It is not the work ledger.
+- An approved Grok Bot scout feed enqueues labeled GitHub issues only after `--apply`. It does not invent tasks or read issue prose.
 - Ordinary runs have no hard run-budget unless declared. Declared enforcement today covers wall-clock and worker-dispatch ceilings only.
 - Model, tool, token, and cost dimensions stay observed unless an adapter owns an enforcement boundary.
 - Cross-repo campaigns aggregate ready work and compose parallel-safe waves at query time from each member's per-repo partition. Waves are not persisted; member ledgers stay authoritative.
@@ -84,9 +85,9 @@ On 2026-08-13 the GitHub repository named in the `aiconfigsync` package metadata
 - Safe targeted handoffs may auto-file. Ambiguous or risky notes wait for review.
 - Outcome learning is scored verification, not reflective memory learning.
 
-## Source checklist (2026-08-26)
+## Source checklist (2026-08-27)
 
-Brigade, Beads, and Gas Town rows were re-read on 2026-08-26. Other neighbor cells stay on the 2026-08-13 pass unless a cell below says otherwise.
+Brigade cells were re-checked on 2026-08-27 against current main (retry decisions, external harness sessions, approved Grok Bot scout feed). Beads and Gas Town stay on the 2026-08-26 pass. Other neighbor cells stay on the 2026-08-13 pass unless a cell below says otherwise.
 
 - https://github.com/escoffier-labs/brigade
 - https://github.com/gastownhall/beads
