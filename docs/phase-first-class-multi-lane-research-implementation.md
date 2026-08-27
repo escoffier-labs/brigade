@@ -76,7 +76,7 @@ impact set to the implementation run.
 | `src/brigade/research/doctor.py` | Report lane configuration, executable, auth, model, safety, and concurrency health. |
 | `src/brigade/research_cmd.py` | Admit, run, cancel, resume, render, and project research runs. |
 | `src/brigade/cli/research.py` | Register profiles, lane overrides, browser discovery, init, doctor, and status flags. |
-| `src/brigade/work_cmd/ledger.py` | Accept completed standard research runs as trusted planning inputs. |
+| `src/brigade/work_cmd/ledger/` | Accept completed standard research runs as trusted planning inputs. |
 | `tests/test_roster.py` | Cover capability parsing and compatibility behavior. |
 | `tests/test_run_seat.py` | Cover exact prompt dispatch, controls, receipts, and failures. |
 | `tests/test_run_projector.py` | Cover kind preservation and legacy defaulting. |
@@ -1995,7 +1995,7 @@ git commit -m "feat: make research runs durable"
 - Create: `src/brigade/research/doctor.py`
 - Modify: `src/brigade/research_cmd.py`
 - Modify: `src/brigade/cli/research.py`
-- Modify: `src/brigade/work_cmd/ledger.py:4328-4395`
+- Modify: `src/brigade/work_cmd/ledger/tasks_plans.py` (task plan from a research run; was `ledger.py:4328-4395` before the package split)
 - Test: `tests/test_research_doctor.py`
 - Test: `tests/test_research_cmd.py`
 - Test: `tests/test_work_cmd_ledger.py`
@@ -2266,7 +2266,7 @@ Expect all files to pass.
 - [x] Commit Task 8:
 
 ```bash
-git add src/brigade/research/doctor.py src/brigade/research_cmd.py src/brigade/cli/research.py src/brigade/work_cmd/ledger.py tests/test_research_doctor.py tests/test_research_cmd.py tests/test_work_cmd_ledger.py
+git add src/brigade/research/doctor.py src/brigade/research_cmd.py src/brigade/cli/research.py src/brigade/work_cmd/ledger/ tests/test_research_doctor.py tests/test_research_cmd.py tests/test_work_cmd_ledger.py
 git commit -m "feat: expose research operations and health"
 ```
 
