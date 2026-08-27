@@ -638,6 +638,9 @@ _MODEL_POLICY_PROVIDER_ALIASES = {
     "grok": "xai",
     "jules-cloud": "google",
 }
+_MODEL_POLICY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_MODEL_POLICY_INVALID_RUN_RE = re.compile(r"[^a-z0-9._-]+")
+_MODEL_POLICY_HYPHEN_RUN_RE = re.compile(r"-{2,}")
 
 
 def model_policy_provider(cli_ref: str) -> str:
@@ -648,13 +651,19 @@ def model_policy_provider(cli_ref: str) -> str:
 
 def model_policy_model(cli_ref: str, model: str | None) -> str:
     """Return the effective registry model, including embedded adapter pins."""
+    raw = ""
     if model is not None and model.strip():
-        return model.strip()
-    if ":" in cli_ref:
+        raw = model.strip()
+    elif ":" in cli_ref:
         embedded = cli_ref.split(":", 1)[1].strip()
         if embedded:
-            return embedded
-    return "default"
+            raw = embedded
+    if not raw:
+        return "default"
+    if _MODEL_POLICY_ID_RE.fullmatch(raw):
+        return raw
+    slug = _MODEL_POLICY_INVALID_RUN_RE.sub("-", raw.lower())
+    return _MODEL_POLICY_HYPHEN_RUN_RE.sub("-", slug).strip("-._") or "default"
 
 
 def supports_reasoning(cli_ref: str) -> bool:
