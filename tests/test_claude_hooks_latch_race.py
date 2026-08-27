@@ -8,10 +8,15 @@ read-modify-write sequence is serialized per session.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import multiprocessing as mp
+import os
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from brigade.claude_hooks import envelope, runtime
 from brigade.work_cmd import inbox_lock
@@ -23,6 +28,24 @@ def _wait_for_timeout_followups() -> None:
     while any(thread.name == "brigade-hook-best-effort" for thread in threading.enumerate()):
         assert time.monotonic() < deadline, "timeout follow-up thread did not finish"
         time.sleep(0.02)
+
+
+def _record_hook_timeout_in_fork(target: Path, session_id: str) -> None:
+    runtime._record_hook_timeout(target, session_id)
+
+
+def test_session_state_helpers_resolve_runtime_primitives_at_call_time(tmp_path: Path, monkeypatch) -> None:
+    from brigade.claude_hooks import session_state
+
+    calls: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        runtime,
+        "read_session_state",
+        lambda target, session_id: calls.append((target, session_id)) or {"hook_latched": True},
+    )
+
+    assert session_state._read_hook_latch(tmp_path, "s") == (True, True)
+    assert calls == [(tmp_path, "s")]
 
 
 def test_slow_timeout_writes_eventually_latch_and_hold(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -82,6 +105,80 @@ def test_concurrent_timeout_increments_are_not_lost(tmp_path: Path) -> None:
     assert state is not None
     assert state["hook_timeout_count"] == 200
     assert state["hook_latched"] is True
+
+
+def test_preserving_writer_keeps_latch_from_a_stale_state(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    stale = {"session_id": "s", "hook_timeout_count": 0, "hook_latched": False, "stale_field": "written"}
+    runtime.write_session_state(target, "s", stale)
+    stale = runtime.read_session_state(target, "s")
+    assert stale is not None
+    runtime._record_hook_timeout(target, "s")
+    runtime._record_hook_timeout(target, "s")
+    assert runtime._write_session_state_preserving_latch(target, "s", stale)
+
+    preserved = runtime.read_session_state(target, "s")
+    assert preserved is not None
+    assert preserved["hook_timeout_count"] == 2
+    assert preserved["hook_latched"] is True
+    assert preserved["stale_field"] == "written"
+
+    # The raw primitive documents the race: a stale writer erases the latch.
+    raw_stale = {"session_id": "raw", "hook_timeout_count": 0, "hook_latched": False}
+    runtime.write_session_state(target, "raw", raw_stale)
+    raw_stale = runtime.read_session_state(target, "raw")
+    assert raw_stale is not None
+    runtime._record_hook_timeout(target, "raw")
+    runtime._record_hook_timeout(target, "raw")
+    runtime.write_session_state(target, "raw", raw_stale)
+    clobbered = runtime.read_session_state(target, "raw")
+    assert clobbered is not None
+    assert clobbered["hook_timeout_count"] == 0
+    assert clobbered["hook_latched"] is False
+
+
+def test_preserving_writer_logs_when_the_session_lock_times_out(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    logged: list[tuple[Path, str]] = []
+
+    @contextlib.contextmanager
+    def timeout_lock(_target: Path, _session_id: str):
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
+
+    monkeypatch.setattr(runtime, "_session_state_lock", timeout_lock)
+    monkeypatch.setattr(envelope, "append_log", lambda path, message: logged.append((path, message)))
+
+    assert runtime._write_session_state_preserving_latch(target, "s", {"session_id": "s"}, log_target=target) is False
+    assert logged == [(target, "session state write skipped after lock timeout: s")]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fork is only available on POSIX")
+def test_forked_timeout_writer_does_not_inherit_held_session_lock(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_session_lock() -> None:
+        with runtime._session_state_lock(target, "s"):
+            acquired.set()
+            release.wait(timeout=10)
+
+    holder = threading.Thread(target=hold_session_lock)
+    holder.start()
+    assert acquired.wait(timeout=2)
+    process = mp.get_context("fork").Process(target=_record_hook_timeout_in_fork, args=(target, "s"))
+    try:
+        process.start()
+        process.join(timeout=3)
+        assert not process.is_alive(), "forked timeout writer inherited a permanently-held lock"
+        assert process.exitcode == 0
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
 
 
 def test_session_lock_timeout_preserves_latched_state(tmp_path: Path) -> None:

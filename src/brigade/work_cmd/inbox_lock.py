@@ -84,6 +84,24 @@ except ImportError:  # pragma: no cover - POSIX does not provide msvcrt.
 
 _PROCESS_LOCK = threading.Lock()
 _ACTIVE_LOCKS: dict[str, "_ActiveInboxLock"] = {}
+_HELD_FILE_LOCK_FDS_GUARD = threading.Lock()
+_HELD_FILE_LOCK_FDS: set[int] = set()
+
+
+def _close_held_file_locks_after_fork() -> None:
+    """Close child copies of adjacent state-file locks after a fork."""
+    global _HELD_FILE_LOCK_FDS_GUARD, _HELD_FILE_LOCK_FDS
+    for fd in _HELD_FILE_LOCK_FDS:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _HELD_FILE_LOCK_FDS_GUARD = threading.Lock()
+    _HELD_FILE_LOCK_FDS = set()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_close_held_file_locks_after_fork)
 
 
 class _ActiveInboxLock:
@@ -133,9 +151,13 @@ def held_file_lock(path: Path, *, deadline_seconds: float) -> Iterator[None]:
     state-file locks that need independent cross-process exclusion.
     """
     held = _acquire_cross_process(str(path), deadline_seconds=deadline_seconds)
+    with _HELD_FILE_LOCK_FDS_GUARD:
+        _HELD_FILE_LOCK_FDS.add(held.fd)
     try:
         yield
     finally:
+        with _HELD_FILE_LOCK_FDS_GUARD:
+            _HELD_FILE_LOCK_FDS.discard(held.fd)
         held.release()
 
 

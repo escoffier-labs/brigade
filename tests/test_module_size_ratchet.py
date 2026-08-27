@@ -14,7 +14,7 @@ LEGACY_OVERSIZED: dict[str, int] = {
     "src/brigade/aboyeur.py": 5362,
     "src/brigade/skills_cmd.py": 5305,
     "src/brigade/runs_cmd.py": 3584,
-    "src/brigade/claude_hooks/runtime.py": 3389,
+    "src/brigade/claude_hooks/runtime.py": 3354,
     "src/brigade/work_cmd/scanners.py": 3332,
     "src/brigade/research_cmd.py": 3088,
     "src/brigade/outcome_cmd.py": 2903,
