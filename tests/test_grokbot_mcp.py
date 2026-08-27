@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from brigade import cli, fleet_client, grokbot_jobs, grokbot_mcp
+
+REPORT_TEXT = "PRIVATE_SCOUT_FINDING_TOKEN_alpha\nScout findings for example/brigade.\n"
 
 
 def _spec(role: str) -> dict[str, object]:
@@ -23,6 +26,18 @@ def _spec(role: str) -> dict[str, object]:
         "artifact": {"kind": "report" if role == "repository-scout" else "draft-pr"},
         "timeout_seconds": 900,
     }
+
+
+def _report_artifact(text: str = REPORT_TEXT, path: str = "artifacts/report.md") -> dict[str, str]:
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return {"kind": "report", "path": path, "sha256": digest}
+
+
+def _running_scout_job(tmp_path: Path) -> str:
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("repository-scout"), "scout-job")["job_id"]
+    grokbot_jobs.claim(tmp_path, job_id, "grokbot-repository-scout", "lease-a", grokbot_mcp.LEASE_SECONDS)
+    grokbot_jobs.transition(tmp_path, job_id, "grokbot-repository-scout", "lease-a", "running")
+    return job_id
 
 
 def _adapter(tmp_path: Path, role: str = "implementation-worker") -> grokbot_mcp.GrokbotAdapter:
@@ -46,6 +61,7 @@ def test_exact_role_tool_inventories_and_hidden_direct_calls_are_indistinguishab
             "grokbot_queue_status",
             "grokbot_queue_cancel",
             "grokbot_queue_expire",
+            "grokbot_queue_report",
         },
         "repository-scout": {
             "grokbot_queue_list",
@@ -79,6 +95,11 @@ def test_exact_role_tool_inventories_and_hidden_direct_calls_are_indistinguishab
     with pytest.raises(grokbot_mcp.AdapterError) as unknown:
         operator.call_tool("not-a-real-tool", {})
     assert hidden.value.public_error() == unknown.value.public_error()
+
+    worker = _adapter(tmp_path, "repository-scout")
+    with pytest.raises(grokbot_mcp.AdapterError) as worker_hidden:
+        worker.call_tool("grokbot_queue_report", {"job_id": "grokbot-" + "a" * 24})
+    assert worker_hidden.value.public_error() == unknown.value.public_error()
 
 
 def test_workers_only_list_claim_and_read_their_configured_role(tmp_path: Path):
@@ -868,6 +889,272 @@ def test_mcp_asgi_rejects_extra_and_malformed_raw_tool_arguments(tmp_path: Path)
     assert valid.json()["result"]["isError"] is False
     assert omitted_arguments.status_code == 200
     assert omitted_arguments.json()["result"]["isError"] is False
+
+
+def test_complete_with_report_text_retrieves_via_operator_without_leaking(tmp_path: Path, monkeypatch):
+    job_id = _running_scout_job(tmp_path)
+    scout = _adapter(tmp_path, "repository-scout")
+    operator = _adapter(tmp_path, "operator")
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_claim",
+        lambda target, **kwargs: fleet_client.ClaimDecision(granted=True, reason="ok", holder=str(kwargs["holder"])),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "report_external_event",
+        lambda **kwargs: events.append(kwargs),
+        raising=False,
+    )
+    monkeypatch.setattr(fleet_client, "release_claim", lambda target, **kwargs: None, raising=False)
+
+    completed = scout.call_tool(
+        "grokbot_queue_complete",
+        {
+            "job_id": job_id,
+            "lease_id": "lease-a",
+            "artifact": _report_artifact(),
+            "report_text": REPORT_TEXT,
+        },
+    )
+    assert completed["state"] == "completed"
+    assert REPORT_TEXT not in json.dumps(completed)
+
+    report = operator.call_tool("grokbot_queue_report", {"job_id": job_id})
+    assert report == {
+        "job_id": job_id,
+        "text": REPORT_TEXT,
+        "bytes": len(REPORT_TEXT.encode("utf-8")),
+        "sha256": hashlib.sha256(REPORT_TEXT.encode("utf-8")).hexdigest(),
+    }
+
+    listed = operator.call_tool("grokbot_queue_list", {})
+    status = operator.call_tool("grokbot_queue_status", {"job_id": job_id})
+    dumped = json.dumps({"listed": listed, "status": status, "events": events})
+    assert REPORT_TEXT not in dumped
+    assert "PRIVATE_SCOUT_FINDING_TOKEN_alpha" not in dumped
+
+    with pytest.raises(grokbot_mcp.AdapterError) as error:
+        operator.call_tool("grokbot_queue_report", {"job_id": "grokbot-" + "b" * 24})
+    assert REPORT_TEXT not in json.dumps(error.value.public_error())
+
+
+def test_metadata_only_scout_completion_operator_report_is_public_validation(tmp_path: Path):
+    job_id = _running_scout_job(tmp_path)
+    scout = _adapter(tmp_path, "repository-scout")
+    operator = _adapter(tmp_path, "operator")
+
+    completed = scout.call_tool(
+        "grokbot_queue_complete",
+        {"job_id": job_id, "lease_id": "lease-a", "artifact": _report_artifact()},
+    )
+    assert completed["state"] == "completed"
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "completed"
+
+    with pytest.raises(grokbot_mcp.AdapterError) as error:
+        operator.call_tool("grokbot_queue_report", {"job_id": job_id})
+    assert error.value.public_error() == {
+        "error": {"code": "invalid_request", "message": "Tool input failed validation"}
+    }
+
+
+@pytest.mark.parametrize("report_text", [None, [], 42])
+def test_direct_complete_rejects_present_non_string_report_text(tmp_path: Path, report_text: object):
+    job_id = _running_scout_job(tmp_path)
+    scout = _adapter(tmp_path, "repository-scout")
+
+    with pytest.raises(grokbot_mcp.AdapterError):
+        scout.call_tool(
+            "grokbot_queue_complete",
+            {
+                "job_id": job_id,
+                "lease_id": "lease-a",
+                "artifact": _report_artifact(),
+                "report_text": report_text,
+            },
+        )
+
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "running"
+
+
+def test_mcp_raw_schema_accepts_report_text_only_on_complete(tmp_path: Path):
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
+    TestClient = pytest.importorskip("starlette.testclient", reason="requires the grokbot extra").TestClient
+
+    headers = {"authorization": "Bearer not-a-real-token", "content-type": "application/json"}
+    invalid_calls = (
+        ("grokbot_queue_report", {"job_id": "grokbot-" + "a" * 24, "report_text": REPORT_TEXT}),
+        (
+            "grokbot_queue_complete",
+            {"job_id": "grokbot-" + "a" * 24, "lease_id": "lease-a", "artifact": {}, "report_text": []},
+        ),
+        (
+            "grokbot_queue_complete",
+            {
+                "job_id": "grokbot-" + "a" * 24,
+                "lease_id": "lease-a",
+                "artifact": {},
+                "report_text": REPORT_TEXT,
+                "extra": "forbidden",
+            },
+        ),
+    )
+    with TestClient(grokbot_mcp.build_app(_adapter(tmp_path).config), base_url="http://127.0.0.1:8766") as client:
+        for name, arguments in invalid_calls:
+            response = client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+                headers=headers,
+            )
+            assert response.status_code == 400
+            assert response.json() == {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32602, "message": "Invalid request"},
+            }
+
+
+def _worst_case_escaped_complete_body(report_text: str) -> bytes:
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "grokbot_queue_complete",
+                "arguments": {
+                    "job_id": "grokbot-" + "a" * 24,
+                    "lease_id": "L" * 128,
+                    "artifact": {
+                        "kind": "report",
+                        "path": "p" * 512,
+                        "sha256": hashlib.sha256(report_text.encode("utf-8")).hexdigest(),
+                    },
+                    "report_text": report_text,
+                },
+            },
+        }
+    ).encode("utf-8")
+
+
+def test_asgi_admits_worst_case_json_escaped_max_report(tmp_path: Path):
+    adapter = _adapter(tmp_path, "repository-scout")
+    report_text = "\x01" * grokbot_jobs.MAX_REPORT_BYTES
+    body = _worst_case_escaped_complete_body(report_text)
+    reached: list[int] = []
+
+    async def downstream(scope, receive, send):
+        messages = []
+        while True:
+            message = await receive()
+            messages.append(message)
+            if not message.get("more_body", False) or message.get("type") != "http.request":
+                break
+        reached.append(sum(len(message.get("body", b"")) for message in messages))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def request() -> list[dict[str, object]]:
+        pending = iter(
+            [
+                {"type": "http.request", "body": body, "more_body": False},
+            ]
+        )
+        sent: list[dict[str, object]] = []
+
+        async def receive():
+            return next(pending, {"type": "http.disconnect"})
+
+        async def send(message):
+            sent.append(message)
+
+        await grokbot_mcp._GateASGI(downstream, grokbot_mcp.RequestGate(adapter.config), adapter)(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/mcp",
+                "headers": [
+                    (b"host", b"127.0.0.1:8766"),
+                    (b"authorization", b"Bearer not-a-real-token"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"content-type", b"application/json"),
+                ],
+            },
+            receive,
+            send,
+        )
+        return sent
+
+    assert grokbot_jobs.MAX_REPORT_BYTES == 12000
+    assert len(report_text.encode("utf-8")) == grokbot_jobs.MAX_REPORT_BYTES
+    assert grokbot_jobs._report_bytes(report_text) == report_text.encode("utf-8")
+    assert len(body) <= grokbot_mcp.MAX_REQUEST_BYTES
+    sent = asyncio.run(request())
+    assert sent[0]["status"] != 413
+    assert sent[0]["status"] == 200
+    assert reached == [len(body)]
+
+
+def test_asgi_replay_delegates_to_original_receive_after_buffer(tmp_path: Path):
+    adapter = _adapter(tmp_path)
+    released = asyncio.Event()
+    disconnect = {"type": "http.disconnect"}
+    reads = 0
+    delegated: list[dict[str, object]] = []
+
+    async def downstream(scope, receive, send):
+        first = await receive()
+        assert first == {"type": "http.request", "body": b"payload", "more_body": False}
+        second_task = asyncio.create_task(receive())
+        await asyncio.sleep(0.01)
+        assert not second_task.done()
+        released.set()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+        delegated.append(await second_task)
+
+    async def outer_receive() -> dict[str, object]:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return {"type": "http.request", "body": b"payload", "more_body": False}
+        await released.wait()
+        return disconnect
+
+    async def request() -> list[dict[str, object]]:
+        sent: list[dict[str, object]] = []
+
+        async def send(message: dict[str, object]) -> None:
+            sent.append(message)
+
+        await grokbot_mcp._GateASGI(
+            downstream,
+            grokbot_mcp.RequestGate(adapter.config),
+            adapter,
+        )(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/health",
+                "headers": [
+                    (b"host", b"127.0.0.1:8766"),
+                    (b"authorization", b"Bearer not-a-real-token"),
+                ],
+            },
+            outer_receive,
+            send,
+        )
+        return sent
+
+    sent = asyncio.run(request())
+    assert sent[0]["status"] == 200
+    assert delegated == [disconnect]
 
 
 def test_cli_serve_reports_missing_optional_extra_without_printing_secret(tmp_path: Path, monkeypatch, capsys):
