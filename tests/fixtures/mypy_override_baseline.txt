@@ -1,7 +1,6 @@
 brigade.center_cmd
 brigade.center_cmd.*
 brigade.cli.run
-brigade.cli.work.*
 brigade.daily_cmd
 brigade.daily_cmd.*
 brigade.doctor
