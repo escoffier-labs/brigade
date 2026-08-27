@@ -12,10 +12,6 @@ from ...dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
 from ...work_cmd import TASK_PRIORITIES, TASK_TYPES
 from .. import extras as _extras_cli
 
-from . import registration as _family_base
-
-globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
-
 
 def _register_phases(work_sub: argparse._SubParsersAction) -> None:
     p_work_phases = work_sub.add_parser("phases", help="Plan and inspect auditable phase execution records.")
