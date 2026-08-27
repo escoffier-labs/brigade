@@ -2281,7 +2281,7 @@ def _execute_skill_decision(target: Path, artifact_id: str, action: str) -> str:
 
     try:
         if action == "install":
-            if not skills_cmd._skill_path(target, artifact_id).is_dir():
+            if not skills_cmd._registry_entry_present(target, artifact_id):
                 # The ledger named an artifact that was never accepted into the
                 # registry, so there is nothing to install. Report it distinctly
                 # instead of a generic rc failure; reconcile keeps it a candidate.

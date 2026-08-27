@@ -15,9 +15,10 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence, cast
 from uuid import uuid4
-from . import constants, edges as edges_mod, helpers
+from . import constants, edges as edges_mod, helpers, inbox_lock
+from .inbox_lock import verify_canonical_write_locks
 from .. import component_paths, evidence_redaction, provenance, runguard, trust_gate
 from ..untrusted import scan_handoff_injection_heuristics
 
@@ -27,18 +28,75 @@ def _task_ledger_lock_path(target: Path) -> Path:
     return path.with_name(f"{path.name}.lock")
 
 
+#: Bounded window while an outside writer waits for the task-ledger lock.
+#: Patient by design so concurrent trusted writers serialize behind a brief
+#: holder instead of failing; bounded so a lost holder cannot block them
+#: forever (mirrors ``inbox_lock.DEFAULT_LOCK_DEADLINE_SECONDS``).
+TASK_LEDGER_LOCK_DEADLINE_SECONDS = inbox_lock.DEFAULT_LOCK_DEADLINE_SECONDS
+
+#: Shorter bound inside a scanner run: a marked child holding the writer lock
+#: must not pin the task-ledger lock behind another holder for long.
+SCANNER_CHILD_TASK_LEDGER_LOCK_DEADLINE_SECONDS = 5.0
+
+#: Poll interval while a bounded task-ledger acquisition waits for a busy lock.
+_TASK_LEDGER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
+
+
+class TaskLedgerLockTimeout(TimeoutError):
+    """Typed failure when the task-ledger lock stayed busy past its deadline."""
+
+
+def _task_ledger_lock_deadline_seconds() -> float:
+    """Return this process's bounded wait for the task-ledger lock.
+
+    Marked scanner children stay short so a child already holding the writer
+    lock cannot pin the task-ledger lock for a run window; outside writers get
+    the patient bounded window so concurrent trusted writers serialize instead
+    of failing immediately.
+    """
+    if inbox_lock.inside_scanner_run():
+        return SCANNER_CHILD_TASK_LEDGER_LOCK_DEADLINE_SECONDS
+    return TASK_LEDGER_LOCK_DEADLINE_SECONDS
+
+
+@contextmanager
+def _canonical_inbox_write(target: Path) -> Iterator[None]:
+    """Lock set for one canonical inbox read-modify-write (run then writer).
+
+    Inside a scanner run (``BRIGADE_SCANNER_RUN_ID``, a marker that carries no
+    capability) a self-importing child takes only the writer lock, which it
+    opens itself; outside writers take the run lock first and then the writer
+    lock. Resolved through the ``inbox_lock`` module so tests can instrument
+    either lock in one place.
+    """
+    if inbox_lock.inside_scanner_run():
+        with inbox_lock.inbox_writer_lock(target):
+            yield
+    else:
+        with inbox_lock.scanner_inbox_run_lock(target), inbox_lock.inbox_writer_lock(target):
+            yield
+
+
 def _acquire_task_ledger_lock(path: Path) -> runguard._LockOwnership:
-    deadline = time.monotonic() + 5.0
+    # Bounded retry so concurrent trusted writers serialize behind a brief
+    # holder instead of failing (the lock order task -> run -> writer means no
+    # holder ever waits on an inbox lock here). Inside a scanner run the bound
+    # is short and fails closed with ``RunLockError``: a marked child already
+    # holding the writer lock must never pin the task-ledger lock behind
+    # another holder for a long window. Outside writers are patient but still
+    # bounded, raising the typed timeout on expiry.
+    requested_seconds = _task_ledger_lock_deadline_seconds()
+    deadline = time.monotonic() + requested_seconds
     while True:
         try:
             return runguard._acquire_lock(path)
         except runguard.RunLockError as exc:
-            if time.monotonic() >= deadline:
-                raise runguard.RunLockError(
-                    f"task ledger lock still held after waiting 5s: {path}. "
-                    "Another process may be updating .brigade/work/tasks.json; retry shortly."
-                ) from exc
-            time.sleep(0.01)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if inbox_lock.inside_scanner_run():
+                    raise
+                raise TaskLedgerLockTimeout(f"task ledger lock stayed busy for {requested_seconds:g}s: {path}") from exc
+            time.sleep(min(_TASK_LEDGER_LOCK_RETRY_INTERVAL_SECONDS, remaining))
 
 
 @contextmanager
@@ -56,6 +114,14 @@ REASON_CORRUPT_LEDGER = "corrupt_ledger"
 REASON_UNSUPPORTED_LEDGER_VERSION = "unsupported_ledger_version"
 REASON_TRUST_POLICY = "trust_policy"
 REASON_IMPORT_SNAPSHOT_CHANGED = "import_snapshot_changed"
+
+# Byte budget enforced while reading one import-inbox snapshot, so growth
+# after any earlier size check can never drive unbounded chunk accumulation.
+_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES = 4 * 1024 * 1024
+
+
+class ImportInboxSnapshotLimitExceeded(OSError):
+    """Typed failure when an import inbox grows past its snapshot read cap."""
 
 
 class TaskLedgerError(ValueError):
@@ -480,13 +546,36 @@ def _read_import_inbox_raw(target: Path) -> tuple[bytes, tuple[int, int, int, in
         _validate_import_inbox_descriptor(descriptor)
         before = os.fstat(descriptor)
         chunks: list[bytes] = []
+        snapshot_total = 0
         while chunk := os.read(descriptor, 1024 * 1024):
+            snapshot_total += len(chunk)
+            if snapshot_total > _IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES:
+                raise ImportInboxSnapshotLimitExceeded(
+                    f"import inbox exceeds {_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES} byte snapshot limit"
+                )
             chunks.append(chunk)
         after = os.fstat(descriptor)
         identity = (before.st_dev, before.st_ino, before.st_mode, before.st_nlink)
-        if identity != (after.st_dev, after.st_ino, after.st_mode, after.st_nlink):
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
             raise OSError("import inbox changed while snapshotting")
-        return b"".join(chunks), identity, True
+        raw = b"".join(chunks)
+        if len(raw) != before.st_size:
+            raise OSError("import inbox changed while snapshotting")
+        return raw, identity, True
     finally:
         if descriptor != -1:
             os.close(descriptor)
@@ -531,19 +620,27 @@ def _read_imports(target: Path) -> list[dict[str, Any]]:
 
 
 def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
-    """Publish the inbox through its retained parent without following a link."""
-    parent, name, previous_raw, previous_exists = _snapshot_import_inbox(target)
-    rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
-    try:
-        _write_import_inbox_bytes_at(
-            parent,
-            name,
-            rendered,
-            previous_raw=previous_raw,
-            previous_exists=previous_exists,
-        )
-    finally:
-        os.close(parent)
+    """Publish the inbox under the canonical writer exclusion.
+
+    Every canonical writer holds the writer lock (outsiders take the run lock
+    first) so a concurrent import, promote, dismiss, or scanner run cannot
+    interleave with scanner stamping or rollback (reentrant, so callers
+    already inside the lock are unaffected).
+    """
+    with _canonical_inbox_write(target):
+        verify_canonical_write_locks(target)
+        parent, name, previous_raw, previous_exists = _snapshot_import_inbox(target)
+        rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports).encode("utf-8")
+        try:
+            _write_import_inbox_bytes_at(
+                parent,
+                name,
+                rendered,
+                previous_raw=previous_raw,
+                previous_exists=previous_exists,
+            )
+        finally:
+            os.close(parent)
 
 
 def _append_archived_imports(target: Path, imports: list[dict[str, Any]]) -> None:
@@ -2151,6 +2248,8 @@ def downgrade_external_directory_authority(
     fingerprint = authority_marker.target_fingerprint(workspace)
     marker_path = authority_marker.signed_marker_path(fingerprint, env=env)
     authority_marker.reject_unsafe_marker_path(marker_path, workspace, env=env)
+    posture_path = authority_marker.isolation_marker_path(fingerprint, env=env)
+    authority_marker.reject_unsafe_marker_path(posture_path, workspace, env=env)
     isolation_path = security_config_path(workspace)
 
     store_backup, raw_payload = _read_raw_authority_store(store_path)
@@ -2182,10 +2281,16 @@ def downgrade_external_directory_authority(
         marker_bytes = None
     except OSError as exc:
         raise OSError("authority signed marker is unreadable") from exc
+    try:
+        posture_bytes = posture_path.read_bytes()
+    except FileNotFoundError:
+        posture_bytes = None
+    except OSError as exc:
+        raise OSError("authority isolation posture marker is unreadable") from exc
 
     actor_value = actor if actor is not None else authority_marker.operator_identity(env=env)
     resolved = str(workspace)
-    if unsigned_record is None and marker_bytes is None:
+    if unsigned_record is None and marker_bytes is None and posture_bytes is None:
         return {
             "action": "authority-downgrade",
             "actor": actor_value,
@@ -2229,6 +2334,7 @@ def downgrade_external_directory_authority(
 
     changed: dict[Path, bytes] = {}
     marker_removed = False
+    posture_removed = False
 
     def _record_change(path: Path, backup: bytes | None) -> None:
         if backup is not None:
@@ -2240,6 +2346,8 @@ def downgrade_external_directory_authority(
             _restore_authority_file(path, backup)
         if marker_removed and marker_bytes is not None:
             _restore_authority_file(marker_path, marker_bytes)
+        if posture_removed and posture_bytes is not None:
+            _restore_authority_file(posture_path, posture_bytes)
 
     try:
         if unsigned_record is not None:
@@ -2269,6 +2377,14 @@ def downgrade_external_directory_authority(
             else:
                 marker_removed = True
                 _downgrade_durability_checkpoint(marker_path)
+        if posture_bytes is not None:
+            try:
+                posture_path.unlink()
+            except FileNotFoundError:
+                pass
+            else:
+                posture_removed = True
+                _downgrade_durability_checkpoint(posture_path)
     except OSError:
         try:
             _restore_all()
@@ -2282,6 +2398,7 @@ def downgrade_external_directory_authority(
         "created_at": utc_now_iso_z(),
         "phase": "complete",
         "removed": marker_removed,
+        "posture_marker_removed": posture_removed,
         "store_unwrapped": unsigned_record is not None,
         "target": resolved,
         "target_fingerprint": fingerprint,
@@ -2387,6 +2504,18 @@ def _reanchor_external_directory_authority(
             or directories.get(scope) != identity
         ):
             continue
+        # Carry the verified isolation posture onto the relocated path before
+        # any unsigned state is evaluated (#881 round 4): the candidate record
+        # just proved it belongs to the same physical workspace (HMAC envelope,
+        # root identity, and directory identities verified above), so its
+        # posture marker is transferred and re-verified here, ahead of the
+        # store adoption. A transfer or verification failure refuses the
+        # reanchor instead of silently dropping the posture.
+        from .. import authority_marker
+
+        source_target = payload.get("target")
+        if isinstance(source_target, str) and source_target:
+            authority_marker.transfer_isolation_marker(Path(source_target), target, destination_identity=workspace)
         _record_external_directory_authority(target, components, directory, workspace=workspace)
         new_path, new_payload = _read_external_directory_authority(target)
         if new_payload is None:
@@ -2585,10 +2714,31 @@ def _record_verifier_owned_directory(
     )
 
 
+def _validate_record_bound_directory(record: Mapping[str, Any], *, components: tuple[str, ...], directory: int) -> None:
+    """Validate a directory binding against an already-read verified record."""
+    directories = record.get("directories")
+    if not isinstance(directories, dict) or directories.get(
+        _directory_authority_scope(components)
+    ) != _directory_identity(directory):
+        raise OSError("external directory authority record does not match directory")
+
+
 def _validate_verifier_owned_directory(
-    target: Path, *, components: tuple[str, ...], directory: int, workspace: dict[str, int] | None = None
+    target: Path,
+    *,
+    components: tuple[str, ...],
+    directory: int,
+    workspace: dict[str, int] | None = None,
+    record: Mapping[str, Any] | None = None,
 ) -> None:
-    """Require that a directory still matches its verifier-owned external record."""
+    """Require that a directory still matches its verifier-owned external record.
+
+    ``record`` consumes an already-read verified snapshot; the authority
+    store is never reopened on that path.
+    """
+    if record is not None:
+        _validate_record_bound_directory(record, components=components, directory=directory)
+        return
     _validate_external_directory_authority(
         target,
         components,
@@ -2701,9 +2851,25 @@ def _record_verifier_owned_file(
 
 
 def _validate_verifier_owned_file(
-    target: Path, *, components: tuple[str, ...], descriptor: int, data: bytes, workspace: dict[str, int] | None = None
+    target: Path,
+    *,
+    components: tuple[str, ...],
+    descriptor: int,
+    data: bytes,
+    workspace: dict[str, int] | None = None,
+    record: Mapping[str, Any] | None = None,
 ) -> None:
-    """Require that a file still matches its verifier-owned identity and content."""
+    """Require that a file still matches its verifier-owned identity and content.
+
+    ``record`` consumes an already-read verified snapshot; the authority
+    store is never reopened on that path.
+    """
+    if record is not None:
+        files = record.get("files")
+        scope = _directory_authority_scope(components)
+        if not isinstance(files, dict) or files.get(scope) != _file_identity(descriptor, data):
+            raise OSError("external file authority record does not match file")
+        return
     bound_workspace = _external_workspace_directory_identity(target) if workspace is None else workspace
     _require_workspace_directory_identity(target, bound_workspace)
     _path, payload = _read_external_directory_authority(target)
@@ -2819,8 +2985,20 @@ def _open_legacy_scanner_runs_directory(target: Path) -> int:
             os.close(descriptor)
 
 
-def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...], anchor_name: str, create: bool) -> int:
-    """Open an externally bound directory through no-follow descriptors."""
+def _open_verifier_owned_directory(
+    target: Path,
+    *,
+    components: tuple[str, ...],
+    anchor_name: str,
+    create: bool,
+    record: Mapping[str, Any] | None = None,
+) -> int:
+    """Open an externally bound directory through no-follow descriptors.
+
+    ``record`` validates every binding against one already-read verified
+    snapshot instead of the live store: no validation re-read, no recording,
+    and no reanchoring happens on that path.
+    """
     if not _dirfd_available():
         raise OSError("descriptor-relative directory authority operations are unavailable")
     descriptor = _open_directory_nofollow(target.expanduser().resolve())
@@ -2859,8 +3037,13 @@ def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...],
             child = _dirfd_open_dir(parent, name)
             created = True
         try:
-            _validate_external_directory_authority(target, components, child, workspace=workspace)
+            if record is None:
+                _validate_external_directory_authority(target, components, child, workspace=workspace)
+            else:
+                _validate_record_bound_directory(record, components=components, directory=child)
         except OSError:
+            if record is not None:
+                raise
             if created:
                 _record_external_directory_authority(target, components, child, workspace=workspace)
             elif _reanchor_external_directory_authority(target, components, child, workspace=workspace):
@@ -2886,13 +3069,14 @@ def _open_verifier_owned_directory(target: Path, *, components: tuple[str, ...],
         raise
 
 
-def _open_import_proof_directory(target: Path, *, create: bool) -> int:
+def _open_import_proof_directory(target: Path, *, create: bool, record: Mapping[str, Any] | None = None) -> int:
     """Open the verifier-owned proof directory through no-follow descriptors."""
     return _open_verifier_owned_directory(
         target,
         components=(".brigade", "work", "imports", "proofs"),
         anchor_name=".proofs.authority.json",
         create=create,
+        record=record,
     )
 
 
@@ -3028,15 +3212,21 @@ def _remove_persisted_import_proofs(target: Path, items: list[dict[str, Any]]) -
         os.close(parent)
 
 
-def _has_persisted_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
-    """Verify the external local-import proof without trusting row-controlled paths."""
+def _has_persisted_import_proof(
+    item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
+) -> bool:
+    """Verify the external local-import proof without trusting row-controlled paths.
+
+    ``record`` validates the proof-directory and sidecar bindings against one
+    already-read verified snapshot; the authority store is never reopened.
+    """
     if target is None:
         return False
     name = _import_proof_name(item.get("id"))
     if name is None:
         return False
     try:
-        parent = _open_import_proof_directory(target, create=False)
+        parent = _open_import_proof_directory(target, create=False, record=record)
     except OSError:
         return False
     try:
@@ -3069,6 +3259,7 @@ def _has_persisted_import_proof(item: dict[str, Any], *, target: Path | None = N
                 components=(".brigade", "work", "imports", "proofs", name),
                 descriptor=descriptor,
                 data=data,
+                record=record,
             )
             payload = json.loads(data)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -3122,8 +3313,14 @@ def _has_local_import_envelope(item: dict[str, Any], *, importer_source: str) ->
     )
 
 
-def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, Any] | None:
-    """Read one local scanner receipt through no-follow descriptor traversal."""
+def _read_local_scanner_receipt(
+    target: Path, scanner_run_id: str, *, record: Mapping[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """Read one local scanner receipt through no-follow descriptor traversal.
+
+    ``record`` validates every binding against one already-read verified
+    snapshot instead of reopening the authority store.
+    """
     if (
         os.name != "posix"
         or not getattr(os, "O_NOFOLLOW", 0)
@@ -3144,6 +3341,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             components=(".brigade", "scanners", "runs"),
             anchor_name=".runs.authority.json",
             create=False,
+            record=record,
         )
         current = os.open(scanner_run_id, directory_flags, dir_fd=root)
         opened_run = os.fstat(current)
@@ -3158,6 +3356,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             target,
             components=(".brigade", "scanners", "runs", scanner_run_id),
             directory=current,
+            record=record,
         )
         receipt_descriptor = os.open(
             "receipt.json",
@@ -3188,6 +3387,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             target,
             components=(".brigade", "scanners", "runs", scanner_run_id),
             directory=current,
+            record=record,
         )
         data = b"".join(chunks)
         _validate_verifier_owned_file(
@@ -3195,6 +3395,7 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             components=(".brigade", "scanners", "runs", scanner_run_id, "receipt.json"),
             descriptor=receipt_descriptor,
             data=data,
+            record=record,
         )
         payload = json.loads(data)
         if not isinstance(payload, dict) or payload.get("run_id") != scanner_run_id:
@@ -3211,8 +3412,14 @@ def _read_local_scanner_receipt(target: Path, scanner_run_id: str) -> dict[str, 
             os.close(root)
 
 
-def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | None = None) -> bool:
-    """Return whether a verifier-owned scanner receipt binds this exact row."""
+def _has_locally_stamped_import_proof(
+    item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
+) -> bool:
+    """Return whether a verifier-owned scanner receipt binds this exact row.
+
+    ``record`` validates the receipt bindings against one already-read
+    verified snapshot; the authority store is never reopened.
+    """
     if target is None:
         return False
     source = item.get("source")
@@ -3225,7 +3432,7 @@ def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | No
         return False
     if not _has_local_import_envelope(item, importer_source=source):
         return False
-    receipt = _read_local_scanner_receipt(target, scanner_run_id)
+    receipt = _read_local_scanner_receipt(target, scanner_run_id, record=record)
     if (
         receipt is None
         or receipt.get("run_id") != scanner_run_id
@@ -3258,13 +3465,198 @@ def _has_locally_stamped_import_proof(item: dict[str, Any], *, target: Path | No
     )
 
 
+def _read_verified_authority_snapshot(target: Path | None) -> dict[str, Any] | None:
+    """Read the authority store once and return its record only from a signed payload.
+
+    Signedness and the verified record come from a single read of the same
+    bytes: the raw payload must carry an HMAC envelope and that exact
+    envelope must verify. A concurrent same-uid writer cannot swap bytes
+    between a verified read and an envelope_version re-check.
+    """
+    if target is None:
+        return None
+    path = _directory_authority_store_path(target)
+    try:
+        descriptor = _open_file_nofollow(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError:
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            return None
+        raw = os.read(descriptor, 1024 * 1024)
+    finally:
+        os.close(descriptor)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("envelope_version") != 1
+        or not isinstance(payload.get("record"), dict)
+    ):
+        return None
+    try:
+        record = _unwrap_authority_envelope(path, payload, workspace=target)
+    except OSError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _acquire_authenticated_authority_snapshot(target: Path | None) -> dict[str, Any] | None:
+    """Reanchor relocated directories once, then read exactly one signed record.
+
+    The authority store may legitimately be missing right after a workspace
+    rename until a bound directory open copies the previous workspace's
+    record, so the reanchoring opens run before this single verified read.
+    Callers must pass the returned record into every downstream validator:
+    reopening the store mid-validation lets a concurrent same-uid writer
+    combine evidence that never existed in one authenticated snapshot.
+    """
+    if target is None:
+        return None
+    try:
+        workspace = _workspace_directory_identity(target)
+    except OSError:
+        return None
+    for components, anchor_name in (
+        ((".brigade", "scanners", "runs"), ".runs.authority.json"),
+        ((".brigade", "work", "imports", "proofs"), ".proofs.authority.json"),
+    ):
+        try:
+            descriptor = _open_verifier_owned_directory(
+                target, components=components, anchor_name=anchor_name, create=False
+            )
+        except OSError:
+            continue
+        os.close(descriptor)
+    record = _read_verified_authority_snapshot(target)
+    if record is None:
+        return None
+    if (
+        record.get("schema_version") != _EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+        or record.get("target") != str(target.expanduser().resolve())
+        or record.get("workspace") != workspace
+        or not isinstance(record.get("directories"), dict)
+    ):
+        return None
+    return record
+
+
+def _authority_store_binding_is_verifier_signed(target: Path | None) -> bool:
+    """Return whether the external authority record is a verifier-signed HMAC envelope.
+
+    Receipt and proof file identities recorded in an unsigned store are
+    scanner-reproducible bytes that a same-uid attacker can re-bind after the
+    run exits. Legacy migration may only trust bindings whose authority record
+    itself carries a verified HMAC envelope.
+    """
+    return _read_verified_authority_snapshot(target) is not None
+
+
+_APPEND_SNAPSHOT_ABSENT = cast("Mapping[str, Any]", object())
+"""Sentinel for append-path callers whose single snapshot acquisition already
+ran and legitimately found no signed record. Passing it instead of ``None``
+tells :func:`_authenticated_legacy_import_proof` never to re-acquire, so one
+append consumes exactly one acquisition (#881 round 4)."""
+
+
+def _authenticated_legacy_import_proof(
+    item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
+) -> bool:
+    """Shared authenticated-legacy predicate: receipt, sidecar, and signed store.
+
+    Every legacy identity path must require a verifier-owned scanner receipt,
+    a persisted proof sidecar, and a signed authority record from one
+    verified snapshot before trusting scanner-reproducible bindings. With
+    ``record`` unset the single snapshot is acquired here after one
+    reanchor pass; callers holding a snapshot must pass it back so the
+    receipt, directory, and sidecar validators all consume that same record
+    instead of independently reopening the store. Append-path callers pass
+    :data:`_APPEND_SNAPSHOT_ABSENT` once their own acquisition has run and
+    legitimately returned nothing — treating that as unset here would reopen
+    the authority state mid-append.
+    """
+    if record is _APPEND_SNAPSHOT_ABSENT:
+        record = None
+    elif record is None:
+        record = _acquire_authenticated_authority_snapshot(target)
+    if target is None or record is None:
+        return False
+    if not _has_locally_stamped_import_proof(item, target=target, record=record):
+        return False
+    return _has_persisted_import_proof(item, target=target, record=record)
+
+
+_UNSIGNED_DEDUPE_DOWNGRADE_WARNED = False
+
+
+def _unsigned_dedupe_proof_for_non_isolated_workspace(target: Path | None) -> bool:
+    """Return whether canonical dedupe may fall back to the unsigned proof path.
+
+    Without ``authority_store.isolation = "external-key"`` no verifier-signed
+    store can exist for this workspace, and a same-uid writer can already
+    rewrite the import inbox directly (issue #1093 tracks that boundary), so
+    canonical dedupe suppression degrades to the pre-#881 evidence grade:
+    the persisted sidecar validated against the workspace's own authority
+    record — receipt bytes are not revalidated on this fallback path. The
+    first selection per process prints one warning naming that downgrade.
+
+    The repo-writable selector alone is not trusted (#881): the fallback is
+    also refused when the workspace configuration exists but cannot be parsed
+    (invalid input normalizes to ``off``), and whenever the user-level
+    isolation posture marker for this target is not positively confirmed
+    absent (#881 round 4). Marker reads are tri-state: only one positively
+    read healthy marker store that names no governing marker admits the
+    fallback; an unreadable or malformed marker store reports unknown, which
+    is treated like present. Markers bind the stable workspace root identity,
+    so a renamed workspace stays governed and an unrelated workspace at the
+    recycled path is not blocked by a stale path-keyed marker. Only the
+    explicit, audited ``brigade security authority downgrade`` command clears
+    that marker.
+    """
+    global _UNSIGNED_DEDUPE_DOWNGRADE_WARNED
+    if target is None:
+        return False
+    from .. import authority_marker
+    from ..security_cmd.config import authority_store_isolation_state
+    from ..security_cmd.models import AUTHORITY_STORE_ISOLATION_OFF
+
+    try:
+        mode, healthy = authority_store_isolation_state(target)
+    except OSError:
+        # Observation failed closed (posture persistence refused); never
+        # degrade to the unsigned grade over a broken posture channel.
+        return False
+    if mode != AUTHORITY_STORE_ISOLATION_OFF or not healthy:
+        return False
+    try:
+        live_identity = _workspace_directory_identity(target)
+    except OSError:
+        return False
+    status = authority_marker.isolation_marker_status(target, workspace_identity=live_identity)
+    if status != authority_marker.MARKER_STATUS_CONFIRMED_ABSENT:
+        return False
+    if not _UNSIGNED_DEDUPE_DOWNGRADE_WARNED:
+        _UNSIGNED_DEDUPE_DOWNGRADE_WARNED = True
+        print(
+            'warning: authority_store.isolation is not "external-key"; canonical import'
+            " dedupe suppression is downgraded to unsigned persisted-proof evidence"
+            " (persisted sidecar) in this workspace",
+            file=sys.stderr,
+        )
+    return True
+
+
 def _legacy_import_source_content_identity(
-    item: dict[str, Any], *, target: Path | None = None
+    item: dict[str, Any], *, target: Path | None = None, record: Mapping[str, Any] | None = None
 ) -> tuple[str, str, str] | None:
     """Return a legacy identity only when local provenance establishes its source."""
-    if not _has_locally_stamped_import_proof(item, target=target) or not _has_persisted_import_proof(
-        item, target=target
-    ):
+    if not _authenticated_legacy_import_proof(item, target=target, record=record):
         return None
     source = item["source"]
     content_identity = _import_content_identity(item)
@@ -3440,17 +3832,35 @@ def _snapshot_import_inbox(target: Path) -> tuple[int, str, bytes, bool]:
         _validate_import_inbox_descriptor(descriptor)
         before = os.fstat(descriptor)
         chunks: list[bytes] = []
+        snapshot_total = 0
         while chunk := os.read(descriptor, 1024 * 1024):
+            snapshot_total += len(chunk)
+            if snapshot_total > _IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES:
+                raise ImportInboxSnapshotLimitExceeded(
+                    f"import inbox exceeds {_IMPORT_INBOX_SNAPSHOT_LIMIT_BYTES} byte snapshot limit"
+                )
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink) != (
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
             after.st_dev,
             after.st_ino,
             after.st_mode,
             after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
         ):
             raise OSError("import inbox changed while snapshotting")
-        return parent, name, b"".join(chunks), True
+        raw = b"".join(chunks)
+        if len(raw) != before.st_size:
+            raise OSError("import inbox changed while snapshotting")
+        return parent, name, raw, True
     except BaseException:
         os.close(parent)
         raise
@@ -3827,7 +4237,14 @@ def _import_envelope_matches(item: dict[str, Any]) -> bool:
 
 
 def _backfill_import_provenance(target: Path) -> dict[str, Any]:
+    """Stamp inferred envelopes under the canonical inbox writer exclusion."""
+    with _canonical_inbox_write(target):
+        return _backfill_import_provenance_locked(target)
+
+
+def _backfill_import_provenance_locked(target: Path) -> dict[str, Any]:
     """Stamp inferred envelopes on inbox rows missing a valid matching envelope."""
+    verify_canonical_write_locks(target)
     imports = _read_imports(target)
     now = helpers._now().isoformat()
     updated: list[dict[str, Any]] = []
@@ -4130,7 +4547,56 @@ def _append_import_records(
     restore_existing_raw: Callable[[bytes, bool], None] | None = None,
     existing_imports: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Append records as one locked inbox read-modify-write transaction.
+
+    The canonical writer locks span the read through the publication so a
+    concurrent import, promote, dismiss, or scanner run cannot interleave
+    (reentrant per process for callers already inside the lock; a marked
+    self-importing child takes only the writer lock).
+    """
+    with _canonical_inbox_write(target):
+        return _append_import_records_locked(
+            target,
+            records,
+            dry_run=dry_run,
+            provenance_source=provenance_source,
+            contain_provenance_errors=contain_provenance_errors,
+            migrate_untrusted_identities=migrate_untrusted_identities,
+            preserve_existing_raw=preserve_existing_raw,
+            restore_existing_raw=restore_existing_raw,
+            existing_imports=existing_imports,
+        )
+
+
+def _append_import_records_locked(
+    target: Path,
+    records: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
+    provenance_source: str | None = None,
+    contain_provenance_errors: bool = False,
+    migrate_untrusted_identities: bool = False,
+    preserve_existing_raw: Callable[[bytes], None] | None = None,
+    restore_existing_raw: Callable[[bytes, bool], None] | None = None,
+    existing_imports: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     imports = existing_imports if existing_imports is not None else _read_imports(target)
+    # One authenticated view of authority state for the whole append: the
+    # snapshot is acquired once (after a reanchor pass) and consumed by
+    # every proof validator below, which never reopen the store (#881).
+    authority_record = _acquire_authenticated_authority_snapshot(target)
+    # Canonical-dedupe posture split (#881 operator decision): suppression
+    # consumes the single authenticated snapshot whenever the store verifies
+    # as signed; only where no verifier-signed store can exist - isolation is
+    # not "external-key" - does it fall back to the pre-#881 unsigned proof
+    # path (persisted sidecar plus reproducible receipt), warning once per
+    # process about the downgrade. Legacy identity grants below never take
+    # that fallback: they stay signed-only.
+    unsigned_dedupe_fallback = authority_record is None and _unsigned_dedupe_proof_for_non_isolated_workspace(target)
+    # Exactly one acquisition per append: downstream legacy validators receive
+    # the consumed snapshot, or the explicit absent-sentinel that forbids
+    # re-acquisition (#881 round 4).
+    snapshot_binding = authority_record if authority_record is not None else _APPEND_SNAPSHOT_ABSENT
     existing = {
         _import_record_key(item)
         for item in imports
@@ -4144,7 +4610,7 @@ def _append_import_records(
         identity = _import_source_identity(item)
         if identity is not None:
             existing_by_source[identity] = item
-        legacy_identity = _legacy_import_source_content_identity(item, target=target)
+        legacy_identity = _legacy_import_source_content_identity(item, target=target, record=snapshot_binding)
         if legacy_identity is not None and not _has_canonical_untrusted_import_identity(item):
             legacy_by_source_content[legacy_identity] = item
     imported: list[dict[str, Any]] = []
@@ -4156,13 +4622,28 @@ def _append_import_records(
         identity = _import_source_identity(record)
         if identity is not None and identity in existing_by_source:
             existing_item = existing_by_source[identity]
-            canonical_existing_proof = _has_persisted_import_proof(existing_item, target=target)
+            # Dedupe suppression consumes the one signed authority record
+            # acquired above when one exists. Without external-key isolation
+            # no signed store can exist, so the explicit unsigned downgrade
+            # predicate admits the pre-#881 persisted-proof path instead;
+            # unsigned sidecar or receipt bindings stay forgeable (#881) and
+            # are never trusted for legacy identity grants.
+            if authority_record is not None:
+                canonical_existing_proof = _has_persisted_import_proof(
+                    existing_item, target=target, record=authority_record
+                )
+            elif unsigned_dedupe_fallback:
+                canonical_existing_proof = _has_persisted_import_proof(existing_item, target=target)
+            else:
+                canonical_existing_proof = False
             canonical_existing_row = _has_canonical_untrusted_import_identity(existing_item)
             canonical_incoming_row = _has_canonical_untrusted_import_identity(record)
             canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row
-            existing_migration_proof = _has_locally_stamped_import_proof(
-                existing_item, target=target
-            ) and _import_content_identity(existing_item) == _import_content_identity(record)
+            existing_migration_proof = (
+                authority_record is not None
+                and _authenticated_legacy_import_proof(existing_item, target=target, record=snapshot_binding)
+                and _import_content_identity(existing_item) == _import_content_identity(record)
+            )
             if canonical_existing_row and canonical_incoming_row and not canonical_existing_proof:
                 pass
             elif canonical_migration and not existing_migration_proof:
@@ -4214,6 +4695,7 @@ def _append_import_records(
         if identity is not None:
             existing_by_source[identity] = item
     if imported and not dry_run:
+        verify_canonical_write_locks(target)
         inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
         published = False
         try:
@@ -4649,64 +5131,84 @@ def _promote_matching_imports(
 
     Each matching item is applied all-or-nothing in memory. The task ledger is
     flushed only after the late-window CAS succeeds, so a refused promote writes
-    no task files and a failed item cannot ride a later success.
+    no task files and a failed item cannot ride a later success. Lock order is
+    task-ledger first, then the canonical writer locks (run then writer for an
+    outside promoter; writer only inside a run) spanning the snapshot through
+    the final publication so scanner stamping or rollback cannot interleave
+    with the promote.
     """
-    with _task_ledger_lock(target):
-        snapshot = _capture_reviewed_import_snapshot(target)
-        reviewed_join = _import_snapshot_join_set(
-            snapshot.items,
-            kind=kind,
-            source=source,
-            metadata_filters=metadata_filters,
-        )
-        _after_reviewed_import_snapshot(target, snapshot)
-        _require_reviewed_import_snapshot(
-            target,
-            snapshot,
-            reviewed_join,
-            kind=kind,
-            source=source,
-            metadata_filters=metadata_filters,
-        )
-        matching = _matching_pending_imports(
+    with _task_ledger_lock(target), _canonical_inbox_write(target):
+        return _promote_matching_imports_locked(
             target,
             kind=kind,
             source=source,
             metadata_filters=metadata_filters,
-            imports=snapshot.items,
         )
-        ledger = _read_task_ledger(target)
-        promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
-        failed: list[tuple[dict[str, Any], Exception]] = []
-        created_any = False
-        for item in matching:
-            text = str(item.get("text") or "").strip()
-            if not text:
-                continue
-            tasks_before = list(ledger["tasks"])
-            edges_before = list(edges_mod.ensure_ledger_edges(ledger))
-            try:
-                task, created = _mark_import_promoted(target, item, ledger=ledger)
-            except (edges_mod.EdgeError, TaskLedgerError) as exc:
-                ledger["tasks"][:] = tasks_before
-                ledger["edges"] = edges_before
-                failed.append((item, exc))
-                continue
-            promoted.append((item, task, created))
-            created_any = created_any or created
-        _after_batch_import_promote_applied(target, snapshot)
-        _require_reviewed_import_snapshot(
-            target,
-            snapshot,
-            reviewed_join,
-            kind=kind,
-            source=source,
-            metadata_filters=metadata_filters,
-        )
-        if created_any:
-            _write_task_ledger(target, ledger)
-        _write_imports(target, snapshot.items)
-        return promoted, failed
+
+
+def _promote_matching_imports_locked(
+    target: Path,
+    *,
+    kind: str | None = None,
+    source: str | None = None,
+    metadata_filters: dict[str, str] | None = None,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any], bool]], list[tuple[dict[str, Any], Exception]]]:
+    verify_canonical_write_locks(target)
+    snapshot = _capture_reviewed_import_snapshot(target)
+    reviewed_join = _import_snapshot_join_set(
+        snapshot.items,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    _after_reviewed_import_snapshot(target, snapshot)
+    _require_reviewed_import_snapshot(
+        target,
+        snapshot,
+        reviewed_join,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    matching = _matching_pending_imports(
+        target,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+        imports=snapshot.items,
+    )
+    ledger = _read_task_ledger(target)
+    promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+    failed: list[tuple[dict[str, Any], Exception]] = []
+    created_any = False
+    for item in matching:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        tasks_before = list(ledger["tasks"])
+        edges_before = list(edges_mod.ensure_ledger_edges(ledger))
+        try:
+            task, created = _mark_import_promoted(target, item, ledger=ledger)
+        except (edges_mod.EdgeError, TaskLedgerError) as exc:
+            ledger["tasks"][:] = tasks_before
+            ledger["edges"] = edges_before
+            failed.append((item, exc))
+            continue
+        promoted.append((item, task, created))
+        created_any = created_any or created
+    _after_batch_import_promote_applied(target, snapshot)
+    _require_reviewed_import_snapshot(
+        target,
+        snapshot,
+        reviewed_join,
+        kind=kind,
+        source=source,
+        metadata_filters=metadata_filters,
+    )
+    if created_any:
+        _write_task_ledger(target, ledger)
+    _write_imports(target, snapshot.items)
+    return promoted, failed
 
 
 def _handoff_is_document_target(value: str) -> bool:

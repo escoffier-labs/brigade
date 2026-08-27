@@ -372,10 +372,12 @@ def authority_downgrade(
     except OSError as exc:
         print(f"error: authority downgrade failed: {exc}", file=sys.stderr)
         return 2
-    if not payload.get("removed") and not payload.get("store_unwrapped"):
+    if not payload.get("removed") and not payload.get("store_unwrapped") and not payload.get("posture_marker_removed"):
         print("authority downgrade: no sticky marker for this target")
         return 0
     print(f"authority downgrade: removed sticky marker for {payload['target_fingerprint']}")
+    if payload.get("posture_marker_removed"):
+        print("authority downgrade: removed isolation posture marker")
     if payload.get("store_unwrapped"):
         print("authority downgrade: converted signed store to an unsigned record")
     print(f"actor: {payload['actor']}")

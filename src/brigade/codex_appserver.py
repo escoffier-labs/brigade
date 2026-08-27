@@ -45,6 +45,12 @@ _DELTA_METHODS = frozenset(
     }
 )
 
+# #1200 round 4: completion is recorded only for records json.loads parsed
+# successfully; an oversized raw record (one the reader cannot hand to
+# json.loads within MAX_CAPTURE_BYTES) never signals completion. The map of
+# observed completions is bounded so interleaved turns cannot grow it forever.
+_MAX_OBSERVED_COMPLETIONS = 256
+
 
 def _byte_stream(stdout: Any) -> Any:
     """Prefer the binary buffer so text-mode iteration cannot hold an unbounded line."""
@@ -105,6 +111,9 @@ class TurnResult:
     detail: str = ""
     timed_out: bool = False
     output_limit_exceeded: bool = False
+    # #1200: True only when a turn/completed notification for this turn id was
+    # actually observed on the stream before the capture cap hit.
+    completed_observed: bool = False
 
 
 class AppServer:
@@ -132,6 +141,10 @@ class AppServer:
         self._capture_budgets: dict[str, proc_mod.ByteBudget] = {}
         self._orphan_budget = proc_mod.ByteBudget()
         self._output_limit_exceeded = False
+        # #1200: (thread id, turn id) -> status for every parsed turn/completed
+        # whose result has not been built yet. Keyed per turn so interleaved
+        # turns cannot erase each other's completions.
+        self._observed_completions: dict[tuple[str, str], str] = {}
 
     def __enter__(self) -> "AppServer":
         self.start()
@@ -236,8 +249,37 @@ class AppServer:
             return self._orphan_budget
         return self._capture_budgets.setdefault(thread_id, proc_mod.ByteBudget())
 
+    def observed_completion_status(self, thread_id: str, turn_id: str) -> str | None:
+        """#1200: status of a turn/completed observed on the stream, if any."""
+
+        with self._state_lock:
+            return self._observed_completions.get((thread_id, turn_id))
+
+    def consume_observed_completion(self, thread_id: str, turn_id: str) -> str | None:
+        """#1200: atomically read-and-remove exactly this turn's entry."""
+
+        with self._state_lock:
+            return self._observed_completions.pop((thread_id, turn_id), None)
+
+    def _note_turn_completed(self, thread_id: Any, turn: Any) -> None:
+        if not isinstance(turn, dict):
+            return
+        turn_id = turn.get("id")
+        status = turn.get("status")
+        if isinstance(thread_id, str) and isinstance(turn_id, str):
+            with self._state_lock:
+                key = (thread_id, turn_id)
+                self._observed_completions.pop(key, None)
+                self._observed_completions[key] = status if isinstance(status, str) else ""
+                while len(self._observed_completions) > _MAX_OBSERVED_COMPLETIONS:
+                    del self._observed_completions[next(iter(self._observed_completions))]
+
     def reset_capture(self, thread_id: str) -> None:
         self._capture_budgets[thread_id] = proc_mod.ByteBudget()
+        with self._state_lock:
+            stale = [key for key in self._observed_completions if key[0] == thread_id]
+            for key in stale:
+                del self._observed_completions[key]
 
     def _attach(self, thread_id: str) -> "CodexThread":
         q: queue.Queue = queue.Queue()
@@ -307,7 +349,10 @@ class AppServer:
 
         A record larger than the cap is charged and rejected before
         ``json.loads``. Malformed or non-object records are charged too, so
-        they cannot bypass the cap by failing to parse.
+        they cannot bypass the cap by failing to parse. An oversized raw
+        record never signals completion (#1200): only a record json.loads
+        parses successfully records a turn/completed, including a parsed
+        record that then overflows the shared budget.
         """
 
         if self._output_limit_exceeded:
@@ -326,8 +371,16 @@ class AppServer:
         if not isinstance(msg, dict):
             return self._charge_record(line_bytes, None)
         thread_id = _message_thread_id(msg)
-        if not self._charge_record(line_bytes, thread_id):
+        if not self.capture_budget(thread_id).try_add(line_bytes):
+            # #1200: record parsed completion metadata BEFORE publishing the
+            # limit signal, under the same lock discipline, so a turn waiting
+            # on the limit never wakes to find its entry still absent.
+            if msg.get("method") == "turn/completed":
+                self._note_turn_completed(thread_id, (msg.get("params") or {}).get("turn"))
+            self._signal_output_limit()
             return False
+        if msg.get("method") == "turn/completed":
+            self._note_turn_completed(thread_id, (msg.get("params") or {}).get("turn"))
         if msg.get("id") is not None and "method" in msg:
             self._handle_server_request(msg)
         elif msg.get("id") is not None:
@@ -475,7 +528,7 @@ class CodexThread:
 
         completed = self._consume(deadline, turn_id, deltas, completed_texts, on_event)
         if completed is _OUTPUT_LIMIT or self._server_output_limited():
-            return self._output_limit_result(deltas, completed_texts)
+            return self._output_limit_result(deltas, completed_texts, turn_id)
         if completed is not None:
             return self._finish(completed, deltas, completed_texts)
 
@@ -486,7 +539,7 @@ class CodexThread:
             pass
         completed = self._consume(time.monotonic() + _INTERRUPT_GRACE, turn_id, deltas, completed_texts, on_event)
         if completed is _OUTPUT_LIMIT or self._server_output_limited():
-            return self._output_limit_result(deltas, completed_texts)
+            return self._output_limit_result(deltas, completed_texts, turn_id)
         salvaged = self._salvage(deltas, completed_texts)
         detail = f"timeout after {timeout}s; interrupted"
         if completed is _DEAD:
@@ -588,7 +641,13 @@ class CodexThread:
         completed_texts.append(text)
         return True
 
-    def _output_limit_result(self, deltas: dict, completed_texts: list[str]) -> TurnResult:
+    def _output_limit_result(self, deltas: dict, completed_texts: list[str], turn_id: str = "") -> TurnResult:
+        # #1200: one atomic read-and-remove of this exact turn's entry, so a
+        # sibling completion arriving between lookup and consume is never lost.
+        consume = getattr(self._server, "consume_observed_completion", None)
+        observed = None
+        if turn_id and callable(consume):
+            observed = consume(self.thread_id, turn_id)
         return TurnResult(
             text=proc_mod.bound_text(self._salvage(deltas, completed_texts)),
             ok=False,
@@ -596,6 +655,7 @@ class CodexThread:
             thread_id=self.thread_id,
             detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
             output_limit_exceeded=True,
+            completed_observed=observed == "completed",
         )
 
     def _finish(self, completed, deltas: dict, completed_texts: list[str]) -> TurnResult:
@@ -623,6 +683,8 @@ class CodexThread:
                 thread_id=self.thread_id,
                 detail=f"combined output exceeded {proc_mod.MAX_CAPTURE_BYTES} byte limit"[:200],
                 output_limit_exceeded=True,
+                # #1200: only a genuinely completed turn is a salvage signal.
+                completed_observed=status == "completed",
             )
         if status == "completed":
             return TurnResult(

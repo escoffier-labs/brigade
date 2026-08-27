@@ -103,54 +103,106 @@ def enqueue(
     """Queue a validated private envelope and return an opaque handle."""
     envelope = _validate_spec(spec)
     key = _validate_idempotency_key(idempotency_key)
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        return _enqueue_locked(storage, envelope, key, now)
+
+
+def enqueue_repository_scout(
+    target: Path,
+    spec: dict[str, Any],
+    idempotency_key: str,
+    *,
+    daily_limit: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Atomically admit one Repository Scout under its active and daily limits."""
+    envelope = _validate_spec(spec)
+    if envelope["role"] != "repository-scout":
+        raise GrokbotJobError("invalid-role")
+    key = _validate_idempotency_key(idempotency_key)
+    if type(daily_limit) is not int or daily_limit < 1:
+        raise GrokbotJobError("invalid-daily-limit")
+    _, instant = _timestamp(now)
+    with _storage_paths(target) as storage, _queue_lock(storage):
+        scout_records = _repository_scout_records_locked(storage)
+        created_today = sum(_parse_timestamp(record["created_at"]).date() == instant.date() for record in scout_records)
+        if any(_is_active_repository_scout(record) for record in scout_records):
+            return {"reason": "active-scout", "created_today": created_today, "handle": None}
+        if created_today >= daily_limit:
+            return {"reason": "daily-limit-reached", "created_today": created_today, "handle": None}
+        handle = _enqueue_locked(storage, envelope, key, instant)
+        if handle["idempotent"]:
+            return {"reason": "all-known", "created_today": created_today, "handle": handle}
+        return {"reason": "created", "created_today": created_today, "handle": handle}
+
+
+def _enqueue_locked(storage: _Storage, envelope: dict[str, Any], key: str, now: datetime | None) -> dict[str, Any]:
+    """Persist one validated queue envelope while the caller holds the queue lock."""
     task_hash = _task_hash(envelope)
     key_hash = _idempotency_key_hash(key)
-    with _storage_paths(target) as storage, _queue_lock(storage):
-        idempotency_name = f"{key_hash.removeprefix('sha256:')}.json"
-        existing = _read_json_file(storage.idempotency, idempotency_name, missing_ok=True)
-        if existing is not None:
-            idempotency = _validate_idempotency_record(existing)
-            if idempotency["task_hash"] != task_hash:
-                raise GrokbotJobError("idempotency-conflict")
-            job_id = idempotency["job_id"]
-            record = _load_record(storage.jobs, job_id)
-            if record["task_hash"] != task_hash:
-                raise GrokbotJobError("corrupt-storage")
-            return _handle(record, idempotent=True)
+    idempotency_name = f"{key_hash.removeprefix('sha256:')}.json"
+    existing = _read_json_file(storage.idempotency, idempotency_name, missing_ok=True)
+    if existing is not None:
+        idempotency = _validate_idempotency_record(existing)
+        if idempotency["task_hash"] != task_hash:
+            raise GrokbotJobError("idempotency-conflict")
+        job_id = idempotency["job_id"]
+        record = _load_record(storage.jobs, job_id)
+        if record["task_hash"] != task_hash:
+            raise GrokbotJobError("corrupt-storage")
+        return _handle(record, idempotent=True)
 
-        recovered = _find_record_by_idempotency_hash(storage.jobs, key_hash)
-        if recovered is not None:
-            if recovered["task_hash"] != task_hash:
-                raise GrokbotJobError("idempotency-conflict")
-            _write_json_file(
-                storage.idempotency,
-                idempotency_name,
-                {"schema": IDEMPOTENCY_SCHEMA, "job_id": recovered["job_id"], "task_hash": task_hash},
-            )
-            return _handle(recovered, idempotent=True)
-
-        timestamp = _now_iso(now)
-        job_id = f"grokbot-{secrets.token_hex(12)}"
-        record = {
-            "schema": JOB_SCHEMA,
-            "job_id": job_id,
-            "task_hash": task_hash,
-            "idempotency_key_hash": key_hash,
-            "state": "queued",
-            "created_at": timestamp,
-            "updated_at": timestamp,
-            "queued_at": timestamp,
-            "timeout_seconds": envelope["timeout_seconds"],
-            "item_revision": 1,
-            "spec": envelope,
-        }
-        _write_json_file(storage.jobs, f"{job_id}.json", record)
+    recovered = _find_record_by_idempotency_hash(storage.jobs, key_hash)
+    if recovered is not None:
+        if recovered["task_hash"] != task_hash:
+            raise GrokbotJobError("idempotency-conflict")
         _write_json_file(
             storage.idempotency,
             idempotency_name,
-            {"schema": IDEMPOTENCY_SCHEMA, "job_id": job_id, "task_hash": task_hash},
+            {"schema": IDEMPOTENCY_SCHEMA, "job_id": recovered["job_id"], "task_hash": task_hash},
         )
-        return _handle(record, idempotent=False)
+        return _handle(recovered, idempotent=True)
+
+    timestamp = _now_iso(now)
+    job_id = f"grokbot-{secrets.token_hex(12)}"
+    record = {
+        "schema": JOB_SCHEMA,
+        "job_id": job_id,
+        "task_hash": task_hash,
+        "idempotency_key_hash": key_hash,
+        "state": "queued",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "queued_at": timestamp,
+        "timeout_seconds": envelope["timeout_seconds"],
+        "item_revision": 1,
+        "spec": envelope,
+    }
+    _write_json_file(storage.jobs, f"{job_id}.json", record)
+    _write_json_file(
+        storage.idempotency,
+        idempotency_name,
+        {"schema": IDEMPOTENCY_SCHEMA, "job_id": job_id, "task_hash": task_hash},
+    )
+    return _handle(record, idempotent=False)
+
+
+def _repository_scout_records_locked(storage: _Storage) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
+        payload = _read_json_file(storage.jobs, name)
+        if payload is None:
+            raise GrokbotJobError("corrupt-storage")
+        record = _validate_record(payload)
+        if record["spec"]["role"] == "repository-scout":
+            records.append(record)
+    return records
+
+
+def _is_active_repository_scout(record: dict[str, Any]) -> bool:
+    return record["state"] in {"queued", "claimed", "running"} or (
+        "cancel_requested_at" in record and record["state"] not in {"completed", "failed", "expired", "canceled"}
+    )
 
 
 def get_job(target: Path, job_id: str) -> dict[str, Any]:

@@ -63,6 +63,8 @@ def _use_home(monkeypatch, tmp_path: Path) -> Path:
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("HOME", str(home))
+    # Harness CLI calls must not spawn the detached update-notify cache writer.
+    monkeypatch.setenv("BRIGADE_NO_UPDATE_CHECK", "1")
     return home
 
 
@@ -173,6 +175,33 @@ def test_sync_dry_run_writes_nothing(tmp_path, monkeypatch, capsys, harness):
     assert cli.main(_sync_base(workspace, harness) + ["--json"]) == 0
     capsys.readouterr()
     assert _file_snapshot(home) == {}
+
+
+@pytest.mark.parametrize("harness", SLICE2_HARNESSES)
+def test_sync_dry_run_reports_pending_until_applied(tmp_path, monkeypatch, capsys, harness):
+    """Issue #1170: a conflict-free dry run with planned writes is not "current"."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    base = _sync_base(workspace, harness)
+
+    assert cli.main(base + ["--json"]) == 0
+    planned = json.loads(capsys.readouterr().out)["results"][0]
+    assert planned["status"] == "pending"
+    assert planned["ready"] is True
+    assert planned["receipt_state"] == "missing"
+    assert any(item["action"] in {"create", "update", "remove"} for item in planned["items"])
+    assert _file_snapshot(home) == {}
+
+    assert cli.main(base + ["--write", "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(base + ["--json"]) == 0
+    applied = json.loads(capsys.readouterr().out)["results"][0]
+    assert applied["status"] == "current"
+    assert applied["receipt_state"] == "present"
+    assert all(item["action"] not in {"create", "update", "remove"} for item in applied["items"])
 
 
 @pytest.mark.parametrize("harness", SLICE2_HARNESSES)

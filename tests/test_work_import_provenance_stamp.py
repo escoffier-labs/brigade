@@ -12,8 +12,27 @@ from typing import Any
 import pytest
 
 from brigade import provenance
+from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import constants, helpers, ledger
 from tests.support import PRIVATE_FILE_MODE
+
+
+def _enable_external_key_isolation(target: Path) -> None:
+    """Require a verifier-signed authority store before any bindings are written."""
+    config = target / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[authority_store]",
+                f'isolation = "{AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 def _read_imports_in_child(target: str) -> None:
@@ -216,6 +235,7 @@ def test_legacy_identity_rejects_in_place_receipt_overwrite_and_attacker_sidecar
 
 
 def test_legacy_identity_rejects_in_place_change_of_bound_successful_receipt(tmp_path: Path) -> None:
+    _enable_external_key_isolation(tmp_path)
     item = ledger._make_import("bound receipt overwrite", kind="task", source="handoff-ingest")
     path = _write_builtin_scanner_receipt(tmp_path, item)
     ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
@@ -356,6 +376,7 @@ def test_receipt_binding_write_failure_restores_receipt_proof_inbox_and_bindings
 def test_file_authority_reanchors_with_directory_after_workspace_rename(tmp_path: Path) -> None:
     original = tmp_path / "original-workspace"
     original.mkdir()
+    _enable_external_key_isolation(original)
     item = ledger._make_import("rename-survives", kind="task", source="handoff-ingest")
     _write_builtin_scanner_receipt(original, item)
     ledger._write_persisted_import_proofs(original, [item], operation_id="0" * 32)
@@ -512,6 +533,7 @@ def test_scanner_child_cannot_rewrite_authority_store_via_inherited_env(tmp_path
     from brigade import component_paths
     from brigade.work_cmd import scanners as scanners_mod
 
+    _enable_external_key_isolation(tmp_path)
     item = ledger._make_import("env-scrub probe", kind="task", source="handoff-ingest")
     receipt_path = _write_builtin_scanner_receipt(tmp_path, item)
     ledger._write_persisted_import_proofs(tmp_path, [item], operation_id="0" * 32)
@@ -1292,6 +1314,7 @@ def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_vali
 
 @pytest.mark.parametrize("status", ["pending", "dismissed"])
 def test_untrusted_identity_migration_is_scoped_to_trusted_legacy_source(tmp_path: Path, status: str):
+    _enable_external_key_isolation(tmp_path)
     record = {
         "text": "Legacy source-normalized import",
         "kind": "task",
@@ -2551,6 +2574,159 @@ def test_work_backfill_strips_well_formed_verified_claim(tmp_path: Path):
     assert env["trust"]["label"] != "verified"
     assert env["trust"]["label"] in {"unknown", "untrusted", "quarantined"}
     assert env["attribution"] == "inferred"
+
+
+def test_alternate_legacy_identity_path_requires_authenticated_proof(tmp_path: Path):
+    """#881: a receipt-stamped row without sidecar or signed store must not
+    suppress an incoming canonical record through the matching source key."""
+    text = "alternate legacy identity probe"
+    canonical_hash = ledger._untrusted_import_canonical_hash({"text": text, "kind": "task"})
+    existing = ledger._make_import(
+        text,
+        kind="task",
+        source="handoff-ingest",
+        metadata={"source_item_id": f"handoff-ingest:{canonical_hash}", "source_fingerprint": canonical_hash},
+    )
+    _write_builtin_scanner_receipt(tmp_path, existing)
+    incoming = ledger._sanitize_untrusted_import_record(
+        {"text": text, "kind": "task", "source": "handoff-ingest", "metadata": {}},
+        importer_source="handoff-ingest",
+    )
+    assert ledger._has_canonical_untrusted_import_identity(incoming)
+    assert not ledger._has_canonical_untrusted_import_identity(existing)
+    assert ledger._legacy_import_source_content_identity(existing, target=tmp_path) is None
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="handoff-ingest",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+
+def test_unsigned_canonical_dedupe_cannot_suppress_incoming(tmp_path: Path):
+    """#881 posture split: in an external-key isolated workspace, dedupe
+    suppression keeps requiring the verifier-signed snapshot, so a same-uid
+    writer's planted sidecar bytes cannot suppress a genuine incoming record.
+    Converted from the round-1 non-isolated fixture per the operator decision;
+    the outcome assertions are unchanged."""
+
+    text = "unsigned dedupe probe"
+    canonical_hash = ledger._untrusted_import_canonical_hash({"text": text, "kind": "task"})
+    existing = ledger._make_import(
+        text,
+        kind="task",
+        source="learning-loop",
+        metadata={
+            "source_item_key": f"learning-loop:{canonical_hash}",
+            "source_fingerprint": canonical_hash,
+        },
+    )
+    _enable_external_key_isolation(tmp_path)
+    ledger._write_persisted_import_proofs(tmp_path, [existing], operation_id="0" * 32)
+    assert ledger._has_persisted_import_proof(existing, target=tmp_path)
+    assert ledger._authority_store_binding_is_verifier_signed(tmp_path)
+    # Same-uid writer replaces the persisted sidecar with forged bytes after
+    # the run exits; the signed store binding no longer matches those bytes,
+    # so the proof is unauthenticated and must never suppress.
+    proof_name = ledger._import_proof_name(existing["id"])
+    assert proof_name is not None
+    (tmp_path / ".brigade" / "work" / "imports" / "proofs" / proof_name).write_text(
+        json.dumps({"schema_version": 1, "forged": True}), encoding="utf-8"
+    )
+    incoming = ledger._sanitize_untrusted_import_record(
+        {"text": text, "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+
+def test_canonical_dedupe_after_rename_without_preopening_authority(tmp_path: Path):
+    """#881 round 2: relocation must reanchor before signedness is decided.
+
+    After a workspace rename the authority-store path for the new location
+    does not exist yet. Signedness evaluated before the proof-directory
+    open triggers reanchoring stays false, so a genuine canonical duplicate
+    is re-imported instead of suppressed. The fix reanchors before the
+    snapshot read; this test never pre-opens any authority directory.
+    """
+
+    original = tmp_path / "original-workspace"
+    original.mkdir()
+    _enable_external_key_isolation(original)
+    (original / ".brigade").mkdir(exist_ok=True)
+    descriptor = os.open(original / ".brigade", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        ledger._record_external_directory_authority(
+            original,
+            (".brigade",),
+            descriptor,
+            workspace=ledger._workspace_directory_identity(original),
+        )
+    finally:
+        os.close(descriptor)
+
+    text = "relocated dedupe probe"
+    canonical_hash = ledger._untrusted_import_canonical_hash({"text": text, "kind": "task"})
+    existing = ledger._make_import(
+        text,
+        kind="task",
+        source="learning-loop",
+        metadata={
+            "source_item_key": f"learning-loop:{canonical_hash}",
+            "source_fingerprint": canonical_hash,
+        },
+    )
+    ledger._write_persisted_import_proofs(original, [existing], operation_id="0" * 32)
+    incoming = ledger._sanitize_untrusted_import_record(
+        {"text": text, "kind": "task", "source": "learning-loop", "metadata": {}},
+        importer_source="learning-loop",
+    )
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        original,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+    )
+    assert imported == []
+    assert len(skipped) == 1
+    assert dismissed == []
+    assert rejected == []
+
+    relocated = tmp_path / "relocated-workspace"
+    original.rename(relocated)
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        relocated,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+        existing_imports=[existing],
+    )
+    assert imported == []
+    assert len(skipped) == 1
+    assert dismissed == []
+    assert rejected == []
 
 
 def test_work_backfill_quarantines_injection_hits(tmp_path: Path):

@@ -111,6 +111,459 @@ def test_workers_only_list_claim_and_read_their_configured_role(tmp_path: Path, 
     assert grokbot_jobs.get_job(tmp_path, implementation)["role"] == "implementation-worker"
 
 
+def test_worker_lifecycle_is_mirrored_to_the_fleet_without_queue_content(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def claim(target, **kwargs):
+        calls.append(("claim", {"target": target, **kwargs}))
+        return fleet_client.ClaimDecision(granted=True, reason="ok", holder=str(kwargs["holder"]))
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", claim)
+
+    def renew(target, **kwargs):
+        calls.append(("renew", {"target": target, **kwargs}))
+        return fleet_client.ClaimDecision(granted=True, reason="ok", holder=str(kwargs["holder"]))
+
+    monkeypatch.setattr(fleet_client, "renew_claim", renew)
+    monkeypatch.setattr(
+        fleet_client, "release_claim", lambda target, **kwargs: calls.append(("release", {"target": target, **kwargs}))
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "report_external_event",
+        lambda **kwargs: calls.append(("event", kwargs)),
+        raising=False,
+    )
+
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_start", {"job_id": job_id, "lease_id": "lease-a"})
+    adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
+
+    claim_call = next(payload for kind, payload in calls if kind == "claim")
+    holder = grokbot_mcp.fleet_holder(job_id, "lease-a")
+    session = grokbot_mcp.fleet_session(job_id, "lease-a")
+    assert holder != "lease-a" and session != "lease-a" and holder != session
+    assert {key: claim_call[key] for key in ("harness", "role", "job", "session", "holder")} == {
+        "harness": "grokbot",
+        "role": "implementation-worker",
+        "job": job_id,
+        "session": session,
+        "holder": holder,
+    }
+    events = [payload for kind, payload in calls if kind == "event"]
+    assert [payload["state"] for payload in events] == [
+        "external.claimed",
+        "external.heartbeat",
+        "external.running",
+        "external.failed",
+    ]
+    assert all(payload["session"] == session for payload in events)
+    dumped_events = json.dumps(events)
+    assert "lease-a" not in dumped_events
+    assert holder not in dumped_events
+    assert [kind for kind, _payload in calls].count("release") == 1
+    assert next(payload for kind, payload in calls if kind == "release")["holder"] == holder
+    assert "PRIVATE_INSTRUCTIONS_MUST_NOT_LEAK" not in json.dumps(calls)
+
+
+def test_complete_and_cancel_ack_release_the_fleet_claim(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def claim(target, **kwargs):
+        calls.append(("claim", {"target": target, **kwargs}))
+        return fleet_client.ClaimDecision(granted=True, reason="ok", holder=str(kwargs["holder"]))
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", claim)
+    monkeypatch.setattr(
+        fleet_client,
+        "release_claim",
+        lambda target, **kwargs: calls.append(("release", {"target": target, **kwargs})),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "report_external_event",
+        lambda **kwargs: calls.append(("event", kwargs)),
+        raising=False,
+    )
+
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-b"})
+    adapter.call_tool("grokbot_queue_start", {"job_id": job_id, "lease_id": "lease-b"})
+    adapter.call_tool(
+        "grokbot_queue_complete",
+        {
+            "job_id": job_id,
+            "lease_id": "lease-b",
+            "artifact": {
+                "kind": "draft-pr",
+                "url": "https://github.com/example/brigade/pull/1",
+                "branch": "feat/SECRET_ARTIFACT",
+            },
+        },
+    )
+    assert [payload["state"] for kind, payload in calls if kind == "event"] == [
+        "external.claimed",
+        "external.running",
+        "external.completed",
+    ]
+    assert [kind for kind, _payload in calls].count("release") == 1
+    dumped = json.dumps(calls)
+    assert "SECRET_ARTIFACT" not in dumped
+    assert "PRIVATE_INSTRUCTIONS_MUST_NOT_LEAK" not in dumped
+    assert "hub_url" not in dumped
+    assert "token" not in dumped
+    assert "bearer" not in dumped
+
+    canceled = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "cancel-job")["job_id"]
+    adapter.call_tool("grokbot_queue_claim", {"job_id": canceled, "lease_id": "lease-c"})
+    grokbot_jobs.cancel(tmp_path, canceled)
+    adapter.call_tool("grokbot_queue_ack_cancel", {"job_id": canceled, "lease_id": "lease-c"})
+    assert [payload["state"] for kind, payload in calls if kind == "event"][-1] == "external.canceled"
+    assert [kind for kind, _payload in calls].count("release") == 2
+
+
+def test_fleet_holder_and_session_are_domain_separated_from_the_queue_lease():
+    holder = grokbot_mcp.fleet_holder("job-a", "lease-a")
+    session = grokbot_mcp.fleet_session("job-a", "lease-a")
+    assert holder == grokbot_mcp.fleet_holder("job-a", "lease-a")
+    assert session == grokbot_mcp.fleet_session("job-a", "lease-a")
+    assert holder != session
+    assert "lease-a" not in holder
+    assert "lease-a" not in session
+    assert "job-a" not in holder
+    assert "job-a" not in session
+    assert grokbot_mcp.fleet_holder("job-a", "lease-b") != holder
+    assert grokbot_mcp.fleet_session("job-a", "lease-b") != session
+    assert len(holder) == 64
+    assert 0 < len(session) < len(holder)
+
+
+def test_same_lease_id_on_different_jobs_derives_distinct_fleet_identities():
+    lease_id = "shared-lease"
+    holder_a = grokbot_mcp.fleet_holder("job-a", lease_id)
+    holder_b = grokbot_mcp.fleet_holder("job-b", lease_id)
+    session_a = grokbot_mcp.fleet_session("job-a", lease_id)
+    session_b = grokbot_mcp.fleet_session("job-b", lease_id)
+    assert holder_a != holder_b
+    assert session_a != session_b
+    assert holder_a == grokbot_mcp.fleet_holder("job-a", lease_id)
+    assert session_a == grokbot_mcp.fleet_session("job-a", lease_id)
+    assert holder_a != session_a
+    assert holder_b != session_b
+
+
+def test_same_lease_id_on_different_jobs_cannot_share_or_release_fleet_claims(tmp_path: Path, monkeypatch):
+    first = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "first-job")["job_id"]
+    second = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "second-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    held: list[str] = []
+    releases: list[str] = []
+
+    def claim(target, **kwargs):
+        holder = str(kwargs["holder"])
+        if held and held[0] != holder:
+            return fleet_client.ClaimDecision(granted=False, reason="held", holder=holder)
+        if not held:
+            held.append(holder)
+        return fleet_client.ClaimDecision(granted=True, reason="ok", holder=holder)
+
+    def release(target, **kwargs):
+        holder = str(kwargs["holder"])
+        releases.append(holder)
+        if held and held[0] == holder:
+            held.clear()
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", claim)
+    monkeypatch.setattr(fleet_client, "release_claim", release)
+    monkeypatch.setattr(fleet_client, "report_external_event", lambda **kwargs: None, raising=False)
+
+    adapter.call_tool("grokbot_queue_claim", {"job_id": first, "lease_id": "shared-lease"})
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": second, "lease_id": "shared-lease"})
+    assert grokbot_jobs.get_job(tmp_path, first)["state"] == "claimed"
+    assert grokbot_jobs.get_job(tmp_path, second)["state"] == "queued"
+    first_holder = grokbot_mcp.fleet_holder(first, "shared-lease")
+    second_holder = grokbot_mcp.fleet_holder(second, "shared-lease")
+    first_session = grokbot_mcp.fleet_session(first, "shared-lease")
+    second_session = grokbot_mcp.fleet_session(second, "shared-lease")
+    assert first_holder != second_holder
+    assert first_session != second_session
+    assert held == [first_holder]
+
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_fail", {"job_id": second, "lease_id": "shared-lease"})
+    assert releases == []
+    assert held == [first_holder]
+    assert grokbot_jobs.get_job(tmp_path, first)["state"] == "claimed"
+    assert grokbot_jobs.get_job(tmp_path, second)["state"] == "queued"
+
+    adapter.call_tool("grokbot_queue_fail", {"job_id": first, "lease_id": "shared-lease"})
+    assert releases == [first_holder]
+    assert held == []
+
+
+def test_known_fleet_refusal_does_not_claim_or_emit(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    for reason in ("held", "auth-failed", "invalid", "missing"):
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        def refuse(target, *, _reason=reason, **kwargs):
+            return fleet_client.ClaimDecision(granted=False, reason=_reason, holder=str(kwargs["holder"]))
+
+        def record_event(*, _calls=calls, **kwargs):
+            _calls.append(("event", kwargs))
+
+        monkeypatch.setattr(fleet_client, "acquire_claim", refuse)
+        monkeypatch.setattr(fleet_client, "report_external_event", record_event, raising=False)
+        with pytest.raises(grokbot_mcp.AdapterError):
+            adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-refuse"})
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "queued"
+        assert calls == []
+
+
+def test_best_effort_fleet_gaps_still_claim_the_queue(tmp_path: Path, monkeypatch):
+    for reason in ("no-hub", "no-identity", "hub-unavailable"):
+        job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), f"{reason}-job")["job_id"]
+        adapter = _adapter(tmp_path)
+
+        def gap(target, *, _reason=reason, **kwargs):
+            return fleet_client.ClaimDecision(granted=False, reason=_reason, holder=str(kwargs["holder"]))
+
+        monkeypatch.setattr(fleet_client, "acquire_claim", gap)
+        claimed = adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": f"lease-{reason}"})
+        assert claimed["state"] == "claimed"
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
+
+
+def test_known_fleet_renew_refusal_does_not_heartbeat_or_extend_the_lease(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_claim",
+        lambda target, **kwargs: fleet_client.ClaimDecision(granted=True, reason="ok", holder=str(kwargs["holder"])),
+    )
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(fleet_client, "report_external_event", lambda **kwargs: events.append(kwargs), raising=False)
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-renew"})
+    events.clear()
+    before = grokbot_jobs.get_job(tmp_path, job_id)["lease_expires_at"]
+    monkeypatch.setattr(
+        fleet_client,
+        "renew_claim",
+        lambda target, **kwargs: fleet_client.ClaimDecision(granted=False, reason="held", holder=str(kwargs["holder"])),
+    )
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-renew"})
+    assert grokbot_jobs.get_job(tmp_path, job_id)["lease_expires_at"] == before
+    assert events == []
+
+
+def test_queue_renew_failure_releases_a_granted_fleet_claim(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def granted(target, **kwargs):
+        calls.append(("granted", {"target": target, **kwargs}))
+        return fleet_client.ClaimDecision(granted=True, reason="ok", holder=str(kwargs["holder"]))
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", granted)
+    monkeypatch.setattr(fleet_client, "renew_claim", granted)
+    monkeypatch.setattr(
+        fleet_client,
+        "release_claim",
+        lambda target, **kwargs: calls.append(("release", {"target": target, **kwargs})),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "report_external_event",
+        lambda **kwargs: calls.append(("event", kwargs)),
+        raising=False,
+    )
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-renew-rollback"})
+    before = grokbot_jobs.get_job(tmp_path, job_id)["lease_expires_at"]
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "renew",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("lease-conflict")),
+    )
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-renew-rollback"})
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
+    assert grokbot_jobs.get_job(tmp_path, job_id)["lease_expires_at"] == before
+    assert [kind for kind, _payload in calls if kind == "release"] == ["release"]
+    assert next(payload for kind, payload in calls if kind == "release")["holder"] == grokbot_mcp.fleet_holder(
+        job_id, "lease-renew-rollback"
+    )
+    assert [payload["state"] for kind, payload in calls if kind == "event"] == ["external.claimed"]
+
+
+def test_fleet_outage_then_missing_renew_recovers_via_acquire(tmp_path: Path, monkeypatch):
+    for reason in ("no-hub", "no-identity", "hub-unavailable"):
+        job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), f"{reason}-recover")["job_id"]
+        adapter = _adapter(tmp_path)
+        calls: list[tuple[str, dict[str, object]]] = []
+        lease_id = f"lease-{reason}-recover"
+
+        def gap_then_grant(target, *, _reason=reason, _calls=calls, **kwargs):
+            _calls.append(("acquire", {"target": target, **kwargs}))
+            if len([kind for kind, _payload in _calls if kind == "acquire"]) == 1:
+                return fleet_client.ClaimDecision(granted=False, reason=_reason, holder=str(kwargs["holder"]))
+            return fleet_client.ClaimDecision(granted=True, reason="ok", holder=str(kwargs["holder"]))
+
+        def missing_renew(target, *, _calls=calls, **kwargs):
+            _calls.append(("renew", {"target": target, **kwargs}))
+            return fleet_client.ClaimDecision(granted=False, reason="missing", holder=str(kwargs["holder"]))
+
+        def record_event(*, _calls=calls, **kwargs):
+            _calls.append(("event", kwargs))
+
+        monkeypatch.setattr(fleet_client, "acquire_claim", gap_then_grant)
+        monkeypatch.setattr(fleet_client, "renew_claim", missing_renew)
+        monkeypatch.setattr(fleet_client, "report_external_event", record_event, raising=False)
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": lease_id})
+        result = adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": lease_id})
+        assert result["state"] == "claimed"
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
+        assert [kind for kind, _payload in calls if kind == "renew"] == ["renew"]
+        acquire_calls = [payload for kind, payload in calls if kind == "acquire"]
+        assert len(acquire_calls) == 2
+        recovered = acquire_calls[1]
+        assert recovered["holder"] == grokbot_mcp.fleet_holder(job_id, lease_id)
+        assert recovered["session"] == grokbot_mcp.fleet_session(job_id, lease_id)
+        assert recovered["job"] == job_id
+        assert [payload["state"] for kind, payload in calls if kind == "event"] == [
+            "external.claimed",
+            "external.heartbeat",
+        ]
+
+
+def test_fleet_outage_then_missing_renew_allows_best_effort_acquire(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "best-effort-recover")["job_id"]
+    adapter = _adapter(tmp_path)
+    events: list[dict[str, object]] = []
+
+    def gap(target, **kwargs):
+        return fleet_client.ClaimDecision(granted=False, reason="no-hub", holder=str(kwargs["holder"]))
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", gap)
+    monkeypatch.setattr(
+        fleet_client,
+        "renew_claim",
+        lambda target, **kwargs: fleet_client.ClaimDecision(
+            granted=False, reason="missing", holder=str(kwargs["holder"])
+        ),
+    )
+    monkeypatch.setattr(fleet_client, "report_external_event", lambda **kwargs: events.append(kwargs), raising=False)
+    adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-best-effort"})
+    events.clear()
+    monkeypatch.setattr(
+        fleet_client,
+        "acquire_claim",
+        lambda target, **kwargs: fleet_client.ClaimDecision(
+            granted=False, reason="hub-unavailable", holder=str(kwargs["holder"])
+        ),
+    )
+    result = adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": "lease-best-effort"})
+    assert result["state"] == "claimed"
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
+    assert [payload["state"] for payload in events] == ["external.heartbeat"]
+
+
+def test_fleet_outage_then_missing_renew_refuses_known_acquire_refusal(tmp_path: Path, monkeypatch):
+    for reason in ("held", "auth-failed", "invalid", "missing"):
+        job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), f"{reason}-refuse")["job_id"]
+        adapter = _adapter(tmp_path)
+        events: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            fleet_client,
+            "acquire_claim",
+            lambda target, **kwargs: fleet_client.ClaimDecision(
+                granted=False, reason="no-hub", holder=str(kwargs["holder"])
+            ),
+        )
+
+        def record_event(*, _events=events, **kwargs):
+            _events.append(kwargs)
+
+        monkeypatch.setattr(fleet_client, "report_external_event", record_event, raising=False)
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": f"lease-{reason}-refuse"})
+        events.clear()
+        before = grokbot_jobs.get_job(tmp_path, job_id)["lease_expires_at"]
+        monkeypatch.setattr(
+            fleet_client,
+            "renew_claim",
+            lambda target, **kwargs: fleet_client.ClaimDecision(
+                granted=False, reason="missing", holder=str(kwargs["holder"])
+            ),
+        )
+        monkeypatch.setattr(
+            fleet_client,
+            "acquire_claim",
+            lambda target, *, _reason=reason, **kwargs: fleet_client.ClaimDecision(
+                granted=False, reason=_reason, holder=str(kwargs["holder"])
+            ),
+        )
+        with pytest.raises(grokbot_mcp.AdapterError):
+            adapter.call_tool("grokbot_queue_renew", {"job_id": job_id, "lease_id": f"lease-{reason}-refuse"})
+        assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
+        assert grokbot_jobs.get_job(tmp_path, job_id)["lease_expires_at"] == before
+        assert events == []
+
+
+def test_queue_claim_failure_releases_a_granted_fleet_claim(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def claim(target, **kwargs):
+        calls.append(("claim", {"target": target, **kwargs}))
+        return fleet_client.ClaimDecision(granted=True, reason="ok", holder=str(kwargs["holder"]))
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", claim)
+    monkeypatch.setattr(
+        fleet_client,
+        "release_claim",
+        lambda target, **kwargs: calls.append(("release", {"target": target, **kwargs})),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "report_external_event",
+        lambda **kwargs: calls.append(("event", kwargs)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        grokbot_jobs,
+        "claim_execution_context",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(grokbot_jobs.GrokbotJobError("lease-conflict")),
+    )
+    with pytest.raises(grokbot_mcp.AdapterError):
+        adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-rollback"})
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "queued"
+    assert [kind for kind, _payload in calls] == ["claim", "release"]
+    assert calls[1][1]["holder"] == grokbot_mcp.fleet_holder(job_id, "lease-rollback")
+
+
+def test_fleet_outage_does_not_fail_queue_claim(tmp_path: Path, monkeypatch):
+    job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
+    adapter = _adapter(tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("hub down")
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", boom)
+    monkeypatch.setattr(fleet_client, "report_external_event", boom, raising=False)
+    claimed = adapter.call_tool("grokbot_queue_claim", {"job_id": job_id, "lease_id": "lease-d"})
+    assert claimed["state"] == "claimed"
+    assert grokbot_jobs.get_job(tmp_path, job_id)["state"] == "claimed"
+
+
 def test_worker_inputs_cannot_select_target_role_bot_identity_or_lease_duration(tmp_path: Path):
     job_id = grokbot_jobs.enqueue(tmp_path, _spec("implementation-worker"), "implementation-job")["job_id"]
     worker = _adapter(tmp_path)

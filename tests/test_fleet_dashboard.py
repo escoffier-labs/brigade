@@ -203,6 +203,63 @@ class TestBoards:
         repo_c = by_repo["repo-c"]
         assert "idle" in repo_c and "succeeded" in repo_c
 
+    def test_claims_and_boards_render_external_labels_and_hide_finished_verify(self, hub):
+        now = datetime.now(timezone.utc).isoformat()
+        events = [
+            {
+                **_event(NODE_A, "ext-1", 1, "external.claimed", repo="repo-x", harness="grokbot", ts=now),
+                "seat": "implementation-worker",
+            },
+            {
+                **_event(NODE_A, "vr-1", 1, "verify.completed", repo="repo-x", harness="brigade-work", ts=now),
+                "exit_status": 0,
+                "capability_fingerprint": "fp-1",
+            },
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        claim = {
+            "action": "acquire",
+            "target": "repo-x",
+            "node_id": NODE_A,
+            "holder": "holder-secret",
+            "harness": "grokbot",
+            "role": "implementation-worker",
+            "job": "job-x",
+            "session": "lease-x",
+        }
+        status, _headers, text = _request(hub, "POST", "/claims", headers=_bearer(), body=claim)
+        assert status == 200, text
+        _status, _headers, text = _request(hub, "GET", "/", headers=_bearer())
+        assert "repo-x" in text
+        assert "grokbot" in text and "lease-x" in text
+        assert "holder-secret" not in text
+        assert "vr-1" not in text
+        _status, _headers, all_text = _request(hub, "GET", "/?all=1", headers=_bearer())
+        assert "vr-1" in all_text
+        assert "succeeded" in all_text
+        assert "holder-secret" not in all_text
+
+    def test_finished_verify_buckets_use_exit_status(self, hub):
+        now = datetime.now(timezone.utc).isoformat()
+        events = [
+            {
+                **_event(NODE_A, "vr-fail", 1, "verify.completed", repo="repo-fail", harness="brigade-work", ts=now),
+                "exit_status": 1,
+            },
+            {
+                **_event(NODE_A, "vr-int", 1, "verify.completed", repo="repo-int", harness="brigade-work", ts=now),
+                "exit_status": 130,
+            },
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        _status, _headers, all_text = _request(hub, "GET", "/?all=1", headers=_bearer())
+        fail_row = next(row for row in all_text.split("<tr") if "vr-fail" in row)
+        int_row = next(row for row in all_text.split("<tr") if "vr-int" in row)
+        assert 'data-bucket="failed"' in fail_row
+        assert 'data-bucket="interrupted"' in int_row
+
     def test_empty_hub_renders(self, hub):
         _status, _headers, text = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert "No fleet events recorded yet." in text
@@ -372,6 +429,10 @@ class TestPureRendering:
         assert fleet_dashboard.bucket_for("run.dispatch.observed", age_seconds=0) == "running"
         assert fleet_dashboard.bucket_for("run.dispatch.observed", age_seconds=3600) == "stale"
         assert fleet_dashboard.bucket_for("run.paused", age_seconds=3600) == "awaiting approval"
+        assert fleet_dashboard.bucket_for("verify.completed", age_seconds=0, exit_status=0) == "succeeded"
+        assert fleet_dashboard.bucket_for("verify.completed", age_seconds=0, exit_status=130) == "interrupted"
+        assert fleet_dashboard.bucket_for("verify.completed", age_seconds=0, exit_status=1) == "failed"
+        assert fleet_dashboard.bucket_for("verify.completed", age_seconds=0, exit_status=137) == "failed"
 
     def test_parse_query_sanitises(self):
         query = fleet_dashboard.parse_query("sort=bogus&node=" + "x" * 500 + "&attention=yes&all=0", view="nope")

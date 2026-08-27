@@ -302,8 +302,21 @@ def test_finish_truncates_worker_text_before_envelope_emit(monkeypatch, tmp_path
     assert len((worker.stdout or "").encode("utf-8")) <= proc.MAX_CAPTURE_BYTES
 
 
-def test_over_cap_worker_result_preserved_without_poisoning_seat(monkeypatch, tmp_path):
-    """#1144: an over-cap app-server stream keeps its bounded result and never quarantines the seat."""
+def _over_cap_appserver_result(**kwargs):
+    return agents.AgentResult(
+        text="final structured answer",
+        ok=False,
+        detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"[:200],
+        failure_phase="harness",
+        failure_kind="output-limit",
+        status="failed",
+        transport="codex-app-server",
+        **kwargs,
+    )
+
+
+def test_over_cap_worker_result_with_completed_turn_stays_ok(monkeypatch, tmp_path):
+    """#1200: an over-cap app-server stream whose turn/completed was observed stays salvageable."""
     from brigade.seat_health_policy import SeatQuarantineState
 
     quarantine_state = SeatQuarantineState()
@@ -311,19 +324,7 @@ def test_over_cap_worker_result_preserved_without_poisoning_seat(monkeypatch, tm
         monkeypatch,
         tmp_path,
         [Assignment(worker="coder", task="implement it")],
-        {
-            "coder": [
-                agents.AgentResult(
-                    text="final structured answer",
-                    ok=False,
-                    detail=f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte limit"[:200],
-                    failure_phase="harness",
-                    failure_kind="output-limit",
-                    status="failed",
-                    transport="codex-app-server",
-                )
-            ]
-        },
+        {"coder": [_over_cap_appserver_result(turn_completed=True)]},
         quarantine_state=quarantine_state,
     )
     worker = results[0]
@@ -340,6 +341,85 @@ def test_over_cap_worker_result_preserved_without_poisoning_seat(monkeypatch, tm
     assert payload["ok"] is True
     assert payload["output_truncated"] is True
     assert payload["text"] == "final structured answer"
+
+
+def test_over_cap_worker_result_without_completed_turn_is_failure(monkeypatch, tmp_path):
+    """#1200: over-cap salvage without an observed turn/completed must not satisfy prerequisites."""
+    from brigade.seat_health_policy import SeatQuarantineState
+
+    quarantine_state = SeatQuarantineState()
+    results, prompts = _dispatch(
+        monkeypatch,
+        tmp_path,
+        [Assignment(worker="coder", task="implement it", stage=1, covers=("plan",))],
+        {"coder": [_over_cap_appserver_result()]},
+        quarantine_state=quarantine_state,
+        scheduler="dag",
+        route_dependencies={"plan": (), "implement": ("plan",)},
+    )
+    worker = results[0]
+    assert worker.ok is False
+    assert worker.failure_kind == "output-limit"
+    assert worker.text == "final structured answer"
+    assert worker.output_truncated is True
+    assert prompts == ["implement it"]
+    assert not quarantine_state.is_quarantined("coder")
+
+    from brigade.run_receipts import worker_payload_one
+
+    payload = worker_payload_one(worker)
+    assert payload["ok"] is False
+    assert payload["output_truncated"] is True
+    assert payload["text"] == "final structured answer"
+
+
+def test_dag_dependent_skipped_when_only_coverer_is_truncated_uncompleted_result(monkeypatch, tmp_path):
+    """#1200: a truncated, uncompleted over-cap result does not satisfy downstream DAG stages."""
+
+    class _Recorder:
+        def __init__(self):
+            self.invocations = []
+
+    recorder = _Recorder()
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        recorder.invocations.append(cli_ref)
+        if cli_ref == "coder":
+            return _over_cap_appserver_result()
+        return agents.AgentResult(text="ok", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    assignments = [
+        Assignment(worker="coder", task="plan it", stage=1, covers=("plan",)),
+        Assignment(worker="reviewer", task="implement it", stage=2, covers=("implement",)),
+    ]
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "coder": Agent(name="coder", cli="coder", role="write"),
+            "reviewer": Agent(name="reviewer", cli="reviewer", role="review"),
+        },
+        max_workers=2,
+    )
+    results = run_transport.dispatch(
+        assignments,
+        roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+        scheduler="dag",
+        route_dependencies={"plan": (), "implement": ("plan",)},
+    )
+    by_worker = {r.worker: r for r in results}
+    assert by_worker["coder"].ok is False
+    assert by_worker["coder"].output_truncated is True
+    assert by_worker["reviewer"].status == "skipped"
+    assert by_worker["reviewer"].detail == "skipped: prerequisite failed"
+    assert set(recorder.invocations) == {"coder"}
 
 
 def test_over_cap_worker_result_without_text_fails_once_without_retry_or_quarantine(monkeypatch, tmp_path):

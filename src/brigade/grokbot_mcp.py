@@ -7,6 +7,7 @@ identity, target, role, or lease duration.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -26,6 +27,9 @@ LEASE_SECONDS = 300
 MAX_LISTED_JOBS = 100
 SDK_LOOPBACK_ALLOWED_HOSTS = ("localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "::1", "[::1]:*")
 INSTANCES = frozenset({"operator", "repository-scout", "implementation-worker"})
+_FLEET_HOLDER_DOMAIN = b"brigade.grokbot.fleet-holder"
+_FLEET_SESSION_DOMAIN = b"brigade.grokbot.fleet-session"
+_FLEET_BEST_EFFORT = frozenset({"no-hub", "no-identity", "hub-unavailable"})
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 
 OPERATOR_TOOLS = frozenset(
@@ -184,7 +188,14 @@ class GrokbotAdapter:
         if name == "grokbot_queue_claim":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
             lease_id = _lease_id(arguments)
-            if not self._admit_hub_lease(job, lease_id):
+            cloud_decision = self._admit_hub_lease_decision(job, lease_id)
+            if _cloud_refused(cloud_decision):
+                raise AdapterError()
+            holder, session = fleet_holder(job["job_id"], lease_id), fleet_session(job["job_id"], lease_id)
+            decision = self._fleet_acquire(job["job_id"], holder, session)
+            if _fleet_refused(decision):
+                if cloud_decision is not None and cloud_decision.granted:
+                    self._release_hub_lease(job["job_id"], lease_id, "released")
                 raise AdapterError()
             try:
                 result = grokbot_jobs.claim_execution_context(
@@ -192,25 +203,48 @@ class GrokbotAdapter:
                 )
             except Exception:
                 self._release_hub_lease(job["job_id"], lease_id, "released")
+                if decision.granted:
+                    self._fleet_release(holder)
                 raise
             self._bind_hub_lease(job["job_id"], lease_id)
+            self._fleet_event(job["job_id"], session, "external.claimed")
             return result
         if name == "grokbot_queue_renew":
             job = self._eligible_job(arguments, allowed={"job_id", "lease_id"})
             lease_id = _lease_id(arguments)
-            result = grokbot_jobs.renew(self.config.target, job["job_id"], self.config.bot_id, lease_id, LEASE_SECONDS)
+            job_id = job["job_id"]
+            holder, session = fleet_holder(job_id, lease_id), fleet_session(job_id, lease_id)
+            decision = self._fleet_renew(holder)
+            if not decision.granted and decision.reason == "missing":
+                decision = self._fleet_acquire(job_id, holder, session)
+            if _fleet_refused(decision):
+                raise AdapterError()
+            try:
+                result = grokbot_jobs.renew(self.config.target, job_id, self.config.bot_id, lease_id, LEASE_SECONDS)
+            except Exception:
+                if decision.granted:
+                    self._fleet_release(holder)
+                raise
             self._renew_or_reconcile_hub_lease(result, lease_id)
+            self._fleet_event(job_id, session, "external.heartbeat")
             return result
         if name in {"grokbot_queue_start", "grokbot_queue_fail", "grokbot_queue_ack_cancel"}:
             job_id, lease_id = _job_id(arguments, {"job_id", "lease_id"}), _lease_id(arguments)
+            holder, session = fleet_holder(job_id, lease_id), fleet_session(job_id, lease_id)
             if name.endswith("start"):
                 result = grokbot_jobs.transition(self.config.target, job_id, self.config.bot_id, lease_id, "running")
                 self._renew_or_reconcile_hub_lease(result, lease_id)
+                self._fleet_event(job_id, session, "external.running")
                 return result
             if name.endswith("fail"):
                 result = grokbot_jobs.transition(self.config.target, job_id, self.config.bot_id, lease_id, "failed")
-            else:
-                result = grokbot_jobs.acknowledge_cancel(self.config.target, job_id, self.config.bot_id, lease_id)
+                self._fleet_event(job_id, session, "external.failed")
+                self._fleet_release(holder)
+                self._release_hub_lease(job_id, lease_id, result["state"])
+                return result
+            result = grokbot_jobs.acknowledge_cancel(self.config.target, job_id, self.config.bot_id, lease_id)
+            self._fleet_event(job_id, session, "external.canceled")
+            self._fleet_release(holder)
             self._release_hub_lease(job_id, lease_id, result["state"])
             return result
         if name == "grokbot_queue_complete":
@@ -219,6 +253,7 @@ class GrokbotAdapter:
             if not isinstance(artifact, dict):
                 raise AdapterError()
             lease_id = _lease_id(arguments)
+            holder, session = fleet_holder(job["job_id"], lease_id), fleet_session(job["job_id"], lease_id)
             result = grokbot_jobs.transition(
                 self.config.target,
                 job["job_id"],
@@ -227,19 +262,21 @@ class GrokbotAdapter:
                 "completed",
                 artifact=artifact,
             )
+            self._fleet_event(job["job_id"], session, "external.completed")
+            self._fleet_release(holder)
             self._release_hub_lease(job["job_id"], lease_id, result["state"])
             return result
         raise AdapterError()
 
-    def _admit_hub_lease(self, job: Mapping[str, Any], holder: str) -> bool:
-        """Gate new local claims on one deterministic fleet-hub lease."""
+    def _admit_hub_lease_decision(self, job: Mapping[str, Any], holder: str) -> fleet_client.CloudDecision | None:
+        """Ask the hub for one deterministic GrokBot cloud lease."""
         task_hash = job.get("task_hash")
         repository = job.get("repository")
         job_id = job.get("job_id")
         if not isinstance(task_hash, str) or not isinstance(repository, str) or not isinstance(job_id, str):
-            return False
+            return fleet_client.CloudDecision(False, "invalid")
         prompt_hash = task_hash.removeprefix("sha256:")
-        decision = self._hub_call(
+        return self._hub_call(
             fleet_client.admit_cloud,
             "grokbot-cloud",
             repo=repository,
@@ -250,6 +287,10 @@ class GrokbotAdapter:
             lease_id=job_id,
             holder=holder,
         )
+
+    def _admit_hub_lease(self, job: Mapping[str, Any], holder: str) -> bool:
+        """True only when the hub granted the separate GrokBot cloud lease."""
+        decision = self._admit_hub_lease_decision(job, holder)
         return bool(decision is not None and decision.granted)
 
     def _bind_hub_lease(self, job_id: str, holder: str) -> None:
@@ -279,6 +320,48 @@ class GrokbotAdapter:
         except Exception:
             return None
         return result if isinstance(result, fleet_client.CloudDecision) else None
+
+    def _fleet_target(self) -> str:
+        return fleet_client.resolve_claim_target(self.config.target)
+
+    def _fleet_acquire(self, job_id: str, holder: str, session: str) -> fleet_client.ClaimDecision:
+        try:
+            return fleet_client.acquire_claim(
+                self._fleet_target(),
+                holder=holder,
+                ttl_seconds=LEASE_SECONDS,
+                harness="grokbot",
+                role=self.config.instance,
+                job=job_id,
+                session=session,
+            )
+        except Exception:
+            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
+
+    def _fleet_renew(self, holder: str) -> fleet_client.ClaimDecision:
+        try:
+            return fleet_client.renew_claim(self._fleet_target(), holder=holder, ttl_seconds=LEASE_SECONDS)
+        except Exception:
+            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable", holder=holder)
+
+    def _fleet_release(self, holder: str) -> None:
+        try:
+            fleet_client.release_claim(self._fleet_target(), holder=holder)
+        except Exception:
+            return
+
+    def _fleet_event(self, job_id: str, session: str, state: str) -> None:
+        try:
+            fleet_client.report_external_event(
+                target=self._fleet_target(),
+                harness="grokbot",
+                role=self.config.instance,
+                job=job_id,
+                session=session,
+                state=state,
+            )
+        except Exception:
+            return
 
     def _eligible_job(self, arguments: dict[str, Any], allowed: set[str] | None = None) -> dict[str, Any]:
         job_id = _job_id(arguments, allowed or {"job_id"})
@@ -536,6 +619,30 @@ def _lease_id(arguments: dict[str, Any]) -> str:
     if not isinstance(lease_id, str):
         raise AdapterError()
     return lease_id
+
+
+def _fleet_derivation_message(job_id: str, lease_id: str) -> bytes:
+    """Length-prefixed so job_id and lease_id cannot collide across concatenations."""
+    return f"{len(job_id)}:{job_id}:{len(lease_id)}:{lease_id}".encode("utf-8")
+
+
+def fleet_holder(job_id: str, lease_id: str) -> str:
+    """Full fencing token derived from the job-scoped queue lease, never the lease itself."""
+    return hmac.new(_FLEET_HOLDER_DOMAIN, _fleet_derivation_message(job_id, lease_id), hashlib.sha256).hexdigest()
+
+
+def fleet_session(job_id: str, lease_id: str) -> str:
+    """Opaque non-capability session label, domain-separated from the holder."""
+    return hmac.new(_FLEET_SESSION_DOMAIN, _fleet_derivation_message(job_id, lease_id), hashlib.sha256).hexdigest()[:32]
+
+
+def _fleet_refused(decision: fleet_client.ClaimDecision) -> bool:
+    return not decision.granted and decision.reason not in _FLEET_BEST_EFFORT
+
+
+def _cloud_refused(decision: fleet_client.CloudDecision | None) -> bool:
+    """Hard-refuse only explicit cloud denials; no-hub and outages stay best-effort."""
+    return decision is not None and not decision.granted and decision.reason not in _FLEET_BEST_EFFORT
 
 
 def _valid_tool_arguments(name: object, arguments: object) -> bool:

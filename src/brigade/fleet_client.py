@@ -68,6 +68,11 @@ run.lock; a claim failure is never a new way for a run to fail. The one
 exception is a credential refusal: HTTP 401/403 are stable ``auth-failed``
 outcomes (never retried, no orphan-release fallback) and ``repo_claim``
 fails closed rather than running unprotected on bad credentials.
+
+Known liveness gaps, tracked in escoffier-labs/brigade#1219: a node whose claim
+renewals are selectively blocked keeps retrying without a local lease-expiry
+deadline, and a worker blocked in a silent child wait may outlive a lost claim
+until the queued KeyboardInterrupt is delivered.
 """
 
 from __future__ import annotations
@@ -90,6 +95,8 @@ import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -877,6 +884,40 @@ def report_journal_event(envelope: dict[str, Any], *, journal_path: Path | None 
     return report_event(event, base_path=journal_path)
 
 
+def report_external_event(
+    *,
+    target: str,
+    harness: str,
+    role: str | None = None,
+    job: str | None = None,
+    session: str,
+    state: str,
+) -> bool:
+    """Best-effort lifecycle event for an external harness session.
+
+    The hub receives only the opaque identity labels needed to locate the
+    session. Queue payloads, artifacts, headers, and credentials never enter
+    the event. ``session`` contributes to the digest but is deliberately not
+    a hub event field; the claim row is its lookup surface.
+    """
+    try:
+        labels = validated_opaque_labels(harness=harness, role=role, job=job, session=session)
+        event = {
+            "run_id": labels["job"] or labels["session"] or session,
+            "repo": target,
+            "seat": labels["role"],
+            "harness": labels["harness"],
+            "state": state,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "sequence": time.time_ns(),
+        }
+        digest_input = json.dumps({**event, "session": labels["session"]}, sort_keys=True, separators=(",", ":"))
+        event["digest"] = sha256(digest_input.encode("utf-8")).hexdigest()
+    except Exception:
+        return False
+    return report_event(event)
+
+
 def fetch_status(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
     """GET /status from the hub; raises FleetClientError when unreachable."""
     config = load_fleet_config()
@@ -901,10 +942,35 @@ def fetch_status(*, hub_url: str | None = None, include_all: bool = False) -> li
 # never the literal "unknown" (two identity-less machines must not both be
 # granted the same target).
 _CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+OPAQUE_LABEL_MAX_CHARS = 128
+OPAQUE_LABEL_FIELDS = ("harness", "role", "job", "session")
+EXTERNAL_OUTCOMES = frozenset({"external.completed", "external.failed", "external.canceled"})
 
 
 def _node_id_is_claimable(node_id: str) -> bool:
     return node_id != "unknown" and bool(_CLAIM_ID_RE.match(node_id))
+
+
+def _contains_controls(value: str) -> bool:
+    return any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value)
+
+
+def validate_opaque_label(field: str, value: str | None) -> str | None:
+    """Return a stripped opaque label, or None when omitted. Raises ValueError."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > OPAQUE_LABEL_MAX_CHARS:
+        raise ValueError(
+            f"claim field {field!r} must be a non-empty string at most {OPAQUE_LABEL_MAX_CHARS} characters"
+        )
+    if _contains_controls(value):
+        raise ValueError(f"claim field {field!r} must not contain control characters")
+    return value.strip()
+
+
+def validated_opaque_labels(**labels: str | None) -> dict[str, str | None]:
+    """Validate the acquire-only identity labels. Extra keys are ignored."""
+    return {field: validate_opaque_label(field, labels.get(field)) for field in OPAQUE_LABEL_FIELDS}
 
 
 @dataclass(frozen=True)
@@ -1332,6 +1398,10 @@ def _claim_op(
     lock: Mapping[str, str] | None = None,
     supersede: Mapping[str, str] | None = None,
     acquired_at: str | None = None,
+    harness: str | None = None,
+    role: str | None = None,
+    job: str | None = None,
+    session: str | None = None,
 ) -> ClaimDecision:
     """One claim request; never raises for network or hub failures.
 
@@ -1367,6 +1437,13 @@ def _claim_op(
             body["acquired_at"] = acquired_at
         if conductor:
             body["conductor"] = conductor
+        try:
+            labels = validated_opaque_labels(harness=harness, role=role, job=job, session=session)
+        except ValueError as exc:
+            return ClaimDecision(granted=False, reason="invalid", detail=str(exc), holder=holder)
+        for field, value in labels.items():
+            if value is not None:
+                body[field] = value
         tok = token or config["token"]
         status, payload = _run_with_deadline(
             lambda: _post_claim_blocking(hub, tok, body, timeout=CLAIM_TIMEOUT_SECONDS),
@@ -1406,6 +1483,10 @@ def acquire_claim(
     holder: str | None = None,
     lock_owner: Mapping[str, object] | None = None,
     supersede_dead_owner: Mapping[str, object] | None = None,
+    harness: str | None = None,
+    role: str | None = None,
+    job: str | None = None,
+    session: str | None = None,
     **kwargs: Any,
 ) -> ClaimDecision:
     """Acquire ``target``; a fresh fencing token is minted unless ``holder``
@@ -1429,6 +1510,10 @@ def acquire_claim(
         scope="node" if supersede is not None else "holder",
         lock=lease_from_lock_owner(lock_owner),
         supersede=supersede,
+        harness=harness,
+        role=role,
+        job=job,
+        session=session,
         **kwargs,
     )
 

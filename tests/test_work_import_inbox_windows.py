@@ -321,3 +321,21 @@ def test_append_import_records_succeeds_on_current_platform(tmp_path: Path) -> N
     assert "windows inbox regression" in inbox.read_text()
     assert ledger._read_imports(tmp_path)
     assert ledger._has_persisted_import_proof(imported, target=tmp_path)
+
+
+def test_inbox_lock_module_has_no_bare_windows_open_flags() -> None:
+    """Both lock files share the validated open path; no bare POSIX-only flags."""
+    from brigade.work_cmd import inbox_lock
+
+    _assert_no_bare_windows_open_flags(Path(inbox_lock.__file__))
+
+
+def test_scanner_run_marker_is_capability_free_and_writer_lock_is_adjacent(tmp_path: Path) -> None:
+    """Round 4: the child marker carries no capability; writer lock sits beside the inbox."""
+    from brigade.work_cmd import inbox_lock
+
+    assert inbox_lock.SCANNER_RUN_ENV == "BRIGADE_SCANNER_RUN_ID"
+    writer_path = inbox_lock.inbox_writer_lock_path(tmp_path)
+    assert inbox_lock.inbox_lock_path(tmp_path).name == "inbox.jsonl.lock"
+    assert writer_path.name == "inbox.jsonl.writer.lock"
+    assert writer_path.parent == inbox_lock.inbox_lock_path(tmp_path).parent

@@ -127,6 +127,15 @@ def _full_base_snapshot() -> dict:
         "route": "route-id",
         "skill_route_policy": "auto",
         "seat_routing": [{"requested_seat": "coder", "outcome": "skip"}],
+        "retry_decisions": [
+            {
+                "attempt": 1,
+                "seat": "coder",
+                "failure_kind": "network-unavailable",
+                "decision": "same-seat-once",
+                "reason": "seat coder may retry once after re-probe [network-unavailable]",
+            }
+        ],
         "health": {"schema": "brigade.seat_health_summary.v1", "healthy": 1},
         "worker_failure_summary": {"domain": "infrastructure", "classes": {}, "seats": []},
         "transport_routing": {"schema": "brigade.transport_routing.v1", "outcome": "fallback"},

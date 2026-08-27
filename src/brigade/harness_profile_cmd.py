@@ -1985,9 +1985,12 @@ def _sync_profile(
             migration="legacy-v1" if migrated_from_legacy else None,
         ), bool(files_written or files_removed)
     receipt_state = "present" if profile.receipt_path.exists() else "missing"
+    # A conflict-free plan with planned writes is "safe to apply", not
+    # "already applied".  Only a fully applied profile is "current".
+    pending = any(item["action"] in {"create", "update", "remove"} for item in items)
     return _result(
         profile,
-        status="current" if ready else "conflict",
+        status="conflict" if conflicts else ("pending" if pending else "current"),
         ready=ready,
         items=items,
         conflicts=conflicts,
@@ -2268,9 +2271,12 @@ def _uninstall_profile(
                 _prune_created_directories(instruction_dirs + generated_plan["prune"], profile.user_root)
             )
     changed = bool(files_removed or files_written)
+    # Dry-run parity with sync: planned removals mean the profile is pending
+    # removal, not already gone.
+    pending = any(item["action"] in {"create", "update", "remove"} for item in items)
     return _result(
         profile,
-        status="conflict" if conflicts else ("updated" if changed else "current"),
+        status="conflict" if conflicts else ("updated" if changed else ("pending" if pending else "current")),
         ready=not conflicts,
         items=items,
         conflicts=conflicts,

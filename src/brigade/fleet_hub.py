@@ -182,9 +182,22 @@ EVENT_FIELDS = {
     "digest": str,
 }
 OPTIONAL_STR_FIELDS = ("repo", "seat", "harness")
+OPTIONAL_EVENT_STR_FIELDS = ("capability_fingerprint",)
+OPTIONAL_EVENT_INT_FIELDS = ("exit_status",)
 
-# Terminal run_event.v1 lifecycle types (see run_events.EVENT_TYPES).
-TERMINAL_STATES = frozenset({"run.completed", "run.failed", "run.interrupted"})
+# Terminal run_event.v1 lifecycle types (see run_events.EVENT_TYPES), plus
+# verify/external completions so finished sessions leave the live status view.
+TERMINAL_STATES = frozenset(
+    {
+        "run.completed",
+        "run.failed",
+        "run.interrupted",
+        "verify.completed",
+        "external.completed",
+        "external.failed",
+        "external.canceled",
+    }
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -197,6 +210,8 @@ CREATE TABLE IF NOT EXISTS events (
     harness TEXT,
     state TEXT NOT NULL,
     ts TEXT NOT NULL,
+    exit_status INTEGER,
+    capability_fingerprint TEXT,
     received_at TEXT NOT NULL,
     PRIMARY KEY (node_id, run_id, sequence, digest)
 );
@@ -216,6 +231,10 @@ CREATE TABLE IF NOT EXISTS claims (
     target TEXT NOT NULL PRIMARY KEY,
     owner_node TEXT NOT NULL,
     owner_conductor TEXT,
+    harness TEXT,
+    role TEXT,
+    job TEXT,
+    session TEXT,
     holder_token TEXT NOT NULL,
     acquired_at TEXT NOT NULL,
     renewed_at TEXT NOT NULL,
@@ -226,7 +245,16 @@ CREATE TABLE IF NOT EXISTS claims (
     lock_run_dir TEXT
 );
 """
-_CLAIMS_LEASE_COLUMNS = ("lock_token", "lock_acquired_at", "lock_run_dir")
+_CLAIMS_ADDITIVE_COLUMNS = (
+    "harness",
+    "role",
+    "job",
+    "session",
+    "lock_token",
+    "lock_acquired_at",
+    "lock_run_dir",
+)
+_EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint")
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
 # node's bearer token. The plaintext token is returned once by the add
@@ -318,6 +346,8 @@ _CLOUD_TEXT_MAX = 256
 # Bounded so a hostile client cannot bloat the row; a lease token is a uuid4
 # hex and an ISO-8601 stamp, a run_dir a filesystem path.
 LEASE_FIELD_MAX_CHARS = 1024
+OPAQUE_LABEL_MAX_CHARS = 128
+OPAQUE_LABEL_FIELDS = ("harness", "role", "job", "session")
 
 
 class FleetHubError(RuntimeError):
@@ -330,6 +360,20 @@ class FleetHubForbidden(FleetHubError):
 
 class FleetHubConflict(FleetHubError):
     """The request conflicts with current hub state (HTTP 409)."""
+
+
+class FleetHubUnprocessable(FleetHubError):
+    """A field failed semantic validation (HTTP 422), e.g. control characters."""
+
+
+def _contains_controls(value: str) -> bool:
+    """True when ``value`` contains a C0 or C1 control character (including DEL)."""
+    return any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value)
+
+
+def _reject_controls(value: str, field: str, *, kind: str) -> None:
+    if _contains_controls(value):
+        raise FleetHubUnprocessable(f"{kind} field {field!r} must not contain control characters")
 
 
 def _utc_now() -> str:
@@ -347,7 +391,11 @@ def _claims_table_needs_migration(claims_columns: set[str]) -> bool:
         return True
     if "holder_token" not in claims_columns:
         return True
-    return any(column not in claims_columns for column in _CLAIMS_LEASE_COLUMNS)
+    return any(column not in claims_columns for column in _CLAIMS_ADDITIVE_COLUMNS)
+
+
+def _events_columns(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
 
 
 def _model_policy_table_needs_recreation(conn: sqlite3.Connection) -> bool:
@@ -425,7 +473,7 @@ def _migrate_claims_table(conn: sqlite3.Connection) -> None:
         # v2 -> v3: the lease columns are nullable, so live claims survive
         # the upgrade (they can never be superseded, only released/expired).
         if claims_columns:
-            for column in _CLAIMS_LEASE_COLUMNS:
+            for column in _CLAIMS_ADDITIVE_COLUMNS:
                 if column in claims_columns:
                     continue
                 try:
@@ -494,6 +542,11 @@ def init_db(db_path: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA busy_timeout=5000")
         _refuse_newer_schema(conn, resolved)
         conn.execute(_SCHEMA)
+        for column in _EVENTS_ADDITIVE_COLUMNS:
+            if column not in _events_columns(conn):
+                conn.execute(
+                    f"ALTER TABLE events ADD COLUMN {column} {'INTEGER' if column == 'exit_status' else 'TEXT'}"
+                )
         if _claims_table_needs_migration(_claims_columns(conn)):
             with _migration_lock(db_path):
                 # Re-check under the lock: the thread that held it first has
@@ -540,12 +593,25 @@ def _validate_event(raw: Any) -> dict[str, Any]:
         if kind is str:
             if not isinstance(value, str) or not value.strip():
                 raise FleetHubError(f"event field {field!r} must be a non-empty string")
+            _reject_controls(value, field, kind="event")
         elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise FleetHubError(f"event field {field!r} must be a non-negative integer")
         event[field] = value
     for field in OPTIONAL_STR_FIELDS:
         value = raw.get(field)
+        if isinstance(value, str):
+            _reject_controls(value, field, kind="event")
         event[field] = value if isinstance(value, str) and value.strip() else None
+    for field in OPTIONAL_EVENT_STR_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, str):
+            _reject_controls(value, field, kind="event")
+        event[field] = value if isinstance(value, str) and value.strip() else None
+    for field in OPTIONAL_EVENT_INT_FIELDS:
+        value = raw.get(field)
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            raise FleetHubError(f"event field {field!r} must be a non-negative integer")
+        event[field] = value
     return event
 
 
@@ -578,8 +644,8 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
     for event in events:
         cursor = conn.execute(
             "INSERT OR IGNORE INTO events "
-            "(node_id, run_id, sequence, digest, repo, seat, harness, state, ts, received_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(node_id, run_id, sequence, digest, repo, seat, harness, state, ts, exit_status, "
+            "capability_fingerprint, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event["node_id"],
                 event["run_id"],
@@ -590,6 +656,8 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
                 event["harness"],
                 event["state"],
                 event["ts"],
+                event["exit_status"],
+                event["capability_fingerprint"],
                 received_at,
             ),
         )
@@ -609,7 +677,7 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
     larger digest, so the view never shows a run twice.
     """
     rows = conn.execute(
-        "SELECT node_id, run_id, repo, seat, harness, state, ts, sequence, digest FROM ("
+        "SELECT node_id, run_id, repo, seat, harness, state, ts, sequence, digest, exit_status, capability_fingerprint FROM ("
         "  SELECT e.*, ROW_NUMBER() OVER ("
         "    PARTITION BY node_id, run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
         "  ) AS rn FROM events e"
@@ -630,6 +698,8 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
                 "ts": row[6],
                 "sequence": row[7],
                 "digest": row[8],
+                "exit_status": row[9],
+                "capability_fingerprint": row[10],
             }
         )
     return result
@@ -694,6 +764,8 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
             continue
         if not isinstance(value, str) or not value.strip():
             raise FleetHubError(f"claim field {field!r} must be a non-empty string")
+        if field == "target":
+            _reject_controls(value, field, kind="claim")
         request[field] = value.strip()
     for field in ("node_id", "holder"):
         if request[field] is None:
@@ -704,7 +776,24 @@ def _validate_claim_request(raw: Any) -> dict[str, Any]:
                 "([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')"
             )
     conductor = raw.get("conductor")
+    if isinstance(conductor, str):
+        _reject_controls(conductor, "conductor", kind="claim")
     request["conductor"] = conductor.strip() if isinstance(conductor, str) and conductor.strip() else None
+    labels: dict[str, str | None] = {}
+    for field in OPAQUE_LABEL_FIELDS:
+        value = raw.get(field)
+        if value is not None and action != "acquire":
+            raise FleetHubError(f"claim field {field!r} is only valid for acquire")
+        if value is not None and (
+            not isinstance(value, str) or not value.strip() or len(value) > OPAQUE_LABEL_MAX_CHARS
+        ):
+            raise FleetHubError(
+                f"claim field {field!r} must be a non-empty string at most {OPAQUE_LABEL_MAX_CHARS} characters"
+            )
+        if isinstance(value, str):
+            _reject_controls(value, field, kind="claim")
+        labels[field] = value.strip() if isinstance(value, str) and value.strip() else None
+    request["labels"] = labels
     ttl = raw.get("ttl_seconds", DEFAULT_CLAIM_TTL_SECONDS)
     if not isinstance(ttl, int) or isinstance(ttl, bool) or not CLAIM_TTL_MIN_SECONDS <= ttl <= CLAIM_TTL_MAX_SECONDS:
         raise FleetHubError(
@@ -765,21 +854,27 @@ def _claim_payload(row: tuple[Any, ...]) -> dict[str, Any]:
         "target": row[0],
         "owner_node": row[1],
         "owner_conductor": row[2],
-        "acquired_at": row[3],
-        "renewed_at": row[4],
-        "ttl_seconds": row[5],
-        "expires_at": _epoch_to_iso(row[6]),
+        "harness": row[3],
+        "role": row[4],
+        "job": row[5],
+        "session": row[6],
+        "acquired_at": row[7],
+        "renewed_at": row[8],
+        "ttl_seconds": row[9],
+        "expires_at": _epoch_to_iso(row[10]),
     }
 
 
 # Payload columns only: holder_token is a fencing capability and is never
 # serialized to callers (it would let anyone forge a renew/release).
-_CLAIM_COLUMNS = "target, owner_node, owner_conductor, acquired_at, renewed_at, ttl_seconds, expires_at"
+_CLAIM_COLUMNS = (
+    "target, owner_node, owner_conductor, harness, role, job, session, acquired_at, renewed_at, ttl_seconds, expires_at"
+)
 
 
 def _fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | None:
     """Row as (_CLAIM_COLUMNS..., holder_token, lock_token, lock_acquired_at,
-    lock_run_dir); the fencing token is index 7, the lease token index 8."""
+    lock_run_dir); the fencing token is index 11, the lease token index 12."""
     return conn.execute(
         f"SELECT {_CLAIM_COLUMNS}, holder_token, lock_token, lock_acquired_at, lock_run_dir "
         "FROM claims WHERE target = ?",
@@ -833,15 +928,16 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
     holder = request["holder"]
     ttl = request["ttl_seconds"]
     scope = request["scope"]
+    labels = request["labels"]
     now = _now_epoch()
     now_iso = _epoch_to_iso(now)
     if request["action"] == "inspect":
         row = _fetch_claim(conn, target)
-        if row is None or row[6] <= now:
+        if row is None or row[10] <= now:
             return 200, {"inspected": True, "claim": None, "owned": False}
         inspected: dict[str, Any] = {"inspected": True, "claim": _claim_payload(row), "owned": row[1] == node}
         if row[1] == node:
-            inspected["lock_run_dir"] = row[10]
+            inspected["lock_run_dir"] = row[14]
         return 200, inspected
     if request["action"] == "acquire":
         # One write transaction: the prune, the prior-row read that the
@@ -855,12 +951,17 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         supersede = request["supersede"] or {"token": None, "acquired_at": None}
         cursor = conn.execute(
             "INSERT INTO claims "
-            "(target, owner_node, owner_conductor, holder_token, lock_token, lock_acquired_at, lock_run_dir, "
+            "(target, owner_node, owner_conductor, harness, role, job, session, holder_token, "
+            "lock_token, lock_acquired_at, lock_run_dir, "
             "acquired_at, renewed_at, ttl_seconds, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(target) DO UPDATE SET "
             "owner_node = excluded.owner_node, "
             "owner_conductor = excluded.owner_conductor, "
+            "harness = excluded.harness, "
+            "role = excluded.role, "
+            "job = excluded.job, "
+            "session = excluded.session, "
             "holder_token = excluded.holder_token, "
             "lock_token = excluded.lock_token, "
             "lock_acquired_at = excluded.lock_acquired_at, "
@@ -881,6 +982,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
                 target,
                 node,
                 conductor,
+                labels["harness"],
+                labels["role"],
+                labels["job"],
+                labels["session"],
                 holder,
                 lock["token"],
                 lock["acquired_at"],
@@ -900,9 +1005,21 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         conn.commit()
         if cursor.rowcount == 1:
             row = _fetch_claim(conn, target)
-            written = (target, node, conductor, now_iso, now_iso, ttl, now + ttl)
+            written = (
+                target,
+                node,
+                conductor,
+                labels["harness"],
+                labels["role"],
+                labels["job"],
+                labels["session"],
+                now_iso,
+                now_iso,
+                ttl,
+                now + ttl,
+            )
             granted: dict[str, Any] = {"granted": True, "claim": _claim_payload(row if row is not None else written)}
-            if prior is not None and prior[7] != holder:
+            if prior is not None and prior[11] != holder:
                 granted["superseded"] = _claim_payload(prior)
             return 200, granted
         row = _fetch_claim(conn, target)
@@ -921,10 +1038,10 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         conn.commit()
         if cursor.rowcount == 1:
             row = _fetch_claim(conn, target)
-            written = (target, node, conductor, now_iso, now_iso, ttl, now + ttl)
+            written = (target, node, conductor, None, None, None, None, now_iso, now_iso, ttl, now + ttl)
             return 200, {"renewed": True, "claim": _claim_payload(row if row is not None else written)}
         row = _fetch_claim(conn, target)
-        if row is not None and row[6] > now and (row[7] != holder or row[1] != node):
+        if row is not None and row[10] > now and (row[11] != holder or row[1] != node):
             return 409, {
                 "renewed": False,
                 "error": f"target {target!r} is held by {row[1]}",
@@ -971,7 +1088,7 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
         if scope != "force" and row[1] != node:
             error = f"target {target!r} is held by {row[1]}, not {node}"
         else:
-            error = f"target {target!r} was re-acquired since it was inspected (now acquired {row[3]})"
+            error = f"target {target!r} was re-acquired since it was inspected (now acquired {row[7]})"
         return 409, {"released": False, "error": error, "owner": _claim_payload(row)}
     return 200, {"released": False}
 
@@ -982,7 +1099,7 @@ def list_claims(conn: sqlite3.Connection, *, include_all: bool = False) -> list[
     rows = conn.execute(f"SELECT {_CLAIM_COLUMNS} FROM claims ORDER BY target").fetchall()
     result = []
     for row in rows:
-        expired = row[6] <= now
+        expired = row[10] <= now
         if expired and not include_all:
             continue
         payload = _claim_payload(row)
@@ -1586,6 +1703,7 @@ def make_handler(
 
     class _Handler(BaseHTTPRequestHandler):
         server_version = "brigade-fleet-hub/1"
+        sys_version = ""
         # Idle-socket guard: a peer that connects and never sends a request
         # line cannot pin a handler thread forever (pre-auth).
         timeout = 30
@@ -2019,6 +2137,9 @@ def make_handler(
                     status, body_payload = handle_node_request(conn, parsed)
             except FleetHubForbidden as exc:
                 self._send_json(403, {"error": str(exc)})
+                return
+            except FleetHubUnprocessable as exc:
+                self._send_json(422, {"error": str(exc)})
                 return
             except FleetHubError as exc:
                 self._send_json(400, {"error": str(exc)})

@@ -1,0 +1,17 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if (( $# == 0 )); then
+  echo "usage: ./scripts/verify-focused <pytest-selector>..." >&2
+  exit 2
+fi
+
+PY=${PY:-.venv/bin}
+"$PY/ruff" check .
+"$PY/ruff" format --check .
+"$PY/mypy"
+"$PY/python" scripts/version_sync.py --check
+"$PY/python" scripts/managed_snapshot.py --check
+"$PY/python" scripts/template_profile_snapshot.py --check
+"$PY/pytest" -q "$@"

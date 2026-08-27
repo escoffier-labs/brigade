@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -247,6 +251,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install
         run: |
           python -m pip install --upgrade pip
@@ -257,6 +263,10 @@ jobs:
         run: python -m ruff format --check .
       - name: Mypy
         run: python -m mypy
+      - name: Size ratchet baseline
+        run: |
+          git fetch --no-tags --depth=1 origin ${{ github.base_ref || 'main' }}
+          python scripts/check_size_ratchet_baseline.py --base-ref origin/${{ github.base_ref || 'main' }}
       - name: Version sync
         run: python scripts/version_sync.py --check
       - name: Managed snapshot
@@ -264,26 +274,85 @@ jobs:
       - name: Template profile snapshot
         run: python scripts/template_profile_snapshot.py --check
 
-  test:
+  test-shards:
+    name: test shard (${{ matrix.python }}, ${{ matrix.shard }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.10", "3.11", "3.12"]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
-      - name: Pytest
+      - name: Pytest shard
         if: matrix.python != '3.12'
-        run: python -m pytest -q
-      - name: Pytest with coverage gate
+        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q
+      - name: Pytest shard with coverage
         if: matrix.python == '3.12'
-        run: python -m pytest -q --cov=brigade --cov-report=term --cov-fail-under=78
+        env:
+          COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}
+        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q --cov=brigade --cov-report=
+      - name: Upload coverage data
+        if: matrix.python == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python }}-${{ matrix.shard }}
+          path: .coverage.${{ matrix.python }}.${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+
+  coverage:
+    needs: test-shards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Download coverage data
+        uses: actions/download-artifact@v5
+        with:
+          pattern: coverage-*
+          path: .coverage-data
+          merge-multiple: true
+      - name: Combine coverage
+        run: python -m coverage combine .coverage-data
+      - name: Coverage report
+        run: python -m coverage report --fail-under=78
+
+  test:
+    name: test (${{ matrix.python }})
+    needs: [test-shards, coverage]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Require shards and coverage
+        env:
+          SHARDS_RESULT: ${{ needs.test-shards.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+        run: |
+          if [ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ]; then
+            echo "test-shards=$SHARDS_RESULT coverage=$COVERAGE_RESULT"
+            exit 1
+          fi
 
   component-manifest-provenance:
     runs-on: ubuntu-latest
@@ -292,6 +361,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install
         run: |
           python -m pip install --upgrade pip
@@ -326,6 +397,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install
         run: |
           python -m pip install --upgrade pip
