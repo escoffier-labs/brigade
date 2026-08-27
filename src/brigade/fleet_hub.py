@@ -1200,6 +1200,11 @@ def _model_policy_name(raw: Any, field: str) -> str:
 def _validate_model_policy_request(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise FleetHubError("model policy request must be a JSON object")
+    if raw.get("action") == "set":
+        set_fields = frozenset({"action", "provider", "model", "seat", "enabled", "limit", "notes"})
+        lease_fields = set(raw).difference(set_fields)
+        if lease_fields:
+            raise FleetHubError(f"unknown model policy field(s): {', '.join(sorted(lease_fields))}")
     unknown = set(raw).difference(_MODEL_POLICY_REQUEST_FIELDS)
     if unknown:
         raise FleetHubError(f"unknown model policy field(s): {', '.join(sorted(unknown))}")
@@ -1940,7 +1945,7 @@ def make_handler(
             nonce = nonce or secrets.token_urlsafe(16)
             csp = (
                 f"default-src 'none'; script-src 'nonce-{nonce}'; script-src-attr 'none'; "
-                f"style-src 'nonce-{nonce}'; img-src 'none'; connect-src 'none'; base-uri 'none'; "
+                f"style-src 'nonce-{nonce}'; img-src 'self'; manifest-src 'self'; connect-src 'none'; base-uri 'none'; "
                 "form-action 'self'; frame-ancestors 'none'"
             )
             data = body.encode("utf-8")

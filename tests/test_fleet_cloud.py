@@ -414,6 +414,14 @@ def test_cloud_http_node_reads_and_admin_model_policy_mutation(tmp_path):
             "enabled": True,
             "token": "nope",
         },
+        {
+            "action": "set",
+            "provider": "openai",
+            "model": "gpt-5.6-terra",
+            "seat": "coder",
+            "enabled": True,
+            "lease_id": "lease-only-field-must-not-set-policy",
+        },
         {"action": "set", "provider": "OpenAI", "model": "gpt-5.6-terra", "seat": "coder", "enabled": True},
         {"action": "set", "provider": "openai", "model": "gpt-5.6-terra", "seat": "coder", "enabled": 1},
         {

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from functools import partial, wraps
 from json import JSONDecoder
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, ContextManager, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from . import agents
@@ -128,34 +128,12 @@ class FleetModelPolicyResolution:
 
 
 def _model_lease_lifecycle(function: Callable[..., int]) -> Callable[..., int]:
-    """Acquire all admitted seat capacities from one startup snapshot, then release them."""
+    """Freeze one startup policy snapshot without reserving unused seats."""
 
     def wrapped(task: str, roster: Roster, *args: Any, **kwargs: Any) -> int:
-        worker = kwargs.get("worker")
-        model_override = kwargs.get("model_override")
         snapshot = fleet_client.load_model_policy_snapshot()
-        resolution = resolve_fleet_model_policy(roster, worker=worker, model_override=model_override, snapshot=snapshot)
-        leases: list[fleet_client.ModelLeaseDecision] = []
-        lease_error: str | None = None
-        if resolution.error is None and snapshot.get("state") == "authoritative":
-            for seat, agent in resolution.roster.agents.items():
-                decision = fleet_client.acquire_model_lease(
-                    seat,
-                    agents.model_policy_provider(agent.cli or ""),
-                    agents.model_policy_model(agent.cli or "", agent.model),
-                )
-                if not decision.granted:
-                    lease_error = f"fleet model policy denied seat {seat!r}: {decision.reason}"
-                    break
-                leases.append(decision)
         kwargs["model_policy_snapshot"] = snapshot
-        kwargs["model_lease_error"] = lease_error
-        try:
-            return function(task, roster, *args, **kwargs)
-        finally:
-            for decision in leases:
-                if decision.lease_id is not None and decision.holder is not None:
-                    fleet_client.release_model_lease(decision.lease_id, holder=decision.holder)
+        return function(task, roster, *args, **kwargs)
 
     return wrapped
 
@@ -1518,6 +1496,7 @@ def _run_orchestrator(
     sandbox: str | None = None,
     codex_transport: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
+    model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
 ) -> agents.AgentResult:
     orchestrator = roster.agents[roster.orchestrator]
     transport = codex_transport or roster.codex_transport
@@ -1559,13 +1538,19 @@ def _run_orchestrator(
         kwargs["env"] = dict(orchestrator.env)
     if orchestrator.command is not None:
         kwargs["command"] = orchestrator.command
-    result = _call_with_process_registry(
-        agents.run_agent,
-        orchestrator.cli,
-        prompt,
-        process_registry=process_registry,
-        **kwargs,
-    )
+    if model_lease is None:
+        result = _call_with_process_registry(
+            agents.run_agent, orchestrator.cli, prompt, process_registry=process_registry, **kwargs
+        )
+    else:
+        with model_lease(orchestrator) as lease_error:
+            if lease_error is not None:
+                return agents.AgentResult(
+                    text="", ok=False, detail=lease_error, failure_phase="preflight", failure_kind="fleet-model-policy"
+                )
+            result = _call_with_process_registry(
+                agents.run_agent, orchestrator.cli, prompt, process_registry=process_registry, **kwargs
+            )
     if not result.ok and orchestrator.cli == "codex":
         detail = _orchestrator_failure_detail(
             result,
@@ -1745,6 +1730,7 @@ def plan(
     codex_transport: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     output_dir: Path | None = None,
+    model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
 ) -> list[Assignment]:
     transport = codex_transport or roster.codex_transport
     no_file_writes = _orchestrator_hides_write_tools(
@@ -1777,6 +1763,7 @@ def plan(
         sandbox=sandbox,
         codex_transport=transport,
         process_registry=process_registry,
+        model_lease=model_lease,
     )
     if not first.ok:
         _record_plan_attempt(attempts, stage="initial", result=first)
@@ -1827,6 +1814,7 @@ def plan(
             sandbox=sandbox,
             codex_transport=transport,
             process_registry=process_registry,
+            model_lease=model_lease,
         )
         if not second.ok:
             _record_plan_attempt(attempts, stage="correction", result=second)
@@ -1892,6 +1880,7 @@ def plan(
         sandbox=sandbox,
         codex_transport=transport,
         process_registry=process_registry,
+        model_lease=model_lease,
     )
     if not revised_result.ok:
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result)
@@ -2215,6 +2204,7 @@ def _apply_candidate_set_gate(
     process_registry: Any,
     plan_attempts: list[dict[str, object]] | None,
     allow_replan: bool,
+    model_lease: Callable[[Agent], ContextManager[str | None]] | None,
 ) -> tuple[list[Assignment], Any, str | None]:
     """Filter tools per assignment, write receipt, optionally replan once on empty sets.
 
@@ -2285,6 +2275,7 @@ def _apply_candidate_set_gate(
             sandbox=sandbox,
             codex_transport=transport_for_payload,
             process_registry=process_registry,
+            model_lease=model_lease,
         )
         if revised_result.ok:
             try:
@@ -2368,6 +2359,7 @@ def dispatch(
     on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
     run_id: str | None = None,
     output_dir: Path | None = None,
+    model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
 ) -> list[WorkerResult]:
     from . import run_transport
 
@@ -2414,6 +2406,7 @@ def dispatch(
         on_failed_attempt_persisted=on_failed_attempt_persisted,
         run_id=run_id,
         output_dir=output_dir,
+        model_lease=model_lease,
     )
 
 
@@ -4105,7 +4098,6 @@ def run(
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
     model_policy_snapshot: Mapping[str, Any] | None = None,
-    model_lease_error: str | None = None,
 ) -> int:
     if run_budget_payload is not None:
         run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
@@ -4152,8 +4144,8 @@ def run(
                 seat_routing=[dict(decision) for decision in roster.seat_routing],
             )
         _write_json(output_dir / "roster.json", _roster_payload(roster))
-    if model_policy.error is not None or model_lease_error is not None:
-        policy_error = model_policy.error or model_lease_error
+    if model_policy.error is not None:
+        policy_error = model_policy.error
         if output_dir is not None and not (output_dir / "run.json").is_file():
             record_run_start(
                 output_dir,
@@ -4181,6 +4173,25 @@ def run(
             )
         print(f"error: {policy_error}", file=sys.stderr)
         return 2
+
+    @contextmanager
+    def lease_model_agent(agent: Agent) -> Iterator[str | None]:
+        if model_policy.receipt.get("state") != "authoritative":
+            yield None
+            return
+        decision = fleet_client.acquire_model_lease(
+            agent.name,
+            agents.model_policy_provider(agent.cli or ""),
+            agents.model_policy_model(agent.cli or "", agent.model),
+        )
+        if not decision.granted:
+            yield f"fleet model policy denied seat {agent.name!r}: {decision.reason}"
+            return
+        try:
+            yield None
+        finally:
+            if decision.lease_id is not None and decision.holder is not None:
+                fleet_client.release_model_lease(decision.lease_id, holder=decision.holder)
 
     def scheduler_resolved(used: str, fallback_reason: str | None) -> None:
         scheduler_resolution["used"] = used
@@ -4595,6 +4606,7 @@ def run(
                 codex_transport=transport_for_payload,
                 process_registry=process_registry,
                 output_dir=output_dir,
+                model_lease=lease_model_agent,
             )
         except RuntimeError as exc:
             final_attempt = plan_attempts[-1] if plan_attempts else None
@@ -4706,6 +4718,7 @@ def run(
             process_registry=process_registry,
             plan_attempts=plan_attempts,
             allow_replan=not dry_run and not direct_worker,
+            model_lease=lease_model_agent,
         )
         plan_doc = receipt_schema.run_plan_document(
             _assignment_payload(assignments),
@@ -5123,6 +5136,7 @@ def run(
                 on_failed_attempt_persisted=persist_failed_attempt,
                 run_id=output_dir.name if output_dir is not None else None,
                 output_dir=output_dir,
+                model_lease=lease_model_agent,
             )
         except runguard.RetainRunLockError:
             raise
@@ -5342,6 +5356,7 @@ def run(
                 sandbox=sandbox,
                 codex_transport=transport_for_payload,
                 process_registry=process_registry,
+                model_lease=lease_model_agent,
             )
             synth_captured = message_envelope.emit(
                 final.text,

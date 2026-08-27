@@ -471,6 +471,7 @@ def dispatch(
     on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
     run_id: str | None = None,
     output_dir: Path | None = None,
+    model_lease: Callable[[Agent], Any] | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -846,7 +847,22 @@ def dispatch(
                 return blocked
             attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
             try:
-                result = _invoke_external(selected_agent, selected_prompt, resume_session_id=resume_session_id)
+                if model_lease is None:
+                    result = _invoke_external(selected_agent, selected_prompt, resume_session_id=resume_session_id)
+                else:
+                    with model_lease(selected_agent) as lease_error:
+                        if lease_error is not None:
+                            result = agents.AgentResult(
+                                text="",
+                                ok=False,
+                                detail=lease_error,
+                                failure_phase="preflight",
+                                failure_kind="fleet-model-policy",
+                            )
+                        else:
+                            result = _invoke_external(
+                                selected_agent, selected_prompt, resume_session_id=resume_session_id
+                            )
             except BaseException:
                 if attempt is not None and on_dispatch_failed is not None:
                     on_dispatch_failed(selected_agent, attempt)

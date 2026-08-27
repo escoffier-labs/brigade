@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import sys
+import threading
 import time
 
 import pytest
@@ -67,6 +69,122 @@ def test_dispatch_preserves_legacy_run_agent_call_shape(monkeypatch, tmp_path):
     )
     assert results[0].ok is True
     assert results[0].text == "implement it"
+
+
+def test_dispatch_acquires_and_releases_only_the_invoked_worker_seat(monkeypatch, tmp_path):
+    acquired: list[str] = []
+    released: list[str] = []
+
+    @contextmanager
+    def lease(agent):
+        acquired.append(agent.name)
+        try:
+            yield None
+        finally:
+            released.append(agent.name)
+
+    results, _ = _dispatch(
+        monkeypatch,
+        tmp_path,
+        [Assignment(worker="coder", task="implement it")],
+        {"coder": [agents.AgentResult(text="done", ok=True)]},
+        model_lease=lease,
+    )
+
+    assert results[0].ok is True
+    assert acquired == ["coder"]
+    assert released == ["coder"]
+
+
+def test_dispatch_releases_lease_when_worker_invocation_raises(monkeypatch, tmp_path):
+    released: list[str] = []
+
+    @contextmanager
+    def lease(agent):
+        try:
+            yield None
+        finally:
+            released.append(agent.name)
+
+    def raises(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("worker transport failed")
+
+    monkeypatch.setattr(agents, "run_agent", raises)
+    results = run_transport.dispatch(
+        [Assignment(worker="coder", task="implement it")],
+        _roster(),
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+        model_lease=lease,
+    )
+
+    assert results[0].ok is False
+    assert "worker transport failed" in results[0].detail
+    assert released == ["coder"]
+
+
+def test_parallel_dispatches_respect_a_same_seat_capacity_guard(monkeypatch, tmp_path):
+    active = 0
+    acquired: list[str] = []
+    released: list[str] = []
+    lock = threading.Lock()
+    worker_started = threading.Event()
+    allow_worker_finish = threading.Event()
+
+    @contextmanager
+    def lease(agent):
+        nonlocal active
+        with lock:
+            acquired.append(agent.name)
+            if active >= 1:
+                yield "fleet model policy denied seat 'coder': model policy capacity is exhausted"
+                return
+            active += 1
+        try:
+            yield None
+        finally:
+            with lock:
+                active -= 1
+                released.append(agent.name)
+
+    def fake_run_agent(*args, **kwargs):  # noqa: ARG001
+        worker_started.set()
+        assert allow_worker_finish.wait(timeout=2)
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+
+    def invoke(output_dir):
+        return run_transport.dispatch(
+            [Assignment(worker="coder", task="implement it")],
+            _roster(),
+            build_prompt=lambda agent, assignment, **kw: assignment.task,
+            run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+            event_writer=lambda events_dir, worker, verbose=False: None,
+            cwd=tmp_path,
+            read_only=True,
+            output_dir=output_dir,
+            model_lease=lease,
+        )[0]
+
+    first_result: list[object] = []
+    first = threading.Thread(target=lambda: first_result.append(invoke(tmp_path / "first")))
+    first.start()
+    assert worker_started.wait(timeout=2)
+    second = invoke(tmp_path / "second")
+    allow_worker_finish.set()
+    first.join(timeout=2)
+
+    assert not first.is_alive()
+    assert first_result[0].ok is True
+    assert second.ok is False
+    assert second.failure_kind == "fleet-model-policy"
+    assert acquired == ["coder", "coder"]
+    assert released == ["coder"]
 
 
 def test_dispatch_stamps_worker_request_and_result(monkeypatch, tmp_path):

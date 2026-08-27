@@ -600,8 +600,11 @@ def test_command_deck_asset_routes_and_metadata(tmp_path):
             assert headers["x-content-type-options"] == "nosniff", path
 
         for path in ("/", "/deck", "/deck/repos"):
-            status, _headers, body = _request(hub, "GET", path, headers=_bearer())
+            status, headers, body = _request(hub, "GET", path, headers=_bearer())
             assert status == 200, path
+            csp = headers["content-security-policy"]
+            assert "img-src 'self'" in csp
+            assert "manifest-src 'self'" in csp
             assert '<link rel="icon" type="image/x-icon" href="/favicon.ico"' in body
             assert '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"' in body
             assert '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"' in body
