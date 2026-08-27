@@ -28,7 +28,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 11 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 9 command path(s)
+- `brigade fleet`: 11 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade guard`: 1 command path(s)
 - `brigade handoff`: 17 command path(s)
@@ -59,7 +59,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roster`: 4 command path(s)
 - `brigade route`: 1 command path(s)
 - `brigade run`: 1 command path(s)
-- `brigade run-cloud`: 21 command path(s)
+- `brigade run-cloud`: 27 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 18 command path(s)
 - `brigade scrub`: 1 command path(s)
@@ -190,8 +190,10 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade extras on`
 - `brigade extras status`
 - `brigade fleet claims`
+- `brigade fleet cloud`
 - `brigade fleet export`
 - `brigade fleet flush`
+- `brigade fleet models set`
 - `brigade fleet nodes add`
 - `brigade fleet nodes list`
 - `brigade fleet nodes revoke`
@@ -473,7 +475,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade route`
 - `brigade run`
 - `brigade run-cloud adopt`
+- `brigade run-cloud canary`
 - `brigade run-cloud compact`
+- `brigade run-cloud doctor`
 - `brigade run-cloud grokbot ack-cancel`
 - `brigade run-cloud grokbot canary`
 - `brigade run-cloud grokbot cancel`
@@ -491,9 +495,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run-cloud grokbot setup`
 - `brigade run-cloud grokbot start`
 - `brigade run-cloud grokbot status`
+- `brigade run-cloud launch`
 - `brigade run-cloud register`
+- `brigade run-cloud setup`
 - `brigade run-cloud status`
 - `brigade run-cloud sweep`
+- `brigade run-cloud sync`
 - `brigade runbook closeout` (extras)
 - `brigade runbook pin` (extras)
 - `brigade runbook plan` (extras)
