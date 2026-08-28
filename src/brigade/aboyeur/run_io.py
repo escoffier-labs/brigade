@@ -33,6 +33,7 @@ from .. import proc, receipt_schema, runguard
 from .. import run_control
 from .. import run_checkpoint
 from .. import run_budget
+from .. import run_dirfd
 from .. import run_events
 from .. import run_journal
 from .. import run_lifecycle
@@ -72,6 +73,15 @@ from . import orchestrator as _orchestrator_mod
 _AUTHORITY_REQUEST_FIELD = "run_journal_authority_requested"
 
 
+def _read_run_json_bytes(path: Path) -> bytes:
+    """Read run.json; descriptor-relative when a binding authorizes the path.
+
+    No active binding keeps Path.read_bytes. An authorized binding never
+    re-opens, stats, or resolves the lexical name after that check.
+    """
+    return run_dirfd.read_bytes(path, max_bytes=run_dirfd.MAX_READ_BYTES)
+
+
 def make_run_dir(base: Path, now: datetime | None = None, *, workspace: Path | None = None) -> Path:
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
     local_id = f"{stamp}-{uuid4().hex[:8]}"
@@ -108,7 +118,7 @@ def _resolve_authority_state(run_dir: Path) -> str:
     """
     run_json = run_dir / "run.json"
     try:
-        raw = run_json.read_bytes()
+        raw = _read_run_json_bytes(run_json)
     except FileNotFoundError:
         return "legacy"
     try:
@@ -318,18 +328,17 @@ def _write_json_inner(path: Path, payload: object) -> None:
             transition_status = status
             prior_status: str | None = None
             prior_kind: str | None = None
-            if path.is_file():
-                try:
-                    prior_snapshot = json.loads(path.read_bytes())
-                except (OSError, ValueError, UnicodeDecodeError, RecursionError):
-                    prior_snapshot = None
-                if isinstance(prior_snapshot, dict):
-                    raw_prior_status = prior_snapshot.get("status")
-                    if isinstance(raw_prior_status, str) and raw_prior_status:
-                        prior_status = raw_prior_status
-                    raw_prior_kind = prior_snapshot.get("kind")
-                    if isinstance(raw_prior_kind, str) and raw_prior_kind:
-                        prior_kind = raw_prior_kind
+            try:
+                prior_snapshot = json.loads(_read_run_json_bytes(path))
+            except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+                prior_snapshot = None
+            if isinstance(prior_snapshot, dict):
+                raw_prior_status = prior_snapshot.get("status")
+                if isinstance(raw_prior_status, str) and raw_prior_status:
+                    prior_status = raw_prior_status
+                raw_prior_kind = prior_snapshot.get("kind")
+                if isinstance(raw_prior_kind, str) and raw_prior_kind:
+                    prior_kind = raw_prior_kind
             kind = payload.get("kind") if isinstance(payload.get("kind"), str) else prior_kind
             approval_reference = payload.get("approval_reference")
             if status == "running" and isinstance(approval_reference, Mapping):
@@ -408,7 +417,7 @@ def _write_json_inner(path: Path, payload: object) -> None:
             # runs skip this gate.
             if authority_state == "authoritative":
                 try:
-                    prior_snapshot = json.loads(path.read_bytes())
+                    prior_snapshot = json.loads(_read_run_json_bytes(path))
                 except (OSError, ValueError, UnicodeDecodeError) as exc:
                     raise run_lifecycle.LifecycleJournalError(
                         run_events._bound("authoritative prior snapshot is unreadable")
