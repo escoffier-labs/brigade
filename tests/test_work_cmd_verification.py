@@ -1988,6 +1988,8 @@ def test_work_verify_graphtrail_delta_sidecar_digest_cleanup_and_summary(tmp_pat
     assert sidecar["attestations"]["before_snapshot_sha256"]
     after_sha = sidecar["attestations"]["after_snapshot_sha256"]
     assert isinstance(after_sha, str) and len(after_sha) == 64
+    assert receipt["code_graph_delta"]["stale_graph_used"] is False
+    assert sidecar["stale_graph_used"] is False
     assert receipt["digests"]["logs"]["graph-delta.json"] == localio.file_sha256(sidecar_path)
     assert json.loads((run_dir / "receipt.json").read_text())["digests"] == receipt["digests"]
     assert "- Code graph delta: " + receipt["code_graph_delta"]["summary"] in (run_dir / "summary.md").read_text()
@@ -2334,8 +2336,8 @@ def test_work_verify_graphtrail_delta_cold_initial_early_db_timeout_stays_sync_t
     assert receipt["commands"][0]["exit_code"] == 0
     assert compact_delta["status"] == "sync_timed_out"
     assert sidecar["status"] == "sync_timed_out"
-    assert "stale_graph_used" not in compact_delta
-    assert "stale_graph_used" not in sidecar
+    assert compact_delta["stale_graph_used"] is False
+    assert sidecar["stale_graph_used"] is False
     assert before_sync["stage"] == "initial-index"
     assert before_sync["timed_out"] is True
     assert sidecar["commands"]["after_sync"] is None
@@ -2445,15 +2447,41 @@ def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, ca
 def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     _seed_graphtrail_db(tmp_path)
-    graphtrail = _write_fake_graphtrail(tmp_path, sync_delay_seconds=0.2)
+    graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
-    _derace_graphtrail_sync_timing(monkeypatch, graphtrail, time_out_sync_call=1)
+    real_run = graphtrail_delta._run_graphtrail
+    sync_calls = {"count": 0}
+
+    def timeout_first_sync(binary, db_path, command, *extra, timeout, json_output=False, stage=None):
+        if command == "sync":
+            sync_calls["count"] += 1
+            if sync_calls["count"] == 1:
+                return graphtrail_delta._command_result(
+                    argv=[binary, "--db", str(db_path), command, *extra],
+                    returncode=124,
+                    stdout="",
+                    stderr=f"timeout after {timeout:g}s",
+                    timed_out=True,
+                    duration_seconds=float(timeout),
+                    timeout=timeout,
+                    stage=stage,
+                )
+        return real_run(
+            binary,
+            db_path,
+            command,
+            *extra,
+            timeout=timeout,
+            json_output=json_output,
+            stage=stage,
+        )
+
+    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", timeout_first_sync)
 
     assert (
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            graphtrail_timeout=0.05,
             json_output=True,
         )
         == 0
