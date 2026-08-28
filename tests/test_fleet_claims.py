@@ -952,6 +952,52 @@ class TestClientClaims:
         bare.mkdir()
         assert fleet_client.resolve_claim_target(bare) == "just-a-dir"
 
+    def test_resolve_claim_target_ignores_redirected_home_identity(self, tmp_path, monkeypatch, request):
+        """A planted home node.toml must not steal the claim key (#1182).
+
+        ``find_workspace_for_path`` walks ancestors. When pytest tmp lives
+        under ``$HOME`` and ``~/.brigade/node.toml`` exists, that walk
+        resolves the home directory name. Isolation must keep the workspace
+        name even when an ancestor of the sandbox carries a real identity.
+        """
+        from brigade import node as node_mod
+
+        # Plant on a real ancestor of the pytest sandbox. The class fixture
+        # home (tmp_path / "brigade-home") is a sibling of these workspaces
+        # and would never be discovered by the walk.
+        ancestor = tmp_path.parent
+        monkeypatch.setenv("BRIGADE_HOME", str(ancestor / ".brigade"))
+        assert fleet_client.home_identity_target() == ancestor
+
+        planted = node_mod.node_path(ancestor)
+        brigade_dir = planted.parent
+        existed_dir = brigade_dir.is_dir()
+        previous = planted.read_text(encoding="utf-8") if planted.is_file() else None
+
+        def _cleanup_planted_ancestor_identity() -> None:
+            if previous is None:
+                planted.unlink(missing_ok=True)
+                if not existed_dir and brigade_dir.is_dir() and not any(brigade_dir.iterdir()):
+                    brigade_dir.rmdir()
+            else:
+                planted.write_text(previous, encoding="utf-8")
+
+        request.addfinalizer(_cleanup_planted_ancestor_identity)
+        _plant_home_identity(ancestor, NODE_A)
+        assert planted.is_file()
+
+        workspace = tmp_path / "ws"
+        nested = workspace / "src" / "deep"
+        nested.mkdir(parents=True)
+        node_mod.ensure_identity(workspace)
+        assert fleet_client.resolve_claim_target(nested) == "ws"
+        assert fleet_client.resolve_claim_target(nested) != ancestor.name
+
+        bare = tmp_path / "just-a-dir"
+        bare.mkdir()
+        assert fleet_client.resolve_claim_target(bare) == "just-a-dir"
+        assert fleet_client.resolve_claim_target(bare) != ancestor.name
+
 
 class TestFleetClaimsCli:
     def test_claims_table_and_json(self, hub, monkeypatch, capsys):
