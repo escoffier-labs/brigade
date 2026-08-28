@@ -229,7 +229,7 @@ def _genuine_journal_ahead(run_dir: Path) -> bool:
     """
     artifact_path = run_shadow.shadow_artifact_path(run_dir)
     try:
-        data = json.loads(artifact_path.read_text())
+        data = json.loads(run_journal.bound_read_text(artifact_path))
     except (OSError, ValueError):
         return False
     if not isinstance(data, dict):
@@ -272,7 +272,7 @@ def _authoritative_prior_decision(run_dir: Path, prior_snapshot: dict[str, objec
         if caught_up.ready:
             artifact_path = run_shadow.shadow_artifact_path(run_dir)
             try:
-                artifact = json.loads(artifact_path.read_text())
+                artifact = json.loads(run_journal.bound_read_text(artifact_path))
             except (OSError, ValueError) as exc:
                 raise run_lifecycle.LifecycleJournalError(
                     run_events._bound("authoritative run prior catch-up evidence is unreadable")

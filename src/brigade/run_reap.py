@@ -307,7 +307,7 @@ def _revalidate_metadata(
     started = _parse_timestamp(meta.get("started_at"))
     if started is None:
         return "malformed"
-    if now - started < older_than:
+    if now - started <= older_than:
         return "too-young"
     return None
 
@@ -440,19 +440,20 @@ def _reap_one(
                     return None, _skip(run_dir.name, reason)
                 try:
                     return _terminalize(run_dir, current, workspace=workspace, now=now), None
-                except (run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
+                except (run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError, OSError) as exc:
                     # The sanctioned writer refused this run's transaction (an
-                    # unready authority gate, a broken chain), possibly after
-                    # activating the journal or publishing a checkpoint. Claim
-                    # mode already deleted the original dead owner's lock, so
-                    # releasing here would leave the run with no lock and no
-                    # matching ``.stale`` claim for ``brigade runs recover``.
-                    # ``RetainRunLockError`` keeps this claimed lock in place:
-                    # it records this run_dir, so once the reaper process exits
-                    # the lock reads back as a dead-owner stale lock that
-                    # recovery matches. The reason string stays bounded; the
-                    # writer's diagnostic may name a path, so it stays out of
-                    # the contract.
+                    # unready authority gate, a broken chain, or a raw
+                    # write-path OSError from the final run.json replace),
+                    # possibly after activating the journal or publishing a
+                    # checkpoint. Claim mode already deleted the original dead
+                    # owner's lock, so releasing here would leave the run with
+                    # no lock and no matching ``.stale`` claim for
+                    # ``brigade runs recover``. ``RetainRunLockError`` keeps
+                    # this claimed lock in place: it records this run_dir, so
+                    # once the reaper process exits the lock reads back as a
+                    # dead-owner stale lock that recovery matches. The reason
+                    # string stays bounded; the writer's diagnostic may name a
+                    # path, so it stays out of the contract.
                     raise runguard.RetainRunLockError("orphan reap write refused") from exc
     except ReapBindingError:
         # The run directory entry stopped resolving to the inode the reaper
@@ -525,14 +526,14 @@ def reap(
         return 2
     cwd = cwd.expanduser().resolve()
     if not cwd.is_dir():
-        print(f"error: --cwd is not a directory: {cwd}", file=sys.stderr)
+        print("error: --cwd is not a directory", file=sys.stderr)
         return 2
     # Resolve the root so a candidate's path already equals what every writer
     # module normalizes to. A binding is authorized lexically against the exact
     # bound path, so an unresolved root would silently skip the binding.
     root = runs_dir.expanduser().resolve() if runs_dir is not None else cwd / ".brigade" / "runs"
     if not root.is_dir():
-        print(f"error: runs directory not found: {root}", file=sys.stderr)
+        print("error: runs directory not found", file=sys.stderr)
         return 2
 
     clock = _utc_now(now)

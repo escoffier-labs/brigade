@@ -196,6 +196,59 @@ def test_reap_skips_too_young_run(tmp_path, capsys):
     assert json.loads((young / "run.json").read_text())["status"] == "dispatching"
 
 
+def test_revalidate_metadata_exact_threshold_is_too_young():
+    """The contract is strictly older than the threshold; equality stays too-young."""
+    started = NOW - timedelta(hours=2)
+    reason = run_reap._revalidate_metadata(
+        {"status": "dispatching", "started_at": started.isoformat()},
+        older_than=timedelta(hours=2),
+        now=NOW,
+    )
+    assert reason == "too-young"
+
+
+def test_reap_missing_cwd_error_is_bounded(tmp_path, capsys):
+    nasty = tmp_path / "cwd\n\x1b[31mINJECT"
+    nasty.write_text("not-a-directory\n")
+    assert (
+        run_reap.reap(
+            cwd=nasty,
+            runs_dir=None,
+            older_than="2h",
+            json_output=True,
+            now=NOW,
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert err == "error: --cwd is not a directory\n"
+    assert "INJECT" not in err
+    assert "\x1b" not in err
+    assert nasty.name not in err
+    assert str(nasty.resolve()) not in err
+
+
+def test_reap_missing_runs_dir_error_is_bounded(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    nasty = tmp_path / "runs\n\x1b[31mINJECT"
+    assert (
+        run_reap.reap(
+            cwd=repo,
+            runs_dir=nasty,
+            older_than="2h",
+            json_output=True,
+            now=NOW,
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert err == "error: runs directory not found\n"
+    assert "INJECT" not in err
+    assert "\x1b" not in err
+    assert nasty.name not in err
+    assert str(nasty.resolve()) not in err
+
+
 def test_reap_skips_malformed_symlink_and_ambiguous(tmp_path, capsys):
     repo = _repo(tmp_path)
     runs = repo / ".brigade" / "runs"
@@ -1101,6 +1154,37 @@ def test_symlinked_recovery_checkpoints_directory_fails_closed(tmp_path, capsys)
     assert [row["reason"] for row in payload["skipped"]] == ["write-refused"]
     assert (run_dir / "run.json").read_bytes() == before
     assert list(outside.iterdir()) == []
+
+
+def test_final_write_oserror_retains_the_claimed_lock_and_writes_nothing_outside(tmp_path, capsys, monkeypatch):
+    """A raw OSError from the terminal run.json write must keep the recovery lock."""
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-oserror1", extra=dict(JOURNAL_REQUESTED))
+    claimed = run_dir.resolve()
+    _write_stale_lock(repo, run_dir)
+    outside, outside_json, before = _outside_canary(tmp_path, "outside-oserror")
+    moved: list[Path] = []
+    real_write = localio.write_text_atomic
+
+    def swap_then_oserror(path: Path, data: str) -> None:
+        if Path(path).name == "run.json":
+            if not moved:
+                moved.append(_swap_aside(run_dir, outside))
+            raise OSError("final sanctioned write refused")
+        return real_write(path, data)
+
+    monkeypatch.setattr(localio, "write_text_atomic", swap_then_oserror)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["write-refused"]
+    assert moved, "the terminal run.json write never ran"
+    _assert_outside_untouched(outside, outside_json, before)
+    owner = json.loads((repo / ".brigade" / "run.lock" / "owner.json").read_text())
+    assert owner["pid"] == os.getpid()
+    assert Path(owner["run_dir"]) == claimed
+    assert json.loads((moved[0] / "run.json").read_text())["status"] == "dispatching"
 
 
 def test_write_refused_under_a_swap_retains_the_claimed_lock(tmp_path, capsys, monkeypatch):
