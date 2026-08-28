@@ -27,7 +27,7 @@ tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 notify = { version = "8", optional = true }
-ureq = { version = "2", features = ["json"], optional = true }
+ureq = { version = "3", features = ["json"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
