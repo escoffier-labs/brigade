@@ -24,8 +24,9 @@ from . import compaction_marker, envelope
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
+    _ANNOUNCE_CLAIMED_KEY,
+    _claim_timeout_announce,
     _clear_hook_timeouts,
-    _mark_hook_latch_announced,
     _read_hook_latch,
     _record_hook_timeout,
     _session_state_lock,  # noqa: F401 - runtime compatibility alias
@@ -35,6 +36,12 @@ from .session_state import (
 BRIEF_TIMEOUT_SECONDS = 10
 HOOK_TIMEOUT_LATCH_AFTER = 2
 _TIMEOUT_FOLLOWUP_SECONDS = 0.5
+# Inner lock acquire only. Must stay strictly below the 0.5s outer follow-up
+# so a contended lock fails open to the journal path instead of consuming
+# the whole parent wait. Do not add observe slack or a second sequential
+# announce wait: 12s worker + 1.2s terminate + 0.5s claim + 0.5s follow-up
+# = 14.2s under the 15s handler.
+_SESSION_STATE_LOCK_SECONDS = 0.25
 _HOOK_OUTCOME_KINDS = frozenset({"ok", "latched", "latched_silent"})
 
 MAX_RECENT_SESSION_STATES = 512
@@ -2822,9 +2829,8 @@ def _hook_run_body(
             }
         )
     if latched and log_target is not None:
-        if announce:
+        if announce and _claim_timeout_announce(log_target, session_id):
             envelope.append_log(log_target, f"{event}: latched after repeated timeouts")
-            _mark_hook_latch_announced(log_target, session_id)
             return {
                 "kind": "latched",
                 "result": envelope.latched_envelope(event),
@@ -3187,17 +3193,33 @@ def _run_best_effort_bounded(
     return box[0]
 
 
-def _apply_timeout_followup_inprocess(event: str, target: Path, session_id: str, detail: str) -> str:
+def _apply_timeout_followup_inprocess(
+    event: str,
+    target: Path,
+    session_id: str,
+    detail: str,
+    *,
+    publish: Callable[[str], None] | None = None,
+) -> str:
     try:
-        state = _record_hook_timeout(target, session_id)
-        envelope.append_log(target, f"{event}: degraded: {detail}")
-        if state.get("hook_latched") is True:
-            envelope.append_log(target, f"{event}: latched after repeated timeouts")
-            _mark_hook_latch_announced(target, session_id)
-            return "latched"
-        return "degraded"
+        state = _record_hook_timeout(target, session_id, announce=True)
     except OSError:
         return "degraded"
+    if state.get(_ANNOUNCE_CLAIMED_KEY) is True:
+        outcome = "latched"
+    elif state.get("hook_latched") is True:
+        outcome = "latched_silent"
+    else:
+        outcome = "degraded"
+    if publish is not None:
+        publish(outcome)
+    try:
+        envelope.append_log(target, f"{event}: degraded: {detail}")
+        if outcome == "latched":
+            envelope.append_log(target, f"{event}: latched after repeated timeouts")
+    except OSError:
+        pass
+    return outcome
 
 
 def _append_degraded_diagnostic(event: str, log_target: Path | None, detail: object) -> None:
@@ -3239,15 +3261,22 @@ def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc
     The path was already resolved inside the timed worker. Latch-state
     writes (and that path's target-tree hook.log) still touch that tree;
     they run best-effort under a hard cap so a later stall cannot hang
-    the parent. Non-timeout doctor-pointer logs use
-    ``_append_degraded_diagnostic`` instead.
+    the parent. The latch outcome is published as soon as state is known
+    so a later log stall cannot hide it. Non-timeout doctor-pointer logs
+    use ``_append_degraded_diagnostic`` instead.
     """
     detail = str(exc)
-    return _run_best_effort_bounded(
-        lambda: _apply_timeout_followup_inprocess(event, log_target, session_id, detail),
+    published = ["degraded"]
+
+    def publish(outcome: str) -> None:
+        published[0] = outcome
+
+    _run_best_effort_bounded(
+        lambda: _apply_timeout_followup_inprocess(event, log_target, session_id, detail, publish=publish),
         timeout=_TIMEOUT_FOLLOWUP_SECONDS,
         default="degraded",
     )
+    return published[0]
 
 
 def _bounded_release_claim(path: Path | None) -> None:
@@ -3321,8 +3350,12 @@ def hook_run(
         claim_path = None
         followup_target = exc.log_target if exc.log_target is not None else log_target
         if followup_target is not None and _is_timeout_degraded(exc):
-            if _bounded_timeout_followup(event, followup_target, session_id, exc) == "latched":
+            followup = _bounded_timeout_followup(event, followup_target, session_id, exc)
+            if followup == "latched":
                 envelope.emit_stdout(envelope.latched_envelope(event))
+                return 0
+            if followup == "latched_silent":
+                envelope.emit_stdout(envelope.empty_envelope(event))
                 return 0
         else:
             _append_degraded_diagnostic(event, followup_target, exc)
