@@ -117,6 +117,7 @@ SCHEMA_VERSION = 13
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 ACTIVE_EVENT_TTL_SECONDS = 30 * 60
+STALE_HISTORY_AFTER_SECONDS = 24 * 60 * 60
 
 # Dashboard cookie (issue #1124): a derived, read-only capability, not the token.
 DASHBOARD_COOKIE = "brigade_fleet_view"
@@ -193,6 +194,7 @@ TERMINAL_STATES = frozenset(
         "run.completed",
         "run.failed",
         "run.interrupted",
+        "run.orphaned",
         "verify.completed",
         "external.completed",
         "external.failed",
@@ -723,18 +725,35 @@ def _received_at_is_active(value: object, *, now: datetime, ttl_seconds: int) ->
     return (now - received.astimezone(timezone.utc)).total_seconds() <= ttl_seconds
 
 
+def _received_at_age_seconds(value: object, *, now: datetime) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        received = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=timezone.utc)
+    return (now - received.astimezone(timezone.utc)).total_seconds()
+
+
 def latest_status(
     conn: sqlite3.Connection,
     *,
     include_all: bool = False,
     now: datetime | None = None,
     active_ttl_seconds: int = ACTIVE_EVENT_TTL_SECONDS,
+    stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
 ) -> list[dict[str, Any]]:
     """Latest event per (node_id, run_id); non-terminal runs unless include_all.
 
     Exactly one row per (node_id, run_id): ties on sequence (same sequence
     seen with two digests) resolve to the most recently received, then the
     larger digest, so the view never shows a run twice.
+
+    History views (``include_all``) age old nonterminal rows to synthetic
+    ``run.stale`` from Hub ``received_at``, keeping the recorded state in
+    ``original_state``. Event history itself is not rewritten.
     """
     rows = conn.execute(
         "SELECT node_id, run_id, repo, seat, harness, state, ts, sequence, digest, exit_status, capability_fingerprint, received_at FROM ("
@@ -746,27 +765,32 @@ def latest_status(
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     result = []
     for row in rows:
+        state = row[5]
         if not include_all and (
-            fleet_command_deck.is_terminal_state(row[5])
+            fleet_command_deck.is_terminal_state(state)
             or not _received_at_is_active(row[11], now=current, ttl_seconds=active_ttl_seconds)
         ):
             continue
-        result.append(
-            {
-                "node_id": row[0],
-                "run_id": row[1],
-                "repo": row[2],
-                "seat": _last_known_seat(conn, row[0], row[1], row[3]),
-                "harness": row[4],
-                "state": row[5],
-                "ts": row[6],
-                "sequence": row[7],
-                "digest": row[8],
-                "exit_status": row[9],
-                "capability_fingerprint": row[10],
-                "received_at": row[11],
-            }
-        )
+        entry = {
+            "node_id": row[0],
+            "run_id": row[1],
+            "repo": row[2],
+            "seat": _last_known_seat(conn, row[0], row[1], row[3]),
+            "harness": row[4],
+            "state": state,
+            "ts": row[6],
+            "sequence": row[7],
+            "digest": row[8],
+            "exit_status": row[9],
+            "capability_fingerprint": row[10],
+            "received_at": row[11],
+        }
+        if include_all and not fleet_command_deck.is_terminal_state(state):
+            age = _received_at_age_seconds(row[11], now=current)
+            if age is not None and age > stale_history_after_seconds:
+                entry["original_state"] = state
+                entry["state"] = "run.stale"
+        result.append(entry)
     return result
 
 

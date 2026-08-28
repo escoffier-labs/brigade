@@ -1064,13 +1064,18 @@ def _wait_to_acquire_lock(
     wait_seconds: float,
     poll_interval: float,
     on_reconcile: Callable[[dict[str, object] | None], None] | None = None,
+    stale_action: str = "recover",
 ) -> _LockOwnership:
     def _acquire() -> _LockOwnership:
-        # Forward the callback only when set: the acquire seam is
-        # monkeypatched by tests with fakes that predate it.
-        if on_reconcile is None:
+        # Forward optional kwargs only when set: the acquire seam is
+        # monkeypatched by tests with fakes that predate them.
+        if on_reconcile is None and stale_action == "recover":
             return _acquire_lock(path, run_dir=run_dir)
-        return _acquire_lock(path, run_dir=run_dir, on_reconcile=on_reconcile)
+        if on_reconcile is None:
+            return _acquire_lock(path, run_dir=run_dir, stale_action=stale_action)
+        if stale_action == "recover":
+            return _acquire_lock(path, run_dir=run_dir, on_reconcile=on_reconcile)
+        return _acquire_lock(path, run_dir=run_dir, on_reconcile=on_reconcile, stale_action=stale_action)
 
     if wait_seconds == 0:
         return _acquire()
@@ -1119,6 +1124,7 @@ def _acquire_lock(
     *,
     run_dir: Path | None = None,
     on_reconcile: Callable[[dict[str, object] | None], None] | None = None,
+    stale_action: str = "recover",
 ) -> _LockOwnership:
     """Publish the lock, reconciling a dead-owner lock on the way in.
 
@@ -1143,6 +1149,24 @@ def _acquire_lock(
                     f"another brigade run appears active: {path}. Remove the lock only if no run is active."
                 ) from None
             claimed, owner = stale
+            if stale_action == "claim":
+                # TOCTOU gate: the pre-acquire ``run_lock_state`` verdict was
+                # read before the rename, so the directory now under our
+                # recovery claim may belong to a different run. Re-verify the
+                # claimed dead owner's recorded run_dir inside the atomic
+                # claim path and fail closed on a mismatch: a foreign claim is
+                # restored where possible and never deleted.
+                if run_dir is None or not _owner_matches_run(owner, run_dir.expanduser().resolve()):
+                    if not path.exists():
+                        try:
+                            claimed.rename(path)
+                        except OSError:
+                            pass
+                    raise RunLockError(
+                        f"stale run lock does not belong to this run: {path}. Refusing to claim it."
+                    ) from None
+                shutil.rmtree(claimed, ignore_errors=True)
+                continue
             _invoke_before_terminalize(path, claimed, owner, None)
             if on_reconcile is not None:
                 on_reconcile(owner)
@@ -1187,16 +1211,26 @@ def run_lock(
     wait_seconds: float = 0.0,
     poll_interval: float = 0.1,
     on_reconcile: Callable[[dict[str, object] | None], None] | None = None,
+    stale_action: str = "recover",
 ):
     """Hold the workspace run lock for the block; yields the lock path.
 
     ``on_reconcile`` is invoked when acquiring released a dead-owner lock
     (see ``_acquire_lock``), before the block runs.
+    ``stale_action="claim"`` takes over a dead-owner lock without writing a
+    stale-lock-recovery failure receipt so an explicit reaper can terminalize.
+    It requires ``run_dir``: the claim path re-verifies the dead owner's
+    recorded run directory inside the atomic claim and fails closed rather
+    than deleting a lock that belongs to a different run.
     """
     if wait_seconds < 0 or (not math.isinf(wait_seconds) and not math.isfinite(wait_seconds)):
         raise ValueError("run lock wait_seconds must be zero, positive, or unbounded")
     if poll_interval <= 0:
         raise ValueError("run lock poll_interval must be positive")
+    if stale_action not in {"recover", "claim"}:
+        raise ValueError("run lock stale_action must be recover or claim")
+    if stale_action == "claim" and run_dir is None:
+        raise ValueError("run lock stale_action=claim requires run_dir")
     path = lock_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
     ownership = _wait_to_acquire_lock(
@@ -1205,6 +1239,7 @@ def run_lock(
         wait_seconds=wait_seconds,
         poll_interval=poll_interval,
         on_reconcile=on_reconcile,
+        stale_action=stale_action,
     )
     retain_lock = False
     try:

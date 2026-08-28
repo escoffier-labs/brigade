@@ -314,7 +314,11 @@ def make_handler(
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
             try:
-                runs = latest_status(conn, include_all=True)
+                runs = latest_status(
+                    conn,
+                    include_all=True,
+                    stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                )
                 claims = list_claims(conn)
                 started_at = run_started_at(conn)
                 nodes = node_summary(conn)
@@ -469,7 +473,13 @@ def make_handler(
                             return
                         payload = {"nodes": list_nodes(conn)}
                     elif path == "/status":
-                        payload = {"runs": latest_status(conn, include_all=include_all)}
+                        payload = {
+                            "runs": latest_status(
+                                conn,
+                                include_all=include_all,
+                                stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                            )
+                        }
                     elif path == "/cloud":
                         payload = cloud_snapshot(conn, frozen_deck, include_all=include_all, include_grokbot=is_admin)
                     elif path == "/models":

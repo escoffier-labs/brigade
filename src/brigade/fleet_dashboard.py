@@ -151,6 +151,10 @@ def _parse_stamp(value: object) -> datetime | None:
 
 def bucket_for(state: str, *, age_seconds: float | None, exit_status: int | None = None) -> str:
     """Map a run_event type plus its age to an attention bucket."""
+    if state == "run.stale":
+        return "stale"
+    if state == "run.orphaned":
+        return "interrupted"
     if state == "verify.completed":
         if exit_status == 130:
             return "interrupted"

@@ -94,6 +94,7 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     "run.completed": frozenset({"status", "detail"}),
     "run.failed": frozenset({"status", "detail"}),
     "run.interrupted": frozenset({"status", "detail"}),
+    "run.orphaned": frozenset({"status", "last_observed_status", "uncommitted_change_count"}),
     "run.snapshot.checkpointed": frozenset(
         {
             "path",

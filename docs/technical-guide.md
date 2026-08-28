@@ -435,7 +435,7 @@ The examples above all drive the same `brigade run` command to show its main fla
 Common `brigade run` flags:
 
 - `--dry-run` prints planned assignments as JSON and stops before worker dispatch.
-- `--detach` starts the run in a child process, writes child output to `detached.log`, and returns after `run.json` appears.
+- `--detach` starts the run in a child process, writes child output to `detached.log`, and returns after `run.json` appears. The child takes over a new session (`start_new_session` on POSIX, job-breakaway on Windows) and does not depend on the launching session staying alive.
 - `--wait[=SECONDS]` waits for the target's active run lock instead of failing immediately. A bare `--wait` waits up to 600 seconds. Without this flag, lock conflicts remain fail-fast.
 - `--no-fleet-claim` skips the fleet hub repo claim and relies on the local run lock alone (logged once). The escape hatch when a claim left by a crashed run blocks the repo; `brigade fleet claims --release <target>` frees such a claim (`--force` for another node's).
 - `--allow-dirty` bypasses the default dirty-git-worktree guard.
@@ -485,6 +485,18 @@ verified journal checkpoint. Recovery validates the bounded event chain and
 checkpoint before replacing `run.json`. If rollback leaves an older Brigade
 unable to interpret a journal event or projector version, stop that writer and
 roll forward. The append-only journal format is a one-way storage boundary.
+
+Use `brigade runs reap --cwd /path/to/repo` to terminalize local runs whose
+recorded owner process is gone. Reap writes `status: orphaned` and a dirty-file
+count (filenames stay off the receipt) through the same run.json writer every
+other status transition uses, under the run lock it claims from the dead owner.
+A run enrolled in lifecycle journaling therefore also gets a recovery
+checkpoint paired with a `run.orphaned` event, so the Hub row can close and
+`brigade doctor` stays clean; a legacy snapshot-only run is left snapshot-only
+rather than migrated. It does not rewrite Hub history: `brigade fleet
+status --all` ages silent nonterminal rows to display-only `run.stale` after
+24h, separate from the 30-minute live-status window. `brigade work brief`
+lists orphaned runs and the recorded dirty count.
 
 `brigade runs resume <run>` also handles an app-server run whose owner exited
 after dispatch began but before `worker-results.json` was aggregated. After it

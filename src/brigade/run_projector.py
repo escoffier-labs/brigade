@@ -113,6 +113,9 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         # Artifact references
         "artifacts",
         "handoff",
+        "orphaned_at",
+        "last_observed_status",
+        "uncommitted_change_count",
     }
 )
 
@@ -187,6 +190,7 @@ _PAYLOAD_STATUS_RULES: dict[str, tuple[frozenset[str], str | None]] = {
     # Payload status is preserved so canceled (brigade run) and cancelled
     # (research) both project correctly without rewriting each other.
     "run.interrupted": (frozenset({"canceled", "cancelled"}), None),
+    "run.orphaned": (frozenset({"orphaned"}), "orphaned"),
 }
 
 

@@ -117,6 +117,7 @@ STATUS_EVENT_TYPE: dict[str, str] = {
     "timeout": "run.failed",
     "dry-run": "run.completed",
     "incomplete": "run.failed",
+    "orphaned": "run.orphaned",
     "artifact-collection": "run.artifact_collection.started",
     "paused": "run.paused",
     "running": "run.resumed",
@@ -680,6 +681,15 @@ def _allowlisted_payload(
         if len(text) > run_events.MAX_PAYLOAD_STR_LEN:
             text = text[: run_events.MAX_PAYLOAD_STR_LEN]
         payload["detail"] = text
+    incoming = incoming_snapshot or {}
+    if "last_observed_status" in allowed:
+        last_status = incoming.get("last_observed_status")
+        if isinstance(last_status, str) and last_status:
+            payload["last_observed_status"] = last_status[: run_events.MAX_PAYLOAD_STR_LEN]
+    if "uncommitted_change_count" in allowed:
+        dirty = incoming.get("uncommitted_change_count")
+        if isinstance(dirty, int) and not isinstance(dirty, bool) and 0 <= dirty <= run_events.MAX_CANONICAL_INT:
+            payload["uncommitted_change_count"] = dirty
     if event_type in {"run.paused", "run.resumed"}:
         reference = _approval_reference(incoming_snapshot)
         if reference is None:

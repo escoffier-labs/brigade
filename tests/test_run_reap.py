@@ -1,0 +1,616 @@
+"""Local orphan-run reaper, Hub stale-history aging, and work-brief surfacing."""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from brigade import cli
+from brigade import doctor
+from brigade import dogfood_cmd
+from brigade import fleet_command_deck as deck
+from brigade import fleet_dashboard
+from brigade import fleet_hub
+from brigade import localio
+from brigade import proc
+from brigade import run_checkpoint
+from brigade import run_events
+from brigade import run_journal
+from brigade import run_lifecycle
+from brigade import run_projector
+from brigade import run_reap
+from brigade import runguard
+from brigade import work_cmd
+from tests.work_cmd_test_helpers import _init_git_repo
+
+
+OLD_STARTED = "2026-08-20T12:00:00+00:00"
+NOW = datetime(2026, 8, 28, 18, 0, 0, tzinfo=timezone.utc)
+NODE = "11111111-1111-4111-8111-111111111111"
+# A run that durably opted into lifecycle journaling. Legacy runs omit it and
+# must stay snapshot-only through the reaper.
+JOURNAL_REQUESTED = {"lifecycle_journal_requested": True}
+AUTHORITY_REQUESTED = {"lifecycle_journal_requested": True, "run_journal_authority_requested": True}
+
+
+def _git(repo: Path, *args: str) -> proc.Result:
+    result = proc.run(["git", *args], cwd=repo)
+    assert result.code == 0, result.stderr
+    return result
+
+
+def _repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "tracked.txt").write_text("base\n")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    return repo
+
+
+def _write_run(
+    repo: Path,
+    run_id: str,
+    *,
+    status: str = "dispatching",
+    started_at: str = OLD_STARTED,
+    extra: dict | None = None,
+) -> Path:
+    run_dir = repo / ".brigade" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    payload = {
+        "task": "orphan task",
+        "cwd": str(repo),
+        "lock_workspace": str(repo),
+        "orchestrator": "chef",
+        "status": status,
+        "started_at": started_at,
+    }
+    if extra:
+        payload.update(extra)
+    localio.write_json(run_dir / "run.json", payload)
+    return run_dir
+
+
+def _write_stale_lock(repo: Path, run_dir: Path, *, pid: int = 99999999) -> Path:
+    lock_path = repo / ".brigade" / "run.lock"
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{pid}\n")
+    localio.write_json(
+        lock_path / "owner.json",
+        {
+            "schema": "brigade.run_lock.v1",
+            "owner_token": "owner",
+            "pid": pid,
+            "run_dir": str(run_dir.resolve()),
+            "acquired_at": OLD_STARTED,
+        },
+    )
+    return lock_path
+
+
+def _reap(repo: Path, *, older_than: str = "2h", json_output: bool = True, now: datetime = NOW) -> int:
+    return run_reap.reap(
+        cwd=repo,
+        runs_dir=None,
+        older_than=older_than,
+        json_output=json_output,
+        now=now,
+    )
+
+
+def test_parse_older_than_default_and_units():
+    assert run_reap.parse_older_than("2h") == timedelta(hours=2)
+    assert run_reap.parse_older_than("30m") == timedelta(minutes=30)
+    assert run_reap.parse_older_than("90s") == timedelta(seconds=90)
+    assert run_reap.parse_older_than("1d") == timedelta(days=1)
+    with pytest.raises(ValueError):
+        run_reap.parse_older_than("nope")
+
+
+def test_reap_terminalizes_stale_owner_as_orphaned(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    (repo / "secret-name.txt").write_text("dirty\n")
+    (repo / "tracked.txt").write_text("changed\n")
+    run_dir = _write_run(repo, "20260820-120000-orphan01", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == "brigade.runs-reap.v1"
+    assert payload["reaped"][0]["run_id"] == "20260820-120000-orphan01"
+    assert payload["reaped"][0]["uncommitted_change_count"] == 2
+    dumped = json.dumps(payload)
+    assert "secret-name.txt" not in dumped
+    assert "tracked.txt" not in dumped
+
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["status"] == "orphaned"
+    assert meta["last_observed_status"] == "dispatching"
+    assert meta["uncommitted_change_count"] == 2
+    assert meta["orphaned_at"]
+    assert meta["finished_at"]
+    assert "secret-name.txt" not in json.dumps(meta)
+
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    assert journal.is_file()
+    events = run_journal.read_journal(journal).events
+    assert events[-1].event_type == "run.orphaned"
+    assert events[-1].payload["status"] == "orphaned"
+    assert events[-1].payload["last_observed_status"] == "dispatching"
+    assert events[-1].payload["uncommitted_change_count"] == 2
+    assert "secret-name.txt" not in journal.read_text()
+
+
+def test_reap_is_idempotent(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-orphan02", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    assert _reap(repo) == 0
+    first = json.loads((run_dir / "run.json").read_text())
+    first_events = run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+    capsys.readouterr()
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert payload["skipped"][0]["reason"] == "already-orphaned"
+    second = json.loads((run_dir / "run.json").read_text())
+    assert second == first
+    assert run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events == first_events
+
+
+def _skipped_reasons(capsys, repo: Path) -> dict[str, str]:
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    return {row["run_id"]: row["reason"] for row in payload["skipped"]}
+
+
+def test_reap_skips_live_owner(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    live = _write_run(repo, "20260820-120000-live0001")
+    _write_stale_lock(repo, live, pid=os.getpid())
+    (repo / ".brigade" / "run.lock" / "pid").write_text(f"{os.getpid()}\n")
+    reasons = _skipped_reasons(capsys, repo)
+    assert reasons["20260820-120000-live0001"] == "live"
+    assert json.loads((live / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_reap_skips_too_young_run(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    young = _write_run(repo, "20260828-170000-young001", started_at="2026-08-28T17:00:00+00:00")
+    _write_stale_lock(repo, young)
+    reasons = _skipped_reasons(capsys, repo)
+    assert reasons["20260828-170000-young001"] == "too-young"
+    assert json.loads((young / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_reap_skips_malformed_symlink_and_ambiguous(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    runs = repo / ".brigade" / "runs"
+    runs.mkdir(parents=True)
+    malformed = runs / "20260820-120000-badjson1"
+    malformed.mkdir()
+    (malformed / "run.json").write_text("{not-json")
+    outside = tmp_path / "outside-run"
+    outside.mkdir()
+    localio.write_json(outside / "run.json", {"status": "dispatching", "started_at": OLD_STARTED})
+    (runs / "20260820-120000-symlink1").symlink_to(outside)
+    ambiguous = _write_run(repo, "20260820-120000-nolock01")
+    reasons = _skipped_reasons(capsys, repo)
+    assert reasons["20260820-120000-badjson1"] == "malformed"
+    assert reasons["20260820-120000-symlink1"] == "symlink"
+    assert reasons["20260820-120000-nolock01"] == "ambiguous"
+    assert json.loads((ambiguous / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_reap_one_winner_under_race(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-race0001", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    results: list[int] = []
+
+    def _worker() -> None:
+        results.append(
+            run_reap.reap(
+                cwd=repo,
+                runs_dir=None,
+                older_than="2h",
+                json_output=True,
+                now=NOW,
+            )
+        )
+
+    threads = [threading.Thread(target=_worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert results == [0, 0]
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["status"] == "orphaned"
+    events = run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+    assert sum(1 for event in events if event.event_type == "run.orphaned") == 1
+
+
+def test_reap_skips_concurrently_changed_run(tmp_path, capsys, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-changed1")
+    _write_stale_lock(repo, run_dir)
+    real_lock = runguard.run_lock
+
+    def _racing_lock(*args, **kwargs):
+        context = real_lock(*args, **kwargs)
+
+        class _Wrapper:
+            def __enter__(self):
+                path = context.__enter__()
+                payload = json.loads((run_dir / "run.json").read_text())
+                payload["status"] = "ok"
+                payload["finished_at"] = "2026-08-28T17:59:00+00:00"
+                localio.write_json(run_dir / "run.json", payload)
+                return path
+
+            def __exit__(self, *exc):
+                return context.__exit__(*exc)
+
+        return _Wrapper()
+
+    monkeypatch.setattr(runguard, "run_lock", _racing_lock)
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert payload["skipped"][0]["reason"] == "concurrently-changed"
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "ok"
+
+
+def test_runs_reap_cli_default_older_than_and_readable(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-cli0001")
+    _write_stale_lock(repo, run_dir)
+    assert cli.main(["runs", "reap", "--cwd", str(repo)]) == 0
+    out = capsys.readouterr().out
+    assert "reaped: 1" in out
+    assert "20260820-120000-cli0001" in out
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "orphaned"
+
+
+def test_run_orphaned_is_terminal_across_contracts():
+    assert "run.orphaned" in run_events.EVENT_TYPES
+    assert run_events.EVENT_TYPES["run.orphaned"] == frozenset(
+        {"status", "last_observed_status", "uncommitted_change_count"}
+    )
+    assert run_lifecycle.STATUS_EVENT_TYPE["orphaned"] == "run.orphaned"
+    assert "run.orphaned" in fleet_hub.TERMINAL_STATES
+    assert "run.orphaned" in deck.TERMINAL_STATES
+    assert deck.is_terminal_state("run.orphaned")
+    assert "orphaned_at" in run_projector.PRESERVED_FIELDS
+    assert "last_observed_status" in run_projector.PRESERVED_FIELDS
+    assert "uncommitted_change_count" in run_projector.PRESERVED_FIELDS
+
+
+def test_projector_derives_orphaned_and_keeps_privacy():
+    created = run_events.build_event(
+        run_id="20260820-120000-proj0001",
+        sequence=1,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="create-1",
+        recorded_at="2026-08-20T12:00:00.000000Z",
+        previous_digest=None,
+    )
+    orphaned = run_events.build_event(
+        run_id="20260820-120000-proj0001",
+        sequence=2,
+        event_type="run.orphaned",
+        payload={
+            "status": "orphaned",
+            "last_observed_status": "dispatching",
+            "uncommitted_change_count": 2,
+        },
+        idempotency_key="orphan-1",
+        recorded_at="2026-08-28T18:00:00.000000Z",
+        previous_digest=created["event_digest"],
+    )
+    with pytest.raises(run_events.CanonicalizationError):
+        run_events.build_event(
+            run_id="20260820-120000-proj0001",
+            sequence=2,
+            event_type="run.orphaned",
+            payload={"status": "orphaned", "filenames": ["secret-name.txt"]},
+            idempotency_key="orphan-bad",
+            recorded_at="2026-08-28T18:00:00.000000Z",
+            previous_digest=created["event_digest"],
+        )
+    projection = run_projector.project_run_snapshot(
+        {"status": "started", "schema": "brigade.run.v1"},
+        [created, orphaned],
+        journal_present=True,
+    )
+    assert projection.status == "orphaned"
+
+
+def test_hub_history_ages_old_nonterminal_as_synthetic_stale(tmp_path):
+    db = tmp_path / "fleet.db"
+    conn = fleet_hub.init_db(db)
+    now = datetime(2026, 8, 28, 18, 0, 0, tzinfo=timezone.utc)
+    conn.execute(
+        "INSERT INTO events (node_id, run_id, sequence, digest, repo, seat, harness, state, ts, exit_status, capability_fingerprint, received_at) "
+        "VALUES (?, ?, 1, 'old', 'repo', 'coder', 'cursor', 'run.dispatch.requested', ?, NULL, NULL, ?)",
+        (NODE, "old-run", now.isoformat(), (now - timedelta(hours=30)).isoformat()),
+    )
+    conn.execute(
+        "INSERT INTO events (node_id, run_id, sequence, digest, repo, seat, harness, state, ts, exit_status, capability_fingerprint, received_at) "
+        "VALUES (?, ?, 1, 'fresh', 'repo', 'coder', 'cursor', 'run.dispatch.requested', ?, NULL, NULL, ?)",
+        (NODE, "fresh-run", now.isoformat(), (now - timedelta(minutes=5)).isoformat()),
+    )
+    conn.commit()
+    active = fleet_hub.latest_status(conn, now=now)
+    history = fleet_hub.latest_status(conn, include_all=True, now=now)
+    conn.close()
+    assert {row["run_id"] for row in active} == {"fresh-run"}
+    by_id = {row["run_id"]: row for row in history}
+    assert by_id["old-run"]["state"] == "run.stale"
+    assert by_id["old-run"]["original_state"] == "run.dispatch.requested"
+    assert by_id["fresh-run"]["state"] == "run.dispatch.requested"
+    assert "original_state" not in by_id["fresh-run"]
+
+
+def test_stale_history_threshold_is_bounded_and_separate_from_liveness(tmp_path):
+    assert fleet_hub.ACTIVE_EVENT_TTL_SECONDS == 30 * 60
+    assert deck.DeckConfig().stale_after_seconds == 1800
+    assert deck.DeckConfig().stale_history_after_seconds == 86400
+    path = tmp_path / "deck.json"
+    path.write_text(
+        json.dumps(
+            {
+                "stations": [{"node_id": NODE, "name": "Alpha", "capacity": 2}],
+                "stale_history_after_seconds": 3600,
+            }
+        )
+    )
+    assert deck.load_config(path).stale_history_after_seconds == 3600
+    path.write_text(
+        json.dumps(
+            {
+                "stations": [{"node_id": NODE, "name": "Alpha", "capacity": 2}],
+                "stale_history_after_seconds": 60,
+            }
+        )
+    )
+    with pytest.raises(deck.DeckConfigError):
+        deck.load_config(path)
+    assert fleet_dashboard.bucket_for("run.stale", age_seconds=0) == "stale"
+    assert fleet_dashboard.bucket_for("run.stale", age_seconds=None) == "stale"
+    assert fleet_dashboard.bucket_for("run.orphaned", age_seconds=0) == "interrupted"
+
+
+def test_work_brief_reports_orphaned_runs_and_dirty_trap(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    run_dir = tmp_path / ".brigade" / "runs" / "20260820-120000-brief001"
+    run_dir.mkdir(parents=True)
+    localio.write_json(
+        run_dir / "run.json",
+        {
+            "status": "orphaned",
+            "started_at": OLD_STARTED,
+            "orphaned_at": "2026-08-28T18:00:00+00:00",
+            "last_observed_status": "dispatching",
+            "uncommitted_change_count": 3,
+            "task": "stuck work",
+        },
+    )
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "orphaned_runs: 1" in out
+    assert "20260820-120000-brief001" in out
+    assert "dirty=3" in out
+    assert "orphaned_trap:" in out
+    assert "brigade runs show" in out
+    capsys.readouterr()
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["orphaned_runs"][0]["uncommitted_change_count"] == 3
+    assert "secret-name.txt" not in json.dumps(payload)
+    assert payload["orphaned_runs"][0]["suggested_command"].startswith("brigade runs show")
+
+
+def _journal_events(run_dir: Path):
+    return run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+
+
+def _doctor_recovery(repo: Path) -> tuple[str, str, str]:
+    return doctor._check_recovery_checkpoints(repo, full=True)
+
+
+def _bootstrap_journaled_run(repo: Path, run_id: str, *, authority: bool) -> Path:
+    """Create a run the way a real dispatch does, through the sanctioned writer.
+
+    The run.json durable request fields are written first, then one status
+    write under the run lock activates the journal, publishes the first
+    recovery checkpoint, and (for an authority run) projects run.json.
+    """
+    from brigade import aboyeur, receipt_schema
+
+    extra = dict(AUTHORITY_REQUESTED if authority else JOURNAL_REQUESTED)
+    run_dir = _write_run(repo, run_id, status="planning", extra=extra)
+    payload = json.loads((run_dir / "run.json").read_text())
+    payload["status"] = "dispatching"
+    with runguard.run_lock(repo, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(payload))
+    _write_stale_lock(repo, run_dir)
+    return run_dir
+
+
+def test_reap_leaves_a_legacy_snapshot_only_run_without_a_journal(tmp_path, capsys):
+    """A run that never requested journaling is terminalized snapshot-only."""
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-legacy01")
+    _write_stale_lock(repo, run_dir)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"][0]["run_id"] == "20260820-120000-legacy01"
+
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["status"] == "orphaned"
+    assert meta["last_observed_status"] == "dispatching"
+    # No journal is manufactured, and no projection metadata is invented.
+    assert not (run_dir / "events" / "lifecycle.jsonl").exists()
+    assert not (run_dir / "events" / "recovery-checkpoints").exists()
+    for derived in ("projector_version", "journal_present", "journal_last_sequence", "journal_last_event_digest"):
+        assert derived not in meta
+
+    status, _name, detail = _doctor_recovery(repo)
+    assert status == doctor.OK, detail
+    assert "fail=0" in detail
+    assert "omitted=1" in detail
+
+
+def test_reap_of_a_journal_requested_run_writes_a_checkpoint_and_orphaned_pair(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    run_dir = _bootstrap_journaled_run(repo, "20260820-120000-journal1", authority=False)
+    before = len(_journal_events(run_dir))
+
+    assert _reap(repo) == 0
+    capsys.readouterr()
+
+    events = _journal_events(run_dir)
+    appended = events[before:]
+    assert [event.event_type for event in appended] == ["run.snapshot.checkpointed", "run.orphaned"]
+    assert appended[-1].payload["status"] == "orphaned"
+    assert appended[-1].payload["last_observed_status"] == "dispatching"
+    checkpoint = run_checkpoint.checkpoint_path(run_dir, appended[0].payload["sha256"])
+    assert checkpoint.is_file()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "orphaned"
+
+    status, _name, detail = _doctor_recovery(repo)
+    assert status == doctor.OK, detail
+    assert "fail=0" in detail
+
+
+def test_reap_of_an_authoritative_run_keeps_projected_cursor_parity(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    run_dir = _bootstrap_journaled_run(repo, "20260820-120000-authori1", authority=True)
+    bootstrapped = json.loads((run_dir / "run.json").read_text())
+    assert bootstrapped["journal_present"] is True
+    before = len(_journal_events(run_dir))
+
+    assert _reap(repo) == 0
+    capsys.readouterr()
+
+    events = _journal_events(run_dir)
+    appended = events[before:]
+    assert [event.event_type for event in appended] == ["run.snapshot.checkpointed", "run.orphaned"]
+
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["status"] == "orphaned"
+    assert meta["last_observed_status"] == "dispatching"
+    # Projected cursor parity: run.json's saved cursor is the journal tail.
+    assert meta["projector_version"] == run_projector.PROJECTOR_VERSION
+    assert meta["journal_present"] is True
+    assert meta["journal_last_sequence"] == len(events)
+    assert meta["journal_last_event_digest"] == events[-1].event_digest
+
+    # No lifecycle projection drift: run.json is exactly the projection of the
+    # latest stripped checkpoint base over the verified event sequence.
+    latest = run_checkpoint.latest_checkpoint_event(events)
+    base = json.loads(run_checkpoint.checkpoint_path(run_dir, latest.payload["sha256"]).read_bytes())
+    projection = run_projector.project_run_snapshot(base, events, journal_present=True)
+    assert projection.to_bytes() == (run_dir / "run.json").read_bytes()
+    assert projection.status == "orphaned"
+
+    status, _name, detail = _doctor_recovery(repo)
+    assert status == doctor.OK, detail
+    assert "fail=0" in detail
+
+
+def test_run_lock_claim_refuses_a_stale_lock_owned_by_another_run(tmp_path):
+    """stale_action='claim' fails closed on a run_dir mismatch, deleting nothing."""
+    repo = _repo(tmp_path)
+    mine = _write_run(repo, "20260820-120000-mine0001")
+    theirs = _write_run(repo, "20260820-120000-theirs01")
+    _write_stale_lock(repo, theirs)
+    lock = repo / ".brigade" / "run.lock"
+    owner_before = (lock / "owner.json").read_text()
+
+    with pytest.raises(runguard.RunLockError) as excinfo:
+        with runguard.run_lock(repo, run_dir=mine, wait_seconds=0, stale_action="claim"):
+            pass
+    assert "does not belong to this run" in str(excinfo.value)
+    assert lock.is_dir()
+    assert (lock / "owner.json").read_text() == owner_before
+    assert json.loads((theirs / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_run_lock_claim_requires_a_run_dir():
+    with pytest.raises(ValueError, match="requires run_dir"):
+        with runguard.run_lock(Path("."), stale_action="claim"):
+            pass
+
+
+def test_reap_fails_closed_when_the_lock_owner_changes_after_preflight(tmp_path, capsys, monkeypatch):
+    """TOCTOU: preflight saw a matching stale lock; the claim path sees another run."""
+    repo = _repo(tmp_path)
+    mine = _write_run(repo, "20260820-120000-toctou01")
+    theirs = _write_run(repo, "20260820-120000-toctou02", status="ok", started_at=OLD_STARTED)
+    _write_stale_lock(repo, theirs)
+    lock = repo / ".brigade" / "run.lock"
+    owner_before = (lock / "owner.json").read_text()
+
+    monkeypatch.setattr(runguard, "run_lock_state", lambda workspace, run_dir: "stale")
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    reasons = {row["run_id"]: row["reason"] for row in payload["skipped"]}
+    assert reasons["20260820-120000-toctou01"] == "concurrently-changed"
+    # The foreign claim survives untouched for its own owner to recover.
+    assert lock.is_dir()
+    assert (lock / "owner.json").read_text() == owner_before
+    assert json.loads((mine / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_list_orphaned_runs_scan_is_bounded(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    assert run_reap.ORPHAN_SCAN_LIMIT == 50
+    for index in range(run_reap.ORPHAN_SCAN_LIMIT + 10):
+        _write_run(repo, f"20260820-1200{index:02d}-bound{index:03d}")
+    buried = _write_run(repo, "20260819-120000-buried01")
+    localio.write_json(
+        buried / "run.json",
+        {"status": "orphaned", "last_observed_status": "dispatching", "uncommitted_change_count": 1},
+    )
+
+    reads: list[Path] = []
+    real_read = run_reap._read_run_bytes
+
+    def _counting_read(run_dir: Path):
+        reads.append(run_dir)
+        return real_read(run_dir)
+
+    monkeypatch.setattr(run_reap, "_read_run_bytes", _counting_read)
+    assert run_reap.list_orphaned_runs(repo) == []
+    assert len(reads) == run_reap.ORPHAN_SCAN_LIMIT
+    # The bound is a window, not a filter: a wider scan still finds the orphan.
+    reads.clear()
+    rows = run_reap.list_orphaned_runs(repo, scan_limit=200)
+    assert [row["run_id"] for row in rows] == ["20260819-120000-buried01"]
+
+
+def test_command_deck_buckets_synthetic_stale_history():
+    assert deck.bucket_for("run.stale", age_seconds=0, stale_after_seconds=1800) == "stale"
+    assert deck.bucket_for("run.stale", age_seconds=None, stale_after_seconds=1800) == "stale"
+    assert deck.bucket_for("run.stale", age_seconds=999_999, stale_after_seconds=1800) == "stale"
+    assert deck.bucket_for("run.stale", age_seconds=0, stale_after_seconds=1800) == fleet_dashboard.bucket_for(
+        "run.stale", age_seconds=0
+    )

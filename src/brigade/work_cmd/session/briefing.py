@@ -278,6 +278,9 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     )
     ledger_task = resolved.get("ledger_task") if isinstance(resolved.get("ledger_task"), dict) else None
     git = helpers._git_snapshot(target)
+    from ... import run_reap
+
+    orphaned_runs = run_reap.list_orphaned_runs(target)
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
     pending = ledger_mod._pending_tasks(target)
     ready_tasks = ledger_mod._ready_tasks(target)
@@ -543,6 +546,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "next_issue": ledger_mod._task_issue_metadata(ledger_task) if ledger_task else None,
         "next": str(resolved["task"]),
         "suggested_command": suggested,
+        "orphaned_runs": orphaned_runs,
         "update": update_notify.available_update(),
         "cloud_tracker": _cloud_tracker_for_brief(target),
     }
@@ -718,6 +722,21 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"issue_labels: {', '.join(str(label) for label in labels)}")
     print(f"next: {helpers._short(str(payload['next']))}")
     print(f"suggested_command: {payload['suggested_command']}")
+
+    orphaned_runs = payload.get("orphaned_runs")
+    if isinstance(orphaned_runs, list) and orphaned_runs:
+        print(f"orphaned_runs: {len(orphaned_runs)}")
+        for row in orphaned_runs:
+            if not isinstance(row, dict):
+                continue
+            print(
+                f"  {row.get('run_id')} last={row.get('last_observed_status')} "
+                f"dirty={row.get('uncommitted_change_count')}"
+            )
+            command = row.get("suggested_command")
+            if isinstance(command, str) and command.strip():
+                print(f"  {command}")
+        print("orphaned_trap: recorded dirty count only; inspect before assuming the tree is clean")
 
     pending = payload["pending_tasks"]
     if isinstance(pending, list) and pending:

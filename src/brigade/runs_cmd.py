@@ -2397,7 +2397,7 @@ def _supported_branch_snapshot(parent_run_dir: Path, branch_event: Any) -> tuple
     return projection.snapshot, None
 
 
-_TERMINAL_BRANCH_EVENT_TYPES = frozenset({"run.completed", "run.failed", "run.interrupted"})
+_TERMINAL_BRANCH_EVENT_TYPES = frozenset({"run.completed", "run.failed", "run.interrupted", "run.orphaned"})
 _TERMINAL_PARENT_EVENT_ERROR = "cannot branch a durable child from a terminal parent event"
 
 
@@ -3205,6 +3205,7 @@ _TERMINAL_LIFECYCLE_EVENT_TYPES = frozenset(
         "run.completed",
         "run.failed",
         "run.interrupted",
+        "run.orphaned",
     }
 )
 
