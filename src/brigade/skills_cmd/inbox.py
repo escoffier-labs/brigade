@@ -222,11 +222,11 @@ def inbox_add(
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
-    source_dir, error = _registry_mod._source_skill_dir(source)
+    source_dir, collected_dirs, collected_files, error = _registry_mod._collect_classified_source_tree(target, source)
     if source_dir is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    metadata = _registry_mod._read_json(source_dir / "skill.json")
+    metadata = _registry_mod._metadata_from_collected(collected_files)
     resolved_skill_id = _registry_mod._slug(skill_id or str(metadata.get("id") or source_dir.name))
     created = _now()
     proposal_id = f"{created[:19].replace(':', '').replace('-', '')}-{resolved_skill_id}-{uuid.uuid4().hex[:8]}"
@@ -244,10 +244,10 @@ def inbox_add(
                 return 2
             if force and existing != "missing":
                 _registry_mod._remove_tree_in_anchor(state_anchor, *proposal_rel)
-            # Collect the candidate once: the copy, the recorded fingerprint,
-            # and the staged lint below all derive from these bytes; the
-            # state-root proposal copy is never re-read by pathname.
-            collected_dirs, collected_files = _registry_mod._collect_source_tree(source_dir)
+            # The classified collect above is the only source read: the copy,
+            # the recorded fingerprint, and the staged lint below all derive
+            # from those bytes; the state-root proposal copy is never re-read
+            # by pathname.
             _registry_mod._write_collected_tree_into_anchor(
                 collected_dirs, collected_files, state_anchor, *proposal_rel, "skill"
             )

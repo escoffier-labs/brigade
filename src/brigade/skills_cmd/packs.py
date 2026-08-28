@@ -158,23 +158,37 @@ def _is_under_state_root(path: Path, target: Path) -> bool:
 def _lexical_state_root_parts(target: Path, path: Path) -> tuple[str, ...] | None:
     """Classify an un-resolved path against ``<target>/.brigade`` lexically.
 
+    Resolves only the trusted workspace prefix (everything before ``.brigade``)
+    so a symlinked workspace alias still matches; remaining components after
+    ``.brigade`` stay lexical. ``os.path.normcase`` makes the prefix comparison
+    case-insensitive on Windows.
+
     Returns the path's components below ``.brigade`` (empty tuple for the
     state root itself) or ``None`` when the path lies outside it.
     """
     try:
         candidate = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
-        state_root = os.path.normpath(os.path.abspath(str(target / ".brigade")))
+        trusted_target = os.path.normcase(os.path.normpath(str(Path(target).expanduser().resolve())))
     except OSError:
         return None
-    if candidate == state_root:
-        return ()
-    prefix = state_root + os.sep
-    if not candidate.startswith(prefix):
+    drive, tail = os.path.splitdrive(candidate)
+    parts = [part for part in tail.split(os.sep) if part]
+    try:
+        brigade_idx = parts.index(".brigade")
+    except ValueError:
         return None
-    parts = tuple(part for part in candidate[len(prefix) :].split(os.sep) if part)
-    if ".." in parts or not parts:
+    prefix_parts = parts[:brigade_idx]
+    prefix = os.path.join(drive + os.sep, *prefix_parts) if prefix_parts else drive + os.sep
+    try:
+        resolved_prefix = os.path.normcase(os.path.normpath(os.path.realpath(prefix)))
+    except OSError:
         return None
-    return parts
+    if resolved_prefix != trusted_target:
+        return None
+    remaining = tuple(part for part in parts[brigade_idx + 1 :] if part)
+    if ".." in remaining:
+        return None
+    return remaining
 
 
 def _state_root_selector_kind(target: Path, requested: str) -> str:

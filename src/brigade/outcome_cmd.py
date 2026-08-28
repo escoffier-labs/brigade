@@ -179,23 +179,34 @@ def _skill_names_at(root: Path) -> set[str]:
     root_resolved = _resolve_root(root)
     if root_resolved is None:
         return names
+    from . import skills_cmd
+
     for skill_md in root.glob(".*/skills/*/SKILL.md"):
+        if skills_cmd._lexical_state_root_parts(root, skill_md) is not None:
+            continue
         skill_id = _safe_skill_id_component(skill_md.parent.name)
         if skill_id is None:
             continue
         if _contained_under(root_resolved, skill_md) is None:
             continue
         names.add(skill_id)
-    registry = root / ".brigade" / "skills" / "registry"
-    if registry.is_dir():
-        for child in registry.iterdir():
-            skill_id = _safe_skill_id_component(child.name)
-            if skill_id is None:
-                continue
-            skill_md = child / "SKILL.md"
-            if _contained_under(root_resolved, skill_md) is None:
-                continue
-            names.add(skill_id)
+    if (root / ".brigade").exists():
+        try:
+            with skills_cmd._held_state_root(root) as anchor:
+                listed = skills_cmd._plain_subdirs_under_anchor(anchor, "skills", "registry")
+                if listed:
+                    for name in listed:
+                        skill_id = _safe_skill_id_component(name)
+                        if skill_id is None:
+                            continue
+                        try:
+                            raw = skills_cmd._read_state_file_bytes(anchor, "skills", "registry", name, "SKILL.md")
+                        except skills_cmd.SkillsStatePathError:
+                            continue
+                        if raw is not None:
+                            names.add(skill_id)
+        except skills_cmd.SkillsStatePathError:
+            pass
     return names
 
 
@@ -258,14 +269,25 @@ def _artifact_content_path_at(root: Path, artifact_id: str) -> Path | None:
     root_resolved = _resolve_root(root)
     if root_resolved is None:
         return None
+    from . import skills_cmd
+
     # Enumerate harness skill roots without interpolating the untrusted id into glob.
+    # `.brigade/skills` matches this glob but is state-root content; skip it
+    # so a registry directory symlink cannot pass containment.
     for skills_root in sorted(path for path in root.glob(".*/skills") if path.is_dir()):
+        if skills_cmd._lexical_state_root_parts(root, skills_root) is not None:
+            continue
         candidate = skills_root / skill_id / "SKILL.md"
         contained = _contained_under(root_resolved, candidate)
         if contained is not None:
             return contained
-    registry_md = root / ".brigade" / "skills" / "registry" / skill_id / "SKILL.md"
-    return _contained_under(root_resolved, registry_md)
+    if (root / ".brigade").exists():
+        if skills_cmd._registry_entry_present(root, skill_id):
+            registry_dir = root / ".brigade" / "skills" / "registry" / skill_id
+            _dirs, files = skills_cmd._installed_tree_snapshot(root, registry_dir)
+            if ("SKILL.md",) in files:
+                return registry_dir / "SKILL.md"
+    return None
 
 
 def _artifact_content_path(target: Path, artifact_id: str, kind: str) -> Path | None:
@@ -439,6 +461,22 @@ def _bundle_fingerprint(skill_dir: Path) -> str | None:
         return None
 
 
+def _bundle_fingerprint_from_files(files: dict[tuple[str, ...], bytes]) -> str | None:
+    """``_bundle_fingerprint`` digest over an already-collected snapshot."""
+    content = {parts: data for parts, data in files.items() if parts[-1] not in _BUNDLE_IGNORED_NAMES}
+    if not content:
+        return None
+    if set(content) == {("SKILL.md",)}:
+        return hashlib.sha256(content[("SKILL.md",)]).hexdigest()
+    digest = hashlib.sha256()
+    for parts in sorted(content, key=lambda key: "/".join(key)):
+        digest.update("/".join(parts).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(content[parts]).hexdigest().encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _link_target_slug(raw: str) -> str:
     """Reduce a raw ``[[wiki-link]]`` body to the card stem it points at.
 
@@ -539,6 +577,12 @@ def artifact_fingerprint(target: Path, artifact_id: str, kind: str) -> str | Non
         return None
     if kind == "card":
         return _card_fingerprint(path)
+    from . import skills_cmd
+
+    for root in _linked_worktree_skill_roots(target):
+        if skills_cmd._lexical_state_root_parts(root, path.parent) is not None:
+            _dirs, files = skills_cmd._installed_tree_snapshot(root, path.parent)
+            return _bundle_fingerprint_from_files(files)
     return _bundle_fingerprint(path.parent)
 
 

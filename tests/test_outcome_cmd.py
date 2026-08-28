@@ -1277,6 +1277,20 @@ def test_artifact_content_path_rejects_external_skill_directory_symlink(tmp_path
     assert outcome_cmd.artifact_fingerprint(repo, "leaky-skill", "skill") is None
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_outcome_registry_dir_symlink_to_trusted_skill_is_not_fingerprinted(tmp_path):
+    trusted = _write_harness_skill(tmp_path, "private", "# TRUSTED-REGISTRY-FOLLOW-MARKER\n")
+    registry_entry = tmp_path / ".brigade" / "skills" / "registry" / "leaky"
+    registry_entry.parent.mkdir(parents=True)
+    registry_entry.symlink_to(trusted.parent, target_is_directory=True)
+
+    assert "leaky" not in outcome_cmd._known_skill_names(tmp_path)
+    assert outcome_cmd._artifact_content_path(tmp_path, "leaky", "skill") is None
+    fp = outcome_cmd.artifact_fingerprint(tmp_path, "leaky", "skill")
+    assert fp is None
+    assert fp != _sha256_of(trusted)
+
+
 def test_capture_unknown_skill_warning_sanitizes_windows_paths_on_posix(tmp_path, capsys):
     _write_verify_receipt(tmp_path)
     leaked = r"C:\Users\victim\.claude\skills\secret-skill\SKILL.md"

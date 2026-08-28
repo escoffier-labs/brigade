@@ -12,13 +12,9 @@ which closes symlink/reparse redirection but keeps a small unavoidable
 check-then-use window because no held directory descriptor exists there.
 
 Further residuals from the final #1211 review are tracked in escoffier-labs/brigade#1214:
-generic ``import`` and ``inbox add`` classify a source only after resolving it;
-forced install snapshots a state-backed destination by pathname before the
-anchored delete refuses it; the lexical classifier does not normalise case or a
-symlinked workspace alias; outcome discovery walks the registry by pathname;
-plus small staging-path, hash-oracle, name-disclosure, and control-character
-items. All need write access to the state root without read access to the
-trusted skill directories.
+small staging-path, hash-oracle, name-disclosure, and control-character items.
+All need write access to the state root without read access to the trusted
+skill directories.
 """
 # ruff: noqa: F401
 
@@ -458,6 +454,57 @@ def _source_skill_dir(source: Path) -> tuple[Path | None, str | None]:
     return source_dir, None
 
 
+def _metadata_from_collected(files: dict[tuple[str, ...], bytes]) -> dict[str, Any]:
+    raw = files.get(("skill.json",))
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _collect_classified_source_tree(
+    target: Path, source: Path
+) -> tuple[Path | None, list[tuple[str, ...]], dict[tuple[str, ...], bytes], str | None]:
+    """Collect a skill source after classifying it, never resolving a state-root path.
+
+    Locations lexically under ``.brigade`` are read through the held state-root
+    anchor so a planted symlink cannot re-classify as a trusted ``.claude``
+    directory. Trusted external paths are resolved only after that check.
+    """
+    raw = source.expanduser()
+    parts = _packs_mod._lexical_state_root_parts(target, raw)
+    if parts is not None:
+        if parts and parts[-1] == "SKILL.md":
+            parts = parts[:-1]
+        if not parts:
+            return None, [], {}, "skill source must be a SKILL.md file or a directory containing SKILL.md"
+        try:
+            with _held_state_root(target) as anchor:
+                if _state_entry_kind(anchor, *parts) != "dir":
+                    return None, [], {}, f"refusing skills state path as import source: {raw}"
+                collected_dirs, collected_files = _read_tree_from_anchor(anchor, *parts)
+        except SkillsStatePathError as exc:
+            return None, [], {}, str(exc)
+        if ("SKILL.md",) not in collected_files:
+            return None, [], {}, "skill source must be a SKILL.md file or a directory containing SKILL.md"
+        display = Path(os.path.abspath(os.path.expanduser(str(raw))))
+        return display, collected_dirs, collected_files, None
+
+    source_dir, error = _source_skill_dir(raw)
+    if source_dir is None:
+        return None, [], {}, error
+    try:
+        collected_dirs, collected_files = _collect_source_tree(source_dir)
+    except SkillsStatePathError as exc:
+        return None, [], {}, str(exc)
+    if ("SKILL.md",) not in collected_files:
+        return None, [], {}, "skill source must be a SKILL.md file or a directory containing SKILL.md"
+    return source_dir, collected_dirs, collected_files, None
+
+
 def _registry_import_payload(
     *,
     target: Path,
@@ -466,19 +513,19 @@ def _registry_import_payload(
     force: bool,
     source_provenance: Path | str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, int]:
-    source_dir, error = _source_skill_dir(source)
+    source_dir, collected_dirs, collected_files, error = _collect_classified_source_tree(target, source)
     if source_dir is None:
         return None, error, 2
-    incoming_metadata = _read_json(source_dir / "skill.json")
+    incoming_metadata = _metadata_from_collected(collected_files)
     resolved_id = _slug(skill_id or str(incoming_metadata.get("id") or source_dir.name))
     dest = _skill_path(target, resolved_id)
     if dest.exists() and not force:
         return None, f"skill already exists: {dest}", 2
     try:
-        # Collect exactly once: the anchored copy, the recorded fingerprint,
-        # and the staged lint below all consume these bytes; nothing re-reads
-        # the entry through its state-root pathname.
-        collected_dirs, collected_files = _collect_source_tree(source_dir)
+        # The classified collect above is the only source read: the anchored
+        # copy, the recorded fingerprint, and the staged lint below all
+        # consume those bytes; nothing re-reads the entry through its
+        # state-root pathname.
         with _held_state_root(target) as anchor:
             _write_collected_tree_into_anchor(
                 collected_dirs, collected_files, anchor, "skills", "registry", resolved_id
