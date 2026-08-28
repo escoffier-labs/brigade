@@ -43,7 +43,7 @@ REASON_CODES = frozenset(
         "other-sensitive-data",
     }
 )
-TERMINAL_STATUSES = frozenset({"ok", "dry-run", "failed", "timeout", "incomplete", "canceled"})
+TERMINAL_STATUSES = frozenset({"ok", "dry-run", "failed", "timeout", "incomplete", "canceled", "orphaned"})
 
 _FILE_MODE = 0o600
 _DIR_MODE = 0o700

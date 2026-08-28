@@ -26,6 +26,7 @@ from brigade import run_journal
 from brigade import run_lifecycle
 from brigade import run_projector
 from brigade import run_reap
+from brigade import run_redaction
 from brigade import runguard
 from brigade import runs_cmd
 from brigade import work_cmd
@@ -268,6 +269,38 @@ def test_reap_skips_malformed_symlink_and_ambiguous(tmp_path, capsys):
     assert json.loads((ambiguous / "run.json").read_text())["status"] == "dispatching"
 
 
+def test_symlinked_default_runs_root_never_terminalizes_the_outside_target(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    outside_root = tmp_path / "outside-runs"
+    run_id = "20260820-120000-symroot1"
+    outside_run = outside_root / run_id
+    outside_run.mkdir(parents=True)
+    localio.write_json(
+        outside_run / "run.json",
+        {
+            "task": "orphan task",
+            "cwd": str(repo),
+            "lock_workspace": str(repo),
+            "orchestrator": "chef",
+            "status": "dispatching",
+            "started_at": OLD_STARTED,
+        },
+    )
+    brigade = repo / ".brigade"
+    brigade.mkdir(exist_ok=True)
+    (brigade / "runs").symlink_to(outside_root)
+    _write_stale_lock(repo, outside_run)
+    before = (outside_run / "run.json").read_bytes()
+
+    assert _reap(repo) == 2
+    err = capsys.readouterr().err
+    assert err == "error: runs directory not found\n"
+    assert (outside_run / "run.json").read_bytes() == before
+    assert json.loads(before)["status"] == "dispatching"
+    lock_owner = json.loads((repo / ".brigade" / "run.lock" / "owner.json").read_text())
+    assert lock_owner["pid"] == 99999999
+
+
 def test_reap_one_winner_under_race(tmp_path):
     repo = _repo(tmp_path)
     run_dir = _write_run(repo, "20260820-120000-race0001", extra=dict(JOURNAL_REQUESTED))
@@ -297,10 +330,7 @@ def test_reap_one_winner_under_race(tmp_path):
     assert sum(1 for event in events if event.event_type == "run.orphaned") == 1
 
 
-def test_reap_skips_concurrently_changed_run(tmp_path, capsys, monkeypatch):
-    repo = _repo(tmp_path)
-    run_dir = _write_run(repo, "20260820-120000-changed1")
-    _write_stale_lock(repo, run_dir)
+def _racing_lock_after_claim(run_dir: Path, mutate):
     real_lock = runguard.run_lock
 
     def _racing_lock(*args, **kwargs):
@@ -310,8 +340,7 @@ def test_reap_skips_concurrently_changed_run(tmp_path, capsys, monkeypatch):
             def __enter__(self):
                 path = context.__enter__()
                 payload = json.loads((run_dir / "run.json").read_text())
-                payload["status"] = "ok"
-                payload["finished_at"] = "2026-08-28T17:59:00+00:00"
+                mutate(payload)
                 localio.write_json(run_dir / "run.json", payload)
                 return path
 
@@ -320,12 +349,67 @@ def test_reap_skips_concurrently_changed_run(tmp_path, capsys, monkeypatch):
 
         return _Wrapper()
 
-    monkeypatch.setattr(runguard, "run_lock", _racing_lock)
+    return _racing_lock
+
+
+def test_reap_skips_concurrently_changed_run(tmp_path, capsys, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-changed1")
+    _write_stale_lock(repo, run_dir)
+
+    def _to_terminal(payload: dict) -> None:
+        payload["status"] = "ok"
+        payload["finished_at"] = "2026-08-28T17:59:00+00:00"
+
+    monkeypatch.setattr(runguard, "run_lock", _racing_lock_after_claim(run_dir, _to_terminal))
     assert _reap(repo) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["reaped"] == []
     assert payload["skipped"][0]["reason"] == "concurrently-changed"
     assert json.loads((run_dir / "run.json").read_text())["status"] == "ok"
+
+
+def test_nonterminal_cas_loss_retains_the_claimed_lock(tmp_path, capsys, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-casret01")
+    _write_stale_lock(repo, run_dir)
+
+    def _keep_nonterminal(payload: dict) -> None:
+        payload["task"] = "concurrent edit"
+
+    monkeypatch.setattr(runguard, "run_lock", _racing_lock_after_claim(run_dir, _keep_nonterminal))
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert payload["skipped"][0]["reason"] == "concurrently-changed"
+    current = json.loads((run_dir / "run.json").read_text())
+    assert current["status"] == "dispatching"
+    assert current["task"] == "concurrent edit"
+    lock_path = repo / ".brigade" / "run.lock"
+    assert lock_path.is_dir()
+    owner = json.loads((lock_path / "owner.json").read_text())
+    assert Path(owner["run_dir"]) == run_dir.resolve()
+    assert owner["pid"] == os.getpid()
+    assert runguard.run_lock_state(repo, run_dir) == "live"
+
+
+def test_terminal_concurrent_update_releases_the_claimed_lock(tmp_path, capsys, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-casrel01")
+    _write_stale_lock(repo, run_dir)
+
+    def _to_terminal(payload: dict) -> None:
+        payload["status"] = "ok"
+        payload["finished_at"] = "2026-08-28T17:59:00+00:00"
+
+    monkeypatch.setattr(runguard, "run_lock", _racing_lock_after_claim(run_dir, _to_terminal))
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert payload["skipped"][0]["reason"] == "concurrently-changed"
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "ok"
+    assert not (repo / ".brigade" / "run.lock").exists()
+    assert runguard.run_lock_state(repo, run_dir) == "absent"
 
 
 def test_runs_reap_cli_default_older_than_and_readable(tmp_path, capsys):
@@ -351,6 +435,7 @@ def test_run_orphaned_is_terminal_across_contracts():
     assert "orphaned_at" in run_projector.PRESERVED_FIELDS
     assert "last_observed_status" in run_projector.PRESERVED_FIELDS
     assert "uncommitted_change_count" in run_projector.PRESERVED_FIELDS
+    assert "orphaned" in run_redaction.TERMINAL_STATUSES
 
 
 def test_projector_derives_orphaned_and_keeps_privacy():
@@ -907,6 +992,29 @@ def test_reap_fails_closed_when_the_platform_cannot_bind_a_run_directory(tmp_pat
     assert lock_owner["pid"] == 99999999
 
 
+def test_identity_without_binding_is_unbindable_before_lock(tmp_path, capsys, monkeypatch):
+    """Identity flags without dirfd binding support must not claim the lock."""
+    from brigade import dirfd
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-diverg01")
+    _write_stale_lock(repo, run_dir)
+    before = (run_dir / "run.json").read_bytes()
+    lock_before = (repo / ".brigade" / "run.lock" / "owner.json").read_bytes()
+
+    monkeypatch.setattr(dirfd, "available", lambda: False)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["unbindable"]
+    assert payload["skipped"][0]["run_id"] == "20260820-120000-diverg01"
+    assert (run_dir / "run.json").read_bytes() == before
+    assert (repo / ".brigade" / "run.lock" / "owner.json").read_bytes() == lock_before
+    lock_owner = json.loads((repo / ".brigade" / "run.lock" / "owner.json").read_text())
+    assert lock_owner["pid"] == 99999999
+
+
 def test_reap_swap_from_inside_the_sanctioned_writer_is_bounded_to_the_run_directory(tmp_path, capsys, monkeypatch):
     """A swap racing in from inside the writer path must not escape the runs root.
 
@@ -1330,12 +1438,10 @@ def test_a_symlinked_journal_inside_a_binding_is_refused_not_followed(tmp_path):
 def test_swap_before_the_sanctioned_writer_poisons_no_write_outside_the_run(tmp_path, capsys, monkeypatch):
     """The swap lands between the reaper's CAS read and ``aboyeur._write_json``.
 
-    ``aboyeur.run_io`` still reads the prior ``run.json`` snapshot by pathname
-    (its authority and transition gates), so a swap here can feed those gates
-    outside bytes. That is the one residual of this slice: it is a read, and
-    every write in the transaction is descriptor-bound, so the outside
-    directory is never mutated and the run is never silently terminalized
-    somewhere else.
+    Bound reads and shadow reads are descriptor-aware, so a swap here cannot
+    redirect those gates to outside bytes. Every write in the transaction is
+    descriptor-bound: the outside directory is never mutated and the run is
+    never silently terminalized somewhere else.
     """
     from brigade import receipt_schema
 

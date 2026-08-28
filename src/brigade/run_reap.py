@@ -22,15 +22,6 @@ reach the original held run inode, or the operation fails closed with a
 bounded error. No write in this transaction can reach a directory outside the
 bound run.
 
-One read residual remains, and it is a read only: ``aboyeur.run_io`` still
-opens ``run.json`` by pathname for its prior-snapshot and authority-state
-gates (``_write_json_inner`` and ``_resolve_authority_state``). A swap landing
-between the reaper's CAS read and those gates can feed them outside bytes.
-Closing it needs the same treatment inside ``aboyeur.run_io``, which is
-outside this module set. The consequence is bounded: the gates can only
-refuse, or record a transition on the bound run itself, and every resulting
-write still lands on the held inode.
-
 Ordinary callers run with no binding and keep the existing pathname behavior;
 the binding is authorized lexically against the exact bound run path, so it
 never widens to a sibling run.
@@ -49,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from . import proc, run_checkpoint, run_dirfd, run_journal, run_lifecycle, runguard, runs_cmd
+from . import dirfd, proc, run_checkpoint, run_dirfd, run_journal, run_lifecycle, runguard, runs_cmd
 
 SCHEMA = "brigade.runs-reap.v1"
 DEFAULT_OLDER_THAN = "2h"
@@ -67,6 +58,14 @@ _UNKNOWN_STATUS = "unknown"
 
 class ReapError(ValueError):
     """Bounded CLI / contract error for the local reaper."""
+
+
+class RetainRunLockError(runguard.RetainRunLockError):
+    """Keep the claimed lock and carry the bounded public skip reason."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class _BoundRunDir:
@@ -116,15 +115,11 @@ def _public_status(value: object) -> str:
 
 
 def _dirfd_identity_available() -> bool:
-    if bool(getattr(os, "O_NOFOLLOW", 0)) and bool(getattr(os, "O_DIRECTORY", 0)):
-        return True
-    if sys.platform == "win32":
-        try:
-            from .work_cmd import nt_dirfd
-        except ImportError:
-            return False
-        return nt_dirfd.available()
-    return False
+    # Same predicate as ``run_dirfd`` / ``dirfd.available()`` so identity
+    # cannot be claimed on a platform that cannot bind the transaction.
+    # Windows stays fail-closed unless ``dirfd.nt_available()`` is true.
+    # Tests keep monkeypatching this name.
+    return dirfd.available()
 
 
 def _open_dir_nofollow(path: Path) -> int:
@@ -423,38 +418,48 @@ def _reap_one(
     try:
         with runguard.run_lock(workspace, run_dir=run_dir, wait_seconds=0, stale_action="claim"):
             if not bound.still_bound():
-                return None, _skip(run_dir.name, "concurrently-changed")
+                raise RetainRunLockError("concurrently-changed")
             # Everything below runs inside the transaction binding: the CAS
             # read, the revalidation it gates, and the sanctioned writer all
             # resolve descriptor-relative through the same held run inode.
-            with _bound_transaction(bound):
-                raw, current = _read_run_bytes(run_dir)
-                if raw is None or current is None:
-                    return None, _skip(run_dir.name, "concurrently-changed")
-                if _run_fingerprint(raw) != fingerprint:
-                    return None, _skip(run_dir.name, "concurrently-changed")
-                # Under the reaper's newly claimed live lock, re-check run.json
-                # only. Original-owner liveness was already proven before acquire.
-                reason = _revalidate_metadata(current, older_than=older_than, now=now)
-                if reason is not None:
-                    return None, _skip(run_dir.name, reason)
-                try:
-                    return _terminalize(run_dir, current, workspace=workspace, now=now), None
-                except (run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError, OSError) as exc:
-                    # The sanctioned writer refused this run's transaction (an
-                    # unready authority gate, a broken chain, or a raw
-                    # write-path OSError from the final run.json replace),
-                    # possibly after activating the journal or publishing a
-                    # checkpoint. Claim mode already deleted the original dead
-                    # owner's lock, so releasing here would leave the run with
-                    # no lock and no matching ``.stale`` claim for
-                    # ``brigade runs recover``. ``RetainRunLockError`` keeps
-                    # this claimed lock in place: it records this run_dir, so
-                    # once the reaper process exits the lock reads back as a
-                    # dead-owner stale lock that recovery matches. The reason
-                    # string stays bounded; the writer's diagnostic may name a
-                    # path, so it stays out of the contract.
-                    raise runguard.RetainRunLockError("orphan reap write refused") from exc
+            try:
+                with _bound_transaction(bound):
+                    raw, current = _read_run_bytes(run_dir)
+                    if raw is None or current is None:
+                        raise RetainRunLockError("concurrently-changed")
+                    if _run_fingerprint(raw) != fingerprint:
+                        stale_reason = _revalidate_metadata(current, older_than=older_than, now=now)
+                        if stale_reason in {"terminal", "already-orphaned"}:
+                            return None, _skip(run_dir.name, "concurrently-changed")
+                        raise RetainRunLockError("concurrently-changed")
+                    # Under the reaper's newly claimed live lock, re-check run.json
+                    # only. Original-owner liveness was already proven before acquire.
+                    reason = _revalidate_metadata(current, older_than=older_than, now=now)
+                    if reason is not None:
+                        return None, _skip(run_dir.name, reason)
+                    try:
+                        return _terminalize(run_dir, current, workspace=workspace, now=now), None
+                    except (run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError, OSError) as exc:
+                        # The sanctioned writer refused this run's transaction (an
+                        # unready authority gate, a broken chain, or a raw
+                        # write-path OSError from the final run.json replace),
+                        # possibly after activating the journal or publishing a
+                        # checkpoint. Claim mode already deleted the original dead
+                        # owner's lock, so releasing here would leave the run with
+                        # no lock and no matching ``.stale`` claim for
+                        # ``brigade runs recover``. ``RetainRunLockError`` keeps
+                        # this claimed lock in place: it records this run_dir, so
+                        # once the reaper process exits the lock reads back as a
+                        # dead-owner stale lock that recovery matches. The reason
+                        # string stays bounded; the writer's diagnostic may name a
+                        # path, so it stays out of the contract.
+                        raise runguard.RetainRunLockError("orphan reap write refused") from exc
+            except ReapBindingError:
+                raise RetainRunLockError("concurrently-changed") from None
+    except RetainRunLockError as exc:
+        # Caught outside the context so ``run_lock`` has already skipped the
+        # release. Public skip reason stays the bounded value on the error.
+        return None, _skip(run_dir.name, exc.reason)
     except ReapBindingError:
         # The run directory entry stopped resolving to the inode the reaper
         # validated. Nothing was written; report it like any other CAS loss.
@@ -528,11 +533,12 @@ def reap(
     if not cwd.is_dir():
         print("error: --cwd is not a directory", file=sys.stderr)
         return 2
-    # Resolve the root so a candidate's path already equals what every writer
-    # module normalizes to. A binding is authorized lexically against the exact
-    # bound path, so an unresolved root would silently skip the binding.
+    # Explicit --runs-dir is canonicalized so writer-normalized candidate
+    # paths match the binding. The default workspace root must already be
+    # canonical: do not follow or resolve a workspace-controlled
+    # ``.brigade/runs`` symlink.
     root = runs_dir.expanduser().resolve() if runs_dir is not None else cwd / ".brigade" / "runs"
-    if not root.is_dir():
+    if (runs_dir is None and root.is_symlink()) or not root.is_dir():
         print("error: runs directory not found", file=sys.stderr)
         return 2
 

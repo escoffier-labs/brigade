@@ -115,6 +115,79 @@ def _authority_run(
     return run_dir, projection.snapshot, events
 
 
+def _authority_orphaned_run(tmp_path: Path) -> tuple[Path, dict, list[run_journal.RunEvent]]:
+    run_dir = tmp_path / "workspace" / ".brigade" / "runs" / RUN_ID
+    journal = _journal_path(run_dir)
+    base = {
+        "schema": "brigade.run.v1",
+        "schema_version": 1,
+        "task": "redaction fixture",
+        "status": "orphaned",
+        "cwd": str(tmp_path / "workspace"),
+        "lock_workspace": str(tmp_path / "workspace"),
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+        "orphaned_at": "2026-07-30T19:00:04.000000Z",
+        "last_observed_status": "started",
+        "uncommitted_change_count": 0,
+    }
+    checkpoint_bytes = run_projector.encode_snapshot_bytes(base)
+    run_checkpoint.publish_checkpoint_file(run_dir, checkpoint_bytes)
+    events = [
+        _append(
+            journal,
+            event_type="run.created",
+            payload={"status": "started"},
+            key="created",
+            prior=0,
+            second=0,
+        ),
+        _append(
+            journal,
+            event_type="run.planning.started",
+            payload={"detail": SECRET},
+            key="planning",
+            prior=1,
+            second=1,
+        ),
+        _append(
+            journal,
+            event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+            payload=run_checkpoint._checkpoint_payload(
+                checkpoint_bytes,
+                paired_event_type="run.orphaned",
+                body_kind="base-stripped",
+            ),
+            key=run_checkpoint._checkpoint_idempotency_key(
+                run_checkpoint._checkpoint_payload(
+                    checkpoint_bytes,
+                    paired_event_type="run.orphaned",
+                    body_kind="base-stripped",
+                )["sha256"],
+                paired_event_type="run.orphaned",
+                body_kind="base-stripped",
+            ),
+            prior=2,
+            second=2,
+        ),
+        _append(
+            journal,
+            event_type="run.orphaned",
+            payload={
+                "status": "orphaned",
+                "last_observed_status": "started",
+                "uncommitted_change_count": 0,
+            },
+            key="orphaned",
+            prior=3,
+            second=3,
+        ),
+    ]
+    projection = run_projector.project_run_snapshot(base, events, journal_present=True)
+    (run_dir / "run.json").write_bytes(projection.to_bytes())
+    return run_dir, projection.snapshot, events
+
+
 def _without_tail_digest(snapshot: dict) -> dict:
     return {key: value for key, value in snapshot.items() if key != "journal_last_event_digest"}
 
@@ -1690,6 +1763,21 @@ def test_redaction_refuses_nonterminal_or_ambiguous_projection_status(tmp_path, 
             operator_confirmed=True,
         )
     assert not (run_dir / "events" / "redactions").exists()
+
+
+def test_redaction_accepts_authoritative_orphaned_run_as_closed(tmp_path):
+    run_dir, snapshot, _ = _authority_orphaned_run(tmp_path)
+    assert snapshot["status"] == "orphaned"
+
+    report = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=2,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    assert report.sequence_start == 2
+    assert (run_dir / "events" / "redactions").is_dir()
 
 
 def test_overlapping_redactions_are_deterministic_and_idempotent(tmp_path):
