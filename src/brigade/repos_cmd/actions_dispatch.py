@@ -18,6 +18,7 @@ from typing import Any
 from uuid import uuid4
 
 from .. import actionqueue, config as brigade_config, reportstore, toml_compat as tomllib, work_cmd
+from ..work_cmd import ledger as ledger_mod
 from ..budgets import HANDOFF_BACKLOG_STALE_DAYS
 from ..install import apply_gitignore
 from ..localio import (
@@ -151,29 +152,30 @@ def _supersede_prior_dispatch_imports(
     repo_path: Path, action: dict[str, Any], current_import_ids: set[str]
 ) -> list[str]:
     source_fingerprint = str(action.get("source_fingerprint") or fleet._fingerprint_payload(action))
-    imports = work_cmd._read_imports(repo_path)
-    superseded: list[str] = []
-    changed = False
-    now = _now().isoformat()
-    for item in imports:
-        metadata = _dict_or_empty(item.get("metadata"))
-        if metadata.get("fleet_action_id") != action.get("fleet_action_id"):
-            continue
-        if item.get("id") in current_import_ids:
-            continue
-        if metadata.get("source_fingerprint") == source_fingerprint:
-            continue
-        if item.get("status") == "superseded":
-            continue
-        item["status"] = "superseded"
-        item["updated_at"] = now
-        item["superseded_at"] = now
-        item["superseded_by"] = sorted(current_import_ids)[0] if current_import_ids else None
-        superseded.append(str(item.get("id")))
-        changed = True
-    if changed:
-        work_cmd._write_imports(repo_path, imports)
-    return superseded
+    with ledger_mod._canonical_inbox_write(repo_path):
+        imports = work_cmd._read_imports(repo_path)
+        superseded: list[str] = []
+        changed = False
+        now = _now().isoformat()
+        for item in imports:
+            metadata = _dict_or_empty(item.get("metadata"))
+            if metadata.get("fleet_action_id") != action.get("fleet_action_id"):
+                continue
+            if item.get("id") in current_import_ids:
+                continue
+            if metadata.get("source_fingerprint") == source_fingerprint:
+                continue
+            if item.get("status") == "superseded":
+                continue
+            item["status"] = "superseded"
+            item["updated_at"] = now
+            item["superseded_at"] = now
+            item["superseded_by"] = sorted(current_import_ids)[0] if current_import_ids else None
+            superseded.append(str(item.get("id")))
+            changed = True
+        if changed:
+            work_cmd._write_imports(repo_path, imports)
+        return superseded
 
 
 def _dispatch_state(action: dict[str, Any], repo_path: Path | None = None) -> dict[str, Any]:

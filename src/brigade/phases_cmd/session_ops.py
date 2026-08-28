@@ -1226,54 +1226,58 @@ def session_import_issues(*, target: Path, session_id: str, dry_run: bool = Fals
         print(f"error: {exc}", file=sys.stderr)
         return 2
     from .. import work_cmd
+    from ..work_cmd import ledger as ledger_mod
 
-    existing = work_cmd._read_imports(target)
-    existing_keys = {
-        (
-            item.get("source"),
-            (item.get("metadata") or {}).get("session_id") if isinstance(item.get("metadata"), dict) else None,
-            (item.get("metadata") or {}).get("phase_id") if isinstance(item.get("metadata"), dict) else None,
-            (item.get("metadata") or {}).get("issue_type") if isinstance(item.get("metadata"), dict) else None,
-            (item.get("metadata") or {}).get("source_fingerprint") if isinstance(item.get("metadata"), dict) else None,
-        ): item
-        for item in existing
-        if item.get("source") == "phase-session" and isinstance(item.get("metadata"), dict)
-    }
-    created: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for candidate in candidates:
-        metadata = candidate["metadata"]
-        key = (
-            "phase-session",
-            metadata.get("session_id"),
-            metadata.get("phase_id"),
-            metadata.get("issue_type"),
-            metadata.get("source_fingerprint"),
-        )
-        if key in existing_keys:
-            skipped.append(
-                {
-                    "import_id": existing_keys[key].get("id"),
-                    "status": existing_keys[key].get("status"),
-                    "metadata": metadata,
-                }
+    with ledger_mod._canonical_inbox_write(target):
+        existing = work_cmd._read_imports(target)
+        existing_keys = {
+            (
+                item.get("source"),
+                (item.get("metadata") or {}).get("session_id") if isinstance(item.get("metadata"), dict) else None,
+                (item.get("metadata") or {}).get("phase_id") if isinstance(item.get("metadata"), dict) else None,
+                (item.get("metadata") or {}).get("issue_type") if isinstance(item.get("metadata"), dict) else None,
+                (item.get("metadata") or {}).get("source_fingerprint")
+                if isinstance(item.get("metadata"), dict)
+                else None,
+            ): item
+            for item in existing
+            if item.get("source") == "phase-session" and isinstance(item.get("metadata"), dict)
+        }
+        created: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for candidate in candidates:
+            metadata = candidate["metadata"]
+            key = (
+                "phase-session",
+                metadata.get("session_id"),
+                metadata.get("phase_id"),
+                metadata.get("issue_type"),
+                metadata.get("source_fingerprint"),
             )
-            continue
-        item = work_cmd._make_import(
-            candidate["text"],
-            kind=candidate["kind"],
-            source=candidate["source"],
-            metadata=metadata,
-            task_type="task",
-            priority="high",
-            acceptance=candidate["acceptance"],
-            template="bugfix",
-        )
-        created.append(item)
-        if not dry_run:
-            existing.append(item)
-    if created and not dry_run:
-        work_cmd._write_imports(target, existing)
+            if key in existing_keys:
+                skipped.append(
+                    {
+                        "import_id": existing_keys[key].get("id"),
+                        "status": existing_keys[key].get("status"),
+                        "metadata": metadata,
+                    }
+                )
+                continue
+            item = work_cmd._make_import(
+                candidate["text"],
+                kind=candidate["kind"],
+                source=candidate["source"],
+                metadata=metadata,
+                task_type="task",
+                priority="high",
+                acceptance=candidate["acceptance"],
+                template="bugfix",
+            )
+            created.append(item)
+            if not dry_run:
+                existing.append(item)
+        if created and not dry_run:
+            work_cmd._write_imports(target, existing)
     payload = {
         "schema_version": constants.SCHEMA_VERSION,
         "schema": constants._schema("phase-ledger-session-import-issues"),
