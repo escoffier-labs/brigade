@@ -155,40 +155,68 @@ def _is_under_state_root(path: Path, target: Path) -> bool:
     return _lexical_state_root_parts(target, path) is not None
 
 
+def _casefold_path(value: str) -> str:
+    """Case-fold a path or component for state-root classification.
+
+    ``os.path.normcase`` is the Windows rule; ``casefold`` keeps the same
+    comparison honest on case-insensitive mounts where ``normcase`` is a no-op.
+    """
+    return os.path.normcase(value).casefold()
+
+
+def _is_brigade_component(part: str) -> bool:
+    return _casefold_path(part) == _casefold_path(".brigade")
+
+
+def _absolute_lexical_path(path: Path) -> str:
+    """Make *path* absolute without collapsing ``..`` or ``.brigade`` away."""
+    raw = os.path.expanduser(str(path))
+    if not os.path.isabs(raw):
+        raw = os.path.join(os.getcwd(), raw)
+    altsep = os.altsep
+    if altsep:
+        raw = raw.replace(altsep, os.sep)
+    return raw
+
+
 def _lexical_state_root_parts(target: Path, path: Path) -> tuple[str, ...] | None:
     """Classify an un-resolved path against ``<target>/.brigade`` lexically.
 
-    Resolves only the trusted workspace prefix (everything before ``.brigade``)
-    so a symlinked workspace alias still matches; remaining components after
-    ``.brigade`` stay lexical. ``os.path.normcase`` makes the prefix comparison
-    case-insensitive on Windows.
+    Classification uses the raw lexical components *before* any whole-path
+    ``normpath`` / ``resolve``: those collapse ``.brigade/skills/../..`` into
+    an external pathname and would re-open the follow. Resolves only the
+    trusted workspace prefix (everything before the ``.brigade`` component)
+    so a symlinked workspace alias still matches. The ``.brigade`` component
+    and the trusted prefix are compared with ``os.path.normcase`` / casefold
+    so a case-variant state-root path stays state-root.
+
+    A ``..`` after the ``.brigade`` component, or a ``.brigade`` component at
+    any position whose prefix matches, is state-root (refuse or anchor) —
+    never external.
 
     Returns the path's components below ``.brigade`` (empty tuple for the
-    state root itself) or ``None`` when the path lies outside it.
+    state root itself; may include ``..``) or ``None`` when the path lies
+    outside it.
     """
     try:
-        candidate = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
-        trusted_target = os.path.normcase(os.path.normpath(str(Path(target).expanduser().resolve())))
+        candidate = _absolute_lexical_path(path)
+        trusted_target = _casefold_path(os.path.normpath(str(Path(target).expanduser().resolve())))
     except OSError:
         return None
     drive, tail = os.path.splitdrive(candidate)
-    parts = [part for part in tail.split(os.sep) if part]
-    try:
-        brigade_idx = parts.index(".brigade")
-    except ValueError:
+    parts = [part for part in tail.split(os.sep) if part and part != "."]
+    brigade_idx = next((index for index, part in enumerate(parts) if _is_brigade_component(part)), None)
+    if brigade_idx is None:
         return None
     prefix_parts = parts[:brigade_idx]
     prefix = os.path.join(drive + os.sep, *prefix_parts) if prefix_parts else drive + os.sep
     try:
-        resolved_prefix = os.path.normcase(os.path.normpath(os.path.realpath(prefix)))
+        resolved_prefix = _casefold_path(os.path.normpath(os.path.realpath(prefix)))
     except OSError:
         return None
     if resolved_prefix != trusted_target:
         return None
-    remaining = tuple(part for part in parts[brigade_idx + 1 :] if part)
-    if ".." in remaining:
-        return None
-    return remaining
+    return tuple(part for part in parts[brigade_idx + 1 :] if part)
 
 
 def _state_root_selector_kind(target: Path, requested: str) -> str:

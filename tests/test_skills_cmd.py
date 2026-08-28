@@ -3549,3 +3549,74 @@ def test_state_root_selector_matches_symlinked_workspace_alias(tmp_path, capsys)
     assert skills_cmd.lint(target=workspace, skill=requested) == 1
     lint_cap = capsys.readouterr()
     assert "ALIAS-REGISTRY-MARKER" not in lint_cap.out + lint_cap.err
+
+
+# --- #1214 Daybreak residuals: case-variant .brigade and raw-lexical .. escape -
+
+
+def _assert_trusted_bytes_not_copied(workspace: Path, marker: bytes = b"TRUSTED-PRIVATE-SKILL-MARKER") -> None:
+    for root_name in ("registry", "inbox"):
+        root = workspace / ".brigade" / "skills" / root_name
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                assert marker not in path.read_bytes()
+
+
+@pytest.mark.parametrize("brigade_name", [".brigade", ".BRIGADE", ".Brigade"])
+def test_state_root_classification_is_case_insensitive_for_brigade_component(tmp_path, monkeypatch, brigade_name):
+    """Bypass A: a case-variant .brigade component must classify as state-root.
+
+    Windows (and other case-insensitive filesystems) treat ``.BRIGADE`` as the
+    state root. The comparison uses ``os.path.normcase`` so the parametrized
+    casings also fail-closed on Linux when normcase is the identity.
+    """
+    monkeypatch.setattr(os.path, "normcase", lambda p: str(p).casefold())
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = workspace / brigade_name / "skills" / "planted"
+    assert skills_cmd._lexical_state_root_parts(workspace, source) == ("skills", "planted")
+    assert skills_cmd._state_root_selector_kind(workspace, str(source)) == "refuse"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+@pytest.mark.parametrize("brigade_name", [".brigade", ".BRIGADE", ".Brigade"])
+def test_import_refuses_case_variant_state_root_symlink_to_trusted_skill(tmp_path, capsys, monkeypatch, brigade_name):
+    """Bypass A: ``.BRIGADE/skills/planted`` must not resolve and copy trusted bytes."""
+    monkeypatch.setattr(os.path, "normcase", lambda p: str(p).casefold())
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    planted = workspace / ".brigade" / "skills" / "planted"
+    planted.parent.mkdir(parents=True)
+    planted.symlink_to(trusted, target_is_directory=True)
+    source = workspace / brigade_name / "skills" / "planted"
+    assert skills_cmd._lexical_state_root_parts(workspace, source) == ("skills", "planted")
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+def test_import_refuses_state_root_dotdot_escape_without_copying_bytes(tmp_path, capsys):
+    """Bypass B: ``.brigade/skills/../../.claude/skills/private`` must refuse, not resolve."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    source = workspace / ".brigade" / "skills" / ".." / ".." / ".claude" / "skills" / trusted.name
+    assert ".." in source.parts
+    assert skills_cmd._lexical_state_root_parts(workspace, source) is not None
+    assert skills_cmd._state_root_selector_kind(workspace, str(source)) == "refuse"
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"

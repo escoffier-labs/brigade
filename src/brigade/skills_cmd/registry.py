@@ -481,6 +481,8 @@ def _collect_classified_source_tree(
             parts = parts[:-1]
         if not parts:
             return None, [], {}, "skill source must be a SKILL.md file or a directory containing SKILL.md"
+        if any(part in {"", ".", ".."} for part in parts):
+            return None, [], {}, f"refusing skills state path as import source: {raw}"
         try:
             with _held_state_root(target) as anchor:
                 if _state_entry_kind(anchor, *parts) != "dir":
@@ -1074,6 +1076,11 @@ def _fallback_prepare_parent(anchor: _StateRootAnchor, *relative_dirs: str, crea
     final open cannot be anchored to a held directory descriptor; see
     ``_StateRootAnchor``.
     """
+    if any(part in {"", ".", ".."} for part in relative_dirs):
+        raise SkillsStatePathError(
+            f"skills state path must not contain '.' or '..' components: "
+            f"{(anchor.workspace / '.brigade').joinpath(*relative_dirs)}"
+        )
     base = anchor.workspace / ".brigade"
     chain = [base.joinpath(*relative_dirs[: index + 1]) for index in range(len(relative_dirs))]
     for candidate in chain:
@@ -1147,6 +1154,11 @@ def _anchor_open_chain(
     following any path.
     """
     assert anchor.fd is not None
+    if any(part in {"", ".", ".."} for part in relative):
+        raise SkillsStatePathError(
+            f"skills state path must not contain '.' or '..' components: "
+            f"{(anchor.workspace / '.brigade').joinpath(*relative)}"
+        )
     opened: list[int] = []
     current = anchor.workspace / ".brigade"
     try:

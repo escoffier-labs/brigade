@@ -309,6 +309,8 @@ def _installed_tree_snapshot(
         if not installed_dir.is_dir():
             return [], {}
         return registry._collect_source_tree(installed_dir)
+    if any(part in {"", ".", ".."} for part in parts):
+        return [], {}
 
     def _collect(held: registry._StateRootAnchor) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
         if registry._state_entry_kind(held, *parts) != "dir":
