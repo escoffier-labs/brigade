@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -22,7 +23,12 @@ from .contracts import (
     parse_phase1_action,
     require_utf8,
 )
-from .operator_adapter import OPERATOR_ADAPTER_TOOLS, PRIVATE_TOOL_RESULT_KEYS
+from .operator_adapter import (
+    CALLABLE_OPERATOR_ADAPTER_TOOLS,
+    CAS_ADAPTER_TOOLS,
+    PRIVATE_TOOL_RESULT_KEYS,
+    PRIVATE_TOOL_RESULT_SCHEMAS,
+)
 from .path_policy import assert_readable, assert_static_writable, assert_writable, normalize_vault_path, policy_for_tags
 from .utf8 import is_well_formed, truncate_utf8, utf8_byte_length
 
@@ -35,6 +41,7 @@ COMMANDS_MAX = 512
 TAGS_MAX = 64
 LINKS_MAX = 256
 RESULT_BYTES = PUBLIC_RESULT_BYTES
+OMNISEARCH_RESULT_BYTES = 65536
 EXCALIDRAW_ROOT = "03 - Resources/Excalidraw"
 EMBED_HEADING = ["Excalidraw"]
 ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR")
@@ -207,7 +214,7 @@ class NativeMcpPort:
             closer()
 
     def _call(self, name: str, arguments: Mapping[str, Any] | None = None) -> object:
-        if name not in NATIVE_MCP_TOOLS and name not in OPERATOR_ADAPTER_TOOLS:
+        if name not in NATIVE_MCP_TOOLS and name not in CALLABLE_OPERATOR_ADAPTER_TOOLS:
             _protocol()
         return invoke_native(lambda: self.client.call_tool(name, arguments or {}))
 
@@ -493,10 +500,10 @@ class NativeMcpPort:
         tools = raw.get("tools") if isinstance(raw, dict) else raw
         if not isinstance(tools, list):
             _unavailable()
-        return [item for item in tools if isinstance(item, dict) and item.get("name") in OPERATOR_ADAPTER_TOOLS]
+        return [item for item in tools if isinstance(item, dict) and item.get("name") in CAS_ADAPTER_TOOLS]
 
     def _replace_structured(self, name: str, path: str, expected_sha256: str, replacement_utf8: str) -> dict[str, str]:
-        if name not in OPERATOR_ADAPTER_TOOLS or not HEX64.fullmatch(expected_sha256):
+        if name not in CAS_ADAPTER_TOOLS or not HEX64.fullmatch(expected_sha256):
             _protocol()
         raw = self._call(
             name,
@@ -524,6 +531,105 @@ class NativeMcpPort:
 
     def replace_excalidraw(self, path: str, expected_sha256: str, replacement_utf8: str) -> dict[str, str]:
         return self._replace_structured("grokbot_replace_excalidraw_v1", path, expected_sha256, replacement_utf8)
+
+    def _private_result(self, raw: object, name: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(_tool_text(raw))
+        except json.JSONDecodeError:
+            _protocol()
+        expected = PRIVATE_TOOL_RESULT_SCHEMAS[name]
+        if not isinstance(payload, dict) or set(payload) != set(expected):
+            _protocol()
+        return payload
+
+    def _private_path(self, value: object) -> str:
+        if not isinstance(value, str):
+            _protocol()
+        try:
+            return normalize_vault_path(value)
+        except ObsidianError:
+            _protocol()
+        raise AssertionError("unreachable")
+
+    def lint_note(self, path: str, expected_sha256: str) -> dict[str, str]:
+        if not HEX64.fullmatch(expected_sha256):
+            _protocol()
+        requested = self._private_path(path)
+        current = self._read_authorized_vault_file(requested)
+        if current is None:
+            _protocol()
+        if hashlib.sha256(current["content"].encode("utf-8")).hexdigest() != expected_sha256:
+            _conflict()
+        raw = self._call("grokbot_lint_note_v1", {"path": requested, "expected_sha256": expected_sha256})
+        payload = self._private_result(raw, "grokbot_lint_note_v1")
+        normalized = self._private_path(payload.get("path"))
+        if normalized != requested:
+            _protocol()
+        file = self._read_authorized_vault_file(normalized)
+        if file is None:
+            _protocol()
+        before, after = payload.get("before_sha256"), payload.get("after_sha256")
+        if not isinstance(before, str) or not HEX64.fullmatch(before) or before != expected_sha256:
+            _protocol()
+        if not isinstance(after, str) or not HEX64.fullmatch(after):
+            _protocol()
+        if after != hashlib.sha256(file["content"].encode("utf-8")).hexdigest():
+            _protocol()
+        return {"path": normalized, "before_sha256": before, "after_sha256": after}
+
+    def open_spaced_review(self) -> dict[str, object]:
+        payload = self._private_result(self._call("grokbot_sr_open_review_v1", {}), "grokbot_sr_open_review_v1")
+        if payload.get("view_id") != "review-queue" or payload.get("opened") is not True:
+            _protocol()
+        return {"view_id": "review-queue", "opened": True}
+
+    def omnisearch(self, query: str, limit: int) -> list[dict[str, object]]:
+        if utf8_byte_length(query) < 1 or utf8_byte_length(query) > 512 or not 1 <= limit <= 10:
+            _protocol()
+        payload = self._private_result(
+            self._call("grokbot_omnisearch_v1", {"query": query, "limit": limit}), "grokbot_omnisearch_v1"
+        )
+        raw_hits = payload.get("hits")
+        if not isinstance(raw_hits, list) or len(raw_hits) > SEARCH_HITS_MAX:
+            _protocol()
+        hits: list[dict[str, object]] = []
+        for item in raw_hits:
+            if not isinstance(item, dict) or set(item) != {"path", "title", "snippet", "score"}:
+                _protocol()
+            path_value = self._private_path(item.get("path"))
+            if self._allow_hit(path_value, []) is None:
+                continue
+            file = self._read_vault_file(path_value)
+            if file is None or self._allow_hit(path_value, file["tags"]) is None:
+                continue
+            title = require_utf8(item.get("title"), 0, TITLE_BYTES)
+            snippet = require_utf8(item.get("snippet"), 0, SNIPPET_BYTES)
+            score = item.get("score")
+            if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+                _protocol()
+            hits.append({"path": path_value, "title": title, "snippet": snippet, "score": float(score)})
+            if len(hits) >= limit:
+                break
+        if (
+            utf8_byte_length(json.dumps({"hits": hits}, ensure_ascii=False, separators=(",", ":")))
+            > OMNISEARCH_RESULT_BYTES
+        ):
+            _protocol()
+        return hits
+
+    def open_excalidraw(self, path: str) -> dict[str, str]:
+        requested = self._private_path(path)
+        if self._read_authorized_vault_file(requested) is None:
+            _protocol()
+        payload = self._private_result(
+            self._call("grokbot_excalidraw_open_v1", {"path": requested}), "grokbot_excalidraw_open_v1"
+        )
+        normalized = self._private_path(payload.get("path"))
+        if normalized != requested or payload.get("view_type") != "excalidraw":
+            _protocol()
+        if self._read_authorized_vault_file(normalized) is None:
+            _protocol()
+        return {"path": normalized, "view_type": "excalidraw"}
 
 
 def allowlisted_excalidraw_env(source: Mapping[str, str]) -> dict[str, str]:

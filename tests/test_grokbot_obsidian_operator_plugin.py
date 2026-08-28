@@ -57,9 +57,17 @@ def test_plugin_sources_are_checked_in_commonjs():
     assert "grokbot_replace_canvas_v1" in source
     assert "grokbot_replace_base_v1" in source
     assert "grokbot_replace_excalidraw_v1" in source
+    assert "grokbot_lint_note_v1" in source
+    assert "grokbot_auto_move_note_v1" in source
+    assert "grokbot_sr_open_review_v1" in source
+    assert "grokbot_homepage_open_v1" in source
+    assert "grokbot_omnisearch_v1" in source
+    assert "grokbot_excalidraw_open_v1" in source
+    assert "grokbot_excalidraw_export_v1" in source
     assert "vault.process" in source or "vault.process(" in source
     assert "vault_write" not in source
     assert "command_execute" not in source
+    assert "run_plugin_command" not in source
     assert "function inputSchema" not in source
     assert "Private canvas compare-and-swap v0.1.0" in source
     assert "zod@3.25.76" in source

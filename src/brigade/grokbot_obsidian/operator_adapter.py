@@ -1,4 +1,4 @@
-"""Pinned private adapter inventory and fingerprint for Phase 2 CAS tools."""
+"""Pinned private adapter inventory and fingerprint for Phase 2 private tools."""
 
 from __future__ import annotations
 
@@ -8,20 +8,73 @@ from typing import Any
 
 ADAPTER_MANIFEST_ID = "grokbot-operator-adapter"
 ADAPTER_MANIFEST_VERSION = "0.1.0"
-OPERATOR_ADAPTER_TOOLS = frozenset(
+CAS_ADAPTER_TOOLS = frozenset(
     {
         "grokbot_replace_canvas_v1",
         "grokbot_replace_base_v1",
         "grokbot_replace_excalidraw_v1",
     }
 )
+WORKFLOW_ADAPTER_TOOLS = frozenset(
+    {
+        "grokbot_lint_note_v1",
+        "grokbot_auto_move_note_v1",
+        "grokbot_sr_open_review_v1",
+        "grokbot_homepage_open_v1",
+        "grokbot_omnisearch_v1",
+        "grokbot_excalidraw_open_v1",
+        "grokbot_excalidraw_export_v1",
+    }
+)
+OPERATOR_ADAPTER_TOOLS = CAS_ADAPTER_TOOLS | WORKFLOW_ADAPTER_TOOLS
+# Only these tools are callable before the Task 20 canary and capability gate.
+# OPERATOR_ADAPTER_TOOLS remains the documented schema inventory.
+CALLABLE_OPERATOR_ADAPTER_TOOLS = CAS_ADAPTER_TOOLS | frozenset(
+    {
+        "grokbot_lint_note_v1",
+        "grokbot_sr_open_review_v1",
+        "grokbot_omnisearch_v1",
+        "grokbot_excalidraw_open_v1",
+    }
+)
 PRIVATE_TOOL_DESCRIPTIONS = {
     "grokbot_replace_canvas_v1": f"Private canvas compare-and-swap v{ADAPTER_MANIFEST_VERSION}",
     "grokbot_replace_base_v1": f"Private base compare-and-swap v{ADAPTER_MANIFEST_VERSION}",
     "grokbot_replace_excalidraw_v1": f"Private excalidraw compare-and-swap v{ADAPTER_MANIFEST_VERSION}",
+    "grokbot_lint_note_v1": f"Private fixed Linter note workflow v{ADAPTER_MANIFEST_VERSION}",
+    "grokbot_auto_move_note_v1": f"Private fixed Auto Note Mover workflow v{ADAPTER_MANIFEST_VERSION}",
+    "grokbot_sr_open_review_v1": f"Private fixed Spaced Repetition review workflow v{ADAPTER_MANIFEST_VERSION}",
+    "grokbot_homepage_open_v1": f"Private fixed Homepage workflow v{ADAPTER_MANIFEST_VERSION}",
+    "grokbot_omnisearch_v1": f"Private Omnisearch 1.30.1 runtime index v{ADAPTER_MANIFEST_VERSION}",
+    "grokbot_excalidraw_open_v1": f"Private fixed Excalidraw open workflow v{ADAPTER_MANIFEST_VERSION}",
+    "grokbot_excalidraw_export_v1": f"Private fixed Excalidraw export workflow v{ADAPTER_MANIFEST_VERSION}",
 }
 PRIVATE_TOOL_INPUT_KEYS = ("expected_sha256", "path", "replacement_utf8")
 PRIVATE_TOOL_RESULT_KEYS = ("previous_sha256", "resulting_sha256")
+PRIVATE_TOOL_INPUT_SCHEMAS = {
+    "grokbot_replace_canvas_v1": PRIVATE_TOOL_INPUT_KEYS,
+    "grokbot_replace_base_v1": PRIVATE_TOOL_INPUT_KEYS,
+    "grokbot_replace_excalidraw_v1": PRIVATE_TOOL_INPUT_KEYS,
+    "grokbot_lint_note_v1": ("expected_sha256", "path"),
+    "grokbot_auto_move_note_v1": ("expected_sha256", "path"),
+    "grokbot_sr_open_review_v1": (),
+    "grokbot_homepage_open_v1": (),
+    "grokbot_omnisearch_v1": ("limit", "query"),
+    "grokbot_excalidraw_open_v1": ("path",),
+    "grokbot_excalidraw_export_v1": ("format", "path"),
+}
+PRIVATE_TOOL_RESULT_SCHEMAS = {
+    "grokbot_replace_canvas_v1": PRIVATE_TOOL_RESULT_KEYS,
+    "grokbot_replace_base_v1": PRIVATE_TOOL_RESULT_KEYS,
+    "grokbot_replace_excalidraw_v1": PRIVATE_TOOL_RESULT_KEYS,
+    "grokbot_lint_note_v1": ("after_sha256", "before_sha256", "path"),
+    "grokbot_auto_move_note_v1": ("content_sha256", "destination_path", "source_path"),
+    "grokbot_sr_open_review_v1": ("opened", "view_id"),
+    "grokbot_homepage_open_v1": ("opened", "path"),
+    "grokbot_omnisearch_v1": ("hits",),
+    "grokbot_excalidraw_open_v1": ("path", "view_type"),
+    "grokbot_excalidraw_export_v1": ("artifact_ref", "content_sha256"),
+}
 
 
 def _tool_input_keys(tool: dict[str, Any]) -> list[str]:
@@ -37,7 +90,8 @@ def _tool_input_keys(tool: dict[str, Any]) -> list[str]:
 
 
 def canonicalize_private_tools(raw: object) -> list[dict[str, Any]]:
-    if not isinstance(raw, list) or len(raw) != 3:
+    """Canonicalize the mandatory CAS inventory used by Phase 2 readiness."""
+    if not isinstance(raw, list) or len(raw) != len(CAS_ADAPTER_TOOLS):
         raise ValueError("adapter inventory")
     parsed: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -45,10 +99,10 @@ def canonicalize_private_tools(raw: object) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             raise ValueError("adapter inventory")
         name = item.get("name")
-        if not isinstance(name, str) or name not in OPERATOR_ADAPTER_TOOLS or name in seen:
+        if not isinstance(name, str) or name not in CAS_ADAPTER_TOOLS or name in seen:
             raise ValueError("adapter inventory")
         keys = _tool_input_keys(item)
-        if tuple(keys) != PRIVATE_TOOL_INPUT_KEYS:
+        if tuple(keys) != PRIVATE_TOOL_INPUT_SCHEMAS[name]:
             raise ValueError("adapter inventory")
         description = item.get("description")
         if description != PRIVATE_TOOL_DESCRIPTIONS[name]:
@@ -57,11 +111,11 @@ def canonicalize_private_tools(raw: object) -> list[dict[str, Any]]:
         parsed.append(
             {
                 "description": description,
-                "input": list(PRIVATE_TOOL_INPUT_KEYS),
+                "input": list(PRIVATE_TOOL_INPUT_SCHEMAS[name]),
                 "name": name,
             }
         )
-    if seen != set(OPERATOR_ADAPTER_TOOLS):
+    if seen != set(CAS_ADAPTER_TOOLS):
         raise ValueError("adapter inventory")
     parsed.sort(key=lambda tool: tool["name"])
     return parsed
@@ -79,8 +133,8 @@ def expected_private_tool_fingerprint() -> str:
             {
                 "name": name,
                 "description": PRIVATE_TOOL_DESCRIPTIONS[name],
-                "input": list(PRIVATE_TOOL_INPUT_KEYS),
+                "input": list(PRIVATE_TOOL_INPUT_SCHEMAS[name]),
             }
-            for name in sorted(OPERATOR_ADAPTER_TOOLS)
+            for name in sorted(CAS_ADAPTER_TOOLS)
         ]
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,10 @@ def _hit(filename: str, context: str, score: float = 1.0) -> dict[str, object]:
 
 def _vault_file(content: str, tags: list[str], etag: str = "aaaaaa") -> dict[str, object]:
     return {"content": content, "tags": tags, "etag": etag}
+
+
+def _private_result(payload: object) -> dict[str, object]:
+    return {"content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}]}
 
 
 class ScriptedExcalidraw:
@@ -187,6 +192,109 @@ def test_sensitive_tags_filter_search_and_deny_read_patch_move_trash():
     assert "vault_patch" not in {name for name, _ in client.calls}
     assert "vault_move" not in {name for name, _ in client.calls}
     assert "vault_delete" not in {name for name, _ in client.calls}
+
+
+def test_private_workflow_gateway_methods_use_fixed_tools_and_filter_sensitive_omnisearch_hits():
+    note = "01 - Projects/note.md"
+    drawing = "03 - Resources/Excalidraw/scene.excalidraw.md"
+    secret = "01 - Projects/secret.md"
+    note_hash = hashlib.sha256(b"note").hexdigest()
+    client = ScriptedClient(
+        {
+            "grokbot_lint_note_v1": _private_result(
+                {"path": note, "before_sha256": note_hash, "after_sha256": note_hash}
+            ),
+            "grokbot_sr_open_review_v1": _private_result({"view_id": "review-queue", "opened": True}),
+            "grokbot_omnisearch_v1": _private_result(
+                {
+                    "hits": [
+                        {"path": note, "title": "Note", "snippet": "allowed", "score": 1.0},
+                        {"path": secret, "title": "Secret", "snippet": "hidden", "score": 0.5},
+                    ]
+                }
+            ),
+            "grokbot_excalidraw_open_v1": _private_result({"path": drawing, "view_type": "excalidraw"}),
+        },
+        files={
+            note: _vault_file("note", []),
+            secret: _vault_file("secret", ["private"]),
+            drawing: _vault_file("drawing", []),
+        },
+    )
+    port = NativeMcpPort(client, policy=SENSITIVE_POLICY)
+    assert port.lint_note(note, note_hash)["after_sha256"] == note_hash
+    assert port.open_spaced_review() == {"view_id": "review-queue", "opened": True}
+    assert port.omnisearch("note", 10) == [{"path": note, "title": "Note", "snippet": "allowed", "score": 1.0}]
+    assert port.open_excalidraw(drawing) == {"path": drawing, "view_type": "excalidraw"}
+    assert [name for name, _ in client.calls if name.startswith("grokbot_")] == [
+        "grokbot_lint_note_v1",
+        "grokbot_sr_open_review_v1",
+        "grokbot_omnisearch_v1",
+        "grokbot_excalidraw_open_v1",
+    ]
+
+
+def test_private_path_workflows_authorize_sensitive_files_before_the_private_call():
+    note = "01 - Projects/secret.md"
+    drawing = "03 - Resources/Excalidraw/secret.excalidraw.md"
+    client = ScriptedClient(
+        {
+            "grokbot_lint_note_v1": _private_result(
+                {"path": note, "before_sha256": "a" * 64, "after_sha256": "a" * 64}
+            ),
+            "grokbot_excalidraw_open_v1": _private_result({"path": drawing, "view_type": "excalidraw"}),
+        },
+        files={note: _vault_file("secret", ["private"]), drawing: _vault_file("secret", ["private"])},
+    )
+    port = NativeMcpPort(client, policy=SENSITIVE_POLICY)
+    for call in (
+        lambda: port.lint_note(note, hashlib.sha256(b"secret").hexdigest()),
+        lambda: port.open_excalidraw(drawing),
+    ):
+        with pytest.raises(ObsidianError) as caught:
+            call()
+        assert caught.value.code == "denied"
+    assert not [name for name, _ in client.calls if name.startswith("grokbot_")]
+
+
+@pytest.mark.parametrize(
+    ("payload", "method"),
+    [
+        (
+            {"path": "01 - Projects/note.md", "before_sha256": "a" * 64, "after_sha256": "b" * 64, "extra": True},
+            "lint_note",
+        ),
+        ({"path": "01 - Projects/note.md", "before_sha256": "a" * 64}, "lint_note"),
+        ({"view_id": "wrong-view", "opened": True}, "open_spaced_review"),
+        ({"hits": [{"path": "01 - Projects/note.md", "title": "Note", "snippet": "ok", "score": True}]}, "omnisearch"),
+        ({"path": "01 - Projects/note.md", "view_type": "markdown"}, "open_excalidraw"),
+    ],
+)
+def test_private_workflow_gateway_result_drift_fails_closed(payload: dict[str, object], method: str):
+    names = {
+        "lint_note": "grokbot_lint_note_v1",
+        "open_spaced_review": "grokbot_sr_open_review_v1",
+        "omnisearch": "grokbot_omnisearch_v1",
+        "open_excalidraw": "grokbot_excalidraw_open_v1",
+    }
+    note = "01 - Projects/note.md"
+    client = ScriptedClient(
+        {names[method]: _private_result(payload)},
+        files={note: _vault_file("note", [])},
+    )
+    port = NativeMcpPort(client)
+    with pytest.raises(ObsidianError) as caught:
+        if method == "lint_note":
+            port.lint_note(note, hashlib.sha256(b"note").hexdigest())
+        elif method == "open_spaced_review":
+            port.open_spaced_review()
+        elif method == "omnisearch":
+            port.omnisearch("note", 1)
+        elif method == "open_excalidraw":
+            port.open_excalidraw(note)
+        else:
+            port.open_excalidraw(note)
+    assert caught.value.code == "protocol_error"
 
 
 def test_excalidraw_four_call_order_and_allowlisted_env(tmp_path: Path):

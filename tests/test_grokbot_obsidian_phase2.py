@@ -25,6 +25,7 @@ from brigade.grokbot_obsidian.catalog import get_catalog_row, hash_action_conten
 from brigade.grokbot_obsidian.contracts import (
     ERROR_MESSAGES,
     PHASE2_ONLY_ACTION_IDS,
+    TOOLS,
     ObsidianError,
     parse_capabilities_result,
     parse_operator_action,
@@ -44,8 +45,12 @@ from brigade.grokbot_obsidian.native_client import (
 )
 from brigade.grokbot_obsidian.operator_adapter import (
     ADAPTER_MANIFEST_VERSION,
+    CAS_ADAPTER_TOOLS,
+    CALLABLE_OPERATOR_ADAPTER_TOOLS,
     OPERATOR_ADAPTER_TOOLS,
     PRIVATE_TOOL_DESCRIPTIONS,
+    PRIVATE_TOOL_INPUT_SCHEMAS,
+    PRIVATE_TOOL_RESULT_SCHEMAS,
     expected_private_tool_fingerprint,
     hash_private_tool_fingerprint,
 )
@@ -117,18 +122,14 @@ def _phase2_tools(*, description_version: str = ADAPTER_MANIFEST_VERSION) -> lis
             "description": (
                 PRIVATE_TOOL_DESCRIPTIONS[name]
                 if description_version == ADAPTER_MANIFEST_VERSION
-                else f"Private {name.split('_')[2]} compare-and-swap v{description_version}"
+                else PRIVATE_TOOL_DESCRIPTIONS[name].replace(ADAPTER_MANIFEST_VERSION, description_version)
             ),
             "inputSchema": {
                 "type": "object",
-                "properties": {"expected_sha256": {}, "path": {}, "replacement_utf8": {}},
+                "properties": {key: {} for key in PRIVATE_TOOL_INPUT_SCHEMAS[name]},
             },
         }
-        for name in (
-            "grokbot_replace_canvas_v1",
-            "grokbot_replace_base_v1",
-            "grokbot_replace_excalidraw_v1",
-        )
+        for name in sorted(CAS_ADAPTER_TOOLS)
     ]
 
 
@@ -183,7 +184,7 @@ def test_capabilities_demote_without_adapter_and_promote_on_fingerprint_match():
     assert "patch_base" in parsed["supported_action_ids"]
 
 
-def test_native_allowlist_includes_only_fixed_private_replace_tools():
+def test_native_allowlist_includes_only_fixed_private_adapter_tools():
     calls: list[dict[str, object]] = []
     client = StreamableNativeMcpClient(url=UPSTREAM_URL, api_key=UPSTREAM_KEY, fetch=_scripted_fetch(calls))
     client.call_tool(
@@ -199,8 +200,73 @@ def test_native_allowlist_includes_only_fixed_private_replace_tools():
         "grokbot_replace_canvas_v1",
         "grokbot_replace_base_v1",
         "grokbot_replace_excalidraw_v1",
+        "grokbot_lint_note_v1",
+        "grokbot_auto_move_note_v1",
+        "grokbot_sr_open_review_v1",
+        "grokbot_homepage_open_v1",
+        "grokbot_omnisearch_v1",
+        "grokbot_excalidraw_open_v1",
+        "grokbot_excalidraw_export_v1",
     }
     assert "vault_write" not in OPERATOR_ADAPTER_TOOLS
+    assert CALLABLE_OPERATOR_ADAPTER_TOOLS == CAS_ADAPTER_TOOLS | {
+        "grokbot_lint_note_v1",
+        "grokbot_sr_open_review_v1",
+        "grokbot_omnisearch_v1",
+        "grokbot_excalidraw_open_v1",
+    }
+    calls_before = len(calls)
+    for deferred in (
+        "grokbot_auto_move_note_v1",
+        "grokbot_homepage_open_v1",
+        "grokbot_excalidraw_export_v1",
+    ):
+        with pytest.raises(ObsidianError) as rejected:
+            client.call_tool(deferred, {})
+        assert rejected.value.code == "protocol_error"
+    assert len(calls) == calls_before
+    assert not hasattr(NativeMcpPort, "auto_move_note")
+    assert not hasattr(NativeMcpPort, "open_homepage")
+    assert not hasattr(NativeMcpPort, "export_excalidraw")
+    assert not (CALLABLE_OPERATOR_ADAPTER_TOOLS & TOOLS)
+
+
+def test_private_adapter_inventory_pins_each_tool_schema_and_result_shape():
+    tools = _phase2_tools()
+    assert hash_private_tool_fingerprint(tools) == expected_private_tool_fingerprint()
+    assert PRIVATE_TOOL_INPUT_SCHEMAS["grokbot_lint_note_v1"] == ("expected_sha256", "path")
+    assert PRIVATE_TOOL_INPUT_SCHEMAS["grokbot_auto_move_note_v1"] == ("expected_sha256", "path")
+    assert PRIVATE_TOOL_INPUT_SCHEMAS["grokbot_sr_open_review_v1"] == ()
+    assert PRIVATE_TOOL_INPUT_SCHEMAS["grokbot_homepage_open_v1"] == ()
+    assert PRIVATE_TOOL_INPUT_SCHEMAS["grokbot_omnisearch_v1"] == ("limit", "query")
+    assert PRIVATE_TOOL_INPUT_SCHEMAS["grokbot_excalidraw_open_v1"] == ("path",)
+    assert PRIVATE_TOOL_INPUT_SCHEMAS["grokbot_excalidraw_export_v1"] == ("format", "path")
+    assert PRIVATE_TOOL_RESULT_SCHEMAS["grokbot_lint_note_v1"] == ("after_sha256", "before_sha256", "path")
+    assert PRIVATE_TOOL_RESULT_SCHEMAS["grokbot_auto_move_note_v1"] == (
+        "content_sha256",
+        "destination_path",
+        "source_path",
+    )
+    assert PRIVATE_TOOL_RESULT_SCHEMAS["grokbot_sr_open_review_v1"] == ("opened", "view_id")
+    assert PRIVATE_TOOL_RESULT_SCHEMAS["grokbot_homepage_open_v1"] == ("opened", "path")
+    assert PRIVATE_TOOL_RESULT_SCHEMAS["grokbot_omnisearch_v1"] == ("hits",)
+    assert PRIVATE_TOOL_RESULT_SCHEMAS["grokbot_excalidraw_open_v1"] == ("path", "view_type")
+    assert PRIVATE_TOOL_RESULT_SCHEMAS["grokbot_excalidraw_export_v1"] == ("artifact_ref", "content_sha256")
+    with pytest.raises(ValueError):
+        hash_private_tool_fingerprint(
+            tools
+            + [
+                {
+                    "name": "grokbot_lint_note_v1",
+                    "description": PRIVATE_TOOL_DESCRIPTIONS["grokbot_lint_note_v1"],
+                    "inputSchema": {"type": "object", "properties": {"expected_sha256": {}, "path": {}}},
+                }
+            ]
+        )
+    drifted = _phase2_tools()
+    drifted[0]["inputSchema"]["properties"]["extra"] = {}
+    with pytest.raises(ValueError):
+        hash_private_tool_fingerprint(drifted)
 
 
 def test_native_replace_methods_parse_exact_hash_result_and_reject_unknown_tools():
