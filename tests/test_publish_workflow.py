@@ -208,7 +208,7 @@ def test_publish_workflow_builds_five_agent_notify_binaries_with_release_metadat
     # The wall-clock form must be absent so a re-run cannot drift the build date.
     assert 'BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"' not in section
     assert "date -u +%Y-%m-%dT%H:%M:%SZ" not in section
-    assert "actions/upload-artifact@v4" in section
+    assert "actions/upload-artifact@v7" in section
     assert "if-no-files-found: error" in section
 
 

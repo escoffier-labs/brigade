@@ -20,7 +20,7 @@ def test_ci_workflow_path_filter_has_valid_structure_and_engine_paths():
 
     assert "jobs:\n  changes:" in text
     assert "runs-on: ubuntu-latest" in changes
-    assert "uses: dorny/paths-filter@v3" in changes
+    assert "uses: dorny/paths-filter@v4" in changes
     assert "code_graph: ${{ steps.filter.outputs.code_graph }}" in changes
     assert "evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}" in changes
     assert "notify: ${{ steps.filter.outputs.notify }}" in changes
@@ -125,7 +125,7 @@ def test_ci_workflow_notify_jobs_run_go_steps_only_when_notify_paths_change():
         ),
     ):
         section = _workflow_job_section(text, job_name)
-        for uses in ("actions/checkout@v5", "actions/setup-go@v5"):
+        for uses in ("actions/checkout@v7", "actions/setup-go@v5"):
             uses_at = 0
             while True:
                 try:
@@ -320,9 +320,9 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert "COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}" in shards
     assert "--cov=brigade --cov-report=\n" in shards
     assert "--cov-report=term" not in shards
-    assert "uses: actions/upload-artifact@v4" in shards
+    assert "uses: actions/upload-artifact@v7" in shards
     assert "include-hidden-files: true" in shards
-    assert "uses: actions/download-artifact@v5" in coverage
+    assert "uses: actions/download-artifact@v8" in coverage
     assert "pattern: coverage-*" in coverage
     assert "python -m coverage combine .coverage-data" in coverage
     assert "python -m coverage report --fail-under=78" in coverage

@@ -31,7 +31,7 @@ jobs:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Verify tag matches every declared version
         env:
           TAG: ${{ github.ref_name }}
@@ -80,7 +80,7 @@ jobs:
       run:
         working-directory: engines/code-graph
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
@@ -104,7 +104,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/release-assets" | Out-Null
           Copy-Item target/release/graphtrail.exe "$env:GITHUB_WORKSPACE/release-assets/graphtrail-${{ matrix.platform }}.exe"
           Copy-Item target/release/graphtrail-mcp.exe "$env:GITHUB_WORKSPACE/release-assets/graphtrail-mcp-${{ matrix.platform }}.exe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rust-${{ matrix.platform }}
           path: release-assets/
@@ -138,7 +138,7 @@ jobs:
       run:
         working-directory: engines/evidence-ledger
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -154,7 +154,7 @@ jobs:
           if [ "$GOOS" = windows ]; then suffix=.exe; fi
           go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/miseledger-${{ matrix.platform }}$suffix" ./cmd/miseledger
           go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/sessionfind-${{ matrix.platform }}$suffix" ./cmd/sessionfind
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: go-${{ matrix.platform }}
           path: release-assets/
@@ -188,7 +188,7 @@ jobs:
       run:
         working-directory: stations/notify
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -212,7 +212,7 @@ jobs:
           VERSION="${AGENT_NOTIFY_TAG#v}"
           BUILD_DATE="$(date -u -d "@$(git show -s --format=%ct ${AGENT_NOTIFY_COMMIT})" +%Y-%m-%dT%H:%M:%SZ)"
           go build -trimpath -ldflags "-X main.version=${VERSION} -X main.commit=${AGENT_NOTIFY_COMMIT} -X main.buildDate=${BUILD_DATE} -s -w" -o "$GITHUB_WORKSPACE/release-assets/agent-notify-${{ matrix.platform }}$suffix" ./cmd/agent-notify
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: agent-notify-${{ matrix.platform }}
           path: release-assets/
@@ -227,16 +227,16 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: rust-*
           path: downloaded/rust
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: go-*
           path: downloaded/go
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: agent-notify-*
           path: downloaded/agent-notify
@@ -282,7 +282,7 @@ jobs:
             release-assets/agent-notify-darwin-arm64
             release-assets/agent-notify-windows-amd64.exe
             release-assets/component-manifest-v1.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: unified-release-assets
           path: release-assets/
@@ -294,7 +294,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: unified-release-assets
           path: release-assets
@@ -364,7 +364,7 @@ jobs:
       attestations: read
       artifact-metadata: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Redownload, checksum, provenance, and attestation gate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -388,12 +388,12 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: unified-release-assets
           path: release-assets
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Replace the packaged manifest with the release manifest
@@ -439,8 +439,8 @@ jobs:
             kind: windows
             extra: ''
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Ensure Rosetta for darwin-amd64 smoke

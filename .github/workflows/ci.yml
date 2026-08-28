@@ -23,8 +23,8 @@ jobs:
       evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}
       notify: ${{ steps.filter.outputs.notify }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -50,7 +50,7 @@ jobs:
       run:
         working-directory: engines/code-graph
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.85.0
@@ -69,7 +69,7 @@ jobs:
       run:
         working-directory: engines/code-graph
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
@@ -111,7 +111,7 @@ jobs:
       run:
         working-directory: engines/code-graph
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
@@ -130,7 +130,7 @@ jobs:
       run:
         working-directory: engines/code-graph
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
@@ -148,7 +148,7 @@ jobs:
       run:
         working-directory: engines/evidence-ledger
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -176,7 +176,7 @@ jobs:
         # Override job default: checkout is gated, so stations/notify is absent.
         working-directory: ${{ github.workspace }}
         run: echo "stations/notify unchanged; required check satisfied without running Go tests."
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         if: ${{ needs.changes.outputs.notify == 'true' }}
         with:
           persist-credentials: false
@@ -225,7 +225,7 @@ jobs:
         # Override job default: checkout is gated, so stations/notify is absent.
         working-directory: ${{ github.workspace }}
         run: echo "stations/notify unchanged; required check satisfied without running Go tests."
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         if: ${{ needs.changes.outputs.notify == 'true' }}
         with:
           persist-credentials: false
@@ -247,8 +247,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -283,8 +283,8 @@ jobs:
         python: ["3.10", "3.11", "3.12"]
         shard: [0, 1, 2, 3]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -303,7 +303,7 @@ jobs:
         run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q --cov=brigade --cov-report=
       - name: Upload coverage data
         if: matrix.python == '3.12'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.python }}-${{ matrix.shard }}
           path: .coverage.${{ matrix.python }}.${{ matrix.shard }}
@@ -314,8 +314,8 @@ jobs:
     needs: test-shards
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -325,7 +325,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
       - name: Download coverage data
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-*
           path: .coverage-data
@@ -357,8 +357,8 @@ jobs:
   component-manifest-provenance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -373,15 +373,15 @@ jobs:
   content-guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: brigade
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: solomonneas/content-guard
           ref: v0.1.1
           path: content-guard
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Scan
@@ -393,8 +393,8 @@ jobs:
   repo-metadata:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -457,8 +457,8 @@ jobs:
           - name: "repo+claude+publisher"
             flags: "--depth repo --harnesses claude --include publisher"
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: pipx install
@@ -500,8 +500,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: pipx install
@@ -566,8 +566,8 @@ jobs:
     name: windows-native-acceptance
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Run Windows native acceptance (source install)
