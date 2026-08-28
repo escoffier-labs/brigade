@@ -634,6 +634,72 @@ def test_doctor_reports_drift_without_mutating(tmp_path, monkeypatch, capsys):
     assert row["instruction_ready"] is False
 
 
+def _doctor_json(workspace: Path) -> list[str]:
+    return ["harness", "doctor", "--target", "codex", "--scope", "user", "--workspace", str(workspace), "--json"]
+
+
+def _assert_check_and_doctor_report_drift(workspace: Path, capsys, *, surface: str) -> tuple[dict, dict]:
+    from brigade import cli
+
+    assert cli.main(_sync_base(workspace) + ["--check", "--json"]) == 1
+    checked = json.loads(capsys.readouterr().out)["results"][0]
+    assert checked["status"] != "current"
+    assert checked["ready"] is False
+    assert any(
+        item["surface"] == surface and item["action"] in {"create", "update", "remove"} for item in checked["items"]
+    )
+
+    assert cli.main(_doctor_json(workspace)) == 1
+    doctor = json.loads(capsys.readouterr().out)["results"][0]
+    assert doctor["status"] != "current"
+    assert doctor["ready"] is False
+    assert any(
+        item["surface"] == surface and item["action"] in {"create", "update", "remove"} for item in doctor["items"]
+    )
+    return checked, doctor
+
+
+def test_doctor_and_check_report_state_only_package_version_drift(tmp_path, monkeypatch, capsys):
+    """Issue #1218: install-state.json package_version drift is not current."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 0
+    capsys.readouterr()
+
+    state_path = home / ".codex" / "brigade" / "install-state.json"
+    state = json.loads(state_path.read_text())
+    state["package_version"] = "old"
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+    _assert_check_and_doctor_report_drift(workspace, capsys, surface="ownership-state")
+
+
+@pytest.mark.parametrize("receipt_change", ["missing", "drifted"])
+def test_doctor_and_check_report_receipt_only_drift(tmp_path, monkeypatch, capsys, receipt_change):
+    """Issue #1218: missing or fingerprint-drifted sync receipt is not current."""
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 0
+    capsys.readouterr()
+
+    receipt = home / ".codex" / "brigade" / "profile-receipt.json"
+    if receipt_change == "missing":
+        receipt.unlink()
+    else:
+        payload = json.loads(receipt.read_text())
+        payload["ownership_fingerprints"]["instruction_fingerprint"] = "drifted"
+        receipt.write_text(json.dumps(payload))
+
+    checked, doctor = _assert_check_and_doctor_report_drift(workspace, capsys, surface="profile-receipt")
+    if receipt_change == "missing":
+        assert checked["receipt_state"] == "missing"
+        assert doctor["receipt_state"] == "missing"
+
+
 def test_uninstall_removes_only_brigade_owned_block(tmp_path, monkeypatch, capsys):
     from brigade import cli
 

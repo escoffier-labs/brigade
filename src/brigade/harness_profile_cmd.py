@@ -1569,6 +1569,87 @@ def _receipt_item(path: Path, *, state_action: str, remove: bool = False) -> dic
     }
 
 
+def _doctor_receipt_item(profile, state: dict[str, Any], *, state_action: str) -> dict[str, Any]:
+    """Classify the sync receipt for doctor/--check, including attestation drift."""
+    item = _receipt_item(profile.receipt_path, state_action=state_action)
+    if item["action"] != "none":
+        return item
+    conflict = _uninstall_receipt_conflict(profile, state)
+    if conflict is None:
+        return item
+    return {
+        "surface": "profile-receipt",
+        "path": str(profile.receipt_path),
+        "status": "stale",
+        "action": "update",
+        "detail": conflict["detail"],
+    }
+
+
+def _expected_profile_state(
+    state: dict[str, Any],
+    *,
+    instruction: SurfacePlan,
+    instruction_existed: bool,
+    depth: dict[str, Any],
+    skill_plan: dict[str, Any],
+    generated_plan: dict[str, Any],
+    hook_plan: dict[str, Any] | None,
+    mcp_next: dict[str, Any],
+    profile,
+) -> dict[str, Any]:
+    """Build the ownership state a conflict-free sync would persist."""
+    proposed = json.loads(json.dumps(state))
+    if instruction.status != "conflict":
+        old_instruction = state.get("instructions", {})
+        created_file = (
+            old_instruction.get("created_file", not instruction_existed)
+            if isinstance(old_instruction, dict)
+            else not instruction_existed
+        )
+        if instruction.desired_digest:
+            instruction_record: dict[str, Any] = {
+                "digest": instruction.desired_digest,
+                "created_file": created_file,
+                _INSTRUCTION_REQUIRED_PROFILE_KEY: depth["required_profile"],
+                _INSTRUCTION_EFFECTIVE_PROFILE_KEY: depth["effective_profile"],
+            }
+            if isinstance(old_instruction, dict) and old_instruction.get("created_directories"):
+                instruction_record["created_directories"] = list(old_instruction["created_directories"])
+            if isinstance(old_instruction, dict) and old_instruction.get(_LEGACY_MIGRATED):
+                instruction_record[_LEGACY_MIGRATED] = True
+            proposed["instructions"] = instruction_record
+        else:
+            proposed["instructions"] = {}
+    proposed["skills"] = skill_plan["next"]
+    proposed["generated"] = generated_plan["next"]
+    if hook_plan is not None:
+        proposed["generated"][_HOOK_STATE_KEY] = hook_plan["next"]
+    proposed["mcp"] = mcp_next
+    proposed["package_version"] = BRIGADE_VERSION
+    instruction_dirs = (
+        _missing_directories(profile.user_root, instruction.path)
+        if instruction.action in {"create", "update"} and profile.instruction_mode == "managed-file"
+        else []
+    )
+    if instruction_dirs and isinstance(proposed.get("instructions"), dict):
+        existing = proposed["instructions"].get("created_directories", [])
+        proposed["instructions"]["created_directories"] = sorted(set(existing) | set(instruction_dirs))
+    created_dirs: dict[str, list[str]] = {}
+    for path, _data, skill_id, _relative in skill_plan["writes"]:
+        created_dirs.setdefault(skill_id, []).extend(_missing_skill_directories(profile, path))
+    for skill_id, directories in created_dirs.items():
+        existing = proposed["skills"][skill_id].setdefault("created_directories", [])
+        proposed["skills"][skill_id]["created_directories"] = sorted(set(existing) | set(directories))
+    generated_dirs: dict[str, list[str]] = {}
+    for path, _text, _executable, relative in generated_plan["writes"]:
+        generated_dirs.setdefault(relative, []).extend(_missing_directories(profile.user_root, path))
+    for relative, directories in generated_dirs.items():
+        existing = proposed["generated"][relative].setdefault("created_directories", [])
+        proposed["generated"][relative]["created_directories"] = sorted(set(existing) | set(directories))
+    return proposed
+
+
 def _prune_created_directories(paths: list[Path], root: Path) -> list[str]:
     removed: list[str] = []
     for path in sorted(set(paths), reverse=True):
@@ -1786,54 +1867,17 @@ def _sync_profile(
     mcp_plan = _mcp_plan(profile, state, workspace, allow_global_stdio=allow_global_stdio, adopt=adopt)
     items.extend(mcp_plan["items"])
     conflicts.extend(mcp_plan["conflicts"])
-    proposed = json.loads(json.dumps(state))
-    if instruction.status != "conflict":
-        old_instruction = state.get("instructions", {})
-        created_file = (
-            old_instruction.get("created_file", not instruction_existed)
-            if isinstance(old_instruction, dict)
-            else not instruction_existed
-        )
-        if instruction.desired_digest:
-            instruction_record: dict[str, Any] = {
-                "digest": instruction.desired_digest,
-                "created_file": created_file,
-                _INSTRUCTION_REQUIRED_PROFILE_KEY: depth["required_profile"],
-                _INSTRUCTION_EFFECTIVE_PROFILE_KEY: depth["effective_profile"],
-            }
-            if isinstance(old_instruction, dict) and old_instruction.get("created_directories"):
-                instruction_record["created_directories"] = list(old_instruction["created_directories"])
-            if isinstance(old_instruction, dict) and old_instruction.get(_LEGACY_MIGRATED):
-                instruction_record[_LEGACY_MIGRATED] = True
-            proposed["instructions"] = instruction_record
-        else:
-            proposed["instructions"] = {}
-    proposed["skills"] = skill_plan["next"]
-    proposed["generated"] = generated_plan["next"]
-    if hook_plan is not None:
-        proposed["generated"][_HOOK_STATE_KEY] = hook_plan["next"]
-    proposed["mcp"] = mcp_plan["next"]
-    proposed["package_version"] = BRIGADE_VERSION
-    instruction_dirs = (
-        _missing_directories(profile.user_root, instruction.path)
-        if instruction.action in {"create", "update"} and profile.instruction_mode == "managed-file"
-        else []
+    proposed = _expected_profile_state(
+        state,
+        instruction=instruction,
+        instruction_existed=instruction_existed,
+        depth=depth,
+        skill_plan=skill_plan,
+        generated_plan=generated_plan,
+        hook_plan=hook_plan,
+        mcp_next=mcp_plan["next"],
+        profile=profile,
     )
-    if instruction_dirs and isinstance(proposed.get("instructions"), dict):
-        existing = proposed["instructions"].get("created_directories", [])
-        proposed["instructions"]["created_directories"] = sorted(set(existing) | set(instruction_dirs))
-    created_dirs: dict[str, list[str]] = {}
-    for path, _data, skill_id, _relative in skill_plan["writes"]:
-        created_dirs.setdefault(skill_id, []).extend(_missing_skill_directories(profile, path))
-    for skill_id, directories in created_dirs.items():
-        existing = proposed["skills"][skill_id].setdefault("created_directories", [])
-        proposed["skills"][skill_id]["created_directories"] = sorted(set(existing) | set(directories))
-    generated_dirs: dict[str, list[str]] = {}
-    for path, _text, _executable, relative in generated_plan["writes"]:
-        generated_dirs.setdefault(relative, []).extend(_missing_directories(profile.user_root, path))
-    for relative, directories in generated_dirs.items():
-        existing = proposed["generated"][relative].setdefault("created_directories", [])
-        proposed["generated"][relative]["created_directories"] = sorted(set(existing) | set(directories))
     state_item = _state_item(profile.state_path, before=state, after=proposed)
     receipt_item = _receipt_item(profile.receipt_path, state_action=state_item["action"])
     items.extend([state_item, receipt_item])
@@ -2321,7 +2365,7 @@ def _doctor_profile(
             receipt_path=profile.receipt_path,
             receipt_state="missing",
         ), False
-    state = loaded.state
+    state = json.loads(json.dumps(loaded.state))
     instruction, depth = _instruction_plan(
         profile,
         state,
@@ -2391,18 +2435,34 @@ def _doctor_profile(
     generated_plan = _generated_plans(profile, state, adopt=False)
     generated_issues = [entry for entry in generated_plan["items"] if entry["status"] != "current"]
     conflicts.extend(generated_issues)
-    hook_items: list[dict[str, Any]] = []
-    if profile.hook is not None:
-        hook_plan = _hook_plan(profile, state, adopt=False)
-        hook_items = hook_plan["items"]
+    hook_plan = _hook_plan(profile, state, adopt=False) if profile.hook is not None else None
+    hook_items = hook_plan["items"] if hook_plan is not None else []
+    if hook_plan is not None:
         conflicts.extend(entry for entry in hook_items if entry["status"] != "current")
+    proposed = _expected_profile_state(
+        state,
+        instruction=instruction,
+        instruction_existed=profile.instruction_path.exists(),
+        depth=depth,
+        skill_plan=skill_plan,
+        generated_plan=generated_plan,
+        hook_plan=hook_plan,
+        mcp_next=state["mcp"],
+        profile=profile,
+    )
+    state_item = _state_item(profile.state_path, before=state, after=proposed)
+    receipt_item = _doctor_receipt_item(profile, state, state_action=state_item["action"])
+    items = [*items_prefix, *skill_plan["items"], *generated_plan["items"], *hook_items, state_item, receipt_item]
+    # Same create/update/remove predicate as sync/uninstall (#1193). Doctor
+    # --check treats pending ownership-state or receipt work as not ready.
+    pending = any(item["action"] in {"create", "update", "remove"} for item in items)
     mcp, mcp_ok = _verify_mcp(profile, state, workspace) if verify_mcp else ({"status": "pending", "items": []}, True)
-    ready = not conflicts and mcp_ok
+    ready = not conflicts and mcp_ok and not pending
     return _result(
         profile,
-        status="current" if ready else "conflict",
+        status="conflict" if conflicts else ("pending" if pending else "current"),
         ready=ready,
-        items=[*items_prefix, *skill_plan["items"], *generated_plan["items"], *hook_items],
+        items=items,
         conflicts=conflicts,
         files_written=[],
         files_removed=[],
