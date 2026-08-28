@@ -303,7 +303,7 @@ jobs:
         run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q --cov=brigade --cov-report=
       - name: Upload coverage data
         if: matrix.python == '3.12'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.python }}-${{ matrix.shard }}
           path: .coverage.${{ matrix.python }}.${{ matrix.shard }}

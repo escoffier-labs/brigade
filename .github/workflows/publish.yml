@@ -104,7 +104,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/release-assets" | Out-Null
           Copy-Item target/release/graphtrail.exe "$env:GITHUB_WORKSPACE/release-assets/graphtrail-${{ matrix.platform }}.exe"
           Copy-Item target/release/graphtrail-mcp.exe "$env:GITHUB_WORKSPACE/release-assets/graphtrail-mcp-${{ matrix.platform }}.exe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rust-${{ matrix.platform }}
           path: release-assets/
@@ -154,7 +154,7 @@ jobs:
           if [ "$GOOS" = windows ]; then suffix=.exe; fi
           go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/miseledger-${{ matrix.platform }}$suffix" ./cmd/miseledger
           go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/sessionfind-${{ matrix.platform }}$suffix" ./cmd/sessionfind
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: go-${{ matrix.platform }}
           path: release-assets/
@@ -212,7 +212,7 @@ jobs:
           VERSION="${AGENT_NOTIFY_TAG#v}"
           BUILD_DATE="$(date -u -d "@$(git show -s --format=%ct ${AGENT_NOTIFY_COMMIT})" +%Y-%m-%dT%H:%M:%SZ)"
           go build -trimpath -ldflags "-X main.version=${VERSION} -X main.commit=${AGENT_NOTIFY_COMMIT} -X main.buildDate=${BUILD_DATE} -s -w" -o "$GITHUB_WORKSPACE/release-assets/agent-notify-${{ matrix.platform }}$suffix" ./cmd/agent-notify
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: agent-notify-${{ matrix.platform }}
           path: release-assets/
@@ -282,7 +282,7 @@ jobs:
             release-assets/agent-notify-darwin-arm64
             release-assets/agent-notify-windows-amd64.exe
             release-assets/component-manifest-v1.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: unified-release-assets
           path: release-assets/
