@@ -988,6 +988,30 @@ def test_work_doctor_warns_for_plan_coverage(tmp_path, monkeypatch, capsys):
     assert "[ok] plan_coverage: significant pending tasks have plan artifacts" in out
 
 
+def test_work_doctor_does_not_ok_plan_coverage_when_ledger_unavailable(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
+
+    calls = {"n": 0}
+
+    def _raise_first_ledger(_target):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise work_cmd.TaskLedgerError("task ledger is unreadable", reason="corrupt_ledger")
+        return {"version": 1, "tasks": [], "edges": []}
+
+    monkeypatch.setattr(work_cmd.ledger, "_read_task_ledger", _raise_first_ledger)
+    capsys.readouterr()
+
+    assert work_cmd.doctor(target=tmp_path) == 1
+    out = capsys.readouterr().out
+    assert "[fail] task_ledger:" in out
+    assert "[ok] plan_coverage:" not in out
+    assert "[warn] plan_coverage:" in out
+
+
 def test_brief_payload_includes_plan_coverage(tmp_path, capsys):
     _init_git_repo(tmp_path)
     task_id = _plan_task_id(tmp_path, capsys)
