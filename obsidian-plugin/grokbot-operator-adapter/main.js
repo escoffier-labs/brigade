@@ -4466,8 +4466,23 @@ const TOOL_DESCRIPTIONS = {
   grokbot_replace_canvas_v1: "Private canvas compare-and-swap v0.1.0",
   grokbot_replace_base_v1: "Private base compare-and-swap v0.1.0",
   grokbot_replace_excalidraw_v1: "Private excalidraw compare-and-swap v0.1.0",
+  grokbot_lint_note_v1: "Private fixed Linter note workflow v0.1.0",
+  grokbot_auto_move_note_v1: "Private fixed Auto Note Mover workflow v0.1.0",
+  grokbot_sr_open_review_v1: "Private fixed Spaced Repetition review workflow v0.1.0",
+  grokbot_homepage_open_v1: "Private fixed Homepage workflow v0.1.0",
+  grokbot_omnisearch_v1: "Private Omnisearch 1.30.1 runtime index v0.1.0",
+  grokbot_excalidraw_open_v1: "Private fixed Excalidraw open workflow v0.1.0",
+  grokbot_excalidraw_export_v1: "Private fixed Excalidraw export workflow v0.1.0",
 };
 const HEX64 = /^[0-9a-f]{64}$/;
+const LINTER_COMMAND = "obsidian-linter:lint-file";
+const SPACED_REPETITION_COMMAND = "obsidian-spaced-repetition:srs-open-review-queue-view";
+const EXCALIDRAW_OPEN_COMMAND = "obsidian-excalidraw-plugin:excalidraw-open";
+const OMNISEARCH_PLUGIN_ID = "omnisearch";
+const OMNISEARCH_VERSION = "1.30.1";
+const MAX_OMNISEARCH_QUERY_BYTES = 512;
+const MAX_OMNISEARCH_RESULT_BYTES = 65536;
+const MAX_OMNISEARCH_HITS = 32;
 const CANVAS_ROOTS = [
   "00 - Inbox/Agent Notes",
   "01 - Projects",
@@ -4588,12 +4603,28 @@ function validateExcalidraw(text, pathValue) {
   }
 }
 
-function publicSchema() {
+function replacementSchema() {
   return {
     path: z.string(),
     expected_sha256: z.string().regex(HEX64),
     replacement_utf8: z.string().min(1),
   };
+}
+
+function lintSchema() {
+  return { path: z.string(), expected_sha256: z.string().regex(HEX64) };
+}
+
+function emptySchema() {
+  return {};
+}
+
+function omnisearchSchema() {
+  return { query: z.string().min(1).max(MAX_OMNISEARCH_QUERY_BYTES), limit: z.number().int().min(1).max(10) };
+}
+
+function excalidrawOpenSchema() {
+  return { path: z.string() };
 }
 
 function parseInput(raw) {
@@ -4620,6 +4651,50 @@ function parseInput(raw) {
   };
 }
 
+function parsePathHashInput(raw) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_request");
+  const keys = Object.keys(raw).sort();
+  if (keys.length !== 2 || keys[0] !== "expected_sha256" || keys[1] !== "path") throw new Error("invalid_request");
+  if (typeof raw.path !== "string" || typeof raw.expected_sha256 !== "string" || !HEX64.test(raw.expected_sha256)) {
+    throw new Error("invalid_request");
+  }
+  return { path: raw.path, expected_sha256: raw.expected_sha256 };
+}
+
+function parseEmptyInput(raw) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).length !== 0) {
+    throw new Error("invalid_request");
+  }
+  return {};
+}
+
+function parseOmnisearchInput(raw) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_request");
+  const keys = Object.keys(raw).sort();
+  if (keys.length !== 2 || keys[0] !== "limit" || keys[1] !== "query") throw new Error("invalid_request");
+  if (typeof raw.query !== "string" || byteLength(raw.query) < 1 || byteLength(raw.query) > MAX_OMNISEARCH_QUERY_BYTES) {
+    throw new Error("invalid_request");
+  }
+  if (!Number.isInteger(raw.limit) || raw.limit < 1 || raw.limit > 10) throw new Error("invalid_request");
+  return { query: raw.query, limit: raw.limit };
+}
+
+function parseExcalidrawPathInput(raw) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).length !== 1 || typeof raw.path !== "string") {
+    throw new Error("invalid_request");
+  }
+  return { path: raw.path };
+}
+
+function authorizeMarkdown(pathValue) {
+  if (pathValue.slice(-3) !== ".md") throw new Error("denied");
+  for (let index = 0; index < CANVAS_ROOTS.length; index += 1) {
+    const root = CANVAS_ROOTS[index];
+    if (pathValue.indexOf(root + "/") === 0 && pathValue.length > root.length + 4) return pathValue;
+  }
+  throw new Error("denied");
+}
+
 class GrokbotOperatorAdapter extends Plugin {
   constructor(app, manifest) {
     super(app, manifest);
@@ -4627,6 +4702,7 @@ class GrokbotOperatorAdapter extends Plugin {
     this._host = null;
     this._registered = false;
     this._onLoaded = null;
+    this._mutationTail = Promise.resolve();
   }
 
   async onload() {
@@ -4648,6 +4724,27 @@ class GrokbotOperatorAdapter extends Plugin {
 
   _hostIsLive(host) {
     return !!(host && typeof host.getPublicApi === "function");
+  }
+
+  _hasFixedCommand(command) {
+    const commands = this.app.commands && this.app.commands.commands;
+    return !!(commands && Object.prototype.hasOwnProperty.call(commands, command));
+  }
+
+  _hasOmnisearch() {
+    // Presence-only registration. Task 20 capability reconciliation enforces
+    // the commissioned command fingerprint before any public promotion.
+    const plugins = this.app.plugins && this.app.plugins.plugins;
+    const manifests = this.app.plugins && this.app.plugins.manifests;
+    const plugin = plugins && plugins[OMNISEARCH_PLUGIN_ID];
+    return !!(
+      plugin &&
+      plugin.api &&
+      typeof plugin.api.search === "function" &&
+      manifests &&
+      manifests[OMNISEARCH_PLUGIN_ID] &&
+      manifests[OMNISEARCH_PLUGIN_ID].version === OMNISEARCH_VERSION
+    );
   }
 
   _clearRegistration() {
@@ -4689,11 +4786,11 @@ class GrokbotOperatorAdapter extends Plugin {
     }
     const self = this;
     try {
-      const schema = publicSchema();
+      const replacement = replacementSchema();
       api.addMcpTool(
         "grokbot_replace_canvas_v1",
         TOOL_DESCRIPTIONS.grokbot_replace_canvas_v1,
-        schema,
+        replacement,
         function replaceCanvas(args) {
           return self._replace("canvas", args);
         },
@@ -4701,7 +4798,7 @@ class GrokbotOperatorAdapter extends Plugin {
       api.addMcpTool(
         "grokbot_replace_base_v1",
         TOOL_DESCRIPTIONS.grokbot_replace_base_v1,
-        schema,
+        replacement,
         function replaceBase(args) {
           return self._replace("base", args);
         },
@@ -4709,11 +4806,31 @@ class GrokbotOperatorAdapter extends Plugin {
       api.addMcpTool(
         "grokbot_replace_excalidraw_v1",
         TOOL_DESCRIPTIONS.grokbot_replace_excalidraw_v1,
-        schema,
+        replacement,
         function replaceExcalidraw(args) {
           return self._replace("excalidraw", args);
         },
       );
+      if (this._hasFixedCommand(LINTER_COMMAND)) {
+        api.addMcpTool("grokbot_lint_note_v1", TOOL_DESCRIPTIONS.grokbot_lint_note_v1, lintSchema(), function lintNote(args) {
+          return self._lintNote(args);
+        });
+      }
+      if (this._hasFixedCommand(SPACED_REPETITION_COMMAND)) {
+        api.addMcpTool("grokbot_sr_open_review_v1", TOOL_DESCRIPTIONS.grokbot_sr_open_review_v1, emptySchema(), function openSpacedReview(args) {
+          return self._openSpacedReview(args);
+        });
+      }
+      if (this._hasOmnisearch()) {
+        api.addMcpTool("grokbot_omnisearch_v1", TOOL_DESCRIPTIONS.grokbot_omnisearch_v1, omnisearchSchema(), function omnisearch(args) {
+          return self._omnisearch(args);
+        });
+      }
+      if (this._hasFixedCommand(EXCALIDRAW_OPEN_COMMAND)) {
+        api.addMcpTool("grokbot_excalidraw_open_v1", TOOL_DESCRIPTIONS.grokbot_excalidraw_open_v1, excalidrawOpenSchema(), function openExcalidraw(args) {
+          return self._openExcalidraw(args);
+        });
+      }
     } catch (_error) {
       try {
         api.unregister();
@@ -4763,6 +4880,113 @@ class GrokbotOperatorAdapter extends Plugin {
       ],
     };
   }
+
+  _result(value) {
+    return { content: [{ type: "text", text: JSON.stringify(value) }] };
+  }
+
+  _withMutation(work) {
+    const prior = this._mutationTail;
+    let release;
+    this._mutationTail = new Promise(function resolveTail(resolve) {
+      release = resolve;
+    });
+    return prior.then(work).finally(release);
+  }
+
+  _existingFile(pathValue) {
+    const file = this.app.vault.getAbstractFileByPath(pathValue);
+    if (!file) throw new Error("not_found");
+    return file;
+  }
+
+  async _readText(file) {
+    if (!this.app.vault || typeof this.app.vault.read !== "function") throw new Error("unavailable");
+    const text = await this.app.vault.read(file);
+    if (typeof text !== "string") throw new Error("unavailable");
+    return text;
+  }
+
+  async _activate(pathValue) {
+    const file = this._existingFile(pathValue);
+    const workspace = this.app.workspace;
+    if (!workspace || typeof workspace.getLeaf !== "function" || typeof workspace.getActiveFile !== "function") {
+      throw new Error("unavailable");
+    }
+    const leaf = workspace.getLeaf(true);
+    if (!leaf || typeof leaf.openFile !== "function") throw new Error("unavailable");
+    await leaf.openFile(file);
+    const active = workspace.getActiveFile();
+    if (!active || active.path !== pathValue) throw new Error("unavailable");
+    return file;
+  }
+
+  _verifyActive(pathValue) {
+    const active = this.app.workspace && this.app.workspace.getActiveFile && this.app.workspace.getActiveFile();
+    if (!active || active.path !== pathValue) throw new Error("unavailable");
+  }
+
+  async _lintNote(raw) {
+    const input = parsePathHashInput(raw);
+    const pathValue = authorizeMarkdown(normalizeVaultPath(input.path));
+    return this._withMutation(async () => {
+      const file = await this._activate(pathValue);
+      const before = await this._readText(file);
+      if (sha256Utf8(before) !== input.expected_sha256) throw new Error("stale");
+      if (!this.app.commands || typeof this.app.commands.executeCommandById !== "function") throw new Error("unavailable");
+      if ((await this.app.commands.executeCommandById(LINTER_COMMAND)) === false) throw new Error("unavailable");
+      this._verifyActive(pathValue);
+      const after = await this._readText(this._existingFile(pathValue));
+      return this._result({ path: pathValue, before_sha256: sha256Utf8(before), after_sha256: sha256Utf8(after) });
+    });
+  }
+
+  async _openSpacedReview(raw) {
+    parseEmptyInput(raw);
+    return this._withMutation(async () => {
+      if (!this.app.commands || typeof this.app.commands.executeCommandById !== "function") throw new Error("unavailable");
+      if ((await this.app.commands.executeCommandById(SPACED_REPETITION_COMMAND)) === false) throw new Error("unavailable");
+      const view = this.app.workspace && this.app.workspace.getActiveView && this.app.workspace.getActiveView();
+      if (!view || typeof view.getViewType !== "function" || view.getViewType() !== "review-queue") throw new Error("unavailable");
+      return this._result({ view_id: "review-queue", opened: true });
+    });
+  }
+
+  async _omnisearch(raw) {
+    const input = parseOmnisearchInput(raw);
+    const plugins = this.app.plugins && this.app.plugins.plugins;
+    const manifests = this.app.plugins && this.app.plugins.manifests;
+    const plugin = plugins && plugins[OMNISEARCH_PLUGIN_ID];
+    if (!plugin || !plugin.api || typeof plugin.api.search !== "function" || !manifests || !manifests[OMNISEARCH_PLUGIN_ID] || manifests[OMNISEARCH_PLUGIN_ID].version !== OMNISEARCH_VERSION) {
+      throw new Error("unavailable");
+    }
+    const rawHits = await plugin.api.search(input.query);
+    if (!Array.isArray(rawHits) || rawHits.length > MAX_OMNISEARCH_HITS) throw new Error("unavailable");
+    const hits = [];
+    for (let index = 0; index < rawHits.length && hits.length < input.limit; index += 1) {
+      const item = rawHits[index];
+      if (!item || typeof item !== "object" || Array.isArray(item) || Object.keys(item).sort().join(",") !== "path,score,snippet,title") throw new Error("unavailable");
+      if (typeof item.path !== "string" || typeof item.title !== "string" || typeof item.snippet !== "string" || typeof item.score !== "number" || !Number.isFinite(item.score)) throw new Error("unavailable");
+      const pathValue = authorizeMarkdown(normalizeVaultPath(item.path));
+      hits.push({ path: pathValue, title: item.title, snippet: item.snippet, score: item.score });
+    }
+    const payload = { hits };
+    if (byteLength(JSON.stringify(payload)) > MAX_OMNISEARCH_RESULT_BYTES) throw new Error("unavailable");
+    return this._result(payload);
+  }
+
+  async _openExcalidraw(raw) {
+    const input = parseExcalidrawPathInput(raw);
+    const pathValue = authorizeExcalidraw(normalizeVaultPath(input.path));
+    return this._withMutation(async () => {
+      await this._activate(pathValue);
+      if (!this.app.commands || typeof this.app.commands.executeCommandById !== "function") throw new Error("unavailable");
+      if ((await this.app.commands.executeCommandById(EXCALIDRAW_OPEN_COMMAND)) === false) throw new Error("unavailable");
+      this._verifyActive(pathValue);
+      return this._result({ path: pathValue, view_type: "excalidraw" });
+    });
+  }
+
 }
 
 module.exports = GrokbotOperatorAdapter;

@@ -7,7 +7,7 @@ import re
 from typing import Any, Callable, Mapping, NoReturn
 
 from .adapters import NATIVE_MCP_TOOLS
-from .operator_adapter import OPERATOR_ADAPTER_TOOLS
+from .operator_adapter import CALLABLE_OPERATOR_ADAPTER_TOOLS
 from .contracts import ERROR_MESSAGES, ObsidianError
 from .runtime_config import required_upstream_url
 from .tls import CONNECT_TIMEOUT_SECONDS, MAX_RESPONSE_BYTES, pinned_fetch
@@ -217,7 +217,7 @@ class StreamableNativeMcpClient:
         self._ready = True
 
     def call_tool(self, name: str, arguments: Mapping[str, Any] | None = None) -> object:
-        if name not in NATIVE_MCP_TOOLS and name not in OPERATOR_ADAPTER_TOOLS:
+        if name not in NATIVE_MCP_TOOLS and name not in CALLABLE_OPERATOR_ADAPTER_TOOLS:
             _protocol()
         self._ensure_session()
         return self._rpc("tools/call", {"name": name, "arguments": dict(arguments or {})})
