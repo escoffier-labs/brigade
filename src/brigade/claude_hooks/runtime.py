@@ -3164,6 +3164,7 @@ def _run_best_effort_bounded(
     *,
     timeout: float,
     default: Any,
+    on_abandon: Callable[[], None] | None = None,
 ) -> Any:
     """Run ``fn`` in a daemon thread; return ``default`` if it exceeds ``timeout``.
 
@@ -3191,6 +3192,11 @@ def _run_best_effort_bounded(
     thread = threading.Thread(target=_run, name="brigade-hook-best-effort", daemon=True)
     thread.start()
     if not done.wait(timeout=max(timeout, 0.0)):
+        if on_abandon is not None:
+            try:
+                on_abandon()
+            except Exception:  # noqa: BLE001 - parent must still emit a valid envelope
+                pass
         return default
     return box[0]
 
