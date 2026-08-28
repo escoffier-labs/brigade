@@ -4781,14 +4781,26 @@ import_format = "jsonl"
     assert "writer lock" in str(receipt.get("error")), receipt
 
 
-def test_overlapping_thread_acquisitions_share_one_owner_close_once_and_stay_exclusive(tmp_path, monkeypatch):
-    """Round 6 (L1): depth and ownership live in one registry entry.
+def _writer_lock_probe_script(tmp_path, lock_path):
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import errno, fcntl, os, sys\n"
+        f"lock = {str(lock_path)!r}\n"
+        "fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except OSError as exc:\n"
+        "    sys.exit(0 if exc.errno in (errno.EACCES, errno.EAGAIN) else 1)\n"
+        "sys.exit(2)\n"
+    )
+    return probe
 
-    An inner thread context must stay protected when the outer context exits
-    first, the fd closes exactly once at outermost exit, and concurrent first
-    acquisitions serialize instead of exposing a half-initialized entry.
-    """
+
+def test_overlapping_thread_acquisitions_are_thread_owned_and_close_once(tmp_path, monkeypatch):
+    """Finding 2: reentrancy is owned by one thread; others wait for full release."""
+    import subprocess
     import threading
+    import time
 
     from brigade.work_cmd import inbox_lock as inbox_lock_mod
 
@@ -4802,77 +4814,81 @@ def test_overlapping_thread_acquisitions_share_one_owner_close_once_and_stay_exc
 
     monkeypatch.setattr(inbox_lock_mod._HeldInboxLock, "release", spying_release)
 
-    outer_entered = threading.Event()
-    outer_exit = threading.Event()
-    inner_entered = threading.Event()
-    inner_exit = threading.Event()
+    owner_entered = threading.Event()
+    owner_exit = threading.Event()
+    waiter_entered = threading.Event()
+    waiter_exit = threading.Event()
+    owner_ident = {"value": None}
 
-    def outer():
+    def owner():
         with inbox_lock_mod.inbox_writer_lock(tmp_path):
-            outer_entered.set()
-            assert outer_exit.wait(timeout=30)
+            owner_ident["value"] = threading.get_ident()
+            with inbox_lock_mod.inbox_writer_lock(tmp_path):
+                owner_entered.set()
+                entry = inbox_lock_mod._ACTIVE_LOCKS[key]
+                assert entry.depth == 2
+                assert entry.owner_ident == threading.get_ident()
+                assert owner_exit.wait(timeout=30)
 
-    def inner():
+    def waiter():
         with inbox_lock_mod.inbox_writer_lock(tmp_path):
-            inner_entered.set()
-            assert inner_exit.wait(timeout=30)
+            waiter_entered.set()
+            assert waiter_exit.wait(timeout=30)
 
-    thread_outer = threading.Thread(target=outer)
-    thread_inner = threading.Thread(target=inner)
-    thread_outer.start()
-    assert outer_entered.wait(timeout=30)
+    thread_owner = threading.Thread(target=owner)
+    thread_waiter = threading.Thread(target=waiter)
+    thread_owner.start()
+    assert owner_entered.wait(timeout=30)
     held_fd = inbox_lock_mod._ACTIVE_LOCKS[key].owner.fd
-    thread_inner.start()
+    thread_waiter.start()
 
-    deadline = __import__("time").monotonic() + 30
-    while not inner_entered.is_set() and __import__("time").monotonic() < deadline:
-        __import__("time").sleep(0.01)
-    assert inner_entered.is_set(), "inner acquisition never entered"
+    deadline = time.monotonic() + 0.3
+    while time.monotonic() < deadline:
+        assert not waiter_entered.is_set(), "other thread entered the writer window while the owner still held it"
+        time.sleep(0.01)
+    assert inbox_lock_mod._ACTIVE_LOCKS[key].owner_ident == owner_ident["value"]
+    assert inbox_lock_mod._ACTIVE_LOCKS[key].depth == 2
 
-    # The outer context exits FIRST while the inner one is still inside.
-    outer_exit.set()
-    thread_outer.join(timeout=30)
-
-    assert key in inbox_lock_mod._ACTIVE_LOCKS, "outer exit dropped the entry while an inner context held it"
-    inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
-    assert inner_entered.is_set()
-
-    # Cross-process exclusion must still hold while the inner context runs.
-    probe = tmp_path / "probe.py"
-    probe.write_text(
-        "import errno, fcntl, os, sys\n"
-        f"lock = {str(inbox_lock_mod.inbox_writer_lock_path(tmp_path))!r}\n"
-        "fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)\n"
-        "try:\n"
-        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-        "except OSError as exc:\n"
-        "    sys.exit(0 if exc.errno in (errno.EACCES, errno.EAGAIN) else 1)\n"
-        "sys.exit(2)\n"
+    blocked = subprocess.run(
+        [sys.executable, str(_writer_lock_probe_script(tmp_path, inbox_lock_mod.inbox_writer_lock_path(tmp_path)))],
+        timeout=30,
     )
-    import subprocess
+    assert blocked.returncode == 0, "owner lost cross-process exclusion during nested hold"
 
-    blocked = subprocess.run([sys.executable, str(probe)], timeout=30)
-    assert blocked.returncode == 0, "inner context lost cross-process exclusion after outer exit"
+    owner_exit.set()
+    thread_owner.join(timeout=30)
+    assert not thread_owner.is_alive()
+    assert waiter_entered.wait(timeout=30), "waiter never entered after the owner fully released"
+    assert inbox_lock_mod._ACTIVE_LOCKS[key].owner_ident == thread_waiter.ident
+    assert inbox_lock_mod._ACTIVE_LOCKS[key].depth == 1
+    assert released_fds == [held_fd], f"owner nest closed the fd {len(released_fds)} times: {released_fds}"
 
-    inner_exit.set()
-    thread_inner.join(timeout=30)
+    blocked = subprocess.run(
+        [sys.executable, str(_writer_lock_probe_script(tmp_path, inbox_lock_mod.inbox_writer_lock_path(tmp_path)))],
+        timeout=30,
+    )
+    assert blocked.returncode == 0, "waiter lost cross-process exclusion"
+
+    waiter_exit.set()
+    thread_waiter.join(timeout=30)
     assert key not in inbox_lock_mod._ACTIVE_LOCKS
-    assert released_fds == [held_fd], f"fd closed {len(released_fds)} times: {released_fds}"
+    assert len(released_fds) == 2, released_fds
 
-    # Concurrent first acquisitions must serialize their initialization.
     errors: list[BaseException] = []
     barrier = threading.Barrier(6)
-    # All racers must be inside their acquisition before any is allowed to
-    # leave; otherwise a fast thread can fully release before a slow one
-    # enters, yielding multiple ownership cycles instead of one shared owner.
-    inside_barrier = threading.Barrier(6)
+    seen_idents: list[int] = []
+    seen_guard = threading.Lock()
 
     def racer():
         barrier.wait(timeout=30)
         try:
             with inbox_lock_mod.inbox_writer_lock(tmp_path):
                 inbox_lock_mod.verify_inbox_writer_lock(tmp_path)
-                inside_barrier.wait(timeout=30)
+                entry = inbox_lock_mod._ACTIVE_LOCKS[key]
+                assert entry.depth == 1
+                assert entry.owner_ident == threading.get_ident()
+                with seen_guard:
+                    seen_idents.append(threading.get_ident())
         except BaseException as exc:  # pragma: no cover - surfaced below
             errors.append(exc)
 
@@ -4883,8 +4899,32 @@ def test_overlapping_thread_acquisitions_share_one_owner_close_once_and_stay_exc
         thread.join(timeout=60)
     assert not errors, errors
     assert key not in inbox_lock_mod._ACTIVE_LOCKS
-    # Exactly one additional acquisition/release cycle came out of the race.
-    assert len(released_fds) == 2, released_fds
+    assert len(seen_idents) == 6, seen_idents
+    assert len(released_fds) == 8, released_fds
+
+
+def test_two_threads_do_not_lose_updates_under_writer_lock(tmp_path):
+    """Finding 2: two threads serialize their read-modify-write on one entry."""
+    import threading
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+
+    counter = tmp_path / "counter.txt"
+    counter.write_text("0")
+
+    def bump():
+        with inbox_lock_mod.inbox_writer_lock(tmp_path):
+            value = int(counter.read_text())
+            __import__("time").sleep(0.05)
+            counter.write_text(str(value + 1))
+
+    threads = [threading.Thread(target=bump) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+    assert counter.read_text() == "2"
 
 
 def test_outside_canonical_writer_gets_typed_failure_when_writer_lock_busy(tmp_path, monkeypatch):
