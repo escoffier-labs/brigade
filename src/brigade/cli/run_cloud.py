@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 import sys
 from pathlib import Path
+from typing import Any
+
+_PROMPT_FILE_MAX_BYTES = 64 * 1024
+_LAUNCH_LABEL_MAX = 120
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -26,9 +32,44 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Override and persist the stale-READY threshold in hours.",
     )
 
+    p_sync = cloud_sub.add_parser(
+        "sync", help="Reconcile cloud observations with hub leases (read-only status is not mutating)."
+    )
+    p_sync.add_argument("--target", type=Path, default=Path("."))
+    p_sync.add_argument("--json", action="store_true", help="Emit the sync JSON contract.")
+
+    p_launch = cloud_sub.add_parser(
+        "launch",
+        help="Launch a Cursor Cloud or Jules session from a private prompt file.",
+    )
+    p_launch.add_argument("--target", type=Path, default=Path("."), help="Workspace with .brigade/cloud state.")
+    p_launch.add_argument("--provider", required=True, choices=("cursor-cloud", "jules"))
+    p_launch.add_argument("--repo", required=True, help="GitHub owner/repo or https://github.com/owner/repo URL.")
+    p_launch.add_argument("--label", required=True, help="Registry label. Prompt text is never stored.")
+    p_launch.add_argument(
+        "--prompt-file",
+        type=Path,
+        required=True,
+        help="Bounded private prompt file. Prompt text is never an argv value.",
+    )
+    p_launch.add_argument(
+        "--starting-branch",
+        default=None,
+        help="Jules starting branch. Rejected for Cursor Cloud.",
+    )
+    p_launch.add_argument("--title", default=None, help="Jules session title. Rejected for Cursor Cloud.")
+    p_launch.add_argument(
+        "--auto-create-pr",
+        action="store_true",
+        help="Opt in to provider autoCreatePR. Default is off.",
+    )
+    p_launch.add_argument("--json", action="store_true", help="Emit the public launch JSON contract.")
+
     p_register = cloud_sub.add_parser("register", help="Register a dispatched cloud task.")
     p_register.add_argument("--target", type=Path, default=Path("."))
-    p_register.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud"))
+    p_register.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
     p_register.add_argument("--task-id", required=True)
     p_register.add_argument("--label", required=True)
     p_register.add_argument("--prompt-hash", default=None, help="sha256:... of the prompt; never store prompt text.")
@@ -44,7 +85,9 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p_adopt = cloud_sub.add_parser("adopt", help="Back-register an already-running task or orphaned branch.")
     p_adopt.add_argument("--target", type=Path, default=Path("."))
-    p_adopt.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud"))
+    p_adopt.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
     p_adopt.add_argument("--task-id", default=None)
     p_adopt.add_argument("--branch", default=None)
     p_adopt.add_argument("--label", default=None)
@@ -58,6 +101,58 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_sweep.add_argument("--target", type=Path, default=Path("."))
     p_sweep.add_argument("--json", action="store_true")
+
+    p_compact = cloud_sub.add_parser(
+        "compact",
+        help="Explicit registry maintenance. Never runs as a side effect of status.",
+    )
+    p_compact.add_argument("--target", type=Path, default=Path("."))
+    p_compact.add_argument("--json", action="store_true")
+    p_compact.add_argument(
+        "--keep-terminal",
+        type=int,
+        default=None,
+        help="Newest landed/terminal rows to keep (default 50).",
+    )
+    p_compact.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=None,
+        help="Drop landed/terminal rows older than this many hours (default 168).",
+    )
+
+    p_setup = cloud_sub.add_parser("setup", help="Write local Codex Cloud environment configuration (no live task).")
+    p_setup.add_argument("--target", type=Path, default=Path("."))
+    p_setup.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
+    setup_src = p_setup.add_mutually_exclusive_group(required=True)
+    setup_src.add_argument("--env-var", help="Name of the environment variable holding the Codex Cloud env id.")
+    setup_src.add_argument("--env-id", help="Store a Codex Cloud env id locally. Prefer --env-var.")
+
+    p_doctor = cloud_sub.add_parser("doctor", help="Check Codex Cloud seat configuration without submitting a task.")
+    p_doctor.add_argument("--target", type=Path, default=Path("."))
+    p_doctor.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
+    p_doctor.add_argument("--json", action="store_true")
+    p_doctor.add_argument(
+        "--selector",
+        default="configured",
+        help="Codex Cloud environment selector to validate (configured, $VAR, or literal id).",
+    )
+
+    p_canary = cloud_sub.add_parser("canary", help="Bounded Codex Cloud inventory check. Never exec or apply.")
+    p_canary.add_argument("--target", type=Path, default=Path("."))
+    p_canary.add_argument(
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+    )
+    p_canary.add_argument("--json", action="store_true")
+    p_canary.add_argument(
+        "--selector",
+        default="configured",
+        help="Codex Cloud environment selector to validate (configured, $VAR, or literal id).",
+    )
 
     p_grokbot = cloud_sub.add_parser("grokbot", help="Manage the private local Grok Bot job queue.")
     grokbot_sub = p_grokbot.add_subparsers(dest="grokbot_command", metavar="<grokbot-command>")
@@ -157,15 +252,34 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p_grokbot_serve = grokbot_sub.add_parser("serve", help="Run the role-scoped Grok Bot MCP listener.")
     p_grokbot_serve.add_argument("--target", type=Path, default=Path("."))
-    p_grokbot_serve.add_argument(
-        "--instance", required=True, choices=("operator", "repository-scout", "implementation-worker")
+    serve_identity = p_grokbot_serve.add_mutually_exclusive_group(required=True)
+    serve_identity.add_argument("--instance", choices=("operator", "repository-scout", "implementation-worker"))
+    serve_identity.add_argument(
+        "--pack", choices=("cerebro-memory", "fleet-steward", "backup-steward", "obsidian-operator")
     )
-    p_grokbot_serve.add_argument("--bind", default="127.0.0.1:8766", help="Listener host:port. Defaults to loopback.")
+    p_grokbot_serve.add_argument(
+        "--bind", default=None, help="Listener host:port. Defaults to the role or pack loopback."
+    )
     p_grokbot_serve.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
     p_grokbot_serve.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
     secret_group = p_grokbot_serve.add_mutually_exclusive_group(required=True)
     secret_group.add_argument("--bearer-file", type=Path, help="Protected file containing the listener bearer.")
     secret_group.add_argument("--bearer-env", help="Environment variable name containing the listener bearer.")
+    p_grokbot_serve.add_argument(
+        "--upstream-url",
+        default=None,
+        help="Loopback HTTPS Local REST URL. Used by obsidian-operator.",
+    )
+    serve_upstream_key = p_grokbot_serve.add_mutually_exclusive_group()
+    serve_upstream_key.add_argument(
+        "--upstream-key-file",
+        type=Path,
+        help="Protected file containing the Obsidian upstream key (reference only).",
+    )
+    serve_upstream_key.add_argument(
+        "--upstream-key-env",
+        help="Environment variable name containing the Obsidian upstream key.",
+    )
 
     def add_instance(command: argparse.ArgumentParser) -> None:
         command.add_argument("--target", type=Path, default=Path("."))
@@ -197,6 +311,119 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_install.add_argument("--out", type=Path, default=None, help="Directory to render the unit into.")
     p_install.add_argument("--force", action="store_true", help="Allow overwriting this role's own unit file.")
 
+    from .. import grokbot_packs
+
+    pack_ids = tuple(pack["id"] for pack in grokbot_packs.list_packs())
+    p_pack = grokbot_sub.add_parser("pack", help="Inspect and manage first-party Grok Bot connector packs.")
+    pack_sub = p_pack.add_subparsers(dest="grokbot_pack_command", metavar="<pack-command>")
+    pack_sub.required = True
+
+    def add_pack_id(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--target", type=Path, default=Path("."))
+        command.add_argument("--id", required=True, choices=pack_ids, dest="pack_id")
+        command.add_argument("--json", action="store_true")
+
+    p_pack_list = pack_sub.add_parser("list", help="List packaged first-party connector packs.")
+    add_target(p_pack_list)
+
+    p_pack_show = pack_sub.add_parser("show", help="Show one packaged connector pack.")
+    add_pack_id(p_pack_show)
+
+    p_pack_setup = pack_sub.add_parser("setup", help="Preview or apply non-secret pack instance configuration.")
+    add_pack_id(p_pack_setup)
+    p_pack_setup.add_argument("--bind", default=None, help="Listener host:port. Defaults to the pack loopback port.")
+    p_pack_setup.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
+    p_pack_setup.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
+    pack_secret = p_pack_setup.add_mutually_exclusive_group(required=True)
+    pack_secret.add_argument("--bearer-file", type=Path, help="Path of a protected bearer file (reference only).")
+    pack_secret.add_argument("--bearer-env", help="Name of the environment variable holding the bearer.")
+    p_pack_setup.add_argument(
+        "--cli-executable",
+        type=Path,
+        default=None,
+        help="Absolute Cerebro CLI executable. Required for cerebro-memory.",
+    )
+    p_pack_setup.add_argument(
+        "--workdir",
+        type=Path,
+        default=None,
+        help="Absolute Cerebro work directory. Required for cerebro-memory.",
+    )
+    p_pack_setup.add_argument(
+        "--runtime-path",
+        type=Path,
+        default=None,
+        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, and obsidian-operator.",
+    )
+    p_pack_setup.add_argument(
+        "--ledger-path",
+        type=Path,
+        default=None,
+        help="Absolute steward ledger path. Required for fleet-steward and backup-steward.",
+    )
+    p_pack_setup.add_argument(
+        "--action-state-path",
+        type=Path,
+        default=None,
+        help="Absolute action-state directory. Required for fleet-steward, backup-steward, and obsidian-operator.",
+    )
+    p_pack_setup.add_argument(
+        "--approval-dir",
+        type=Path,
+        default=None,
+        help="Absolute approval directory. Required for fleet-steward, backup-steward, and obsidian-operator.",
+    )
+    p_pack_setup.add_argument(
+        "--staging-dir",
+        type=Path,
+        default=None,
+        help="Absolute Obsidian staging directory. Required for obsidian-operator.",
+    )
+    p_pack_setup.add_argument(
+        "--excalidraw-bin",
+        type=Path,
+        default=None,
+        help="Absolute Excalidraw helper executable. Required for obsidian-operator.",
+    )
+    p_pack_setup.add_argument(
+        "--upstream-url",
+        default=None,
+        help="Loopback HTTPS Local REST URL. Required for obsidian-operator.",
+    )
+    pack_upstream_key = p_pack_setup.add_mutually_exclusive_group()
+    pack_upstream_key.add_argument(
+        "--upstream-key-file",
+        type=Path,
+        help="Path of a protected upstream-key file (reference only). Required for obsidian-operator.",
+    )
+    pack_upstream_key.add_argument(
+        "--upstream-key-env",
+        help="Name of the environment variable holding the upstream key. Required for obsidian-operator.",
+    )
+    p_pack_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
+
+    p_pack_doctor = pack_sub.add_parser("doctor", help="Sanitized pack diagnostics.")
+    add_pack_id(p_pack_doctor)
+
+    p_pack_canary = pack_sub.add_parser("canary", help="Bounded non-mutating pack authentication and inventory check.")
+    add_pack_id(p_pack_canary)
+
+    p_pack_install = pack_sub.add_parser("install-service", help="Render or install a pack-scoped systemd unit.")
+    add_pack_id(p_pack_install)
+    p_pack_install.add_argument("--out", type=Path, default=None, help="Directory to render the unit into.")
+    p_pack_install.add_argument("--force", action="store_true", help="Allow overwriting this pack's own unit file.")
+
+    p_pack_update = pack_sub.add_parser("update", help="Preview or apply a compatible pack version update.")
+    add_pack_id(p_pack_update)
+    p_pack_update.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
+
+    p_pack_remove = pack_sub.add_parser("remove", help="Preview or apply removal of owned pack config and unit files.")
+    add_pack_id(p_pack_remove)
+    p_pack_remove.add_argument(
+        "--out", type=Path, default=None, help="Owned unit directory previously written by install-service."
+    )
+    p_pack_remove.add_argument("--apply", action="store_true", help="Delete owned files. Default is preview only.")
+
     p.set_defaults(func=dispatch)
 
 
@@ -209,8 +436,13 @@ def dispatch(args) -> int:
 
     if command == "grokbot":
         return _dispatch_grokbot(args, target)
+    if command in {"setup", "doctor", "canary"}:
+        return _dispatch_codex_cloud_ops(args, target)
 
     from .. import cloud_tracker
+
+    if command == "launch":
+        return _dispatch_launch(args, target)
 
     if command == "register":
         try:
@@ -255,6 +487,38 @@ def dispatch(args) -> int:
             print(json.dumps(entry, indent=2, sort_keys=True))
         else:
             print(f"adopted {entry['id']} source={entry['source']}")
+        return 0
+
+    if command == "sync":
+        from .. import fleet_client
+
+        provider_tasks, github, cursor_wired = cloud_tracker.observe_providers(target)
+        hub_leases: list[dict[str, Any]] = []
+        try:
+            snapshot = fleet_client.fetch_cloud()
+            leases = snapshot.get("leases")
+            if isinstance(leases, list):
+                hub_leases = leases
+        except fleet_client.FleetClientError:
+            # No hub configured or unreachable: keep sync purely observational.
+            pass
+        payload = cloud_tracker.sync_payload(
+            target,
+            provider_tasks=provider_tasks,
+            github=github,
+            cursor_wired=cursor_wired,
+            hub_leases=hub_leases,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        print(f"cloud sync: {payload['target']}")
+        print(f"action: {payload['action']}")
+        print(
+            f"active: {payload['counts']['active']} released: {payload['counts']['released']} needs_you: {payload['counts']['needs_you']}"
+        )
+        for row in payload.get("needs_you", []):
+            print(f"  needs-you: {row.get('detail')}")
         return 0
 
     if command == "status":
@@ -306,6 +570,249 @@ def dispatch(args) -> int:
         print(report["note"])
         return 0
 
+    if command == "compact":
+        provider_tasks, github, cursor_wired = cloud_tracker.observe_providers(target)
+        try:
+            report = cloud_tracker.compact_registry(
+                target,
+                keep_terminal=args.keep_terminal,
+                max_age_hours=args.max_age_hours,
+                provider_tasks=provider_tasks,
+                github=github,
+                cursor_wired=cursor_wired,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0
+        print(f"cloud compact: {report['maintenance_id']} dropped={report['counts']['dropped']}")
+        print(
+            "policy: keep_terminal="
+            f"{report['policy']['keep_terminal']} max_age_hours={report['policy']['max_age_hours']}"
+        )
+        return 0
+
+    print(f"error: unknown cloud command: {command}", file=sys.stderr)
+    return 2
+
+
+def _dispatch_launch(args, target: Path) -> int:
+    """Launch Cursor Cloud or Jules from a private prompt file, then register on bind."""
+    from .. import cloud_tracker, cursor_cloud, jules_cloud
+
+    provider = args.provider
+    try:
+        label = _canonicalize_launch_label(args.label)
+    except ValueError:
+        return _emit_launch_payload(
+            {"ok": False, "provider": provider, "label": args.label, "reason": "bad-label"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    if provider == "cursor-cloud" and (args.starting_branch is not None or args.title is not None):
+        return _emit_launch_payload(
+            {"ok": False, "provider": provider, "label": label, "reason": "unsupported-flag"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    try:
+        prompt = _read_prompt_file(Path(args.prompt_file))
+    except ValueError:
+        return _emit_launch_payload(
+            {"ok": False, "provider": provider, "label": label, "reason": "bad-prompt-file"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    prompt_hash = cloud_tracker.prompt_hash(prompt)
+    api_key = _resolve_launch_key(provider)
+    if not api_key:
+        return _emit_launch_payload(
+            {
+                "ok": False,
+                "provider": provider,
+                "label": label,
+                "prompt_hash": prompt_hash,
+                "reason": "missing-key",
+            },
+            as_json=args.json,
+            exit_code=2,
+        )
+
+    launched: Any
+    if provider == "cursor-cloud":
+        launched = cursor_cloud.launch_agent(
+            api_key,
+            repo=args.repo,
+            prompt=prompt,
+            auto_create_pr=bool(args.auto_create_pr),
+            register_target=target,
+            label=label,
+        )
+    else:
+        launched = jules_cloud.launch_agent(
+            api_key,
+            repo=args.repo,
+            prompt=prompt,
+            title=args.title,
+            starting_branch=args.starting_branch,
+            auto_create_pr=bool(args.auto_create_pr),
+            register_target=target,
+            label=label,
+        )
+    payload = _public_launch_payload(provider=provider, label=label, prompt_hash=prompt_hash, result=launched)
+    return _emit_launch_payload(payload, as_json=args.json, exit_code=0 if launched.ok else 1)
+
+
+def _resolve_launch_key(provider: str) -> str | None:
+    """Return the provider key from existing environment resolution, never argv."""
+    from .. import cloud_tracker
+
+    if provider == "cursor-cloud":
+        return cloud_tracker._cursor_api_key()
+    if provider == "jules":
+        return cloud_tracker._jules_api_key()
+    return None
+
+
+def _canonicalize_launch_label(label: object) -> str:
+    """Strip and validate a launch label once before any provider or hub mutation."""
+    if not isinstance(label, str):
+        raise ValueError("bad-label")
+    canonical = label.strip()
+    if not 1 <= len(canonical) <= _LAUNCH_LABEL_MAX:
+        raise ValueError("bad-label")
+    if any(ord(ch) < 32 or ch == "\x7f" for ch in canonical):
+        raise ValueError("bad-label")
+    return canonical
+
+
+def _read_prompt_file(path: Path) -> str:
+    """Read a bounded regular prompt file through one O_NOFOLLOW descriptor."""
+    resolved = path.expanduser()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise ValueError("bad-prompt-file")
+    flags |= nofollow
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(os.fspath(resolved), flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("bad-prompt-file")
+        owner_uid = getattr(os, "getuid", None)
+        if owner_uid is not None and info.st_uid != owner_uid():
+            raise ValueError("bad-prompt-file")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ValueError("bad-prompt-file")
+        if info.st_size < 1 or info.st_size > _PROMPT_FILE_MAX_BYTES:
+            raise ValueError("bad-prompt-file")
+        chunks: list[bytes] = []
+        remaining = _PROMPT_FILE_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if not 1 <= len(data) <= _PROMPT_FILE_MAX_BYTES:
+            raise ValueError("bad-prompt-file")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("bad-prompt-file") from exc
+        if not text.strip():
+            raise ValueError("bad-prompt-file")
+        return text
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError("bad-prompt-file") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                raise ValueError("bad-prompt-file") from exc
+
+
+def _public_launch_payload(*, provider: str, label: str, prompt_hash: str, result: Any) -> dict[str, Any]:
+    """Build the public launch contract. Holder and prompt text never appear."""
+    payload: dict[str, Any] = {
+        "ok": bool(result.ok),
+        "provider": provider,
+        "label": label,
+        "prompt_hash": prompt_hash,
+        "reason": result.reason,
+    }
+    if provider == "cursor-cloud":
+        payload["task_id"] = result.agent_id
+        payload["run_id"] = result.run_id
+    else:
+        payload["task_id"] = result.session_id
+        payload["session_id"] = result.session_id
+        payload["source_name"] = result.source_name
+        payload["starting_branch"] = result.starting_branch
+    return payload
+
+
+def _emit_launch_payload(payload: dict[str, Any], *, as_json: bool, exit_code: int) -> int:
+    """Print a holder-free result. Prompt text is never echoed."""
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return exit_code
+    if payload.get("ok"):
+        extra = f" run={payload['run_id']}" if payload.get("run_id") else ""
+        print(f"launched {payload.get('provider')} task={payload.get('task_id')}{extra}")
+        return exit_code
+    print(f"error: {payload.get('reason', 'launch-failed')}", file=sys.stderr)
+    return exit_code
+
+
+def _dispatch_codex_cloud_ops(args, target: Path) -> int:
+    """Setup, doctor, and inventory canary for a Codex Cloud run seat."""
+    from .. import codex_cloud
+
+    if getattr(args, "provider", None) != "codex-cloud":
+        print("error: setup, doctor, and canary currently support --provider codex-cloud", file=sys.stderr)
+        return 2
+    command = args.run_cloud_command
+    if command == "setup":
+        try:
+            if args.env_var:
+                codex_cloud.save_environment_config(target, environment_id_env=args.env_var)
+            else:
+                codex_cloud.save_environment_config(target, environment_id=args.env_id)
+        except codex_cloud.CodexCloudConfigError:
+            print("error: invalid Codex Cloud setup", file=sys.stderr)
+            return 2
+        print("codex-cloud config saved")
+        return 0
+    if command == "doctor":
+        result = codex_cloud.doctor(target, selector=args.selector)
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(f"codex-cloud doctor: {'ok' if result['ok'] else 'fail'}")
+            print(f"environment_configured: {'yes' if result['environment_configured'] else 'no'}")
+            print(f"selector: {result.get('selector', args.selector)}")
+        return 0 if result["ok"] else 1
+    if command == "canary":
+        result = codex_cloud.canary(target, selector=args.selector)
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(f"codex-cloud canary: {'ok' if result['ok'] else 'fail'}")
+            print(f"environment_configured: {'yes' if result['environment_configured'] else 'no'}")
+            print(f"selector: {result.get('selector', args.selector)}")
+            if not result["ok"]:
+                print(f"reason: {result.get('reason', 'unknown')}")
+            print(f"task_count: {result['task_count']}")
+            print("apply: no")
+        return 0 if result["ok"] else 1
     print(f"error: unknown cloud command: {command}", file=sys.stderr)
     return 2
 
@@ -315,6 +822,8 @@ def _dispatch_grokbot(args, target: Path) -> int:
     from .. import grokbot_jobs, grokbot_mcp
 
     command = args.grokbot_command
+    if command == "pack":
+        return _dispatch_grokbot_pack(args, target)
     if command in {"setup", "doctor", "canary", "install-service"}:
         return _dispatch_grokbot_ops(args, target)
     if command == "feed":
@@ -331,22 +840,86 @@ def _dispatch_grokbot(args, target: Path) -> int:
         from .. import grokbot_mcp
 
         try:
-            config = grokbot_mcp.build_listener_config(
-                target=target,
-                instance=args.instance,
-                bind=args.bind,
-                allowed_hosts=args.allow_host,
-                allowed_origins=args.allow_origin,
-                bearer_file=args.bearer_file,
-                bearer_env=args.bearer_env,
-            )
-            grokbot_mcp.run_listener(config)
+            if getattr(args, "pack", None):
+                from .. import grokbot_cerebro
+
+                if args.pack != "obsidian-operator" and (
+                    args.upstream_url or args.upstream_key_file or args.upstream_key_env
+                ):
+                    print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
+                    return 2
+                listener_kwargs = {
+                    "bind": args.bind,
+                    "allowed_hosts": args.allow_host,
+                    "allowed_origins": args.allow_origin,
+                    "bearer_file": args.bearer_file,
+                    "bearer_env": args.bearer_env,
+                }
+                if args.pack == "fleet-steward":
+                    from ..grokbot_fleet.lifecycle import (
+                        build_listener_from_target as build_fleet_listener,
+                        run_listener as run_fleet_listener,
+                    )
+
+                    fleet_config, fleet_tools = build_fleet_listener(target, **listener_kwargs)
+                    run_fleet_listener(fleet_config, fleet_tools)
+                elif args.pack == "backup-steward":
+                    from ..grokbot_backup.lifecycle import (
+                        build_listener_from_target as build_backup_listener,
+                        run_listener as run_backup_listener,
+                    )
+
+                    backup_config, backup_tools = build_backup_listener(target, **listener_kwargs)
+                    run_backup_listener(backup_config, backup_tools)
+                elif args.pack == "obsidian-operator":
+                    from ..grokbot_obsidian.lifecycle import (
+                        build_listener_from_target as build_obsidian_listener,
+                        run_listener as run_obsidian_listener,
+                    )
+
+                    listener_kwargs["upstream_url"] = args.upstream_url
+                    listener_kwargs["upstream_key_file"] = args.upstream_key_file
+                    listener_kwargs["upstream_key_env"] = args.upstream_key_env
+                    obsidian_config, obsidian_tools = build_obsidian_listener(target, **listener_kwargs)
+                    run_obsidian_listener(obsidian_config, obsidian_tools)
+                else:
+                    cerebro_config, cerebro_tools = grokbot_cerebro.build_listener_from_target(
+                        target, **listener_kwargs
+                    )
+                    grokbot_cerebro.run_listener(cerebro_config, cerebro_tools)
+            else:
+                config = grokbot_mcp.build_listener_config(
+                    target=target,
+                    instance=args.instance,
+                    bind=args.bind or "127.0.0.1:8766",
+                    allowed_hosts=args.allow_host,
+                    allowed_origins=args.allow_origin,
+                    bearer_file=args.bearer_file,
+                    bearer_env=args.bearer_env,
+                )
+                grokbot_mcp.run_listener(config)
         except grokbot_mcp.OptionalDependencyError:
             print("error: Grok Bot listener requires pip install brigade-cli[grokbot]", file=sys.stderr)
             return 2
         except grokbot_mcp.ConfigurationError:
             print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
             return 2
+        except Exception as exc:
+            from .. import grokbot_backup, grokbot_cerebro, grokbot_fleet, grokbot_obsidian, grokbot_packs
+
+            if isinstance(
+                exc,
+                (
+                    grokbot_backup.BackupError,
+                    grokbot_cerebro.CerebroError,
+                    grokbot_fleet.FleetError,
+                    grokbot_obsidian.ObsidianError,
+                    grokbot_packs.PackError,
+                ),
+            ):
+                print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
+                return 2
+            raise
         return 0
     try:
         if command == "enqueue":
@@ -551,6 +1124,97 @@ def _print_reconcile_result(result: dict) -> None:
     print("grokbot reconcile-reports: " + " ".join(parts))
     for job in result.get("jobs", []):
         print(f"job {job['job_id']} state={job['state']}")
+
+
+def _dispatch_grokbot_pack(args, target: Path) -> int:
+    """Preview-first connector-pack lifecycle without printing secret values."""
+    from .. import grokbot_mcp, grokbot_ops, grokbot_packs
+
+    command = args.grokbot_pack_command
+    try:
+        if command == "list":
+            result = {"packs": grokbot_packs.list_packs()}
+        elif command == "show":
+            result = grokbot_packs.show_pack(args.pack_id)
+        elif command == "setup":
+            setup_kwargs = {
+                "bind": args.bind,
+                "allowed_hosts": args.allow_host,
+                "allowed_origins": args.allow_origin,
+                "bearer_env": args.bearer_env,
+                "bearer_file": args.bearer_file,
+                "cli_executable": getattr(args, "cli_executable", None),
+                "workdir": getattr(args, "workdir", None),
+                "runtime_path": getattr(args, "runtime_path", None),
+                "ledger_path": getattr(args, "ledger_path", None),
+                "action_state_path": getattr(args, "action_state_path", None),
+                "approval_dir": getattr(args, "approval_dir", None),
+                "staging_dir": getattr(args, "staging_dir", None),
+                "excalidraw_bin": getattr(args, "excalidraw_bin", None),
+                "upstream_url": getattr(args, "upstream_url", None),
+                "upstream_key_env": getattr(args, "upstream_key_env", None),
+                "upstream_key_file": getattr(args, "upstream_key_file", None),
+            }
+            result = (
+                grokbot_packs.apply_setup(target, args.pack_id, **setup_kwargs)
+                if args.apply
+                else grokbot_packs.preview_setup(target, args.pack_id, **setup_kwargs)
+            )
+        elif command == "doctor":
+            checks = grokbot_packs.doctor(target, args.pack_id)
+            if args.json:
+                print(json.dumps({"checks": checks}, indent=2, sort_keys=True))
+            else:
+                for check in checks:
+                    print(f"{check['check']}: {check['status']}")
+            return 1 if any(check["status"] != "ok" for check in checks) else 0
+        elif command == "canary":
+            result = grokbot_packs.canary(target, args.pack_id)
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(f"canary: {'ok' if result['ok'] else 'fail'}")
+                if not result["ok"]:
+                    print(f"reason: {result.get('reason', 'unknown')}")
+            return 0 if result["ok"] else 1
+        elif command == "install-service":
+            if args.out is None:
+                sys.stdout.write(grokbot_packs.render_install_service(target, args.pack_id))
+                return 0
+            result = grokbot_packs.apply_install_service(target, args.pack_id, out_dir=Path(args.out), force=args.force)
+        elif command == "update":
+            result = (
+                grokbot_packs.apply_update(target, args.pack_id)
+                if args.apply
+                else grokbot_packs.preview_update(target, args.pack_id)
+            )
+        elif command == "remove":
+            result = (
+                grokbot_packs.apply_remove(target, args.pack_id, unit_dir=args.out)
+                if args.apply
+                else grokbot_packs.preview_remove(target, args.pack_id, unit_dir=args.out)
+            )
+        else:
+            print(f"error: unknown Grok Bot pack command: {command}", file=sys.stderr)
+            return 2
+    except grokbot_packs.PackError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+    except grokbot_mcp.ConfigurationError:
+        print("error: Grok Bot configuration is invalid", file=sys.stderr)
+        return 2
+    except grokbot_ops.ServiceRenderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError):
+        print("error: Grok Bot pack operation failed", file=sys.stderr)
+        return 2
+
+    if args.json or command in {"list", "show"}:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"grokbot pack {command}: apply={result.get('apply', False)} pack={result.get('pack_id', args.pack_id)}")
+    return 0
 
 
 def _dispatch_grokbot_ops(args, target: Path) -> int:

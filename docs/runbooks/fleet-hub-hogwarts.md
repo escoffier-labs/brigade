@@ -340,6 +340,29 @@ The hub answers a redirect to `/` without the token and sets a `brigade_fleet_vi
 
 Sort and filter with query parameters, for example `/?attention=1` (only failed, awaiting-approval, or stale runs), `/view/repos?sort=repo`, `/?node=<prefix>`, `/?all=1` (include finished runs). The page refreshes every 10 seconds and works with JavaScript disabled.
 
+### Tailscale Serve identity authentication (optional)
+
+The hub can be started with `--trust-tailscale-identity` so that dashboard routes (`/`, `/deck`, `/deck/repos`, and the legacy `/view/*` boards) authorize a request from the `Tailscale-User-Login` header injected by a Tailscale Serve reverse proxy. This removes the need to pass the admin token or set the `brigade_fleet_view` cookie for dashboard-only access when the proxy is in place.
+
+Safe deployment contract: do not enable this unless all of the following are true:
+
+1. The hub is bound to a loopback interface only (`127.0.0.1` or `::1`). Never bind it to all interfaces or to a routable address when this flag is on.
+2. The dashboard request reaches the hub only through a Tailscale Serve reverse proxy that terminates Tailscale identity and strips any spoofed incoming `Tailscale-User-Login` header. The proxy must run on the same host as the hub, so the immediate TCP peer is loopback.
+3. The backend is never exposed directly to the tailnet or to any other network without the proxy in front.
+
+This mode treats every process inside the hub host or container as trusted because any local process can connect to the loopback backend and supply the identity header. Keep the hub in a dedicated host or container, and do not enable the flag when untrusted workloads share that network namespace.
+
+When the flag is set, the hub authorizes a dashboard request only when the immediate TCP peer is loopback and the header is present, non-empty, at most 256 characters, and contains no control characters. The identity value is never logged or rendered in any response. JSON and API routes (`/status`, `/claims`, `/nodes`, `/cloud`, `/models`, and all `POST` endpoints) still require the bearer/node/admin token checks; the Tailscale identity header does not grant access to them.
+
+Example service unit that binds loopback and trusts the proxy header:
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/brigade fleet serve --host 127.0.0.1 --port 3774 --db /var/lib/brigade/fleet-hub.db --trust-tailscale-identity
+```
+
+Pair this with a Tailscale Serve rule on the same host that forwards `https://brigade-hub` (or a funnel you control) to `http://127.0.0.1:3774`. Do not configure a Serve rule that points at a routable or remote backend address; the whole point is that the proxy is the only thing that can legitimately present the header, and it must speak to the hub over loopback.
+
 ## Migration from the shared token
 
 A fleet deployed before per-node credentials has one token in `/etc/brigade/fleet-hub.env` and in every client's `token_file`. After the upgrade that token is the admin token, and the hub refuses event and claim posts made with it unless `--allow-admin-writes` is set. Migrate in this order so no machine loses reporting:

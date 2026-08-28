@@ -910,12 +910,327 @@ def test_cli_grokbot_complete_rejects_invalid_artifact_files(
     assert expected_error in captured.err
 
 
+def test_report_snapshot_is_private_and_verified(tmp_path: Path):
+    spec = _spec()
+    spec["role"] = "repository-scout"
+    spec["artifact"] = {"kind": "report"}
+    job_id = grokbot_jobs.enqueue(tmp_path, spec, "report-1", now=NOW)["job_id"]
+    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 300, now=NOW)
+    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=NOW + timedelta(seconds=1))
+    report = "Private scout findings."
+    digest = __import__("hashlib").sha256(report.encode()).hexdigest()
+    completed = grokbot_jobs.complete_report(
+        tmp_path,
+        job_id,
+        "bot-a",
+        "lease-a",
+        {"kind": "report", "path": "docs/scout.md", "sha256": digest},
+        report,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert completed["state"] == "completed"
+    assert report not in json.dumps(completed)
+    retrieved = grokbot_jobs.read_report(tmp_path, job_id)
+    assert retrieved["text"] == report
+    assert retrieved["sha256"] == digest
+    artifact = tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts" / f"{job_id}.md"
+    assert artifact.is_file()
+    assert stat.S_IMODE(artifact.stat().st_mode) == 0o600
+
+
+def test_hub_snapshot_conflict_preserves_existing_bytes(tmp_path: Path, monkeypatch):
+    from brigade import fleet_client_grokbot
+
+    job_id = "grokbot-" + hashlib.sha256(b"shared-key").hexdigest()[:24]
+    granted = fleet_client_grokbot.GrokbotHubDecision(
+        True,
+        "ok",
+        job={"job_id": job_id, "state": "queued"},
+        idempotent=False,
+    )
+    repeated_ok = fleet_client_grokbot.GrokbotHubDecision(
+        True,
+        "ok",
+        job={"job_id": job_id, "state": "queued"},
+        idempotent=True,
+    )
+    decisions = [granted, repeated_ok]
+    monkeypatch.setattr(fleet_client_grokbot, "hub_configured", lambda: True)
+    monkeypatch.setattr(fleet_client_grokbot, "enqueue", lambda **kwargs: decisions.pop(0))
+
+    first = grokbot_jobs.enqueue(tmp_path, _spec(), "shared-key", now=NOW)
+    snapshot = tmp_path / ".brigade" / "cloud" / "grokbot" / "snapshots" / f"{first['job_id']}.json"
+    original = snapshot.read_bytes()
+    changed = _spec()
+    changed["label"] = "Different task"
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^idempotency-conflict$"):
+        grokbot_jobs.enqueue(tmp_path, changed, "shared-key", now=NOW)
+    assert snapshot.read_bytes() == original
+    repeated = grokbot_jobs.enqueue(tmp_path, _spec(), "shared-key", now=NOW)
+    assert repeated["job_id"] == first["job_id"]
+    assert snapshot.read_bytes() == original
+
+
+def test_configured_hub_enqueue_is_fail_closed_and_local_only_without_hub(tmp_path: Path, monkeypatch):
+    handle = grokbot_jobs.enqueue(tmp_path, _spec(), "local-only", now=NOW)
+    assert handle["state"] == "queued"
+    assert (tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{handle['job_id']}.json").is_file()
+
+    from brigade import fleet_client_grokbot
+
+    monkeypatch.setattr(fleet_client_grokbot, "hub_configured", lambda: True)
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "enqueue",
+        lambda **kwargs: fleet_client_grokbot.GrokbotHubDecision(False, "hub-unavailable"),
+    )
+    before = list((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("grokbot-*.json"))
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^legacy-active-needs-reconcile$"):
+        grokbot_jobs.enqueue(tmp_path, _spec(), "hub-closed", now=NOW)
+    after = list((tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs").glob("grokbot-*.json"))
+    assert len(after) == len(before)
+
+    empty = tmp_path / "empty-hub"
+    empty.mkdir()
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^hub-unavailable$"):
+        grokbot_jobs.enqueue(empty, _spec(), "hub-closed-empty", now=NOW)
+    assert not list((empty / ".brigade" / "cloud" / "grokbot" / "jobs").glob("grokbot-*.json"))
+
+
+def test_authority_marker_rejects_active_legacy_and_fails_closed(tmp_path: Path, monkeypatch):
+    handle = grokbot_jobs.enqueue(tmp_path, _spec(), "legacy-active", now=NOW)
+    assert handle["state"] == "queued"
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^legacy-active-needs-reconcile$"):
+        grokbot_jobs.admit_hub_authority(tmp_path)
+    assert grokbot_jobs.authority_marker_present(tmp_path) is False
+
+    grokbot_jobs.cancel(tmp_path, handle["job_id"], now=NOW + timedelta(seconds=1))
+    admitted = grokbot_jobs.admit_hub_authority(tmp_path)
+    assert admitted["admitted"] is True
+    assert grokbot_jobs.authority_marker_present(tmp_path) is True
+    again = grokbot_jobs.admit_hub_authority(tmp_path)
+    assert again["idempotent"] is True
+
+    from brigade import fleet_client_grokbot
+
+    monkeypatch.setattr(fleet_client_grokbot, "hub_configured", lambda: False)
+    assert grokbot_jobs.hub_authority(tmp_path) is True
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "status",
+        lambda *args, **kwargs: fleet_client_grokbot.GrokbotHubDecision(False, "hub-unavailable"),
+    )
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^hub-unavailable$"):
+        grokbot_jobs.get_job(tmp_path, handle["job_id"])
+    local = tmp_path / ".brigade" / "cloud" / "grokbot" / "jobs" / f"{handle['job_id']}.json"
+    record = json.loads(local.read_text())
+    assert record["state"] == "canceled"
+
+
+def test_hub_authority_tracker_rows_do_not_use_local_queue_cards(tmp_path: Path, monkeypatch):
+    local = grokbot_jobs.enqueue(tmp_path, _spec(), "local-card", now=NOW)
+    from brigade import fleet_client_grokbot
+
+    monkeypatch.setattr(grokbot_jobs, "authority_marker_present", lambda _target: True)
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **kwargs: fleet_client_grokbot.GrokbotHubDecision(
+            True,
+            "ok",
+            jobs=[
+                {
+                    "job_id": "grokbot-" + "c" * 24,
+                    "label": "hub job",
+                    "role": "implementation-worker",
+                    "repository": "example/brigade",
+                    "task_digest": "c" * 64,
+                    "state": "queued",
+                    "created_at": "2026-08-23T12:00:00Z",
+                    "updated_at": "2026-08-23T12:00:00Z",
+                    "queued_at": "2026-08-23T12:00:00Z",
+                    "timeout_seconds": 900,
+                    "item_revision": 1,
+                    "artifact_kind": "draft-pr",
+                }
+            ],
+        ),
+    )
+    rows = grokbot_jobs.tracker_rows(tmp_path)
+    assert [row["job_id"] for row in rows] == ["grokbot-" + "c" * 24]
+    assert local["job_id"] not in {row["job_id"] for row in rows}
+
+
 def test_cli_grokbot_validates_target_before_queue_access(tmp_path: Path, capsys):
     not_directory = tmp_path / "not-a-directory"
     not_directory.write_text("x")
 
     assert _run_grokbot(not_directory, "status") == 2
     assert capsys.readouterr().err.strip() == f"error: --target is not a directory: {not_directory.resolve()}"
+
+
+def test_safe_artifact_metadata_includes_report_size():
+    job = {"job_id": "grokbot-" + "a" * 24, "artifact_kind": "report", "private_snapshot_id": "snap"}
+    metadata = grokbot_jobs._safe_artifact_metadata(
+        {"kind": "report", "sha256": "b" * 64, "size": 12},
+        job,
+    )
+    assert metadata["kind"] == "report"
+    assert metadata["digest"] == "b" * 64
+    assert metadata["size"] == 12
+    assert metadata["private_snapshot_id"] == "snap"
+
+
+def test_hub_validation_refusal_is_not_hub_unavailable(monkeypatch):
+    from brigade import fleet_client_grokbot
+
+    monkeypatch.setattr(fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "node"})
+    monkeypatch.setattr(fleet_client_grokbot._client, "resolve_node_id", lambda: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    monkeypatch.setattr(fleet_client_grokbot._client, "_node_id_is_claimable", lambda _node: True)
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "_post_grokbot_blocking",
+        lambda *args, **kwargs: (400, {"error": "grokbot artifact size is invalid"}),
+    )
+    monkeypatch.setattr(
+        fleet_client_grokbot._client,
+        "_run_with_deadline",
+        lambda operation, timeout: operation(),
+    )
+    decision = fleet_client_grokbot.complete(
+        "grokbot-" + "a" * 24,
+        lease_id="lease-a",
+        artifact={"kind": "report", "digest": "b" * 64},
+        expected_item_revision=1,
+        operation_id="op-complete-1",
+    )
+    assert decision.granted is False
+    assert decision.reason != "hub-unavailable"
+    assert decision.reason in {"invalid-artifact", "invalid-request", "refused"}
+
+
+def test_hub_complete_report_accepts_claimed_and_cleans_failed_orphan_only(tmp_path: Path, monkeypatch):
+    from brigade import fleet_client_grokbot
+
+    spec = grokbot_jobs._validate_spec(
+        {
+            **_spec(),
+            "role": "repository-scout",
+            "artifact": {"kind": "report"},
+        }
+    )
+    job_id = "grokbot-" + hashlib.sha256(b"claim-complete").hexdigest()[:24]
+    report = "Private scout findings."
+    digest = hashlib.sha256(report.encode()).hexdigest()
+    artifact_path = tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts" / f"{job_id}.md"
+    grokbot_jobs._store_task_snapshot(tmp_path, job_id, spec, grokbot_jobs._idempotency_key_hash("claim-complete"))
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    claimed = {
+        "job_id": job_id,
+        "state": "claimed",
+        "role": "repository-scout",
+        "artifact_kind": "report",
+        "item_revision": 2,
+        "lease_generation": 1,
+        "private_snapshot_id": job_id,
+    }
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "status",
+        lambda *args, **kwargs: fleet_client_grokbot.GrokbotHubDecision(True, "ok", job=claimed),
+    )
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "complete",
+        lambda *args, **kwargs: fleet_client_grokbot.GrokbotHubDecision(False, "invalid-state"),
+    )
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-state$"):
+        grokbot_jobs.complete_report(
+            tmp_path,
+            job_id,
+            "grokbot-repository-scout",
+            "lease-a",
+            {"kind": "report", "path": "docs/scout.md", "sha256": digest},
+            report,
+        )
+    assert not artifact_path.exists()
+
+    preexisting = b"verified report already stored"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(preexisting)
+    artifact_path.chmod(0o600)
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-state$"):
+        grokbot_jobs.complete_report(
+            tmp_path,
+            job_id,
+            "grokbot-repository-scout",
+            "lease-a",
+            {"kind": "report", "path": "docs/scout.md", "sha256": digest},
+            report,
+        )
+    assert artifact_path.read_bytes() == preexisting
+
+    completed = {**claimed, "state": "completed", "artifact_digest": digest, "artifact_size": len(report.encode())}
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "complete",
+        lambda *args, **kwargs: fleet_client_grokbot.GrokbotHubDecision(True, "ok", job=completed),
+    )
+    artifact_path.unlink()
+    result = grokbot_jobs.complete_report(
+        tmp_path,
+        job_id,
+        "grokbot-repository-scout",
+        "lease-a",
+        {"kind": "report", "path": "docs/scout.md", "sha256": digest},
+        report,
+    )
+    assert result["state"] == "completed"
+    assert artifact_path.read_bytes() == report.encode()
+
+
+def test_hub_report_snapshot_requires_digest(tmp_path: Path, monkeypatch):
+    from brigade import fleet_client_grokbot
+
+    job_id = "grokbot-" + "d" * 24
+    report = b"Private scout findings."
+    artifact = tmp_path / ".brigade" / "cloud" / "grokbot" / "artifacts" / f"{job_id}.md"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(report)
+    artifact.chmod(0o600)
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "status",
+        lambda *args, **kwargs: fleet_client_grokbot.GrokbotHubDecision(
+            True,
+            "ok",
+            job={"job_id": job_id, "state": "completed", "artifact_kind": "report"},
+        ),
+    )
+    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^missing-digest$"):
+        grokbot_jobs.read_report(tmp_path, job_id)
+    assert artifact.read_bytes() == report
+
+
+def test_hub_outage_projects_degraded_needs_you_marker(tmp_path: Path, monkeypatch):
+    from brigade import cloud_tracker, fleet_client_grokbot
+
+    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
+    monkeypatch.setattr(
+        fleet_client_grokbot,
+        "list_jobs",
+        lambda **kwargs: fleet_client_grokbot.GrokbotHubDecision(False, "hub-unavailable"),
+    )
+    rows = grokbot_jobs.tracker_rows(tmp_path)
+    assert rows
+    dumped = json.dumps(rows)
+    assert "PRIVATE" not in dumped
+    assert any(row.get("classification") == "needs-investigation" or row.get("degraded") for row in rows)
+    status = cloud_tracker.status_payload(tmp_path, now=NOW, github={"branches": [], "prs": []})
+    assert status["sources"]["grokbot-cloud"].get("degraded") is True or status["counts"]["needs-investigation"] >= 1
+    assert "PRIVATE" not in json.dumps(status)
+    assert "token" not in json.dumps(status["sources"]["grokbot-cloud"]).lower()
 
 
 def test_complete_report_roundtrip_keeps_snapshot_private(tmp_path: Path, caplog):

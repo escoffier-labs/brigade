@@ -177,6 +177,33 @@ def test_default_direct_smoke_is_no_tools_no_write_exact_marker(monkeypatch):
     assert (kwargs["cwd"] / ".git").is_dir() is False  # cleaned after the smoke completes
 
 
+def test_codex_cloud_model_reachability_skips_provider_smoke(monkeypatch):
+    seat = roster.Agent(
+        name="cloud-worker",
+        cli="codex-cloud:configured",
+        role="cloud worker",
+    )
+    roster_value = roster.Roster(
+        orchestrator="chef",
+        agents={
+            "chef": roster.Agent(name="chef", cli="codex", role="plan"),
+            "cloud-worker": seat,
+        },
+    )
+    calls = []
+
+    def fake_run_agent(*args, **kwargs):
+        calls.append((args, kwargs))
+        return agents.AgentResult("should-not-run", True)
+
+    monkeypatch.setattr(seat_health.agents, "run_agent", fake_run_agent)
+    result = SeatHealthProbe().probe(seat, roster_value)
+    check = next(item for item in result.checks if item.name == "model-reachability")
+    assert check.status == "degraded"
+    assert "brigade run cloud canary" in check.detail
+    assert calls == []
+
+
 def test_overall_deadline_returns_timeout_results_without_serial_wait(monkeypatch):
     monkeypatch.setattr(seat_health, "OVERALL_TIMEOUT_SECONDS", 0.01)
 

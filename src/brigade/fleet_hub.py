@@ -75,8 +75,8 @@ Endpoints:
   attributed to its own ``node_id``.
 - ``GET /claims`` — admin or node token; active claims (``?all=1`` includes
   expired).
-- ``GET /`` and ``GET /view/{machines,repos}`` — the server-rendered Fleet
-  dashboard (issue #1124 phase 3; see ``fleet_dashboard``). Same bearer auth,
+- ``GET /`` and ``GET /deck`` — the server-rendered Command Deck, with the
+  legacy Fleet dashboard retained at ``/view/{machines,repos}``. Same bearer auth,
   or the ``brigade_fleet_view`` cookie: opening the page once with
   ``?token=<fleet token>`` from a phone sets an HttpOnly, SameSite=Strict
   cookie and 303-redirects to the same URL without the token. The cookie
@@ -98,7 +98,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
-import json
+import ipaddress
 import os
 import re
 import secrets
@@ -107,23 +107,48 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode
 
-from . import fleet_dashboard
+from . import fleet_command_deck
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 13
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
+ACTIVE_EVENT_TTL_SECONDS = 30 * 60
 
 # Dashboard cookie (issue #1124): a derived, read-only capability, not the token.
 DASHBOARD_COOKIE = "brigade_fleet_view"
 DASHBOARD_COOKIE_MAX_AGE = 30 * 86400
 _DASHBOARD_COOKIE_PURPOSE = b"brigade-fleet-dashboard-cookie-v1"
 _DASHBOARD_PREFIX = "/view/"
+_TAILSCALE_IDENTITY_HEADER = "Tailscale-User-Login"
+_TAILSCALE_IDENTITY_MAX_LEN = 256
+
+# Static branding assets under ``brigade/assets/fleet_hub``; served without
+# auth because they carry no fleet data. Paths are exact and looked up by
+# basename only (no traversal).
+_ASSET_NAMES = frozenset(
+    {
+        "favicon.ico",
+        "favicon-32x32.png",
+        "apple-touch-icon.png",
+        "icon-192.png",
+        "icon-512.png",
+        "site.webmanifest",
+    }
+)
+_ASSET_CONTENT_TYPES: dict[str, str] = {
+    "favicon.ico": "image/x-icon",
+    "favicon-32x32.png": "image/png",
+    "apple-touch-icon.png": "image/png",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+    "site.webmanifest": "application/manifest+json",
+}
+_ASSET_ROUTES = {f"/{name}": name for name in _ASSET_NAMES}
+_ASSET_CACHE_CONTROL = "public, max-age=86400"
 
 CLAIM_ACTIONS = frozenset({"acquire", "renew", "release", "inspect"})
 # Request scopes (issue #1141): "holder" is the fencing-token contract; "node"
@@ -245,7 +270,95 @@ CREATE TABLE IF NOT EXISTS nodes (
     revoked_at TEXT
 );
 """
-# v5 (#1223): one-row fleet run preference. Seat names only; never secrets.
+# v5-v8 are additive. Cloud rows never contain credentials, prompt text,
+# transcripts, or raw provider response bodies. ``holder_token`` is a
+# per-lease fencing capability and is deliberately absent from all payloads.
+_CLOUD_LEASES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cloud_leases (
+    lease_id TEXT NOT NULL PRIMARY KEY,
+    provider TEXT NOT NULL,
+    provider_task_id TEXT,
+    repo TEXT,
+    label TEXT,
+    prompt_hash TEXT,
+    owner_node TEXT NOT NULL,
+    owner_conductor TEXT,
+    holder_token TEXT NOT NULL,
+    state TEXT NOT NULL,
+    admitted_at TEXT NOT NULL,
+    renewed_at TEXT NOT NULL,
+    ttl_seconds INTEGER NOT NULL,
+    expires_at REAL NOT NULL,
+    artifact_ref TEXT,
+    released_at TEXT
+);
+"""
+_CLOUD_PROVIDER_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cloud_provider_state (
+    provider TEXT NOT NULL PRIMARY KEY,
+    enabled INTEGER NOT NULL,
+    limit_count INTEGER NOT NULL,
+    hosted INTEGER NOT NULL,
+    circuit_state TEXT NOT NULL,
+    reason TEXT,
+    subscription_pool TEXT,
+    reset_at TEXT,
+    expires_at TEXT,
+    updated_at TEXT NOT NULL
+);
+"""
+_MODEL_POLICY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS model_policy (
+    seat TEXT NOT NULL PRIMARY KEY,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    limit_count INTEGER,
+    notes TEXT,
+    updated_at TEXT NOT NULL
+);
+"""
+_MODEL_LEASES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS model_leases (
+    lease_id TEXT NOT NULL PRIMARY KEY,
+    seat TEXT NOT NULL,
+    owner_node TEXT NOT NULL,
+    holder_token TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    released_at TEXT
+);
+"""
+_CLOUD_LEASE_COLUMNS = (
+    "lease_id, provider, provider_task_id, repo, label, owner_node, owner_conductor, state, "
+    "admitted_at, renewed_at, ttl_seconds, expires_at, artifact_ref, released_at"
+)
+_CLOUD_LEASE_PRIVATE_COLUMNS = _CLOUD_LEASE_COLUMNS + ", holder_token, prompt_hash"
+_CLOUD_PROVIDER_COLUMNS = (
+    "provider, enabled, limit_count, hosted, circuit_state, reason, subscription_pool, reset_at, expires_at"
+)
+_POLICY_COLUMNS = "seat, provider, model, enabled, limit_count, notes"
+_MODEL_POLICY_SAFE_FIELDS = frozenset({"provider", "model", "seat", "enabled", "limit", "notes"})
+_MODEL_POLICY_REQUEST_FIELDS = frozenset(
+    {"action", "provider", "model", "seat", "enabled", "limit", "notes", "lease_id", "node_id", "holder", "ttl_seconds"}
+)
+MODEL_ACTIONS = frozenset({"set", "acquire", "release"})
+CLOUD_ACTIONS = frozenset({"admit", "bind", "renew", "release", "policy"})
+CLOUD_PROVIDER_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+CLOUD_PROVIDER_ALIASES = {
+    "cursor-cloud": "cursor",
+    "codex-cloud": "codex",
+    "claude-cloud": "claude",
+    "grokbot-cloud": "grok-bot",
+}
+CLOUD_LEASE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+MODEL_POLICY_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
+CLOUD_TTL_MIN_SECONDS = 1
+CLOUD_TTL_MAX_SECONDS = 86400
+DEFAULT_CLOUD_SUBMISSION_TTL_SECONDS = 300
+DEFAULT_CLOUD_TTL_SECONDS = 900
+_CLOUD_TEXT_MAX = 256
+# v13 (#1223): one-row fleet run preference. Seat names only; never secrets.
 _RUN_PREFERENCE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_preference (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -310,6 +423,25 @@ def _claims_table_needs_migration(claims_columns: set[str]) -> bool:
 
 def _events_columns(conn: sqlite3.Connection) -> set[str]:
     return {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+
+
+def _model_policy_table_needs_recreation(conn: sqlite3.Connection) -> bool:
+    """True when the unpublished v8 model_policy table has the wrong shape.
+
+    The dirty-branch correction made the seat the sole primary key; a table
+    keyed on (provider, model) cannot be altered in place and must be
+    recreated. This migration is safe because the schema version was never
+    published with the old key.
+    """
+    rows = conn.execute("PRAGMA table_info(model_policy)").fetchall()
+    if not rows:
+        return False
+    expected = {"seat", "provider", "model", "enabled", "limit_count", "notes", "updated_at"}
+    names = {str(row[1]) for row in rows}
+    if names != expected:
+        return True
+    pk = {str(row[1]) for row in rows if row[5]}
+    return pk != {"seat"}
 
 
 # Intra-process serialization for the claims migration, in addition to the
@@ -449,9 +581,34 @@ def init_db(db_path: Path) -> sqlite3.Connection:
                 if _claims_table_needs_migration(_claims_columns(conn)):
                     _migrate_claims_table(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
-        # v3 -> v4 is one additive table; IF NOT EXISTS is the whole migration.
+        # v3 -> v4 is one additive table; v5-v8 add cloud lease and policy
+        # tables only, and v9 canonicalizes provider aliases. Existing event,
+        # claim, node, and active lease rows survive.
         conn.execute(_NODES_SCHEMA)
-        # v4 -> v5: one-row run preference pin (#1223).
+        conn.execute(_CLOUD_LEASES_SCHEMA)
+        conn.execute(_CLOUD_PROVIDER_STATE_SCHEMA)
+        conn.execute(_MODEL_LEASES_SCHEMA)
+        _canonicalize_cloud_provider_rows(conn)
+        with _migration_lock(db_path):
+            if _model_policy_table_needs_recreation(conn):
+                # Correct the unpublished v8 schema: seat is the authoritative key,
+                # provider-level subscription/circuit fields stay in cloud_provider_state.
+                conn.execute(
+                    "CREATE TABLE _model_policy_new (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL)"
+                )
+                conn.execute(
+                    "INSERT INTO _model_policy_new (seat, provider, model, enabled, limit_count, notes, updated_at) "
+                    "SELECT seat, provider, model, enabled, limit_count, notes, updated_at FROM model_policy WHERE seat IS NOT NULL"
+                )
+                conn.execute("DROP TABLE model_policy")
+                conn.execute("ALTER TABLE _model_policy_new RENAME TO model_policy")
+            conn.execute(_MODEL_POLICY_SCHEMA)
+        conn.execute("CREATE INDEX IF NOT EXISTS cloud_leases_active ON cloud_leases (provider, expires_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS model_leases_active ON model_leases (seat, expires_at)")
+        from . import fleet_hub_grokbot
+
+        fleet_hub_grokbot.ensure_schema(conn)
+        # v12 -> v13: one-row run preference pin (#1223).
         conn.execute(_RUN_PREFERENCE_SCHEMA)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
@@ -546,7 +703,25 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
     return {"accepted": accepted, "duplicate": duplicate}
 
 
-def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> list[dict[str, Any]]:
+def _received_at_is_active(value: object, *, now: datetime, ttl_seconds: int) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        received = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=timezone.utc)
+    return (now - received.astimezone(timezone.utc)).total_seconds() <= ttl_seconds
+
+
+def latest_status(
+    conn: sqlite3.Connection,
+    *,
+    include_all: bool = False,
+    now: datetime | None = None,
+    active_ttl_seconds: int = ACTIVE_EVENT_TTL_SECONDS,
+) -> list[dict[str, Any]]:
     """Latest event per (node_id, run_id); non-terminal runs unless include_all.
 
     Exactly one row per (node_id, run_id): ties on sequence (same sequence
@@ -554,15 +729,19 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
     larger digest, so the view never shows a run twice.
     """
     rows = conn.execute(
-        "SELECT node_id, run_id, repo, seat, harness, state, ts, sequence, digest, exit_status, capability_fingerprint FROM ("
+        "SELECT node_id, run_id, repo, seat, harness, state, ts, sequence, digest, exit_status, capability_fingerprint, received_at FROM ("
         "  SELECT e.*, ROW_NUMBER() OVER ("
         "    PARTITION BY node_id, run_id ORDER BY sequence DESC, received_at DESC, digest DESC"
         "  ) AS rn FROM events e"
         ") WHERE rn = 1 ORDER BY node_id, run_id"
     ).fetchall()
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     result = []
     for row in rows:
-        if not include_all and row[5] in TERMINAL_STATES:
+        if not include_all and (
+            fleet_command_deck.is_terminal_state(row[5])
+            or not _received_at_is_active(row[11], now=current, ttl_seconds=active_ttl_seconds)
+        ):
             continue
         result.append(
             {
@@ -577,6 +756,7 @@ def latest_status(conn: sqlite3.Connection, *, include_all: bool = False) -> lis
                 "digest": row[8],
                 "exit_status": row[9],
                 "capability_fingerprint": row[10],
+                "received_at": row[11],
             }
         )
     return result
@@ -1034,6 +1214,567 @@ def list_claims(conn: sqlite3.Connection, *, include_all: bool = False) -> list[
     return result
 
 
+# --- cloud admission and sanitized provider/model policy -------------------
+
+
+def _safe_cloud_text(raw: Any, field: str, *, required: bool = False, limit: int = _CLOUD_TEXT_MAX) -> str | None:
+    if raw is None and not required:
+        return None
+    if not isinstance(raw, str):
+        raise FleetHubError(f"cloud field {field!r} must be a string")
+    value = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", raw).strip()
+    if (required and not value) or len(value) > limit:
+        qualifier = "a non-empty string" if required else "a string"
+        raise FleetHubError(f"cloud field {field!r} must be {qualifier} of at most {limit} characters")
+    return value or None
+
+
+def _cloud_provider(raw: Any) -> str:
+    provider = _safe_cloud_text(raw, "provider", required=True, limit=64)
+    if provider is None or not CLOUD_PROVIDER_PATTERN.match(provider):
+        raise FleetHubError("cloud field 'provider' must use lowercase letters, digits, and hyphens")
+    return CLOUD_PROVIDER_ALIASES.get(provider, provider)
+
+
+def _canonicalize_cloud_provider_rows(conn: sqlite3.Connection) -> None:
+    """Collapse old provider aliases before requests can compare admission rows."""
+    for alias, canonical in CLOUD_PROVIDER_ALIASES.items():
+        conn.execute("UPDATE cloud_leases SET provider = ? WHERE provider = ?", (canonical, alias))
+        existing = conn.execute("SELECT 1 FROM cloud_provider_state WHERE provider = ?", (canonical,)).fetchone()
+        if existing is None:
+            conn.execute("UPDATE cloud_provider_state SET provider = ? WHERE provider = ?", (canonical, alias))
+        else:
+            conn.execute("DELETE FROM cloud_provider_state WHERE provider = ?", (alias,))
+
+
+def _cloud_lease_id(raw: Any) -> str:
+    lease_id = _safe_cloud_text(raw, "lease_id", required=True, limit=128)
+    if lease_id is None or not CLOUD_LEASE_PATTERN.match(lease_id):
+        raise FleetHubError("cloud field 'lease_id' is invalid")
+    return lease_id
+
+
+def _model_policy_name(raw: Any, field: str) -> str:
+    value = _safe_cloud_text(raw, field, required=True, limit=128)
+    if value is None or not MODEL_POLICY_NAME_PATTERN.match(value):
+        raise FleetHubError(
+            f"model policy field {field!r} must use lowercase letters, digits, dots, underscores, and hyphens"
+        )
+    return value
+
+
+def _validate_model_policy_request(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise FleetHubError("model policy request must be a JSON object")
+    if raw.get("action") == "set":
+        set_fields = frozenset({"action", "provider", "model", "seat", "enabled", "limit", "notes"})
+        lease_fields = set(raw).difference(set_fields)
+        if lease_fields:
+            raise FleetHubError(f"unknown model policy field(s): {', '.join(sorted(lease_fields))}")
+    unknown = set(raw).difference(_MODEL_POLICY_REQUEST_FIELDS)
+    if unknown:
+        raise FleetHubError(f"unknown model policy field(s): {', '.join(sorted(unknown))}")
+    if raw.get("action") != "set":
+        raise FleetHubError("model policy field 'action' must be 'set'")
+    enabled = raw.get("enabled")
+    if type(enabled) is not bool:
+        raise FleetHubError("model policy field 'enabled' must be a boolean")
+    limit = raw.get("limit")
+    if limit is not None and (type(limit) is not int or not 0 <= limit <= 64):
+        raise FleetHubError("model policy field 'limit' must be an integer in 0..64")
+    return {
+        "provider": _cloud_provider(raw.get("provider")),
+        "model": _model_policy_name(raw.get("model"), "model"),
+        "seat": _model_policy_name(raw.get("seat"), "seat"),
+        "enabled": enabled,
+        "limit": limit,
+        "notes": _safe_cloud_text(raw.get("notes"), "notes"),
+    }
+
+
+def _validate_model_lease_request(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or raw.get("action") not in {"acquire", "release"}:
+        raise FleetHubError("model lease action must be acquire or release")
+    unknown = set(raw).difference(_MODEL_POLICY_REQUEST_FIELDS)
+    if unknown:
+        raise FleetHubError(f"unknown model lease field(s): {', '.join(sorted(unknown))}")
+    request = {
+        "action": raw["action"],
+        "lease_id": _cloud_lease_id(raw.get("lease_id")),
+        "node_id": _validate_node_id(raw.get("node_id")),
+        "holder": _safe_cloud_text(raw.get("holder"), "holder", required=True, limit=128),
+    }
+    if request["action"] == "acquire":
+        request.update(
+            seat=_model_policy_name(raw.get("seat"), "seat"),
+            provider=_cloud_provider(raw.get("provider")),
+            model=_model_policy_name(raw.get("model"), "model"),
+        )
+        ttl = raw.get("ttl_seconds", 3600)
+        if type(ttl) is not int or not 1 <= ttl <= CLOUD_TTL_MAX_SECONDS:
+            raise FleetHubError("model lease field 'ttl_seconds' must be an integer in 1..86400")
+        request["ttl_seconds"] = ttl
+    return request
+
+
+def _validate_cloud_request(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise FleetHubError("cloud request must be a JSON object")
+    action = raw.get("action")
+    if not isinstance(action, str) or action not in CLOUD_ACTIONS:
+        raise FleetHubError("cloud field 'action' must be one of: admit, bind, renew, release, policy")
+    request: dict[str, Any] = {"action": action}
+    if action == "policy":
+        request["provider"] = _cloud_provider(raw.get("provider"))
+        for key in ("enabled", "hosted"):
+            value = raw.get(key)
+            if value is not None and type(value) is not bool:
+                raise FleetHubError(f"cloud policy field {key!r} must be a boolean")
+            request[key] = value
+        limit = raw.get("limit")
+        if limit is not None and (type(limit) is not int or not 0 <= limit <= 64):
+            raise FleetHubError("cloud policy field 'limit' must be an integer in 0..64")
+        request["limit"] = limit
+        circuit = raw.get("circuit_state")
+        if circuit is not None and circuit not in ("closed", "open"):
+            raise FleetHubError("cloud policy field 'circuit_state' must be 'closed' or 'open'")
+        request["circuit_state"] = circuit
+        for key in ("reason", "subscription_pool", "reset_at", "expires_at"):
+            request[key] = _safe_cloud_text(raw.get(key), key, limit=_CLOUD_TEXT_MAX)
+        return request
+    request["provider"] = _cloud_provider(raw.get("provider")) if action == "admit" else None
+    request["lease_id"] = _cloud_lease_id(raw.get("lease_id"))
+    request["node_id"] = _validate_node_id(raw.get("node_id"))
+    request["holder"] = _safe_cloud_text(raw.get("holder"), "holder", required=True, limit=128)
+    if action == "admit":
+        ttl_default = DEFAULT_CLOUD_SUBMISSION_TTL_SECONDS
+        ttl = raw.get("ttl_seconds", ttl_default)
+        if type(ttl) is not int or not CLOUD_TTL_MIN_SECONDS <= ttl <= CLOUD_TTL_MAX_SECONDS:
+            raise FleetHubError(
+                f"cloud field 'ttl_seconds' must be an integer in [{CLOUD_TTL_MIN_SECONDS}, {CLOUD_TTL_MAX_SECONDS}]"
+            )
+        request["ttl_seconds"] = ttl
+        request["repo"] = _safe_cloud_text(raw.get("repo"), "repo")
+        request["label"] = _safe_cloud_text(raw.get("label"), "label")
+        prompt_hash = _safe_cloud_text(raw.get("prompt_hash"), "prompt_hash", limit=128)
+        if prompt_hash is not None and not re.fullmatch(r"[A-Fa-f0-9]{16,128}", prompt_hash):
+            raise FleetHubError("cloud field 'prompt_hash' must be a hex digest")
+        request["prompt_hash"] = prompt_hash
+        request["conductor"] = _safe_cloud_text(raw.get("conductor"), "conductor")
+    elif action == "bind":
+        request["provider_task_id"] = _safe_cloud_text(raw.get("provider_task_id"), "provider_task_id", required=True)
+        request["artifact_ref"] = _safe_cloud_text(raw.get("artifact_ref"), "artifact_ref")
+    elif action == "renew":
+        ttl = raw.get("ttl_seconds", DEFAULT_CLOUD_TTL_SECONDS)
+        if type(ttl) is not int or not CLOUD_TTL_MIN_SECONDS <= ttl <= CLOUD_TTL_MAX_SECONDS:
+            raise FleetHubError(
+                f"cloud field 'ttl_seconds' must be an integer in [{CLOUD_TTL_MIN_SECONDS}, {CLOUD_TTL_MAX_SECONDS}]"
+            )
+        request["ttl_seconds"] = ttl
+    else:
+        request["state"] = _safe_cloud_text(raw.get("state", "released"), "state", required=True, limit=64)
+    return request
+
+
+def _provider_defaults(config: fleet_command_deck.DeckConfig, provider: str) -> dict[str, Any]:
+    default = config.cloud.providers.get(provider)
+    if default is None:
+        return {"provider": provider, "enabled": False, "limit": 0, "hosted": True, "circuit_state": "closed"}
+    return {
+        "provider": provider,
+        "enabled": default.enabled,
+        "limit": default.limit,
+        "hosted": default.hosted,
+        "circuit_state": "closed",
+    }
+
+
+def _cloud_policy(conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig) -> dict[str, Any]:
+    policy = {name: _provider_defaults(config, name) for name in config.cloud.providers}
+    rows = conn.execute(f"SELECT {_CLOUD_PROVIDER_COLUMNS} FROM cloud_provider_state").fetchall()
+    for row in rows:
+        provider = str(row[0])
+        merged = policy.setdefault(provider, _provider_defaults(config, provider))
+        merged.update(
+            {
+                "enabled": bool(row[1]),
+                "limit": int(row[2]),
+                "hosted": bool(row[3]),
+                "circuit_state": str(row[4]),
+                "reason": row[5],
+                "subscription_pool": row[6],
+                "reset_at": row[7],
+                "expires_at": row[8],
+            }
+        )
+    return {"global_limit": config.cloud.global_limit, "providers": policy}
+
+
+def _cloud_lease_payload(row: tuple[Any, ...], *, now: float | None = None) -> dict[str, Any]:
+    now = _now_epoch() if now is None else now
+    return {
+        "lease_id": row[0],
+        "provider": row[1],
+        "provider_task_id": row[2],
+        "repo": row[3],
+        "label": row[4],
+        "owner_node": row[5],
+        "owner_conductor": row[6],
+        "state": row[7],
+        "admitted_at": row[8],
+        "renewed_at": row[9],
+        "ttl_seconds": row[10],
+        "expires_at": _epoch_to_iso(row[11]),
+        "artifact_ref": row[12],
+        "released_at": row[13],
+        "expired": row[13] is None and row[11] <= now,
+    }
+
+
+def _fetch_cloud_lease(conn: sqlite3.Connection, lease_id: str) -> tuple[Any, ...] | None:
+    return conn.execute(
+        f"SELECT {_CLOUD_LEASE_PRIVATE_COLUMNS} FROM cloud_leases WHERE lease_id = ?", (lease_id,)
+    ).fetchone()
+
+
+def _expire_cloud_leases(conn: sqlite3.Connection, now: float) -> None:
+    conn.execute(
+        "UPDATE cloud_leases SET state = 'expired', released_at = ? WHERE released_at IS NULL AND expires_at <= ?",
+        (_epoch_to_iso(now), now),
+    )
+
+
+def _active_cloud_counts(conn: sqlite3.Connection, policy: dict[str, Any]) -> tuple[int, dict[str, int]]:
+    rows = conn.execute(
+        "SELECT provider, COUNT(*) FROM cloud_leases WHERE released_at IS NULL GROUP BY provider"
+    ).fetchall()
+    counts = {str(provider): int(count) for provider, count in rows}
+    hosted = sum(
+        count for provider, count in counts.items() if policy["providers"].get(provider, {}).get("hosted", True)
+    )
+    return hosted, counts
+
+
+def _set_cloud_policy(
+    conn: sqlite3.Connection, request: dict[str, Any], config: fleet_command_deck.DeckConfig
+) -> dict[str, Any]:
+    provider = request["provider"]
+    current = _cloud_policy(conn, config)["providers"].get(provider, _provider_defaults(config, provider))
+    enabled = current["enabled"] if request["enabled"] is None else request["enabled"]
+    limit = current["limit"] if request["limit"] is None else request["limit"]
+    hosted = current["hosted"] if request["hosted"] is None else request["hosted"]
+    circuit = current.get("circuit_state", "closed") if request["circuit_state"] is None else request["circuit_state"]
+    conn.execute(
+        "INSERT INTO cloud_provider_state (provider, enabled, limit_count, hosted, circuit_state, reason, subscription_pool, reset_at, expires_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(provider) DO UPDATE SET enabled=excluded.enabled, limit_count=excluded.limit_count, "
+        "hosted=excluded.hosted, circuit_state=excluded.circuit_state, reason=excluded.reason, "
+        "subscription_pool=excluded.subscription_pool, reset_at=excluded.reset_at, expires_at=excluded.expires_at, updated_at=excluded.updated_at",
+        (
+            provider,
+            int(enabled),
+            int(limit),
+            int(hosted),
+            circuit,
+            request["reason"],
+            request["subscription_pool"],
+            request["reset_at"],
+            request["expires_at"],
+            _utc_now(),
+        ),
+    )
+    conn.commit()
+    policy = _cloud_policy(conn, config)["providers"][provider]
+    return {"provider": provider, **policy}
+
+
+def set_model_policy(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
+    """Upsert one admin-controlled seat policy and return safe fields."""
+    request = _validate_model_policy_request(raw)
+    conn.execute(
+        "INSERT INTO model_policy (seat, provider, model, enabled, limit_count, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(seat) DO UPDATE SET provider=excluded.provider, model=excluded.model, enabled=excluded.enabled, "
+        "limit_count=excluded.limit_count, notes=excluded.notes, updated_at=excluded.updated_at",
+        (
+            request["seat"],
+            request["provider"],
+            request["model"],
+            int(request["enabled"]),
+            request["limit"],
+            request["notes"],
+            _utc_now(),
+        ),
+    )
+    conn.commit()
+    return {
+        "seat": request["seat"],
+        "provider": request["provider"],
+        "model": request["model"],
+        "enabled": request["enabled"],
+        "limit": request["limit"],
+        "notes": request["notes"],
+    }
+
+
+def handle_model_policy(
+    conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None
+) -> tuple[int, dict[str, Any]]:
+    """Mutate policy as admin or atomically fence one policy-seat capacity lease."""
+    action = raw.get("action") if isinstance(raw, dict) else None
+    if action == "set":
+        if caller_node is not None:
+            raise FleetHubForbidden("the admin token is required to mutate model policy")
+        return 200, {"updated": True, "policy": set_model_policy(conn, raw)}
+    request = _validate_model_lease_request(raw)
+    if caller_node is not None and request["node_id"] != caller_node:
+        raise FleetHubForbidden("model lease node_id does not match the caller's node token")
+    now = _now_epoch()
+    if request["action"] == "release":
+        cursor = conn.execute(
+            "UPDATE model_leases SET released_at=? WHERE lease_id=? AND owner_node=? AND holder_token=? AND released_at IS NULL",
+            (_epoch_to_iso(now), request["lease_id"], request["node_id"], request["holder"]),
+        )
+        conn.commit()
+        return (
+            (200, {"released": True})
+            if cursor.rowcount == 1
+            else (409, {"released": False, "error": "model lease is missing or fenced"})
+        )
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            "UPDATE model_leases SET released_at=? WHERE released_at IS NULL AND expires_at <= ?",
+            (_epoch_to_iso(now), now),
+        )
+        policy = conn.execute(
+            "SELECT provider, model, enabled, limit_count FROM model_policy WHERE seat=?", (request["seat"],)
+        ).fetchone()
+        if (
+            policy is None
+            or str(policy[0]) != request["provider"]
+            or str(policy[1]) != request["model"]
+            or not bool(policy[2])
+        ):
+            conn.commit()
+            return 409, {"acquired": False, "error": "model policy denied lease"}
+        limit = policy[3]
+        used = conn.execute(
+            "SELECT COUNT(*) FROM model_leases WHERE seat=? AND released_at IS NULL", (request["seat"],)
+        ).fetchone()[0]
+        if limit is not None and int(used) >= int(limit):
+            conn.commit()
+            return 409, {"acquired": False, "error": "model policy capacity is exhausted"}
+        conn.execute(
+            "INSERT INTO model_leases (lease_id, seat, owner_node, holder_token, acquired_at, expires_at, released_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            (
+                request["lease_id"],
+                request["seat"],
+                request["node_id"],
+                request["holder"],
+                _epoch_to_iso(now),
+                now + request["ttl_seconds"],
+            ),
+        )
+        conn.commit()
+        return 200, {
+            "acquired": True,
+            "lease": {
+                "lease_id": request["lease_id"],
+                "seat": request["seat"],
+                "expires_at": _epoch_to_iso(now + request["ttl_seconds"]),
+            },
+        }
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def handle_cloud(
+    conn: sqlite3.Connection,
+    raw: Any,
+    *,
+    caller_node: str | None = None,
+    config: fleet_command_deck.DeckConfig | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Atomically admit, bind, renew, or release one cloud lease.
+
+    Node tokens can only operate on their own rows. Provider policy changes
+    are control-plane actions and therefore require the admin caller
+    (``caller_node is None``). Admission serializes expiry cleanup, both cap
+    checks, and insert in one ``BEGIN IMMEDIATE`` transaction.
+    """
+    request = _validate_cloud_request(raw)
+    config = config or fleet_command_deck.DeckConfig()
+    if request["action"] == "policy":
+        if caller_node is not None:
+            raise FleetHubForbidden("node tokens may not mutate cloud policy")
+        return 200, {"updated": True, "policy": _set_cloud_policy(conn, request, config)}
+    if caller_node is not None and request["node_id"] != caller_node:
+        raise FleetHubForbidden(
+            f"cloud node_id {request['node_id']!r} does not match the caller's node token ({caller_node})"
+        )
+    action, lease_id, node, holder = request["action"], request["lease_id"], request["node_id"], request["holder"]
+    now = _now_epoch()
+    now_iso = _epoch_to_iso(now)
+    if action == "admit" and request["provider"] == "grok-bot":
+        raise FleetHubForbidden("grok-bot cloud leases are reserved for the Grok Bot hub path")
+    existing = _fetch_cloud_lease(conn, lease_id)
+    if existing is not None and existing[1] == "grok-bot":
+        raise FleetHubForbidden("grok-bot cloud leases are reserved for the Grok Bot hub path")
+    if action == "admit":
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _expire_cloud_leases(conn, now)
+            existing = _fetch_cloud_lease(conn, lease_id)
+            if existing is not None:
+                if existing[14] == holder and existing[5] == node and existing[13] is None and existing[11] > now:
+                    conn.commit()
+                    return 200, {"admitted": True, "lease": _cloud_lease_payload(existing, now=now)}
+                conn.commit()
+                return 409, {
+                    "admitted": False,
+                    "error": f"cloud lease {lease_id!r} is no longer active or is already held",
+                }
+            policy = _cloud_policy(conn, config)
+            provider_policy = policy["providers"].get(
+                request["provider"], _provider_defaults(config, request["provider"])
+            )
+            if not provider_policy["enabled"] or provider_policy.get("circuit_state") == "open":
+                conn.commit()
+                return 409, {"admitted": False, "error": provider_policy.get("reason") or "provider disabled by policy"}
+            hosted_count, provider_counts = _active_cloud_counts(conn, policy)
+            if provider_counts.get(request["provider"], 0) >= provider_policy["limit"]:
+                conn.commit()
+                return 409, {"admitted": False, "error": "provider cloud capacity is exhausted"}
+            if provider_policy["hosted"] and hosted_count >= policy["global_limit"]:
+                conn.commit()
+                return 409, {"admitted": False, "error": "global hosted cloud capacity is exhausted"}
+            conn.execute(
+                "INSERT INTO cloud_leases (lease_id, provider, provider_task_id, repo, label, prompt_hash, owner_node, owner_conductor, holder_token, state, admitted_at, renewed_at, ttl_seconds, expires_at, artifact_ref, released_at) "
+                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 'admitted', ?, ?, ?, ?, NULL, NULL)",
+                (
+                    lease_id,
+                    request["provider"],
+                    request["repo"],
+                    request["label"],
+                    request["prompt_hash"],
+                    node,
+                    request["conductor"],
+                    holder,
+                    now_iso,
+                    now_iso,
+                    request["ttl_seconds"],
+                    now + request["ttl_seconds"],
+                ),
+            )
+            row = _fetch_cloud_lease(conn, lease_id)
+            if row is None:
+                raise FleetHubError(f"cloud lease {lease_id!r} was not inserted")
+            conn.commit()
+            return 200, {"admitted": True, "lease": _cloud_lease_payload(row, now=now)}
+        except BaseException:
+            conn.rollback()
+            raise
+    if action == "bind":
+        cursor = conn.execute(
+            "UPDATE cloud_leases SET provider_task_id=?, artifact_ref=?, state='bound' "
+            "WHERE lease_id=? AND owner_node=? AND holder_token=? AND released_at IS NULL AND expires_at > ?",
+            (request["provider_task_id"], request["artifact_ref"], lease_id, node, holder, now),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            return 409, {"bound": False, "error": "cloud lease is missing, expired, or fenced"}
+        row = _fetch_cloud_lease(conn, lease_id)
+        if row is None:
+            raise FleetHubError(f"cloud lease {lease_id!r} disappeared after bind")
+        return 200, {"bound": True, "lease": _cloud_lease_payload(row, now=now)}
+    if action == "renew":
+        cursor = conn.execute(
+            "UPDATE cloud_leases SET renewed_at=?, ttl_seconds=?, expires_at=? "
+            "WHERE lease_id=? AND owner_node=? AND holder_token=? AND released_at IS NULL AND expires_at > ?",
+            (now_iso, request["ttl_seconds"], now + request["ttl_seconds"], lease_id, node, holder, now),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            return 409, {"renewed": False, "error": "cloud lease is missing, expired, or fenced"}
+        row = _fetch_cloud_lease(conn, lease_id)
+        if row is None:
+            raise FleetHubError(f"cloud lease {lease_id!r} disappeared after renew")
+        return 200, {"renewed": True, "lease": _cloud_lease_payload(row, now=now)}
+    cursor = conn.execute(
+        "UPDATE cloud_leases SET state=?, released_at=? WHERE lease_id=? AND owner_node=? AND holder_token=? AND released_at IS NULL",
+        (request["state"], now_iso, lease_id, node, holder),
+    )
+    conn.commit()
+    if cursor.rowcount != 1:
+        return 409, {"released": False, "error": "cloud lease is missing or fenced"}
+    return 200, {"released": True}
+
+
+def list_cloud_leases(conn: sqlite3.Connection, *, include_all: bool = False) -> list[dict[str, Any]]:
+    """Safe lease rows. Fencing tokens and prompt hashes never leave SQLite."""
+    now = _now_epoch()
+    rows = conn.execute(
+        f"SELECT {_CLOUD_LEASE_COLUMNS} FROM cloud_leases ORDER BY admitted_at DESC, lease_id"
+    ).fetchall()
+    payloads = [_cloud_lease_payload(row, now=now) for row in rows]
+    return payloads if include_all else [row for row in payloads if not row["expired"] and row["released_at"] is None]
+
+
+def cloud_snapshot(
+    conn: sqlite3.Connection,
+    config: fleet_command_deck.DeckConfig,
+    *,
+    include_all: bool = False,
+    include_grokbot: bool = True,
+) -> dict[str, Any]:
+    policy = _cloud_policy(conn, config)
+    leases = list_cloud_leases(conn, include_all=include_all)
+    if not include_grokbot:
+        leases = [lease for lease in leases if lease.get("provider") != "grok-bot"]
+    counts: dict[str, int] = {}
+    for lease in leases:
+        if lease["released_at"] is None and not lease["expired"]:
+            counts[lease["provider"]] = counts.get(lease["provider"], 0) + 1
+    providers = []
+    for name in sorted(policy["providers"]):
+        item = dict(policy["providers"][name])
+        item["used"] = counts.get(name, 0)
+        providers.append(item)
+    snapshot: dict[str, Any] = {
+        "leases": leases,
+        "policy": {"global_limit": policy["global_limit"], "providers": providers},
+    }
+    if include_grokbot:
+        from . import fleet_hub_grokbot
+
+        snapshot["grokbot"] = fleet_hub_grokbot.deck_projection(conn)
+    return snapshot
+
+
+def list_model_policy(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Sanitized generic provider/model policy registry for authenticated readers."""
+    provider_rows = conn.execute(
+        f"SELECT {_CLOUD_PROVIDER_COLUMNS} FROM cloud_provider_state ORDER BY provider"
+    ).fetchall()
+    result = [
+        {"provider": row[0], "model": None, "seat": None, "enabled": bool(row[1]), "limit": row[2], "notes": row[5]}
+        for row in provider_rows
+    ]
+    for row in conn.execute(f"SELECT {_POLICY_COLUMNS} FROM model_policy ORDER BY seat").fetchall():
+        result.append(
+            {
+                "seat": row[0],
+                "provider": row[1],
+                "model": row[2],
+                "enabled": bool(row[3]),
+                "limit": row[4],
+                "notes": row[5],
+            }
+        )
+    return result
+
+
 # --- per-node credentials (issue #1150) -------------------------------------
 
 
@@ -1153,338 +1894,48 @@ def _load_token(args: argparse.Namespace) -> str:
     raise FleetHubError("no fleet hub token: set BRIGADE_FLEET_TOKEN or pass --token-file")
 
 
-def make_handler(token: str, db_path: Path, *, allow_admin_writes: bool = False) -> type[BaseHTTPRequestHandler]:
-    """Request handler bound to the admin ``token`` and the hub database.
+def _is_loopback_address(address: str) -> bool:
+    """True for IPv4, IPv6, and IPv4-mapped IPv6 loopback addresses."""
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if parsed.is_loopback:
+        return True
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        return parsed.ipv4_mapped.is_loopback
+    return False
 
-    ``allow_admin_writes`` lets the admin token ``POST /events`` and
-    ``POST /claims`` under any ``node_id`` (the pre-#1150 shared-token
-    behaviour); off by default so a migration is an explicit choice.
-    """
 
-    class _Handler(BaseHTTPRequestHandler):
-        server_version = "brigade-fleet-hub/1"
-        sys_version = ""
-        # Idle-socket guard: a peer that connects and never sends a request
-        # line cannot pin a handler thread forever (pre-auth).
-        timeout = 30
+def make_handler(
+    token: str,
+    db_path: Path,
+    *,
+    allow_admin_writes: bool = False,
+    deck_config: fleet_command_deck.DeckConfig | None = None,
+    trust_tailscale_identity: bool = False,
+) -> type[BaseHTTPRequestHandler]:
+    """Build the HTTP adapter around the hub domain operations."""
+    from .fleet_hub_http import make_handler as _make_handler
 
-        def log_message(self, fmt: str, *log_args: Any) -> None:  # quiet by default
-            pass
-
-        def _bearer(self) -> str | None:
-            """The presented bearer credential, or ``None`` without one."""
-            scheme, _, presented = self.headers.get("Authorization", "").partition(" ")
-            if scheme != "Bearer" or not presented:
-                return None
-            return presented
-
-        def _authorized(self) -> bool:
-            """True for the admin token (constant-time)."""
-            auth = self.headers.get("Authorization", "")
-            return hmac.compare_digest(auth.encode("utf-8"), f"Bearer {token}".encode("utf-8"))
-
-        def _caller(self, conn: sqlite3.Connection) -> tuple[bool, str | None] | None:
-            """``(is_admin, node_id)`` for the request's bearer, having sent a
-            401 and returned ``None`` when it is missing, unknown, or revoked.
-            The admin token is checked first, in constant time; anything
-            else is looked up as a node token."""
-            presented = self._bearer()
-            if presented is None:
-                self._send_json(401, {"error": "unauthorized"})
-                return None
-            if self._authorized():
-                return True, None
-            node_id, revoked = lookup_node_token(conn, presented)
-            if node_id is None:
-                self._send_json(401, {"error": "unauthorized"})
-                return None
-            if revoked:
-                self._send_json(401, {"error": "unauthorized: node token revoked"})
-                return None
-            return False, node_id
-
-        def _cookie_authorized(self) -> bool:
-            header = self.headers.get("Cookie", "")
-            if not header:
-                return False
-            jar: SimpleCookie = SimpleCookie()
-            try:
-                jar.load(header)
-            except CookieError:
-                return False
-            morsel = jar.get(DASHBOARD_COOKIE)
-            if morsel is None:
-                return False
-            return hmac.compare_digest(morsel.value.encode("utf-8"), dashboard_cookie_value(token).encode("utf-8"))
-
-        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def _send_html(
-            self,
-            status: int,
-            body: str,
-            *,
-            content_type: str = "text/html; charset=utf-8",
-            nonce: str | None = None,
-            extra_headers: dict[str, str] | None = None,
-        ) -> None:
-            """Dashboard response with the same security headers as ``center serve``."""
-            nonce = nonce or secrets.token_urlsafe(16)
-            csp = (
-                f"default-src 'none'; script-src 'nonce-{nonce}'; script-src-attr 'none'; "
-                f"style-src 'nonce-{nonce}'; img-src 'none'; connect-src 'none'; base-uri 'none'; "
-                "form-action 'self'; frame-ancestors 'none'"
-            )
-            data = body.encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Security-Policy", csp)
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "no-referrer")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Vary", "Cookie")
-            for key, value in (extra_headers or {}).items():
-                self.send_header(key, value)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def _serve_dashboard(self, path: str, query: str) -> None:
-            plain = "text/plain; charset=utf-8"
-            view = fleet_dashboard.DEFAULT_VIEW if path == "/" else path[len(_DASHBOARD_PREFIX) :]
-            if view not in fleet_dashboard.VIEWS:
-                self._send_html(404, "Not found.\n", content_type=plain)
-                return
-            params = parse_qs(query, keep_blank_values=False)
-            presented = params.pop("token", [""])[0]
-            if presented:
-                if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
-                    self._send_html(401, "Unauthorized.\n", content_type=plain)
-                    return
-                # Redirect to the same page without the token so it does not
-                # linger in the address bar; the view is validated above, so
-                # the Location is always one of our own relative routes.
-                cookie = (
-                    f"{DASHBOARD_COOKIE}={dashboard_cookie_value(token)}; Path=/; HttpOnly; "
-                    f"SameSite=Strict; Max-Age={DASHBOARD_COOKIE_MAX_AGE}"
-                )
-                rest = urlencode(params, doseq=True)
-                location = path + (f"?{rest}" if rest else "")
-                self._send_html(303, "", content_type=plain, extra_headers={"Location": location, "Set-Cookie": cookie})
-                return
-            if not (self._authorized() or self._cookie_authorized()):
-                self._send_html(
-                    401,
-                    "Unauthorized: send the fleet bearer token, or open this page once with "
-                    "?token=<fleet token> to set the read-only dashboard cookie.\n",
-                    content_type=plain,
-                )
-                return
-            try:
-                # Non-migrating connection (#1161): the schema exists because
-                # server startup created it; this open is read/write only.
-                conn = open_db(Path(db_path))
-            except (FleetHubError, sqlite3.Error) as exc:
-                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
-                return
-            try:
-                runs = latest_status(conn, include_all=True)
-                claims = list_claims(conn)
-                started_at = run_started_at(conn)
-                nodes = node_summary(conn)
-            except sqlite3.Error as exc:
-                self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
-                return
-            finally:
-                conn.close()
-            nonce = secrets.token_urlsafe(16)
-            page = fleet_dashboard.render_page(
-                view=view,
-                query_string=urlencode(params, doseq=True),
-                runs=runs,
-                claims=claims,
-                nodes=nodes,
-                started_at=started_at,
-                nonce=nonce,
-            )
-            self._send_html(200, page, nonce=nonce)
-
-        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-            path, _, query = self.path.partition("?")
-            if path == "/health":
-                self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
-                return
-            if path == "/" or path.startswith(_DASHBOARD_PREFIX):
-                self._serve_dashboard(path, query)
-                return
-            if path in ("/status", "/claims", "/nodes", "/preference"):
-                if self._bearer() is None:
-                    self._send_json(401, {"error": "unauthorized"})
-                    return
-                include_all = parse_qs(query).get("all", [""])[0].lower() in ("1", "true", "yes")
-                try:
-                    conn = open_db(Path(db_path))
-                except (FleetHubError, sqlite3.Error) as exc:
-                    self._send_json(500, {"error": f"hub database error: {exc}"})
-                    return
-                payload: dict[str, Any]
-                try:
-                    caller = self._caller(conn)
-                    if caller is None:
-                        return
-                    is_admin, _node = caller
-                    if path == "/nodes":
-                        if not is_admin:
-                            self._send_json(403, {"error": "the admin token is required to manage nodes"})
-                            return
-                        payload = {"nodes": list_nodes(conn)}
-                    elif path == "/status":
-                        payload = {"runs": latest_status(conn, include_all=include_all)}
-                    elif path == "/preference":
-                        payload = {"preference": get_run_preference(conn)}
-                    else:
-                        payload = {"claims": list_claims(conn, include_all=include_all)}
-                except sqlite3.Error as exc:
-                    self._send_json(500, {"error": f"hub database error: {exc}"})
-                    return
-                finally:
-                    conn.close()
-                self._send_json(200, payload)
-                return
-            self._send_json(404, {"error": "not found"})
-
-        def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
-            path = self.path.partition("?")[0]
-            if path != "/preference":
-                self._send_json(404, {"error": "not found"})
-                return
-            if self._bearer() is None:
-                self._send_json(401, {"error": "unauthorized"})
-                return
-            try:
-                conn = open_db(Path(db_path))
-            except (FleetHubError, sqlite3.Error) as exc:
-                self._send_json(500, {"error": f"hub database error: {exc}"})
-                return
-            try:
-                caller = self._caller(conn)
-                if caller is None:
-                    return
-                is_admin, _node = caller
-                if not is_admin:
-                    self._send_json(403, {"error": "the admin token is required to set run preference"})
-                    return
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    self._send_json(400, {"error": "bad Content-Length"})
-                    return
-                if length <= 0 or length > MAX_BODY_BYTES:
-                    self._send_json(400, {"error": "missing or oversized body"})
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    parsed = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._send_json(400, {"error": "body is not valid JSON"})
-                    return
-                body = parsed.get("preference") if isinstance(parsed, dict) and "preference" in parsed else parsed
-                payload = {"preference": set_run_preference(conn, body, updated_by="admin")}
-            except FleetHubError as exc:
-                self._send_json(400, {"error": str(exc)})
-                return
-            except sqlite3.Error as exc:
-                self._send_json(500, {"error": f"hub database error: {exc}"})
-                return
-            finally:
-                conn.close()
-            self._send_json(200, payload)
-
-        def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-            path = self.path.partition("?")[0]
-            if path not in ("/events", "/claims", "/nodes"):
-                self._send_json(404, {"error": "not found"})
-                return
-            if self._bearer() is None:
-                self._send_json(401, {"error": "unauthorized"})
-                return
-            # The database is opened before the body is read: a node token
-            # is resolved against it, and an unauthenticated peer must not
-            # get the hub to read its (up to 8 MiB) body first. This is a
-            # non-migrating connection (#1161): the schema was created once
-            # at server startup.
-            try:
-                conn = open_db(Path(db_path))
-            except (FleetHubError, sqlite3.Error) as exc:
-                self._send_json(500, {"error": f"hub database error: {exc}"})
-                return
-            body_payload: dict[str, Any]
-            try:
-                caller = self._caller(conn)
-                if caller is None:
-                    return
-                is_admin, caller_node = caller
-                if path == "/nodes":
-                    if not is_admin:
-                        self._send_json(403, {"error": "the admin token is required to manage nodes"})
-                        return
-                elif is_admin and not allow_admin_writes:
-                    self._send_json(
-                        403,
-                        {
-                            "error": "the admin token may not post events or claims: enroll this node with "
-                            "'brigade fleet nodes add' and configure its node token, or start the hub with "
-                            "--allow-admin-writes"
-                        },
-                    )
-                    return
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    self._send_json(400, {"error": "bad Content-Length"})
-                    return
-                if length <= 0 or length > MAX_BODY_BYTES:
-                    self._send_json(400, {"error": "missing or oversized body"})
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    parsed = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._send_json(400, {"error": "body is not valid JSON"})
-                    return
-                if path == "/events":
-                    status, body_payload = 200, dict(store_events(conn, parsed, caller_node=caller_node))
-                elif path == "/claims":
-                    status, body_payload = handle_claim(conn, parsed, caller_node=caller_node)
-                else:
-                    status, body_payload = handle_node_request(conn, parsed)
-            except FleetHubForbidden as exc:
-                self._send_json(403, {"error": str(exc)})
-                return
-            except FleetHubUnprocessable as exc:
-                self._send_json(422, {"error": str(exc)})
-                return
-            except FleetHubError as exc:
-                self._send_json(400, {"error": str(exc)})
-                return
-            except sqlite3.Error as exc:
-                self._send_json(500, {"error": f"hub database error: {exc}"})
-                return
-            finally:
-                conn.close()
-            self._send_json(status, body_payload)
-
-    return _Handler
+    return _make_handler(
+        token,
+        db_path,
+        allow_admin_writes=allow_admin_writes,
+        deck_config=deck_config,
+        trust_tailscale_identity=trust_tailscale_identity,
+    )
 
 
 def make_server(
-    host: str, port: int, db_path: Path, token: str, *, allow_admin_writes: bool = False
+    host: str,
+    port: int,
+    db_path: Path,
+    token: str,
+    *,
+    allow_admin_writes: bool = False,
+    deck_config_path: Path | None = None,
+    trust_tailscale_identity: bool = False,
 ) -> ThreadingHTTPServer:
     """Build (but do not serve) the hub HTTPServer; used by tests.
 
@@ -1492,14 +1943,38 @@ def make_server(
     exists, so no request can ever arrive first (#1161). Request handlers then
     use non-migrating connections (``open_db``), keeping token lookup live per
     request. Raises ``FleetHubError``/``sqlite3.Error`` on an unusable or
-    too-new database.
+    too-new database. ``deck_config_path`` is loaded exactly once, before the
+    socket is bound; an invalid file raises ``DeckConfigError`` without
+    creating anything.
     """
+    if trust_tailscale_identity and not _is_loopback_address(host):
+        raise FleetHubError("--trust-tailscale-identity requires a loopback --host")
+    if deck_config_path is not None:
+        deck_config = fleet_command_deck.load_config(Path(deck_config_path))
+    else:
+        deck_config = fleet_command_deck.DeckConfig()
     init_db(Path(db_path)).close()
-    return ThreadingHTTPServer((host, port), make_handler(token, Path(db_path), allow_admin_writes=allow_admin_writes))
+    return ThreadingHTTPServer(
+        (host, port),
+        make_handler(
+            token,
+            Path(db_path),
+            allow_admin_writes=allow_admin_writes,
+            deck_config=deck_config,
+            trust_tailscale_identity=trust_tailscale_identity,
+        ),
+    )
 
 
 def run(
-    *, host: str | None, port: int, db_path: Path, token_file: Path | None, allow_admin_writes: bool = False
+    *,
+    host: str | None,
+    port: int,
+    db_path: Path,
+    token_file: Path | None,
+    allow_admin_writes: bool = False,
+    deck_config_path: Path | None = None,
+    trust_tailscale_identity: bool = False,
 ) -> int:
     if not host:
         print("error: --host is required (the hub never binds all interfaces by default)", file=sys.stderr)
@@ -1510,15 +1985,26 @@ def run(
         print(f"error: {exc}", file=sys.stderr)
         return 2
     try:
-        server = make_server(host, port, Path(db_path).expanduser(), token, allow_admin_writes=allow_admin_writes)
-    except (FleetHubError, sqlite3.Error) as exc:
+        server = make_server(
+            host,
+            port,
+            Path(db_path).expanduser(),
+            token,
+            allow_admin_writes=allow_admin_writes,
+            deck_config_path=deck_config_path,
+            trust_tailscale_identity=trust_tailscale_identity,
+        )
+    except (FleetHubError, sqlite3.Error, fleet_command_deck.DeckConfigError) as exc:
         # Startup migration is the one place the hub touches the schema: if
         # it cannot be done, refuse to serve rather than 500-ing every request.
         print(f"error: {exc}", file=sys.stderr)
         return 2
     bound_host, bound_port = str(server.server_address[0]), int(server.server_address[1])
     mode = "admin writes allowed" if allow_admin_writes else "node tokens required for writes"
-    print(f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()}; {mode})")
+    tailscale_mode = "tailscale identity trusted" if trust_tailscale_identity else "tailscale identity ignored"
+    print(
+        f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()}; {mode}; {tailscale_mode})"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

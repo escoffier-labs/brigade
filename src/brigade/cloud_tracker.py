@@ -16,14 +16,26 @@ from . import localio
 REGISTRY_SCHEMA = "brigade.run.cloud.registry.v1"
 STATUS_SCHEMA = "brigade.run.cloud.status.v1"
 SWEEP_SCHEMA = "brigade.run.cloud.sweep.v1"
+SYNC_SCHEMA = "brigade.run.cloud.sync.v1"
+MAINTENANCE_SCHEMA = "brigade.run.cloud.maintenance.v1"
+DEFAULT_TERMINAL_KEEP = 50
+DEFAULT_TERMINAL_MAX_AGE_HOURS = 168
+PRESERVED_RETENTION_REASONS = ("active", "ambiguous", "orphaned", "needs-investigation")
 
 DEFAULT_STALE_READY_HOURS = 6
-CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/")
-TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "grokbot-cloud"})
+CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/", "claude/", "jules/")
+TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules"})
+
 READY_STATES = frozenset({"ready", "completed", "succeeded", "applied"})
 FAILED_STATES = frozenset({"failed", "errored", "error", "cancelled", "canceled", "expired"})
 FINISHED_STATES = frozenset({"finished", "completed", "succeeded", "applied", "ready"})
 PENDING_STATES = frozenset({"pending", "claimed", "running", "queued", "in_progress", "dispatching"})
+# Jules non-terminal states hold capacity until the provider explicitly finishes.
+JULES_HOLDING_STATES = frozenset(
+    {"planning", "awaiting_plan_approval", "awaiting_user_feedback", "paused", "state_unspecified"}
+)
+ACTIVE_STATES = PENDING_STATES | JULES_HOLDING_STATES | frozenset({"creating", "active"})
+TERMINAL_STATES = FINISHED_STATES | FAILED_STATES | frozenset({"interrupted", "timed_out", "timeout"})
 
 CLASSIFICATIONS = (
     "pending",
@@ -45,6 +57,26 @@ def registry_path(target: Path) -> Path:
 
 def prompt_hash(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+LEASE_LABEL_MAX = 120
+_LEASE_LABEL_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+
+
+def lease_label(provider: str, repo: str | None, prompt_hash_value: str | None) -> str:
+    """Return a bounded ``provider:owner/repo@<digest>`` lease label.
+
+    Prompt text is never a label. Hosted adapters call this so the hub, the
+    registry, and every dashboard row carry a stable identifier derived from the
+    provider, the repository, and the prompt hash instead of the prompt itself.
+    """
+    name = str(provider or "unknown").strip() or "unknown"
+    slug = str(repo or "").strip().removeprefix("https://github.com/").rstrip("/")
+    if not _LEASE_LABEL_REPO_RE.match(slug):
+        slug = "unknown-repo"
+    digest = str(prompt_hash_value or "").strip().rpartition(":")[2]
+    digest = digest[:12] if re.fullmatch(r"[0-9a-fA-F]+", digest or "") else "nohash"
+    return f"{name}:{slug}@{digest}"[:LEASE_LABEL_MAX]
 
 
 def _now_iso(now: datetime | None = None) -> str:
@@ -102,12 +134,16 @@ def load_registry(target: Path) -> dict[str, Any]:
         stale_ready_hours = int(data.get("stale_ready_hours", DEFAULT_STALE_READY_HOURS))
     except (TypeError, ValueError):
         stale_ready_hours = DEFAULT_STALE_READY_HOURS
-    return {
+    loaded = {
         "schema": REGISTRY_SCHEMA,
         "version": 1,
         "stale_ready_hours": stale_ready_hours,
         "entries": [e for e in entries if isinstance(e, dict)],
     }
+    retention = data.get("retention")
+    if isinstance(retention, dict):
+        loaded["retention"] = retention
+    return loaded
 
 
 def save_registry(target: Path, registry: dict[str, Any]) -> None:
@@ -119,6 +155,9 @@ def save_registry(target: Path, registry: dict[str, Any]) -> None:
         "stale_ready_hours": int(registry.get("stale_ready_hours", DEFAULT_STALE_READY_HOURS)),
         "entries": [e for e in (registry.get("entries") or []) if isinstance(e, dict)],
     }
+    retention = registry.get("retention")
+    if isinstance(retention, dict):
+        payload["retention"] = retention
     localio.write_json(path, payload)
 
 
@@ -138,9 +177,11 @@ def register(
     branch: str | None = None,
     dispatched_at: str | None = None,
     source: str = "dispatch",
+    environment_audit: dict[str, str] | None = None,
+    lease_holder: str | None = None,
 ) -> dict[str, Any]:
     if provider not in TRACKER_PROVIDERS:
-        raise ValueError("provider must be codex-cloud, cursor-cloud, or grokbot-cloud")
+        raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud, jules")
     if not label.strip():
         raise ValueError("label must not be empty")
     if source == "dispatch" and not task_id:
@@ -159,6 +200,13 @@ def register(
         "adopted_at": None,
         "source": source,
     }
+    if environment_audit:
+        for key in ("environment_id", "environment_fingerprint"):
+            value = environment_audit.get(key)
+            if isinstance(value, str) and value:
+                entry[key] = value
+    if isinstance(lease_holder, str) and lease_holder:
+        entry["lease_holder"] = lease_holder
     registry["entries"].append(entry)
     save_registry(target, registry)
     return entry
@@ -206,11 +254,27 @@ def adopt(
     return entry
 
 
-def _normalize_provider_state(value: object) -> str | None:
+def normalize_provider_state(value: object) -> str | None:
+    """Public provider-state normalization: lower-case, strip, or None."""
     if not isinstance(value, str):
         return None
     word = value.strip().lower()
     return word or None
+
+
+def _normalize_provider_state(value: object) -> str | None:
+    """Internal alias kept for existing call sites."""
+    return normalize_provider_state(value)
+
+
+def is_active_state(state: str | None) -> bool:
+    """True for states that consume hosted capacity."""
+    return normalize_provider_state(state) in ACTIVE_STATES
+
+
+def is_terminal_state(state: str | None) -> bool:
+    """True for finished/failed states that should not hold capacity."""
+    return normalize_provider_state(state) in TERMINAL_STATES
 
 
 def _hours_since(earlier: datetime | None, now: datetime) -> float | None:
@@ -393,6 +457,10 @@ def _provider_for_branch(branch: str) -> str:
         return "cursor-cloud"
     if branch.startswith("grokbot/"):
         return "grokbot-cloud"
+    if branch.startswith("claude/"):
+        return "claude-cloud"
+    if branch.startswith("jules/"):
+        return "jules"
     return "codex-cloud"
 
 
@@ -405,7 +473,14 @@ def _grokbot_rows(
 
         queue_rows = grokbot_jobs.tracker_rows(target)
     except Exception:  # noqa: BLE001 - tracker remains available when queue storage is unavailable
+        from . import grokbot_jobs
+
+        if grokbot_jobs.hub_authority(target):
+            return [_grokbot_hub_unavailable_row()]
         return []
+
+    if any(isinstance(job, dict) and job.get("degraded") for job in queue_rows):
+        return [_grokbot_hub_unavailable_row()]
 
     rows: list[dict[str, Any]] = []
     for job in queue_rows:
@@ -437,7 +512,7 @@ def _grokbot_rows(
                 "label": job.get("label"),
                 "branch": branch,
                 "dispatched_at": job.get("queued_at"),
-                "source": "grokbot-queue",
+                "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
                 "expected_artifact": artifact,
             },
             provider_tasks={job_id: {"state": job.get("state"), "ready_at": job.get("updated_at")}},
@@ -455,13 +530,27 @@ def _grokbot_rows(
             "state": job.get("state"),
             "classification": classification_row["classification"],
             "artifact_refs": refs,
-            "source": "grokbot-queue",
+            "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
         }
         for key in ("created_at", "updated_at", "queued_at", "claimed_at"):
             if isinstance(job.get(key), str):
                 row[key] = job[key]
         rows.append(row)
     return rows
+
+
+def _grokbot_hub_unavailable_row() -> dict[str, Any]:
+    return {
+        "id": "grokbot:hub-unavailable",
+        "provider": "grokbot-cloud",
+        "job_id": "grokbot-hub-unavailable",
+        "label": "Grok Bot hub unavailable",
+        "state": "unavailable",
+        "classification": "needs-investigation",
+        "degraded": True,
+        "artifact_refs": {"kind": "report"},
+        "source": "grokbot-hub",
+    }
 
 
 def _grokbot_artifact_refs(
@@ -487,9 +576,14 @@ def _grokbot_artifact_refs(
     elif kind == "branch" and isinstance(completed.get("commit"), str):
         refs["head_sha"] = completed["commit"]
     elif kind == "report":
-        for key in ("path", "sha256"):
-            if isinstance(completed.get(key), str):
-                refs[key] = completed[key]
+        if isinstance(completed.get("sha256"), str):
+            refs["sha256"] = completed["sha256"]
+        if isinstance(completed.get("private_snapshot_id"), str):
+            refs["private_snapshot_id"] = completed["private_snapshot_id"]
+        if type(completed.get("size")) is int:
+            refs["size"] = completed["size"]
+        if isinstance(completed.get("path"), str) and not completed.get("private_snapshot_id"):
+            refs["path"] = completed["path"]
     return refs
 
 
@@ -501,6 +595,8 @@ def status_payload(
     github: dict[str, Any] | None = None,
     cursor_wired: bool = False,
 ) -> dict[str, Any]:
+    from . import grokbot_jobs
+
     observed = now or datetime.now(timezone.utc)
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
@@ -508,6 +604,7 @@ def status_payload(
     stale_ready_hours = int(registry.get("stale_ready_hours", DEFAULT_STALE_READY_HOURS))
     provider_tasks = provider_tasks if isinstance(provider_tasks, dict) else {}
     github = github if isinstance(github, dict) else {"branches": [], "prs": []}
+    jules_wired = jules_cloud_wired()
 
     entries = [
         _classify_entry(
@@ -521,6 +618,7 @@ def status_payload(
         for entry in registry["entries"]
     ]
     grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
+    grokbot_degraded = any(row.get("degraded") for row in grokbot_rows)
     entries.extend(grokbot_rows)
     known_queue_branches = {
         refs["branch"]
@@ -548,13 +646,132 @@ def status_payload(
                 "authority": "best-effort" if cursor_wired else "unwired",
                 "detail": None if cursor_wired else "no API key; cursor cloud left unwired",
             },
-            "grokbot-cloud": {"wired": True, "authority": "local-queue"},
+            "claude-cloud": {
+                "wired": False,
+                "authority": "disabled-by-policy",
+                "detail": "local/background sessions are not cloud discovery; claude cloud remains untracked/disabled until a structured bindable provider surface exists",
+            },
+            "jules": {
+                "wired": jules_wired,
+                "authority": "alpha REST" if jules_wired else "unwired",
+                "detail": None if jules_wired else "JULES_API_KEY not set",
+            },
+            "grokbot-cloud": {
+                "wired": True,
+                "authority": "hub" if grokbot_jobs.hub_authority(target) else "local-queue",
+                **({"degraded": True, "detail": "hub unavailable"} if grokbot_degraded else {}),
+            },
             "github": {"wired": True, "authority": "ground-truth"},
         },
         "entries": entries,
         "counts": {
             classification: sum(1 for row in entries if row.get("classification") == classification)
             for classification in CLASSIFICATIONS
+        },
+    }
+
+
+def sync_payload(
+    target: Path,
+    *,
+    now: datetime | None = None,
+    provider_tasks: dict[str, Any] | None = None,
+    github: dict[str, Any] | None = None,
+    cursor_wired: bool = False,
+    hub_leases: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Reconcile registry observations with hub leases without secrets.
+
+    Status is read-only; sync is the only mutating observation step and it is
+    bounded. Terminal observations release matching hub leases; active observations
+    are kept. No Needs You row is invented just because a terminal local registry
+    entry has no matching hub lease. No prompt text, bearer, key, or presigned URL
+    is recorded.
+    """
+    from . import fleet_client
+
+    observed = now or datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    status = status_payload(
+        target,
+        now=observed,
+        provider_tasks=provider_tasks,
+        github=github,
+        cursor_wired=cursor_wired,
+    )
+    hub_leases = hub_leases if isinstance(hub_leases, list) else []
+
+    active: list[dict[str, Any]] = []
+    terminal: list[dict[str, Any]] = []
+    for row in status.get("entries", []):
+        if not isinstance(row, dict):
+            continue
+        state = row.get("provider_state")
+        if is_active_state(state):
+            active.append(row)
+        elif is_terminal_state(state):
+            terminal.append(row)
+
+    registry_entries = {entry.get("id"): entry for entry in load_registry(target)["entries"] if isinstance(entry, dict)}
+    renewed: list[dict[str, Any]] = []
+    released: list[dict[str, Any]] = []
+    needs_you: list[dict[str, Any]] = []
+    for row in active:
+        task_id = row.get("task_id")
+        if not isinstance(task_id, str):
+            continue
+        match = next((lease for lease in hub_leases if str(lease.get("provider_task_id")) == task_id), None)
+        holder = registry_entries.get(row.get("id"), {}).get("lease_holder")
+        if isinstance(match, dict) and match.get("lease_id") and isinstance(holder, str):
+            try:
+                decision = fleet_client.renew_cloud(str(match["lease_id"]), holder=holder)
+                if decision.granted:
+                    renewed.append({"id": row.get("id"), "task_id": task_id, "lease_id": match["lease_id"]})
+                else:
+                    needs_you.append({"id": row.get("id"), "detail": f"hub lease renewal refused: {decision.reason}"})
+            except Exception as exc:  # noqa: BLE001 - sync must stay bounded
+                needs_you.append({"id": row.get("id"), "detail": f"hub lease renewal failed: {type(exc).__name__}"})
+    for row in terminal:
+        # Release a matching hub lease when a terminal observation is known and a
+        # lease id is present. Failures are recorded, not rethrown; no Needs You row
+        # is invented merely because a local registry entry has no matching lease.
+        task_id = row.get("task_id")
+        if not isinstance(task_id, str):
+            continue
+        match = next((lease for lease in hub_leases if str(lease.get("provider_task_id")) == task_id), None)
+        if isinstance(match, dict) and match.get("lease_id"):
+            registry_entry = registry_entries.get(row.get("id"), {})
+            holder = registry_entry.get("lease_holder")
+            try:
+                decision = fleet_client.release_cloud(
+                    str(match["lease_id"]),
+                    state=str(row.get("classification", "released")),
+                    holder=holder if isinstance(holder, str) else None,
+                )
+                if decision.granted:
+                    released.append({"id": row.get("id"), "task_id": task_id, "lease_id": match["lease_id"]})
+                else:
+                    needs_you.append({"id": row.get("id"), "detail": f"hub lease release refused: {decision.reason}"})
+            except Exception as exc:  # noqa: BLE001 - sync must stay bounded
+                needs_you.append({"id": row.get("id"), "detail": f"hub lease release failed: {type(exc).__name__}"})
+
+    return {
+        "schema": SYNC_SCHEMA,
+        "action": "reconcile",
+        "target": str(target.expanduser().resolve()),
+        "observed_at": status.get("observed_at"),
+        "stale_ready_hours": status.get("stale_ready_hours"),
+        "sources": status.get("sources"),
+        "active": active[:100],
+        "renewed": renewed[:100],
+        "released": released[:100],
+        "needs_you": needs_you[:10],
+        "counts": {
+            "active": len(active),
+            "renewed": len(renewed),
+            "released": len(released),
+            "needs_you": len(needs_you),
         },
     }
 
@@ -624,6 +841,130 @@ def sweep(target: Path, *, now: datetime | None = None, status: dict[str, Any] |
     return report
 
 
+def default_retention_policy(
+    *,
+    keep_terminal: int | None = None,
+    max_age_hours: int | None = None,
+) -> dict[str, Any]:
+    """Return the auditable registry retention contract."""
+    return {
+        "preserve": list(PRESERVED_RETENTION_REASONS),
+        "bound": ["landed", "terminal"],
+        "keep_terminal": DEFAULT_TERMINAL_KEEP if keep_terminal is None else int(keep_terminal),
+        "max_age_hours": DEFAULT_TERMINAL_MAX_AGE_HOURS if max_age_hours is None else int(max_age_hours),
+        "sort": ["dispatched_at_desc", "id_desc"],
+    }
+
+
+def _row_is_preserved(row: dict[str, Any]) -> bool:
+    """Keep active, ambiguous, orphaned, needs-investigation, and current work."""
+    classification = row.get("classification")
+    state = row.get("provider_state")
+    if classification in {"orphaned", "needs-investigation", "pending", "ready-to-land", "stale"}:
+        return True
+    if is_active_state(state):
+        return True
+    if not is_terminal_state(state):
+        return True
+    return False
+
+
+def compact_registry(
+    target: Path,
+    *,
+    now: datetime | None = None,
+    keep_terminal: int | None = None,
+    max_age_hours: int | None = None,
+    provider_tasks: dict[str, Any] | None = None,
+    github: dict[str, Any] | None = None,
+    cursor_wired: bool = False,
+    status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Explicit maintenance: bound landed/terminal history and write atomically.
+
+    Read-only status never calls this. Active, ambiguous, orphaned, and
+    needs-investigation rows are always preserved. Missing timestamps are
+    treated as ambiguous and kept.
+    """
+    observed = now or datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    policy = default_retention_policy(keep_terminal=keep_terminal, max_age_hours=max_age_hours)
+    if policy["keep_terminal"] < 0:
+        raise ValueError("keep_terminal must be >= 0")
+    if policy["max_age_hours"] < 1:
+        raise ValueError("max_age_hours must be >= 1")
+
+    registry = load_registry(target)
+    payload = (
+        status
+        if isinstance(status, dict)
+        else status_payload(
+            target,
+            now=observed,
+            provider_tasks=provider_tasks,
+            github=github,
+            cursor_wired=cursor_wired,
+        )
+    )
+    rows_by_id = {
+        row.get("id"): row for row in payload.get("entries", []) if isinstance(row, dict) and row.get("id") is not None
+    }
+
+    preserved: list[dict[str, Any]] = []
+    eligible: list[tuple[datetime, str, dict[str, Any]]] = []
+    for entry in registry["entries"]:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = entry.get("id")
+        row = rows_by_id.get(entry_id, {})
+        if not isinstance(row, dict) or not row or _row_is_preserved(row):
+            preserved.append(entry)
+            continue
+        dispatched = _parse_time(entry.get("dispatched_at"))
+        if dispatched is None:
+            preserved.append(entry)
+            continue
+        eligible.append((dispatched, str(entry_id or ""), entry))
+
+    eligible.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    kept_terminal: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for dispatched, _entry_id, entry in eligible:
+        age = _hours_since(dispatched, observed)
+        over_age = age is not None and age >= policy["max_age_hours"]
+        over_count = len(kept_terminal) >= policy["keep_terminal"]
+        if over_age or over_count:
+            dropped.append(entry)
+        else:
+            kept_terminal.append(entry)
+
+    kept_ids = {item.get("id") for item in (*preserved, *kept_terminal)}
+    registry["entries"] = [
+        entry for entry in registry["entries"] if isinstance(entry, dict) and entry.get("id") in kept_ids
+    ]
+    registry["retention"] = {**policy, "compacted_at": _now_iso(observed)}
+    save_registry(target, registry)
+
+    maintenance_id = f"{observed.strftime('%Y%m%d-%H%M%S')}-cloud-compact-{uuid4().hex[:6]}"
+    report = {
+        "schema": MAINTENANCE_SCHEMA,
+        "maintenance_id": maintenance_id,
+        "action": "compact",
+        "target": str(target.expanduser().resolve()),
+        "observed_at": _now_iso(observed),
+        "policy": policy,
+        "kept": len(registry["entries"]),
+        "dropped_ids": [entry.get("id") for entry in dropped],
+        "counts": {"kept": len(registry["entries"]), "dropped": len(dropped)},
+        "atomic": True,
+    }
+    receipt_dir = _root(target) / "maintenance" / maintenance_id
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    localio.write_json(receipt_dir / "compact.json", report)
+    return report
+
+
 def _run_text(command: list[str], *, cwd: Path | None = None, timeout: float = 30.0) -> tuple[int, str, str]:
     try:
         completed = subprocess.run(
@@ -687,25 +1028,35 @@ def _parse_codex_cloud_list(stdout: str) -> dict[str, Any]:
 
 
 def observe_codex_cloud_tasks(target: Path) -> dict[str, Any]:
-    code, stdout, _stderr = _run_text(["codex", "cloud", "list"], cwd=target)
-    if code != 0 or not stdout.strip():
-        # Fall back to per-task status for known registry ids.
-        registry = load_registry(target)
-        tasks: dict[str, Any] = {}
-        for entry in registry["entries"]:
-            task_id = entry.get("task_id")
-            if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud":
-                continue
-            scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
-            blob = (sout + "\n" + serr).strip()
-            if scode != 0 and not blob:
-                continue
-            from . import codex_cloud
+    from . import codex_cloud
 
-            state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
-            tasks[task_id] = {"state": state, "ready_at": None}
-        return tasks
-    return _parse_codex_cloud_list(stdout)
+    try:
+        inventory = codex_cloud.list_tasks(cwd=target)
+    except Exception:  # noqa: BLE001 - observation must stay bounded
+        inventory = codex_cloud.ListTasksResult([])
+    if inventory.tasks:
+        return {
+            row["id"]: {"state": row.get("state"), "ready_at": None}
+            for row in inventory.tasks
+            if isinstance(row.get("id"), str)
+        }
+
+    # Empty or unavailable structured inventory is not terminal evidence. Fall
+    # back to status reads only for task ids already present in the local
+    # registry, and never infer completion from absence.
+    registry = load_registry(target)
+    tasks: dict[str, Any] = {}
+    for entry in registry["entries"]:
+        task_id = entry.get("task_id")
+        if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud":
+            continue
+        scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
+        blob = (sout + "\n" + serr).strip()
+        if scode != 0 and not blob:
+            continue
+        state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
+        tasks[task_id] = {"state": state, "ready_at": None}
+    return tasks
 
 
 def observe_github(target: Path) -> dict[str, Any]:
@@ -785,8 +1136,120 @@ def cursor_cloud_wired() -> bool:
     return False
 
 
+def _cursor_api_key() -> str | None:
+    """Return the first configured Cursor API key, or None."""
+    import os
+
+    for key in ("CURSOR_API_KEY", "CURSOR_CLOUD_API_KEY", "BG_AGENT_API_KEY"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
+    """Fetch sanitized Cursor Cloud inventory when an API key is present.
+
+    Provider API failures are bounded: the tracker stays available and no
+    existing registry entries are erased or admitted.
+    """
+    api_key = _cursor_api_key()
+    if not api_key:
+        return {}
+    try:
+        from . import cursor_cloud
+
+        agents = cursor_cloud.list_agents(api_key, max_pages=2, max_items=100, include_usage=True)
+    except Exception:  # noqa: BLE001 - observation must stay bounded
+        return {}
+    tasks: dict[str, Any] = {}
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        agent_id = agent.get("id")
+        if not isinstance(agent_id, str):
+            continue
+        row: dict[str, Any] = {
+            "state": cursor_cloud.normalize_state(agent.get("latestRunState")),
+            "agent_id": agent_id,
+        }
+        run_id = agent.get("latestRunId")
+        if isinstance(run_id, str) and run_id:
+            row["run_id"] = run_id
+        duration = agent.get("duration_ms")
+        if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0:
+            row["duration_ms"] = duration
+        updated = agent.get("updated_at")
+        if isinstance(updated, str) and updated:
+            row["updated_at"] = updated
+        usage = cursor_cloud.sanitize_token_usage(agent.get("usage"))
+        if usage:
+            row["usage"] = usage
+        tasks[agent_id] = row
+    return tasks
+
+
+def jules_cloud_wired() -> bool:
+    """Jules Cloud is wired when an API key is present."""
+    import os
+
+    return bool(os.environ.get("JULES_API_KEY", "").strip())
+
+
+def _jules_api_key() -> str | None:
+    """Return the configured Jules API key, or None."""
+    import os
+
+    value = os.environ.get("JULES_API_KEY", "").strip()
+    return value or None
+
+
+def observe_jules_cloud_tasks(target: Path) -> dict[str, Any]:
+    """Fetch sanitized Jules Cloud inventory when an API key is present.
+
+    Provider API failures are bounded: the tracker stays available and no
+    existing registry entries are erased or admitted. Inventory is a positive
+    signal only. A failed fetch returns ``{}`` and a truncated page walk simply
+    omits ids, and absence of an id is never read as terminal, so unknown or
+    truncated inventory can never release capacity.
+    """
+    api_key = _jules_api_key()
+    if not api_key:
+        return {}
+    try:
+        from . import jules_cloud
+
+        sessions = jules_cloud.list_sessions(api_key, max_pages=2, max_items=100)
+    except Exception:  # noqa: BLE001 - observation must stay bounded
+        return {}
+    tasks: dict[str, Any] = {}
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        session_id = session.get("id")
+        if not isinstance(session_id, str):
+            continue
+        tasks[session_id] = {"state": normalize_provider_state(session.get("state"))}
+    return tasks
+
+
 def observe_providers(target: Path, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], bool]:
-    return observe_codex_cloud_tasks(target), observe_github(target), cursor_cloud_wired()
+    provider_tasks: dict[str, Any] = {}
+    try:
+        provider_tasks.update(observe_codex_cloud_tasks(target))
+    except Exception:  # noqa: BLE001 - observation must stay bounded
+        pass
+    if cursor_cloud_wired():
+        try:
+            provider_tasks.update(observe_cursor_cloud_tasks(target))
+        except Exception:  # noqa: BLE001 - observation must stay bounded
+            pass
+    if jules_cloud_wired():
+        try:
+            provider_tasks.update(observe_jules_cloud_tasks(target))
+        except Exception:  # noqa: BLE001 - observation must stay bounded
+            pass
+    return provider_tasks, observe_github(target), cursor_cloud_wired()
 
 
 def center_activity_records(

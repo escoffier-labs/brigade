@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from functools import partial, wraps
 from json import JSONDecoder
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, ContextManager, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from .. import agents
@@ -310,6 +310,7 @@ def _run_orchestrator(
     sandbox: str | None = None,
     codex_transport: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
+    model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
 ) -> agents.AgentResult:
     orchestrator = roster.agents[roster.orchestrator]
     transport = codex_transport or roster.codex_transport
@@ -351,13 +352,23 @@ def _run_orchestrator(
         kwargs["env"] = dict(orchestrator.env)
     if orchestrator.command is not None:
         kwargs["command"] = orchestrator.command
-    result = _call_with_process_registry(
-        agents.run_agent,
-        orchestrator.cli,
-        prompt,
-        process_registry=process_registry,
-        **kwargs,
-    )
+    if model_lease is None:
+        result = _call_with_process_registry(
+            agents.run_agent, orchestrator.cli, prompt, process_registry=process_registry, **kwargs
+        )
+    else:
+        with model_lease(orchestrator) as lease_error:
+            if lease_error is not None:
+                return agents.AgentResult(
+                    text="",
+                    ok=False,
+                    detail=lease_error,
+                    failure_phase="preflight",
+                    failure_kind="fleet-model-policy",
+                )
+            result = _call_with_process_registry(
+                agents.run_agent, orchestrator.cli, prompt, process_registry=process_registry, **kwargs
+            )
     if not result.ok and orchestrator.cli == "codex":
         detail = _orchestrator_failure_detail(
             result,
@@ -537,6 +548,7 @@ def plan(
     codex_transport: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     output_dir: Path | None = None,
+    model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
 ) -> list[Assignment]:
     transport = codex_transport or roster.codex_transport
     no_file_writes = _orchestrator_hides_write_tools(
@@ -569,6 +581,7 @@ def plan(
         sandbox=sandbox,
         codex_transport=transport,
         process_registry=process_registry,
+        model_lease=model_lease,
     )
     if not first.ok:
         _record_plan_attempt(attempts, stage="initial", result=first)
@@ -619,6 +632,7 @@ def plan(
             sandbox=sandbox,
             codex_transport=transport,
             process_registry=process_registry,
+            model_lease=model_lease,
         )
         if not second.ok:
             _record_plan_attempt(attempts, stage="correction", result=second)
@@ -684,6 +698,7 @@ def plan(
         sandbox=sandbox,
         codex_transport=transport,
         process_registry=process_registry,
+        model_lease=model_lease,
     )
     if not revised_result.ok:
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result)
@@ -1007,6 +1022,7 @@ def _apply_candidate_set_gate(
     process_registry: Any,
     plan_attempts: list[dict[str, object]] | None,
     allow_replan: bool,
+    model_lease: Callable[[Agent], ContextManager[str | None]] | None,
 ) -> tuple[list[Assignment], Any, str | None]:
     """Filter tools per assignment, write receipt, optionally replan once on empty sets.
 
@@ -1077,6 +1093,7 @@ def _apply_candidate_set_gate(
             sandbox=sandbox,
             codex_transport=transport_for_payload,
             process_registry=process_registry,
+            model_lease=model_lease,
         )
         if revised_result.ok:
             try:
@@ -1160,6 +1177,7 @@ def dispatch(
     on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
     run_id: str | None = None,
     output_dir: Path | None = None,
+    model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
 ) -> list[WorkerResult]:
     from .. import run_transport
 
@@ -1206,4 +1224,5 @@ def dispatch(
         on_failed_attempt_persisted=on_failed_attempt_persisted,
         run_id=run_id,
         output_dir=output_dir,
+        model_lease=model_lease,
     )

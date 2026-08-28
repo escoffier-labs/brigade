@@ -259,7 +259,7 @@ class TestHubNodeCredentials:
         conn.close()
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 5
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
             node, token = fleet_hub.add_node(conn, NODE_A, "label")
             assert node["node_id"] == NODE_A and node["revoked_at"] is None and token
             assert fleet_hub.lookup_node_token(conn, token) == (NODE_A, False)
@@ -693,5 +693,5 @@ class TestOpenDbSideEffectFree:
         finally:
             conn.close()
         assert mode == "wal"
-        assert version == fleet_hub.SCHEMA_VERSION == 5
+        assert version == fleet_hub.SCHEMA_VERSION
         assert {"events", "claims", "nodes"} <= tables

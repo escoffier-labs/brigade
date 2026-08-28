@@ -154,6 +154,10 @@ def _full_base_snapshot() -> dict:
         "failure_kind": None,
         "failure": {"detail": None},
         "transport_warning": None,
+        "cloud_environment": {
+            "provider": "codex-cloud",
+            "environment_fingerprint": "sha256:environment-fingerprint",
+        },
         "artifact_collection": None,
         "artifacts": [],
         "handoff": None,
@@ -547,7 +551,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 59
+    assert len(PRESERVED_FIELDS) == 60
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",
@@ -579,6 +583,7 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     assert projection.snapshot["active_seats"] is not base["active_seats"]
     assert projection.snapshot["code_graph_brief"] is not base["code_graph_brief"]
     assert projection.snapshot["approval_reference"] is not base["approval_reference"]
+    assert projection.snapshot["cloud_environment"] is not base["cloud_environment"]
     assert set(projection.snapshot.keys()) <= OWNED_FIELDS
 
 

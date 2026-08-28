@@ -23,6 +23,12 @@ def _pid_is_running(pid: int) -> bool:
     return state != "Z"
 
 
+def _expected_detach_mode() -> str:
+    if os.name == "nt":
+        return proc.DETACH_MODE_WINDOWS_JOB_BREAKAWAY
+    return proc.DETACH_MODE_POSIX_SESSION
+
+
 def _write_roster(target: Path) -> None:
     config_dir = target / ".brigade"
     config_dir.mkdir()
@@ -81,7 +87,9 @@ def test_run_detach_spawns_child_with_output_dir_and_log(tmp_path, monkeypatch, 
     run_dirs = list((tmp_path / ".brigade" / "runs").iterdir())
     assert len(run_dirs) == 1
     run_dir = run_dirs[0]
-    assert (run_dir / "detached.log").read_text() == "child started\n"
+    log_lines = (run_dir / "detached.log").read_text().splitlines()
+    assert "child started" in log_lines
+    assert f"brigade detach: {_expected_detach_mode()}" in log_lines
     assert f"run: {run_dir.name}" in captured.out
     assert "detached: pid 4321" in captured.err
     assert f"artifacts: {run_dir}" in captured.err
@@ -110,7 +118,9 @@ def test_run_detach_reports_early_child_exit(tmp_path, monkeypatch, capsys):
     assert rc == 2
     assert "detached child exited before run metadata was written: exit 7" in captured.err
     assert f"log: {run_dir / 'detached.log'}" in captured.err
-    assert (run_dir / "detached.log").read_text() == "boom\n"
+    log_lines = (run_dir / "detached.log").read_text().splitlines()
+    assert "boom" in log_lines
+    assert f"brigade detach: {_expected_detach_mode()}" in log_lines
     run_meta = json.loads((run_dir / "run.json").read_text())
     assert run_meta["status"] == "failed"
     assert run_meta["finished_at"].endswith("Z")
@@ -478,6 +488,7 @@ def test_run_detach_child_argv_preserves_worker(tmp_path):
         handoff=False,
         handoff_inbox=None,
         worker="coder",
+        model=None,
         wait=2.5,
         keep_going=False,
         scheduler="waves",
@@ -522,6 +533,7 @@ def test_run_detach_child_argv_forwards_run_budget(tmp_path):
         handoff=False,
         handoff_inbox=None,
         worker="coder",
+        model=None,
         wait=2.5,
         keep_going=False,
         scheduler="waves",
@@ -644,3 +656,166 @@ def test_detach_lifecycle_pre_lock_sigterm_writes_terminal_without_journal(lifec
         "seat": "coder",
     }
     assert not (run_dir / "events").exists()
+
+
+def test_detached_launch_kwargs_do_not_rely_on_start_new_session_on_windows(monkeypatch):
+    """Windows silently drops start_new_session, so detach must use creation flags."""
+
+    monkeypatch.setattr(os, "name", "nt")
+    kwargs = proc.detached_launch_kwargs()
+
+    assert "start_new_session" not in kwargs
+    flags = kwargs["creationflags"]
+    assert flags & proc._WINDOWS_DETACHED_PROCESS
+    assert flags & proc._WINDOWS_NEW_PROCESS_GROUP
+    assert flags & proc._WINDOWS_CREATE_BREAKAWAY_FROM_JOB
+
+    without_breakaway = proc.detached_launch_kwargs(job_breakaway=False)["creationflags"]
+    assert not without_breakaway & proc._WINDOWS_CREATE_BREAKAWAY_FROM_JOB
+    assert without_breakaway & proc._WINDOWS_DETACHED_PROCESS
+
+
+def test_detached_launch_kwargs_keep_posix_new_session(monkeypatch):
+    monkeypatch.setattr(os, "name", "posix")
+
+    assert proc.detached_launch_kwargs() == {"start_new_session": True}
+    assert proc.detached_launch_kwargs(job_breakaway=False) == {"start_new_session": True}
+
+
+def test_spawn_detached_refuses_when_the_job_forbids_breakaway(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    attempts = []
+
+    class FakeProcess:
+        pid = 99
+
+    def fake_popen(argv, **kwargs):
+        attempts.append(kwargs["creationflags"])
+        if kwargs["creationflags"] & proc._WINDOWS_CREATE_BREAKAWAY_FROM_JOB:
+            error = OSError(5, "Access is denied")
+            error.winerror = proc._WINDOWS_BREAKAWAY_DENIED_WINERROR
+            raise error
+        return FakeProcess()
+
+    with pytest.raises(proc.DetachedLaunchError, match="breakaway"):
+        proc.spawn_detached(["child"], popen=fake_popen)
+
+    assert len(attempts) == 1
+
+
+def test_spawn_detached_propagates_non_breakaway_spawn_failures(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+
+    def fake_popen(argv, **kwargs):
+        error = OSError(2, "The system cannot find the file specified")
+        error.winerror = 2
+        raise error
+
+    with pytest.raises(OSError) as excinfo:
+        proc.spawn_detached(["child"], popen=fake_popen)
+
+    assert excinfo.value.winerror == 2
+
+
+_SURVIVOR_CHILD = """
+import json
+import sys
+import time
+from pathlib import Path
+
+from brigade import aboyeur
+
+output_dir = Path(sys.argv[1])
+(output_dir / "run.json").write_text(json.dumps({"status": "started"}) + "\\n")
+(output_dir / "child-alive").write_text("1")
+deadline = time.monotonic() + 30
+while time.monotonic() < deadline:
+    if not (output_dir / "parent-alive").exists():
+        break
+    time.sleep(0.05)
+aboyeur.record_run_termination(
+    output_dir,
+    status="failed",
+    failure_phase=None,
+    failure_kind="session-teardown",
+    detail="parent session ended",
+)
+"""
+
+_SURVIVOR_PARENT = """
+import sys
+import time
+from pathlib import Path
+
+from brigade import proc
+
+output_dir = Path(sys.argv[1])
+child_script = sys.argv[2]
+child, mode = proc.spawn_detached([sys.executable, child_script, str(output_dir)])
+(output_dir / "detach-mode").write_text(mode)
+(output_dir / "child.pid").write_text(str(child.pid))
+time.sleep(300)
+"""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX session teardown semantics")
+def test_spawn_detached_child_survives_parent_session_exit(tmp_path):
+    """The detached child must reach a terminal receipt after its parent's session dies.
+
+    Killing the parent's whole process group is what an SSH disconnect does.
+    A child launched without its own session dies with that signal; a detached
+    one keeps running and finishes writing run.json.
+    """
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    (output_dir / "parent-alive").write_text("1")
+    child_script = tmp_path / "survivor_child.py"
+    child_script.write_text(_SURVIVOR_CHILD)
+    parent_script = tmp_path / "survivor_parent.py"
+    parent_script.write_text(_SURVIVOR_PARENT)
+
+    parent = subprocess.Popen(
+        [sys.executable, str(parent_script), str(output_dir), str(child_script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (output_dir / "child-alive").exists():
+            if parent.poll() is not None:
+                raise AssertionError(f"parent exited early: {parent.stderr.read().decode()}")
+            time.sleep(0.05)
+        assert (output_dir / "child-alive").exists(), "detached child never started"
+        child_pid = int((output_dir / "child.pid").read_text())
+        assert (output_dir / "detach-mode").read_text() == proc.DETACH_MODE_POSIX_SESSION
+        assert os.getpgid(child_pid) != os.getpgid(parent.pid)
+
+        # Tear down the parent's session the way an SSH disconnect does.
+        os.killpg(os.getpgid(parent.pid), signal.SIGKILL)
+        parent.wait(timeout=30)
+        (output_dir / "parent-alive").unlink()
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            payload = json.loads((output_dir / "run.json").read_text())
+            if payload.get("finished_at"):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("detached child never reached a terminal run receipt")
+
+        assert payload["status"] == "failed"
+        assert payload["failure"]["kind"] == "session-teardown"
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and _pid_is_running(child_pid):
+            time.sleep(0.05)
+        assert not _pid_is_running(child_pid), "detached child never exited on its own"
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=30)
+        if parent.stderr is not None:
+            parent.stderr.close()

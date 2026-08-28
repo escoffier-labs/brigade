@@ -7,6 +7,7 @@ DRIFT_IMPACT_HEADING
 DRIFT_IMPACT_LIMIT
 DriftImpactBrief
 EvidenceBrief
+FleetModelPolicyResolution
 NOOP_DETAIL
 NO_PLAN_FILE_RULE
 OrchestratorHealthRoutingDecision
@@ -46,6 +47,7 @@ _is_brigade_path
 _latest_drift_report
 _loads_first_json_object
 _mark_noop_worker_results
+_model_lease_lifecycle
 _non_brigade_paths
 _observed_budget_cancellation
 _one_line
@@ -119,6 +121,7 @@ record_dispatch_stage
 record_result_processing
 record_run_start
 record_run_termination
+resolve_fleet_model_policy
 resolve_orchestrator_health_routing
 run
 set_artifact_patch_ref

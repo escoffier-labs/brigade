@@ -122,12 +122,53 @@ DEFAULT_CLAIM_TTL_SECONDS = 900
 # One acquire is retried once, so a configured-but-blackholed hub costs at
 # most 2 x this per `brigade run` before falling open on the local lock.
 CLAIM_TIMEOUT_SECONDS = 2.5
+# Cloud admission fences provider work, so its transport uses the same hard
+# deadline as claims. A missing or unavailable hub is a refusal, never a
+# reason to start provider work locally.
+CLOUD_TIMEOUT_SECONDS = 2.5
+MAX_CLOUD_RESPONSE_BYTES = 64 * 1024
 # 4xx statuses that are transient or operator-fixable: keep the spool. 403
 # is a credential mismatch (a node token that is not this node's, or the
 # admin token on a hub without --allow-admin-writes), fixed by config.
 _RETRYABLE_4XX = frozenset({401, 403, 408, 429})
 
 _LOG = logging.getLogger("brigade.fleet")
+
+_CLOUD_API_EXPORTS = frozenset(
+    {
+        "CloudDecision",
+        "ModelLeaseDecision",
+        "_cloud_op",
+        "acquire_model_lease",
+        "admit_cloud",
+        "bind_cloud",
+        "fetch_cloud",
+        "fetch_model_policy",
+        "load_model_policy_snapshot",
+        "release_cloud",
+        "release_model_lease",
+        "renew_cloud",
+        "set_model_policy",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily preserve the public cloud API without a circular import."""
+    if name in _CLOUD_API_EXPORTS:
+        from . import fleet_client_cloud
+
+        return getattr(fleet_client_cloud, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _post_cloud_blocking(hub_url: str, token: str, body: dict[str, Any], *, timeout: float) -> tuple[int, Any]:
+    """Compatibility seam for callers and tests that patch cloud transport."""
+    from .fleet_client_cloud import _post_cloud_blocking as post
+
+    return post(hub_url, token, body, timeout=timeout)
+
+
 _SPOOL_PROCESS_LOCK = threading.Lock()
 # The deprecated shared-token fallback is warned about once per process,
 # not once per journal append.
