@@ -952,6 +952,32 @@ class TestClientClaims:
         bare.mkdir()
         assert fleet_client.resolve_claim_target(bare) == "just-a-dir"
 
+    def test_resolve_claim_target_ignores_redirected_home_identity(self, tmp_path):
+        """A planted home node.toml must not steal the claim key (#1182).
+
+        ``find_workspace_for_path`` walks ancestors. When pytest tmp lives
+        under ``$HOME`` and ``~/.brigade/node.toml`` exists, that walk
+        resolves the home directory name. Isolation must keep the workspace
+        name even when the redirected home carries a real identity file.
+        """
+        from brigade import node as node_mod
+
+        home = fleet_client.home_identity_target()
+        _plant_home_identity(home, NODE_A)
+        assert node_mod.node_path(home).is_file()
+
+        workspace = tmp_path / "ws"
+        nested = workspace / "src" / "deep"
+        nested.mkdir(parents=True)
+        node_mod.ensure_identity(workspace)
+        assert fleet_client.resolve_claim_target(nested) == "ws"
+        assert fleet_client.resolve_claim_target(nested) != home.name
+
+        bare = tmp_path / "just-a-dir"
+        bare.mkdir()
+        assert fleet_client.resolve_claim_target(bare) == "just-a-dir"
+        assert fleet_client.resolve_claim_target(bare) != home.name
+
 
 class TestFleetClaimsCli:
     def test_claims_table_and_json(self, hub, monkeypatch, capsys):

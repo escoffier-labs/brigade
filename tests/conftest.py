@@ -94,15 +94,53 @@ def _no_live_fleet_hub(monkeypatch):
 def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
     """Redirect user-level ``~/.brigade`` sticky state away from the real home.
 
-    Authority signed-markers default to ``$HOME/.brigade``. The redirected
-    path must end in ``.brigade`` so tests exercise the real default location
-    instead of a ``user_brigade`` temp that accidentally omits that component.
+    Authority signed-markers default to ``$HOME/.brigade`` (``BRIGADE_USER_DIR``).
+    Fleet identity uses ``fleet_client.brigade_home()``, which reads
+    ``BRIGADE_HOME`` and otherwise ``Path.home() / ".brigade"``. Cover both
+    so a host ``~/.brigade/node.toml`` cannot leak into claim-target lookup.
+    The redirected path must end in ``.brigade`` so tests exercise the real
+    default location instead of a ``user_brigade`` temp that accidentally
+    omits that component.
     """
     home = tmp_path_factory.mktemp("operator_home")
     user_dir = home / ".brigade"
     user_dir.mkdir(mode=PRIVATE_DIRECTORY_MODE)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("BRIGADE_USER_DIR", str(user_dir))
+    monkeypatch.setenv("BRIGADE_HOME", str(user_dir))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fleet_workspace_walk(tmp_path, monkeypatch, request):
+    """Stop fleet workspace discovery from climbing to a host node identity.
+
+    ``find_workspace_for_path`` walks ancestors looking for ``.brigade/node.toml``.
+    When pytest tmp lives under ``$HOME`` and the host has a home identity,
+    that walk resolves the home directory as the workspace (#1182). Redirecting
+    ``HOME`` / ``BRIGADE_HOME`` does not help: the real file is still on the
+    filesystem above ``tmp_path``. Bound discovery to the test sandbox.
+    """
+    if not request.module.__name__.rsplit(".", 1)[-1].startswith("test_fleet"):
+        return
+
+    from brigade import fleet_client
+
+    real = fleet_client.find_workspace_for_path
+    try:
+        bound = tmp_path.resolve()
+    except OSError:
+        bound = tmp_path
+
+    def find_workspace_for_path(start):
+        found = real(start)
+        if found is None:
+            return None
+        try:
+            return found if found.resolve().is_relative_to(bound) else None
+        except OSError:
+            return None
+
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", find_workspace_for_path)
 
 
 @pytest.fixture(autouse=True)
