@@ -95,12 +95,18 @@ class FindingsError(ValueError):
 
 def draft_filename(producer: str, finding_id: str, revision: str) -> str:
     """Return the deterministic inbox draft name for one identity and revision."""
-    return f"finding-{_identity_digest(producer, finding_id, revision)}.md"
+    return f"finding-{identity_digest(producer, finding_id, revision)}.md"
 
 
 def marker_filename(producer: str, finding_id: str, revision: str) -> str:
     """Return the deterministic queue marker name for one identity and revision."""
-    return f"{_identity_digest(producer, finding_id, revision)}.json"
+    return f"{identity_digest(producer, finding_id, revision)}.json"
+
+
+def identity_digest(producer: str, finding_id: str, revision: str) -> str:
+    """Return the irreversible digest for one producer, finding, and revision."""
+    payload = f"{producer}\0{finding_id}\0{revision}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def content_digest(title: str, body: str) -> str:
@@ -214,45 +220,21 @@ def apply(
 ) -> dict[str, Any]:
     """Write at most ``limit`` owner-review drafts and matching queue markers."""
     owner_path = _validate_owner(owner)
-    limit = _validate_limit(limit)
+    bound = _validate_limit(limit)
     payload = load_manifest(manifest)
-    if not SECURE_OWNER_WRITE_AVAILABLE:  # pragma: no cover - exercised on Windows.
-        raise FindingsError("secure-owner-write-unavailable")
-    created: list[dict[str, str]] = []
-    recovered = 0
-    try:
-        with grokbot_jobs._storage_paths(target) as storage, grokbot_jobs._queue_lock(storage):
-            findings_dir, extra_fd = _open_findings(storage)
-            try:
-                eligible, known, recoverable = _classify_locked(findings_dir, owner_path, payload["entries"])
-                recoverable_ids = {(item["producer"], item["finding_id"]) for item in recoverable}
-                eligible_ids = {(item["producer"], item["finding_id"]) for item in eligible}
-                for entry in payload["entries"]:
-                    identity = (entry["producer"], entry["finding_id"])
-                    if identity not in recoverable_ids and identity not in eligible_ids:
-                        continue
-                    if len(created) + recovered >= limit:
-                        break
-                    handle, status = _deliver_one(findings_dir, owner_path, entry, now)
-                    if status == "created":
-                        created.append(handle)
-                    else:
-                        recovered += 1
-            finally:
-                if extra_fd is not None:
-                    os.close(extra_fd)
-    except grokbot_jobs.GrokbotJobError as exc:
-        raise FindingsError(exc.reason) from exc
-    except grokbot_reconcile.ReconcileError as exc:
-        raise FindingsError(exc.reason) from exc
-    return {
-        "eligible": len(eligible),
-        "known": len(known),
-        "created": len(created),
-        "skipped": len(known) + recovered,
-        "limit": limit,
-        "findings": created,
-    }
+    return _deliver_entries(target, owner_path, payload["entries"], bound, now)
+
+
+def apply_entries(
+    target: Path,
+    owner: Path,
+    entries: object,
+    limit: int = DEFAULT_LIMIT,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Write drafts from in-memory entries after a complete preflight."""
+    owner_path, bound, validated = _preflight_entries(owner, entries, limit)
+    return _deliver_entries(target, owner_path, validated, bound, now)
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -283,6 +265,73 @@ def load_manifest(path: Path) -> dict[str, Any]:
         validated.append(item)
     payload["entries"] = _sorted_entries(validated)
     return payload
+
+
+def _preflight_entries(owner: Path, entries: object, limit: object) -> tuple[Path, int, list[dict[str, str]]]:
+    """Validate owner, limit, and every entry before any queue storage access."""
+    owner_path = _validate_owner(owner)
+    bound = _validate_limit(limit)
+    if not isinstance(entries, list) or len(entries) > MAX_ENTRIES:
+        raise FindingsError("malformed-manifest")
+    seen: set[tuple[str, str]] = set()
+    validated: list[dict[str, str]] = []
+    for index, entry in enumerate(entries):
+        item = _validate_entry(entry, index=index)
+        identity = (item["producer"], item["finding_id"])
+        if identity in seen:
+            raise FindingsError("duplicate-identity", index=index)
+        seen.add(identity)
+        validated.append(item)
+    return owner_path, bound, _sorted_entries(validated)
+
+
+def _deliver_entries(
+    target: Path,
+    owner_path: Path,
+    entries: list[dict[str, str]],
+    limit: int,
+    now: datetime | None,
+) -> dict[str, Any]:
+    """Deliver pre-validated entries through the existing atomic writer."""
+    if not SECURE_OWNER_WRITE_AVAILABLE:  # pragma: no cover - exercised on Windows.
+        raise FindingsError("secure-owner-write-unavailable")
+    created: list[dict[str, str]] = []
+    recovered = 0
+    eligible: list[dict[str, str]] = []
+    known: list[dict[str, str]] = []
+    try:
+        with grokbot_jobs._storage_paths(target) as storage, grokbot_jobs._queue_lock(storage):
+            findings_dir, extra_fd = _open_findings(storage)
+            try:
+                eligible, known, recoverable = _classify_locked(findings_dir, owner_path, entries)
+                recoverable_ids = {(item["producer"], item["finding_id"]) for item in recoverable}
+                eligible_ids = {(item["producer"], item["finding_id"]) for item in eligible}
+                for entry in entries:
+                    identity = (entry["producer"], entry["finding_id"])
+                    if identity not in recoverable_ids and identity not in eligible_ids:
+                        continue
+                    if len(created) + recovered >= limit:
+                        break
+                    handle, status = _deliver_one(findings_dir, owner_path, entry, now)
+                    if status == "created":
+                        created.append(handle)
+                    else:
+                        recovered += 1
+            finally:
+                if extra_fd is not None:
+                    os.close(extra_fd)
+    except grokbot_jobs.GrokbotJobError as exc:
+        raise FindingsError(exc.reason) from exc
+    except grokbot_reconcile.ReconcileError as exc:
+        raise FindingsError(exc.reason) from exc
+    return {
+        "eligible": len(eligible),
+        "known": len(known),
+        "created": len(created),
+        "skipped": len(known) + recovered,
+        "limit": limit,
+        "findings": created,
+    }
 
 
 def _validate_owner(owner: Path) -> Path:
@@ -542,8 +591,7 @@ def _read_manifest_snapshot(path: Path) -> bytes:
 
 
 def _identity_digest(producer: str, finding_id: str, revision: str) -> str:
-    payload = f"{producer}\0{finding_id}\0{revision}".encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+    return identity_digest(producer, finding_id, revision)
 
 
 def _sorted_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -607,7 +655,16 @@ def _classify_one(
     marker = _read_marker(directory, entry) if directory is not None else None
     existing = _existing_handoff(owner, name)
     if marker is not None:
-        if marker["identity"] != {"producer": entry["producer"], "finding_id": entry["finding_id"]}:
+        expected = identity_digest(entry["producer"], entry["finding_id"], entry["revision"])
+        marker_identity = marker["identity"]
+        if isinstance(marker_identity, dict):
+            matches_identity = marker_identity == {
+                "producer": entry["producer"],
+                "finding_id": entry["finding_id"],
+            }
+        else:
+            matches_identity = marker_identity == expected
+        if not matches_identity:
             raise FindingsError("marker-conflict")
         if marker["revision"] != entry["revision"]:
             raise FindingsError("marker-conflict")
@@ -720,17 +777,38 @@ def _existing_handoff(owner: Path, name: str) -> str | None:
             raise FindingsError("unsafe-storage") from close_error
 
 
-def _open_findings(storage: grokbot_jobs._Storage) -> tuple[grokbot_jobs._Directory, int | None]:
+def _open_queue_child(storage: grokbot_jobs._Storage, name: str) -> tuple[grokbot_jobs._Directory, int | None]:
+    """Open or create one private child of the Grok Bot queue root."""
     if storage.root.descriptor is None:  # pragma: no cover - exercised on Windows.
-        path = storage.root.path / FINDINGS_DIRNAME
+        path = storage.root.path / name
         grokbot_jobs._ensure_directory(path)
         return grokbot_jobs._Directory(path, None), None
-    descriptor = grokbot_jobs._open_or_create_directory(storage.root.descriptor, FINDINGS_DIRNAME)
-    return grokbot_jobs._Directory(storage.root.path / FINDINGS_DIRNAME, descriptor), descriptor
+    descriptor = grokbot_jobs._open_or_create_directory(storage.root.descriptor, name)
+    return grokbot_jobs._Directory(storage.root.path / name, descriptor), descriptor
+
+
+def _open_findings(storage: grokbot_jobs._Storage) -> tuple[grokbot_jobs._Directory, int | None]:
+    return _open_queue_child(storage, FINDINGS_DIRNAME)
+
+
+def delivery_marker_valid(target: Path, owner: Path, entry: dict[str, str]) -> bool:
+    """Return True when the delivery marker exists and matches this entry."""
+    directory = _open_findings_readonly(target)
+    try:
+        if directory is None:
+            return False
+        return _classify_one(directory, owner, entry) in {"known", "recover-draft"}
+    finally:
+        if directory is not None and directory.descriptor is not None:
+            os.close(directory.descriptor)
 
 
 def _open_findings_readonly(target: Path) -> grokbot_jobs._Directory | None:
-    names = (".brigade", "cloud", "grokbot", FINDINGS_DIRNAME)
+    return _open_queue_child_readonly(target, FINDINGS_DIRNAME)
+
+
+def _open_queue_child_readonly(target: Path, child: str) -> grokbot_jobs._Directory | None:
+    names = (".brigade", "cloud", "grokbot", child)
     if os.name != "posix":  # pragma: no cover - exercised on Windows.
         current = Path(target).expanduser()
         for name in names:
@@ -755,8 +833,8 @@ def _open_findings_readonly(target: Path) -> grokbot_jobs._Directory | None:
                 return None
             descriptors.append(child_fd)
             parent_fd = child_fd
-        findings_fd = descriptors.pop()
-        return grokbot_jobs._Directory(_queue_root(target) / FINDINGS_DIRNAME, findings_fd)
+        child_descriptor = descriptors.pop()
+        return grokbot_jobs._Directory(_queue_root(target) / child, child_descriptor)
     except grokbot_jobs.GrokbotJobError as exc:
         raise FindingsError(exc.reason) from exc
     except OSError as exc:
@@ -792,9 +870,12 @@ def _read_marker(directory: grokbot_jobs._Directory, entry: dict[str, str]) -> d
     if not isinstance(payload, dict) or set(payload) != MARKER_KEYS or payload.get("schema") != FINDINGS_SCHEMA:
         raise FindingsError("corrupt-storage")
     identity = payload.get("identity")
-    if not isinstance(identity, dict) or set(identity) != IDENTITY_KEYS:
-        raise FindingsError("corrupt-storage")
-    if not isinstance(identity.get("producer"), str) or not isinstance(identity.get("finding_id"), str):
+    if isinstance(identity, dict):
+        if set(identity) != IDENTITY_KEYS:
+            raise FindingsError("corrupt-storage")
+        if not isinstance(identity.get("producer"), str) or not isinstance(identity.get("finding_id"), str):
+            raise FindingsError("corrupt-storage")
+    elif not isinstance(identity, str) or not grokbot_jobs.LOWER_HEX_64_RE.fullmatch(identity):
         raise FindingsError("corrupt-storage")
     if not isinstance(payload.get("revision"), str) or not grokbot_jobs.OPAQUE_ID_RE.fullmatch(payload["revision"]):
         raise FindingsError("corrupt-storage")
@@ -826,7 +907,7 @@ def _write_marker(
         name,
         {
             "schema": FINDINGS_SCHEMA,
-            "identity": {"producer": entry["producer"], "finding_id": entry["finding_id"]},
+            "identity": identity_digest(entry["producer"], entry["finding_id"], entry["revision"]),
             "revision": entry["revision"],
             "source_digest": entry["source_digest"],
             "content_digest": entry["content_digest"],

@@ -375,7 +375,9 @@ def test_apply_writes_one_quoted_handoff_and_a_private_marker(tmp_path: Path):
         "delivered_at",
     }
     assert payload["schema"] == "brigade.grokbot.findings.v1"
-    assert payload["identity"] == {"producer": entry["producer"], "finding_id": entry["finding_id"]}
+    assert payload["identity"] == grokbot_findings.identity_digest(
+        str(entry["producer"]), str(entry["finding_id"]), str(entry["revision"])
+    )
     assert payload["revision"] == entry["revision"]
     assert payload["source_digest"] == entry["source_digest"]
     assert payload["content_digest"] == entry["content_digest"]
@@ -470,7 +472,9 @@ def test_conflicting_marker_fails_closed_before_any_write(tmp_path: Path):
         json.dumps(
             {
                 "schema": "brigade.grokbot.findings.v1",
-                "identity": {"producer": second["producer"], "finding_id": second["finding_id"]},
+                "identity": grokbot_findings.identity_digest(
+                    str(second["producer"]), str(second["finding_id"]), str(second["revision"])
+                ),
                 "revision": second["revision"],
                 "source_digest": "sha256:" + ("ab" * 32),
                 "content_digest": "sha256:" + ("ef" * 32),
@@ -1135,3 +1139,66 @@ def test_convert_findings_appears_in_parser_inventory():
     from brigade.roadmap_cmd import _cli_command_paths
 
     assert "brigade run-cloud grokbot convert-findings" in _cli_command_paths()
+
+
+def test_apply_entries_matches_path_apply_without_a_temp_manifest(tmp_path: Path):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    first = _entry()
+    second = _entry(finding_id="finding-beta", source_ref="cerebro://vault/findings/beta")
+    manifest = _write_manifest(tmp_path / "findings.json", _manifest(first, second))
+    path_result = grokbot_findings.apply(queue, owner, manifest, now=NOW)
+    inbox_after_path = {path.name for path in _review_inbox(owner).glob("*.md")}
+
+    other_queue = tmp_path / "queue-entries"
+    other_owner = tmp_path / "owner-entries"
+    other_queue.mkdir()
+    other_owner.mkdir()
+    before = {path.name for path in tmp_path.rglob("*.json")}
+    entry_result = grokbot_findings.apply_entries(other_queue, other_owner, [second, first], now=NOW)
+    after = {path.name for path in tmp_path.rglob("*.json")}
+
+    assert entry_result == path_result
+    assert inbox_after_path == {path.name for path in _review_inbox(other_owner).glob("*.md")}
+    assert after - before <= {_marker_name(first)}
+    dumped = json.dumps(entry_result, sort_keys=True)
+    assert PRIVATE_TITLE not in dumped
+    assert PRIVATE_BODY not in dumped
+
+
+def test_apply_entries_validates_every_entry_before_storage_access(tmp_path: Path, monkeypatch):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    later = _entry(finding_id="finding-beta")
+    later["title"] = ""
+
+    def _boom(*_args: object, **_kwargs: object):
+        raise AssertionError("storage opened during preflight")
+
+    monkeypatch.setattr(grokbot_findings.grokbot_jobs, "_storage_paths", _boom)
+    with pytest.raises(grokbot_findings.FindingsError, match="^invalid-title$"):
+        grokbot_findings.apply_entries(queue, owner, [_entry(), later], now=NOW)
+    assert not _review_inbox(owner).exists()
+
+
+def test_apply_entries_delivers_in_producer_finding_revision_order(tmp_path: Path):
+    queue = tmp_path / "queue"
+    owner = tmp_path / "owner"
+    queue.mkdir()
+    owner.mkdir()
+    later = _entry(producer="zeta", finding_id="z-finding", revision="2")
+    first = _entry(producer="alpha", finding_id="a-finding", revision="1")
+    middle = _entry(producer="alpha", finding_id="b-finding", revision="1")
+
+    result = grokbot_findings.apply_entries(queue, owner, [later, middle, first], limit=50, now=NOW)
+
+    assert result["findings"] == [_handle(first), _handle(middle), _handle(later)]
+    assert {path.name for path in _review_inbox(owner).glob("*.md")} == {
+        _draft_name(first),
+        _draft_name(middle),
+        _draft_name(later),
+    }

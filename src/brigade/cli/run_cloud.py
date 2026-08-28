@@ -212,6 +212,18 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_convert.add_argument("--input", type=Path, required=True, help="Path to the live normalized findings file.")
     p_convert.add_argument("--output", type=Path, required=True, help="Path to write the generic findings manifest.")
 
+    p_relay = grokbot_sub.add_parser(
+        "relay-findings",
+        help="Preview or relay private findings to Fleet Hub and owner-review drafts.",
+    )
+    add_target(p_relay)
+    p_relay.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
+    p_relay.add_argument("--manifest", type=Path, required=True, help="Path to the private findings manifest.")
+    p_relay.add_argument("--limit", type=int, default=1, help="Maximum new drafts (1-50). Defaults to 1.")
+    p_relay.add_argument(
+        "--apply", action="store_true", help="Write drafts and report events. Default is preview only."
+    )
+
     for name, help_text in (("claim", "Claim a queued job."), ("renew", "Renew a current job lease.")):
         command = grokbot_sub.add_parser(name, help=help_text)
         add_target(command)
@@ -846,6 +858,8 @@ def _dispatch_grokbot(args, target: Path) -> int:
         return _dispatch_grokbot_findings(args, target)
     if command == "convert-findings":
         return _dispatch_grokbot_convert_findings(args)
+    if command == "relay-findings":
+        return _dispatch_grokbot_relay_findings(args, target)
     if command == "serve":
         from .. import grokbot_mcp
 
@@ -1081,6 +1095,46 @@ def _dispatch_grokbot_findings(args, target: Path) -> int:
     return 0
 
 
+def _dispatch_grokbot_relay_findings(args, target: Path) -> int:
+    """Preview or relay findings without printing finding text or credentials."""
+    from .. import grokbot_findings, grokbot_findings_relay
+
+    try:
+        payload = grokbot_findings.load_manifest(args.manifest)
+        if args.apply:
+            result = grokbot_findings_relay.relay_apply(payload["entries"], target, args.owner, limit=args.limit)
+        else:
+            result = grokbot_findings_relay.relay_preview(payload["entries"], target, args.owner, limit=args.limit)
+    except grokbot_findings.FindingsError as exc:
+        print(f"error: {exc.reason}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    _print_relay_findings_result(result)
+    return 0
+
+
+def _print_relay_findings_result(result: dict) -> None:
+    """Render relay counts and irreversible relay IDs only."""
+    parts = [
+        f"eligible={result['eligible']}",
+        f"known={result['known']}",
+        f"created={result['created']}",
+        f"limit={result['limit']}",
+    ]
+    if "skipped" in result:
+        parts.insert(2, f"skipped={result['skipped']}")
+    if "pending" in result:
+        parts.append(f"pending={result['pending']}")
+    if "reported" in result:
+        parts.append(f"reported={result['reported']}")
+    print("grokbot relay-findings: " + " ".join(parts))
+    for relay_id in result.get("relays", []):
+        print(f"relay {relay_id}")
+
+
 def _dispatch_grokbot_convert_findings(args) -> int:
     """Convert live records into a generic manifest without printing finding text."""
     from .. import grokbot_findings
@@ -1308,3 +1362,9 @@ def _print_grokbot_result(result: dict) -> None:
             print(f"job {job['job_id']} state={job['state']}")
         return
     print(f"job {result['job_id']} state={result['state']}")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    from . import main as cli_main
+
+    raise SystemExit(cli_main(["run", "cloud", *sys.argv[1:]]))
