@@ -16,7 +16,15 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from . import grokbot_backup, grokbot_cerebro, grokbot_fleet, grokbot_mcp, grokbot_obsidian, grokbot_ops
+from . import (
+    grokbot_backup,
+    grokbot_cerebro,
+    grokbot_fleet,
+    grokbot_mcp,
+    grokbot_obsidian,
+    grokbot_ops,
+    grokbot_wazuh,
+)
 
 PACK_SCHEMA = "brigade.grokbot.connector-pack.v1"
 INSTANCE_SCHEMA = "brigade.grokbot.connector-instance.v1"
@@ -44,8 +52,9 @@ CONNECTOR_DEFAULT_BINDS = {
     "cerebro-memory": "127.0.0.1:8770",
     "fleet-steward": "127.0.0.1:8771",
     "obsidian-operator": "127.0.0.1:8773",
+    "wazuh-triage": "127.0.0.1:8774",
 }
-STEWARD_PACK_IDS = frozenset({"backup-steward", "fleet-steward"})
+STEWARD_PACK_IDS = frozenset({"backup-steward", "fleet-steward", "wazuh-triage"})
 OBSIDIAN_PACK_ID = "obsidian-operator"
 FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
     {
@@ -103,6 +112,8 @@ def _connector_tools(pack_id: str) -> frozenset[str]:
         return grokbot_fleet.TOOLS
     if pack_id == OBSIDIAN_PACK_ID:
         return grokbot_obsidian.TOOLS
+    if pack_id == "wazuh-triage":
+        return grokbot_wazuh.TOOLS
     return frozenset()
 
 
@@ -276,6 +287,8 @@ def doctor(target: Path, pack_id: str) -> list[dict[str, str]]:
         return grokbot_backup.doctor(target)
     if pack["id"] == OBSIDIAN_PACK_ID:
         return grokbot_obsidian.doctor(target)
+    if pack["id"] == "wazuh-triage":
+        return grokbot_wazuh.doctor(target)
     return grokbot_cerebro.doctor(target)
 
 
@@ -289,6 +302,8 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
         return grokbot_backup.canary(target)
     if pack["id"] == OBSIDIAN_PACK_ID:
         return grokbot_obsidian.canary(target)
+    if pack["id"] == "wazuh-triage":
+        return grokbot_wazuh.canary(target)
     return grokbot_cerebro.canary(target)
 
 
@@ -304,6 +319,8 @@ def render_install_service(target: Path, pack_id: str) -> str:
             return grokbot_backup.render_unit(target, python=sys.executable)
         if pack["id"] == OBSIDIAN_PACK_ID:
             return grokbot_obsidian.render_unit(target, python=sys.executable)
+        if pack["id"] == "wazuh-triage":
+            return grokbot_wazuh.render_unit(target, python=sys.executable)
         return grokbot_cerebro.render_unit(target, python=sys.executable)
     except PackError:
         raise
@@ -317,6 +334,7 @@ def render_install_service(target: Path, pack_id: str) -> str:
                 grokbot_cerebro.CerebroError,
                 grokbot_fleet.FleetError,
                 grokbot_obsidian.ObsidianError,
+                grokbot_wazuh.WazuhError,
             ),
         ):
             raise PackError("unsafe-path") from exc
@@ -341,6 +359,8 @@ def apply_install_service(
             path = grokbot_backup.write_unit(target, out_dir, force=force)
         elif pack["id"] == OBSIDIAN_PACK_ID:
             path = grokbot_obsidian.write_unit(target, out_dir, force=force)
+        elif pack["id"] == "wazuh-triage":
+            path = grokbot_wazuh.write_unit(target, out_dir, force=force)
         else:
             path = grokbot_cerebro.write_unit(target, out_dir, force=force)
     except PackError:
@@ -355,6 +375,7 @@ def apply_install_service(
                 grokbot_cerebro.CerebroError,
                 grokbot_fleet.FleetError,
                 grokbot_obsidian.ObsidianError,
+                grokbot_wazuh.WazuhError,
             ),
         ):
             raise PackError("unsafe-path") from exc
@@ -966,13 +987,20 @@ def _steward_path_references(
                 str(action_state_path),
                 str(approval_dir),
             )
+        if pack_id == "wazuh-triage":
+            return grokbot_wazuh.validate_disjoint_state_paths(
+                str(runtime_path),
+                str(ledger_path),
+                str(action_state_path),
+                str(approval_dir),
+            )
         return grokbot_fleet.validate_disjoint_state_paths(
             str(runtime_path),
             str(ledger_path),
             str(action_state_path),
             str(approval_dir),
         )
-    except (grokbot_backup.BackupError, grokbot_fleet.FleetError) as exc:
+    except (grokbot_backup.BackupError, grokbot_fleet.FleetError, grokbot_wazuh.WazuhError) as exc:
         raise PackError("unsafe-path") from exc
 
 

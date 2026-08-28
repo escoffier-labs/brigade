@@ -267,7 +267,8 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     serve_identity = p_grokbot_serve.add_mutually_exclusive_group(required=True)
     serve_identity.add_argument("--instance", choices=("operator", "repository-scout", "implementation-worker"))
     serve_identity.add_argument(
-        "--pack", choices=("cerebro-memory", "fleet-steward", "backup-steward", "obsidian-operator")
+        "--pack",
+        choices=("cerebro-memory", "fleet-steward", "backup-steward", "obsidian-operator", "wazuh-triage"),
     )
     p_grokbot_serve.add_argument(
         "--bind", default=None, help="Listener host:port. Defaults to the role or pack loopback."
@@ -365,25 +366,25 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--runtime-path",
         type=Path,
         default=None,
-        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, and obsidian-operator.",
+        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, and wazuh-triage.",
     )
     p_pack_setup.add_argument(
         "--ledger-path",
         type=Path,
         default=None,
-        help="Absolute steward ledger path. Required for fleet-steward and backup-steward.",
+        help="Absolute steward ledger path. Required for fleet-steward, backup-steward, and wazuh-triage.",
     )
     p_pack_setup.add_argument(
         "--action-state-path",
         type=Path,
         default=None,
-        help="Absolute action-state directory. Required for fleet-steward, backup-steward, and obsidian-operator.",
+        help="Absolute action-state directory. Required for fleet-steward, backup-steward, obsidian-operator, and wazuh-triage.",
     )
     p_pack_setup.add_argument(
         "--approval-dir",
         type=Path,
         default=None,
-        help="Absolute approval directory. Required for fleet-steward, backup-steward, and obsidian-operator.",
+        help="Absolute approval directory. Required for fleet-steward, backup-steward, obsidian-operator, and wazuh-triage.",
     )
     p_pack_setup.add_argument(
         "--staging-dir",
@@ -906,6 +907,14 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     listener_kwargs["upstream_key_env"] = args.upstream_key_env
                     obsidian_config, obsidian_tools = build_obsidian_listener(target, **listener_kwargs)
                     run_obsidian_listener(obsidian_config, obsidian_tools)
+                elif args.pack == "wazuh-triage":
+                    from ..grokbot_wazuh.lifecycle import (
+                        build_listener_from_target as build_wazuh_listener,
+                        run_listener as run_wazuh_listener,
+                    )
+
+                    wazuh_config, wazuh_tools = build_wazuh_listener(target, **listener_kwargs)
+                    run_wazuh_listener(wazuh_config, wazuh_tools)
                 else:
                     cerebro_config, cerebro_tools = grokbot_cerebro.build_listener_from_target(
                         target, **listener_kwargs
@@ -929,7 +938,14 @@ def _dispatch_grokbot(args, target: Path) -> int:
             print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
             return 2
         except Exception as exc:
-            from .. import grokbot_backup, grokbot_cerebro, grokbot_fleet, grokbot_obsidian, grokbot_packs
+            from .. import (
+                grokbot_backup,
+                grokbot_cerebro,
+                grokbot_fleet,
+                grokbot_obsidian,
+                grokbot_packs,
+                grokbot_wazuh,
+            )
 
             if isinstance(
                 exc,
@@ -939,6 +955,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     grokbot_fleet.FleetError,
                     grokbot_obsidian.ObsidianError,
                     grokbot_packs.PackError,
+                    grokbot_wazuh.WazuhError,
                 ),
             ):
                 print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
