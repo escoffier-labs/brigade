@@ -102,6 +102,15 @@ class FakeExecutor:
     def create_excalidraw(self, action, _context=None):
         return self._ack(action)
 
+    def patch_canvas(self, action):
+        return self._ack(action)
+
+    def patch_base(self, action):
+        return self._ack(action)
+
+    def update_excalidraw(self, action, _context=None):
+        return self._ack(action)
+
 
 class CreateOnlyExecutor:
     def create_note(self, action):

@@ -17,7 +17,7 @@ from .contracts import (
     REQUEST_ID_RE,
     REVISION_TOKEN_RE,
     ObsidianError,
-    parse_phase1_action,
+    parse_operator_action,
     require_opaque_id,
     require_request_id,
 )
@@ -98,7 +98,7 @@ def _target_config_path(action: Mapping[str, Any], target_config: Mapping[str, s
         return action["path"], "absent"
     if kind == "trash_note":
         return action["path"], CURRENT_REVISION
-    if kind == "patch_note":
+    if kind in {"patch_note", "patch_canvas", "patch_base", "update_excalidraw"}:
         return action["path"], action["ifMatch"]
     if kind in {"copy_note", "move_note"}:
         return action["from"], CURRENT_REVISION
@@ -118,13 +118,37 @@ def _target_config_path(action: Mapping[str, Any], target_config: Mapping[str, s
     raise AssertionError("unreachable")
 
 
+def _embed_binding(action: Mapping[str, Any]) -> dict[str, Any]:
+    if action["kind"] == "update_excalidraw" and action.get("embed_path") is not None:
+        return {
+            "embed_path": normalize_vault_path(action["embed_path"]),
+            "embed_version": CURRENT_REVISION,
+        }
+    return {}
+
+
 def derive_binding(action: Mapping[str, Any], target_config: Mapping[str, str] | None) -> dict[str, Any]:
     target_path, target_version = _target_config_path(action, target_config)
-    return {
+    binding = {
         "target_path": normalize_vault_path(target_path),
         "target_version": target_version,
         "blast_radius": get_catalog_row(action["kind"])["blast_radius"],
     }
+    binding.update(_embed_binding(action))
+    return binding
+
+
+def _assert_embed_binding(action: Mapping[str, Any], record: Mapping[str, Any]) -> None:
+    expected = _embed_binding(action)
+    if expected:
+        if record.get("embed_path") != expected["embed_path"]:
+            _state_invalid()
+        version = record.get("embed_version")
+        if not isinstance(version, str) or not REVISION_TOKEN_RE.fullmatch(version):
+            _state_invalid()
+        return
+    if "embed_path" in record or "embed_version" in record:
+        _state_invalid()
 
 
 def _assert_binding(
@@ -133,6 +157,7 @@ def _assert_binding(
     expected = derive_binding(action, target_config)
     if record["target_path"] != expected["target_path"] or record["blast_radius"] != expected["blast_radius"]:
         _state_invalid()
+    _assert_embed_binding(action, record)
     if expected["target_version"] is CURRENT_REVISION:
         if not isinstance(record["target_version"], str) or not REVISION_TOKEN_RE.fullmatch(record["target_version"]):
             _state_invalid()
@@ -171,10 +196,10 @@ def parse_proposal_record(
         "created_at",
         "expires_at",
     }
-    allowed = required | {"template_digest"}
+    allowed = required | {"template_digest", "embed_path", "embed_version"}
     if raw.get("version") != 1 or not required <= set(raw) <= allowed:
         _state_invalid()
-    action = parse_phase1_action(raw.get("action"))
+    action = parse_operator_action(raw.get("action"))
     if raw.get("kind") != action["kind"]:
         _state_invalid()
     digest = raw.get("template_digest")
@@ -203,6 +228,12 @@ def parse_proposal_record(
         "created_at": raw.get("created_at"),
         "expires_at": raw.get("expires_at"),
     }
+    if "embed_path" in raw or "embed_version" in raw:
+        embed_path = raw.get("embed_path")
+        if not isinstance(embed_path, str) or normalize_vault_path(embed_path) != embed_path:
+            _state_invalid()
+        parsed["embed_path"] = embed_path
+        parsed["embed_version"] = raw.get("embed_version")
     if not isinstance(parsed["blast_radius"], str) or not parsed["blast_radius"]:
         _state_invalid()
     if parsed["target_version"] != "absent" and (
@@ -242,10 +273,10 @@ def parse_approval_record(
         "approved_at",
         "approval_receipt",
     }
-    allowed = required | {"template_digest"}
+    allowed = required | {"template_digest", "embed_path", "embed_version"}
     if raw.get("version") != 1 or not required <= set(raw) <= allowed:
         _state_invalid()
-    action = parse_phase1_action(raw.get("action"))
+    action = parse_operator_action(raw.get("action"))
     if raw.get("kind") != action["kind"]:
         _state_invalid()
     digest = raw.get("template_digest")
@@ -275,6 +306,12 @@ def parse_approval_record(
         "approved_at": raw.get("approved_at"),
         "approval_receipt": require_opaque_id(raw.get("approval_receipt")),
     }
+    if "embed_path" in raw or "embed_version" in raw:
+        embed_path = raw.get("embed_path")
+        if not isinstance(embed_path, str) or normalize_vault_path(embed_path) != embed_path:
+            _state_invalid()
+        parsed["embed_path"] = embed_path
+        parsed["embed_version"] = raw.get("embed_version")
     if not isinstance(parsed["blast_radius"], str) or not parsed["blast_radius"]:
         _state_invalid()
     if parsed["target_version"] != "absent" and (

@@ -128,9 +128,17 @@ PR3a landed Cerebro Memory as closed pack `cerebro-memory` on
 `obsidian-operator` on `127.0.0.1:8773` with public route `/mcp` and tools
 `obsidian_capabilities`, `obsidian_search`, `obsidian_read`,
 `obsidian_action_status`, `obsidian_propose_action`, and
-`obsidian_execute_action`. Pack lifecycle stays preview-first and does not start,
-stop, reload, or enable services. Old sidecar coexistence stays in place;
-PR4 owns cutover.
+`obsidian_execute_action`. PR3e adds the checked-in Local REST v2 adapter and
+operator-only installer for atomic `patch_canvas`, `patch_base`, and
+`update_excalidraw` behind the same six public tools. The adapter bundles
+pinned Zod 3.25.76 at build time so `addMcpTool` receives a real
+`Record<string, z.ZodTypeAny>` shape for `{path, expected_sha256,
+replacement_utf8}` and can register against the published host, which wraps
+that shape with `z.object(shape)`. Capabilities still stay Phase 1 until a
+matching live fingerprint is observed. Missing or drifted live fingerprints
+also stay Phase 1.
+Pack lifecycle stays preview-first and does not start, stop, reload, or enable
+services. Old sidecar coexistence stays in place; PR4 owns cutover.
 
 ### PR 4: cutover and retirement
 

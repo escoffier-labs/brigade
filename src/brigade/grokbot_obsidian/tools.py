@@ -13,6 +13,7 @@ from .catalog import get_catalog_row, hash_action_content, hash_template_definit
 from .content_policy import assert_safe_markdown
 from .contracts import (
     ERROR_MESSAGES,
+    PHASE2_ONLY_ACTION_IDS,
     PUBLIC_RESULT_BYTES,
     READ_TEXT_BYTES,
     TOOLS,
@@ -23,13 +24,18 @@ from .contracts import (
     parse_capabilities_input,
     parse_capabilities_result,
     parse_execute_input,
-    parse_phase1_action,
+    parse_operator_action,
     parse_propose_input,
     parse_read_input,
     parse_read_result,
     parse_search_input,
     parse_search_result,
     public_result_bytes,
+)
+from .native_client import (
+    MAX_REPLACEMENT_BYTES,
+    assert_outbound_tools_call_fits,
+    serialize_structured_replacement,
 )
 from .path_policy import assert_readable, assert_static_writable, policy_for_tags
 from .store import ObsidianActionStore, ObsidianActionStoreError
@@ -145,7 +151,7 @@ def _excalidraw_scene(name: str, suffix: str) -> str:
 
 
 def _assert_safe_action_content(action: Mapping[str, Any]) -> None:
-    if action["kind"] == "create_excalidraw":
+    if action["kind"] in {"create_excalidraw", "update_excalidraw"}:
         rest = {key: value for key, value in action.items() if key != "elements"}
         assert_safe_markdown(rest)
         assert_safe_excalidraw_scene(action["elements"])
@@ -188,7 +194,47 @@ def _assert_propose_paths(
         if action.get("embed_path") is not None:
             assert_static_writable("patch_note", action["embed_path"], policy)
         return
+    if kind in {"patch_canvas", "patch_base"}:
+        assert_static_writable(kind, action["path"], policy)
+        if native is not None:
+            _authorize_existing_write(kind, action["path"], policy, native)
+        _assert_phase2_outbound(action)
+        return
+    if kind == "update_excalidraw":
+        assert_static_writable(kind, action["path"], policy)
+        if action.get("embed_path") is not None:
+            assert_static_writable("patch_note", action["embed_path"], policy)
+        if native is not None:
+            _authorize_existing_write(kind, action["path"], policy, native)
+        _assert_phase2_outbound(action)
+        return
     _protocol()
+
+
+def _assert_phase2_outbound(action: Mapping[str, Any]) -> None:
+    kind = action["kind"]
+    if kind == "patch_canvas":
+        name = "grokbot_replace_canvas_v1"
+        replacement = serialize_structured_replacement(action["canvas"])
+        path = action["path"]
+    elif kind == "patch_base":
+        name = "grokbot_replace_base_v1"
+        replacement = serialize_structured_replacement(action["yaml"])
+        path = action["path"]
+    elif kind == "update_excalidraw":
+        name = "grokbot_replace_excalidraw_v1"
+        replacement = "A" * MAX_REPLACEMENT_BYTES
+        path = action["path"]
+    else:
+        return
+    assert_outbound_tools_call_fits(
+        name,
+        {
+            "expected_sha256": "0" * 64,
+            "path": path,
+            "replacement_utf8": replacement,
+        },
+    )
 
 
 def _canonical_digest(request_id: str, action: Mapping[str, Any], digest: str | None) -> str:
@@ -200,8 +246,8 @@ def _canonical_digest(request_id: str, action: Mapping[str, Any], digest: str | 
 
 def _same_private_action(proposal: Mapping[str, Any], approval: Mapping[str, Any]) -> bool:
     try:
-        left = parse_phase1_action(proposal["action"])
-        right = parse_phase1_action(approval["action"])
+        left = parse_operator_action(proposal["action"])
+        right = parse_operator_action(approval["action"])
     except ObsidianError:
         return False
     if left["kind"] != proposal["kind"] or right["kind"] != approval["kind"]:
@@ -229,6 +275,8 @@ def _bound(proposal: Mapping[str, Any], approval: Mapping[str, Any]) -> bool:
     return (
         all(proposal[key] == approval[key] for key in keys)
         and proposal.get("template_digest") == approval.get("template_digest")
+        and proposal.get("embed_path") == approval.get("embed_path")
+        and proposal.get("embed_version") == approval.get("embed_version")
         and _same_private_action(proposal, approval)
     )
 
@@ -409,8 +457,32 @@ class ObsidianTools:
         finally:
             self._reads.release()
 
+    def _phase2_allowed(self, kind: str) -> bool:
+        if kind not in PHASE2_ONLY_ACTION_IDS:
+            return True
+        try:
+            reconciled = (
+                self._reconcile()
+                if self._reconcile is not None
+                else reconcile_capabilities(
+                    {"plugin_inventory": [], "command_fingerprint": "sha256:" + ("0" * 64)},
+                    self.native.command_list,
+                )
+            )
+        except Exception:
+            return False
+        if not isinstance(reconciled, Mapping) or reconciled.get("status") != "ok":
+            return False
+        capabilities = reconciled.get("capabilities")
+        if not isinstance(capabilities, Mapping):
+            return False
+        supported = capabilities.get("supported_action_ids")
+        return isinstance(supported, list) and kind in supported
+
     def propose_action(self, raw: object) -> dict[str, Any]:
         parsed = parse_propose_input(raw)
+        if not self._phase2_allowed(parsed["action"]["kind"]):
+            raise ObsidianError("denied", ERROR_MESSAGES["denied"])
         _assert_propose_paths(parsed["action"], self.policy, self.target_config, self.native)
         digest = (
             hash_template_definition(_resolve_template(self.templates, parsed["action"]["template_id"]))
@@ -454,6 +526,9 @@ class ObsidianTools:
             }
             if digest is not None:
                 record["template_digest"] = digest
+            if "embed_path" in binding:
+                record["embed_path"] = binding["embed_path"]
+                record["embed_version"] = binding["embed_version"]
             self.store.create_proposal(record)
             self.store.write_receipt(
                 {
@@ -532,6 +607,13 @@ class ObsidianTools:
             path = _require_target(self.target_config)["flashcardNote"]
             self._require_etag(path, action["ifMatch"])
             return {"target_path": path, "target_version": action["ifMatch"]}
+        if kind in {"patch_canvas", "patch_base", "update_excalidraw"}:
+            self._require_etag(action["path"], action["ifMatch"])
+            binding = {"target_path": action["path"], "target_version": action["ifMatch"]}
+            if kind == "update_excalidraw" and action.get("embed_path") is not None:
+                binding["embed_path"] = action["embed_path"]
+                binding["embed_version"] = self._require_existing(action["embed_path"])
+            return binding
         if kind == "create_excalidraw":
             configured = _require_target(self.target_config)
             scene = _excalidraw_scene(action["name"], configured["excalidrawSuffix"])
@@ -599,6 +681,11 @@ class ObsidianTools:
         if kind == "create_excalidraw":
             context = {} if action.get("embed_path") is None else {"embedIfMatch": proposal["target_version"]}
             return self.executor.create_excalidraw(action, context)
+        if kind == "update_excalidraw":
+            context = {}
+            if action.get("embed_path") is not None:
+                context["embedIfMatch"] = proposal["embed_version"]
+            return self.executor.update_excalidraw(action, context)
         names = {
             "create_note",
             "patch_note",
@@ -608,6 +695,8 @@ class ObsidianTools:
             "append_flashcard",
             "create_canvas",
             "create_base",
+            "patch_canvas",
+            "patch_base",
         }
         if kind not in names:
             _protocol()
@@ -618,8 +707,12 @@ class ObsidianTools:
         if kind in {"create_note", "create_canvas", "create_base"}:
             self._require_absent(action["path"])
             return
-        if kind == "patch_note":
+        if kind in {"patch_note", "patch_canvas", "patch_base", "update_excalidraw"}:
             self._require_etag(action["path"], action["ifMatch"])
+            if kind == "update_excalidraw" and action.get("embed_path") is not None:
+                self._require_etag(action["embed_path"], proposal["embed_version"])
+            if kind in {"patch_canvas", "patch_base", "update_excalidraw"}:
+                _assert_phase2_outbound(action)
             return
         if kind in {"copy_note", "move_note"}:
             self._require_etag(action["from"], proposal["target_version"])
@@ -663,9 +756,11 @@ class ObsidianTools:
         if now >= _approval_expiry(approval["approved_at"], proposal["expires_at"]):
             self._consume(approval)
             self._deny_execute(action_id, "expired")
-        action = parse_phase1_action(proposal["action"])
+        action = parse_operator_action(proposal["action"])
         if action["kind"] != proposal["kind"]:
             _protocol()
+        if not self._phase2_allowed(action["kind"]):
+            self._deny_execute(action_id, "denied")
         try:
             _assert_propose_paths(action, self.policy, self.target_config, self.native)
             _assert_safe_action_content(action)

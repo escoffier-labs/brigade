@@ -113,12 +113,21 @@ def test_capabilities_projection_is_generic_and_phase1_only():
         }
     )
     assert parsed["phase"] == "phase1"
+    phase2 = parse_capabilities_result(
+        {
+            "phase": "phase1",
+            "search_backend": "native_bounded_search",
+            "plugins": [{"id": "core", "version": "1.0.0", "supported_action_ids": ["create_note"]}],
+            "supported_action_ids": ["create_note", "patch_canvas"],
+        }
+    )
+    assert "patch_canvas" in phase2["supported_action_ids"]
     with pytest.raises(ObsidianError):
         parse_capabilities_result(
             {
                 "phase": "phase1",
                 "search_backend": "native_bounded_search",
-                "plugins": [{"id": "core", "version": "1.0.0", "supported_action_ids": ["patch_canvas"]}],
-                "supported_action_ids": ["patch_canvas"],
+                "plugins": [{"id": "core", "version": "1.0.0", "supported_action_ids": ["command_execute"]}],
+                "supported_action_ids": ["command_execute"],
             }
         )

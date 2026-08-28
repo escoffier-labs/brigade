@@ -7,6 +7,7 @@ import re
 from typing import Any, Callable, Mapping, NoReturn
 
 from .adapters import NATIVE_MCP_TOOLS
+from .operator_adapter import OPERATOR_ADAPTER_TOOLS
 from .contracts import ERROR_MESSAGES, ObsidianError
 from .runtime_config import required_upstream_url
 from .tls import CONNECT_TIMEOUT_SECONDS, MAX_RESPONSE_BYTES, pinned_fetch
@@ -15,8 +16,15 @@ CLIENT_NAME = "grokbot-obsidian-operator"
 CLIENT_VERSION = "0.1.0"
 PROTOCOL_VERSION = "2024-11-05"
 MAX_RPC_ID = 1_000_000
-MAX_REQUEST_BYTES = 16_384
+MAX_REPLACEMENT_BYTES = 262_144
+MAX_JSONRPC_ENVELOPE_BYTES = 16_384
+MAX_OUTBOUND_REQUEST_BYTES = MAX_REPLACEMENT_BYTES + MAX_JSONRPC_ENVELOPE_BYTES
+MAX_OUTBOUND_HARD_CEILING_BYTES = 524_288
+MAX_REQUEST_BYTES = MAX_OUTBOUND_REQUEST_BYTES
 SESSION_ID = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
+
+if not MAX_OUTBOUND_REQUEST_BYTES < MAX_OUTBOUND_HARD_CEILING_BYTES:
+    raise AssertionError("outbound cap must stay below the hard ceiling")
 
 
 def _unavailable() -> NoReturn:
@@ -25,6 +33,32 @@ def _unavailable() -> NoReturn:
 
 def _protocol() -> NoReturn:
     raise ObsidianError("protocol_error", ERROR_MESSAGES["protocol_error"])
+
+
+def encode_jsonrpc(payload: Mapping[str, Any]) -> bytes:
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+def tools_call_payload(name: str, arguments: Mapping[str, Any], request_id: int = MAX_RPC_ID) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": dict(arguments)},
+    }
+
+
+def outbound_tools_call_size(name: str, arguments: Mapping[str, Any], request_id: int = MAX_RPC_ID) -> int:
+    return len(encode_jsonrpc(tools_call_payload(name, arguments, request_id)))
+
+
+def assert_outbound_tools_call_fits(name: str, arguments: Mapping[str, Any]) -> None:
+    if outbound_tools_call_size(name, arguments) > MAX_OUTBOUND_REQUEST_BYTES:
+        raise ObsidianError("invalid_request", ERROR_MESSAGES["invalid_request"])
+
+
+def serialize_structured_replacement(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 def _header(headers: Mapping[str, Any], name: str) -> str:
@@ -111,8 +145,8 @@ class StreamableNativeMcpClient:
     def _post(self, payload: Mapping[str, Any]) -> object:
         if self._closed:
             _unavailable()
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        if len(body) > MAX_REQUEST_BYTES:
+        body = encode_jsonrpc(payload)
+        if len(body) > MAX_OUTBOUND_REQUEST_BYTES:
             _protocol()
         try:
             result = self._fetch(
@@ -183,10 +217,14 @@ class StreamableNativeMcpClient:
         self._ready = True
 
     def call_tool(self, name: str, arguments: Mapping[str, Any] | None = None) -> object:
-        if name not in NATIVE_MCP_TOOLS:
+        if name not in NATIVE_MCP_TOOLS and name not in OPERATOR_ADAPTER_TOOLS:
             _protocol()
         self._ensure_session()
         return self._rpc("tools/call", {"name": name, "arguments": dict(arguments or {})})
+
+    def list_tools(self) -> object:
+        self._ensure_session()
+        return self._rpc("tools/list", {})
 
     def close(self) -> None:
         self._closed = True

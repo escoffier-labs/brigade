@@ -11,15 +11,18 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, NoReturn, Protocol
 
 from .content_policy import contains_executable_markdown
+from .catalog import HEX64
 from .contracts import (
     ERROR_MESSAGES,
     PUBLIC_RESULT_BYTES,
     REVISION_TOKEN_RE,
     ObsidianError,
     parse_json_value,
+    parse_operator_action,
     parse_phase1_action,
     require_utf8,
 )
+from .operator_adapter import OPERATOR_ADAPTER_TOOLS, PRIVATE_TOOL_RESULT_KEYS
 from .path_policy import assert_readable, assert_static_writable, assert_writable, normalize_vault_path, policy_for_tags
 from .utf8 import is_well_formed, truncate_utf8, utf8_byte_length
 
@@ -204,7 +207,7 @@ class NativeMcpPort:
             closer()
 
     def _call(self, name: str, arguments: Mapping[str, Any] | None = None) -> object:
-        if name not in NATIVE_MCP_TOOLS:
+        if name not in NATIVE_MCP_TOOLS and name not in OPERATOR_ADAPTER_TOOLS:
             _protocol()
         return invoke_native(lambda: self.client.call_tool(name, arguments or {}))
 
@@ -482,6 +485,46 @@ class NativeMcpPort:
             parsed.append({"id": require_utf8(item.get("id"), 1, 256), "name": require_utf8(item.get("name"), 1, 256)})
         return parsed
 
+    def adapter_inventory(self) -> list[dict[str, Any]]:
+        lister = getattr(self.client, "list_tools", None)
+        if not callable(lister):
+            _unavailable()
+        raw = invoke_native(lister)
+        tools = raw.get("tools") if isinstance(raw, dict) else raw
+        if not isinstance(tools, list):
+            _unavailable()
+        return [item for item in tools if isinstance(item, dict) and item.get("name") in OPERATOR_ADAPTER_TOOLS]
+
+    def _replace_structured(self, name: str, path: str, expected_sha256: str, replacement_utf8: str) -> dict[str, str]:
+        if name not in OPERATOR_ADAPTER_TOOLS or not HEX64.fullmatch(expected_sha256):
+            _protocol()
+        raw = self._call(
+            name,
+            {"path": path, "expected_sha256": expected_sha256, "replacement_utf8": replacement_utf8},
+        )
+        try:
+            payload = json.loads(_tool_text(raw))
+        except json.JSONDecodeError:
+            _protocol()
+        if not isinstance(payload, dict) or set(payload) != set(PRIVATE_TOOL_RESULT_KEYS):
+            _protocol()
+        previous = payload.get("previous_sha256")
+        resulting = payload.get("resulting_sha256")
+        if not isinstance(previous, str) or not HEX64.fullmatch(previous):
+            _protocol()
+        if not isinstance(resulting, str) or not HEX64.fullmatch(resulting):
+            _protocol()
+        return {"previous_sha256": previous, "resulting_sha256": resulting}
+
+    def replace_canvas(self, path: str, expected_sha256: str, replacement_utf8: str) -> dict[str, str]:
+        return self._replace_structured("grokbot_replace_canvas_v1", path, expected_sha256, replacement_utf8)
+
+    def replace_base(self, path: str, expected_sha256: str, replacement_utf8: str) -> dict[str, str]:
+        return self._replace_structured("grokbot_replace_base_v1", path, expected_sha256, replacement_utf8)
+
+    def replace_excalidraw(self, path: str, expected_sha256: str, replacement_utf8: str) -> dict[str, str]:
+        return self._replace_structured("grokbot_replace_excalidraw_v1", path, expected_sha256, replacement_utf8)
+
 
 def allowlisted_excalidraw_env(source: Mapping[str, str]) -> dict[str, str]:
     env = {key: source[key] for key in ENV_ALLOWLIST if key in source}
@@ -511,6 +554,24 @@ def _require_session_echo(result: object, session_id: str) -> None:
     text = _tool_text(result)
     if f"Session ID: {session_id}" not in text.splitlines():
         _protocol()
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _existing_verified_artifact(raw: bytes, suffix: str) -> None:
+    if suffix == ".excalidraw.md":
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            _invalid()
+        if not text.startswith(NATIVE_ENVELOPE_PREFIX) or not text.endswith(NATIVE_ENVELOPE_SUFFIX):
+            _invalid()
+        inner = text[len(NATIVE_ENVELOPE_PREFIX) : len(text) - len(NATIVE_ENVELOPE_SUFFIX)]
+        _parse_staged_envelope(inner.encode("utf-8"))
+        return
+    _parse_staged_envelope(raw)
 
 
 def _parse_staged_envelope(raw: bytes) -> None:
@@ -661,6 +722,140 @@ class ExcalidrawAdapter:
                 expected = existing
             else:
                 prefix = existing if existing.endswith("\n") or existing == "" else f"{existing}\n"
+                expected = f"{prefix}{link}\n"
+                invoke_native(
+                    lambda: self.native.patch(
+                        embed_path,
+                        {"target": "heading", "heading": list(EMBED_HEADING), "body": expected},
+                        embed_if_match,
+                    )
+                )
+            actual = self.native.read_target(embed_path, {"kind": "heading", "heading": list(EMBED_HEADING)})
+            return {"outcome": "verified" if actual == expected else "unverified"}
+        except Exception:
+            return {"outcome": "unverified"}
+
+    def update_excalidraw(self, action: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, str]:
+        parsed = parse_operator_action(action)
+        if parsed["kind"] != "update_excalidraw":
+            _invalid()
+        try:
+            assert_safe_excalidraw_scene(parsed["elements"])
+        except ObsidianError as exc:
+            if exc.code == "denied":
+                _invalid()
+            raise
+        assert_safe_refs(parsed["elements"])
+        suffix = self.policy["excalidrawSuffix"]
+        vault_path = parsed["path"]
+        assert_static_writable("update_excalidraw", vault_path, self.policy)
+        embed_if_match = None
+        if parsed.get("embed_path") is not None:
+            assert_static_writable("patch_note", parsed["embed_path"], self.policy)
+            match = None if context is None else context.get("embedIfMatch")
+            if not isinstance(match, str) or not match:
+                _invalid()
+            embed_if_match = match
+        _assert_proof(self.read_proof(), suffix)
+        existing = self.native.read(vault_path)
+        if existing is None:
+            _not_found()
+        if existing["etag"] != parsed["ifMatch"]:
+            _conflict()
+        try:
+            _existing_verified_artifact(existing["bytes"], suffix)
+        except ObsidianError:
+            _invalid()
+        expected_sha = _sha256_hex(existing["bytes"])
+        if not self.bin_path.startswith("/") or not self.staging_dir.startswith("/"):
+            _unavailable()
+        session_id = self.random_id()
+        if not SESSION_ID.fullmatch(session_id):
+            _protocol()
+        stamp = self.clock().isoformat().replace("-", "").replace(":", "").replace(".", "")
+        staging_base = f"{self.staging_dir}/excalidraw-{stamp}-{session_id}"
+        spec = {
+            "command": self.bin_path,
+            "args": (),
+            "cwd": self.staging_dir,
+            "shell": False,
+            "timeoutMs": 45_000,
+            "maxOutputBytes": MAX_OUTPUT_BYTES,
+            "env": allowlisted_excalidraw_env(self.env),
+        }
+        client = None
+        try:
+            try:
+                client = self.start_client(spec)
+            except ObsidianError:
+                raise
+            except Exception as exc:
+                raise ObsidianError("unavailable", ERROR_MESSAGES["unavailable"]) from exc
+            calls = (
+                ("start_session", {"sessionId": session_id}),
+                ("create_diagram", {"sessionId": session_id}),
+                ("add_elements", {"sessionId": session_id, "elements": parsed["elements"]}),
+                ("export_diagram", {"path": staging_base, "format": "json", "sessionId": session_id}),
+            )
+            for name, arguments in calls:
+                try:
+                    result = client.call_tool(name, arguments)
+                except ObsidianError:
+                    raise
+                except Exception as exc:
+                    raise ObsidianError("unavailable", ERROR_MESSAGES["unavailable"]) from exc
+                if name in {"start_session", "create_diagram"}:
+                    _require_session_echo(result, session_id)
+                else:
+                    _tool_text(result)
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        try:
+            staged = self.read_file(f"{staging_base}.json")
+        except ObsidianError:
+            raise
+        except Exception as exc:
+            raise ObsidianError("invalid_request", ERROR_MESSAGES["invalid_request"]) from exc
+        _parse_staged_envelope(staged)
+        artifact = _wrap_native_markdown(staged) if suffix == ".excalidraw.md" else staged
+        if len(artifact) > MAX_OUTPUT_BYTES:
+            _invalid()
+        from .native_client import assert_outbound_tools_call_fits
+
+        replacement = artifact.decode("utf-8")
+        assert_outbound_tools_call_fits(
+            "grokbot_replace_excalidraw_v1",
+            {
+                "expected_sha256": expected_sha,
+                "path": vault_path,
+                "replacement_utf8": replacement,
+            },
+        )
+        try:
+            replaced = self.native.replace_excalidraw(vault_path, expected_sha, replacement)
+        except Exception:
+            return {"outcome": "unverified"}
+        got = self.native.read(vault_path)
+        if got is None or _sha256_hex(got["bytes"]) != replaced["resulting_sha256"] or got["bytes"] != artifact:
+            return {"outcome": "unverified"}
+        embed_path = parsed.get("embed_path")
+        if embed_path is None or embed_if_match is None:
+            return {"outcome": "verified"}
+        try:
+            existing_embed = self.native.read_target(embed_path, {"kind": "heading", "heading": list(EMBED_HEADING)})
+            if not isinstance(existing_embed, str):
+                return {"outcome": "unverified"}
+            link = f"![[{vault_path}]]"
+            if link in existing_embed.splitlines():
+                expected = existing_embed
+            else:
+                prefix = (
+                    existing_embed if existing_embed.endswith("\n") or existing_embed == "" else f"{existing_embed}\n"
+                )
                 expected = f"{prefix}{link}\n"
                 invoke_native(
                     lambda: self.native.patch(

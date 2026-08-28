@@ -1,0 +1,9 @@
+{
+  "id": "grokbot-operator-adapter",
+  "name": "Grokbot Operator Adapter",
+  "version": "0.1.0",
+  "minAppVersion": "1.8.0",
+  "description": "Private compare-and-swap tools for the Grokbot Obsidian Operator.",
+  "author": "escoffier-labs",
+  "isDesktopOnly": true
+}

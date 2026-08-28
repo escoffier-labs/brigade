@@ -14,6 +14,11 @@ from .contracts import (
     ObsidianError,
     parse_capabilities_result,
 )
+from .operator_adapter import (
+    ADAPTER_MANIFEST_VERSION,
+    expected_private_tool_fingerprint,
+    hash_private_tool_fingerprint,
+)
 
 CAPABILITIES_FINGERPRINT_VERSION = 1
 
@@ -117,9 +122,46 @@ def project_phase1(plugins: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
+def _adapter_ready(runtime: Mapping[str, Any], adapter_tools: Callable[[], object] | None) -> bool:
+    configured = runtime.get("operator_adapter")
+    if not isinstance(configured, Mapping):
+        return False
+    version = configured.get("manifest_version")
+    expected = configured.get("tool_fingerprint")
+    if version != ADAPTER_MANIFEST_VERSION or not isinstance(expected, str):
+        return False
+    pinned = expected_private_tool_fingerprint()
+    if not hmac.compare_digest(expected.encode("utf-8"), pinned.encode("utf-8")):
+        return False
+    if adapter_tools is None:
+        return False
+    try:
+        live = hash_private_tool_fingerprint(adapter_tools())
+    except Exception:
+        return False
+    return hmac.compare_digest(live.encode("utf-8"), pinned.encode("utf-8"))
+
+
+def _project_with_phase2(plugins: list[dict[str, Any]]) -> dict[str, Any]:
+    projected = project_phase1(plugins)
+    supported = list(projected["supported_action_ids"])
+    for action_id in sorted(PHASE2_ONLY_ACTION_IDS):
+        if action_id not in supported:
+            supported.append(action_id)
+    return parse_capabilities_result(
+        {
+            "phase": "phase1",
+            "search_backend": "native_bounded_search",
+            "plugins": projected["plugins"],
+            "supported_action_ids": supported,
+        }
+    )
+
+
 def reconcile_capabilities(
     runtime: Mapping[str, Any],
     command_list: Callable[[], list[dict[str, str]]],
+    adapter_tools: Callable[[], object] | None = None,
 ) -> dict[str, Any]:
     try:
         commands = command_list()
@@ -144,4 +186,7 @@ def reconcile_capabilities(
             "commands": commands,
         }
     )
-    return {"status": "ok", "capabilities": project_phase1(canonical["plugins"])}
+    capabilities = project_phase1(canonical["plugins"])
+    if _adapter_ready(runtime, adapter_tools):
+        capabilities = _project_with_phase2(canonical["plugins"])
+    return {"status": "ok", "capabilities": capabilities}

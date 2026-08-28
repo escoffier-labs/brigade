@@ -321,7 +321,11 @@ def build_tools_from_config(
         native=native_port,
         policy=policy,
         store=store,
-        reconcile=lambda: reconcile_capabilities(private_runtime, native_port.command_list),
+        reconcile=lambda: reconcile_capabilities(
+            private_runtime,
+            native_port.command_list,
+            adapter_tools=native_port.adapter_inventory,
+        ),
         target_config=target_config,
         templates=private_runtime["templates"]["catalog"],
         executor=executor,
