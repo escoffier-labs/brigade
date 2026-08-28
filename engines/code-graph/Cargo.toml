@@ -19,7 +19,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-ignore = "0.4.25"
+# ignore 0.4.30+ uses let-chains (stable in 1.88); keep below that for MSRV 1.85.
+ignore = ">=0.4.25, <0.4.30"
 tree-sitter = "0.26.9"
 tree-sitter-go = "0.25.0"
 tree-sitter-javascript = "0.25.0"
