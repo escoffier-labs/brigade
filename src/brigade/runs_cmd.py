@@ -3200,14 +3200,7 @@ def redact(
     return 0
 
 
-_TERMINAL_LIFECYCLE_EVENT_TYPES = frozenset(
-    {
-        "run.completed",
-        "run.failed",
-        "run.interrupted",
-        "run.orphaned",
-    }
-)
+_TERMINAL_LIFECYCLE_EVENT_TYPES = _TERMINAL_BRANCH_EVENT_TYPES
 
 
 def _lifecycle_event_record(event: Any) -> dict[str, object]:
