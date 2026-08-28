@@ -4972,11 +4972,11 @@ def test_stamping_takes_writer_lock_before_reading_and_keeps_child_rows(tmp_path
     """Round 5 (F2): stamping snapshots under the writer lock; late child rows survive."""
     import subprocess
     import threading
-    import time as time_mod
 
     from brigade.work_cmd import inbox_lock as inbox_lock_mod
     from brigade.work_cmd import ledger as ledger_mod
     from brigade.work_cmd import scanners as scanners_mod
+    from tests import thread_sync
 
     scanner = _builtin_scanner("handoff-ingest")
     run = _verified_builtin_scanner_run(scanner)
@@ -5001,23 +5001,53 @@ def test_stamping_takes_writer_lock_before_reading_and_keeps_child_rows(tmp_path
         f"os.environ[{inbox_lock_mod.SCANNER_RUN_ENV!r}] = 'race-child'\n"
         "with inbox_lock.inbox_writer_lock(target):\n"
         "    ready.write_text('1')\n"
-        "    for _ in range(750):\n"
-        "        if go.exists():\n"
-        "            break\n"
+        "    deadline = time.time() + 30\n"
+        "    while not go.exists() and time.time() < deadline:\n"
         "        time.sleep(0.02)\n"
-        "imported, _s, _sd, rejected = ledger._append_import_records(\n"
-        "    target=target,\n"
-        "    records=[{'text': 'child race row', 'kind': 'task', 'source': 'manual'}],\n"
-        "    contain_provenance_errors=True,\n"
-        ")\n"
-        "appended.write_text('1' if imported and not rejected else '0')\n"
+        "    imported, _s, _sd, rejected = ledger._append_import_records(\n"
+        "        target=target,\n"
+        "        records=[{'text': 'child race row', 'kind': 'task', 'source': 'manual'}],\n"
+        "        contain_provenance_errors=True,\n"
+        "    )\n"
+        "    appended.write_text('1' if imported and not rejected else '0')\n"
     )
     child = subprocess.Popen([sys.executable, "-c", script])
+
+    def child_row_visible() -> bool:
+        if appended.exists():
+            try:
+                if appended.read_text() == "1":
+                    return True
+            except OSError:
+                pass
+        try:
+            for row in inbox.read_bytes().splitlines():
+                if not row.strip():
+                    continue
+                try:
+                    if json.loads(row).get("text") == "child race row":
+                        return True
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            pass
+        return False
+
     try:
-        deadline = time_mod.monotonic() + 15
-        while not ready.exists():
-            assert time_mod.monotonic() < deadline, "child never took the writer lock"
-            time_mod.sleep(0.02)
+
+        def child_took_writer_lock() -> bool:
+            if ready.exists():
+                return True
+            if child.poll() is not None:
+                pytest.fail(f"child died before taking the writer lock (rc={child.returncode})")
+            return False
+
+        thread_sync.wait_for_predicate(
+            child_took_writer_lock,
+            description="child took the writer lock",
+            hard_timeout=30.0,
+            poll_interval=0.02,
+        )
 
         observed: list[bool] = []
         original_read = scanners_mod._scanner_inbox_bytes
@@ -5046,8 +5076,21 @@ def test_stamping_takes_writer_lock_before_reading_and_keeps_child_rows(tmp_path
 
         worker = threading.Thread(target=stamp)
         worker.start()
-        time_mod.sleep(0.5)
         go.write_text("1")
+
+        def child_stamped_inbox_row() -> bool:
+            if child_row_visible():
+                return True
+            if child.poll() is not None:
+                pytest.fail(f"child died before stamping the inbox row (rc={child.returncode})")
+            return False
+
+        thread_sync.wait_for_predicate(
+            child_stamped_inbox_row,
+            description="child stamped inbox row",
+            hard_timeout=30.0,
+            poll_interval=0.02,
+        )
         child.wait(timeout=30)
         worker.join(timeout=60)
         assert not worker.is_alive(), "stamping never finished"
