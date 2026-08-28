@@ -58,13 +58,15 @@ The routine sequence for a worker is: list, claim, validate role and repository,
 
 ## Connector packs
 
-The three queue roles are also packaged as first-party connector packs. The registry is closed: Brigade does not load user-supplied pack manifests. Pack commands default to preview. `--apply` may write only private local config and an explicitly selected unit file. Pack commands do not start, stop, or reload services, and they never store bearer values.
+The three queue roles and the Cerebro Memory connector are packaged as first-party connector packs. The registry is closed: Brigade does not load user-supplied pack manifests. Pack commands default to preview. `--apply` may write only private local config and an explicitly selected unit file. Pack commands do not start, stop, or reload services, and they never store bearer values. Cerebro setup also stores absolute CLI executable and workdir references. Pack manifests, config previews and results, doctor, canary, errors, receipts, and checked-in docs do not reveal those machine-specific paths. The generated local unit may include the already-validated workdir only as a systemd `ReadWritePaths` entry so `ProtectSystem=strict` can still persist proposals. The CLI executable path, bearer value, and secret material stay out of the unit.
 
 ```bash
 brigade run cloud grokbot pack list
 brigade run cloud grokbot pack show --id operator
 brigade run cloud grokbot pack setup --id operator --bearer-file /run/brigade/grokbot-operator.token
 brigade run cloud grokbot pack setup --id operator --bearer-file /run/brigade/grokbot-operator.token --apply
+brigade run cloud grokbot pack setup --id cerebro-memory --bearer-file /run/brigade/grokbot-cerebro.token --cli-executable /usr/local/bin/cerebro-agents --workdir /var/lib/cerebro-agents
+brigade run cloud grokbot pack setup --id cerebro-memory --bearer-file /run/brigade/grokbot-cerebro.token --cli-executable /usr/local/bin/cerebro-agents --workdir /var/lib/cerebro-agents --apply
 brigade run cloud grokbot pack doctor --id operator
 brigade run cloud grokbot pack install-service --id operator
 brigade run cloud grokbot pack canary --id operator
@@ -72,7 +74,7 @@ brigade run cloud grokbot pack update --id operator
 brigade run cloud grokbot pack remove --id operator
 ```
 
-Default pack binds do not collide: operator `127.0.0.1:8766`, repository-scout `127.0.0.1:8767`, and implementation-worker `127.0.0.1:8768`. Custom `--bind` values that reuse another pack's packaged default or installed port are refused without printing config contents. Apply writes the pack instance store and the legacy role store together; a failed second write restores both to their prior bytes and modes, or to absent on first install, and only after each restored target is verified. A failed restore or verification raises `rollback-failed` without printing config contents. Each pack keeps the same exact tool inventory and credential reference as its legacy role. The existing `--instance` commands remain supported.
+Default pack binds do not collide: operator `127.0.0.1:8766`, repository-scout `127.0.0.1:8767`, implementation-worker `127.0.0.1:8768`, and cerebro-memory `127.0.0.1:8770`. Custom `--bind` values that reuse another pack's packaged default or installed port are refused without printing config contents. Queue-role apply writes the pack instance store and the legacy role store together; a failed second write restores both to their prior bytes and modes, or to absent on first install, and only after each restored target is verified. Connector apply writes only the pack instance store. A failed restore or verification raises `rollback-failed` without printing config contents. Queue-role packs keep the same exact tool inventory and credential reference as their legacy roles. Cerebro exposes `cerebro_search`, `cerebro_show`, `cerebro_propose`, `cerebro_proposal_status`, and `cerebro_health`. The existing `--instance` commands remain supported.
 
 ## Report snapshots
 

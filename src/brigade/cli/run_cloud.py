@@ -157,10 +157,12 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p_grokbot_serve = grokbot_sub.add_parser("serve", help="Run the role-scoped Grok Bot MCP listener.")
     p_grokbot_serve.add_argument("--target", type=Path, default=Path("."))
+    serve_identity = p_grokbot_serve.add_mutually_exclusive_group(required=True)
+    serve_identity.add_argument("--instance", choices=("operator", "repository-scout", "implementation-worker"))
+    serve_identity.add_argument("--pack", choices=("cerebro-memory",))
     p_grokbot_serve.add_argument(
-        "--instance", required=True, choices=("operator", "repository-scout", "implementation-worker")
+        "--bind", default=None, help="Listener host:port. Defaults to the role or pack loopback."
     )
-    p_grokbot_serve.add_argument("--bind", default="127.0.0.1:8766", help="Listener host:port. Defaults to loopback.")
     p_grokbot_serve.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
     p_grokbot_serve.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
     secret_group = p_grokbot_serve.add_mutually_exclusive_group(required=True)
@@ -223,6 +225,18 @@ def register(sub: argparse._SubParsersAction) -> None:
     pack_secret = p_pack_setup.add_mutually_exclusive_group(required=True)
     pack_secret.add_argument("--bearer-file", type=Path, help="Path of a protected bearer file (reference only).")
     pack_secret.add_argument("--bearer-env", help="Name of the environment variable holding the bearer.")
+    p_pack_setup.add_argument(
+        "--cli-executable",
+        type=Path,
+        default=None,
+        help="Absolute Cerebro CLI executable. Required for connector packs.",
+    )
+    p_pack_setup.add_argument(
+        "--workdir",
+        type=Path,
+        default=None,
+        help="Absolute Cerebro work directory. Required for connector packs.",
+    )
     p_pack_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
 
     p_pack_doctor = pack_sub.add_parser("doctor", help="Sanitized pack diagnostics.")
@@ -383,22 +397,42 @@ def _dispatch_grokbot(args, target: Path) -> int:
         from .. import grokbot_mcp
 
         try:
-            config = grokbot_mcp.build_listener_config(
-                target=target,
-                instance=args.instance,
-                bind=args.bind,
-                allowed_hosts=args.allow_host,
-                allowed_origins=args.allow_origin,
-                bearer_file=args.bearer_file,
-                bearer_env=args.bearer_env,
-            )
-            grokbot_mcp.run_listener(config)
+            if getattr(args, "pack", None):
+                from .. import grokbot_cerebro
+
+                cerebro_config, tools = grokbot_cerebro.build_listener_from_target(
+                    target,
+                    bind=args.bind,
+                    allowed_hosts=args.allow_host,
+                    allowed_origins=args.allow_origin,
+                    bearer_file=args.bearer_file,
+                    bearer_env=args.bearer_env,
+                )
+                grokbot_cerebro.run_listener(cerebro_config, tools)
+            else:
+                config = grokbot_mcp.build_listener_config(
+                    target=target,
+                    instance=args.instance,
+                    bind=args.bind or "127.0.0.1:8766",
+                    allowed_hosts=args.allow_host,
+                    allowed_origins=args.allow_origin,
+                    bearer_file=args.bearer_file,
+                    bearer_env=args.bearer_env,
+                )
+                grokbot_mcp.run_listener(config)
         except grokbot_mcp.OptionalDependencyError:
             print("error: Grok Bot listener requires pip install brigade-cli[grokbot]", file=sys.stderr)
             return 2
         except grokbot_mcp.ConfigurationError:
             print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
             return 2
+        except Exception as exc:
+            from .. import grokbot_cerebro, grokbot_packs
+
+            if isinstance(exc, (grokbot_cerebro.CerebroError, grokbot_packs.PackError)):
+                print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
+                return 2
+            raise
         return 0
     try:
         if command == "enqueue":
@@ -622,6 +656,8 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
                 "allowed_origins": args.allow_origin,
                 "bearer_env": args.bearer_env,
                 "bearer_file": args.bearer_file,
+                "cli_executable": getattr(args, "cli_executable", None),
+                "workdir": getattr(args, "workdir", None),
             }
             result = (
                 grokbot_packs.apply_setup(target, args.pack_id, **setup_kwargs)

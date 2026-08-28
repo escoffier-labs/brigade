@@ -11,7 +11,15 @@ import pytest
 from brigade import cli, grokbot_mcp, grokbot_ops, grokbot_packs
 
 SECRET = "not-a-real-token"
-PACK_IDS = ("implementation-worker", "operator", "repository-scout")
+QUEUE_PACK_IDS = ("implementation-worker", "operator", "repository-scout")
+PACK_IDS = ("cerebro-memory", "implementation-worker", "operator", "repository-scout")
+CEREBRO_TOOLS = (
+    "cerebro_health",
+    "cerebro_proposal_status",
+    "cerebro_propose",
+    "cerebro_search",
+    "cerebro_show",
+)
 
 
 def _reject(reason: str):
@@ -56,10 +64,17 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
     for pack in packs:
         assert set(pack) == grokbot_packs.PACK_KEYS
         assert pack["schema"] == grokbot_packs.PACK_SCHEMA
-        assert pack["kind"] == "queue-role"
         shown = grokbot_packs.show_pack(pack["id"])
         assert shown == pack
-        assert set(shown["tools"]) == grokbot_mcp.tools_for_instance(pack["instance"])
+        if pack["id"] in QUEUE_PACK_IDS:
+            assert pack["kind"] == "queue-role"
+            assert set(shown["tools"]) == grokbot_mcp.tools_for_instance(pack["instance"])
+        else:
+            assert pack["kind"] == "connector"
+            assert pack["id"] == "cerebro-memory"
+            assert shown["tools"] == list(CEREBRO_TOOLS)
+            assert shown["default_bind"] == "127.0.0.1:8770"
+            assert shown["public_route"] == ""
 
 
 def test_registry_ignores_user_supplied_pack_files(tmp_path: Path):
@@ -130,8 +145,9 @@ def test_registry_rejects_unexpected_pack_keys():
 
 def test_first_party_queue_packs_keep_isolated_ports_tools_and_credentials():
     packs = {pack["id"]: pack for pack in grokbot_packs.list_packs()}
-    ports = {grokbot_mcp.parse_bind(pack["default_bind"])[1] for pack in packs.values()}
-    assert ports == {8766, 8767, 8768}
+    queue_ports = {grokbot_mcp.parse_bind(packs[pack_id]["default_bind"])[1] for pack_id in QUEUE_PACK_IDS}
+    assert queue_ports == {8766, 8767, 8768}
+    assert grokbot_mcp.parse_bind(packs["cerebro-memory"]["default_bind"])[1] == 8770
     assert packs["operator"]["tools"] == _queue_tools("operator")
     assert packs["repository-scout"]["tools"] == _queue_tools("repository-scout")
     assert packs["implementation-worker"]["tools"] == _queue_tools("implementation-worker")
@@ -599,3 +615,181 @@ def test_legacy_lifecycle_stays_compatible_with_pack_config(tmp_path: Path, monk
         cli.main(["run", "cloud", "grokbot", "doctor", "--target", str(tmp_path), "--instance", "repository-scout"])
         == 1
     )
+
+
+def _cerebro_paths(tmp_path: Path) -> tuple[Path, Path]:
+    workdir = tmp_path / "cerebro-work"
+    workdir.mkdir()
+    executable = tmp_path / "cerebro-agents"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    return executable, workdir
+
+
+def test_cerebro_pack_is_closed_connector_with_exact_inventory():
+    pack = grokbot_packs.show_pack("cerebro-memory")
+    assert pack["kind"] == "connector"
+    assert pack["instance"] == "cerebro-memory"
+    assert pack["default_bind"] == "127.0.0.1:8770"
+    assert pack["public_route"] == ""
+    assert pack["tools"] == list(CEREBRO_TOOLS)
+    with _reject("unknown-pack"):
+        grokbot_packs.show_pack("cerebro")
+
+
+def test_cerebro_setup_preview_apply_and_queue_role_regression(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    executable, workdir = _cerebro_paths(tmp_path)
+    preview = grokbot_packs.preview_setup(
+        tmp_path,
+        "cerebro-memory",
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    assert preview["apply"] is False
+    assert preview["bind"] == "127.0.0.1:8770"
+    assert str(executable) not in json.dumps(preview)
+    assert str(workdir) not in json.dumps(preview)
+    assert not grokbot_packs.instance_config_path(tmp_path, "cerebro-memory").exists()
+    assert not grokbot_ops.config_path(tmp_path, "cerebro-memory").exists()
+
+    applied = grokbot_packs.apply_setup(
+        tmp_path,
+        "cerebro-memory",
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    pack_path = grokbot_packs.instance_config_path(tmp_path, "cerebro-memory")
+    assert applied["apply"] is True
+    assert pack_path.is_file()
+    assert pack_path.stat().st_mode & 0o777 == 0o600
+    assert not grokbot_ops.config_path(tmp_path, "cerebro-memory").exists()
+    config = json.loads(pack_path.read_text(encoding="utf-8"))
+    assert set(config) == grokbot_packs.CONNECTOR_INSTANCE_KEYS
+    assert SECRET not in json.dumps(config)
+    assert config["cli_executable"] == str(executable)
+    assert config["workdir"] == str(workdir)
+    assert config["bearer"] == {"kind": "env", "name": "TEST_GROKBOT_BEARER"}
+
+    operator = grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
+    assert operator["bind"] == "127.0.0.1:8766"
+    assert grokbot_ops.config_path(tmp_path, "operator").is_file()
+    assert grokbot_packs.instance_config_path(tmp_path, "operator").is_file()
+
+
+def test_cerebro_setup_requires_path_refs_and_rejects_them_on_queue_roles(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    executable, workdir = _cerebro_paths(tmp_path)
+    with _reject("missing-path-reference"):
+        grokbot_packs.apply_setup(tmp_path, "cerebro-memory", bearer_env="TEST_GROKBOT_BEARER")
+    with _reject("unexpected-key"):
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "operator",
+            bearer_env="TEST_GROKBOT_BEARER",
+            cli_executable=executable,
+            workdir=workdir,
+        )
+    with _reject("unsafe-path") as caught:
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "cerebro-memory",
+            bearer_env="TEST_GROKBOT_BEARER",
+            cli_executable="cerebro-agents",
+            workdir=workdir,
+        )
+    assert "cerebro-agents" not in str(caught.value)
+    assert not grokbot_packs.instance_config_path(tmp_path, "cerebro-memory").exists()
+    assert not grokbot_ops.config_path(tmp_path, "operator").exists()
+
+
+def test_cerebro_setup_refuses_queue_default_port_and_keeps_rollback(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    executable, workdir = _cerebro_paths(tmp_path)
+    with _reject("duplicate-port"):
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "cerebro-memory",
+            bind="127.0.0.1:8766",
+            bearer_env="TEST_GROKBOT_BEARER",
+            cli_executable=executable,
+            workdir=workdir,
+        )
+    grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
+    with _reject("duplicate-port"):
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "operator",
+            bind="127.0.0.1:8770",
+            bearer_env="TEST_GROKBOT_BEARER",
+        )
+    assert grokbot_ops.load_config(tmp_path, "operator")["bind"] == "127.0.0.1:8766"
+
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "cerebro-memory",
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    pack_path = grokbot_packs.instance_config_path(tmp_path, "cerebro-memory")
+    prior = pack_path.read_bytes()
+    real_write = grokbot_ops._write_text_nofollow_atomic
+
+    def fail_updated_bind(path: Path, data: str, **kwargs: object) -> None:
+        if Path(path) == pack_path and "8791" in data:
+            raise OSError("disk full")
+        real_write(path, data, **kwargs)
+
+    monkeypatch.setattr(grokbot_ops, "_write_text_nofollow_atomic", fail_updated_bind)
+    with _reject("unsafe-path"):
+        grokbot_packs.apply_setup(
+            tmp_path,
+            "cerebro-memory",
+            bind="127.0.0.1:8791",
+            bearer_env="TEST_GROKBOT_BEARER",
+            cli_executable=executable,
+            workdir=workdir,
+        )
+    assert pack_path.read_bytes() == prior
+
+
+def test_cerebro_doctor_canary_and_unit_hide_paths(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
+    executable, workdir = _cerebro_paths(tmp_path)
+    grokbot_packs.apply_setup(
+        tmp_path,
+        "cerebro-memory",
+        bearer_env="TEST_GROKBOT_BEARER",
+        cli_executable=executable,
+        workdir=workdir,
+    )
+    checks = grokbot_packs.doctor(tmp_path, "cerebro-memory")
+    canary = grokbot_packs.canary(tmp_path, "cerebro-memory")
+    unit = grokbot_packs.render_install_service(tmp_path, "cerebro-memory")
+    sanitized = json.dumps({"checks": checks, "canary": canary})
+    assert SECRET not in sanitized
+    assert str(executable) not in sanitized
+    assert str(workdir) not in sanitized
+    assert SECRET not in unit
+    assert str(executable) not in unit
+    assert all(set(check) == {"check", "status"} for check in checks)
+    assert canary["ok"] is False
+    assert "--pack" in unit
+    assert "cerebro-memory" in unit
+    assert "127.0.0.1:8770" in unit
+    assert "NoNewPrivileges=yes" in unit
+    assert "PrivateTmp=yes" in unit
+    assert "ProtectSystem=strict" in unit
+    assert "ProtectHome=read-only" in unit
+    unit_dir = tmp_path / "units"
+    installed = grokbot_packs.apply_install_service(tmp_path, "cerebro-memory", out_dir=unit_dir)
+    assert installed["unit"] == grokbot_ops.unit_name("cerebro-memory")
+    preview = grokbot_packs.preview_remove(tmp_path, "cerebro-memory", unit_dir=unit_dir)
+    assert preview["apply"] is False
+    grokbot_packs.apply_remove(tmp_path, "cerebro-memory", unit_dir=unit_dir)
+    assert not grokbot_packs.instance_config_path(tmp_path, "cerebro-memory").exists()
+    assert not (unit_dir / grokbot_ops.unit_name("cerebro-memory")).exists()
+    assert not grokbot_ops.config_path(tmp_path, "cerebro-memory").exists()
