@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from brigade import run_lifecycle
 from brigade import run_projector
 from brigade import run_reap
 from brigade import runguard
+from brigade import runs_cmd
 from brigade import work_cmd
 from tests.work_cmd_test_helpers import _init_git_repo
 
@@ -614,3 +616,275 @@ def test_command_deck_buckets_synthetic_stale_history():
     assert deck.bucket_for("run.stale", age_seconds=0, stale_after_seconds=1800) == fleet_dashboard.bucket_for(
         "run.stale", age_seconds=0
     )
+
+
+def _pending_stale_claim(repo: Path, run_dir: Path, *, token: str = "pending-other") -> Path:
+    lock = repo / ".brigade" / "run.lock"
+    stale = lock.with_name(f".{lock.name}.unrelated.stale")
+    stale.mkdir(parents=True)
+    (stale / "pid").write_text("99999999\n")
+    localio.write_json(
+        stale / "owner.json",
+        {
+            "schema": "brigade.run_lock.v1",
+            "owner_token": token,
+            "pid": 99999999,
+            "run_dir": str(run_dir.resolve()),
+            "acquired_at": OLD_STARTED,
+        },
+    )
+    return stale
+
+
+def test_run_lock_claim_leaves_unrelated_pending_claim_untouched(tmp_path):
+    """stale_action='claim' must not recover or terminalize a foreign pending claim."""
+    repo = _repo(tmp_path)
+    mine = _write_run(repo, "20260820-120000-claim001")
+    other = _write_run(repo, "20260820-120000-claim002")
+    _write_stale_lock(repo, mine)
+    pending = _pending_stale_claim(repo, other)
+    pending_owner = (pending / "owner.json").read_text()
+    other_before = (other / "run.json").read_bytes()
+
+    with runguard.run_lock(repo, run_dir=mine, wait_seconds=0, stale_action="claim"):
+        pass
+
+    assert pending.is_dir()
+    assert (pending / "owner.json").read_text() == pending_owner
+    assert (other / "run.json").read_bytes() == other_before
+    assert json.loads((other / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_reap_refuses_swapped_run_dir_and_does_not_touch_outside_run_json(tmp_path, capsys, monkeypatch):
+    """A post-containment directory swap must not read or write an outside run.json."""
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-swap0001", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    outside = tmp_path / "outside-run"
+    outside.mkdir()
+    outside_json = outside / "run.json"
+    localio.write_json(
+        outside_json,
+        {"status": "dispatching", "started_at": OLD_STARTED, "marker": "outside-canary"},
+    )
+    outside_before = outside_json.read_bytes()
+    observed: list[str] = []
+    real_read = run_reap._read_run_bytes
+    real_write = __import__("brigade.aboyeur", fromlist=["_write_json"])._write_json
+
+    def _guarded_read(path: Path):
+        target = path / "run.json"
+        try:
+            if target.resolve() == outside_json.resolve():
+                observed.append("read-outside")
+        except OSError:
+            pass
+        return real_read(path)
+
+    def _guarded_write(path: Path, payload: object) -> None:
+        try:
+            if path.resolve() == outside_json.resolve():
+                observed.append("write-outside")
+        except OSError:
+            pass
+        return real_write(path, payload)
+
+    real_lock = runguard.run_lock
+
+    def _swap_then_lock(*args, **kwargs):
+        shutil.rmtree(run_dir)
+        run_dir.symlink_to(outside, target_is_directory=True)
+        return real_lock(*args, **kwargs)
+
+    monkeypatch.setattr(run_reap, "_read_run_bytes", _guarded_read)
+    monkeypatch.setattr("brigade.aboyeur._write_json", _guarded_write)
+    monkeypatch.setattr(runguard, "run_lock", _swap_then_lock)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert payload["skipped"]
+    assert all(row["reason"] in {"concurrently-changed", "malformed"} for row in payload["skipped"])
+    assert outside_json.read_bytes() == outside_before
+    assert "read-outside" not in observed
+    assert "write-outside" not in observed
+    assert json.loads(outside_before)["marker"] == "outside-canary"
+
+
+def test_reap_json_and_cli_never_echo_control_bearing_run_id_or_status(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    runs = repo / ".brigade" / "runs"
+    runs.mkdir(parents=True)
+    injected = "evil\n\x1b[31mINJECT"
+    nasty = runs / injected
+    nasty.mkdir()
+    localio.write_json(
+        nasty / "run.json",
+        {
+            "task": "inject",
+            "cwd": str(repo),
+            "lock_workspace": str(repo),
+            "orchestrator": "chef",
+            "status": "dispatching\n\x1b[31mINJECT",
+            "started_at": OLD_STARTED,
+        },
+    )
+    planted = _write_run(repo, "20260820-120000-safe0001")
+    localio.write_json(
+        planted / "run.json",
+        {
+            "status": "orphaned",
+            "started_at": OLD_STARTED,
+            "orphaned_at": "2026-08-28T18:00:00+00:00",
+            "last_observed_status": "dispatching\n\x1b[31mINJECT",
+            "uncommitted_change_count": 1,
+        },
+    )
+
+    rows = run_reap.list_orphaned_runs(repo)
+    listed = json.dumps(rows)
+    assert injected not in listed
+    assert "INJECT" not in listed
+    assert "\x1b" not in listed
+    assert rows
+    assert all(row["run_id"] == "20260820-120000-safe0001" for row in rows)
+    assert rows[0]["last_observed_status"] == "unknown"
+
+    assert _reap(repo, json_output=True) == 0
+    json_out = capsys.readouterr().out
+    assert injected not in json_out
+    assert "INJECT" not in json_out
+    assert "\x1b" not in json_out
+    payload = json.loads(json_out)
+    for row in payload["skipped"]:
+        assert row["run_id"] == "malformed" or row["run_id"] == "20260820-120000-safe0001"
+        assert "\n" not in row["run_id"]
+        assert "\x1b" not in row["run_id"]
+
+    assert (
+        run_reap.reap(
+            cwd=repo,
+            runs_dir=None,
+            older_than="2h",
+            json_output=False,
+            now=NOW,
+        )
+        == 0
+    )
+    text = capsys.readouterr().out
+    assert injected not in text
+    assert "INJECT" not in text
+    assert "\x1b" not in text
+
+
+def test_write_refused_retains_the_claimed_lock_so_runs_recover_still_finds_the_run(tmp_path, capsys, monkeypatch):
+    """A refused sanctioned write must leave a matching lock for `runs recover`.
+
+    stale_action='claim' deletes the dead owner's lock as it takes over. If the
+    reaper then released its own lock on a LifecycleJournalError/CheckpointError,
+    the run would be left nonterminal with no lock and no matching .stale claim,
+    and `brigade runs recover` would have nothing to match on.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-refuse01")
+    other = _write_run(repo, "20260820-120000-refuse02")
+    _write_stale_lock(repo, run_dir)
+    before = (run_dir / "run.json").read_bytes()
+
+    def _refuse(*args, **kwargs):
+        raise run_checkpoint.CheckpointError("checkpoint refused in test", category="test")
+
+    monkeypatch.setattr(run_checkpoint, "write_checkpoint", _refuse)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    reasons = {row["run_id"]: row["reason"] for row in payload["skipped"]}
+    assert payload["reaped"] == []
+    assert reasons["20260820-120000-refuse01"] == "write-refused"
+    # The refused run is untouched and still nonterminal.
+    assert (run_dir / "run.json").read_bytes() == before
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+    # The retained lock makes the rest of the scan skip: the second run now
+    # sees a live lock in preflight instead of a claimable dead owner.
+    assert reasons["20260820-120000-refuse02"] == "live"
+    assert json.loads((other / "run.json").read_text())["status"] == "dispatching"
+
+    # The lock was retained, not released, and still records this run.
+    lock_path = repo / ".brigade" / "run.lock"
+    assert lock_path.is_dir()
+    owner = json.loads((lock_path / "owner.json").read_text())
+    assert Path(owner["run_dir"]) == run_dir.resolve()
+    assert owner["pid"] == os.getpid()
+    assert runguard.run_lock_state(repo, run_dir) == "live"
+
+    # Once the reaper process is gone the retained lock reads back as a
+    # matching dead-owner stale lock, which is what recovery matches on.
+    dead = 99999998
+    (lock_path / "pid").write_text(f"{dead}\n")
+    owner["pid"] = dead
+    localio.write_json(lock_path / "owner.json", owner)
+    assert runguard.run_lock_state(repo, run_dir) == "stale"
+    assert runs_cmd.recover(run_dir, cwd=repo) == 0
+    capsys.readouterr()
+    assert not lock_path.exists()
+
+
+def test_reap_fails_closed_when_the_platform_cannot_bind_a_run_directory(tmp_path, capsys, monkeypatch):
+    """No no-follow directory primitive means no mutation at all, not a best effort."""
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-nobind1", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    before = (run_dir / "run.json").read_bytes()
+
+    monkeypatch.setattr(run_reap, "_dirfd_identity_available", lambda: False)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["unbindable"]
+    assert payload["skipped"][0]["run_id"] == "20260820-120000-nobind1"
+    # Fail closed means nothing was written: no run.json edit, no journal, no
+    # checkpoint, no shadow artifact, and the dead owner's lock is untouched.
+    assert (run_dir / "run.json").read_bytes() == before
+    assert not (run_dir / "events").exists()
+    assert not (run_dir / "checkpoints").exists()
+    assert not (run_dir / "shadow").exists()
+    lock_owner = json.loads((repo / ".brigade" / "run.lock" / "owner.json").read_text())
+    assert lock_owner["pid"] == 99999999
+
+
+def test_reap_swap_from_inside_the_sanctioned_writer_is_bounded_to_the_run_directory(tmp_path, capsys, monkeypatch):
+    """A swap racing in from inside the writer path must not escape the runs root.
+
+    The swap fires from within the sanctioned writer (the first checkpoint
+    write), which is past every containment check the reaper can make. This
+    pins the current, honest boundary: the reaper must not reap the run and
+    must not leave the outside canary altered by the run.json replace.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-inswap01", extra=dict(JOURNAL_REQUESTED))
+    _write_stale_lock(repo, run_dir)
+    outside = tmp_path / "outside-writer"
+    outside.mkdir()
+    outside_json = outside / "run.json"
+    localio.write_json(
+        outside_json,
+        {"status": "dispatching", "started_at": OLD_STARTED, "marker": "outside-canary"},
+    )
+    outside_before = outside_json.read_bytes()
+
+    def _swap_then_refuse(*args, **kwargs):
+        shutil.rmtree(run_dir, ignore_errors=True)
+        run_dir.symlink_to(outside, target_is_directory=True)
+        raise run_checkpoint.CheckpointError("checkpoint refused after swap", category="test")
+
+    monkeypatch.setattr(run_checkpoint, "write_checkpoint", _swap_then_refuse)
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["write-refused"]
+    assert outside_json.read_bytes() == outside_before
+    assert json.loads(outside_before)["marker"] == "outside-canary"
+    assert not (outside / "events").exists()
+    assert not (outside / "checkpoints").exists()

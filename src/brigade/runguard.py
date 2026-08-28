@@ -1174,6 +1174,11 @@ def _acquire_lock(
         pending = _stale_claims(path)
         if not pending:
             return ownership
+        if stale_action == "claim":
+            # Claim mode takes over this run's lock only. Broad pending-claim
+            # recovery would terminalize unrelated .stale claims that the
+            # reaper has not selected, aged, or containment-checked.
+            return ownership
         _release_lock(path, ownership)
         if _recover_pending_claims(path) and on_reconcile is not None:
             on_reconcile(None)
@@ -1221,7 +1226,9 @@ def run_lock(
     stale-lock-recovery failure receipt so an explicit reaper can terminalize.
     It requires ``run_dir``: the claim path re-verifies the dead owner's
     recorded run directory inside the atomic claim and fails closed rather
-    than deleting a lock that belongs to a different run.
+    than deleting a lock that belongs to a different run. After the lock is
+    acquired, claim mode returns ownership without reconciling unrelated
+    pending ``.stale`` claims.
     """
     if wait_seconds < 0 or (not math.isinf(wait_seconds) and not math.isfinite(wait_seconds)):
         raise ValueError("run lock wait_seconds must be zero, positive, or unbounded")

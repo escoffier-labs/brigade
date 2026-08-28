@@ -1,10 +1,34 @@
-"""Explicit local reaper for runs whose recorded owner process is gone."""
+"""Explicit local reaper for runs whose recorded owner process is gone.
+
+Containment status. The reaper binds each candidate run directory with a
+no-follow open and refuses to proceed when that identity cannot be established
+(:func:`_bind_contained_run_dir`), which fails closed on a symlinked or
+reparse-pointed run directory and on any platform without a no-follow
+directory primitive. It re-checks the bound identity at the last seam before
+handing the run to the sanctioned writer.
+
+That is a narrowed check, not a descriptor-bound transaction. The sanctioned
+``run.json`` transaction is path-based end to end: ``run_lifecycle``,
+``run_checkpoint``, ``run_journal``, ``run_shadow``, ``aboyeur.run_io``, and
+``localio`` each normalize with ``Path(run_dir).expanduser().resolve()`` and
+open by pathname, and their atomicity comes from same-directory
+``mkstemp``/``os.replace``. A swap of the run directory entry that lands after
+the final check, or between two writers inside the transaction, still
+redirects those opens. Binding the whole transaction means threading a
+directory descriptor through all six writer modules and rewriting each one's
+I/O to ``dir_fd``-relative calls, which is outside this change's blast radius;
+staging the transaction elsewhere and republishing descriptor-relative would
+trade the race for a non-atomic republish that can tear the lifecycle chain.
+Until that refactor lands, do not read the checks below as containment.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,10 +46,143 @@ ORPHAN_SCAN_LIMIT = 50
 _OLDER_THAN_RE = re.compile(r"^(\d+)([smhd])$", re.IGNORECASE)
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _REAPABLE_STATUSES = runs_cmd._NONTERMINAL_STATUSES
+_MALFORMED_PUBLIC_RUN_ID = "malformed"
+_UNKNOWN_STATUS = "unknown"
 
 
 class ReapError(ValueError):
     """Bounded CLI / contract error for the local reaper."""
+
+
+class _BoundRunDir:
+    """A no-follow handle on a run directory plus its (dev, ino) identity.
+
+    ``still_bound`` compares the held handle and a fresh no-follow open of the
+    same name against the identity recorded at bind time. That rejects a
+    symlinked or reparse-pointed run directory outright and narrows the window
+    for a directory swap, but it is a check, not containment: the sanctioned
+    ``run.json`` transaction that follows re-resolves ``run_dir`` by pathname
+    in every writer module, so a swap landing between the last check and a
+    writer's own open is still able to redirect that writer. See the module
+    docstring for the residual and why closing it is a cross-cutting change.
+    """
+
+    def __init__(self, path: Path, fd: int, identity: tuple[int, int]) -> None:
+        self.path = path
+        self._fd = fd
+        self.identity = identity
+
+    def still_bound(self) -> bool:
+        try:
+            held = os.fstat(self._fd)
+        except OSError:
+            return False
+        if (held.st_dev, held.st_ino) != self.identity:
+            return False
+        return _directory_identity(self.path) == self.identity
+
+    def close(self) -> None:
+        fd = self._fd
+        self._fd = -1
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _public_run_id(name: str) -> str:
+    if runs_cmd._is_bare_run_id(name):
+        return name
+    return _MALFORMED_PUBLIC_RUN_ID
+
+
+def _public_status(value: object) -> str:
+    if isinstance(value, str) and value in _REAPABLE_STATUSES:
+        return value
+    return _UNKNOWN_STATUS
+
+
+def _dirfd_identity_available() -> bool:
+    if bool(getattr(os, "O_NOFOLLOW", 0)) and bool(getattr(os, "O_DIRECTORY", 0)):
+        return True
+    if sys.platform == "win32":
+        try:
+            from .work_cmd import nt_dirfd
+        except ImportError:
+            return False
+        return nt_dirfd.available()
+    return False
+
+
+def _open_dir_nofollow(path: Path) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if nofollow and directory:
+        flags = os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0)
+        return os.open(path, flags)
+    if sys.platform == "win32":
+        from .work_cmd import nt_dirfd
+
+        if nt_dirfd.available():
+            return nt_dirfd.open_root_directory(path, writable=False)
+    raise OSError("no-follow directory open is unavailable")
+
+
+def _directory_identity(path: Path) -> tuple[int, int] | None:
+    """Return (dev, ino) of a real directory without following a final symlink."""
+    if not _dirfd_identity_available():
+        return None
+    try:
+        fd = _open_dir_nofollow(path)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    try:
+        named = path.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(named.st_mode):
+        return None
+    if (named.st_dev, named.st_ino) != (st.st_dev, st.st_ino):
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _bind_contained_run_dir(path: Path) -> _BoundRunDir | None:
+    """Hold a no-follow directory handle bound to the contained identity.
+
+    Returns None when the identity cannot be established. That includes
+    platforms without an equivalent no-follow primitive: reap fails closed
+    rather than following a symlink or reparse point.
+    """
+    if not _dirfd_identity_available():
+        return None
+    try:
+        fd = _open_dir_nofollow(path)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            os.close(fd)
+            return None
+        named = path.lstat()
+        if stat.S_ISLNK(named.st_mode) or (named.st_dev, named.st_ino) != (st.st_dev, st.st_ino):
+            os.close(fd)
+            return None
+    except OSError:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
+    return _BoundRunDir(path, fd, (st.st_dev, st.st_ino))
 
 
 def parse_older_than(value: str) -> timedelta:
@@ -105,10 +262,12 @@ def _read_run_bytes(run_dir: Path) -> tuple[bytes | None, dict[str, Any] | None]
 
 
 def _skip(run_id: str, reason: str) -> dict[str, str]:
-    return {"run_id": run_id, "reason": reason}
+    return {"run_id": _public_run_id(run_id), "reason": reason}
 
 
 def _classify_child(child: Path, resolved_root: Path) -> str | None:
+    if not runs_cmd._is_bare_run_id(child.name):
+        return "malformed"
     try:
         if child.is_symlink():
             return "symlink"
@@ -179,9 +338,7 @@ def _terminalize(run_dir: Path, meta: dict[str, Any], *, workspace: Path, now: d
     """
     from . import aboyeur, receipt_schema
 
-    last_status = meta.get("status")
-    if not isinstance(last_status, str) or not last_status:
-        last_status = "unknown"
+    last_status = _public_status(meta.get("status"))
     dirty = _count_uncommitted_changes(workspace)
     orphaned_at = now.isoformat()
     updated = dict(meta)
@@ -196,7 +353,7 @@ def _terminalize(run_dir: Path, meta: dict[str, Any], *, workspace: Path, now: d
     )
     aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(updated))
     return {
-        "run_id": run_dir.name,
+        "run_id": _public_run_id(run_dir.name),
         "last_observed_status": last_status,
         "uncommitted_change_count": dirty,
         "orphaned_at": orphaned_at,
@@ -210,6 +367,7 @@ def _reap_one(
     fingerprint: str,
     older_than: timedelta,
     now: datetime,
+    bound: _BoundRunDir,
 ) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
     reason = _preflight(run_dir, meta, older_than=older_than, now=now)
     if reason is not None:
@@ -218,6 +376,8 @@ def _reap_one(
     assert workspace is not None
     try:
         with runguard.run_lock(workspace, run_dir=run_dir, wait_seconds=0, stale_action="claim"):
+            if not bound.still_bound():
+                return None, _skip(run_dir.name, "concurrently-changed")
             raw, current = _read_run_bytes(run_dir)
             if raw is None or current is None:
                 return None, _skip(run_dir.name, "concurrently-changed")
@@ -228,14 +388,28 @@ def _reap_one(
             reason = _revalidate_metadata(current, older_than=older_than, now=now)
             if reason is not None:
                 return None, _skip(run_dir.name, reason)
+            if not bound.still_bound():
+                return None, _skip(run_dir.name, "concurrently-changed")
             try:
                 return _terminalize(run_dir, current, workspace=workspace, now=now), None
-            except (run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError):
+            except (run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
                 # The sanctioned writer refused this run's transaction (an
-                # unready authority gate, a broken chain). Skip it rather than
-                # abandoning the rest of the scan; the diagnostic is bounded
-                # but may name a path, so it stays out of the contract.
-                return None, _skip(run_dir.name, "write-refused")
+                # unready authority gate, a broken chain), possibly after
+                # activating the journal or publishing a checkpoint. Claim
+                # mode already deleted the original dead owner's lock, so
+                # releasing here would leave the run with no lock and no
+                # matching ``.stale`` claim for ``brigade runs recover``.
+                # ``RetainRunLockError`` keeps this claimed lock in place: it
+                # records this run_dir, so once the reaper process exits the
+                # lock reads back as a dead-owner stale lock that recovery
+                # matches. The reason string stays bounded; the writer's
+                # diagnostic may name a path, so it stays out of the contract.
+                raise runguard.RetainRunLockError("orphan reap write refused") from exc
+    except runguard.RetainRunLockError:
+        # Caught outside the context so ``run_lock`` has already skipped the
+        # release. The rest of the scan still runs; other runs in this
+        # workspace now see the retained live lock and skip.
+        return None, _skip(run_dir.name, "write-refused")
     except runguard.RunLockError:
         return None, _skip(run_dir.name, "concurrently-changed")
 
@@ -269,12 +443,13 @@ def list_orphaned_runs(
             continue
         dirty = meta.get("uncommitted_change_count")
         count = dirty if isinstance(dirty, int) and not isinstance(dirty, bool) and dirty >= 0 else 0
+        run_id = _public_run_id(child.name)
         rows.append(
             {
-                "run_id": child.name,
-                "last_observed_status": meta.get("last_observed_status"),
+                "run_id": run_id,
+                "last_observed_status": _public_status(meta.get("last_observed_status")),
                 "uncommitted_change_count": min(count, MAX_UNCOMMITTED_CHANGE_COUNT),
-                "suggested_command": f"brigade runs show {child.name}",
+                "suggested_command": f"brigade runs show {run_id}",
             }
         )
         if len(rows) >= limit:
@@ -318,21 +493,36 @@ def reap(
             continue
         if classified is not None or not child.is_dir():
             continue
-        raw, meta = _read_run_bytes(child)
-        if raw is None or meta is None:
-            skipped.append(_skip(child.name, "malformed"))
+        bound = _bind_contained_run_dir(child)
+        if bound is None:
+            # Fail closed before any mutation. A platform with no no-follow
+            # directory primitive can never bind, so it reports ``unbindable``
+            # for every candidate rather than reusing the bad-run-id reason.
+            reason = "malformed" if _dirfd_identity_available() else "unbindable"
+            skipped.append(_skip(child.name, reason))
             continue
-        won, lost = _reap_one(
-            child,
-            meta,
-            fingerprint=_run_fingerprint(raw),
-            older_than=threshold,
-            now=clock,
-        )
-        if won is not None:
-            reaped.append(won)
-        elif lost is not None:
-            skipped.append(lost)
+        try:
+            if not bound.still_bound():
+                skipped.append(_skip(child.name, "malformed"))
+                continue
+            raw, meta = _read_run_bytes(child)
+            if raw is None or meta is None:
+                skipped.append(_skip(child.name, "malformed"))
+                continue
+            won, lost = _reap_one(
+                child,
+                meta,
+                fingerprint=_run_fingerprint(raw),
+                older_than=threshold,
+                now=clock,
+                bound=bound,
+            )
+            if won is not None:
+                reaped.append(won)
+            elif lost is not None:
+                skipped.append(lost)
+        finally:
+            bound.close()
 
     if json_output:
         print(
