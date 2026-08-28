@@ -225,17 +225,8 @@ def _peel_passthrough_engine_args(argv: list[str]) -> tuple[list[str], list[str]
     return argv[:2], argv[2:]
 
 
-def _rewrite_run_cloud_argv(argv: list[str]) -> list[str]:
-    """Map `brigade run cloud ...` onto the internal `run-cloud` command group."""
-
-    if len(argv) >= 2 and argv[0] == "run" and argv[1] == "cloud":
-        return ["run-cloud", *argv[2:]]
-    return argv
-
-
 def main(argv=None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    raw_argv = _rewrite_run_cloud_argv(raw_argv)
     parse_argv, engine_args = _peel_passthrough_engine_args(raw_argv)
     parser = _build_parser()
     if not parse_argv:

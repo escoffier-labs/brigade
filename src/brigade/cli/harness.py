@@ -138,6 +138,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Also verify native MCP projections for the selected targets.",
     )
 
+    fragments = commands.add_parser(
+        "fragments",
+        help="Write harness config fragments for manual review.",
+    )
+    fragments.add_argument("--harness", required=True, choices=("openclaw", "hermes"))
+    fragments.add_argument("--out", "-o", type=Path, required=True, help="Output directory.")
+
     install = commands.add_parser("install", help="Legacy Cursor user-scope install (use sync for user profiles).")
     _common_cursor(install)
     _write_mode(install)
@@ -193,6 +200,11 @@ def dispatch(args) -> int:
                 json_output=args.json,
             )
         return cursor_user_cmd.doctor(json_output=args.json)
+
+    if args.harness_command == "fragments":
+        from .. import fragments as frag_mod
+
+        return frag_mod.write_fragments(args.out, harness=args.harness)
 
     if args.harness_command == "install":
         if args.harness != "cursor":

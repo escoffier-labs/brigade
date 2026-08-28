@@ -146,55 +146,53 @@ def _resolved_run_lock_wait_seconds(args, run_cwd: Path) -> float:
     return config_mod.resolve_run_lock_wait_seconds(run_cwd)
 
 
-def register(sub: argparse._SubParsersAction) -> None:
-    # run
-    p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
-    p_run.add_argument(
+def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
         "task",
         type=_non_empty_task,
         help="Task for the aboyeur to plan, dispatch, and synthesize.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--roster",
         type=Path,
         default=None,
         help="Path to roster.toml. Defaults to .brigade/roster.toml under the current directory.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--resolved-roster-source",
         choices=("explicit", "workspace", "worktree-parent", "user"),
         default=None,
         help=argparse.SUPPRESS,
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--resolved-roster-shadowed",
         action="append",
         default=[],
         type=Path,
         help=argparse.SUPPRESS,
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--applied-preference",
         action="store_true",
         help=argparse.SUPPRESS,
     )
-    p_run.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
-    p_run.add_argument(
+    parser.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
+    parser.add_argument(
         "--worker",
         default=None,
         help="Dispatch the full task directly to one worker seat, skipping planning and synthesis.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--model",
         default=None,
         help="Override the selected --worker seat's model for this run, subject to Fleet Hub policy.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--detach",
         action="store_true",
         help="Start the run in a detached child process and return after run metadata is written.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--wait",
         nargs="?",
         const=_UNBOUNDED_RUN_LOCK_WAIT,
@@ -208,7 +206,7 @@ def register(sub: argparse._SubParsersAction) -> None:
             ".brigade/config.json sets run_lock_wait_seconds."
         ),
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--no-fleet-claim",
         action="store_true",
         help=(
@@ -217,49 +215,49 @@ def register(sub: argparse._SubParsersAction) -> None:
             "see also `brigade fleet claims --release`."
         ),
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--allow-dirty",
         action="store_true",
         help="Allow running when --cwd has uncommitted git changes.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--worktree",
         action="store_true",
         help="Run agents in a detached git worktree and write changes.patch to the run artifacts.",
     )
-    p_run.add_argument("--show-plan", action="store_true", help="Print parsed assignments before dispatch.")
-    p_run.add_argument("--verbose", action="store_true", help="Print plan, worker status, and synthesis status.")
-    p_run.add_argument(
+    parser.add_argument("--show-plan", action="store_true", help="Print parsed assignments before dispatch.")
+    parser.add_argument("--verbose", action="store_true", help="Print plan, worker status, and synthesis status.")
+    parser.add_argument(
         "--read-only",
         action="store_true",
         help="Tell agents to inspect and recommend only, without modifying files or external state.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--no-code-graph",
         action="store_true",
         help="Do not attach GraphTrail code graph context to brigade run prompts.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--no-evidence",
         action="store_true",
         help="Do not attach MiseLedger run evidence context to brigade run prompts.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--no-route",
         action="store_true",
         help="Do not compute the deterministic route brief or check plan coverage against it.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--approve-ship",
         action="store_true",
         help="Release a ship stage the route would otherwise hold for approval.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--route-template",
         default=None,
         help="Task template hint for route derivation (e.g. vertical-slice, bugfix, docs).",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--route-signal",
         action="append",
         default=[],
@@ -267,7 +265,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         metavar="+SIG|-SIG",
         help="Force-add (+auth-surface) or suppress (~ship-requested) a derived route signal. Repeatable.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default=None,
@@ -276,53 +274,53 @@ def register(sub: argparse._SubParsersAction) -> None:
             "read-only rules while overriding the native sandbox."
         ),
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--codex-transport",
         choices=["exec", "app-server"],
         default=None,
         help="Transport for codex workers. Defaults to the roster's codex_transport (exec).",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--inspect",
         action="store_true",
         help="Print a readable artifact summary after the run completes.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--cwd",
         type=Path,
         default=Path("."),
         help="Working directory for agent CLI calls and default run artifacts.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
         help="Directory for run artifacts. Defaults to .brigade/runs/<id> under --cwd.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--run-budget",
         type=Path,
         default=None,
         help="Path to a brigade.run_budget.v1 JSON declaration persisted with this run.",
     )
-    p_run.add_argument("--no-artifacts", action="store_true", help="Do not write run artifacts.")
-    p_run.add_argument(
+    parser.add_argument("--no-artifacts", action="store_true", help="Do not write run artifacts.")
+    parser.add_argument(
         "--handoff",
         action="store_true",
         help="Write a Memory Handoff for a successful non-dry run.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--handoff-inbox",
         type=Path,
         default=None,
         help="Memory Handoff inbox. Defaults to .claude/memory-handoffs under --cwd.",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--keep-going",
         action="store_true",
         help="Do not skip later stages when an earlier stage worker fails (pre-2026-07 behavior).",
     )
-    p_run.add_argument(
+    parser.add_argument(
         "--scheduler",
         choices=("waves", "dag"),
         default=None,
@@ -331,7 +329,31 @@ def register(sub: argparse._SubParsersAction) -> None:
             "Defaults to limits.scheduler from the roster, then waves."
         ),
     )
-    p_run.set_defaults(func=dispatch)
+    parser.set_defaults(func=dispatch)
+
+
+def register(sub: argparse._SubParsersAction) -> None:
+    p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
+    p_run.set_defaults(func=dispatch, _brigade_command_contract_leaf=True, run_subcommand=None)
+
+    run_sub = p_run.add_subparsers(dest="run_subcommand")
+    p_cloud = run_sub.add_parser("cloud", help="Cloud dispatch registry.")
+    from .run_cloud import add_cloud_subcommands
+
+    add_cloud_subcommands(p_cloud)
+
+    task_parser = argparse.ArgumentParser(prog="brigade run", add_help=True)
+    _add_run_arguments(task_parser)
+
+    orig = p_run.parse_known_args
+
+    def parse_known_args(args=None, namespace=None):
+        tokens = list(args if args is not None else [])
+        if tokens and tokens[0] == "cloud":
+            return orig(tokens, namespace)
+        return task_parser.parse_known_args(tokens, namespace)
+
+    p_run.parse_known_args = parse_known_args  # type: ignore[method-assign]
 
 
 def _resolved_scheduler(args, roster) -> str:

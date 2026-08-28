@@ -157,6 +157,23 @@ def test_roadmap_audit_classifies_stale_sections_and_command_mismatch(tmp_path):
     assert "brigade roadmap audit" not in payload["missing_cli_commands"]
 
 
+def test_commands_from_text_requires_brigade_as_first_token():
+    text = (
+        "A concurrent `brigade work import` is real.\n"
+        "Prose between backticks: `) keeps the user-level brigade directory and outside the workspace`.\n"
+    )
+    commands = roadmap_cmd._commands_from_text(text)
+    assert "brigade work import" in commands
+    assert "brigade directory and outside the workspace" not in commands
+
+
+def test_apply_command_alias_rewrites_run_cloud_and_fragments():
+    assert roadmap_cmd._apply_command_alias("brigade run-cloud status") == "brigade run cloud status"
+    assert roadmap_cmd._apply_command_alias("brigade openclaw-fragments") == "brigade harness fragments"
+    assert roadmap_cmd._apply_command_alias("brigade hermes-fragments") == "brigade harness fragments"
+    assert roadmap_cmd._apply_command_alias("brigade run cloud status") == "brigade run cloud status"
+
+
 def test_roadmap_audit_normalizes_parameterized_and_parent_commands(tmp_path):
     (tmp_path / "ROADMAP.md").write_text("# Roadmap\n")
     (tmp_path / "README.md").write_text(

@@ -1,4 +1,6 @@
-"""`brigade openclaw-fragments` / `hermes-fragments` - write config fragments.
+"""`brigade harness fragments --harness {openclaw,hermes}` - write config fragments.
+
+`brigade openclaw-fragments` and `brigade hermes-fragments` remain aliases.
 
 These never mutate a live config. They drop JSON fragments into the chosen
 output directory so the user can `jq -s '.[0] * .[1]'` them in by hand.

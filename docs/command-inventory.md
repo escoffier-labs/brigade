@@ -33,7 +33,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade guard`: 1 command path(s)
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
-- `brigade harness`: 4 command path(s)
+- `brigade harness`: 5 command path(s)
 - `brigade hermes-fragments` (extras): 1 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
@@ -58,7 +58,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 4 command path(s)
 - `brigade route`: 1 command path(s)
-- `brigade run`: 1 command path(s)
+- `brigade run`: 39 command path(s)
 - `brigade run-cloud`: 38 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 18 command path(s)
@@ -226,6 +226,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade handoff sync-issues`
 - `brigade handoff-template`
 - `brigade harness doctor`
+- `brigade harness fragments`
 - `brigade harness install`
 - `brigade harness sync`
 - `brigade harness uninstall`
@@ -477,6 +478,44 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roster suggest`
 - `brigade route`
 - `brigade run`
+- `brigade run cloud adopt`
+- `brigade run cloud canary`
+- `brigade run cloud compact`
+- `brigade run cloud doctor`
+- `brigade run cloud grokbot ack-cancel`
+- `brigade run cloud grokbot canary`
+- `brigade run cloud grokbot cancel`
+- `brigade run cloud grokbot claim`
+- `brigade run cloud grokbot complete`
+- `brigade run cloud grokbot convert-findings`
+- `brigade run cloud grokbot doctor`
+- `brigade run cloud grokbot enqueue`
+- `brigade run cloud grokbot expire`
+- `brigade run cloud grokbot fail`
+- `brigade run cloud grokbot feed`
+- `brigade run cloud grokbot install-service`
+- `brigade run cloud grokbot pack canary`
+- `brigade run cloud grokbot pack doctor`
+- `brigade run cloud grokbot pack install-service`
+- `brigade run cloud grokbot pack list`
+- `brigade run cloud grokbot pack remove`
+- `brigade run cloud grokbot pack setup`
+- `brigade run cloud grokbot pack show`
+- `brigade run cloud grokbot pack update`
+- `brigade run cloud grokbot reconcile-findings`
+- `brigade run cloud grokbot reconcile-reports`
+- `brigade run cloud grokbot renew`
+- `brigade run cloud grokbot scout-feed`
+- `brigade run cloud grokbot serve`
+- `brigade run cloud grokbot setup`
+- `brigade run cloud grokbot start`
+- `brigade run cloud grokbot status`
+- `brigade run cloud launch`
+- `brigade run cloud register`
+- `brigade run cloud setup`
+- `brigade run cloud status`
+- `brigade run cloud sweep`
+- `brigade run cloud sync`
 - `brigade run-cloud adopt`
 - `brigade run-cloud canary`
 - `brigade run-cloud compact`
