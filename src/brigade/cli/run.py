@@ -173,6 +173,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         type=Path,
         help=argparse.SUPPRESS,
     )
+    p_run.add_argument(
+        "--applied-preference",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     p_run.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
     p_run.add_argument(
         "--worker",
@@ -416,34 +421,35 @@ def dispatch(args) -> int:
         return 2
     from .. import run_preference
 
-    preference = run_preference.refresh_cache()
-    loaded_roster = run_preference.apply_to_roster(loaded_roster, preference)
-    if args.worker is None:
-        pinned_worker = run_preference.resolve_worker(
-            preference,
-            loaded_roster,
-            worker=None,
-            task=args.task,
-        )
-        if pinned_worker is not None:
-            pin_error = _direct_worker_error(
-                pinned_worker,
+    if not getattr(args, "applied_preference", False):
+        preference = run_preference.refresh_cache()
+        loaded_roster = run_preference.apply_to_roster(loaded_roster, preference)
+        if args.worker is None:
+            pinned_worker = run_preference.resolve_worker(
+                preference,
                 loaded_roster,
-                roster_mod,
-                read_only=args.read_only,
+                worker=None,
+                task=args.task,
             )
-            if pin_error is None:
-                args.worker = pinned_worker
-            else:
-                print(
-                    f"warning: run preference impl {pinned_worker!r} is not usable here "
-                    f"({pin_error}); continuing with a planned run",
-                    file=sys.stderr,
+            if pinned_worker is not None:
+                pin_error = _direct_worker_error(
+                    pinned_worker,
+                    loaded_roster,
+                    roster_mod,
+                    read_only=args.read_only,
                 )
-    args.task = run_preference.apply_to_task(args.task, preference, worker=args.worker)
-    preference_bits = [f"{key}={value}" for key, value in preference.payload().items() if key != "notes"]
-    if preference_bits:
-        print(f"run preference: {' '.join(preference_bits)} (cached)", file=sys.stderr)
+                if pin_error is None:
+                    args.worker = pinned_worker
+                else:
+                    print(
+                        f"warning: run preference impl {pinned_worker!r} is not usable here "
+                        f"({pin_error}); continuing with a planned run",
+                        file=sys.stderr,
+                    )
+        args.task = run_preference.apply_to_task(args.task, preference, worker=args.worker)
+        preference_bits = [f"{key}={value}" for key, value in preference.payload().items() if key != "notes"]
+        if preference_bits:
+            print(f"run preference: {' '.join(preference_bits)} (cached)", file=sys.stderr)
     print(f"roster: {roster_resolution.path} ({roster_resolution.source})", file=sys.stderr)
     # A worktree-parent roster shadowing the user roster is the designed
     # outcome for worktrees of a wired repo, so only a workspace roster warns.
@@ -1106,6 +1112,7 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--read-only")
     if args.worker is not None:
         argv.extend(["--worker", args.worker])
+    argv.append("--applied-preference")
     model_override = getattr(args, "model", None)
     if model_override is not None:
         argv.extend(["--model", model_override])

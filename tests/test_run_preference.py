@@ -122,3 +122,23 @@ def test_fleet_preference_cli_get_set_pull(tmp_path, monkeypatch, capsys) -> Non
     out = capsys.readouterr().out
     assert "cursor_grok" in out
     assert "claude_standby" in out
+
+
+def test_print_preference_sanitizes_control_characters(capsys) -> None:
+    from brigade.cli import fleet as fleet_cli
+
+    fleet_cli._print_preference(
+        {
+            "impl": "cursor_grok",
+            "review": None,
+            "chef": None,
+            "notes": "see \x1b[31mred",
+        },
+        source="hub",
+    )
+    out = capsys.readouterr().out
+    assert "impl: cursor_grok" in out
+    assert "review: -" in out
+    assert "chef: -" in out
+    assert "\x1b" not in out
+    assert "\\x1b[31mred" in out

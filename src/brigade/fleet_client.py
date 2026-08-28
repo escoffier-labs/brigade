@@ -343,6 +343,28 @@ def resolve_node_id(base_path: Path | None = None) -> str:
 _DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
 
 
+def _hub_host_is_loopback(host: str) -> bool:
+    if host in {"localhost", "localhost."}:
+        return True
+    try:
+        import ipaddress
+
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _require_encrypted_or_loopback_hub(hub: str) -> None:
+    """Reject cleartext remote hubs before a bearer token is attached."""
+    parsed = urllib.parse.urlsplit(hub)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and _hub_host_is_loopback(host):
+        return
+    raise FleetClientError("fleet hub URL must use https (http is allowed only for loopback)")
+
+
 def _origin(url: urllib.parse.SplitResult) -> tuple[str, str, int | None]:
     """(scheme, host, effective port) for a URL split; the port defaults per
     scheme when absent so explicit default ports compare equal."""
@@ -977,6 +999,7 @@ def fetch_run_preference(*, hub_url: str | None = None) -> dict[str, Any]:
     hub = hub_url or config["hub_url"]
     if not hub:
         raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    _require_encrypted_or_loopback_hub(hub)
     request = urllib.request.Request(
         hub.rstrip("/") + "/preference",
         headers={"Authorization": f"Bearer {config['token']}"},
@@ -996,6 +1019,7 @@ def put_run_preference(preference: dict[str, Any], *, hub_url: str | None = None
     hub = hub_url or settings["hub_url"]
     if not hub:
         raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    _require_encrypted_or_loopback_hub(hub)
     token = settings["admin_token"]
     if not token:
         raise FleetClientError(

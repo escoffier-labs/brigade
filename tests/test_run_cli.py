@@ -276,6 +276,71 @@ read_only_capable = false
     assert "read_only_capable is false" in err
 
 
+def test_detached_dispatch_keeps_pin_without_double_prefix(tmp_path, monkeypatch):
+    from brigade import run_preference
+    from brigade.cli import run as run_cli
+
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.cursor_grok]
+cli = "cursor"
+role = "code"
+"""
+    )
+    run_preference.write_cached(run_preference.RunPreference(impl="cursor_grok", review="claude_standby"))
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        pid = 4321
+
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = list(argv)
+            output_dir = Path(argv[argv.index("--output-dir") + 1])
+            kwargs["stdout"].write("child started\n")
+            kwargs["stdout"].flush()
+            (output_dir / "run.json").write_text(json.dumps({"status": "started"}) + "\n")
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(run_cli, "Popen", FakeProcess)
+    rc = cli.main(
+        [
+            "run",
+            "fix the flaky test",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--detach",
+            "--no-fleet-claim",
+            "--output-dir",
+            str(tmp_path / "runs" / "pref-detach"),
+        ]
+    )
+    assert rc == 0
+    argv = captured["argv"]
+    task = argv[argv.index("run") + 1]
+    assert task == "fix the flaky test"
+    assert task.count("Fleet run preference") == 0
+    assert argv[argv.index("--worker") + 1] == "cursor_grok"
+    assert "--applied-preference" in argv
+
+    child_task = run_preference.apply_to_task(
+        task,
+        run_preference.load_cached(),
+        worker=argv[argv.index("--worker") + 1],
+    )
+    assert child_task == task
+
+
 def test_run_cli_forwards_explicit_budget_file_before_dispatch(tmp_path, monkeypatch):
     roster_path = tmp_path / "roster.toml"
     roster_path.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')

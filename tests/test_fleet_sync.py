@@ -699,6 +699,46 @@ class TestCli:
         assert "run preference (hub)" in out
         assert "impl: cursor_grok" in out
 
+    def test_preference_client_rejects_cleartext_remote_hub(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "admin-token")
+        monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "node-token")
+        opened: list[str] = []
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"preference": {}}'
+
+        def fake_open(request, timeout=None):
+            opened.append(request.full_url)
+            return FakeResponse()
+
+        monkeypatch.setattr(fleet_client, "_hub_open", fake_open)
+        with pytest.raises(fleet_client.FleetClientError, match="https"):
+            fleet_client.fetch_run_preference(hub_url="http://example.com")
+        with pytest.raises(fleet_client.FleetClientError, match="https"):
+            fleet_client.put_run_preference({"impl": "cursor_grok"}, hub_url="http://example.com")
+        assert opened == []
+
+        assert fleet_client.fetch_run_preference(hub_url="http://127.0.0.1") == {}
+        assert fleet_client.fetch_run_preference(hub_url="https://hub.example") == {}
+        assert fleet_client.put_run_preference({"impl": "cursor_grok"}, hub_url="http://127.0.0.1") == {}
+        assert fleet_client.put_run_preference({"impl": "cursor_grok"}, hub_url="https://hub.example") == {}
+        assert opened == [
+            "http://127.0.0.1/preference",
+            "https://hub.example/preference",
+            "http://127.0.0.1/preference",
+            "https://hub.example/preference",
+        ]
+
     def test_status_table_shows_verify_exit_without_receipt_body(self, hub, monkeypatch, capsys):
         from brigade import cli
 

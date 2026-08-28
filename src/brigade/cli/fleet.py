@@ -447,7 +447,7 @@ def _preference_payload(preference: object) -> dict[str, str | None]:
 def _print_preference(payload: dict[str, str | None], *, source: str) -> None:
     print(f"run preference ({source})")
     for key in ("impl", "review", "chef", "notes"):
-        print(f"  {key}: {payload.get(key) or '-'}")
+        print(f"  {key}: {_safe_table_cell(payload.get(key) or '-')}")
 
 
 def _dispatch_preference_get(args: argparse.Namespace) -> int:

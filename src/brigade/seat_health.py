@@ -501,7 +501,10 @@ class SeatHealthProbe:
                 _remove_temp_repo(root)
         if seat.cli is None:
             return SeatHealthCheck(
-                "transport-liveness", "degraded", "endpoint liveness requires a provider-safe status operation"
+                "transport-liveness",
+                "degraded",
+                "endpoint liveness requires a provider-safe status operation",
+                cause_code="probe-incomplete",
             )
         identity = _resolve_agent_executable(seat)
         if not identity.runnable:

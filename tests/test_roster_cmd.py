@@ -257,11 +257,19 @@ def test_roster_doctor_expected_incomplete_health_is_info(tmp_target, capsys):
 
     class IncompleteHealth:
         def probe_roster(self, loaded, **kwargs):
-            check = SeatHealthCheck(
-                "authentication-entitlement",
-                "degraded",
-                "adapter has no prompt-free authentication status check",
-                cause_code="probe-incomplete",
+            checks = (
+                SeatHealthCheck(
+                    "authentication-entitlement",
+                    "degraded",
+                    "adapter has no prompt-free authentication status check",
+                    cause_code="probe-incomplete",
+                ),
+                SeatHealthCheck(
+                    "transport-liveness",
+                    "degraded",
+                    "endpoint liveness requires a provider-safe status operation",
+                    cause_code="probe-incomplete",
+                ),
             )
             return (
                 SeatHealthResult(
@@ -270,7 +278,7 @@ def test_roster_doctor_expected_incomplete_health_is_info(tmp_target, capsys):
                     "fp",
                     "degraded",
                     {},
-                    (check,),
+                    checks,
                     0.0,
                     0.0,
                     0.0,
@@ -284,6 +292,7 @@ def test_roster_doctor_expected_incomplete_health_is_info(tmp_target, capsys):
     assert health_lines
     assert "[info]" in health_lines[0]
     assert "[warn]" not in health_lines[0]
+    assert "transport-liveness=degraded" in health_lines[0]
 
 
 def test_roster_doctor_unexpected_health_failure_stays_warn(tmp_target, capsys):

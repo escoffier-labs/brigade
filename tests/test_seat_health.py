@@ -203,6 +203,26 @@ def test_codex_cloud_model_reachability_skips_provider_smoke(monkeypatch):
     assert "brigade run cloud canary" in check.detail
     assert calls == []
 
+    hosted = roster.Agent(
+        name="hosted",
+        cli=None,
+        role="code",
+        endpoint="https://example.test/v1",
+        model="hosted-model",
+    )
+    endpoint_roster = roster.Roster(
+        orchestrator="chef",
+        agents={
+            "chef": roster.Agent(name="chef", cli="codex", role="plan"),
+            "hosted": hosted,
+        },
+    )
+    endpoint_result = SeatHealthProbe().probe(hosted, endpoint_roster, allow_model_smoke=False)
+    liveness = next(item for item in endpoint_result.checks if item.name == "transport-liveness")
+    assert liveness.status == "degraded"
+    assert liveness.cause_code == "probe-incomplete"
+    assert all(item.status == "passed" or item.cause_code == "probe-incomplete" for item in endpoint_result.checks)
+
 
 def test_overall_deadline_returns_timeout_results_without_serial_wait(monkeypatch):
     monkeypatch.setattr(seat_health, "OVERALL_TIMEOUT_SECONDS", 0.01)
