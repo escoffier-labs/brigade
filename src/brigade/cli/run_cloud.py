@@ -254,7 +254,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_grokbot_serve.add_argument("--target", type=Path, default=Path("."))
     serve_identity = p_grokbot_serve.add_mutually_exclusive_group(required=True)
     serve_identity.add_argument("--instance", choices=("operator", "repository-scout", "implementation-worker"))
-    serve_identity.add_argument("--pack", choices=("cerebro-memory", "fleet-steward"))
+    serve_identity.add_argument("--pack", choices=("cerebro-memory", "fleet-steward", "backup-steward"))
     p_grokbot_serve.add_argument(
         "--bind", default=None, help="Listener host:port. Defaults to the role or pack loopback."
     )
@@ -336,25 +336,25 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--runtime-path",
         type=Path,
         default=None,
-        help="Absolute Fleet Steward runtime JSON path. Required for fleet-steward.",
+        help="Absolute steward runtime JSON path. Required for fleet-steward and backup-steward.",
     )
     p_pack_setup.add_argument(
         "--ledger-path",
         type=Path,
         default=None,
-        help="Absolute Fleet Steward ledger path. Required for fleet-steward.",
+        help="Absolute steward ledger path. Required for fleet-steward and backup-steward.",
     )
     p_pack_setup.add_argument(
         "--action-state-path",
         type=Path,
         default=None,
-        help="Absolute Fleet Steward action-state directory. Required for fleet-steward.",
+        help="Absolute steward action-state directory. Required for fleet-steward and backup-steward.",
     )
     p_pack_setup.add_argument(
         "--approval-dir",
         type=Path,
         default=None,
-        help="Absolute Fleet Steward approval directory. Required for fleet-steward.",
+        help="Absolute steward approval directory. Required for fleet-steward and backup-steward.",
     )
     p_pack_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
 
@@ -797,7 +797,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
 
         try:
             if getattr(args, "pack", None):
-                from .. import grokbot_cerebro, grokbot_fleet
+                from .. import grokbot_cerebro
 
                 listener_kwargs = {
                     "bind": args.bind,
@@ -807,10 +807,21 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     "bearer_env": args.bearer_env,
                 }
                 if args.pack == "fleet-steward":
-                    from ..grokbot_fleet.lifecycle import build_listener_from_target, run_listener
+                    from ..grokbot_fleet.lifecycle import (
+                        build_listener_from_target as build_fleet_listener,
+                        run_listener as run_fleet_listener,
+                    )
 
-                    fleet_config, fleet_tools = build_listener_from_target(target, **listener_kwargs)
-                    run_listener(fleet_config, fleet_tools)
+                    fleet_config, fleet_tools = build_fleet_listener(target, **listener_kwargs)
+                    run_fleet_listener(fleet_config, fleet_tools)
+                elif args.pack == "backup-steward":
+                    from ..grokbot_backup.lifecycle import (
+                        build_listener_from_target as build_backup_listener,
+                        run_listener as run_backup_listener,
+                    )
+
+                    backup_config, backup_tools = build_backup_listener(target, **listener_kwargs)
+                    run_backup_listener(backup_config, backup_tools)
                 else:
                     cerebro_config, cerebro_tools = grokbot_cerebro.build_listener_from_target(
                         target, **listener_kwargs
@@ -834,9 +845,17 @@ def _dispatch_grokbot(args, target: Path) -> int:
             print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
             return 2
         except Exception as exc:
-            from .. import grokbot_cerebro, grokbot_fleet, grokbot_packs
+            from .. import grokbot_backup, grokbot_cerebro, grokbot_fleet, grokbot_packs
 
-            if isinstance(exc, (grokbot_cerebro.CerebroError, grokbot_fleet.FleetError, grokbot_packs.PackError)):
+            if isinstance(
+                exc,
+                (
+                    grokbot_backup.BackupError,
+                    grokbot_cerebro.CerebroError,
+                    grokbot_fleet.FleetError,
+                    grokbot_packs.PackError,
+                ),
+            ):
                 print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
                 return 2
             raise

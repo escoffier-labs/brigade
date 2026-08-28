@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- First-party Grok Bot Backup Steward connector pack `backup-steward` on `127.0.0.1:8772` with the closed six-tool inventory `backup_overview`, `backup_target_status`, `backup_restore_readiness`, `backup_operation_status`, `backup_propose_action`, and `backup_execute_action`. Preview-first pack lifecycle writes only local config and an explicit unit file; canary is non-mutating and this pack does not cut over live services.
 - `brigade run cloud launch` starts Cursor Cloud or Jules work from a bounded private prompt file. Provider keys stay in the existing environment resolution, launch JSON never includes the prompt or the private lease holder, and a missing key or bad prompt file makes no provider call. Successful bind registers provider IDs, the prompt hash, the expected artifact, and the holder `sync` needs.
 
 ### Fixed

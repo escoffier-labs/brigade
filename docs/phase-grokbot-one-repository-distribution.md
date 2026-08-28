@@ -120,7 +120,11 @@ PR3a landed Cerebro Memory as closed pack `cerebro-memory` on
 `127.0.0.1:8770`. PR3b lands Fleet Steward as closed pack `fleet-steward` on
 `127.0.0.1:8771` with tools `fleet_overview`, `host_status`,
 `incident_bundle`, `propose_remediation`, `service_health`, and
-`execute_remediation`. Pack lifecycle stays preview-first and does not start,
+`execute_remediation`. PR3c lands Backup Steward as closed pack
+`backup-steward` on `127.0.0.1:8772` with tools `backup_overview`,
+`backup_target_status`, `backup_restore_readiness`,
+`backup_operation_status`, `backup_propose_action`, and
+`backup_execute_action`. Pack lifecycle stays preview-first and does not start,
 stop, reload, or enable services. Old sidecar coexistence stays in place;
 PR4 owns cutover.
 
