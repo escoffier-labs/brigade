@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from . import grokbot_backup, grokbot_cerebro, grokbot_fleet, grokbot_mcp, grokbot_ops
+from . import grokbot_backup, grokbot_cerebro, grokbot_fleet, grokbot_mcp, grokbot_obsidian, grokbot_ops
 
 PACK_SCHEMA = "brigade.grokbot.connector-pack.v1"
 INSTANCE_SCHEMA = "brigade.grokbot.connector-instance.v1"
@@ -43,14 +43,27 @@ CONNECTOR_DEFAULT_BINDS = {
     "backup-steward": "127.0.0.1:8772",
     "cerebro-memory": "127.0.0.1:8770",
     "fleet-steward": "127.0.0.1:8771",
+    "obsidian-operator": "127.0.0.1:8773",
 }
 STEWARD_PACK_IDS = frozenset({"backup-steward", "fleet-steward"})
+OBSIDIAN_PACK_ID = "obsidian-operator"
 FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
     {
         "runtime_path",
         "ledger_path",
         "action_state_path",
         "approval_dir",
+    }
+)
+OBSIDIAN_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
+    {
+        "runtime_path",
+        "action_state_path",
+        "approval_dir",
+        "staging_dir",
+        "excalidraw_bin",
+        "upstream_url",
+        "upstream_key",
     }
 )
 CONNECTOR_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"cli_executable", "workdir"})
@@ -88,6 +101,8 @@ def _connector_tools(pack_id: str) -> frozenset[str]:
         return grokbot_cerebro.TOOLS
     if pack_id == "fleet-steward":
         return grokbot_fleet.TOOLS
+    if pack_id == OBSIDIAN_PACK_ID:
+        return grokbot_obsidian.TOOLS
     return frozenset()
 
 
@@ -99,7 +114,7 @@ def _connector_pack(pack_id: str) -> dict[str, Any]:
         "kind": "connector",
         "instance": pack_id,
         "default_bind": CONNECTOR_DEFAULT_BINDS[pack_id],
-        "public_route": "",
+        "public_route": "/mcp" if pack_id == OBSIDIAN_PACK_ID else "",
         "tools": sorted(_connector_tools(pack_id)),
     }
 
@@ -171,6 +186,12 @@ def preview_setup(
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
     approval_dir: str | Path | None = None,
+    staging_dir: str | Path | None = None,
+    excalidraw_bin: str | Path | None = None,
+    upstream_url: str | None = None,
+    upstream_key_env: str | None = None,
+    upstream_key_file: Path | None = None,
+    upstream_key: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return _setup(
         target,
@@ -188,6 +209,12 @@ def preview_setup(
         ledger_path=ledger_path,
         action_state_path=action_state_path,
         approval_dir=approval_dir,
+        staging_dir=staging_dir,
+        excalidraw_bin=excalidraw_bin,
+        upstream_url=upstream_url,
+        upstream_key_env=upstream_key_env,
+        upstream_key_file=upstream_key_file,
+        upstream_key=upstream_key,
     )
 
 
@@ -207,6 +234,12 @@ def apply_setup(
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
     approval_dir: str | Path | None = None,
+    staging_dir: str | Path | None = None,
+    excalidraw_bin: str | Path | None = None,
+    upstream_url: str | None = None,
+    upstream_key_env: str | None = None,
+    upstream_key_file: Path | None = None,
+    upstream_key: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return _setup(
         target,
@@ -224,6 +257,12 @@ def apply_setup(
         ledger_path=ledger_path,
         action_state_path=action_state_path,
         approval_dir=approval_dir,
+        staging_dir=staging_dir,
+        excalidraw_bin=excalidraw_bin,
+        upstream_url=upstream_url,
+        upstream_key_env=upstream_key_env,
+        upstream_key_file=upstream_key_file,
+        upstream_key=upstream_key,
     )
 
 
@@ -235,6 +274,8 @@ def doctor(target: Path, pack_id: str) -> list[dict[str, str]]:
         return grokbot_fleet.doctor(target)
     if pack["id"] == "backup-steward":
         return grokbot_backup.doctor(target)
+    if pack["id"] == OBSIDIAN_PACK_ID:
+        return grokbot_obsidian.doctor(target)
     return grokbot_cerebro.doctor(target)
 
 
@@ -246,6 +287,8 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
         return grokbot_fleet.canary(target)
     if pack["id"] == "backup-steward":
         return grokbot_backup.canary(target)
+    if pack["id"] == OBSIDIAN_PACK_ID:
+        return grokbot_obsidian.canary(target)
     return grokbot_cerebro.canary(target)
 
 
@@ -259,13 +302,23 @@ def render_install_service(target: Path, pack_id: str) -> str:
             return grokbot_fleet.render_unit(target, python=sys.executable)
         if pack["id"] == "backup-steward":
             return grokbot_backup.render_unit(target, python=sys.executable)
+        if pack["id"] == OBSIDIAN_PACK_ID:
+            return grokbot_obsidian.render_unit(target, python=sys.executable)
         return grokbot_cerebro.render_unit(target, python=sys.executable)
     except PackError:
         raise
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
         raise PackError("unsafe-path") from exc
     except Exception as exc:
-        if isinstance(exc, (grokbot_backup.BackupError, grokbot_cerebro.CerebroError, grokbot_fleet.FleetError)):
+        if isinstance(
+            exc,
+            (
+                grokbot_backup.BackupError,
+                grokbot_cerebro.CerebroError,
+                grokbot_fleet.FleetError,
+                grokbot_obsidian.ObsidianError,
+            ),
+        ):
             raise PackError("unsafe-path") from exc
         raise
 
@@ -286,6 +339,8 @@ def apply_install_service(
             path = grokbot_fleet.write_unit(target, out_dir, force=force)
         elif pack["id"] == "backup-steward":
             path = grokbot_backup.write_unit(target, out_dir, force=force)
+        elif pack["id"] == OBSIDIAN_PACK_ID:
+            path = grokbot_obsidian.write_unit(target, out_dir, force=force)
         else:
             path = grokbot_cerebro.write_unit(target, out_dir, force=force)
     except PackError:
@@ -293,7 +348,15 @@ def apply_install_service(
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
         raise PackError("unsafe-path") from exc
     except Exception as exc:
-        if isinstance(exc, (grokbot_backup.BackupError, grokbot_cerebro.CerebroError, grokbot_fleet.FleetError)):
+        if isinstance(
+            exc,
+            (
+                grokbot_backup.BackupError,
+                grokbot_cerebro.CerebroError,
+                grokbot_fleet.FleetError,
+                grokbot_obsidian.ObsidianError,
+            ),
+        ):
             raise PackError("unsafe-path") from exc
         raise
     return {"action": "install-service", "apply": True, "pack_id": pack_id, "unit": path.name}
@@ -332,6 +395,12 @@ def _setup(
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
     approval_dir: str | Path | None = None,
+    staging_dir: str | Path | None = None,
+    excalidraw_bin: str | Path | None = None,
+    upstream_url: str | None = None,
+    upstream_key_env: str | None = None,
+    upstream_key_file: Path | None = None,
+    upstream_key: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     pack = show_pack(pack_id)
     reference = _bearer_reference(bearer_env=bearer_env, bearer_file=bearer_file, bearer=bearer)
@@ -350,15 +419,39 @@ def _setup(
         "bearer": reference,
     }
     fleet_paths = (runtime_path, ledger_path, action_state_path, approval_dir)
+    obsidian_paths = (staging_dir, excalidraw_bin)
+    upstream_fields = (upstream_url, upstream_key_env, upstream_key_file, upstream_key)
     if pack["kind"] == "queue-role":
-        if cli_executable is not None or workdir is not None or any(path is not None for path in fleet_paths):
+        if (
+            cli_executable is not None
+            or workdir is not None
+            or any(path is not None for path in fleet_paths)
+            or any(path is not None for path in obsidian_paths)
+            or any(field is not None for field in upstream_fields)
+        ):
             raise PackError("unexpected-key")
     elif pack["id"] in STEWARD_PACK_IDS:
-        if cli_executable is not None or workdir is not None:
+        if (
+            cli_executable is not None
+            or workdir is not None
+            or any(path is not None for path in obsidian_paths)
+            or any(field is not None for field in upstream_fields)
+        ):
             raise PackError("unexpected-key")
         payload.update(_steward_path_references(pack["id"], runtime_path, ledger_path, action_state_path, approval_dir))
+    elif pack["id"] == OBSIDIAN_PACK_ID:
+        if cli_executable is not None or workdir is not None or ledger_path is not None:
+            raise PackError("unexpected-key")
+        payload.update(
+            _obsidian_path_references(runtime_path, action_state_path, approval_dir, staging_dir, excalidraw_bin)
+        )
+        payload.update(_obsidian_upstream_references(upstream_url, upstream_key_env, upstream_key_file, upstream_key))
     else:
-        if any(path is not None for path in fleet_paths):
+        if (
+            any(path is not None for path in fleet_paths)
+            or any(path is not None for path in obsidian_paths)
+            or any(field is not None for field in upstream_fields)
+        ):
             raise PackError("unexpected-key")
         payload["cli_executable"] = _connector_path_reference(cli_executable, kind="executable")
         payload["workdir"] = _connector_path_reference(workdir, kind="directory")
@@ -739,7 +832,20 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
     if not isinstance(route, str) or not PUBLIC_ROUTE_RE.fullmatch(route):
         raise PackError("unexpected-key")
     _validate_bearer_reference(payload.get("bearer"))
-    if pack["id"] in STEWARD_PACK_IDS:
+    if pack["id"] == OBSIDIAN_PACK_ID:
+        _obsidian_path_references(
+            payload.get("runtime_path"),
+            payload.get("action_state_path"),
+            payload.get("approval_dir"),
+            payload.get("staging_dir"),
+            payload.get("excalidraw_bin"),
+        )
+        try:
+            grokbot_obsidian.required_upstream_url(payload.get("upstream_url"))
+        except grokbot_obsidian.ObsidianError as exc:
+            raise PackError("unsafe-path") from exc
+        _validate_bearer_reference(payload.get("upstream_key"))
+    elif pack["id"] in STEWARD_PACK_IDS:
         _steward_path_references(
             pack["id"],
             payload.get("runtime_path"),
@@ -792,9 +898,55 @@ def _validate_bearer_reference(reference: object) -> dict[str, str]:
 def _instance_keys(pack: Mapping[str, Any]) -> frozenset[str]:
     if pack["kind"] == "queue-role":
         return INSTANCE_KEYS
+    if pack["id"] == OBSIDIAN_PACK_ID:
+        return OBSIDIAN_INSTANCE_KEYS
     if pack["id"] in STEWARD_PACK_IDS:
         return FLEET_INSTANCE_KEYS
     return CONNECTOR_INSTANCE_KEYS
+
+
+def _obsidian_upstream_references(
+    upstream_url: object,
+    upstream_key_env: str | None,
+    upstream_key_file: Path | None,
+    upstream_key: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if upstream_url is None:
+        raise PackError("missing-upstream-reference")
+    try:
+        url = grokbot_obsidian.required_upstream_url(upstream_url)
+    except grokbot_obsidian.ObsidianError as exc:
+        raise PackError("unsafe-path") from exc
+    if upstream_key is not None:
+        if upstream_key_env is not None or upstream_key_file is not None:
+            raise PackError("missing-secret-reference")
+        reference = _validate_bearer_reference(upstream_key)
+    elif upstream_key_env is None and upstream_key_file is None:
+        raise PackError("missing-upstream-reference")
+    else:
+        reference = _bearer_reference(bearer_env=upstream_key_env, bearer_file=upstream_key_file, bearer=None)
+    return {"upstream_url": url, "upstream_key": reference}
+
+
+def _obsidian_path_references(
+    runtime_path: object,
+    action_state_path: object,
+    approval_dir: object,
+    staging_dir: object,
+    excalidraw_bin: object,
+) -> dict[str, str]:
+    if any(value is None for value in (runtime_path, action_state_path, approval_dir, staging_dir, excalidraw_bin)):
+        raise PackError("missing-path-reference")
+    try:
+        return grokbot_obsidian.validate_disjoint_state_paths(
+            str(runtime_path),
+            str(action_state_path),
+            str(approval_dir),
+            str(staging_dir),
+            str(excalidraw_bin),
+        )
+    except grokbot_obsidian.ObsidianError as exc:
+        raise PackError("unsafe-path") from exc
 
 
 def _steward_path_references(

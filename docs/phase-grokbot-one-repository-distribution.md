@@ -124,7 +124,11 @@ PR3a landed Cerebro Memory as closed pack `cerebro-memory` on
 `backup-steward` on `127.0.0.1:8772` with tools `backup_overview`,
 `backup_target_status`, `backup_restore_readiness`,
 `backup_operation_status`, `backup_propose_action`, and
-`backup_execute_action`. Pack lifecycle stays preview-first and does not start,
+`backup_execute_action`. PR3d lands Obsidian Operator as closed pack
+`obsidian-operator` on `127.0.0.1:8773` with public route `/mcp` and tools
+`obsidian_capabilities`, `obsidian_search`, `obsidian_read`,
+`obsidian_action_status`, `obsidian_propose_action`, and
+`obsidian_execute_action`. Pack lifecycle stays preview-first and does not start,
 stop, reload, or enable services. Old sidecar coexistence stays in place;
 PR4 owns cutover.
 

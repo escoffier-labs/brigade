@@ -254,7 +254,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_grokbot_serve.add_argument("--target", type=Path, default=Path("."))
     serve_identity = p_grokbot_serve.add_mutually_exclusive_group(required=True)
     serve_identity.add_argument("--instance", choices=("operator", "repository-scout", "implementation-worker"))
-    serve_identity.add_argument("--pack", choices=("cerebro-memory", "fleet-steward", "backup-steward"))
+    serve_identity.add_argument(
+        "--pack", choices=("cerebro-memory", "fleet-steward", "backup-steward", "obsidian-operator")
+    )
     p_grokbot_serve.add_argument(
         "--bind", default=None, help="Listener host:port. Defaults to the role or pack loopback."
     )
@@ -263,6 +265,21 @@ def register(sub: argparse._SubParsersAction) -> None:
     secret_group = p_grokbot_serve.add_mutually_exclusive_group(required=True)
     secret_group.add_argument("--bearer-file", type=Path, help="Protected file containing the listener bearer.")
     secret_group.add_argument("--bearer-env", help="Environment variable name containing the listener bearer.")
+    p_grokbot_serve.add_argument(
+        "--upstream-url",
+        default=None,
+        help="Loopback HTTPS Local REST URL. Used by obsidian-operator.",
+    )
+    serve_upstream_key = p_grokbot_serve.add_mutually_exclusive_group()
+    serve_upstream_key.add_argument(
+        "--upstream-key-file",
+        type=Path,
+        help="Protected file containing the Obsidian upstream key (reference only).",
+    )
+    serve_upstream_key.add_argument(
+        "--upstream-key-env",
+        help="Environment variable name containing the Obsidian upstream key.",
+    )
 
     def add_instance(command: argparse.ArgumentParser) -> None:
         command.add_argument("--target", type=Path, default=Path("."))
@@ -336,7 +353,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--runtime-path",
         type=Path,
         default=None,
-        help="Absolute steward runtime JSON path. Required for fleet-steward and backup-steward.",
+        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, and obsidian-operator.",
     )
     p_pack_setup.add_argument(
         "--ledger-path",
@@ -348,13 +365,40 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--action-state-path",
         type=Path,
         default=None,
-        help="Absolute steward action-state directory. Required for fleet-steward and backup-steward.",
+        help="Absolute action-state directory. Required for fleet-steward, backup-steward, and obsidian-operator.",
     )
     p_pack_setup.add_argument(
         "--approval-dir",
         type=Path,
         default=None,
-        help="Absolute steward approval directory. Required for fleet-steward and backup-steward.",
+        help="Absolute approval directory. Required for fleet-steward, backup-steward, and obsidian-operator.",
+    )
+    p_pack_setup.add_argument(
+        "--staging-dir",
+        type=Path,
+        default=None,
+        help="Absolute Obsidian staging directory. Required for obsidian-operator.",
+    )
+    p_pack_setup.add_argument(
+        "--excalidraw-bin",
+        type=Path,
+        default=None,
+        help="Absolute Excalidraw helper executable. Required for obsidian-operator.",
+    )
+    p_pack_setup.add_argument(
+        "--upstream-url",
+        default=None,
+        help="Loopback HTTPS Local REST URL. Required for obsidian-operator.",
+    )
+    pack_upstream_key = p_pack_setup.add_mutually_exclusive_group()
+    pack_upstream_key.add_argument(
+        "--upstream-key-file",
+        type=Path,
+        help="Path of a protected upstream-key file (reference only). Required for obsidian-operator.",
+    )
+    pack_upstream_key.add_argument(
+        "--upstream-key-env",
+        help="Name of the environment variable holding the upstream key. Required for obsidian-operator.",
     )
     p_pack_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
 
@@ -799,6 +843,11 @@ def _dispatch_grokbot(args, target: Path) -> int:
             if getattr(args, "pack", None):
                 from .. import grokbot_cerebro
 
+                if args.pack != "obsidian-operator" and (
+                    args.upstream_url or args.upstream_key_file or args.upstream_key_env
+                ):
+                    print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
+                    return 2
                 listener_kwargs = {
                     "bind": args.bind,
                     "allowed_hosts": args.allow_host,
@@ -822,6 +871,17 @@ def _dispatch_grokbot(args, target: Path) -> int:
 
                     backup_config, backup_tools = build_backup_listener(target, **listener_kwargs)
                     run_backup_listener(backup_config, backup_tools)
+                elif args.pack == "obsidian-operator":
+                    from ..grokbot_obsidian.lifecycle import (
+                        build_listener_from_target as build_obsidian_listener,
+                        run_listener as run_obsidian_listener,
+                    )
+
+                    listener_kwargs["upstream_url"] = args.upstream_url
+                    listener_kwargs["upstream_key_file"] = args.upstream_key_file
+                    listener_kwargs["upstream_key_env"] = args.upstream_key_env
+                    obsidian_config, obsidian_tools = build_obsidian_listener(target, **listener_kwargs)
+                    run_obsidian_listener(obsidian_config, obsidian_tools)
                 else:
                     cerebro_config, cerebro_tools = grokbot_cerebro.build_listener_from_target(
                         target, **listener_kwargs
@@ -845,7 +905,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
             print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
             return 2
         except Exception as exc:
-            from .. import grokbot_backup, grokbot_cerebro, grokbot_fleet, grokbot_packs
+            from .. import grokbot_backup, grokbot_cerebro, grokbot_fleet, grokbot_obsidian, grokbot_packs
 
             if isinstance(
                 exc,
@@ -853,6 +913,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     grokbot_backup.BackupError,
                     grokbot_cerebro.CerebroError,
                     grokbot_fleet.FleetError,
+                    grokbot_obsidian.ObsidianError,
                     grokbot_packs.PackError,
                 ),
             ):
@@ -1088,6 +1149,11 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
                 "ledger_path": getattr(args, "ledger_path", None),
                 "action_state_path": getattr(args, "action_state_path", None),
                 "approval_dir": getattr(args, "approval_dir", None),
+                "staging_dir": getattr(args, "staging_dir", None),
+                "excalidraw_bin": getattr(args, "excalidraw_bin", None),
+                "upstream_url": getattr(args, "upstream_url", None),
+                "upstream_key_env": getattr(args, "upstream_key_env", None),
+                "upstream_key_file": getattr(args, "upstream_key_file", None),
             }
             result = (
                 grokbot_packs.apply_setup(target, args.pack_id, **setup_kwargs)
