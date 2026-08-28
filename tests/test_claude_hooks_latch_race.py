@@ -21,6 +21,7 @@ import pytest
 
 from brigade.claude_hooks import envelope, runtime
 from brigade.work_cmd import inbox_lock
+from tests import thread_sync
 from tests.test_claude_hooks_user_target import PACKAGE_REF, _payload, _wired_claude
 
 
@@ -598,20 +599,25 @@ def test_abandoned_overflow_increment_is_recovered_by_next_fold(tmp_path: Path, 
     holder = threading.Thread(target=hold_session_lock)
     holder.start()
     assert acquired.wait(timeout=2)
+    pending_path = session_state._pending_increment_path(target, "s")
     process = mp.get_context("fork").Process(target=_record_hook_timeout_in_fork, args=(target, "s"))
     try:
         process.start()
-        deadline = time.monotonic() + 2
-        pending = 0
-        while time.monotonic() < deadline:
-            pending = session_state._pending_timeout_count(target, "s")
-            if pending >= 1:
-                break
-            time.sleep(0.01)
+        # Sidecar is written immediately before the overflow lock wait. Combined
+        # with a still-live child, this proves we are killing mid-wait rather
+        # than reaping a child that already exhausted its retry and exited.
+        thread_sync.wait_for_predicate(
+            lambda: pending_path.is_file() and process.is_alive(),
+            description="overflow child wrote *.json.timeouts.pending and is still in the lock wait",
+        )
+        assert process.is_alive()
+        assert process.exitcode is None
+        pending = session_state._pending_timeout_count(target, "s")
         assert pending >= 1, "overflow writer must persist a pending increment before the retry wait"
-        os.kill(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        assert process.pid is not None
+        os.kill(process.pid, signal.SIGKILL)
         process.join(timeout=2)
-        assert not process.is_alive()
+        assert process.exitcode == -signal.SIGKILL
     finally:
         release.set()
         holder.join(timeout=2)
