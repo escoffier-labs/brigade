@@ -12,6 +12,7 @@ import contextlib
 import json
 import multiprocessing as mp
 import os
+import signal
 import threading
 import time
 from pathlib import Path
@@ -35,12 +36,16 @@ def _record_hook_timeout_in_fork(target: Path, session_id: str) -> None:
 
 
 def _persisted_timeout_count(target: Path, session_id: str) -> int:
-    """Return state count plus journal markers not yet folded into it."""
+    """Return state count plus journal and pending markers not yet folded into it."""
     from brigade.claude_hooks import session_state
 
     state = runtime.read_session_state(target, session_id)
     current = state if isinstance(state, dict) else {}
-    return session_state._effective_timeout_count(current, session_state._journal_timeout_count(target, session_id))
+    return session_state._effective_timeout_count(
+        current,
+        session_state._journal_timeout_count(target, session_id),
+        session_state._pending_timeout_count(target, session_id),
+    )
 
 
 def test_session_state_helpers_resolve_runtime_primitives_at_call_time(tmp_path: Path, monkeypatch) -> None:
@@ -293,7 +298,10 @@ def test_concurrent_timeout_increments_are_not_lost(tmp_path: Path) -> None:
 
     def record() -> None:
         for _ in range(25):
-            runtime._record_hook_timeout(target, "s")
+            try:
+                runtime._record_hook_timeout(target, "s")
+            except inbox_lock.InboxLockTimeout:
+                continue
 
     threads = [threading.Thread(target=record) for _ in range(8)]
     for thread in threads:
@@ -308,33 +316,28 @@ def test_concurrent_timeout_increments_are_not_lost(tmp_path: Path) -> None:
 
 
 def test_journal_overflow_retries_lock_instead_of_dropping(tmp_path: Path, monkeypatch) -> None:
-    """A lock-timeout increment past the journal cap must retry the locked write."""
+    """A lock-timeout increment past the journal cap must persist and fold later."""
     from brigade.claude_hooks import session_state
 
     target = _wired_claude(tmp_path)
     overflow = session_state._TIMEOUT_JOURNAL_MAX_LINES + 4
-    overflow_timeouts = 1
-    real_lock = runtime._session_state_lock
 
     @contextlib.contextmanager
-    def gated_lock(lock_target: Path, session_id: str):
-        nonlocal overflow_timeouts
-        journal = session_state._journal_timeout_count(lock_target, session_id)
-        if journal < session_state._TIMEOUT_JOURNAL_MAX_LINES:
-            raise inbox_lock.InboxLockTimeout("busy")
-            yield
-        if overflow_timeouts > 0:
-            overflow_timeouts -= 1
-            raise inbox_lock.InboxLockTimeout("busy")
-            yield
-        with real_lock(lock_target, session_id):
-            yield
+    def timeout_lock(_target: Path, _session_id: str):
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
 
-    monkeypatch.setattr(runtime, "_session_state_lock", gated_lock)
-    for _ in range(overflow):
-        runtime._record_hook_timeout(target, "s")
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "_session_state_lock", timeout_lock)
+        for _ in range(session_state._TIMEOUT_JOURNAL_MAX_LINES):
+            runtime._record_hook_timeout(target, "s")
+        for _ in range(overflow - session_state._TIMEOUT_JOURNAL_MAX_LINES):
+            with pytest.raises(inbox_lock.InboxLockTimeout, match="busy"):
+                runtime._record_hook_timeout(target, "s")
 
     assert _persisted_timeout_count(target, "s") == overflow
+    folded = runtime._record_hook_timeout(target, "s")
+    assert folded["hook_timeout_count"] == overflow + 1
     assert session_state._journal_timeout_count(target, "s") == session_state._TIMEOUT_JOURNAL_MAX_LINES
 
 
@@ -355,7 +358,7 @@ def test_journal_full_and_lock_exhausted_raises(tmp_path: Path, monkeypatch) -> 
 
     with pytest.raises(inbox_lock.InboxLockTimeout, match="busy"):
         runtime._record_hook_timeout(target, "s")
-    assert _persisted_timeout_count(target, "s") == session_state._TIMEOUT_JOURNAL_MAX_LINES
+    assert _persisted_timeout_count(target, "s") == session_state._TIMEOUT_JOURNAL_MAX_LINES + 1
 
 
 def test_held_lock_past_budget_does_not_lose_increments(tmp_path: Path) -> None:
@@ -396,7 +399,7 @@ def test_held_lock_past_budget_does_not_lose_increments(tmp_path: Path) -> None:
     for thread in threads:
         thread.join(timeout=5)
     assert not any(thread.is_alive() for thread in threads)
-    assert errors == []
+    assert all(isinstance(error, inbox_lock.InboxLockTimeout) for error in errors)
     assert _persisted_timeout_count(target, "s") == workers
 
 
@@ -553,6 +556,74 @@ def test_timeout_followup_budget_keeps_handler_headroom() -> None:
     worst = worker + terminate + followup + followup
     assert worst <= DEFAULT_HOOK_TIMEOUT_SECONDS - 0.5
     assert not hasattr(runtime, "_TIMEOUT_FOLLOWUP_OBSERVE_SLACK_SECONDS")
+
+
+def test_timeout_retry_budget_fits_inside_followup() -> None:
+    """Overflow lock retries must finish before the daemon follow-up is abandoned."""
+    from brigade.claude_hooks import session_state
+
+    followup = runtime._TIMEOUT_FOLLOWUP_SECONDS
+    lock = runtime._SESSION_STATE_LOCK_SECONDS
+    wall = session_state._timeout_retry_wall_seconds()
+    assert wall == session_state._timeout_lock_attempts() * lock
+    assert wall < followup
+    assert (session_state._TIMEOUT_LOCK_RETRIES + 1) * lock == wall
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fork/kill abandon simulation is POSIX-only")
+def test_abandoned_overflow_increment_is_recovered_by_next_fold(tmp_path: Path, monkeypatch) -> None:
+    """A killed overflow writer leaves a pending increment that the next fold consumes."""
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+
+    @contextlib.contextmanager
+    def timeout_lock(_target: Path, _session_id: str):
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "_session_state_lock", timeout_lock)
+        for _ in range(session_state._TIMEOUT_JOURNAL_MAX_LINES):
+            runtime._record_hook_timeout(target, "s")
+
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_session_lock() -> None:
+        with runtime._session_state_lock(target, "s"):
+            acquired.set()
+            release.wait(timeout=10)
+
+    holder = threading.Thread(target=hold_session_lock)
+    holder.start()
+    assert acquired.wait(timeout=2)
+    process = mp.get_context("fork").Process(target=_record_hook_timeout_in_fork, args=(target, "s"))
+    try:
+        process.start()
+        deadline = time.monotonic() + 2
+        pending = 0
+        while time.monotonic() < deadline:
+            pending = session_state._pending_timeout_count(target, "s")
+            if pending >= 1:
+                break
+            time.sleep(0.01)
+        assert pending >= 1, "overflow writer must persist a pending increment before the retry wait"
+        os.kill(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        process.join(timeout=2)
+        assert not process.is_alive()
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
+
+    journaled = session_state._TIMEOUT_JOURNAL_MAX_LINES
+    assert _persisted_timeout_count(target, "s") == journaled + pending
+    recovered = runtime._record_hook_timeout(target, "s")
+    assert recovered["hook_timeout_count"] == journaled + pending + 1
+    assert _persisted_timeout_count(target, "s") == journaled + pending + 1
 
 
 def test_bounded_followup_latches_when_session_lock_times_out(tmp_path: Path, monkeypatch) -> None:
