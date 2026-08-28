@@ -90,7 +90,12 @@ def untested_parser_paths_report(*, tests_root: Path | None = None) -> dict[str,
     }
 
 
-def test_parser_inventory_and_missing_cli_agree_after_alias_normalization():
+def test_parser_inventory_and_missing_cli_agree_after_alias_normalization(monkeypatch, tmp_path):
+    # Pin extras off so this contract cannot pass via ~/.config/brigade/extras
+    # or a developer BRIGADE_EXTRAS=1. _cli_command_paths enumerates the full
+    # documented extras surface regardless.
+    monkeypatch.setenv("BRIGADE_EXTRAS", "0")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     parser_paths = roadmap_cmd._cli_command_paths()
     inventory_paths = _inventory_command_paths(COMMAND_INVENTORY.read_text(encoding="utf-8"))
 
