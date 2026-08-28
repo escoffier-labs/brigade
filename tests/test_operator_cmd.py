@@ -1801,3 +1801,62 @@ def test_adopt_plan_counts_guidance_files_and_dirs_separately(tmp_path, capsys):
     assert cli.main(["operator", "adopt", "plan", "--target", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "guidance_files: 1 (+1 dirs)" in out
+
+
+def test_migration_consolidate_keeps_scanner_commit_landing_before_publication(tmp_path, monkeypatch, capsys):
+    """Finding 3: a canonical writer that locked before reading keeps a concurrent scanner row."""
+    import contextlib
+
+    from brigade.work_cmd import ledger as ledger_mod
+
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "id": "mig-rollup-1",
+            "kind": "task",
+            "source": "operator-migration",
+            "status": "pending",
+            "text": "rollup gap",
+            "metadata": {"gap_name": "surface_reviews_missing"},
+        },
+        {
+            "id": "surf-review-1",
+            "kind": "task",
+            "source": "operator-surface-review",
+            "status": "pending",
+            "text": "tiny surface review",
+            "metadata": {"surface": "shell_crontab", "review_status": "needs-owner"},
+        },
+    ]
+    inbox.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+
+    real = ledger_mod._canonical_inbox_write
+
+    @contextlib.contextmanager
+    def patched(target):
+        with inbox.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "id": "scan-mig-1",
+                        "text": "scanner migrate row",
+                        "kind": "task",
+                        "source": "scanner",
+                        "status": "pending",
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        with real(target):
+            yield
+
+    monkeypatch.setattr(ledger_mod, "_canonical_inbox_write", patched)
+
+    assert operator_cmd.migration_consolidate(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    final = {item["id"]: item for item in work_cmd._read_imports(tmp_path)}
+    assert final["surf-review-1"]["status"] == "dismissed"
+    assert "scan-mig-1" in final, f"scanner commit deleted by migration consolidate: {sorted(final)}"
+    assert final["scan-mig-1"]["status"] == "pending"

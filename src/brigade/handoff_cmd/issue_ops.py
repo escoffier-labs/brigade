@@ -609,56 +609,58 @@ def _close_stale_local_issue_work(
     dry_run: bool,
 ) -> dict[str, list[dict[str, Any]]]:
     from .. import work_cmd
+    from ..work_cmd import ledger as ledger_mod
 
     wanted_categories = {category for category in categories or [] if category}
     now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
     closed_imports: list[dict[str, Any]] = []
-    imports = work_cmd._read_imports(target)
-    for item in imports:
-        if not isinstance(item, dict) or item.get("status", "pending") != "pending":
-            continue
-        if item.get("source") != ISSUE_SOURCE:
-            continue
-        issue_id = _handoff_issue_id(item)
-        if not issue_id:
-            continue
-        if issue_id in current_ids and issue_id not in close_current_ids:
-            continue
-        if wanted_categories and _handoff_issue_category(item) not in wanted_categories:
-            continue
-        updated = dict(item)
-        updated["status"] = "dismissed"
-        updated["updated_at"] = now
-        updated["dismissed_at"] = now
-        updated["dismiss_reason"] = _stale_close_reason(issue_id, close_current_ids)
-        item.update(updated)
-        closed_imports.append(updated)
-    if closed_imports and not dry_run:
-        work_cmd._write_imports(target, imports)
-
     closed_tasks: list[dict[str, Any]] = []
-    ledger = work_cmd._read_task_ledger(target)
-    for task in ledger.get("tasks", []):
-        if not isinstance(task, dict) or task.get("status", "pending") != "pending":
-            continue
-        if task.get("source") != f"import:{ISSUE_SOURCE}":
-            continue
-        issue_id = _handoff_issue_id(task)
-        if not issue_id:
-            continue
-        if issue_id in current_ids and issue_id not in close_current_ids:
-            continue
-        if wanted_categories and _handoff_issue_category(task) not in wanted_categories:
-            continue
-        updated = dict(task)
-        updated["status"] = "done"
-        updated["updated_at"] = now
-        updated["completed_at"] = now
-        updated["completion_reason"] = _stale_close_reason(issue_id, close_current_ids)
-        task.update(updated)
-        closed_tasks.append(updated)
-    if closed_tasks and not dry_run:
-        work_cmd._write_task_ledger(target, ledger)
+    with work_cmd._task_ledger_lock(target), ledger_mod._canonical_inbox_write(target):
+        imports = work_cmd._read_imports(target)
+        for item in imports:
+            if not isinstance(item, dict) or item.get("status", "pending") != "pending":
+                continue
+            if item.get("source") != ISSUE_SOURCE:
+                continue
+            issue_id = _handoff_issue_id(item)
+            if not issue_id:
+                continue
+            if issue_id in current_ids and issue_id not in close_current_ids:
+                continue
+            if wanted_categories and _handoff_issue_category(item) not in wanted_categories:
+                continue
+            updated = dict(item)
+            updated["status"] = "dismissed"
+            updated["updated_at"] = now
+            updated["dismissed_at"] = now
+            updated["dismiss_reason"] = _stale_close_reason(issue_id, close_current_ids)
+            item.update(updated)
+            closed_imports.append(updated)
+        if closed_imports and not dry_run:
+            work_cmd._write_imports(target, imports)
+
+        ledger = work_cmd._read_task_ledger(target)
+        for task in ledger.get("tasks", []):
+            if not isinstance(task, dict) or task.get("status", "pending") != "pending":
+                continue
+            if task.get("source") != f"import:{ISSUE_SOURCE}":
+                continue
+            issue_id = _handoff_issue_id(task)
+            if not issue_id:
+                continue
+            if issue_id in current_ids and issue_id not in close_current_ids:
+                continue
+            if wanted_categories and _handoff_issue_category(task) not in wanted_categories:
+                continue
+            updated = dict(task)
+            updated["status"] = "done"
+            updated["updated_at"] = now
+            updated["completed_at"] = now
+            updated["completion_reason"] = _stale_close_reason(issue_id, close_current_ids)
+            task.update(updated)
+            closed_tasks.append(updated)
+        if closed_tasks and not dry_run:
+            work_cmd._write_task_ledger(target, ledger)
 
     return {
         "imports": closed_imports,

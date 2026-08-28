@@ -44,18 +44,15 @@ open-to-validation window remains a documented residual there. A same-UID
 attacker can additionally ignore the advisory locks entirely; launch-time
 inbox revalidation detects that case.
 
-Each lock is reentrant per process so nested writer paths inside one
-acquisition cannot self-deadlock; nested acquisitions share the outer
-cross-process acquisition.
+Each lock is reentrant for the owning thread so nested writer paths inside
+one acquisition cannot self-deadlock; other threads in the same process
+wait on a per-entry ``RLock`` until that owner fully releases, then take
+their own cross-process acquisition.
 
 Residuals tracked in escoffier-labs/brigade#1215: a descendant that calls
 ``setsid()`` or double-forks escapes process-group reaping (``descendants_reaped``
-records that the group was reaped, not that no descendant survives); reentrancy
-is process-wide rather than thread-owned; canonical writers outside ``work_cmd``
-(operator migration, trust gate, session ops, issue ops, actions dispatch) still
-read the inbox before taking the locks; ``InboxLockTimeout`` escapes a few CLI
-paths as a traceback instead of a bounded nonzero result; and the Windows
-``LK_NBLCK`` deadline path has no native contention test yet.
+records that the group was reaped, not that no descendant survives); and the
+Windows ``LK_NBLCK`` deadline path has no native contention test yet.
 """
 
 from __future__ import annotations
@@ -105,20 +102,21 @@ if hasattr(os, "register_at_fork"):
 
 
 class _ActiveInboxLock:
-    """One process-wide registry entry: ownership and depth together.
+    """One registry entry: thread-owned depth plus the cross-process hold.
 
-    Keeping the cross-process acquisition and the reentrancy count in a single
-    entry means an inner thread context can never lose the fd to an outer
-    context that exits first, the descriptor closes exactly once at outermost
-    exit, and concurrent first acquisitions serialize on ``ready`` instead of
-    observing a half-initialized entry.
+    Only the owning thread may increase ``depth``. Other threads serialize on
+    ``thread_lock`` until that owner fully releases, so two threads cannot
+    share the writer window. The descriptor still closes exactly once at the
+    owner's outermost exit.
     """
 
     def __init__(self) -> None:
         self.owner: _HeldInboxLock | None = None
         self.depth = 0
+        self.owner_ident: int | None = None
         self.ready = threading.Event()
         self.error: BaseException | None = None
+        self.thread_lock = threading.RLock()
 
 
 #: Default bounded window for one cross-process inbox lock acquisition. A
@@ -337,8 +335,8 @@ def scanner_inbox_run_lock(target: Path, *, deadline_seconds: float | None = Non
     """Hold the workspace's run-wide inbox exclusion for the block.
 
     Only a scanner launcher holds this across its run window; honest Brigade
-    writers in other processes serialize behind it (reentrant per process so
-    nested paths inside one holder cannot self-deadlock). Acquisition is
+    writers in other processes serialize behind it (reentrant for the owning
+    thread so nested paths inside one holder cannot self-deadlock). Acquisition is
     deadline-bounded: a lock held past ``deadline_seconds`` (default
     :data:`DEFAULT_LOCK_DEADLINE_SECONDS`) raises :class:`InboxLockTimeout`.
     """
@@ -353,7 +351,7 @@ def inbox_writer_lock(target: Path, *, deadline_seconds: float | None = None) ->
     Serializes one read-modify-write section across all writers: outside
     writers (run lock first), self-importing scanner children (this lock
     only), and the launcher's stamping/rollback sections (under its run lock).
-    Reentrant per process like the run lock, and deadline-bounded like it.
+    Reentrant for the owning thread like the run lock, and deadline-bounded like it.
     """
     with _held_inbox_lock(inbox_writer_lock_path(target), deadline_seconds=deadline_seconds) as held:
         yield held
@@ -362,24 +360,49 @@ def inbox_writer_lock(target: Path, *, deadline_seconds: float | None = None) ->
 @contextlib.contextmanager
 def _held_inbox_lock(key_path: Path, *, deadline_seconds: float | None = None) -> Iterator[_HeldInboxLock]:
     key = str(key_path)
-    with _PROCESS_LOCK:
-        entry = _ACTIVE_LOCKS.get(key)
-        fresh = entry is None
-        if fresh:
-            entry = _ActiveInboxLock()
-            _ACTIVE_LOCKS[key] = entry
+    ident = threading.get_ident()
+    requested_seconds, deadline = _resolve_deadline(deadline_seconds)
+    entry: _ActiveInboxLock | None = None
+    fresh = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise InboxLockTimeout(f"import inbox lock stayed busy for {requested_seconds:g}s: {key}")
+        with _PROCESS_LOCK:
+            entry = _ACTIVE_LOCKS.get(key)
+            if entry is None:
+                entry = _ActiveInboxLock()
+                _ACTIVE_LOCKS[key] = entry
         assert entry is not None
-        entry.depth += 1
+        if not entry.thread_lock.acquire(timeout=remaining):
+            raise InboxLockTimeout(f"import inbox lock stayed busy for {requested_seconds:g}s: {key}")
+        with _PROCESS_LOCK:
+            current = _ACTIVE_LOCKS.get(key)
+            if current is not entry:
+                entry.thread_lock.release()
+                continue
+            if entry.owner_ident is None:
+                entry.owner_ident = ident
+                fresh = True
+            elif entry.owner_ident == ident:
+                fresh = False
+            else:
+                entry.thread_lock.release()
+                continue
+            entry.depth += 1
+        break
+    assert entry is not None
     try:
-        if fresh and entry is not None:
+        if fresh:
             # Initialization runs outside the module lock (the cross-process
-            # acquisition blocks), but the entry exists and later joiners wait
-            # on ``ready``, so no one can observe a missing owner.
+            # acquisition blocks). Same-thread reentry waits on ``ready``;
+            # other threads are still queued on ``thread_lock``.
             try:
                 owned = _acquire_cross_process(key, deadline_seconds=deadline_seconds)
             except BaseException as exc:
                 with _PROCESS_LOCK:
                     entry.error = exc
+                    entry.owner_ident = None
                     if _ACTIVE_LOCKS.get(key) is entry:
                         _ACTIVE_LOCKS.pop(key, None)
                 entry.ready.set()
@@ -389,7 +412,6 @@ def _held_inbox_lock(key_path: Path, *, deadline_seconds: float | None = None) -
             entry.ready.set()
             yield owned
         else:
-            assert entry is not None
             entry.ready.wait()
             if entry.error is not None:
                 raise entry.error
@@ -406,9 +428,12 @@ def _held_inbox_lock(key_path: Path, *, deadline_seconds: float | None = None) -
                 # longer holds, and the entry must be gone before the fd closes.
                 drop = True
                 release_owned = entry.owner
+                entry.owner = None
+                entry.owner_ident = None
                 _ACTIVE_LOCKS.pop(key, None)
         if drop and release_owned is not None:
             release_owned.release()
+        entry.thread_lock.release()
 
 
 def _open_lock_parent_posix(lock_path: Path) -> tuple[int, str]:

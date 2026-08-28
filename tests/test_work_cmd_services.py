@@ -3748,3 +3748,23 @@ def test_inbox_archive_keeps_scanner_commit_landing_before_publication(tmp_path,
     # ...and the scanner commit landing before publication survived.
     assert "scan-archive-1" in final, f"scanner commit deleted by archive: {sorted(final)}"
     assert final["scan-archive-1"]["status"] == "pending"
+
+
+def test_inbox_archive_returns_bounded_error_on_inbox_lock_timeout(tmp_path, monkeypatch, capsys):
+    """Finding 4: archive returns rc 1 with a bounded error instead of a traceback."""
+    import contextlib
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import ledger as ledger_mod
+
+    @contextlib.contextmanager
+    def boom(_target):
+        raise inbox_lock_mod.InboxLockTimeout("import inbox lock stayed busy for 0.5s: test")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ledger_mod, "_canonical_inbox_write", boom)
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 1
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "import inbox lock stayed busy" in captured.err
+    assert "Traceback" not in captured.err
