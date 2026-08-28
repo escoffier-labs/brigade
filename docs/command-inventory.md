@@ -571,8 +571,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs interrupt`
 - `brigade runs latest`
 - `brigade runs list`
-- `brigade runs recover`
 - `brigade runs reap`
+- `brigade runs recover`
 - `brigade runs redact`
 - `brigade runs resume`
 - `brigade runs serve`
