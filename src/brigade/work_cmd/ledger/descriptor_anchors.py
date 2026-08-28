@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -27,6 +28,24 @@ from ...untrusted import scan_handoff_injection_heuristics
 from . import authority_store, import_model
 
 _AUTHORITY_SNAPSHOT_READ_CHUNK_BYTES = 1024 * 1024
+_FILE_AUTHORITY_UPDATE_LOCKS_GUARD = threading.Lock()
+_FILE_AUTHORITY_UPDATE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _file_authority_update_lock(target: Path) -> threading.Lock:
+    """Return the in-process lock that serializes one target's file-authority RMW.
+
+    ``inbox_writer_lock`` is process-reentrant, so two threads can both read
+    state S and then publish S+A and S+B; the second atomic replace drops A.
+    This lock is taken around that window in addition to the file lock.
+    """
+    key = str(target.expanduser().resolve())
+    with _FILE_AUTHORITY_UPDATE_LOCKS_GUARD:
+        lock = _FILE_AUTHORITY_UPDATE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_AUTHORITY_UPDATE_LOCKS[key] = lock
+        return lock
 
 
 def _record_verifier_owned_directory(
@@ -152,7 +171,7 @@ def _record_verifier_owned_file(
     """Record durable file identity after the verifier has published the bytes."""
     bound_workspace = authority_store._external_workspace_directory_identity(target) if workspace is None else workspace
     authority_store._require_workspace_directory_identity(target, bound_workspace)
-    with inbox_lock.inbox_writer_lock(target):
+    with _file_authority_update_lock(target), inbox_lock.inbox_writer_lock(target):
         path, existing = authority_store._read_external_directory_authority(target)
         resolved = str(target.expanduser().resolve())
         authority_store._require_workspace_directory_identity(target, bound_workspace)
@@ -173,6 +192,7 @@ def _record_verifier_owned_file(
         if files.get(scope) == identity:
             return
         files[scope] = identity
+        inbox_lock.verify_inbox_writer_lock(target)
         authority_store._write_external_directory_authority(path, existing, workspace=target)
         if _file_identity(descriptor, data) != identity:
             raise OSError("file identity changed while recording authority")
@@ -344,10 +364,12 @@ def _open_verifier_owned_directory(
                     raise
                 authority_store._dirfd_mkdir(descriptor, component)
                 child = authority_store._dirfd_open_dir(descriptor, component)
-            os.close(descriptor)
+            tmp = descriptor
             descriptor = child
-        anchor_parent = descriptor
+            os.close(tmp)
+        tmp = descriptor
         descriptor = -1
+        anchor_parent = tmp
         parent_name = components[-2]
         try:
             parent = authority_store._dirfd_open_dir(anchor_parent, parent_name)
@@ -358,15 +380,16 @@ def _open_verifier_owned_directory(
             parent = authority_store._dirfd_open_dir(anchor_parent, parent_name)
         name = components[-1]
         created = False
+        child = -1
         try:
-            child = authority_store._dirfd_open_dir(parent, name)
-        except FileNotFoundError:
-            if not create:
-                raise
-            authority_store._dirfd_mkdir(parent, name)
-            child = authority_store._dirfd_open_dir(parent, name)
-            created = True
-        try:
+            try:
+                child = authority_store._dirfd_open_dir(parent, name)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                authority_store._dirfd_mkdir(parent, name)
+                child = authority_store._dirfd_open_dir(parent, name)
+                created = True
             try:
                 if record is None:
                     authority_store._validate_external_directory_authority(
@@ -391,21 +414,30 @@ def _open_verifier_owned_directory(
                     # path: a pre-created directory may be an attacker's inode.
                     raise
             _write_compatibility_directory_anchor(anchor_parent, child, anchor_name=anchor_name)
-            os.close(parent)
+            tmp = parent
             parent = -1
-            os.close(anchor_parent)
+            os.close(tmp)
+            tmp = anchor_parent
             anchor_parent = -1
-            return child
+            os.close(tmp)
+            result = child
+            child = -1
+            return result
         except BaseException:
-            os.close(child)
+            if child != -1:
+                os.close(child)
+                child = -1
             raise
     except BaseException:
         if parent != -1:
             os.close(parent)
+            parent = -1
         if anchor_parent != -1:
             os.close(anchor_parent)
+            anchor_parent = -1
         if descriptor != -1:
             os.close(descriptor)
+            descriptor = -1
         raise
 
 
