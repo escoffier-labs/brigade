@@ -36,6 +36,11 @@ updates:
         update-types:
           - minor
           - patch
+    # Remove when rust-version moves to 1.88 (ignore 0.4.30+ needs let-chains).
+    ignore:
+      - dependency-name: ignore
+        versions:
+          - ">=0.4.30"
 
   - package-ecosystem: gomod
     directory: /stations/notify
