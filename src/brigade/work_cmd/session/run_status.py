@@ -574,21 +574,25 @@ def doctor(*, target: Path) -> int:
         )
 
     if ledger is None:
-        plan_coverage: dict[str, Any] = {"significant_without_plan": 0, "task_ids": []}
-    else:
-        plan_coverage = ledger_mod._plan_coverage_payload(effective_target)
-    significant_count = int(plan_coverage.get("significant_without_plan", 0) or 0)
-    if significant_count > 0:
-        raw_task_ids = plan_coverage.get("task_ids")
-        task_ids_list: list[Any] = raw_task_ids if isinstance(raw_task_ids, list) else []
-        plan_sample = ", ".join(str(item) for item in task_ids_list[:5])
         helpers._doctor_line(
             constants.WARN,
             "plan_coverage",
-            f"{significant_count} significant pending task(s) without a plan artifact: {plan_sample}",
+            "cannot be checked because the task ledger is unavailable",
         )
     else:
-        helpers._doctor_line(constants.OK, "plan_coverage", "significant pending tasks have plan artifacts")
+        plan_coverage = ledger_mod._plan_coverage_payload(effective_target)
+        significant_count = int(plan_coverage.get("significant_without_plan", 0) or 0)
+        if significant_count > 0:
+            raw_task_ids = plan_coverage.get("task_ids")
+            task_ids_list: list[Any] = raw_task_ids if isinstance(raw_task_ids, list) else []
+            plan_sample = ", ".join(str(item) for item in task_ids_list[:5])
+            helpers._doctor_line(
+                constants.WARN,
+                "plan_coverage",
+                f"{significant_count} significant pending task(s) without a plan artifact: {plan_sample}",
+            )
+        else:
+            helpers._doctor_line(constants.OK, "plan_coverage", "significant pending tasks have plan artifacts")
 
     workflow_rules = _workflow_rule_health(effective_target)
     helpers._doctor_line(str(workflow_rules["status"]), str(workflow_rules["name"]), workflow_rules["detail"])
