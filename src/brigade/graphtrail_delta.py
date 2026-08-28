@@ -106,6 +106,7 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
             "db_path": str(db_path),
             "before_snapshot_path": str(snapshot_path),
             "before_snapshot_sha256": _file_sha256(snapshot_path),
+            "stale_graph_used": False,
             "graphtrail_timeout_seconds": timeout,
             "sync": sync,
         }
@@ -254,9 +255,8 @@ def capture_after_and_diff(
                 "after_snapshot_sha256": after_snapshot_sha256,
                 "diff_stdout_sha256": _sha256_text(diff["stdout"]),
             },
+            "stale_graph_used": before.get("stale_graph_used") is True,
         }
-        if before.get("stale_graph_used") is True:
-            payload["stale_graph_used"] = True
         return _write_and_compact(
             run_dir, payload, snapshot_path=snapshot_path, after_snapshot_path=after_snapshot_path
         )
@@ -424,11 +424,10 @@ def _failure_payload(
             "after_snapshot_sha256": None,
             "diff_stdout_sha256": _sha256_text(diff.get("stdout", "")) if isinstance(diff, dict) else None,
         },
+        "stale_graph_used": before.get("stale_graph_used") is True,
     }
     if timeout_value is not None:
         payload["graphtrail_timeout_seconds"] = timeout_value
-    if before.get("stale_graph_used") is True:
-        payload["stale_graph_used"] = True
     return payload
 
 
@@ -464,8 +463,7 @@ def _compact(payload: dict[str, Any]) -> dict[str, Any]:
     timeout = payload.get("graphtrail_timeout_seconds")
     if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
         compact["graphtrail_timeout_seconds"] = float(timeout)
-    if payload.get("stale_graph_used") is True:
-        compact["stale_graph_used"] = True
+    compact["stale_graph_used"] = payload.get("stale_graph_used") is True
     commands = payload.get("commands")
     if isinstance(commands, dict):
         compact["commands"] = commands
@@ -526,7 +524,7 @@ def _code_reference_node_metadata(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _status(status: str, summary: str, **extra: Any) -> dict[str, Any]:
-    payload = {"ok": False, "status": status, "summary": summary}
+    payload = {"ok": False, "status": status, "summary": summary, "stale_graph_used": False}
     payload.update(extra)
     return payload
 
