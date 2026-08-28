@@ -393,7 +393,7 @@ jobs:
         with:
           name: unified-release-assets
           path: release-assets
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Replace the packaged manifest with the release manifest
@@ -440,7 +440,7 @@ jobs:
             extra: ''
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Ensure Rosetta for darwin-amd64 smoke
