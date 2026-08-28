@@ -2107,20 +2107,31 @@ raise SystemExit(cli.main([
     child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
     child = subprocess.Popen([sys.executable, "-c", script], env=child_env, start_new_session=True)
     worker_pid = None
+
+    def blocked_dispatch_ready() -> bool:
+        nonlocal worker_pid
+        if child.poll() is not None:
+            pytest.fail(f"run exited before reaching blocked dispatch (rc={child.returncode})")
+        try:
+            run_meta = json.loads((output_dir / "run.json").read_text())
+            worker_pid = int(worker_pid_path.read_text())
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        return run_meta.get("status") == "dispatching"
+
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                run_meta = json.loads((output_dir / "run.json").read_text())
-                worker_pid = int(worker_pid_path.read_text())
-            except (OSError, ValueError, json.JSONDecodeError):
-                time.sleep(0.02)
-                continue
-            if run_meta.get("status") == "dispatching":
-                break
-            time.sleep(0.02)
-        else:
-            pytest.fail("run did not reach a blocked dispatch")
+        # run.json status=dispatching plus the worker pid file mark the
+        # blocked worker. Poll those durable markers with a load-tolerant
+        # bound; a 5s window loses to child import + journaled phase writes
+        # on a saturated CI runner.
+        try:
+            thread_sync.wait_for_predicate(
+                blocked_dispatch_ready,
+                description="run receipt status=dispatching with worker pid",
+                poll_interval=0.02,
+            )
+        except AssertionError as exc:
+            pytest.fail(f"run did not reach a blocked dispatch: {exc}")
 
         child.send_signal(sig)
         assert child.wait(timeout=3) == expected_code

@@ -17,6 +17,7 @@ from brigade import proc
 from brigade import provenance
 from brigade import runguard
 from brigade.roster import Agent, Roster
+from tests import thread_sync
 from tests.run_test_helpers import HEALTHY_SEAT_HEALTH_CHILD_SETUP, run_aboyeur_guarded
 from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 from tests.work_cmd_test_helpers import _init_git_repo
@@ -2918,19 +2919,29 @@ with runguard.run_lock(workspace, run_dir=run_dir):
     child_env = os.environ.copy()
     child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
     proc = subprocess.Popen([sys.executable, "-c", script], env=child_env)
+
+    def planning_phase_ready() -> bool:
+        if proc.poll() is not None:
+            pytest.fail(f"run exited before reaching planning (rc={proc.returncode})")
+        try:
+            run_meta = json.loads((output_dir / "run.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        return run_meta.get("status") == "planning"
+
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                run_meta = json.loads((output_dir / "run.json").read_text())
-            except (OSError, json.JSONDecodeError):
-                time.sleep(0.02)
-                continue
-            if run_meta.get("status") == "planning":
-                break
-            time.sleep(0.02)
-        else:
-            pytest.fail("direct run did not reach planning before SIGTERM")
+        # run.json status=planning is written before the blocked plan loop.
+        # Poll that durable receipt field with a load-tolerant bound; a 5s
+        # window loses to child import + journaled phase writes on a
+        # saturated CI runner.
+        try:
+            thread_sync.wait_for_predicate(
+                planning_phase_ready,
+                description="run receipt status=planning",
+                poll_interval=0.02,
+            )
+        except AssertionError as exc:
+            pytest.fail(f"direct run did not reach planning before SIGTERM: {exc}")
 
         proc.send_signal(signal.SIGTERM)
         assert proc.wait(timeout=5) == 128 + signal.SIGTERM
@@ -4697,19 +4708,28 @@ with runguard.run_lock(workspace, run_dir=run_dir):
     child_env = os.environ.copy()
     child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
     child = subprocess.Popen([sys.executable, "-c", script], env=child_env)
+
+    def handoff_phase_ready() -> bool:
+        if child.poll() is not None:
+            pytest.fail(f"run exited before reaching handoff (rc={child.returncode})")
+        try:
+            run_meta = json.loads((output_dir / "run.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        return run_meta.get("status") == "handoff" and "finished_at" not in run_meta
+
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                run_meta = json.loads((output_dir / "run.json").read_text())
-            except (OSError, json.JSONDecodeError):
-                time.sleep(0.02)
-                continue
-            if run_meta.get("status") == "handoff":
-                break
-            time.sleep(0.02)
-        else:
-            pytest.fail("run did not reach handoff before SIGTERM")
+        # run.json status=handoff is written before write_run_handoff. Poll that
+        # durable receipt field with a load-tolerant bound; a 5s window loses
+        # to child import + journaled phase writes on a saturated CI runner.
+        try:
+            thread_sync.wait_for_predicate(
+                handoff_phase_ready,
+                description="run receipt status=handoff",
+                poll_interval=0.02,
+            )
+        except AssertionError as exc:
+            pytest.fail(f"run did not reach handoff before SIGTERM: {exc}")
 
         child.send_signal(signal.SIGTERM)
         assert child.wait(timeout=3) == 128 + signal.SIGTERM
