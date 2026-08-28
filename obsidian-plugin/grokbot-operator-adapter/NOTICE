@@ -1,0 +1,26 @@
+Grokbot Operator Adapter third-party notice
+===========================================
+
+This directory ships a build-time CommonJS bundle of Zod 3.25.76 so the
+checked-in plugin can pass a real `Record<string, z.ZodTypeAny>` shape to
+Obsidian Local REST API v2 `addMcpTool`. The host wraps that shape with
+`z.object(shape)`. Brigade's Python runtime does not import Zod. The
+installed vault plugin is only `main.js` and `manifest.json`; no npm
+install happens at runtime.
+
+Pinned package
+--------------
+- name: zod
+- version: 3.25.76
+- resolved: https://registry.npmjs.org/zod/-/zod-3.25.76.tgz
+- integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==
+- tarball sha256: 9e1f1a05f0dd0c1dab64ee91ceb9bf55cd44d35368c70edda80a2fdc70a88377
+- license: MIT
+- homepage: https://zod.dev
+- repository: https://github.com/colinhacks/zod
+- lock: vendor/zod.lock.json
+- license text: vendor/LICENSE
+- rebuild: node scripts/bundle-zod.js
+
+Zod is copyright Colin McDonnell and is used under the MIT license. The
+license text is reproduced in vendor/LICENSE and in THIRD_PARTY_NOTICES.md.

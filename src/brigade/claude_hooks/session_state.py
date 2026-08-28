@@ -8,7 +8,7 @@ import stat
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .. import localio
 from ..work_cmd import inbox_lock
@@ -18,6 +18,8 @@ _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
 _TIMEOUT_JOURNAL_MAX_LINES = 16
 _TIMEOUT_JOURNAL_MAX_BYTES = 4096
+_ANNOUNCE_TOKEN = b"announced"
+_ANNOUNCE_CLAIMED_KEY = "hook_announce_claimed"
 
 
 def _rt() -> Any:
@@ -88,47 +90,112 @@ def _journal_fd_is_safe(fd: int, path: Path) -> bool:
     )
 
 
-def _journal_timeout_count(target: Path, session_id: str) -> int:
-    """Return the number of non-empty timeout markers, or zero on read failure."""
+def _parse_timeout_journal(data: bytes) -> tuple[int, bool, str | None]:
+    """Return marker count, whether announce was claimed, and the first claim id.
+
+    Timeout-marker lines count toward the latch. Standalone ``announced``
+    lines claim the one-shot notice and do not count. Older timestamp-only
+    markers still count. A legacy ``{iso} announced {id}`` line both counts
+    and claims.
+    """
+    count = 0
+    announced = False
+    first_claim: str | None = None
+    for raw in data.splitlines():
+        if not raw.strip():
+            continue
+        parts = raw.split()
+        if parts[0] == _ANNOUNCE_TOKEN:
+            announced = True
+            if first_claim is None:
+                first_claim = parts[1].decode("ascii", "replace") if len(parts) >= 2 else ""
+            continue
+        count += 1
+        if len(parts) >= 2 and parts[1] == _ANNOUNCE_TOKEN:
+            announced = True
+            if first_claim is None:
+                first_claim = parts[2].decode("ascii", "replace") if len(parts) >= 3 else ""
+    return count, announced, first_claim
+
+
+def _read_timeout_journal(target: Path, session_id: str) -> tuple[int, bool, str | None]:
+    """Read the timeout journal, or ``(0, False, None)`` on refusal or failure."""
     path = _journal_path(target, session_id)
     try:
         if not _journal_path_is_safe_without_nofollow(path):
-            return 0
+            return 0, False, None
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         try:
             if not _journal_fd_is_safe(fd, path):
-                return 0
+                return 0, False, None
             data = os.read(fd, _TIMEOUT_JOURNAL_MAX_BYTES)
         finally:
             os.close(fd)
     except OSError:
-        return 0
-    return sum(1 for line in data.splitlines() if line.strip())
+        return 0, False, None
+    return _parse_timeout_journal(data)
 
 
-def _append_timeout_marker(target: Path, session_id: str) -> int:
-    """Append one timeout marker without taking the session-state lock."""
+def _journal_timeout_count(target: Path, session_id: str) -> int:
+    """Return the number of non-empty timeout markers, or zero on read failure."""
+    return _read_timeout_journal(target, session_id)[0]
+
+
+def _append_journal_line(target: Path, session_id: str, payload: bytes) -> bool:
+    """Append one journal line with the existing path/byte hardening."""
     path = _journal_path(target, session_id)
-    journal_lines = _journal_timeout_count(target, session_id)
-    if journal_lines >= _TIMEOUT_JOURNAL_MAX_LINES:
-        return journal_lines
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not _journal_path_is_safe_without_nofollow(path):
-            return 0
+            return False
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(path, flags, 0o600)
         try:
             if not _journal_fd_is_safe(fd, path):
-                return 0
+                return False
             if os.fstat(fd).st_size >= _TIMEOUT_JOURNAL_MAX_BYTES:
-                return journal_lines
-            os.write(fd, f"{localio.utc_now_iso()}\n".encode())
+                return False
+            os.write(fd, payload)
         finally:
             os.close(fd)
     except OSError:
-        return 0
-    return _journal_timeout_count(target, session_id)
+        return False
+    return True
+
+
+def _append_timeout_journal(target: Path, session_id: str) -> int:
+    """Append one timeout occurrence without taking the session-state lock."""
+    journal_lines, _already_announced, _first = _read_timeout_journal(target, session_id)
+    if journal_lines >= _TIMEOUT_JOURNAL_MAX_LINES:
+        return journal_lines
+    if not _append_journal_line(target, session_id, f"{localio.utc_now_iso()}\n".encode()):
+        return journal_lines
+    return _read_timeout_journal(target, session_id)[0]
+
+
+def _append_timeout_marker(target: Path, session_id: str) -> int:
+    """Append one timeout marker without taking the session-state lock."""
+    return _append_timeout_journal(target, session_id)
+
+
+def _persisted_announce_claimed(state: object) -> bool:
+    return isinstance(state, dict) and state.get("hook_latch_announced") is True
+
+
+def _claim_timeout_announce(target: Path, session_id: str) -> bool:
+    """Elect the first announcement claim by appending a non-counting journal line.
+
+    Persisted ``hook_latch_announced`` from older state is already claimed.
+    Concurrent callers re-read after append; only the first claim id wins.
+    """
+    _lines, already_announced, _first = _read_timeout_journal(target, session_id)
+    if already_announced or _persisted_announce_claimed(_rt().read_session_state(target, session_id)):
+        return False
+    claim_id = f"{os.getpid()}-{threading.get_ident()}-{time.monotonic_ns()}"
+    if not _append_journal_line(target, session_id, f"announced {claim_id}\n".encode()):
+        return False
+    _count, _announced, first_claim = _read_timeout_journal(target, session_id)
+    return first_claim == claim_id
 
 
 def _timeout_state_count(state: dict[str, Any]) -> int:
@@ -153,12 +220,13 @@ def _session_state_lock(target: Path, session_id: str) -> Iterator[None]:
     ``held_file_lock`` creates the state directory as needed, matching the
     parent creation performed by ``write_session_state`` through ``localio``.
     Both the process-local lock and the file lock share one budget
-    (``_TIMEOUT_FOLLOWUP_SECONDS``); running out raises ``InboxLockTimeout``
-    and the caller writes nothing.
+    (``_SESSION_STATE_LOCK_SECONDS``), which is shorter than the outer
+    ``_TIMEOUT_FOLLOWUP_SECONDS`` parent wait. Running out raises
+    ``InboxLockTimeout`` and the caller writes nothing.
     """
     state_path = _rt()._state_path(target.expanduser().resolve(), session_id)
     process_lock = _session_state_process_lock(state_path)
-    budget = float(_rt()._TIMEOUT_FOLLOWUP_SECONDS)
+    budget = float(_rt()._SESSION_STATE_LOCK_SECONDS)
     deadline = time.monotonic() + budget
     # One monotonic budget covers both stages so a stalled follow-up holding
     # the process lock cannot park later follow-ups past the file-lock deadline.
@@ -176,7 +244,7 @@ def _session_state_lock(target: Path, session_id: str) -> Iterator[None]:
 
 
 def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
-    journal_lines = _journal_timeout_count(target, session_id)
+    journal_lines, journal_announced, _claim = _read_timeout_journal(target, session_id)
     state = _rt().read_session_state(target, session_id)
     current_state = state if isinstance(state, dict) else {}
     latched = (
@@ -185,7 +253,7 @@ def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
     )
     if not latched:
         return False, False
-    return True, not isinstance(state, dict) or state.get("hook_latch_announced") is not True
+    return True, not (_persisted_announce_claimed(state) or journal_announced)
 
 
 def _write_session_state_preserving_latch(
@@ -233,21 +301,24 @@ def _write_session_state_preserving_latch(
         return False
 
 
-def _mark_hook_latch_announced(target: Path, session_id: str) -> None:
-    try:
-        with _rt()._session_state_lock(target, session_id):
-            state = _rt().read_session_state(target, session_id)
-            if not isinstance(state, dict) or state.get("hook_latch_announced") is True:
-                return
-            updated = dict(state)
-            updated["hook_latched"] = True
-            updated["hook_latch_announced"] = True
-            _rt().write_session_state(target, session_id, updated)
-    except inbox_lock.InboxLockTimeout:
-        return
+def _mark_hook_latch_announced(target: Path, session_id: str) -> bool:
+    """Compatibility wrapper: new notices claim announce only in the journal."""
+    return _claim_timeout_announce(target, session_id)
 
 
-def _record_hook_timeout(target: Path, session_id: str) -> dict[str, Any]:
+def _apply_timeout_latch(state: dict[str, Any], next_count: int) -> None:
+    if state.get("hook_latched") is True or next_count >= _rt().HOOK_TIMEOUT_LATCH_AFTER:
+        state["hook_latched"] = True
+
+
+def _with_announce_claim(state: dict[str, Any], claimed: bool) -> dict[str, Any]:
+    """Return a caller-local copy; the claim key is never written to disk."""
+    returned = dict(state)
+    returned[_ANNOUNCE_CLAIMED_KEY] = claimed
+    return returned
+
+
+def _record_hook_timeout(target: Path, session_id: str, *, announce: bool = False) -> dict[str, Any]:
     state = _rt().read_session_state(target, session_id)
     fallback: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
     try:
@@ -258,19 +329,28 @@ def _record_hook_timeout(target: Path, session_id: str) -> dict[str, Any]:
             next_count = _effective_timeout_count(updated, journal_lines) + 1
             updated["hook_timeout_count"] = next_count
             updated["hook_timeout_journal_folded"] = journal_lines
-            if updated.get("hook_latched") is True or next_count >= _rt().HOOK_TIMEOUT_LATCH_AFTER:
-                updated["hook_latched"] = True
+            already_announced = _persisted_announce_claimed(updated)
+            _apply_timeout_latch(updated, next_count)
             _rt().write_session_state(target, session_id, updated)
-            return updated
+        claimed = False
+        if announce and updated.get("hook_latched") is True and not already_announced:
+            claimed = _claim_timeout_announce(target, session_id)
+        return _with_announce_claim(updated, claimed)
     except inbox_lock.InboxLockTimeout:
         journal_count = _append_timeout_marker(target, session_id)
+        fresh = _rt().read_session_state(target, session_id)
+        current: dict[str, Any] = dict(fresh) if isinstance(fresh, dict) else dict(fallback)
+        journal_lines, journal_announced, _claim = _read_timeout_journal(target, session_id)
         next_count = (
-            _effective_timeout_count(fallback, journal_count) if journal_count else _timeout_state_count(fallback) + 1
+            _effective_timeout_count(current, journal_lines) if journal_count else _timeout_state_count(current) + 1
         )
-        fallback["hook_timeout_count"] = next_count
-        if fallback.get("hook_latched") is True or next_count >= _rt().HOOK_TIMEOUT_LATCH_AFTER:
-            fallback["hook_latched"] = True
-        return fallback
+        current["hook_timeout_count"] = next_count
+        _apply_timeout_latch(current, next_count)
+        already = journal_announced or _persisted_announce_claimed(current)
+        claimed = False
+        if announce and current.get("hook_latched") is True and not already:
+            claimed = _claim_timeout_announce(target, session_id)
+        return _with_announce_claim(current, claimed)
 
 
 def _clear_hook_timeouts(target: Path, session_id: str) -> None:
@@ -290,3 +370,56 @@ def _clear_hook_timeouts(target: Path, session_id: str) -> None:
             _rt().write_session_state(target, session_id, updated)
     except inbox_lock.InboxLockTimeout:
         return
+
+
+def _apply_timeout_followup_inprocess(
+    event: str,
+    target: Path,
+    session_id: str,
+    detail: str,
+    *,
+    publish: Callable[[str], None] | None = None,
+) -> str:
+    try:
+        state = _rt()._record_hook_timeout(target, session_id, announce=True)
+    except OSError:
+        return "degraded"
+    if state.get(_ANNOUNCE_CLAIMED_KEY) is True:
+        outcome = "latched"
+    elif state.get("hook_latched") is True:
+        outcome = "latched_silent"
+    else:
+        outcome = "degraded"
+    if publish is not None:
+        publish(outcome)
+    try:
+        envelope.append_log(target, f"{event}: degraded: {detail}")
+        if outcome == "latched":
+            envelope.append_log(target, f"{event}: latched after repeated timeouts")
+    except OSError:
+        pass
+    return outcome
+
+
+def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
+    """Record timeout latch/state without blocking past a short budget.
+
+    The path was already resolved inside the timed worker. Latch-state
+    writes (and that path's target-tree hook.log) still touch that tree;
+    they run best-effort under a hard cap so a later stall cannot hang
+    the parent. The latch outcome is published as soon as state is known
+    so a later log stall cannot hide it. Non-timeout doctor-pointer logs
+    use ``_append_degraded_diagnostic`` instead.
+    """
+    detail = str(exc)
+    published = ["degraded"]
+
+    def publish(outcome: str) -> None:
+        published[0] = outcome
+
+    _rt()._run_best_effort_bounded(
+        lambda: _rt()._apply_timeout_followup_inprocess(event, log_target, session_id, detail, publish=publish),
+        timeout=_rt()._TIMEOUT_FOLLOWUP_SECONDS,
+        default="degraded",
+    )
+    return published[0]

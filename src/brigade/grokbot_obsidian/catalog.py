@@ -9,7 +9,7 @@ from typing import NoReturn
 from .contracts import (
     ERROR_MESSAGES,
     ObsidianError,
-    parse_phase1_action,
+    parse_operator_action,
     require_request_id,
 )
 from .utf8 import utf8_byte_length
@@ -82,7 +82,27 @@ _PHASE1_CATALOG: tuple[dict[str, str], ...] = (
         "summary": "Apply one template",
     },
 )
-_CATALOG_BY_KIND = {row["kind"]: row for row in _PHASE1_CATALOG}
+_PHASE2_CATALOG: tuple[dict[str, str], ...] = (
+    {
+        "kind": "patch_canvas",
+        "phase": "2",
+        "blast_radius": "one existing `.canvas`; compare-and-swap replacement",
+        "summary": "Replace one canvas",
+    },
+    {
+        "kind": "patch_base",
+        "phase": "2",
+        "blast_radius": "one existing `.base`; compare-and-swap replacement",
+        "summary": "Replace one base",
+    },
+    {
+        "kind": "update_excalidraw",
+        "phase": "2",
+        "blast_radius": "one existing Excalidraw artifact; staged export then compare-and-swap",
+        "summary": "Update one Excalidraw scene",
+    },
+)
+_CATALOG_BY_KIND = {row["kind"]: row for row in (*_PHASE1_CATALOG, *_PHASE2_CATALOG)}
 
 
 def _reject() -> NoReturn:
@@ -177,7 +197,7 @@ def hash_action_content(raw: object) -> str:
     if set(canonical) != allowed:
         _reject()
     request_id = require_request_id(canonical.get("request_id"))
-    action = parse_phase1_action(canonical.get("action"))
+    action = parse_operator_action(canonical.get("action"))
     digest = canonical.get("template_digest")
     if (action["kind"] == "apply_template") != (digest is not None):
         _reject()

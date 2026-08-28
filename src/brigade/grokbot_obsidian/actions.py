@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, NoReturn
 
 from .adapters import NativeMcpPort, invoke_native
 from .content_policy import assert_safe_markdown
-from .contracts import ERROR_MESSAGES, ObsidianError, parse_phase1_action
+from .contracts import ERROR_MESSAGES, ObsidianError, parse_operator_action, parse_phase1_action
+from .native_client import assert_outbound_tools_call_fits, serialize_structured_replacement
 from .path_policy import assert_static_writable
 
 EXCALIDRAW_ROOT = "03 - Resources/Excalidraw"
@@ -268,3 +270,37 @@ class ObsidianExecutor:
         if self.excalidraw is None:
             raise ObsidianError("protocol_error", ERROR_MESSAGES["protocol_error"])
         return self.excalidraw.create_excalidraw(action, context)
+
+    def _replace_structured(self, action: Mapping[str, Any], kind: str, payload_key: str, replacer) -> dict[str, str]:
+        parsed = parse_operator_action(action)
+        if parsed["kind"] != kind:
+            raise ObsidianError("invalid_request", ERROR_MESSAGES["invalid_request"])
+        assert_static_writable(kind, parsed["path"], self.policy)
+        current = _read_existing(self.native, parsed["path"])
+        if current["etag"] != parsed["ifMatch"]:
+            _conflict()
+        expected = hashlib.sha256(current["bytes"]).hexdigest()
+        replacement = serialize_structured_replacement(parsed[payload_key])
+        data = replacement.encode("utf-8")
+        name = "grokbot_replace_canvas_v1" if kind == "patch_canvas" else "grokbot_replace_base_v1"
+        assert_outbound_tools_call_fits(
+            name,
+            {
+                "expected_sha256": expected,
+                "path": parsed["path"],
+                "replacement_utf8": replacement,
+            },
+        )
+        invoke_native(lambda: replacer(parsed["path"], expected, replacement))
+        return _verify_bytes(self.native, parsed["path"], data)
+
+    def patch_canvas(self, action: Mapping[str, Any]) -> dict[str, str]:
+        return self._replace_structured(action, "patch_canvas", "canvas", self.native.replace_canvas)
+
+    def patch_base(self, action: Mapping[str, Any]) -> dict[str, str]:
+        return self._replace_structured(action, "patch_base", "yaml", self.native.replace_base)
+
+    def update_excalidraw(self, action: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, str]:
+        if self.excalidraw is None:
+            raise ObsidianError("protocol_error", ERROR_MESSAGES["protocol_error"])
+        return self.excalidraw.update_excalidraw(action, context)

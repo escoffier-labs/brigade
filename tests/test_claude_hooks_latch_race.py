@@ -381,7 +381,9 @@ def test_session_lock_timeout_preserves_latched_state(tmp_path: Path) -> None:
         thread.join(timeout=2)
         assert not thread.is_alive()
 
-    assert results == [{**initial, "hook_timeout_count": 3}]
+    from brigade.claude_hooks import session_state
+
+    assert results == [{**initial, "hook_timeout_count": 3, session_state._ANNOUNCE_CLAIMED_KEY: False}]
     assert runtime.read_session_state(target, "s") == initial
 
 
@@ -391,9 +393,9 @@ def test_stale_clear_cannot_clobber_latch(tmp_path: Path, monkeypatch) -> None:
     On main the clear thread's write is held until both timeout records have
     landed, so its stale state (count 0, no latch) is written last and the
     latch is lost. With the per-session lock the clear holds the lock through
-    its read-modify-write, the 0.3 s gate (inside the 0.5 s lock budget) times
-    out, and the records that were waiting on the lock then re-derive the
-    latch.
+    its read-modify-write, the gate (inside ``_SESSION_STATE_LOCK_SECONDS``)
+    times out, and the records that were waiting on the lock then re-derive
+    the latch.
     """
     target = _wired_claude(tmp_path)
     runtime.write_session_state(target, "s", {"session_id": "s", "hook_timeout_count": 1})
@@ -404,7 +406,7 @@ def test_stale_clear_cannot_clobber_latch(tmp_path: Path, monkeypatch) -> None:
     def gated_write(target_: Path, session_id: str, state: dict) -> None:
         if state.get("hook_timeout_count") == 0 and state.get("hook_latched") is not True:
             clear_started.set()
-            records_done.wait(timeout=0.3)
+            records_done.wait(timeout=0.15)
         original_write(target_, session_id, state)
 
     monkeypatch.setattr(runtime, "write_session_state", gated_write)
@@ -421,3 +423,410 @@ def test_stale_clear_cannot_clobber_latch(tmp_path: Path, monkeypatch) -> None:
     assert state is not None
     assert state.get("hook_latched") is True, state
     assert state["hook_timeout_count"] >= 2
+
+
+def test_timeout_followup_budget_keeps_handler_headroom() -> None:
+    """Inner lock is shorter than the 0.5s outer follow-up; stacked waits stay safe.
+
+    Claude's handler budget is 15s. The worker is 12s and termination is up
+    to 1.2s (join 1.0 + kill join 0.2). Claim release and latch follow-up
+    each use ``_TIMEOUT_FOLLOWUP_SECONDS``. Observe slack or a second
+    sequential announce wait would erase the remaining headroom.
+    """
+    from brigade.claude_hooks.package import DEFAULT_HOOK_TIMEOUT_SECONDS
+
+    lock_budget = runtime._SESSION_STATE_LOCK_SECONDS
+    followup = runtime._TIMEOUT_FOLLOWUP_SECONDS
+    assert lock_budget < followup
+    worker = envelope.HOOK_TIMEOUT_SECONDS
+    terminate = 1.2
+    worst = worker + terminate + followup + followup
+    assert worst <= DEFAULT_HOOK_TIMEOUT_SECONDS - 0.5
+    assert not hasattr(runtime, "_TIMEOUT_FOLLOWUP_OBSERVE_SLACK_SECONDS")
+
+
+def test_bounded_followup_latches_when_session_lock_times_out(tmp_path: Path, monkeypatch) -> None:
+    """Latch decision uses the journal path, not leftover observe slack."""
+    target = _wired_claude(tmp_path)
+    first = runtime._record_hook_timeout(target, "s")
+    assert first.get("hook_latched") is not True
+
+    @contextlib.contextmanager
+    def timeout_lock(_target: Path, _session_id: str):
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
+
+    monkeypatch.setattr(runtime, "_session_state_lock", timeout_lock)
+
+    outcome = runtime._bounded_timeout_followup(
+        "PreToolUse",
+        target,
+        "s",
+        runtime.HookDegraded("hook operation timed out"),
+    )
+    assert outcome == "latched"
+    assert runtime._read_hook_latch(target, "s")[0] is True
+
+
+def test_timeout_followup_does_not_hide_latch_behind_log_stall(tmp_path: Path, monkeypatch) -> None:
+    """A known latch stays latched when hook.log append blocks."""
+    target = _wired_claude(tmp_path)
+    first = runtime._record_hook_timeout(target, "s")
+    assert first.get("hook_latched") is not True
+
+    release_log = threading.Event()
+
+    def hang_log(*_args, **_kwargs):
+        release_log.wait(timeout=5)
+
+    monkeypatch.setattr(envelope, "append_log", hang_log)
+    monkeypatch.setattr(runtime, "_TIMEOUT_FOLLOWUP_SECONDS", 0.05)
+
+    try:
+        outcome = runtime._bounded_timeout_followup(
+            "PreToolUse",
+            target,
+            "s",
+            runtime.HookDegraded("hook operation timed out"),
+        )
+        assert outcome == "latched"
+        assert runtime._read_hook_latch(target, "s")[0] is True
+    finally:
+        release_log.set()
+
+
+def test_timeout_followup_claims_announce_in_journal_not_state(tmp_path: Path, monkeypatch) -> None:
+    """The locked path latches in state, then claims announce in the journal after the lock."""
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    first = runtime._record_hook_timeout(target, "s")
+    assert first.get("hook_latched") is not True
+
+    writes: list[dict] = []
+    original_write = runtime.write_session_state
+
+    def spy_write(write_target: Path, session_id: str, state: dict) -> None:
+        writes.append(dict(state))
+        original_write(write_target, session_id, state)
+
+    monkeypatch.setattr(runtime, "write_session_state", spy_write)
+
+    outcome = runtime._bounded_timeout_followup(
+        "PreToolUse",
+        target,
+        "s",
+        runtime.HookDegraded("hook operation timed out"),
+    )
+    assert outcome == "latched"
+    latching = [payload for payload in writes if payload.get("hook_latched") is True]
+    assert latching
+    assert all(payload.get("hook_latch_announced") is not True for payload in latching)
+    state = runtime.read_session_state(target, "s")
+    assert state is not None
+    assert state.get("hook_latched") is True
+    assert state.get("hook_latch_announced") is not True
+    assert runtime._read_hook_latch(target, "s") == (True, False)
+    journal = session_state._journal_path(target, "s")
+    assert journal.is_file()
+    claim_lines = [
+        line for line in journal.read_bytes().splitlines() if line.split()[:1] == [session_state._ANNOUNCE_TOKEN]
+    ]
+    assert len(claim_lines) == 1
+
+
+def test_lock_timeout_journal_claims_announce_so_next_hook_is_silent(tmp_path: Path, monkeypatch) -> None:
+    """A journal fallback that crosses the latch also claims the one-shot announce."""
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    first = runtime._record_hook_timeout(target, "s")
+    assert first.get("hook_latched") is not True
+    persisted = runtime.read_session_state(target, "s")
+    assert persisted is not None
+    assert persisted.get("hook_latch_announced") is not True
+
+    @contextlib.contextmanager
+    def timeout_lock(_target: Path, _session_id: str):
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
+
+    monkeypatch.setattr(runtime, "_session_state_lock", timeout_lock)
+
+    outcome = runtime._bounded_timeout_followup(
+        "PreToolUse",
+        target,
+        "s",
+        runtime.HookDegraded("hook operation timed out"),
+    )
+    assert outcome == "latched"
+    assert runtime.read_session_state(target, "s") == persisted
+    assert session_state._journal_timeout_count(target, "s") == 1
+    assert runtime._read_hook_latch(target, "s") == (True, False)
+
+    log = envelope.log_path(target).read_text(encoding="utf-8")
+    assert log.count("latched after repeated timeouts") == 1
+
+    body = runtime._hook_run_body(
+        "PreToolUse",
+        _payload(target, "PreToolUse", session_id="s"),
+        pin_target=target,
+    )
+    assert body["kind"] == "latched_silent"
+    assert body["result"] == envelope.empty_envelope("PreToolUse")
+    log = envelope.log_path(target).read_text(encoding="utf-8")
+    assert log.count("latched after repeated timeouts") == 1
+
+
+def test_concurrent_fallback_writers_only_one_claims_announce(tmp_path: Path, monkeypatch) -> None:
+    """Only the journal marker that crosses the latch threshold announces."""
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    first = runtime._record_hook_timeout(target, "s")
+    assert first.get("hook_latched") is not True
+
+    @contextlib.contextmanager
+    def timeout_lock(_target: Path, _session_id: str):
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
+
+    monkeypatch.setattr(runtime, "_session_state_lock", timeout_lock)
+
+    results: list[dict] = []
+
+    def record() -> None:
+        results.append(runtime._record_hook_timeout(target, "s", announce=True))
+
+    threads = [threading.Thread(target=record) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    claimed = [payload for payload in results if payload.get(session_state._ANNOUNCE_CLAIMED_KEY) is True]
+    assert len(claimed) == 1
+    assert all(payload.get("hook_latched") is True for payload in results)
+    assert runtime._read_hook_latch(target, "s") == (True, False)
+    persisted = runtime.read_session_state(target, "s")
+    assert persisted is None or session_state._ANNOUNCE_CLAIMED_KEY not in persisted
+
+
+def _assert_one_latched_one_silent(outcomes: list[str], target: Path, session_id: str) -> None:
+    from brigade.claude_hooks import session_state
+
+    assert outcomes.count("latched") == 1
+    assert outcomes.count("latched_silent") == 1
+    log = envelope.log_path(target).read_text(encoding="utf-8")
+    assert log.count("latched after repeated timeouts") == 1
+    persisted = runtime.read_session_state(target, session_id)
+    if persisted is not None:
+        assert session_state._ANNOUNCE_CLAIMED_KEY not in persisted
+    journal = session_state._journal_path(target, session_id)
+    if journal.is_file():
+        assert session_state._ANNOUNCE_CLAIMED_KEY.encode() not in journal.read_bytes()
+
+
+def test_concurrent_locked_followups_one_latched_one_silent(tmp_path: Path) -> None:
+    """The locked-path announcer is the not-announced to announced transition."""
+    target = _wired_claude(tmp_path)
+    first = runtime._record_hook_timeout(target, "s")
+    assert first.get("hook_latched") is not True
+
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def follow() -> None:
+        barrier.wait(timeout=2)
+        outcomes.append(
+            runtime._apply_timeout_followup_inprocess(
+                "PreToolUse",
+                target,
+                "s",
+                "hook operation timed out",
+            )
+        )
+
+    threads = [threading.Thread(target=follow) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    _assert_one_latched_one_silent(outcomes, target, "s")
+
+
+def test_concurrent_fallback_followups_one_latched_one_silent(tmp_path: Path, monkeypatch) -> None:
+    """The journal first-claim result is the only fallback announcer."""
+    target = _wired_claude(tmp_path)
+    first = runtime._record_hook_timeout(target, "s")
+    assert first.get("hook_latched") is not True
+
+    @contextlib.contextmanager
+    def timeout_lock(_target: Path, _session_id: str):
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
+
+    monkeypatch.setattr(runtime, "_session_state_lock", timeout_lock)
+
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def follow() -> None:
+        barrier.wait(timeout=2)
+        outcomes.append(
+            runtime._apply_timeout_followup_inprocess(
+                "PreToolUse",
+                target,
+                "s",
+                "hook operation timed out",
+            )
+        )
+
+    threads = [threading.Thread(target=follow) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    _assert_one_latched_one_silent(outcomes, target, "s")
+
+
+def test_hook_run_timeout_emits_empty_envelope_for_latched_silent(tmp_path: Path, monkeypatch, capsys) -> None:
+    """An already-latched unclaimed timeout must not emit degraded or a second notice."""
+    target = _wired_claude(tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise runtime.HookDegraded("hook operation timed out", log_target=target)
+
+    monkeypatch.setattr(runtime, "_run_timed_handle_payload", boom)
+    monkeypatch.setattr(runtime, "_bounded_timeout_followup", lambda *_args, **_kwargs: "latched_silent")
+
+    capsys.readouterr()
+    assert (
+        runtime.hook_run(
+            event="PreToolUse",
+            package=PACKAGE_REF,
+            stdin_text=json.dumps(_payload(target, "PreToolUse", session_id="s")),
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == envelope.empty_envelope("PreToolUse")
+
+
+def test_timestamp_only_journal_still_requests_announce(tmp_path: Path) -> None:
+    """Older timestamp-only markers still latch and leave the one-shot pending."""
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    assert session_state._append_timeout_marker(target, "s") == 1
+    assert session_state._append_timeout_marker(target, "s") == 2
+    journal = session_state._journal_path(target, "s")
+    assert all(line.strip() and b" announced" not in line for line in journal.read_bytes().splitlines() if line.strip())
+    assert runtime._read_hook_latch(target, "s") == (True, True)
+
+
+def test_announce_claim_lines_do_not_count_as_timeouts(tmp_path: Path) -> None:
+    """Standalone journal claim lines latch-announce without inflating the timeout count."""
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    assert session_state._append_timeout_marker(target, "s") == 1
+    assert session_state._claim_timeout_announce(target, "s") is True
+    assert session_state._journal_timeout_count(target, "s") == 1
+    assert runtime._read_hook_latch(target, "s") == (False, False)
+
+
+def test_mixed_locked_and_journal_followups_one_latched_one_silent(tmp_path: Path, monkeypatch) -> None:
+    """A locked slow write and a journal fallback elect exactly one announcement."""
+    target = _wired_claude(tmp_path)
+    first = runtime._record_hook_timeout(target, "s")
+    assert first.get("hook_latched") is not True
+
+    original_write = runtime.write_session_state
+    entered = threading.Event()
+    release = threading.Event()
+
+    def gated_write(write_target: Path, session_id: str, state: dict) -> None:
+        if state.get("hook_timeout_count") == 2:
+            entered.set()
+            release.wait(timeout=10)
+        original_write(write_target, session_id, state)
+
+    monkeypatch.setattr(runtime, "write_session_state", gated_write)
+
+    outcomes: list[str] = []
+
+    def locked_follow() -> None:
+        outcomes.append(
+            runtime._apply_timeout_followup_inprocess(
+                "PreToolUse",
+                target,
+                "s",
+                "hook operation timed out",
+            )
+        )
+
+    def fallback_follow() -> None:
+        assert entered.wait(timeout=2)
+        outcomes.append(
+            runtime._apply_timeout_followup_inprocess(
+                "PreToolUse",
+                target,
+                "s",
+                "hook operation timed out",
+            )
+        )
+
+    locked = threading.Thread(target=locked_follow)
+    fallback = threading.Thread(target=fallback_follow)
+    locked.start()
+    assert entered.wait(timeout=2)
+    fallback.start()
+    fallback.join(timeout=5)
+    assert not fallback.is_alive()
+    release.set()
+    locked.join(timeout=5)
+    assert not locked.is_alive()
+
+    _assert_one_latched_one_silent(outcomes, target, "s")
+
+    body = runtime._hook_run_body(
+        "PreToolUse",
+        _payload(target, "PreToolUse", session_id="s"),
+        pin_target=target,
+    )
+    assert body["kind"] == "latched_silent"
+    log = envelope.log_path(target).read_text(encoding="utf-8")
+    assert log.count("latched after repeated timeouts") == 1
+
+
+def test_concurrent_hook_run_bodies_one_latched_one_silent(tmp_path: Path) -> None:
+    """Two hook bodies seeing latched-but-unannounced elect one journal claim."""
+    target = _wired_claude(tmp_path)
+    runtime.write_session_state(
+        target,
+        "s",
+        {"session_id": "s", "hook_timeout_count": 2, "hook_latched": True},
+    )
+    assert runtime._read_hook_latch(target, "s") == (True, True)
+
+    barrier = threading.Barrier(2)
+    kinds: list[str] = []
+
+    def run_body() -> None:
+        barrier.wait(timeout=2)
+        body = runtime._hook_run_body(
+            "PreToolUse",
+            _payload(target, "PreToolUse", session_id="s"),
+            pin_target=target,
+        )
+        kinds.append(str(body["kind"]))
+
+    threads = [threading.Thread(target=run_body) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    _assert_one_latched_one_silent(kinds, target, "s")

@@ -236,7 +236,10 @@ def parse_private_runtime(raw: object, *, filesystem_read=None) -> dict[str, Any
         "plugin_inventory",
         "excalidraw",
     }
-    if set(raw) != required or raw.get("version") != 1:
+    allowed = set(required)
+    if "operator_adapter" in raw:
+        allowed = allowed | {"operator_adapter"}
+    if set(raw) != allowed or raw.get("version") != 1:
         _runtime_error()
     tls = raw.get("upstream_tls")
     if not isinstance(tls, dict) or set(tls) != {"ca_path", "spki_sha256"}:
@@ -330,7 +333,19 @@ def parse_private_runtime(raw: object, *, filesystem_read=None) -> dict[str, Any
         if not isinstance(receipt_path, str):
             _runtime_error()
         receipt_bytes = reader(required_absolute_path(receipt_path), MAX_RECEIPT_BYTES)
-    return {
+    adapter = None
+    if "operator_adapter" in raw:
+        adapter_raw = raw.get("operator_adapter")
+        if not isinstance(adapter_raw, dict) or set(adapter_raw) != {"manifest_version", "tool_fingerprint"}:
+            _runtime_error()
+        adapter_version = adapter_raw.get("manifest_version")
+        adapter_fingerprint = adapter_raw.get("tool_fingerprint")
+        if not isinstance(adapter_version, str) or not 1 <= len(adapter_version) <= 32:
+            _runtime_error()
+        if not isinstance(adapter_fingerprint, str) or not COMMAND_FINGERPRINT.fullmatch(adapter_fingerprint):
+            _runtime_error()
+        adapter = {"manifest_version": adapter_version, "tool_fingerprint": adapter_fingerprint}
+    parsed_runtime = {
         "version": 1,
         "upstream_tls": {
             "ca_path": ca_path,
@@ -354,6 +369,9 @@ def parse_private_runtime(raw: object, *, filesystem_read=None) -> dict[str, Any
             "probe_receipt_bytes": receipt_bytes,
         },
     }
+    if adapter is not None:
+        parsed_runtime["operator_adapter"] = adapter
+    return parsed_runtime
 
 
 def required_loopback_host(value: object) -> str:

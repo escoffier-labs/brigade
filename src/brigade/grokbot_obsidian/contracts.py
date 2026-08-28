@@ -453,6 +453,45 @@ def parse_template_variable(raw: object) -> Any:
     return require_utf8(raw, 0, BODY_BYTES)
 
 
+def parse_operator_action(raw: object) -> dict[str, Any]:
+    action = _require_mapping(raw)
+    kind = action.get("kind")
+    if kind == "patch_canvas":
+        if set(action) != {"kind", "path", "canvas", "ifMatch"}:
+            _invalid()
+        return {
+            "kind": "patch_canvas",
+            "path": require_vault_path(action.get("path")),
+            "canvas": parse_canvas(action.get("canvas")),
+            "ifMatch": require_revision(action.get("ifMatch")),
+        }
+    if kind == "patch_base":
+        if set(action) != {"kind", "path", "yaml", "ifMatch"}:
+            _invalid()
+        return {
+            "kind": "patch_base",
+            "path": require_vault_path(action.get("path")),
+            "yaml": parse_base_yaml(action.get("yaml")),
+            "ifMatch": require_revision(action.get("ifMatch")),
+        }
+    if kind == "update_excalidraw":
+        allowed = {"kind", "path", "elements", "ifMatch"}
+        if "embed_path" in action:
+            allowed = allowed | {"embed_path"}
+        if set(action) != allowed:
+            _invalid()
+        parsed = {
+            "kind": "update_excalidraw",
+            "path": require_vault_path(action.get("path")),
+            "elements": parse_scene_elements(action.get("elements")),
+            "ifMatch": require_revision(action.get("ifMatch")),
+        }
+        if "embed_path" in action:
+            parsed["embed_path"] = require_vault_path(action.get("embed_path"))
+        return parsed
+    return parse_phase1_action(raw)
+
+
 def parse_phase1_action(raw: object) -> dict[str, Any]:
     action = _require_mapping(raw)
     kind = action.get("kind")
@@ -635,7 +674,7 @@ def parse_propose_input(raw: object) -> dict[str, Any]:
     payload = _require_mapping(raw, {"request_id", "action"})
     return {
         "request_id": require_request_id(payload.get("request_id")),
-        "action": parse_phase1_action(payload.get("action")),
+        "action": parse_operator_action(payload.get("action")),
     }
 
 
@@ -647,10 +686,11 @@ def parse_execute_input(raw: object) -> dict[str, str]:
     }
 
 
-def _exact_unique_phase1_action_ids(ids: list[str]) -> bool:
+def _exact_unique_action_ids(ids: list[str]) -> bool:
+    allowed = PHASE1_ACTION_IDS | PHASE2_ONLY_ACTION_IDS
     seen: set[str] = set()
     for action_id in ids:
-        if action_id not in PHASE1_ACTION_IDS or action_id in seen:
+        if action_id not in allowed or action_id in seen:
             return False
         seen.add(action_id)
     return True
@@ -667,7 +707,7 @@ def parse_capabilities_result(raw: object) -> dict[str, Any]:
     if len(plugins_raw) > 32 or len(supported_raw) > 32:
         _invalid()
     supported = [require_utf8(item, 1, 64) for item in supported_raw]
-    if not _exact_unique_phase1_action_ids(supported):
+    if not _exact_unique_action_ids(supported):
         _invalid()
     plugins = []
     for plugin in plugins_raw:
@@ -676,9 +716,7 @@ def parse_capabilities_result(raw: object) -> dict[str, Any]:
         if not isinstance(plugin_ids, list) or len(plugin_ids) > 32:
             _invalid()
         parsed_ids = [require_utf8(action_id, 1, 64) for action_id in plugin_ids]
-        if not _exact_unique_phase1_action_ids(parsed_ids) or any(
-            action_id not in supported for action_id in parsed_ids
-        ):
+        if not _exact_unique_action_ids(parsed_ids) or any(action_id not in supported for action_id in parsed_ids):
             _invalid()
         plugins.append(
             {

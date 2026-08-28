@@ -1,0 +1,23 @@
+{
+  "name": "zod",
+  "version": "3.25.76",
+  "resolved": "https://registry.npmjs.org/zod/-/zod-3.25.76.tgz",
+  "integrity": "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==",
+  "tarball_sha256": "9e1f1a05f0dd0c1dab64ee91ceb9bf55cd44d35368c70edda80a2fdc70a88377",
+  "license": "MIT",
+  "homepage": "https://zod.dev",
+  "repository": "https://github.com/colinhacks/zod",
+  "entry": "index.cjs",
+  "files": [
+    "index.cjs",
+    "v3/external.cjs",
+    "v3/errors.cjs",
+    "v3/helpers/parseUtil.cjs",
+    "v3/helpers/typeAliases.cjs",
+    "v3/helpers/util.cjs",
+    "v3/types.cjs",
+    "v3/ZodError.cjs",
+    "v3/locales/en.cjs",
+    "v3/helpers/errorUtil.cjs"
+  ]
+}
