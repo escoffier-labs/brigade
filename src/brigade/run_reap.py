@@ -40,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from . import dirfd, proc, run_checkpoint, run_dirfd, run_journal, run_lifecycle, runguard, runs_cmd
+from . import dirfd, proc, run_checkpoint, run_dirfd, run_journal, run_lifecycle, run_redaction, runguard, runs_cmd
 
 SCHEMA = "brigade.runs-reap.v1"
 DEFAULT_OLDER_THAN = "2h"
@@ -91,6 +91,48 @@ class _BoundRunDir:
         if (held.st_dev, held.st_ino) != self.identity:
             return False
         return _directory_identity(self.path) == self.identity
+
+    def read_regular_file(self, name: str, *, max_bytes: int) -> bytes | None:
+        """Read a direct child that must be a regular file, without hanging on a FIFO.
+
+        Stats through the already-held directory descriptor, refuses anything
+        that is not a regular file or that exceeds ``max_bytes``, then opens
+        no-follow and non-blocking so a raced FIFO cannot block the reaper.
+        """
+        try:
+            info = dirfd.stat_child(self._fd, name)
+        except OSError:
+            return None
+        if not stat.S_ISREG(info.st_mode) or info.st_size < 0 or info.st_size > max_bytes:
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = dirfd.open_child_file(self._fd, name, flags)
+        except OSError:
+            return None
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size < 0 or opened.st_size > max_bytes:
+                return None
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, min(65536, max_bytes + 1 - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    return None
+                chunks.append(chunk)
+            return b"".join(chunks)
+        except OSError:
+            return None
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
     def close(self) -> None:
         fd = self._fd
@@ -260,6 +302,25 @@ def _read_run_bytes(run_dir: Path) -> tuple[bytes | None, dict[str, Any] | None]
     path = run_dir / "run.json"
     try:
         raw = run_journal.bound_read_bytes(path)
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    return raw, payload
+
+
+def _read_bound_run_bytes(bound: _BoundRunDir) -> tuple[bytes | None, dict[str, Any] | None]:
+    """Initial snapshot through the already-held run directory descriptor.
+
+    The later CAS read stays on :func:`_read_run_bytes` under
+    :func:`_bound_transaction`. This path must not follow or block on a
+    FIFO, and it must not ingest an oversized receipt.
+    """
+    try:
+        raw = bound.read_regular_file("run.json", max_bytes=run_redaction.MAX_RUN_JSON_BYTES)
+        if raw is None:
+            return None, None
         payload = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return None, None
@@ -568,7 +629,7 @@ def reap(
             if not bound.still_bound():
                 skipped.append(_skip(child.name, "malformed"))
                 continue
-            raw, meta = _read_run_bytes(child)
+            raw, meta = _read_bound_run_bytes(bound)
             if raw is None or meta is None:
                 skipped.append(_skip(child.name, "malformed"))
                 continue

@@ -1015,6 +1015,67 @@ def test_identity_without_binding_is_unbindable_before_lock(tmp_path, capsys, mo
     assert lock_owner["pid"] == 99999999
 
 
+def _assert_stale_lock_unclaimed(repo: Path, run_dir: Path, lock_before: bytes) -> None:
+    lock_path = repo / ".brigade" / "run.lock"
+    assert lock_path.is_dir()
+    assert (lock_path / "owner.json").read_bytes() == lock_before
+    owner = json.loads((lock_path / "owner.json").read_text())
+    assert owner["pid"] == 99999999
+    assert Path(owner["run_dir"]) == run_dir.resolve()
+    assert runguard.run_lock_state(repo, run_dir) == "stale"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform cannot create FIFOs")
+def test_reap_refuses_fifo_run_json_without_claiming_the_stale_lock(tmp_path, capsys):
+    """A planted FIFO must not block the initial snapshot or take the stale lock."""
+    if not run_reap._dirfd_identity_available():
+        pytest.skip("descriptor bind required to reach the initial snapshot")
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-fifo0001")
+    (run_dir / "run.json").unlink()
+    os.mkfifo(run_dir / "run.json")
+    _write_stale_lock(repo, run_dir)
+    lock_before = (repo / ".brigade" / "run.lock" / "owner.json").read_bytes()
+
+    result: dict[str, object] = {}
+
+    def _call() -> None:
+        result["code"] = _reap(repo)
+
+    worker = threading.Thread(target=_call, daemon=True)
+    worker.start()
+    worker.join(2.0)
+    assert not worker.is_alive(), "reap blocked on a FIFO run.json"
+    assert result["code"] == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["malformed"]
+    assert payload["skipped"][0]["run_id"] == "20260820-120000-fifo0001"
+    _assert_stale_lock_unclaimed(repo, run_dir, lock_before)
+
+
+def test_reap_refuses_oversized_run_json_without_claiming_the_stale_lock(tmp_path, capsys):
+    """An oversized receipt must fail closed as malformed before the lock is claimed."""
+    if not run_reap._dirfd_identity_available():
+        pytest.skip("descriptor bind required to reach the initial snapshot")
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-huge0001")
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["padding"] = "x" * run_redaction.MAX_RUN_JSON_BYTES
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    assert (run_dir / "run.json").stat().st_size > run_redaction.MAX_RUN_JSON_BYTES
+    _write_stale_lock(repo, run_dir)
+    lock_before = (repo / ".brigade" / "run.lock" / "owner.json").read_bytes()
+
+    assert _reap(repo) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert [row["reason"] for row in payload["skipped"]] == ["malformed"]
+    assert payload["skipped"][0]["run_id"] == "20260820-120000-huge0001"
+    _assert_stale_lock_unclaimed(repo, run_dir, lock_before)
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
 def test_reap_swap_from_inside_the_sanctioned_writer_is_bounded_to_the_run_directory(tmp_path, capsys, monkeypatch):
     """A swap racing in from inside the writer path must not escape the runs root.
 
