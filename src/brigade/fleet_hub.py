@@ -111,7 +111,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import fleet_command_deck
+from . import fleet_command_deck, fleet_hub_preference
 
 SCHEMA_VERSION = 13
 DEFAULT_PORT = 3774
@@ -358,18 +358,6 @@ CLOUD_TTL_MAX_SECONDS = 86400
 DEFAULT_CLOUD_SUBMISSION_TTL_SECONDS = 300
 DEFAULT_CLOUD_TTL_SECONDS = 900
 _CLOUD_TEXT_MAX = 256
-# v13 (#1223): one-row fleet run preference. Seat names only; never secrets.
-_RUN_PREFERENCE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS run_preference (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    impl TEXT,
-    review TEXT,
-    chef TEXT,
-    notes TEXT,
-    updated_at TEXT NOT NULL,
-    updated_by TEXT
-);
-"""
 # Bounded so a hostile client cannot bloat the row; a lease token is a uuid4
 # hex and an ISO-8601 stamp, a run_dir a filesystem path.
 LEASE_FIELD_MAX_CHARS = 1024
@@ -609,7 +597,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
 
         fleet_hub_grokbot.ensure_schema(conn)
         # v12 -> v13: one-row run preference pin (#1223).
-        conn.execute(_RUN_PREFERENCE_SCHEMA)
+        fleet_hub_preference.ensure_schema(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
     except BaseException:
@@ -776,39 +764,13 @@ def _last_known_seat(conn: sqlite3.Connection, node_id: str, run_id: str, latest
 
 
 def get_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Return the one-row fleet run preference, or empty fields when unset."""
-    row = conn.execute("SELECT impl, review, chef, notes FROM run_preference WHERE id = 1").fetchone()
-    if row is None:
-        return {"impl": None, "review": None, "chef": None, "notes": None}
-    return {"impl": row[0], "review": row[1], "chef": row[2], "notes": row[3]}
+    """Return the one-row fleet run preference (see ``fleet_hub_preference``)."""
+    return fleet_hub_preference.get_run_preference(conn)
 
 
 def set_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | None = None) -> dict[str, Any]:
-    """Replace the fleet run preference. Rejects secret or path material."""
-    from . import run_preference
-
-    try:
-        parsed = run_preference.parse_preference(raw)
-    except run_preference.RunPreferenceError as exc:
-        raise FleetHubError(str(exc)) from exc
-    payload = parsed.payload()
-    conn.execute(
-        "INSERT INTO run_preference (id, impl, review, chef, notes, updated_at, updated_by) "
-        "VALUES (1, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(id) DO UPDATE SET impl=excluded.impl, review=excluded.review, "
-        "chef=excluded.chef, notes=excluded.notes, updated_at=excluded.updated_at, "
-        "updated_by=excluded.updated_by",
-        (
-            payload.get("impl"),
-            payload.get("review"),
-            payload.get("chef"),
-            payload.get("notes"),
-            _utc_now(),
-            updated_by,
-        ),
-    )
-    conn.commit()
-    return get_run_preference(conn)
+    """Replace the fleet run preference (see ``fleet_hub_preference``)."""
+    return fleet_hub_preference.set_run_preference(conn, raw, updated_by=updated_by)
 
 
 def run_started_at(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:

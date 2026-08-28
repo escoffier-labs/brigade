@@ -419,12 +419,27 @@ def dispatch(args) -> int:
     preference = run_preference.refresh_cache()
     loaded_roster = run_preference.apply_to_roster(loaded_roster, preference)
     if args.worker is None:
-        args.worker = run_preference.resolve_worker(
+        pinned_worker = run_preference.resolve_worker(
             preference,
             loaded_roster,
             worker=None,
             task=args.task,
         )
+        if pinned_worker is not None:
+            pin_error = _direct_worker_error(
+                pinned_worker,
+                loaded_roster,
+                roster_mod,
+                read_only=args.read_only,
+            )
+            if pin_error is None:
+                args.worker = pinned_worker
+            else:
+                print(
+                    f"warning: run preference impl {pinned_worker!r} is not usable here "
+                    f"({pin_error}); continuing with a planned run",
+                    file=sys.stderr,
+                )
     args.task = run_preference.apply_to_task(args.task, preference, worker=args.worker)
     preference_bits = [f"{key}={value}" for key, value in preference.payload().items() if key != "notes"]
     if preference_bits:

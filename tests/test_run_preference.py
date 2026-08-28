@@ -44,10 +44,25 @@ def test_resolve_worker_honors_impl_unless_overridden() -> None:
     pref = run_preference.RunPreference(impl="cursor_grok", review="claude_standby")
     assert run_preference.resolve_worker(pref, roster, worker=None, task="fix the flaky test") == "cursor_grok"
     assert run_preference.resolve_worker(pref, roster, worker="reviewer", task="fix the flaky test") == "reviewer"
-    assert run_preference.resolve_worker(pref, roster, worker=None, task="have reviewer inspect the diff") == "reviewer"
+    # A spoken roster seat name suppresses the pin: the orchestrator plans and
+    # sees the named seat, rather than the whole task being direct-dispatched.
+    assert run_preference.resolve_worker(pref, roster, worker=None, task="have reviewer inspect the diff") is None
     assert run_preference.resolve_worker(pref, roster, worker=None, task="ask chef and reviewer") is None
     missing = run_preference.RunPreference(impl="absent")
     assert run_preference.resolve_worker(missing, roster, worker=None, task="fix the flaky test") is None
+
+
+def test_resolve_worker_without_pin_never_dispatches_on_prose() -> None:
+    roster = _FakeRoster(orchestrator="chef", agents={"chef": object(), "cursor_grok": object(), "reviewer": object()})
+    unpinned = run_preference.RunPreference()
+    assert run_preference.resolve_worker(unpinned, roster, worker=None, task="have reviewer inspect the diff") is None
+    assert run_preference.resolve_worker(unpinned, roster, worker=None, task="fix the flaky test") is None
+
+
+def test_resolve_worker_never_resolves_to_orchestrator() -> None:
+    roster = _FakeRoster(orchestrator="chef", agents={"chef": object(), "cursor_grok": object()})
+    pinned_chef = run_preference.RunPreference(impl="chef")
+    assert run_preference.resolve_worker(pinned_chef, roster, worker=None, task="fix the flaky test") is None
 
 
 def test_cache_round_trip(tmp_path) -> None:

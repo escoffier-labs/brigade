@@ -228,6 +228,54 @@ role = "code"
     assert seen["task"] == "fix the flaky test"
 
 
+def test_run_cli_degrades_unusable_pinned_impl_to_planned_run(tmp_path, monkeypatch, capsys):
+    from brigade import run_preference
+
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+read_only_capable = true
+
+[agents.cursor_grok]
+cli = "cursor"
+role = "code"
+read_only_capable = false
+"""
+    )
+    run_preference.write_cached(run_preference.RunPreference(impl="cursor_grok"))
+    seen = {}
+
+    def fake_run(task, loaded_roster, **kwargs):
+        seen["task"] = task
+        seen["worker"] = kwargs.get("worker")
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "fix the flaky test",
+            "--roster",
+            str(roster_path),
+            "--read-only",
+            "--cwd",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "runs" / "pref-degrade"),
+        ]
+    )
+    assert rc == 0
+    assert seen["worker"] is None
+    err = capsys.readouterr().err
+    assert "run preference impl 'cursor_grok' is not usable here" in err
+    assert "read_only_capable is false" in err
+
+
 def test_run_cli_forwards_explicit_budget_file_before_dispatch(tmp_path, monkeypatch):
     roster_path = tmp_path / "roster.toml"
     roster_path.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')

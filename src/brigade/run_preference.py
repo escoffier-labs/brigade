@@ -166,20 +166,27 @@ def resolve_worker(
     worker: str | None,
     task: str,
 ) -> str | None:
-    """Pick the worker seat. ``--worker`` wins, then one spoken roster name, then impl."""
+    """Pick the default worker seat from the pin.
+
+    ``--worker`` always wins. Without a pinned ``impl`` the answer is always
+    ``None`` (the orchestrator plans, exactly as before the pin existed): a
+    roster seat name appearing in task prose must never convert a planned run
+    into a direct dispatch on its own. With a pin, any spoken roster seat name
+    suppresses the pin and hands the task back to the orchestrator, which sees
+    the named seat in the planner prefix; the pin also never resolves to the
+    orchestrator seat.
+    """
     if worker:
         return worker
-    spoken = _spoken_seat_names(task, roster)
-    orchestrator = getattr(roster, "orchestrator", None)
-    if len(spoken) >= 2:
-        return None
-    if len(spoken) == 1 and spoken[0] != orchestrator:
-        return spoken[0]
     impl = preference.impl
     agents = getattr(roster, "agents", {}) or {}
-    if impl and impl in agents:
-        return impl
-    return None
+    if not impl or impl not in agents:
+        return None
+    if impl == getattr(roster, "orchestrator", None):
+        return None
+    if _spoken_seat_names(task, roster):
+        return None
+    return impl
 
 
 def refresh_cache(*, home: Path | None = None) -> RunPreference:
