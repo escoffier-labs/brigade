@@ -4,6 +4,7 @@ import contextlib
 import errno
 import io
 import json
+import ntpath
 import os
 import shutil
 import signal
@@ -15,6 +16,7 @@ import pytest
 
 from brigade import cli, skills_cmd
 from brigade.projection import kernel as projection
+from brigade.skills_cmd.packs import UnsupportedLexicalPathError, _absolute_lexical_path
 
 
 def _write_skill(root, name="security-review"):
@@ -3617,6 +3619,73 @@ def test_import_refuses_state_root_dotdot_escape_without_copying_bytes(tmp_path,
 
     assert rc == 2
     captured = capsys.readouterr()
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+# --- #1214 Daybreak residual: Windows drive-relative and current-drive-rooted paths -
+
+
+_WINDOWS_DRIVE_RELATIVE_SOURCES = (
+    r"D:.BRIGADE\skills\planted",
+    r"D:.brigade\skills\..\..\.claude\skills\private",
+)
+_WINDOWS_ROOTED_WITHOUT_DRIVE = r"\.brigade\skills\x"
+
+
+@pytest.mark.parametrize("raw", [*_WINDOWS_DRIVE_RELATIVE_SOURCES, _WINDOWS_ROOTED_WITHOUT_DRIVE])
+@pytest.mark.parametrize("pathmod", [ntpath, os.path], ids=["ntpath", "os.path"])
+def test_absolute_lexical_path_refuses_windows_unrooted_forms(raw, pathmod, monkeypatch):
+    """Drive-relative / current-drive-rooted forms must not join process cwd."""
+    cwd_calls: list[str] = []
+
+    def _track_cwd() -> str:
+        cwd_calls.append("called")
+        return r"C:\other"
+
+    monkeypatch.setattr(os, "getcwd", _track_cwd)
+    with pytest.raises(UnsupportedLexicalPathError, match="drive-relative"):
+        _absolute_lexical_path(Path(raw), pathmod=pathmod)
+    assert cwd_calls == []
+
+
+@pytest.mark.parametrize("raw", _WINDOWS_DRIVE_RELATIVE_SOURCES)
+def test_import_refuses_windows_drive_relative_source_without_copying_bytes(tmp_path, capsys, raw):
+    """Bypass C: Windows drive-relative sources must refuse before any copy."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    planted = workspace / ".brigade" / "skills" / "planted"
+    planted.parent.mkdir(parents=True)
+    if hasattr(os, "symlink"):
+        planted.symlink_to(trusted, target_is_directory=True)
+    source = Path(raw)
+    assert skills_cmd._state_root_selector_kind(workspace, raw) == "refuse"
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "drive-relative" in captured.err
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+def test_import_refuses_windows_rooted_without_drive_source_without_copying_bytes(tmp_path, capsys):
+    """Current-drive-rooted ``\\.brigade\\...`` must refuse the same way."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    source = Path(_WINDOWS_ROOTED_WITHOUT_DRIVE)
+    assert skills_cmd._state_root_selector_kind(workspace, _WINDOWS_ROOTED_WITHOUT_DRIVE) == "refuse"
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "drive-relative" in captured.err
     assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
     _assert_trusted_bytes_not_copied(workspace)
     assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"

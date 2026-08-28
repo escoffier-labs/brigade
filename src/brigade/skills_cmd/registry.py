@@ -475,7 +475,10 @@ def _collect_classified_source_tree(
     directory. Trusted external paths are resolved only after that check.
     """
     raw = source.expanduser()
-    parts = _packs_mod._lexical_state_root_parts(target, raw)
+    try:
+        parts = _packs_mod._lexical_state_root_parts(target, raw)
+    except _packs_mod.UnsupportedLexicalPathError as exc:
+        return None, [], {}, str(exc)
     if parts is not None:
         if parts and parts[-1] == "SKILL.md":
             parts = parts[:-1]
