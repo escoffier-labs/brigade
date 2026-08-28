@@ -22,12 +22,14 @@ DOC_COMMAND_TOP_LEVELS = {
     "dogfood",
     "handoff",
     "handoff-template",
+    "harness",
     "hermes-fragments",
     "ingest",
     "init",
     "learn",
     "memory",
     "openclaw-fragments",
+    "run-cloud",
     "projects",
     "reconfigure",
     "release",
@@ -43,6 +45,12 @@ DOC_COMMAND_TOP_LEVELS = {
     "work",
 }
 COMMAND_INVENTORY_RELATIVE_PATH = Path("docs") / "command-inventory.md"
+COMMAND_ALIASES: tuple[tuple[str, str], ...] = (
+    ("brigade run-cloud", "brigade run cloud"),
+    ("brigade openclaw-fragments", "brigade harness fragments"),
+    ("brigade hermes-fragments", "brigade harness fragments"),
+    ("brigade import", "brigade work import"),
+)
 ROADMAP_ARCHIVE_RELATIVE_PATH = Path("docs") / "roadmap-archive.md"
 ROADMAP_VERSION_HEADLINE_RE = re.compile(r"\*\*v(\d+)\.(\d+)\.(?:x|\d+) on main\*\*")
 PROJECT_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)")
@@ -528,6 +536,11 @@ def _commands_from_text(text: str) -> set[str]:
         return False
 
     def add_command(raw_command: str, *, require_known_head: bool = False) -> None:
+        # Ignore prose captured between accidental backticks. Real invocations
+        # start with `brigade` after optional prompt/punctuation.
+        leading = raw_command.lstrip(" `'\"$")
+        if not leading.startswith("brigade"):
+            return
         match = command_re.search(raw_command)
         if not match:
             return
@@ -583,25 +596,34 @@ def _documented_brigade_commands(target: Path) -> list[str]:
 
 def _cli_command_paths() -> list[str]:
     from . import cli
+    from . import extras as extras_mod
 
-    parser = cli._build_parser()
-    commands: set[str] = set()
+    # Inventory documents the full extras surface. Enumerate with extras on
+    # so the production missing-command check is honest regardless of the
+    # operator marker or BRIGADE_EXTRAS.
+    original_enabled = extras_mod.enabled
+    extras_mod.enabled = lambda: True
+    try:
+        parser = cli._build_parser()
+        commands: set[str] = set()
 
-    def walk(prefix: list[str], parser_obj: argparse.ArgumentParser) -> None:
-        subparsers = [action for action in parser_obj._actions if isinstance(action, argparse._SubParsersAction)]
-        if prefix and parser_obj.get_default("_brigade_command_contract_leaf"):
-            commands.add(" ".join(["brigade", *prefix]))
-        if prefix and parser_obj.get_default("_brigade_legacy_plan"):
-            commands.add(" ".join(["brigade", *prefix, "plan"]))
-        if not subparsers and prefix:
-            commands.add(" ".join(["brigade", *prefix]))
-            return
-        for action in subparsers:
-            for name, subparser in action.choices.items():
-                walk([*prefix, str(name)], subparser)
+        def walk(prefix: list[str], parser_obj: argparse.ArgumentParser) -> None:
+            subparsers = [action for action in parser_obj._actions if isinstance(action, argparse._SubParsersAction)]
+            if prefix and parser_obj.get_default("_brigade_command_contract_leaf"):
+                commands.add(" ".join(["brigade", *prefix]))
+            if prefix and parser_obj.get_default("_brigade_legacy_plan"):
+                commands.add(" ".join(["brigade", *prefix, "plan"]))
+            if not subparsers and prefix:
+                commands.add(" ".join(["brigade", *prefix]))
+                return
+            for action in subparsers:
+                for name, subparser in action.choices.items():
+                    walk([*prefix, str(name)], subparser)
 
-    walk([], parser)
-    return sorted(commands)
+        walk([], parser)
+        return sorted(commands)
+    finally:
+        extras_mod.enabled = original_enabled
 
 
 def _cli_command_prefixes(commands: list[str]) -> set[str]:
@@ -613,13 +635,23 @@ def _cli_command_prefixes(commands: list[str]) -> set[str]:
     return prefixes
 
 
-def _normalize_documented_command(command: str, known_prefixes: set[str]) -> str:
-    parts = command.split()
-    for length in range(len(parts), 1, -1):
-        candidate = " ".join(parts[:length])
-        if candidate in known_prefixes:
-            return candidate
+def _apply_command_alias(command: str) -> str:
+    """Rewrite documented/parser aliases to their canonical command path."""
+    for source, dest in COMMAND_ALIASES:
+        if command == source or command.startswith(f"{source} "):
+            return dest + command[len(source) :]
     return command
+
+
+def _normalize_documented_command(command: str, known_prefixes: set[str]) -> str:
+    aliased = _apply_command_alias(command)
+    for source in (command, aliased):
+        parts = source.split()
+        for length in range(len(parts), 1, -1):
+            candidate = " ".join(parts[:length])
+            if candidate in known_prefixes:
+                return candidate
+    return aliased
 
 
 def _active_queue_items() -> list[dict[str, Any]]:
