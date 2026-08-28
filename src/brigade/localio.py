@@ -43,6 +43,12 @@ def read_json_dict(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _active_bound_target(path: Path) -> tuple[Any, tuple[str, ...], str] | None:
+    from . import run_dirfd
+
+    return run_dirfd.active_binding_for(path)
+
+
 def write_text_atomic(path: Path, data: str) -> None:
     """Write data to path atomically, creating parents.
 
@@ -52,7 +58,16 @@ def write_text_atomic(path: Path, data: str) -> None:
     replacement the temp file is removed and the existing file is left untouched.
     A directory-fsync failure occurs after replacement and means durable
     publication is unconfirmed, although the new bytes are already present.
+
+    When a ``run_dirfd`` binding is active and ``path`` is a lexical descendant
+    of that bound run directory, the write is authorized only through held
+    no-follow dirfds. Without a binding the pathname writer is unchanged.
     """
+    bound = _active_bound_target(path)
+    if bound is not None:
+        run_dir, components, name = bound
+        run_dir.write_text_atomic(components, name, data)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
@@ -95,7 +110,17 @@ def _supports_directory_fsync() -> bool:
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:
-    """Write bytes to path atomically, creating parents."""
+    """Write bytes to path atomically, creating parents.
+
+    When a ``run_dirfd`` binding is active and ``path`` is a lexical descendant
+    of that bound run directory, the write is authorized only through held
+    no-follow dirfds. Without a binding the pathname writer is unchanged.
+    """
+    bound = _active_bound_target(path)
+    if bound is not None:
+        run_dir, components, name = bound
+        run_dir.write_bytes_atomic(components, name, data)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)

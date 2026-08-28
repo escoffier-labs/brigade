@@ -24,6 +24,7 @@ from ..inbox_lock import verify_canonical_write_locks
 from ... import component_paths, evidence_redaction, provenance, runguard, trust_gate
 from ...untrusted import scan_handoff_injection_heuristics
 
+from ... import dirfd
 from . import descriptor_anchors, import_model
 
 
@@ -56,25 +57,12 @@ def _directory_identity(descriptor: int) -> dict[str, int]:
 
 def _posix_dirfd_available() -> bool:
     """Return whether POSIX openat/O_NOFOLLOW primitives can hold a parent."""
-    return (
-        os.name == "posix"
-        and bool(getattr(os, "O_NOFOLLOW", 0))
-        and bool(getattr(os, "O_DIRECTORY", 0))
-        and os.open in os.supports_dir_fd
-        and os.mkdir in os.supports_dir_fd
-        and os.stat in os.supports_dir_fd
-        and os.unlink in os.supports_dir_fd
-        and os.rename in os.supports_dir_fd
-    )
+    return dirfd.posix_available()
 
 
 def _nt_dirfd_available() -> bool:
     """Return whether Windows handle-relative no-follow operations can be used."""
-    if sys.platform != "win32":
-        return False
-    from .. import nt_dirfd
-
-    return nt_dirfd.available()
+    return dirfd.nt_available()
 
 
 def _dirfd_available() -> bool:
@@ -82,18 +70,15 @@ def _dirfd_available() -> bool:
 
 
 def _dirfd_unavailable(kind: str) -> OSError:
-    return OSError(f"descriptor-relative {kind} are unavailable")
+    return dirfd.unavailable(kind)
 
 
 def _open_directory_nofollow(path: Path) -> int:
     """Open a directory without following a final symlink or reparse point."""
     if _posix_dirfd_available():
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        return os.open(path, flags)
+        return dirfd._posix_open_directory(path)
     if _nt_dirfd_available():
-        from .. import nt_dirfd
-
-        return nt_dirfd.open_root_directory(path)
+        return dirfd._nt_open_directory(path)
     raise _dirfd_unavailable("directory operations")
 
 
@@ -101,93 +86,69 @@ def _open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
     """Open a file path without following a final symlink or reparse point."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow:
-        if flags & os.O_CREAT:
-            return os.open(path, flags | nofollow | getattr(os, "O_CLOEXEC", 0), mode)
-        return os.open(path, flags | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+        return dirfd._posix_open_file(path, flags, mode)
     if _nt_dirfd_available():
-        from .. import nt_dirfd
-
-        return nt_dirfd.open_path_file(path, flags, mode)
+        return dirfd._nt_open_file(path, flags, mode)
     raise OSError("no-follow file open is unavailable")
 
 
 def _dirfd_open_dir(parent: int, name: str) -> int:
     if _posix_dirfd_available():
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        return os.open(name, flags, dir_fd=parent)
+        return dirfd._posix_open_child_directory(parent, name)
     if _nt_dirfd_available():
-        from .. import nt_dirfd
-
-        return nt_dirfd.open_child_directory(parent, name)
+        return dirfd._nt_open_child_directory(parent, name)
     raise _dirfd_unavailable("directory operations")
 
 
 def _dirfd_mkdir(parent: int, name: str) -> None:
     if _posix_dirfd_available():
-        os.mkdir(name, 0o700, dir_fd=parent)
+        dirfd._posix_mkdir_child(parent, name)
         return
     if _nt_dirfd_available():
-        from .. import nt_dirfd
-
-        nt_dirfd.mkdir_child(parent, name)
+        dirfd._nt_mkdir_child(parent, name)
         return
     raise _dirfd_unavailable("directory operations")
 
 
 def _dirfd_open_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
     if _posix_dirfd_available():
-        if flags & os.O_CREAT:
-            return os.open(name, flags, mode, dir_fd=parent)
-        return os.open(name, flags, dir_fd=parent)
+        return dirfd._posix_open_child_file(parent, name, flags, mode)
     if _nt_dirfd_available():
-        from .. import nt_dirfd
-
-        return nt_dirfd.open_file(parent, name, flags, mode)
+        return dirfd._nt_open_child_file(parent, name, flags, mode)
     raise _dirfd_unavailable("import inbox operations")
 
 
 def _dirfd_replace(parent: int, source: str, destination: str) -> None:
     if _posix_dirfd_available():
-        os.replace(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+        dirfd._posix_replace_children(parent, source, destination)
         return
     if _nt_dirfd_available():
-        from .. import nt_dirfd
-
-        nt_dirfd.replace_children(parent, source, destination)
+        dirfd._nt_replace_children(parent, source, destination)
         return
     raise _dirfd_unavailable("import inbox operations")
 
 
 def _dirfd_unlink(parent: int, name: str) -> None:
     if _posix_dirfd_available():
-        os.unlink(name, dir_fd=parent)
+        dirfd._posix_unlink_child(parent, name)
         return
     if _nt_dirfd_available():
-        from .. import nt_dirfd
-
-        nt_dirfd.unlink_child(parent, name)
+        dirfd._nt_unlink_child(parent, name)
         return
     raise _dirfd_unavailable("import inbox operations")
 
 
 def _dirfd_stat(parent: int, name: str) -> os.stat_result:
     if _posix_dirfd_available():
-        return os.stat(name, dir_fd=parent, follow_symlinks=False)
+        return dirfd._posix_stat_child(parent, name)
     if _nt_dirfd_available():
-        from .. import nt_dirfd
-
-        return nt_dirfd.stat_child(parent, name)
+        return dirfd._nt_stat_child(parent, name)
     raise _dirfd_unavailable("import inbox validation")
 
 
 def _dirfd_fsync(descriptor: int) -> None:
     """Flush a held descriptor; directory fsync is best-effort on Windows."""
-    try:
-        os.fsync(descriptor)
-    except OSError as exc:
-        if sys.platform == "win32" and getattr(exc, "winerror", None) in {1, 5}:
-            return
-        raise
+    dirfd.fsync_directory(descriptor)
 
 
 def _workspace_directory_identity(target: Path) -> dict[str, int]:
