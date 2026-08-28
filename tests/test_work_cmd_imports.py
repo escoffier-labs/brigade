@@ -4873,3 +4873,58 @@ def test_dismiss_single_keeps_scanner_commit_landing_before_publication(tmp_path
     assert final[seeded["id"]]["status"] == "dismissed"
     assert final["scan-one-1"]["status"] == "pending"
     assert "scan-one-1" in final, f"scanner commit deleted by dismiss: {sorted(final)}"
+
+
+def _raise_canonical_inbox_lock_timeout(monkeypatch):
+    import contextlib
+
+    from brigade.work_cmd import inbox_lock as inbox_lock_mod
+    from brigade.work_cmd import ledger as ledger_mod
+
+    @contextlib.contextmanager
+    def boom(_target):
+        raise inbox_lock_mod.InboxLockTimeout("import inbox lock stayed busy for 0.5s: test")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ledger_mod, "_canonical_inbox_write", boom)
+
+
+def test_import_context_returns_bounded_error_on_inbox_lock_timeout(tmp_path, monkeypatch, capsys):
+    """Finding 4: context returns rc 1 with a bounded error instead of a traceback."""
+    _raise_canonical_inbox_lock_timeout(monkeypatch)
+    assert work_cmd.import_context(target=tmp_path, text="context under lock timeout") == 1
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "import inbox lock stayed busy" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_import_promote_handoff_returns_bounded_error_on_inbox_lock_timeout(tmp_path, monkeypatch, capsys):
+    """Finding 4: promote-handoff returns rc 1 with a bounded error instead of a traceback."""
+    _raise_canonical_inbox_lock_timeout(monkeypatch)
+    assert work_cmd.import_promote_handoff(target=tmp_path, import_id="imp-timeout") == 1
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "import inbox lock stayed busy" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_import_promote_returns_bounded_error_on_inbox_lock_timeout(tmp_path, monkeypatch, capsys):
+    """Finding 4: promote returns rc 1 with a bounded error instead of a traceback."""
+    _raise_canonical_inbox_lock_timeout(monkeypatch)
+    assert work_cmd.import_promote(target=tmp_path, import_id="imp-timeout") == 1
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "import inbox lock stayed busy" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_import_dismiss_returns_bounded_error_on_inbox_lock_timeout(tmp_path, monkeypatch, capsys):
+    """Finding 4: dismiss returns rc 1 with a bounded error instead of a traceback."""
+    _raise_canonical_inbox_lock_timeout(monkeypatch)
+    assert work_cmd.import_dismiss(target=tmp_path, import_id="imp-timeout") == 1
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "import inbox lock stayed busy" in captured.err
+    assert "Traceback" not in captured.err

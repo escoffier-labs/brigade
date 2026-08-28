@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import work_cmd
+from ..work_cmd import ledger as ledger_mod
 from .adoption import adoption_plan_payload
 from .surfaces import (
     _read_latest_surfaces_capture,
@@ -209,43 +210,44 @@ def migration_consolidate(
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    imports = work_cmd._read_imports(target)
-    rollup_ids = [
-        str(item.get("id"))
-        for item in imports
-        if isinstance(item, dict)
-        and item.get("status", "pending") == "pending"
-        and item.get("source") == "operator-migration"
-        and ((item.get("metadata") or {}).get("gap_name") if isinstance(item.get("metadata"), dict) else None)
-        in {"surface_reviews_missing", "surface_records_need_owner"}
-    ]
-    candidates = []
-    now = datetime.now(timezone.utc).isoformat()
-    for item in imports:
-        if (
-            not isinstance(item, dict)
-            or item.get("status", "pending") != "pending"
-            or item.get("source") != "operator-surface-review"
-        ):
-            continue
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        if surface and metadata.get("surface") != surface:
-            continue
-        if review_status and metadata.get("review_status") != review_status:
-            continue
-        candidates.append(item)
-    if rollup_ids and not dry_run:
-        rollup_id = rollup_ids[0]
-        for item in candidates:
-            item["status"] = "dismissed"
-            item["dismissed_at"] = now
-            item["dismiss_reason"] = reason
+    with ledger_mod._canonical_inbox_write(target):
+        imports = work_cmd._read_imports(target)
+        rollup_ids = [
+            str(item.get("id"))
+            for item in imports
+            if isinstance(item, dict)
+            and item.get("status", "pending") == "pending"
+            and item.get("source") == "operator-migration"
+            and ((item.get("metadata") or {}).get("gap_name") if isinstance(item.get("metadata"), dict) else None)
+            in {"surface_reviews_missing", "surface_records_need_owner"}
+        ]
+        candidates = []
+        now = datetime.now(timezone.utc).isoformat()
+        for item in imports:
+            if (
+                not isinstance(item, dict)
+                or item.get("status", "pending") != "pending"
+                or item.get("source") != "operator-surface-review"
+            ):
+                continue
             metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-            metadata["superseded_by_import_id"] = rollup_id
-            metadata["superseded_by_source"] = "operator-migration"
-            item["metadata"] = metadata
-        if candidates:
-            work_cmd._write_imports(target, imports)
+            if surface and metadata.get("surface") != surface:
+                continue
+            if review_status and metadata.get("review_status") != review_status:
+                continue
+            candidates.append(item)
+        if rollup_ids and not dry_run:
+            rollup_id = rollup_ids[0]
+            for item in candidates:
+                item["status"] = "dismissed"
+                item["dismissed_at"] = now
+                item["dismiss_reason"] = reason
+                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                metadata["superseded_by_import_id"] = rollup_id
+                metadata["superseded_by_source"] = "operator-migration"
+                item["metadata"] = metadata
+            if candidates:
+                work_cmd._write_imports(target, imports)
     result = {
         "target": str(target),
         "surface": surface,
@@ -496,37 +498,38 @@ def _supersede_stale_operator_migration_imports(
             current_by_identity[identity] = fingerprint
     if not current_by_identity:
         return []
-    imports = work_cmd._read_imports(target)
-    superseded: list[str] = []
-    now = datetime.now(timezone.utc).isoformat()
-    for item in imports:
-        if (
-            not isinstance(item, dict)
-            or item.get("status", "pending") != "pending"
-            or item.get("source") != "operator-migration"
-        ):
-            continue
-        identity = work_cmd._import_source_identity(item)
-        if identity not in current_by_identity:
-            continue
-        current = current_by_identity[identity]
-        existing = work_cmd._import_fingerprint(item)
-        if existing == current:
-            continue
-        item_id = str(item.get("id") or "")
-        if item_id:
-            superseded.append(item_id)
-        if not dry_run:
-            item["status"] = "dismissed"
-            item["dismissed_at"] = now
-            item["dismiss_reason"] = "superseded-by-current-migration-rollup"
-            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-            metadata["superseded_by_source"] = "operator-migration"
-            metadata["current_source_fingerprint"] = current
-            item["metadata"] = metadata
-    if superseded and not dry_run:
-        work_cmd._write_imports(target, imports)
-    return superseded
+    with ledger_mod._canonical_inbox_write(target):
+        imports = work_cmd._read_imports(target)
+        superseded: list[str] = []
+        now = datetime.now(timezone.utc).isoformat()
+        for item in imports:
+            if (
+                not isinstance(item, dict)
+                or item.get("status", "pending") != "pending"
+                or item.get("source") != "operator-migration"
+            ):
+                continue
+            identity = work_cmd._import_source_identity(item)
+            if identity not in current_by_identity:
+                continue
+            current = current_by_identity[identity]
+            existing = work_cmd._import_fingerprint(item)
+            if existing == current:
+                continue
+            item_id = str(item.get("id") or "")
+            if item_id:
+                superseded.append(item_id)
+            if not dry_run:
+                item["status"] = "dismissed"
+                item["dismissed_at"] = now
+                item["dismiss_reason"] = "superseded-by-current-migration-rollup"
+                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                metadata["superseded_by_source"] = "operator-migration"
+                metadata["current_source_fingerprint"] = current
+                item["metadata"] = metadata
+        if superseded and not dry_run:
+            work_cmd._write_imports(target, imports)
+        return superseded
 
 
 def _supersede_stale_operator_source_imports(
@@ -553,39 +556,40 @@ def _supersede_stale_operator_source_imports(
         gap.get("name") for gap in (payload.get("gaps") or {}).get("items") or [] if isinstance(gap, dict)
     }
     has_surface_rollup = "surface_records_need_owner" in migration_gap_names
-    imports = work_cmd._read_imports(target)
-    superseded: list[str] = []
-    now = datetime.now(timezone.utc).isoformat()
-    for item in imports:
-        if not isinstance(item, dict) or item.get("status", "pending") != "pending":
-            continue
-        source = item.get("source")
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        source_key = metadata.get("source_item_key")
-        should_supersede = False
-        reason = "superseded-by-current-migration-status"
-        if (
-            source == "operator-adoption"
-            and isinstance(source_key, str)
-            and source_key not in current_adoption_issue_keys
-        ):
-            should_supersede = True
-        elif source == "operator-surface" and has_surface_rollup:
-            surface = metadata.get("surface")
-            if isinstance(surface, str) and surface in reviewed_surfaces:
+    with ledger_mod._canonical_inbox_write(target):
+        imports = work_cmd._read_imports(target)
+        superseded: list[str] = []
+        now = datetime.now(timezone.utc).isoformat()
+        for item in imports:
+            if not isinstance(item, dict) or item.get("status", "pending") != "pending":
+                continue
+            source = item.get("source")
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            source_key = metadata.get("source_item_key")
+            should_supersede = False
+            reason = "superseded-by-current-migration-status"
+            if (
+                source == "operator-adoption"
+                and isinstance(source_key, str)
+                and source_key not in current_adoption_issue_keys
+            ):
                 should_supersede = True
-                reason = "superseded-by-reviewed-surface-rollup"
-        if not should_supersede:
-            continue
-        item_id = str(item.get("id") or "")
-        if item_id:
-            superseded.append(item_id)
-        if not dry_run:
-            item["status"] = "dismissed"
-            item["dismissed_at"] = now
-            item["dismiss_reason"] = reason
-            metadata["superseded_by_source"] = "operator-migration"
-            item["metadata"] = metadata
-    if superseded and not dry_run:
-        work_cmd._write_imports(target, imports)
-    return superseded
+            elif source == "operator-surface" and has_surface_rollup:
+                surface = metadata.get("surface")
+                if isinstance(surface, str) and surface in reviewed_surfaces:
+                    should_supersede = True
+                    reason = "superseded-by-reviewed-surface-rollup"
+            if not should_supersede:
+                continue
+            item_id = str(item.get("id") or "")
+            if item_id:
+                superseded.append(item_id)
+            if not dry_run:
+                item["status"] = "dismissed"
+                item["dismissed_at"] = now
+                item["dismiss_reason"] = reason
+                metadata["superseded_by_source"] = "operator-migration"
+                item["metadata"] = metadata
+        if superseded and not dry_run:
+            work_cmd._write_imports(target, imports)
+        return superseded

@@ -520,32 +520,33 @@ def review_work_import(
     from .work_cmd import ledger as ledger_mod
 
     expected = _require_digest(expected_hash)
-    item, imports = ledger_mod._find_import(target, import_id)
-    if item is None:
-        raise TrustReviewError(f"import not found: {import_id}")
-    env = envelope_from_record(item)
-    text = str(item.get("text") or "")
-    current = current_envelope_digest(env, text)
-    if current != expected:
-        raise TrustReviewError("content hash does not match the current envelope digest")
-    item_ref = f"{ITEM_REF_WORK_IMPORT}{item.get('id')}"
-    label = trust_label_of(env)
-    if label == "reviewed" and has_matching_transition(
-        target, item_ref=item_ref, to_label="reviewed", envelope_content_hash=current
-    ):
-        return {"status": "noop", "item_ref": item_ref, "to_label": "reviewed", "envelope_content_hash": current}
-    if label in {"unknown", "quarantined"}:
-        raise TrustReviewError(f"cannot review {label} content until classification or scan is resolved")
-    if label != "untrusted":
-        raise TrustReviewError(f"cannot review trust label {label}")
-    now = localio.utc_now_iso()
-    updated_env = apply_trust_label(env, to_label="reviewed", assigned_by=operator_command, assigned_at=now)
-    raw_metadata = item.get("metadata")
-    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
-    metadata["provenance"] = updated_env
-    item["metadata"] = metadata
-    item["updated_at"] = now
-    ledger_mod._write_imports(target, imports)
+    with ledger_mod._canonical_inbox_write(target):
+        item, imports = ledger_mod._find_import(target, import_id)
+        if item is None:
+            raise TrustReviewError(f"import not found: {import_id}")
+        env = envelope_from_record(item)
+        text = str(item.get("text") or "")
+        current = current_envelope_digest(env, text)
+        if current != expected:
+            raise TrustReviewError("content hash does not match the current envelope digest")
+        item_ref = f"{ITEM_REF_WORK_IMPORT}{item.get('id')}"
+        label = trust_label_of(env)
+        if label == "reviewed" and has_matching_transition(
+            target, item_ref=item_ref, to_label="reviewed", envelope_content_hash=current
+        ):
+            return {"status": "noop", "item_ref": item_ref, "to_label": "reviewed", "envelope_content_hash": current}
+        if label in {"unknown", "quarantined"}:
+            raise TrustReviewError(f"cannot review {label} content until classification or scan is resolved")
+        if label != "untrusted":
+            raise TrustReviewError(f"cannot review trust label {label}")
+        now = localio.utc_now_iso()
+        updated_env = apply_trust_label(env, to_label="reviewed", assigned_by=operator_command, assigned_at=now)
+        raw_metadata = item.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+        metadata["provenance"] = updated_env
+        item["metadata"] = metadata
+        item["updated_at"] = now
+        ledger_mod._write_imports(target, imports)
     event = build_provenance_event(
         item_ref=item_ref,
         from_label=label,
