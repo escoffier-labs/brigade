@@ -26,6 +26,8 @@ from ...untrusted import scan_handoff_injection_heuristics
 
 from . import inbox_provenance, queries_handoffs, authority_store, descriptor_anchors, locking
 
+_GITHUB_ISSUE_VIEW_TIMEOUT_SECONDS = 30.0
+
 
 def _metadata(item: Mapping[str, Any]) -> dict[str, Any]:
     value = item.get("metadata")
@@ -678,21 +680,25 @@ def _github_issue_ref(issue: dict[str, Any]) -> str | None:
 def _read_github_issue(target: Path, issue_ref: str) -> tuple[dict[str, Any] | None, list[str], str | None]:
     if shutil.which("gh") is None:
         return None, [], "gh CLI is not available on PATH"
-    result = subprocess.run(
-        [
-            "gh",
-            "issue",
-            "view",
-            issue_ref,
-            "--json",
-            "url,number,title,labels,state,body",
-        ],
-        cwd=target,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "view",
+                issue_ref,
+                "--json",
+                "url,number,title,labels,state,body",
+            ],
+            cwd=target,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=_GITHUB_ISSUE_VIEW_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return None, [], f"gh issue view timed out after {exc.timeout:g}s"
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"gh issue view exited {result.returncode}"
         return None, [], detail

@@ -26,6 +26,8 @@ from ...untrusted import scan_handoff_injection_heuristics
 
 from . import authority_store, import_model
 
+_AUTHORITY_SNAPSHOT_READ_CHUNK_BYTES = 1024 * 1024
+
 
 def _record_verifier_owned_directory(
     target: Path, *, components: tuple[str, ...], directory: int, workspace: dict[str, int] | None = None
@@ -150,29 +152,30 @@ def _record_verifier_owned_file(
     """Record durable file identity after the verifier has published the bytes."""
     bound_workspace = authority_store._external_workspace_directory_identity(target) if workspace is None else workspace
     authority_store._require_workspace_directory_identity(target, bound_workspace)
-    path, existing = authority_store._read_external_directory_authority(target)
-    resolved = str(target.expanduser().resolve())
-    authority_store._require_workspace_directory_identity(target, bound_workspace)
-    if existing is None:
-        raise OSError("external directory authority record is missing")
-    if (
-        existing.get("schema_version") != import_model._EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
-        or existing.get("target") != resolved
-        or existing.get("workspace") != bound_workspace
-        or not isinstance(existing.get("directories"), dict)
-    ):
-        raise OSError("external directory authority record is malformed")
-    files = existing.setdefault("files", {})
-    if not isinstance(files, dict):
-        raise OSError("external file authority record is malformed")
-    scope = authority_store._directory_authority_scope(components)
-    identity = _file_identity(descriptor, data)
-    if files.get(scope) == identity:
-        return
-    files[scope] = identity
-    authority_store._write_external_directory_authority(path, existing, workspace=target)
-    if _file_identity(descriptor, data) != identity:
-        raise OSError("file identity changed while recording authority")
+    with inbox_lock.inbox_writer_lock(target):
+        path, existing = authority_store._read_external_directory_authority(target)
+        resolved = str(target.expanduser().resolve())
+        authority_store._require_workspace_directory_identity(target, bound_workspace)
+        if existing is None:
+            raise OSError("external directory authority record is missing")
+        if (
+            existing.get("schema_version") != import_model._EXTERNAL_DIRECTORY_AUTHORITY_SCHEMA_VERSION
+            or existing.get("target") != resolved
+            or existing.get("workspace") != bound_workspace
+            or not isinstance(existing.get("directories"), dict)
+        ):
+            raise OSError("external directory authority record is malformed")
+        files = existing.setdefault("files", {})
+        if not isinstance(files, dict):
+            raise OSError("external file authority record is malformed")
+        scope = authority_store._directory_authority_scope(components)
+        identity = _file_identity(descriptor, data)
+        if files.get(scope) == identity:
+            return
+        files[scope] = identity
+        authority_store._write_external_directory_authority(path, existing, workspace=target)
+        if _file_identity(descriptor, data) != identity:
+            raise OSError("file identity changed while recording authority")
 
 
 def _validate_verifier_owned_file(
@@ -364,28 +367,38 @@ def _open_verifier_owned_directory(
             child = authority_store._dirfd_open_dir(parent, name)
             created = True
         try:
-            if record is None:
-                authority_store._validate_external_directory_authority(target, components, child, workspace=workspace)
-            else:
-                _validate_record_bound_directory(record, components=components, directory=child)
-        except OSError:
-            if record is not None:
-                raise
-            if created:
-                authority_store._record_external_directory_authority(target, components, child, workspace=workspace)
-            elif authority_store._reanchor_external_directory_authority(target, components, child, workspace=workspace):
-                authority_store._validate_external_directory_authority(target, components, child, workspace=workspace)
-            else:
-                # A directory that already existed and is not bound to this
-                # workspace record is never adopted, including on the create
-                # path: a pre-created directory may be an attacker's inode.
-                raise
-        _write_compatibility_directory_anchor(anchor_parent, child, anchor_name=anchor_name)
-        os.close(parent)
-        parent = -1
-        os.close(anchor_parent)
-        anchor_parent = -1
-        return child
+            try:
+                if record is None:
+                    authority_store._validate_external_directory_authority(
+                        target, components, child, workspace=workspace
+                    )
+                else:
+                    _validate_record_bound_directory(record, components=components, directory=child)
+            except OSError:
+                if record is not None:
+                    raise
+                if created:
+                    authority_store._record_external_directory_authority(target, components, child, workspace=workspace)
+                elif authority_store._reanchor_external_directory_authority(
+                    target, components, child, workspace=workspace
+                ):
+                    authority_store._validate_external_directory_authority(
+                        target, components, child, workspace=workspace
+                    )
+                else:
+                    # A directory that already existed and is not bound to this
+                    # workspace record is never adopted, including on the create
+                    # path: a pre-created directory may be an attacker's inode.
+                    raise
+            _write_compatibility_directory_anchor(anchor_parent, child, anchor_name=anchor_name)
+            os.close(parent)
+            parent = -1
+            os.close(anchor_parent)
+            anchor_parent = -1
+            return child
+        except BaseException:
+            os.close(child)
+            raise
     except BaseException:
         if parent != -1:
             os.close(parent)
@@ -817,7 +830,10 @@ def _read_verified_authority_snapshot(target: Path | None) -> dict[str, Any] | N
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             return None
-        raw = os.read(descriptor, 1024 * 1024)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, _AUTHORITY_SNAPSHOT_READ_CHUNK_BYTES):
+            chunks.append(chunk)
+        raw = b"".join(chunks)
     finally:
         os.close(descriptor)
     try:
