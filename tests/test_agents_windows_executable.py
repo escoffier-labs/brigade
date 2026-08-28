@@ -106,7 +106,7 @@ def test_run_agent_uses_command_prefix_for_cursor_on_windows(monkeypatch):
     result = agents.run_agent("cursor", "do it", command=(node, index))
 
     assert result.ok is True
-    assert launched == [[node, index, "-p", "--output-format", "text", "-f", "do it"]]
+    assert launched == [[node, index, "-p", "--output-format", "text", "-f", "--trust", "do it"]]
 
 
 def test_run_agent_resolves_once_from_child_path(monkeypatch):

@@ -1,4 +1,4 @@
-"""brigade fleet command group (issues #1123, #1125, #1141, #1150): hub serve, status, spool flush, claims, nodes."""
+"""brigade fleet command group (issues #1123, #1125, #1141, #1150, #1223): hub serve, status, spool flush, claims, nodes, preference."""
 
 from __future__ import annotations
 
@@ -248,6 +248,26 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_sink.set_defaults(func=_dispatch_sink)
 
+    p_preference = fleet_sub.add_parser(
+        "preference",
+        help="Get, set, or pull the fleet run preference overlay (#1223).",
+    )
+    preference_sub = p_preference.add_subparsers(dest="preference_command", metavar="<preference-command>")
+    preference_sub.required = True
+    p_pref_get = preference_sub.add_parser("get", help="Show the hub pin, or the local cache when the hub is down.")
+    p_pref_get.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_pref_get.set_defaults(func=_dispatch_preference_get)
+    p_pref_set = preference_sub.add_parser("set", help="Replace the hub pin and refresh the local cache (admin token).")
+    p_pref_set.add_argument("--impl", default=None, help="Default implementation seat name.")
+    p_pref_set.add_argument("--review", default=None, help="Default review seat name.")
+    p_pref_set.add_argument("--chef", default=None, help="Default chef/orchestrator seat name.")
+    p_pref_set.add_argument("--notes", default=None, help="Optional operator note (no secrets or home paths).")
+    p_pref_set.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_pref_set.set_defaults(func=_dispatch_preference_set)
+    p_pref_pull = preference_sub.add_parser("pull", help="Refresh the local cache from the hub. Never fails a run.")
+    p_pref_pull.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_pref_pull.set_defaults(func=_dispatch_preference_pull)
+
 
 def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | None = None) -> int:
     from .. import fleet_command_deck, fleet_hub
@@ -355,15 +375,27 @@ def _dispatch_sink(args: argparse.Namespace) -> int:
 def _dispatch_status(args: argparse.Namespace) -> int:
     import json as _json
 
-    from .. import fleet_client
+    from .. import fleet_client, run_preference
 
     try:
         runs = fleet_client.fetch_status(include_all=args.all)
     except fleet_client.FleetClientError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    preference_source = "hub"
+    try:
+        preference_payload = _preference_payload(fleet_client.fetch_run_preference())
+    except fleet_client.FleetClientError:
+        preference_payload = _preference_payload(run_preference.load_cached())
+        preference_source = "cached"
     if args.json:
-        print(_json.dumps({"runs": runs}, indent=2, sort_keys=True))
+        print(
+            _json.dumps(
+                {"preference": preference_payload, "runs": runs},
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     headers = ("node", "repo", "run_id", "seat/harness", "state", "exit", "age")
     rows = []
@@ -387,6 +419,95 @@ def _dispatch_status(args: argparse.Namespace) -> int:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
     if not rows:
         print("(no active fleet runs)")
+    print()
+    _print_preference(preference_payload, source=preference_source)
+    return 0
+
+
+def _preference_payload(preference: object) -> dict[str, str | None]:
+    from .. import run_preference
+
+    if isinstance(preference, run_preference.RunPreference):
+        return {
+            "impl": preference.impl,
+            "review": preference.review,
+            "chef": preference.chef,
+            "notes": preference.notes,
+        }
+    if isinstance(preference, dict):
+        return {
+            "impl": preference.get("impl"),
+            "review": preference.get("review"),
+            "chef": preference.get("chef"),
+            "notes": preference.get("notes"),
+        }
+    return {"impl": None, "review": None, "chef": None, "notes": None}
+
+
+def _print_preference(payload: dict[str, str | None], *, source: str) -> None:
+    print(f"run preference ({source})")
+    for key in ("impl", "review", "chef", "notes"):
+        print(f"  {key}: {_safe_table_cell(payload.get(key) or '-')}")
+
+
+def _dispatch_preference_get(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client, run_preference
+
+    source = "hub"
+    try:
+        payload = _preference_payload(fleet_client.fetch_run_preference())
+        parsed = run_preference.parse_preference({key: value for key, value in payload.items() if value})
+        run_preference.write_cached(parsed)
+    except (fleet_client.FleetClientError, run_preference.RunPreferenceError):
+        payload = _preference_payload(run_preference.load_cached())
+        source = "cached"
+    if args.json:
+        print(_json.dumps({"preference": payload, "source": source}, indent=2, sort_keys=True))
+        return 0
+    _print_preference(payload, source=source)
+    return 0
+
+
+def _dispatch_preference_set(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import fleet_client, run_preference
+
+    raw = {key: getattr(args, key) for key in ("impl", "review", "chef", "notes") if getattr(args, key) is not None}
+    if not raw:
+        print("error: set at least one of --impl, --review, --chef, or --notes", file=sys.stderr)
+        return 2
+    try:
+        parsed = run_preference.parse_preference(raw)
+        stored = fleet_client.put_run_preference(parsed.payload())
+        run_preference.write_cached(run_preference.parse_preference(stored))
+    except run_preference.RunPreferenceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    payload = _preference_payload(stored)
+    if args.json:
+        print(_json.dumps({"preference": payload, "source": "hub"}, indent=2, sort_keys=True))
+        return 0
+    _print_preference(payload, source="hub")
+    return 0
+
+
+def _dispatch_preference_pull(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .. import run_preference
+
+    preference = run_preference.refresh_cache()
+    payload = _preference_payload(preference)
+    if args.json:
+        print(_json.dumps({"preference": payload, "source": "cached"}, indent=2, sort_keys=True))
+        return 0
+    _print_preference(payload, source="cached")
     return 0
 
 

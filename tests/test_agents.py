@@ -29,6 +29,7 @@ def test_build_argv_for_known_clis():
         "--output-format",
         "text",
         "-f",
+        "--trust",
         "hi",
     ]
     assert agents.build_argv("aider", "hi") == ["aider", "--yes", "--no-auto-commits", "--message", "hi"]

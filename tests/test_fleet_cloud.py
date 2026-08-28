@@ -211,7 +211,7 @@ def test_v4_migration_preserves_existing_rows(tmp_path):
         assert migrated.execute("SELECT run_id FROM events").fetchone()[0] == "run-a"
         assert migrated.execute("SELECT COUNT(*) FROM cloud_leases").fetchone()[0] == 0
         assert migrated.execute("SELECT COUNT(*) FROM grokbot_jobs").fetchone()[0] == 0
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 12
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     finally:
         migrated.close()
 

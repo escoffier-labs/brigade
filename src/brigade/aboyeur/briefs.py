@@ -392,6 +392,22 @@ def drift_impact_brief(cwd: Path | None) -> DriftImpactBrief:
     )
 
 
+def _planner_worker_line(agent: Agent, *, read_only: bool) -> str:
+    parts = [f"{agent.name}: cli={agent.cli}"]
+    if agent.model:
+        parts.append(f"model={agent.model}")
+    if agent.purpose:
+        parts.append(f"purpose={agent.purpose}")
+    if agent.caveats:
+        parts.append("caveats=" + ", ".join(agent.caveats))
+    if agent.fallback:
+        parts.append("fallback=" + ", ".join(agent.fallback))
+    if read_only:
+        parts.append(f"read_only_capable={str(agent.read_only_capable).lower()}")
+    parts.append(f"role={agent.role}")
+    return "- " + "; ".join(parts)
+
+
 def build_plan_prompt(
     task: str,
     roster: Roster,
@@ -404,12 +420,7 @@ def build_plan_prompt(
     no_file_writes: bool = False,
     skill_policy: RoutePolicyDecision | None = None,
 ) -> str:
-    worker_lines = "\n".join(
-        f"- {agent.name}: cli={agent.cli}; "
-        + (f"read_only_capable={str(agent.read_only_capable).lower()}; " if read_only else "")
-        + f"role={agent.role}"
-        for agent in workers(roster)
-    )
+    worker_lines = "\n".join(_planner_worker_line(agent, read_only=read_only) for agent in workers(roster))
     if not worker_lines:
         worker_lines = "- no workers configured"
 

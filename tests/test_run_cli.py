@@ -22,6 +22,13 @@ from tests import thread_sync
 from tests.run_test_helpers import HEALTHY_SEAT_HEALTH_CHILD_SETUP
 
 
+@pytest.fixture(autouse=True)
+def _isolate_run_preference_home(tmp_path, monkeypatch):
+    home = tmp_path / "brigade-home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+
+
 def test_run_cli_missing_roster_errors(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
@@ -157,6 +164,181 @@ role = "code"
         "scheduler": "waves",
     }
     assert seen["fail_fast"] is True
+
+
+def test_run_cli_applies_cached_preference_unless_worker_is_set(tmp_path, monkeypatch, capsys):
+    from brigade import run_preference
+
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.cursor_grok]
+cli = "cursor"
+role = "code"
+"""
+    )
+    run_preference.write_cached(run_preference.RunPreference(impl="cursor_grok", review="claude_standby"))
+    seen = {}
+
+    def fake_run(task, loaded_roster, **kwargs):
+        seen["task"] = task
+        seen["worker"] = kwargs.get("worker")
+        seen["orchestrator"] = loaded_roster.orchestrator
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "fix the flaky test",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "runs" / "pref"),
+        ]
+    )
+    assert rc == 0
+    assert seen["task"] == "fix the flaky test"
+    assert seen["worker"] == "cursor_grok"
+    assert "run preference: impl=cursor_grok review=claude_standby (cached)" in capsys.readouterr().err
+
+    rc = cli.main(
+        [
+            "run",
+            "fix the flaky test",
+            "--roster",
+            str(roster_path),
+            "--worker",
+            "cursor_grok",
+            "--cwd",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "runs" / "pref-worker"),
+        ]
+    )
+    assert rc == 0
+    assert seen["task"] == "fix the flaky test"
+
+
+def test_run_cli_degrades_unusable_pinned_impl_to_planned_run(tmp_path, monkeypatch, capsys):
+    from brigade import run_preference
+
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+read_only_capable = true
+
+[agents.cursor_grok]
+cli = "cursor"
+role = "code"
+read_only_capable = false
+"""
+    )
+    run_preference.write_cached(run_preference.RunPreference(impl="cursor_grok"))
+    seen = {}
+
+    def fake_run(task, loaded_roster, **kwargs):
+        seen["task"] = task
+        seen["worker"] = kwargs.get("worker")
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "fix the flaky test",
+            "--roster",
+            str(roster_path),
+            "--read-only",
+            "--cwd",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "runs" / "pref-degrade"),
+        ]
+    )
+    assert rc == 0
+    assert seen["worker"] is None
+    err = capsys.readouterr().err
+    assert "run preference impl 'cursor_grok' is not usable here" in err
+    assert "read_only_capable is false" in err
+
+
+def test_detached_dispatch_keeps_pin_without_double_prefix(tmp_path, monkeypatch):
+    from brigade import run_preference
+    from brigade.cli import run as run_cli
+
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.cursor_grok]
+cli = "cursor"
+role = "code"
+"""
+    )
+    run_preference.write_cached(run_preference.RunPreference(impl="cursor_grok", review="claude_standby"))
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        pid = 4321
+
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = list(argv)
+            output_dir = Path(argv[argv.index("--output-dir") + 1])
+            kwargs["stdout"].write("child started\n")
+            kwargs["stdout"].flush()
+            (output_dir / "run.json").write_text(json.dumps({"status": "started"}) + "\n")
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(run_cli, "Popen", FakeProcess)
+    rc = cli.main(
+        [
+            "run",
+            "fix the flaky test",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--detach",
+            "--no-fleet-claim",
+            "--output-dir",
+            str(tmp_path / "runs" / "pref-detach"),
+        ]
+    )
+    assert rc == 0
+    argv = captured["argv"]
+    task = argv[argv.index("run") + 1]
+    assert task == "fix the flaky test"
+    assert task.count("Fleet run preference") == 0
+    assert argv[argv.index("--worker") + 1] == "cursor_grok"
+    assert "--applied-preference" in argv
+
+    child_task = run_preference.apply_to_task(
+        task,
+        run_preference.load_cached(),
+        worker=argv[argv.index("--worker") + 1],
+    )
+    assert child_task == task
 
 
 def test_run_cli_forwards_explicit_budget_file_before_dispatch(tmp_path, monkeypatch):

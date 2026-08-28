@@ -141,6 +141,44 @@ class TestHub:
             conn.close()
         assert rows == 1
 
+    def test_terminal_event_keeps_last_known_seat(self, hub):
+        url, token, _db = hub
+        started = {**_event(run_id="seat-run", seq=1, digest="ds1"), "seat": "cursor_grok"}
+        finished = {
+            **_event(run_id="seat-run", seq=2, digest="ds2", state="run.completed"),
+            "seat": "",
+        }
+        assert _post(url, token, [started, finished])[1] == {"accepted": 2, "duplicate": 0}
+        rows = _get(url, "/status?all=1", token)[1]["runs"]
+        match = next(row for row in rows if row["run_id"] == "seat-run")
+        assert match["state"] == "run.completed"
+        assert match["seat"] == "cursor_grok"
+
+    def test_preference_get_put_and_rejects_secrets(self, hub):
+        url, token, _db = hub
+        status, payload = _get(url, "/preference", token)
+        assert status == 200
+        assert payload["preference"] == {"impl": None, "review": None, "chef": None, "notes": None}
+        request = urllib.request.Request(
+            url + "/preference",
+            data=json.dumps({"preference": {"impl": "cursor_grok", "review": "claude_standby"}}).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            method="PUT",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            stored = json.loads(response.read())
+        assert stored["preference"]["impl"] == "cursor_grok"
+        assert _get(url, "/preference", token)[1]["preference"]["review"] == "claude_standby"
+        bad = urllib.request.Request(
+            url + "/preference",
+            data=json.dumps({"token": "leak"}).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            method="PUT",
+        )
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(bad, timeout=5)
+        assert excinfo.value.code == 400
+
     def test_batch_and_terminal_filter(self, hub):
         url, token, _db = hub
         batch = [
@@ -635,6 +673,71 @@ class TestCli:
         out = capsys.readouterr().out
         assert "repo-a" in out and "worker/claude" in out and "run.created" in out
         assert out.splitlines()[0].split()[-1] == "age"
+
+    def test_status_includes_run_preference(self, hub, monkeypatch, capsys):
+        from brigade import cli, fleet_hub
+
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        conn = sqlite3.connect(str(db))
+        try:
+            fleet_hub.set_run_preference(
+                conn,
+                {"impl": "cursor_grok", "review": "claude_standby"},
+                updated_by="admin",
+            )
+        finally:
+            conn.close()
+        assert cli.main(["fleet", "status", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["preference"]["impl"] == "cursor_grok"
+        assert payload["preference"]["review"] == "claude_standby"
+        assert cli.main(["fleet", "status"]) == 0
+        out = capsys.readouterr().out
+        assert out.splitlines()[0].split()[-1] == "age"
+        assert "run preference (hub)" in out
+        assert "impl: cursor_grok" in out
+
+    def test_preference_client_rejects_cleartext_remote_hub(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "admin-token")
+        monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "node-token")
+        opened: list[str] = []
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"preference": {}}'
+
+        def fake_open(request, timeout=None):
+            opened.append(request.full_url)
+            return FakeResponse()
+
+        monkeypatch.setattr(fleet_client, "_hub_open", fake_open)
+        with pytest.raises(fleet_client.FleetClientError, match="https"):
+            fleet_client.fetch_run_preference(hub_url="http://example.com")
+        with pytest.raises(fleet_client.FleetClientError, match="https"):
+            fleet_client.put_run_preference({"impl": "cursor_grok"}, hub_url="http://example.com")
+        assert opened == []
+
+        assert fleet_client.fetch_run_preference(hub_url="http://127.0.0.1") == {}
+        assert fleet_client.fetch_run_preference(hub_url="https://hub.example") == {}
+        assert fleet_client.put_run_preference({"impl": "cursor_grok"}, hub_url="http://127.0.0.1") == {}
+        assert fleet_client.put_run_preference({"impl": "cursor_grok"}, hub_url="https://hub.example") == {}
+        assert opened == [
+            "http://127.0.0.1/preference",
+            "https://hub.example/preference",
+            "http://127.0.0.1/preference",
+            "https://hub.example/preference",
+        ]
 
     def test_status_table_shows_verify_exit_without_receipt_body(self, hub, monkeypatch, capsys):
         from brigade import cli

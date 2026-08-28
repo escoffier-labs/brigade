@@ -95,6 +95,7 @@ def test_pins_model_for_cursor():
         "--output-format",
         "text",
         "-f",
+        "--trust",
         "P",
     ]
     read_only = agents.build_argv("cursor", "P", read_only=True, model="gpt-5")

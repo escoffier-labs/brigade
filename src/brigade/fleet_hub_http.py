@@ -96,6 +96,14 @@ def list_nodes(*args: Any, **kwargs: Any) -> Any:
     return _hub.list_nodes(*args, **kwargs)
 
 
+def get_run_preference(*args: Any, **kwargs: Any) -> Any:
+    return _hub.get_run_preference(*args, **kwargs)
+
+
+def set_run_preference(*args: Any, **kwargs: Any) -> Any:
+    return _hub.set_run_preference(*args, **kwargs)
+
+
 def lookup_node_token(*args: Any, **kwargs: Any) -> Any:
     return _hub.lookup_node_token(*args, **kwargs)
 
@@ -439,7 +447,7 @@ def make_handler(
             if path.startswith(_DASHBOARD_PREFIX):
                 self._serve_dashboard(path, query)
                 return
-            if path in ("/status", "/claims", "/nodes", "/cloud", "/models"):
+            if path in ("/status", "/claims", "/nodes", "/cloud", "/models", "/preference"):
                 if self._bearer() is None:
                     self._send_json(401, {"error": "unauthorized"})
                     return
@@ -466,6 +474,8 @@ def make_handler(
                         payload = cloud_snapshot(conn, frozen_deck, include_all=include_all, include_grokbot=is_admin)
                     elif path == "/models":
                         payload = {"models": list_model_policy(conn)}
+                    elif path == "/preference":
+                        payload = {"preference": get_run_preference(conn)}
                     else:
                         payload = {"claims": list_claims(conn, include_all=include_all)}
                 except sqlite3.Error as exc:
@@ -476,6 +486,53 @@ def make_handler(
                 self._send_json(200, payload)
                 return
             self._send_json(404, {"error": "not found"})
+
+        def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
+            path = self.path.partition("?")[0]
+            if path != "/preference":
+                self._send_json(404, {"error": "not found"})
+                return
+            if self._bearer() is None:
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            try:
+                conn = open_db(Path(db_path))
+            except (FleetHubError, sqlite3.Error) as exc:
+                self._send_json(500, {"error": f"hub database error: {exc}"})
+                return
+            try:
+                caller = self._caller(conn)
+                if caller is None:
+                    return
+                is_admin, _node = caller
+                if not is_admin:
+                    self._send_json(403, {"error": "the admin token is required to set run preference"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self._send_json(400, {"error": "bad Content-Length"})
+                    return
+                if length <= 0 or length > MAX_BODY_BYTES:
+                    self._send_json(400, {"error": "missing or oversized body"})
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_json(400, {"error": "body is not valid JSON"})
+                    return
+                body = parsed.get("preference") if isinstance(parsed, dict) and "preference" in parsed else parsed
+                payload = {"preference": set_run_preference(conn, body, updated_by="admin")}
+            except FleetHubError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            except sqlite3.Error as exc:
+                self._send_json(500, {"error": f"hub database error: {exc}"})
+                return
+            finally:
+                conn.close()
+            self._send_json(200, payload)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
             path = self.path.partition("?")[0]

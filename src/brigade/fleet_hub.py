@@ -29,7 +29,11 @@ Endpoints:
   carrying the caller's ``node_id``. Dedupe on UNIQUE(node_id, run_id,
   sequence, digest). Responds ``{"accepted": n, "duplicate": m}``.
 - ``GET /status`` — admin or node token; latest state per (node_id, run_id)
-  for non-terminal runs. ``?all=1`` includes terminal runs.
+  for non-terminal runs. ``?all=1`` includes terminal runs. A terminal event
+  that omitted ``seat`` keeps the last non-empty seat from earlier events.
+- ``GET /preference`` — admin or node token; current fleet run preference.
+- ``PUT /preference`` — admin token; replace the one-row run preference pin
+  (seat names only; secret or path material is rejected).
 - ``GET /nodes`` / ``POST /nodes`` — admin token only; list enrolled nodes,
   ``{"action": "add", "node_id", "label"?}`` mints a token (returned once,
   in that response only; an enrolled, unrevoked node answers 409),
@@ -107,9 +111,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import fleet_command_deck
+from . import fleet_command_deck, fleet_hub_preference
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 ACTIVE_EVENT_TTL_SECONDS = 30 * 60
@@ -592,6 +596,8 @@ def init_db(db_path: Path) -> sqlite3.Connection:
         from . import fleet_hub_grokbot
 
         fleet_hub_grokbot.ensure_schema(conn)
+        # v12 -> v13: one-row run preference pin (#1223).
+        fleet_hub_preference.ensure_schema(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
     except BaseException:
@@ -730,7 +736,7 @@ def latest_status(
                 "node_id": row[0],
                 "run_id": row[1],
                 "repo": row[2],
-                "seat": row[3],
+                "seat": _last_known_seat(conn, row[0], row[1], row[3]),
                 "harness": row[4],
                 "state": row[5],
                 "ts": row[6],
@@ -742,6 +748,29 @@ def latest_status(
             }
         )
     return result
+
+
+def _last_known_seat(conn: sqlite3.Connection, node_id: str, run_id: str, latest: Any) -> Any:
+    """Keep the last non-empty seat when a terminal event drops it."""
+    if isinstance(latest, str) and latest.strip() and latest.strip() != "-":
+        return latest
+    row = conn.execute(
+        "SELECT seat FROM events WHERE node_id = ? AND run_id = ? "
+        "AND seat IS NOT NULL AND trim(seat) != '' AND seat != '-' "
+        "ORDER BY sequence DESC, received_at DESC, digest DESC LIMIT 1",
+        (node_id, run_id),
+    ).fetchone()
+    return row[0] if row else latest
+
+
+def get_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return the one-row fleet run preference (see ``fleet_hub_preference``)."""
+    return fleet_hub_preference.get_run_preference(conn)
+
+
+def set_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | None = None) -> dict[str, Any]:
+    """Replace the fleet run preference (see ``fleet_hub_preference``)."""
+    return fleet_hub_preference.set_run_preference(conn, raw, updated_by=updated_by)
 
 
 def run_started_at(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
