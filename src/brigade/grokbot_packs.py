@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from . import grokbot_cerebro, grokbot_mcp, grokbot_ops
+from . import grokbot_cerebro, grokbot_fleet, grokbot_mcp, grokbot_ops
 
 PACK_SCHEMA = "brigade.grokbot.connector-pack.v1"
 INSTANCE_SCHEMA = "brigade.grokbot.connector-instance.v1"
@@ -41,7 +41,16 @@ DEFAULT_BINDS = {
 }
 CONNECTOR_DEFAULT_BINDS = {
     "cerebro-memory": "127.0.0.1:8770",
+    "fleet-steward": "127.0.0.1:8771",
 }
+FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
+    {
+        "runtime_path",
+        "ledger_path",
+        "action_state_path",
+        "approval_dir",
+    }
+)
 CONNECTOR_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"cli_executable", "workdir"})
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -70,6 +79,14 @@ def _queue_pack(instance: str) -> dict[str, Any]:
     }
 
 
+def _connector_tools(pack_id: str) -> frozenset[str]:
+    if pack_id == "cerebro-memory":
+        return grokbot_cerebro.TOOLS
+    if pack_id == "fleet-steward":
+        return grokbot_fleet.TOOLS
+    return frozenset()
+
+
 def _connector_pack(pack_id: str) -> dict[str, Any]:
     return {
         "schema": PACK_SCHEMA,
@@ -79,7 +96,7 @@ def _connector_pack(pack_id: str) -> dict[str, Any]:
         "instance": pack_id,
         "default_bind": CONNECTOR_DEFAULT_BINDS[pack_id],
         "public_route": "",
-        "tools": sorted(grokbot_cerebro.TOOLS if pack_id == "cerebro-memory" else ()),
+        "tools": sorted(_connector_tools(pack_id)),
     }
 
 
@@ -146,6 +163,10 @@ def preview_setup(
     bearer: dict[str, Any] | None = None,
     cli_executable: str | Path | None = None,
     workdir: str | Path | None = None,
+    runtime_path: str | Path | None = None,
+    ledger_path: str | Path | None = None,
+    action_state_path: str | Path | None = None,
+    approval_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
         target,
@@ -159,6 +180,10 @@ def preview_setup(
         bearer=bearer,
         cli_executable=cli_executable,
         workdir=workdir,
+        runtime_path=runtime_path,
+        ledger_path=ledger_path,
+        action_state_path=action_state_path,
+        approval_dir=approval_dir,
     )
 
 
@@ -174,6 +199,10 @@ def apply_setup(
     bearer: dict[str, Any] | None = None,
     cli_executable: str | Path | None = None,
     workdir: str | Path | None = None,
+    runtime_path: str | Path | None = None,
+    ledger_path: str | Path | None = None,
+    action_state_path: str | Path | None = None,
+    approval_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
         target,
@@ -187,6 +216,10 @@ def apply_setup(
         bearer=bearer,
         cli_executable=cli_executable,
         workdir=workdir,
+        runtime_path=runtime_path,
+        ledger_path=ledger_path,
+        action_state_path=action_state_path,
+        approval_dir=approval_dir,
     )
 
 
@@ -194,8 +227,8 @@ def doctor(target: Path, pack_id: str) -> list[dict[str, str]]:
     pack = show_pack(pack_id)
     if pack["kind"] == "queue-role":
         return grokbot_ops.doctor(target, pack["instance"])
-    from . import grokbot_cerebro
-
+    if pack["id"] == "fleet-steward":
+        return grokbot_fleet.doctor(target)
     return grokbot_cerebro.doctor(target)
 
 
@@ -203,8 +236,8 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
     pack = show_pack(pack_id)
     if pack["kind"] == "queue-role":
         return grokbot_ops.canary(target, pack["instance"])
-    from . import grokbot_cerebro
-
+    if pack["id"] == "fleet-steward":
+        return grokbot_fleet.canary(target)
     return grokbot_cerebro.canary(target)
 
 
@@ -214,17 +247,15 @@ def render_install_service(target: Path, pack_id: str) -> str:
         if pack["kind"] == "queue-role":
             config = grokbot_ops.load_config(target, pack["instance"])
             return grokbot_ops.render_unit(config, python=sys.executable, exec_root=target)
-        from . import grokbot_cerebro
-
+        if pack["id"] == "fleet-steward":
+            return grokbot_fleet.render_unit(target, python=sys.executable)
         return grokbot_cerebro.render_unit(target, python=sys.executable)
     except PackError:
         raise
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
         raise PackError("unsafe-path") from exc
     except Exception as exc:
-        from . import grokbot_cerebro
-
-        if isinstance(exc, grokbot_cerebro.CerebroError):
+        if isinstance(exc, (grokbot_cerebro.CerebroError, grokbot_fleet.FleetError)):
             raise PackError("unsafe-path") from exc
         raise
 
@@ -241,18 +272,16 @@ def apply_install_service(
         if pack["kind"] == "queue-role":
             config = grokbot_ops.load_config(target, pack["instance"])
             path = grokbot_ops.write_unit(config, out_dir, exec_root=target, force=force)
+        elif pack["id"] == "fleet-steward":
+            path = grokbot_fleet.write_unit(target, out_dir, force=force)
         else:
-            from . import grokbot_cerebro
-
             path = grokbot_cerebro.write_unit(target, out_dir, force=force)
     except PackError:
         raise
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
         raise PackError("unsafe-path") from exc
     except Exception as exc:
-        from . import grokbot_cerebro
-
-        if isinstance(exc, grokbot_cerebro.CerebroError):
+        if isinstance(exc, (grokbot_cerebro.CerebroError, grokbot_fleet.FleetError)):
             raise PackError("unsafe-path") from exc
         raise
     return {"action": "install-service", "apply": True, "pack_id": pack_id, "unit": path.name}
@@ -287,6 +316,10 @@ def _setup(
     bearer: dict[str, Any] | None,
     cli_executable: str | Path | None,
     workdir: str | Path | None,
+    runtime_path: str | Path | None = None,
+    ledger_path: str | Path | None = None,
+    action_state_path: str | Path | None = None,
+    approval_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     pack = show_pack(pack_id)
     reference = _bearer_reference(bearer_env=bearer_env, bearer_file=bearer_file, bearer=bearer)
@@ -304,10 +337,17 @@ def _setup(
         "public_route": pack["public_route"],
         "bearer": reference,
     }
+    fleet_paths = (runtime_path, ledger_path, action_state_path, approval_dir)
     if pack["kind"] == "queue-role":
+        if cli_executable is not None or workdir is not None or any(path is not None for path in fleet_paths):
+            raise PackError("unexpected-key")
+    elif pack["id"] == "fleet-steward":
         if cli_executable is not None or workdir is not None:
             raise PackError("unexpected-key")
+        payload.update(_fleet_path_references(runtime_path, ledger_path, action_state_path, approval_dir))
     else:
+        if any(path is not None for path in fleet_paths):
+            raise PackError("unexpected-key")
         payload["cli_executable"] = _connector_path_reference(cli_executable, kind="executable")
         payload["workdir"] = _connector_path_reference(workdir, kind="directory")
         if payload["cli_executable"] == payload["workdir"]:
@@ -636,7 +676,7 @@ def _validate_pack(raw: Mapping[str, Any]) -> dict[str, Any]:
     elif kind == "connector":
         if pack_id not in CONNECTOR_DEFAULT_BINDS or instance != pack_id:
             raise PackError("unexpected-key")
-        expected_tools = grokbot_cerebro.TOOLS if pack_id == "cerebro-memory" else frozenset()
+        expected_tools = _connector_tools(pack_id)
     else:
         raise PackError("unexpected-key")
     if not isinstance(route, str) or not PUBLIC_ROUTE_RE.fullmatch(route):
@@ -663,7 +703,7 @@ def _validate_pack(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[str, Any]:
     pack = show_pack(pack_id)
-    expected_keys = INSTANCE_KEYS if pack["kind"] == "queue-role" else CONNECTOR_INSTANCE_KEYS
+    expected_keys = _instance_keys(pack)
     if set(payload) != expected_keys or payload.get("schema") != INSTANCE_SCHEMA:
         raise PackError("unexpected-key")
     if payload.get("pack_id") != pack_id:
@@ -687,7 +727,14 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
     if not isinstance(route, str) or not PUBLIC_ROUTE_RE.fullmatch(route):
         raise PackError("unexpected-key")
     _validate_bearer_reference(payload.get("bearer"))
-    if pack["kind"] == "connector":
+    if pack["id"] == "fleet-steward":
+        _fleet_path_references(
+            payload.get("runtime_path"),
+            payload.get("ledger_path"),
+            payload.get("action_state_path"),
+            payload.get("approval_dir"),
+        )
+    elif pack["kind"] == "connector":
         _connector_path_reference(payload.get("cli_executable"), kind="executable")
         workdir = _connector_path_reference(payload.get("workdir"), kind="directory")
         if payload.get("cli_executable") == workdir:
@@ -727,6 +774,34 @@ def _validate_bearer_reference(reference: object) -> dict[str, str]:
             grokbot_ops._systemd_quote(path)
             return {"kind": "file", "path": path}
     raise PackError("weak-secret-reference")
+
+
+def _instance_keys(pack: Mapping[str, Any]) -> frozenset[str]:
+    if pack["kind"] == "queue-role":
+        return INSTANCE_KEYS
+    if pack["id"] == "fleet-steward":
+        return FLEET_INSTANCE_KEYS
+    return CONNECTOR_INSTANCE_KEYS
+
+
+def _fleet_path_references(
+    runtime_path: object,
+    ledger_path: object,
+    action_state_path: object,
+    approval_dir: object,
+) -> dict[str, str]:
+    if any(value is None for value in (runtime_path, ledger_path, action_state_path, approval_dir)):
+        raise PackError("missing-path-reference")
+    try:
+        paths = grokbot_fleet.validate_disjoint_state_paths(
+            str(runtime_path),
+            str(ledger_path),
+            str(action_state_path),
+            str(approval_dir),
+        )
+    except grokbot_fleet.FleetError as exc:
+        raise PackError("unsafe-path") from exc
+    return paths
 
 
 def _connector_path_reference(value: object, *, kind: str) -> str:

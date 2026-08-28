@@ -116,6 +116,14 @@ connectors into Brigade. Preserve their current external URLs during rollout.
 Keep each connector isolated. Split this work when one pull request would make
 review or rollback unsafe.
 
+PR3a landed Cerebro Memory as closed pack `cerebro-memory` on
+`127.0.0.1:8770`. PR3b lands Fleet Steward as closed pack `fleet-steward` on
+`127.0.0.1:8771` with tools `fleet_overview`, `host_status`,
+`incident_bundle`, `propose_remediation`, `service_health`, and
+`execute_remediation`. Pack lifecycle stays preview-first and does not start,
+stop, reload, or enable services. Old sidecar coexistence stays in place;
+PR4 owns cutover.
+
 ### PR 4: cutover and retirement
 
 1. Preview and apply a reversible state migration to Brigade-owned paths.
