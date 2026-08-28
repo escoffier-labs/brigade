@@ -1038,7 +1038,6 @@ def rebind_directory_authority(*, target: Path) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    path = _directory_authority_store_path(target)
     try:
         path, payload = _read_external_directory_authority(target)
     except OSError as exc:

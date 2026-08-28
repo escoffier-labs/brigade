@@ -1202,9 +1202,9 @@ def _write_plan_artifact(
             print(f"error: task not found: {task_id}", file=sys.stderr)
             return 1
         resolved_id = str(task.get("id") or resolved_id)
-        existing = _read_plan_receipt(target, resolved_id, kind)
         now = helpers._now().isoformat()
         try:
+            existing = _load_plan_receipt(target, resolved_id, kind)
             if existing is None or "decisions" not in existing:
                 decisions = _normalize_decisions(None, now=now)
             else:
