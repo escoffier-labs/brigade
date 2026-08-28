@@ -70,21 +70,21 @@ Fleet Hub receives only the persisted opaque `report_event` object: irreversible
 
 ## Slice 2 test-first recipe
 
-- [ ] Write `tests/test_grokbot_wazuh_contracts.py::test_ingest_rejects_unbounded_or_secret_fields`; assert unknown keys, oversized body, raw credentials, and caller-supplied command/path values are rejected.
-- [ ] Run `pytest -q tests/test_grokbot_wazuh_contracts.py::test_ingest_rejects_unbounded_or_secret_fields`; expect failure because the pack does not exist.
-- [ ] Implement the strict contracts and bounded normalizer. The normalized record must contain producer, finding ID, revision, observed time, severity, title, redacted body, source reference, source digest, and content digest.
-- [ ] Run the test; expect it to pass.
-- [ ] Write `tests/test_grokbot_wazuh_policy.py::test_known_noise_expires_to_watch_and_high_confidence_event_escalates`; assert SCA repeats and known installer events classify as suppress/watch with expiry, while a cataloged high-confidence event classifies as escalate.
-- [ ] Run that test; expect failure because classification is absent.
-- [ ] Implement deterministic classification precedence: malformed/unknown -> watch, expired suppression -> watch, explicit suppression -> suppress, matching high-confidence rule and scope -> escalate, otherwise watch.
-- [ ] Run `pytest -q tests/test_grokbot_wazuh_contracts.py tests/test_grokbot_wazuh_normalize.py tests/test_grokbot_wazuh_policy.py`; expect all tests to pass.
-- [ ] Write `tests/test_grokbot_wazuh_tools.py::test_ingest_dedupes_and_emits_one_review_finding`; assert repeated identical fingerprints produce one current finding, one sanitized relay event, and one review draft.
-- [ ] Run it; expect failure because storage/tools are absent.
-- [ ] Implement the private atomic store and six public tools. `wazuh_ingest` accepts only bounded normalized alert batches, `wazuh_alert_status` returns counts and last-seen timestamps, `wazuh_classify` returns category and reason, `wazuh_incident_bundle` returns grouped public findings, `wazuh_propose_remediation` creates a proposal only for `escalate`, and `wazuh_action_status` returns opaque lifecycle state.
-- [ ] Run `pytest -q tests/test_grokbot_wazuh_tools.py tests/test_grokbot_wazuh_store.py`; expect all tests to pass with no raw body in public results.
-- [ ] Write lifecycle tests for default bind collision, preview-only setup, mode-0600 state, canary read path, failed second-write rollback, and exact tool inventory; run `pytest -q tests/test_grokbot_wazuh_lifecycle.py tests/test_grokbot_packs.py tests/test_run_cloud.py` and expect all tests to pass.
-- [ ] Verify through Brigade: `brigade work verify run --target . --command "pytest -q tests/test_grokbot_wazuh_contracts.py tests/test_grokbot_wazuh_normalize.py tests/test_grokbot_wazuh_policy.py tests/test_grokbot_wazuh_store.py tests/test_grokbot_wazuh_tools.py tests/test_grokbot_wazuh_lifecycle.py tests/test_grokbot_packs.py tests/test_run_cloud.py" --capture grokbot-wazuh-triage-pack`; expect a successful receipt.
-- [ ] Commit only the Slice 2 files with `git add src/brigade/grokbot_wazuh src/brigade/grokbot_packs.py src/brigade/cli/run_cloud.py tests/test_grokbot_wazuh* tests/test_grokbot_packs.py tests/test_run_cloud.py && git commit -m "feat: add first-party Wazuh triage pack"`.
+- [x] Write `tests/test_grokbot_wazuh_contracts.py::test_ingest_rejects_unbounded_or_secret_fields`; assert unknown keys, oversized body, raw credentials, and caller-supplied command/path values are rejected.
+- [x] Run `pytest -q tests/test_grokbot_wazuh_contracts.py::test_ingest_rejects_unbounded_or_secret_fields`; expect failure because the pack does not exist.
+- [x] Implement the strict contracts and bounded normalizer. The normalized record must contain producer, finding ID, revision, observed time, severity, title, redacted body, source reference, source digest, and content digest.
+- [x] Run the test; expect it to pass.
+- [x] Write `tests/test_grokbot_wazuh_policy.py::test_known_noise_expires_to_watch_and_high_confidence_event_escalates`; assert SCA repeats and known installer events classify as suppress/watch with expiry, while a cataloged high-confidence event classifies as escalate.
+- [x] Run that test; expect failure because classification is absent.
+- [x] Implement deterministic classification precedence: malformed/unknown -> watch, expired suppression -> watch, explicit suppression -> suppress, matching high-confidence rule and scope -> escalate, otherwise watch.
+- [x] Run `pytest -q tests/test_grokbot_wazuh_contracts.py tests/test_grokbot_wazuh_normalize.py tests/test_grokbot_wazuh_policy.py`; expect all tests to pass.
+- [x] Write `tests/test_grokbot_wazuh_tools.py::test_ingest_dedupes_and_emits_one_review_finding`; assert repeated identical fingerprints produce one current finding, one sanitized relay event, and one review draft.
+- [x] Run it; expect failure because storage/tools are absent.
+- [x] Implement the private atomic store and six public tools. `wazuh_ingest` accepts only bounded normalized alert batches, `wazuh_alert_status` returns counts and last-seen timestamps, `wazuh_classify` returns category and reason, `wazuh_incident_bundle` returns grouped public findings, `wazuh_propose_remediation` creates a proposal only for `escalate`, and `wazuh_action_status` returns opaque lifecycle state.
+- [x] Run `pytest -q tests/test_grokbot_wazuh_tools.py tests/test_grokbot_wazuh_store.py`; expect all tests to pass with no raw body in public results.
+- [x] Write lifecycle tests for default bind collision, preview-only setup, mode-0600 state, canary read path, failed second-write rollback, and exact tool inventory; run `pytest -q tests/test_grokbot_wazuh_lifecycle.py tests/test_grokbot_packs.py` (no `tests/test_run_cloud.py` in this tree; CLI pack/serve coverage lives in the pack and lifecycle tests) and expect all tests to pass.
+- [x] Verify through Brigade: `brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_grokbot_wazuh_contracts.py","tests/test_grokbot_wazuh_normalize.py","tests/test_grokbot_wazuh_policy.py","tests/test_grokbot_wazuh_store.py","tests/test_grokbot_wazuh_tools.py","tests/test_grokbot_wazuh_lifecycle.py","tests/test_grokbot_packs.py"]' --capture grokbot-wazuh-triage-pack`; receipt `20260828-224612-work-verify-9e7954` completed with 62 focused tests passing.
+- [x] Commit only the Slice 2 files with `git add src/brigade/grokbot_wazuh src/brigade/grokbot_packs.py src/brigade/cli/run_cloud.py tests/test_grokbot_wazuh* tests/test_grokbot_packs.py && git commit -m "feat: add first-party Wazuh triage pack"`.
 
 ## Slice 3 test-first recipe
 
