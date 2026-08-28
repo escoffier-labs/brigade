@@ -197,6 +197,21 @@ def _resolve_proposal(target: Path, proposal_id: str) -> tuple[str | None, dict[
     return matches[0][0], matches[0][1], None
 
 
+def _load_anchored_proposal(state_anchor: Any, name: str) -> dict[str, Any] | None:
+    """Re-read one proposal.json through the held state-root anchor."""
+    raw = _registry_mod._read_state_file_bytes(state_anchor, "skills", "inbox", name, "proposal.json")
+    if raw is None:
+        return None
+    try:
+        meta = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    meta.setdefault("proposal_id", name)
+    return meta
+
+
 def inbox_add(
     *,
     target: Path,
@@ -214,7 +229,7 @@ def inbox_add(
     metadata = _registry_mod._read_json(source_dir / "skill.json")
     resolved_skill_id = _registry_mod._slug(skill_id or str(metadata.get("id") or source_dir.name))
     created = _now()
-    proposal_id = f"{created[:19].replace(':', '').replace('-', '')}-{resolved_skill_id}"
+    proposal_id = f"{created[:19].replace(':', '').replace('-', '')}-{resolved_skill_id}-{uuid.uuid4().hex[:8]}"
     proposal_rel = ("skills", "inbox", _registry_mod._slug(proposal_id))
     proposal_dir = target / ".brigade" / "skills" / "inbox" / _registry_mod._slug(proposal_id)
     skill_dest = _proposal_skill_path(proposal_dir)
@@ -356,6 +371,14 @@ def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_ou
         return 2
     try:
         with _registry_mod._held_state_root(target) as state_anchor:
+            current = _load_anchored_proposal(state_anchor, name)
+            if current is None:
+                print(f"error: skill proposal not found: {proposal_id}", file=sys.stderr)
+                return 2
+            if current.get("status") != "pending" and not force:
+                print(f"error: skill proposal is not pending: {current.get('status')}", file=sys.stderr)
+                return 2
+            proposal = current
             # The proposal's skill tree is read back through the anchor and
             # staged from those collected bytes; a symlinked proposal
             # component can never redirect the import outside the held state
@@ -405,6 +428,14 @@ def inbox_reject(*, target: Path, proposal_id: str, reason: str, json_output: bo
         return 2
     try:
         with _registry_mod._held_state_root(target) as state_anchor:
+            current = _load_anchored_proposal(state_anchor, name)
+            if current is None:
+                print(f"error: skill proposal not found: {proposal_id}", file=sys.stderr)
+                return 2
+            if current.get("status") != "pending":
+                print(f"error: skill proposal is not pending: {current.get('status')}", file=sys.stderr)
+                return 2
+            proposal = current
             proposal.update({"status": "rejected", "rejected_at": _now(), "reason": reason})
             _registry_mod._write_state_file(
                 state_anchor, "skills", "inbox", name, "proposal.json", data=_registry_mod._json_bytes(proposal)
