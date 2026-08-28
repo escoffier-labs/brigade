@@ -173,7 +173,7 @@ def _is_brigade_component(part: str) -> bool:
 
 
 class UnsupportedLexicalPathError(ValueError):
-    """A Windows drive-relative or current-drive-rooted path cannot be classified safely."""
+    """A Windows path form that cannot be classified safely without a cwd or namespace."""
 
 
 def _path_seps(pathmod: Any) -> frozenset[str]:
@@ -181,6 +181,66 @@ def _path_seps(pathmod: Any) -> frozenset[str]:
     if pathmod.altsep:
         seps.add(pathmod.altsep)
     return frozenset(seps)
+
+
+def _win_backslash_form(raw: str) -> str:
+    return raw.replace("/", "\\")
+
+
+def _win_namespace_kind(raw: str) -> str | None:
+    """Return ``extended-drive``, ``extended``, ``device``, ``unc``, or ``None``.
+
+    Matching is case-insensitive after ``/`` → ``\\`` so ``os.path.normcase``
+    / ``ntpath.normcase`` lowercase prefixes still classify.
+    """
+    normalized = _win_backslash_form(raw)
+    folded = normalized.casefold()
+    if folded.startswith("\\\\.\\"):
+        return "device"
+    if folded.startswith("\\\\?\\unc\\"):
+        return "unc"
+    if folded.startswith("\\\\?\\"):
+        remainder = normalized[4:]
+        if len(remainder) >= 3 and remainder[0].isalpha() and remainder[1] == ":" and remainder[2] == "\\":
+            return "extended-drive"
+        return "extended"
+    if folded.startswith("\\\\"):
+        return "unc"
+    return None
+
+
+def _detected_win_namespace_kind(raw: str) -> str | None:
+    for candidate in (raw, os.path.normcase(raw), ntpath.normcase(raw)):
+        kind = _win_namespace_kind(candidate)
+        if kind is not None:
+            return kind
+    return None
+
+
+def _pathmod_has_windows_drives(pathmod: Any) -> bool:
+    return pathmod is ntpath or pathmod.__name__ == "ntpath" or bool(getattr(pathmod, "altsep", None))
+
+
+def _plain_win_lexical_path(raw: str, pathmod: Any) -> str:
+    """Strip a safe ``\\?\\X:\\`` prefix, or refuse UNC / device / other ``\\?\\`` forms.
+
+    Stripping is only applied when *pathmod* understands drive letters, so a
+    POSIX helper cannot cwd-join ``C:\\ws\\...``. The remainder is then
+    classified like the plain drive path.
+    """
+    kind = _detected_win_namespace_kind(raw)
+    if kind == "extended-drive" and _pathmod_has_windows_drives(pathmod):
+        stripped = _win_backslash_form(raw)[4:]
+        if _detected_win_namespace_kind(stripped) is not None:
+            raise UnsupportedLexicalPathError("Windows extended-length paths are unsupported")
+        return stripped
+    if kind == "device":
+        raise UnsupportedLexicalPathError("Windows device paths are unsupported")
+    if kind == "unc":
+        raise UnsupportedLexicalPathError("UNC paths are unsupported")
+    if kind is not None:
+        raise UnsupportedLexicalPathError("Windows extended-length paths are unsupported")
+    return raw
 
 
 def _is_drive_relative(raw: str, pathmod: Any) -> bool:
@@ -226,9 +286,12 @@ def _absolute_lexical_path(path: Path, *, pathmod: Any = os.path) -> str:
 
     Drive-relative (``D:foo``) and current-drive-rooted (``\\foo``) Windows
     forms are refused: they resolve against a per-drive cwd, and joining them
-    with the process cwd classifies the source as trusted-external.
+    with the process cwd classifies the source as trusted-external. Extended
+    ``\\?\\X:\\`` prefixes are stripped so classification matches the plain
+    drive path; UNC and device namespaces are refused.
     """
     raw = os.path.expanduser(str(path))
+    raw = _plain_win_lexical_path(raw, pathmod)
     _raise_if_unsupported_win_form(raw, pathmod)
     if not pathmod.isabs(raw):
         raw = pathmod.join(os.getcwd(), raw)

@@ -3689,3 +3689,77 @@ def test_import_refuses_windows_rooted_without_drive_source_without_copying_byte
     assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
     _assert_trusted_bytes_not_copied(workspace)
     assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+# --- #1214 Daybreak residual: Windows extended-length, device, and UNC prefixes -
+
+
+_WINDOWS_EXTENDED_DRIVE = r"\\?\C:\ws\.brigade\skills\x"
+_WINDOWS_EXTENDED_DRIVE_NORMCASE = ntpath.normcase(_WINDOWS_EXTENDED_DRIVE)
+_WINDOWS_EXTENDED_UNC = r"\\?\UNC\srv\share\.brigade\skills\x"
+_WINDOWS_PLAIN_UNC = r"\\srv\share\.brigade\skills\x"
+_WINDOWS_DEVICE = r"\\.\C:\ws\.brigade\skills\x"
+
+
+def _ntpath_lexical_parts(raw: str) -> tuple[str, list[str]]:
+    candidate = _absolute_lexical_path(Path(raw), pathmod=ntpath)
+    drive, tail = ntpath.splitdrive(candidate)
+    return drive, [part for part in tail.split(ntpath.sep) if part]
+
+
+@pytest.mark.parametrize("raw", [_WINDOWS_EXTENDED_DRIVE, _WINDOWS_EXTENDED_DRIVE_NORMCASE])
+def test_absolute_lexical_path_strips_extended_length_drive_prefix(raw, monkeypatch):
+    """``\\?\\C:\\ws\\.brigade\\...`` must classify like ``C:\\ws\\.brigade\\...``."""
+    cwd_calls: list[str] = []
+
+    def _track_cwd() -> str:
+        cwd_calls.append("called")
+        return r"C:\other"
+
+    monkeypatch.setattr(os, "getcwd", _track_cwd)
+    drive, parts = _ntpath_lexical_parts(raw)
+    assert drive.casefold() == "c:"
+    assert parts == ["ws", ".brigade", "skills", "x"]
+    stripped = _absolute_lexical_path(Path(raw), pathmod=ntpath)
+    plain = _absolute_lexical_path(Path(r"C:\ws\.brigade\skills\x"), pathmod=ntpath)
+    assert stripped.casefold() == plain.casefold()
+    assert cwd_calls == []
+
+
+@pytest.mark.parametrize("raw", [_WINDOWS_EXTENDED_UNC, _WINDOWS_PLAIN_UNC, _WINDOWS_DEVICE])
+def test_absolute_lexical_path_refuses_unc_and_device_forms(raw, monkeypatch):
+    cwd_calls: list[str] = []
+
+    def _track_cwd() -> str:
+        cwd_calls.append("called")
+        return r"C:\other"
+
+    monkeypatch.setattr(os, "getcwd", _track_cwd)
+    with pytest.raises(UnsupportedLexicalPathError):
+        _absolute_lexical_path(Path(raw), pathmod=ntpath)
+    assert cwd_calls == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [_WINDOWS_EXTENDED_DRIVE, _WINDOWS_EXTENDED_DRIVE_NORMCASE, _WINDOWS_EXTENDED_UNC, _WINDOWS_PLAIN_UNC],
+)
+def test_import_refuses_windows_namespace_source_without_copying_bytes(tmp_path, capsys, raw):
+    """Extended-length state-root and UNC forms must refuse, never copy trusted bytes."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    planted = workspace / ".brigade" / "skills" / "planted"
+    planted.parent.mkdir(parents=True)
+    if hasattr(os, "symlink"):
+        planted.symlink_to(trusted, target_is_directory=True)
+    source = Path(raw)
+    assert skills_cmd._state_root_selector_kind(workspace, raw) == "refuse"
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
