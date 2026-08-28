@@ -24,11 +24,13 @@ from . import compaction_marker, envelope
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
-    _ANNOUNCE_CLAIMED_KEY,
+    _ANNOUNCE_CLAIMED_KEY,  # noqa: F401 - runtime compatibility alias
+    _apply_timeout_followup_inprocess,  # noqa: F401 - runtime compatibility alias
+    _bounded_timeout_followup as _bounded_timeout_followup_impl,
     _claim_timeout_announce,
     _clear_hook_timeouts,
     _read_hook_latch,
-    _record_hook_timeout,
+    _record_hook_timeout,  # noqa: F401 - runtime compatibility alias
     _session_state_lock,  # noqa: F401 - runtime compatibility alias
     _write_session_state_preserving_latch,
 )
@@ -3193,35 +3195,6 @@ def _run_best_effort_bounded(
     return box[0]
 
 
-def _apply_timeout_followup_inprocess(
-    event: str,
-    target: Path,
-    session_id: str,
-    detail: str,
-    *,
-    publish: Callable[[str], None] | None = None,
-) -> str:
-    try:
-        state = _record_hook_timeout(target, session_id, announce=True)
-    except OSError:
-        return "degraded"
-    if state.get(_ANNOUNCE_CLAIMED_KEY) is True:
-        outcome = "latched"
-    elif state.get("hook_latched") is True:
-        outcome = "latched_silent"
-    else:
-        outcome = "degraded"
-    if publish is not None:
-        publish(outcome)
-    try:
-        envelope.append_log(target, f"{event}: degraded: {detail}")
-        if outcome == "latched":
-            envelope.append_log(target, f"{event}: latched after repeated timeouts")
-    except OSError:
-        pass
-    return outcome
-
-
 def _append_degraded_diagnostic(event: str, log_target: Path | None, detail: object) -> None:
     """Write the #735 doctor-pointer ``hook.log`` before ``hook_run`` returns.
 
@@ -3256,27 +3229,8 @@ def _append_error_diagnostic(event: str, log_target: Path | None, exc: BaseExcep
 
 
 def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
-    """Record timeout latch/state without blocking past a short budget.
-
-    The path was already resolved inside the timed worker. Latch-state
-    writes (and that path's target-tree hook.log) still touch that tree;
-    they run best-effort under a hard cap so a later stall cannot hang
-    the parent. The latch outcome is published as soon as state is known
-    so a later log stall cannot hide it. Non-timeout doctor-pointer logs
-    use ``_append_degraded_diagnostic`` instead.
-    """
-    detail = str(exc)
-    published = ["degraded"]
-
-    def publish(outcome: str) -> None:
-        published[0] = outcome
-
-    _run_best_effort_bounded(
-        lambda: _apply_timeout_followup_inprocess(event, log_target, session_id, detail, publish=publish),
-        timeout=_TIMEOUT_FOLLOWUP_SECONDS,
-        default="degraded",
-    )
-    return published[0]
+    """Compatibility wrapper: timeout follow-up lives in session_state."""
+    return _bounded_timeout_followup_impl(event, log_target, session_id, exc)
 
 
 def _bounded_release_claim(path: Path | None) -> None:

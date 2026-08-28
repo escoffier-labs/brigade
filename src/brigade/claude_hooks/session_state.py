@@ -8,7 +8,7 @@ import stat
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .. import localio
 from ..work_cmd import inbox_lock
@@ -370,3 +370,56 @@ def _clear_hook_timeouts(target: Path, session_id: str) -> None:
             _rt().write_session_state(target, session_id, updated)
     except inbox_lock.InboxLockTimeout:
         return
+
+
+def _apply_timeout_followup_inprocess(
+    event: str,
+    target: Path,
+    session_id: str,
+    detail: str,
+    *,
+    publish: Callable[[str], None] | None = None,
+) -> str:
+    try:
+        state = _rt()._record_hook_timeout(target, session_id, announce=True)
+    except OSError:
+        return "degraded"
+    if state.get(_ANNOUNCE_CLAIMED_KEY) is True:
+        outcome = "latched"
+    elif state.get("hook_latched") is True:
+        outcome = "latched_silent"
+    else:
+        outcome = "degraded"
+    if publish is not None:
+        publish(outcome)
+    try:
+        envelope.append_log(target, f"{event}: degraded: {detail}")
+        if outcome == "latched":
+            envelope.append_log(target, f"{event}: latched after repeated timeouts")
+    except OSError:
+        pass
+    return outcome
+
+
+def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
+    """Record timeout latch/state without blocking past a short budget.
+
+    The path was already resolved inside the timed worker. Latch-state
+    writes (and that path's target-tree hook.log) still touch that tree;
+    they run best-effort under a hard cap so a later stall cannot hang
+    the parent. The latch outcome is published as soon as state is known
+    so a later log stall cannot hide it. Non-timeout doctor-pointer logs
+    use ``_append_degraded_diagnostic`` instead.
+    """
+    detail = str(exc)
+    published = ["degraded"]
+
+    def publish(outcome: str) -> None:
+        published[0] = outcome
+
+    _rt()._run_best_effort_bounded(
+        lambda: _rt()._apply_timeout_followup_inprocess(event, log_target, session_id, detail, publish=publish),
+        timeout=_rt()._TIMEOUT_FOLLOWUP_SECONDS,
+        default="degraded",
+    )
+    return published[0]
