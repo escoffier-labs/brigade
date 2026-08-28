@@ -34,6 +34,15 @@ def _record_hook_timeout_in_fork(target: Path, session_id: str) -> None:
     runtime._record_hook_timeout(target, session_id)
 
 
+def _persisted_timeout_count(target: Path, session_id: str) -> int:
+    """Return state count plus journal markers not yet folded into it."""
+    from brigade.claude_hooks import session_state
+
+    state = runtime.read_session_state(target, session_id)
+    current = state if isinstance(state, dict) else {}
+    return session_state._effective_timeout_count(current, session_state._journal_timeout_count(target, session_id))
+
+
 def test_session_state_helpers_resolve_runtime_primitives_at_call_time(tmp_path: Path, monkeypatch) -> None:
     from brigade.claude_hooks import session_state
 
@@ -272,6 +281,14 @@ def test_slow_timeout_writes_eventually_latch_and_hold(tmp_path: Path, monkeypat
 
 
 def test_concurrent_timeout_increments_are_not_lost(tmp_path: Path) -> None:
+    """Every increment is persisted in state and/or the timeout journal.
+
+    The per-session lock budget is 0.25s so a contended hook follow-up can
+    fail open to the journal. Under CI load some of the 200 calls take that
+    path; ``hook_timeout_count`` then lags until a later locked write folds
+    the journal. The production latch reads the effective total, so that is
+    the property this test guards.
+    """
     target = _wired_claude(tmp_path)
 
     def record() -> None:
@@ -284,10 +301,103 @@ def test_concurrent_timeout_increments_are_not_lost(tmp_path: Path) -> None:
     for thread in threads:
         thread.join()
 
+    assert _persisted_timeout_count(target, "s") == 200
     state = runtime.read_session_state(target, "s")
     assert state is not None
-    assert state["hook_timeout_count"] == 200
     assert state["hook_latched"] is True
+
+
+def test_journal_overflow_retries_lock_instead_of_dropping(tmp_path: Path, monkeypatch) -> None:
+    """A lock-timeout increment past the journal cap must retry the locked write."""
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    overflow = session_state._TIMEOUT_JOURNAL_MAX_LINES + 4
+    overflow_timeouts = 1
+    real_lock = runtime._session_state_lock
+
+    @contextlib.contextmanager
+    def gated_lock(lock_target: Path, session_id: str):
+        nonlocal overflow_timeouts
+        journal = session_state._journal_timeout_count(lock_target, session_id)
+        if journal < session_state._TIMEOUT_JOURNAL_MAX_LINES:
+            raise inbox_lock.InboxLockTimeout("busy")
+            yield
+        if overflow_timeouts > 0:
+            overflow_timeouts -= 1
+            raise inbox_lock.InboxLockTimeout("busy")
+            yield
+        with real_lock(lock_target, session_id):
+            yield
+
+    monkeypatch.setattr(runtime, "_session_state_lock", gated_lock)
+    for _ in range(overflow):
+        runtime._record_hook_timeout(target, "s")
+
+    assert _persisted_timeout_count(target, "s") == overflow
+    assert session_state._journal_timeout_count(target, "s") == session_state._TIMEOUT_JOURNAL_MAX_LINES
+
+
+def test_journal_full_and_lock_exhausted_raises(tmp_path: Path, monkeypatch) -> None:
+    """When the journal cannot accept another marker, lock timeout is not silent."""
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+
+    @contextlib.contextmanager
+    def timeout_lock(_target: Path, _session_id: str):
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
+
+    monkeypatch.setattr(runtime, "_session_state_lock", timeout_lock)
+    for _ in range(session_state._TIMEOUT_JOURNAL_MAX_LINES):
+        runtime._record_hook_timeout(target, "s")
+
+    with pytest.raises(inbox_lock.InboxLockTimeout, match="busy"):
+        runtime._record_hook_timeout(target, "s")
+    assert _persisted_timeout_count(target, "s") == session_state._TIMEOUT_JOURNAL_MAX_LINES
+
+
+def test_held_lock_past_budget_does_not_lose_increments(tmp_path: Path) -> None:
+    """Real lock contention past the 0.25s budget still persists every increment."""
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    workers = session_state._TIMEOUT_JOURNAL_MAX_LINES + 4
+    acquired = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    def hold_session_lock() -> None:
+        with runtime._session_state_lock(target, "s"):
+            acquired.set()
+            release.wait(timeout=10)
+
+    def record() -> None:
+        try:
+            runtime._record_hook_timeout(target, "s")
+        except BaseException as exc:
+            errors.append(exc)
+
+    holder = threading.Thread(target=hold_session_lock)
+    holder.start()
+    assert acquired.wait(timeout=2)
+    threads = [threading.Thread(target=record) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if session_state._journal_timeout_count(target, "s") >= session_state._TIMEOUT_JOURNAL_MAX_LINES:
+            break
+        time.sleep(0.01)
+    release.set()
+    holder.join(timeout=2)
+    assert not holder.is_alive()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert _persisted_timeout_count(target, "s") == workers
 
 
 def test_preserving_writer_keeps_latch_from_a_stale_state(tmp_path: Path) -> None:

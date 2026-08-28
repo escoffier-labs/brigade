@@ -18,6 +18,7 @@ _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
 _TIMEOUT_JOURNAL_MAX_LINES = 16
 _TIMEOUT_JOURNAL_MAX_BYTES = 4096
+_TIMEOUT_LOCK_RETRIES = 3
 _ANNOUNCE_TOKEN = b"announced"
 _ANNOUNCE_CLAIMED_KEY = "hook_announce_claimed"
 
@@ -163,19 +164,19 @@ def _append_journal_line(target: Path, session_id: str, payload: bytes) -> bool:
     return True
 
 
-def _append_timeout_journal(target: Path, session_id: str) -> int:
+def _append_timeout_journal(target: Path, session_id: str) -> tuple[int, bool]:
     """Append one timeout occurrence without taking the session-state lock."""
     journal_lines, _already_announced, _first = _read_timeout_journal(target, session_id)
     if journal_lines >= _TIMEOUT_JOURNAL_MAX_LINES:
-        return journal_lines
+        return journal_lines, False
     if not _append_journal_line(target, session_id, f"{localio.utc_now_iso()}\n".encode()):
-        return journal_lines
-    return _read_timeout_journal(target, session_id)[0]
+        return journal_lines, False
+    return _read_timeout_journal(target, session_id)[0], True
 
 
 def _append_timeout_marker(target: Path, session_id: str) -> int:
     """Append one timeout marker without taking the session-state lock."""
-    return _append_timeout_journal(target, session_id)
+    return _append_timeout_journal(target, session_id)[0]
 
 
 def _persisted_announce_claimed(state: object) -> bool:
@@ -321,36 +322,42 @@ def _with_announce_claim(state: dict[str, Any], claimed: bool) -> dict[str, Any]
 def _record_hook_timeout(target: Path, session_id: str, *, announce: bool = False) -> dict[str, Any]:
     state = _rt().read_session_state(target, session_id)
     fallback: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
-    try:
-        with _rt()._session_state_lock(target, session_id):
-            journal_lines = _journal_timeout_count(target, session_id)
-            state = _rt().read_session_state(target, session_id)
-            updated: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
-            next_count = _effective_timeout_count(updated, journal_lines) + 1
-            updated["hook_timeout_count"] = next_count
-            updated["hook_timeout_journal_folded"] = journal_lines
-            already_announced = _persisted_announce_claimed(updated)
-            _apply_timeout_latch(updated, next_count)
-            _rt().write_session_state(target, session_id, updated)
-        claimed = False
-        if announce and updated.get("hook_latched") is True and not already_announced:
-            claimed = _claim_timeout_announce(target, session_id)
-        return _with_announce_claim(updated, claimed)
-    except inbox_lock.InboxLockTimeout:
-        journal_count = _append_timeout_marker(target, session_id)
-        fresh = _rt().read_session_state(target, session_id)
-        current: dict[str, Any] = dict(fresh) if isinstance(fresh, dict) else dict(fallback)
-        journal_lines, journal_announced, _claim = _read_timeout_journal(target, session_id)
-        next_count = (
-            _effective_timeout_count(current, journal_lines) if journal_count else _timeout_state_count(current) + 1
-        )
-        current["hook_timeout_count"] = next_count
-        _apply_timeout_latch(current, next_count)
-        already = journal_announced or _persisted_announce_claimed(current)
-        claimed = False
-        if announce and current.get("hook_latched") is True and not already:
-            claimed = _claim_timeout_announce(target, session_id)
-        return _with_announce_claim(current, claimed)
+    last_timeout: inbox_lock.InboxLockTimeout | None = None
+    for _attempt in range(_TIMEOUT_LOCK_RETRIES + 1):
+        try:
+            with _rt()._session_state_lock(target, session_id):
+                journal_lines = _journal_timeout_count(target, session_id)
+                state = _rt().read_session_state(target, session_id)
+                updated: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
+                next_count = _effective_timeout_count(updated, journal_lines) + 1
+                updated["hook_timeout_count"] = next_count
+                updated["hook_timeout_journal_folded"] = journal_lines
+                already_announced = _persisted_announce_claimed(updated)
+                _apply_timeout_latch(updated, next_count)
+                _rt().write_session_state(target, session_id, updated)
+            claimed = False
+            if announce and updated.get("hook_latched") is True and not already_announced:
+                claimed = _claim_timeout_announce(target, session_id)
+            return _with_announce_claim(updated, claimed)
+        except inbox_lock.InboxLockTimeout as exc:
+            last_timeout = exc
+            _, persisted = _append_timeout_journal(target, session_id)
+            if not persisted:
+                continue
+            fresh = _rt().read_session_state(target, session_id)
+            current: dict[str, Any] = dict(fresh) if isinstance(fresh, dict) else dict(fallback)
+            journal_lines, journal_announced, _claim = _read_timeout_journal(target, session_id)
+            next_count = _effective_timeout_count(current, journal_lines)
+            current["hook_timeout_count"] = next_count
+            _apply_timeout_latch(current, next_count)
+            already = journal_announced or _persisted_announce_claimed(current)
+            claimed = False
+            if announce and current.get("hook_latched") is True and not already:
+                claimed = _claim_timeout_announce(target, session_id)
+            return _with_announce_claim(current, claimed)
+    if last_timeout is None:
+        raise RuntimeError("timeout retry loop exited without InboxLockTimeout")
+    raise last_timeout
 
 
 def _clear_hook_timeouts(target: Path, session_id: str) -> None:
