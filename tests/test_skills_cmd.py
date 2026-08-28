@@ -4,6 +4,7 @@ import contextlib
 import errno
 import io
 import json
+import ntpath
 import os
 import shutil
 import signal
@@ -15,6 +16,7 @@ import pytest
 
 from brigade import cli, skills_cmd
 from brigade.projection import kernel as projection
+from brigade.skills_cmd.packs import UnsupportedLexicalPathError, _absolute_lexical_path
 
 
 def _write_skill(root, name="security-review"):
@@ -3449,3 +3451,315 @@ def test_no_tmp_staging_paths_in_install_errors_or_proposal_metadata(tmp_path, c
     # staging directory the import ran from.
     assert registry_meta.get("source") == original_source
     assert "brigade-proposal-import-" not in json.dumps(accepted)
+
+
+# --- #1214 findings 1-3: classify / snapshot / alias residuals -----------------
+
+
+def _trusted_private_skill(workspace: Path, tmp_path: Path, name: str = "private") -> Path:
+    """A trusted in-workspace .claude skill used as a symlink follow target."""
+    trusted = _write_skill(workspace / ".claude" / "skills", name=name)
+    (trusted / "SKILL.md").write_text("# TRUSTED-PRIVATE-SKILL-MARKER\n")
+    return trusted
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_import_refuses_state_root_symlink_to_trusted_skill(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    planted = workspace / ".brigade" / "skills" / "planted-import"
+    planted.parent.mkdir(parents=True)
+    planted.symlink_to(trusted, target_is_directory=True)
+
+    rc = skills_cmd.import_skill(target=workspace, source=planted, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    registry_root = workspace / ".brigade" / "skills" / "registry"
+    if registry_root.is_dir():
+        for path in registry_root.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                assert b"TRUSTED-PRIVATE-SKILL-MARKER" not in path.read_bytes()
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_inbox_add_refuses_state_root_symlink_to_trusted_skill(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path, name="inbox-private")
+    planted = workspace / ".brigade" / "skills" / "planted-inbox"
+    planted.parent.mkdir(parents=True)
+    planted.symlink_to(trusted, target_is_directory=True)
+
+    rc = skills_cmd.inbox_add(target=workspace, source=planted, summary="review me")
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    inbox_root = workspace / ".brigade" / "skills" / "inbox"
+    if inbox_root.is_dir():
+        for path in inbox_root.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                assert b"TRUSTED-PRIVATE-SKILL-MARKER" not in path.read_bytes()
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_forced_install_directory_symlink_does_not_snapshot_trusted_bytes(tmp_path, capsys):
+    workspace = _round6_workspace(tmp_path, capsys, name="mcp-victim")
+    assert skills_cmd.install(workspace=workspace, skill="registry:mcp-victim", harness="mcp", json_output=True) == 0
+    assert skills_cmd.install(workspace=workspace, skill="registry:mcp-victim", harness="claude", json_output=True) == 0
+    capsys.readouterr()
+    trusted = workspace / ".claude" / "skills" / "mcp-victim"
+    assert trusted.is_dir()
+    (trusted / "SKILL.md").write_text("# TRUSTED-CLAUDE-INSTALL-MARKER\n")
+
+    resources = workspace / ".brigade" / "skills" / "mcp-resources"
+    shutil.move(str(resources), str(tmp_path / "real-mcp-resources"))
+    resources.symlink_to(trusted.parent, target_is_directory=True)
+
+    rc = skills_cmd.install(workspace=workspace, skill="registry:mcp-victim", harness="mcp", force=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TRUSTED-CLAUDE-INSTALL-MARKER" not in captured.out + captured.err
+    rollback_root = workspace / ".brigade" / "skills" / "rollback"
+    if rollback_root.is_dir():
+        for rollback_file in rollback_root.rglob("*"):
+            if rollback_file.is_file() and not rollback_file.is_symlink():
+                assert b"TRUSTED-CLAUDE-INSTALL-MARKER" not in rollback_file.read_bytes()
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-CLAUDE-INSTALL-MARKER\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_state_root_selector_matches_symlinked_workspace_alias(tmp_path, capsys):
+    workspace = _round6_workspace(tmp_path, capsys, name="alias-victim")
+    entry_md = workspace / ".brigade" / "skills" / "registry" / "alias-victim" / "SKILL.md"
+    outside = tmp_path / "outside-alias-secret.md"
+    outside.write_text("# ALIAS-REGISTRY-MARKER\n")
+    entry_md.unlink()
+    entry_md.symlink_to(outside)
+
+    alias = tmp_path / "ws-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    requested = str(alias / ".brigade" / "skills" / "registry" / "alias-victim")
+
+    assert skills_cmd._state_root_selector_kind(workspace.resolve(), requested) == "registry"
+    assert skills_cmd.lint(target=workspace, skill=requested) == 1
+    lint_cap = capsys.readouterr()
+    assert "ALIAS-REGISTRY-MARKER" not in lint_cap.out + lint_cap.err
+
+
+# --- #1214 Daybreak residuals: case-variant .brigade and raw-lexical .. escape -
+
+
+def _assert_trusted_bytes_not_copied(workspace: Path, marker: bytes = b"TRUSTED-PRIVATE-SKILL-MARKER") -> None:
+    for root_name in ("registry", "inbox"):
+        root = workspace / ".brigade" / "skills" / root_name
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                assert marker not in path.read_bytes()
+
+
+@pytest.mark.parametrize("brigade_name", [".brigade", ".BRIGADE", ".Brigade"])
+def test_state_root_classification_is_case_insensitive_for_brigade_component(tmp_path, monkeypatch, brigade_name):
+    """Bypass A: a case-variant .brigade component must classify as state-root.
+
+    Windows (and other case-insensitive filesystems) treat ``.BRIGADE`` as the
+    state root. The comparison uses ``os.path.normcase`` so the parametrized
+    casings also fail-closed on Linux when normcase is the identity.
+    """
+    monkeypatch.setattr(os.path, "normcase", lambda p: str(p).casefold())
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = workspace / brigade_name / "skills" / "planted"
+    assert skills_cmd._lexical_state_root_parts(workspace, source) == ("skills", "planted")
+    assert skills_cmd._state_root_selector_kind(workspace, str(source)) == "refuse"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+@pytest.mark.parametrize("brigade_name", [".brigade", ".BRIGADE", ".Brigade"])
+def test_import_refuses_case_variant_state_root_symlink_to_trusted_skill(tmp_path, capsys, monkeypatch, brigade_name):
+    """Bypass A: ``.BRIGADE/skills/planted`` must not resolve and copy trusted bytes."""
+    monkeypatch.setattr(os.path, "normcase", lambda p: str(p).casefold())
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    planted = workspace / ".brigade" / "skills" / "planted"
+    planted.parent.mkdir(parents=True)
+    planted.symlink_to(trusted, target_is_directory=True)
+    source = workspace / brigade_name / "skills" / "planted"
+    assert skills_cmd._lexical_state_root_parts(workspace, source) == ("skills", "planted")
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+def test_import_refuses_state_root_dotdot_escape_without_copying_bytes(tmp_path, capsys):
+    """Bypass B: ``.brigade/skills/../../.claude/skills/private`` must refuse, not resolve."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    source = workspace / ".brigade" / "skills" / ".." / ".." / ".claude" / "skills" / trusted.name
+    assert ".." in source.parts
+    assert skills_cmd._lexical_state_root_parts(workspace, source) is not None
+    assert skills_cmd._state_root_selector_kind(workspace, str(source)) == "refuse"
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+# --- #1214 Daybreak residual: Windows drive-relative and current-drive-rooted paths -
+
+
+_WINDOWS_DRIVE_RELATIVE_SOURCES = (
+    r"D:.BRIGADE\skills\planted",
+    r"D:.brigade\skills\..\..\.claude\skills\private",
+)
+_WINDOWS_ROOTED_WITHOUT_DRIVE = r"\.brigade\skills\x"
+
+
+@pytest.mark.parametrize("raw", [*_WINDOWS_DRIVE_RELATIVE_SOURCES, _WINDOWS_ROOTED_WITHOUT_DRIVE])
+@pytest.mark.parametrize("pathmod", [ntpath, os.path], ids=["ntpath", "os.path"])
+def test_absolute_lexical_path_refuses_windows_unrooted_forms(raw, pathmod, monkeypatch):
+    """Drive-relative / current-drive-rooted forms must not join process cwd."""
+    cwd_calls: list[str] = []
+
+    def _track_cwd() -> str:
+        cwd_calls.append("called")
+        return r"C:\other"
+
+    monkeypatch.setattr(os, "getcwd", _track_cwd)
+    with pytest.raises(UnsupportedLexicalPathError, match="drive-relative"):
+        _absolute_lexical_path(Path(raw), pathmod=pathmod)
+    assert cwd_calls == []
+
+
+@pytest.mark.parametrize("raw", _WINDOWS_DRIVE_RELATIVE_SOURCES)
+def test_import_refuses_windows_drive_relative_source_without_copying_bytes(tmp_path, capsys, raw):
+    """Bypass C: Windows drive-relative sources must refuse before any copy."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    planted = workspace / ".brigade" / "skills" / "planted"
+    planted.parent.mkdir(parents=True)
+    if hasattr(os, "symlink"):
+        planted.symlink_to(trusted, target_is_directory=True)
+    source = Path(raw)
+    assert skills_cmd._state_root_selector_kind(workspace, raw) == "refuse"
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "drive-relative" in captured.err
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+def test_import_refuses_windows_rooted_without_drive_source_without_copying_bytes(tmp_path, capsys):
+    """Current-drive-rooted ``\\.brigade\\...`` must refuse the same way."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    source = Path(_WINDOWS_ROOTED_WITHOUT_DRIVE)
+    assert skills_cmd._state_root_selector_kind(workspace, _WINDOWS_ROOTED_WITHOUT_DRIVE) == "refuse"
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "drive-relative" in captured.err
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"
+
+
+# --- #1214 Daybreak residual: Windows extended-length, device, and UNC prefixes -
+
+
+_WINDOWS_EXTENDED_DRIVE = r"\\?\C:\ws\.brigade\skills\x"
+_WINDOWS_EXTENDED_DRIVE_NORMCASE = ntpath.normcase(_WINDOWS_EXTENDED_DRIVE)
+_WINDOWS_EXTENDED_UNC = r"\\?\UNC\srv\share\.brigade\skills\x"
+_WINDOWS_PLAIN_UNC = r"\\srv\share\.brigade\skills\x"
+_WINDOWS_DEVICE = r"\\.\C:\ws\.brigade\skills\x"
+
+
+def _ntpath_lexical_parts(raw: str) -> tuple[str, list[str]]:
+    candidate = _absolute_lexical_path(Path(raw), pathmod=ntpath)
+    drive, tail = ntpath.splitdrive(candidate)
+    return drive, [part for part in tail.split(ntpath.sep) if part]
+
+
+@pytest.mark.parametrize("raw", [_WINDOWS_EXTENDED_DRIVE, _WINDOWS_EXTENDED_DRIVE_NORMCASE])
+def test_absolute_lexical_path_strips_extended_length_drive_prefix(raw, monkeypatch):
+    """``\\?\\C:\\ws\\.brigade\\...`` must classify like ``C:\\ws\\.brigade\\...``."""
+    cwd_calls: list[str] = []
+
+    def _track_cwd() -> str:
+        cwd_calls.append("called")
+        return r"C:\other"
+
+    monkeypatch.setattr(os, "getcwd", _track_cwd)
+    drive, parts = _ntpath_lexical_parts(raw)
+    assert drive.casefold() == "c:"
+    assert parts == ["ws", ".brigade", "skills", "x"]
+    stripped = _absolute_lexical_path(Path(raw), pathmod=ntpath)
+    plain = _absolute_lexical_path(Path(r"C:\ws\.brigade\skills\x"), pathmod=ntpath)
+    assert stripped.casefold() == plain.casefold()
+    assert cwd_calls == []
+
+
+@pytest.mark.parametrize("raw", [_WINDOWS_EXTENDED_UNC, _WINDOWS_PLAIN_UNC, _WINDOWS_DEVICE])
+def test_absolute_lexical_path_refuses_unc_and_device_forms(raw, monkeypatch):
+    cwd_calls: list[str] = []
+
+    def _track_cwd() -> str:
+        cwd_calls.append("called")
+        return r"C:\other"
+
+    monkeypatch.setattr(os, "getcwd", _track_cwd)
+    with pytest.raises(UnsupportedLexicalPathError):
+        _absolute_lexical_path(Path(raw), pathmod=ntpath)
+    assert cwd_calls == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [_WINDOWS_EXTENDED_DRIVE, _WINDOWS_EXTENDED_DRIVE_NORMCASE, _WINDOWS_EXTENDED_UNC, _WINDOWS_PLAIN_UNC],
+)
+def test_import_refuses_windows_namespace_source_without_copying_bytes(tmp_path, capsys, raw):
+    """Extended-length state-root and UNC forms must refuse, never copy trusted bytes."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trusted = _trusted_private_skill(workspace, tmp_path)
+    planted = workspace / ".brigade" / "skills" / "planted"
+    planted.parent.mkdir(parents=True)
+    if hasattr(os, "symlink"):
+        planted.symlink_to(trusted, target_is_directory=True)
+    source = Path(raw)
+    assert skills_cmd._state_root_selector_kind(workspace, raw) == "refuse"
+
+    rc = skills_cmd.import_skill(target=workspace, source=source, json_output=True)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TRUSTED-PRIVATE-SKILL-MARKER" not in captured.out + captured.err
+    _assert_trusted_bytes_not_copied(workspace)
+    assert trusted.joinpath("SKILL.md").read_text() == "# TRUSTED-PRIVATE-SKILL-MARKER\n"

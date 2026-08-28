@@ -7,6 +7,7 @@ import contextlib
 import difflib
 import hashlib
 import json
+import ntpath
 import os
 import shlex
 import shutil
@@ -152,29 +153,192 @@ def _is_under_state_root(path: Path, target: Path) -> bool:
     re-classify state-root content as a trusted external path. Same-uid
     replacement of trusted ancestors stays out of scope (#1093).
     """
-    return _lexical_state_root_parts(target, path) is not None
+    try:
+        return _lexical_state_root_parts(target, path) is not None
+    except UnsupportedLexicalPathError:
+        return True
 
 
-def _lexical_state_root_parts(target: Path, path: Path) -> tuple[str, ...] | None:
+def _casefold_path(value: str) -> str:
+    """Case-fold a path or component for state-root classification.
+
+    ``os.path.normcase`` is the Windows rule; ``casefold`` keeps the same
+    comparison honest on case-insensitive mounts where ``normcase`` is a no-op.
+    """
+    return os.path.normcase(value).casefold()
+
+
+def _is_brigade_component(part: str) -> bool:
+    return _casefold_path(part) == _casefold_path(".brigade")
+
+
+class UnsupportedLexicalPathError(ValueError):
+    """A Windows path form that cannot be classified safely without a cwd or namespace."""
+
+
+def _path_seps(pathmod: Any) -> frozenset[str]:
+    seps = {pathmod.sep}
+    if pathmod.altsep:
+        seps.add(pathmod.altsep)
+    return frozenset(seps)
+
+
+def _win_backslash_form(raw: str) -> str:
+    return raw.replace("/", "\\")
+
+
+def _win_namespace_kind(raw: str) -> str | None:
+    """Return ``extended-drive``, ``extended``, ``device``, ``unc``, or ``None``.
+
+    Matching is case-insensitive after ``/`` → ``\\`` so ``os.path.normcase``
+    / ``ntpath.normcase`` lowercase prefixes still classify.
+    """
+    normalized = _win_backslash_form(raw)
+    folded = normalized.casefold()
+    if folded.startswith("\\\\.\\"):
+        return "device"
+    if folded.startswith("\\\\?\\unc\\"):
+        return "unc"
+    if folded.startswith("\\\\?\\"):
+        remainder = normalized[4:]
+        if len(remainder) >= 3 and remainder[0].isalpha() and remainder[1] == ":" and remainder[2] == "\\":
+            return "extended-drive"
+        return "extended"
+    if folded.startswith("\\\\"):
+        return "unc"
+    return None
+
+
+def _detected_win_namespace_kind(raw: str) -> str | None:
+    for candidate in (raw, os.path.normcase(raw), ntpath.normcase(raw)):
+        kind = _win_namespace_kind(candidate)
+        if kind is not None:
+            return kind
+    return None
+
+
+def _pathmod_has_windows_drives(pathmod: Any) -> bool:
+    return pathmod is ntpath or pathmod.__name__ == "ntpath" or bool(getattr(pathmod, "altsep", None))
+
+
+def _plain_win_lexical_path(raw: str, pathmod: Any) -> str:
+    """Strip a safe ``\\?\\X:\\`` prefix, or refuse UNC / device / other ``\\?\\`` forms.
+
+    Stripping is only applied when *pathmod* understands drive letters, so a
+    POSIX helper cannot cwd-join ``C:\\ws\\...``. The remainder is then
+    classified like the plain drive path.
+    """
+    kind = _detected_win_namespace_kind(raw)
+    if kind == "extended-drive" and _pathmod_has_windows_drives(pathmod):
+        stripped = _win_backslash_form(raw)[4:]
+        if _detected_win_namespace_kind(stripped) is not None:
+            raise UnsupportedLexicalPathError("Windows extended-length paths are unsupported")
+        return stripped
+    if kind == "device":
+        raise UnsupportedLexicalPathError("Windows device paths are unsupported")
+    if kind == "unc":
+        raise UnsupportedLexicalPathError("UNC paths are unsupported")
+    if kind is not None:
+        raise UnsupportedLexicalPathError("Windows extended-length paths are unsupported")
+    return raw
+
+
+def _is_drive_relative(raw: str, pathmod: Any) -> bool:
+    """True for ``D:foo``: a drive letter whose remainder is not rooted."""
+    drive, tail = pathmod.splitdrive(raw)
+    if not drive:
+        return False
+    return not tail or tail[0] not in _path_seps(pathmod)
+
+
+def _is_rooted_without_drive(raw: str, pathmod: Any) -> bool:
+    """True for Windows ``\\foo`` forms that resolve against the current drive.
+
+    POSIX absolute paths (``/foo``) are not this form: ``posixpath`` has no
+    ``altsep``, and a lone ``/`` start is a normal absolute path.
+    """
+    drive, tail = pathmod.splitdrive(raw)
+    if drive or not tail:
+        return False
+    if pathmod.altsep:
+        return tail[0] in _path_seps(pathmod)
+    return tail.startswith("\\")
+
+
+def _raise_if_unsupported_win_form(raw: str, pathmod: Any) -> None:
+    """Refuse forms that Windows would resolve against a per-drive cwd.
+
+    Checked against both *pathmod* and ``ntpath`` so Linux still rejects the
+    Daybreak inputs (``D:.BRIGADE\\...``, ``\\.brigade\\...``) without treating
+    POSIX ``/absolute`` paths as current-drive-rooted.
+    """
+    if _is_drive_relative(raw, pathmod) or _is_drive_relative(raw, ntpath):
+        raise UnsupportedLexicalPathError("drive-relative paths are unsupported")
+    if _is_rooted_without_drive(raw, pathmod):
+        raise UnsupportedLexicalPathError("drive-relative paths are unsupported")
+    drive, tail = ntpath.splitdrive(raw)
+    if not drive and tail.startswith("\\"):
+        raise UnsupportedLexicalPathError("drive-relative paths are unsupported")
+
+
+def _absolute_lexical_path(path: Path, *, pathmod: Any = os.path) -> str:
+    """Make *path* absolute without collapsing ``..`` or ``.brigade`` away.
+
+    Drive-relative (``D:foo``) and current-drive-rooted (``\\foo``) Windows
+    forms are refused: they resolve against a per-drive cwd, and joining them
+    with the process cwd classifies the source as trusted-external. Extended
+    ``\\?\\X:\\`` prefixes are stripped so classification matches the plain
+    drive path; UNC and device namespaces are refused.
+    """
+    raw = os.path.expanduser(str(path))
+    raw = _plain_win_lexical_path(raw, pathmod)
+    _raise_if_unsupported_win_form(raw, pathmod)
+    if not pathmod.isabs(raw):
+        raw = pathmod.join(os.getcwd(), raw)
+    altsep = pathmod.altsep
+    if altsep:
+        raw = raw.replace(altsep, pathmod.sep)
+    return raw
+
+
+def _lexical_state_root_parts(target: Path, path: Path, *, pathmod: Any = os.path) -> tuple[str, ...] | None:
     """Classify an un-resolved path against ``<target>/.brigade`` lexically.
 
+    Classification uses the raw lexical components *before* any whole-path
+    ``normpath`` / ``resolve``: those collapse ``.brigade/skills/../..`` into
+    an external pathname and would re-open the follow. Resolves only the
+    trusted workspace prefix (everything before the ``.brigade`` component)
+    so a symlinked workspace alias still matches. The ``.brigade`` component
+    and the trusted prefix are compared with ``os.path.normcase`` / casefold
+    so a case-variant state-root path stays state-root.
+
+    A ``..`` after the ``.brigade`` component, or a ``.brigade`` component at
+    any position whose prefix matches, is state-root (refuse or anchor) —
+    never external.
+
     Returns the path's components below ``.brigade`` (empty tuple for the
-    state root itself) or ``None`` when the path lies outside it.
+    state root itself; may include ``..``) or ``None`` when the path lies
+    outside it.
     """
     try:
-        candidate = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
-        state_root = os.path.normpath(os.path.abspath(str(target / ".brigade")))
+        candidate = _absolute_lexical_path(path, pathmod=pathmod)
+        trusted_target = _casefold_path(pathmod.normpath(str(Path(target).expanduser().resolve())))
     except OSError:
         return None
-    if candidate == state_root:
-        return ()
-    prefix = state_root + os.sep
-    if not candidate.startswith(prefix):
+    drive, tail = pathmod.splitdrive(candidate)
+    parts = [part for part in tail.split(pathmod.sep) if part and part != "."]
+    brigade_idx = next((index for index, part in enumerate(parts) if _is_brigade_component(part)), None)
+    if brigade_idx is None:
         return None
-    parts = tuple(part for part in candidate[len(prefix) :].split(os.sep) if part)
-    if ".." in parts or not parts:
+    prefix_parts = parts[:brigade_idx]
+    prefix = pathmod.join(drive + pathmod.sep, *prefix_parts) if prefix_parts else drive + pathmod.sep
+    try:
+        resolved_prefix = _casefold_path(pathmod.normpath(os.path.realpath(prefix)))
+    except OSError:
         return None
-    return parts
+    if resolved_prefix != trusted_target:
+        return None
+    return tuple(part for part in parts[brigade_idx + 1 :] if part)
 
 
 def _state_root_selector_kind(target: Path, requested: str) -> str:
@@ -185,7 +349,10 @@ def _state_root_selector_kind(target: Path, requested: str) -> str:
     every other location inside the attacker-influenced state root is refused
     as a pathname source instead of being read through the filesystem.
     """
-    parts = _lexical_state_root_parts(target, Path(requested))
+    try:
+        parts = _lexical_state_root_parts(target, Path(requested))
+    except UnsupportedLexicalPathError:
+        return "refuse"
     if parts is None:
         return "external"
     if len(parts) >= 3 and parts[:2] == ("skills", "registry") and _registry_mod._slug(parts[2]) == parts[2]:

@@ -345,7 +345,6 @@ def import_skill(
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
-    source = source.expanduser().resolve()
     payload, error, rc = registry._registry_import_payload(target=target, source=source, skill_id=skill_id, force=force)
     if payload is None:
         print(f"error: {error}", file=sys.stderr)

@@ -15,7 +15,6 @@ import io
 import json
 import os
 import platform as platform_mod
-import re
 import secrets
 import sys
 import time
@@ -24,11 +23,19 @@ from pathlib import Path
 from typing import Any
 
 from . import causal_receipt, localio, outcome as core, receipt_schema, scorecard as scorecard_mod, verify_trial
+from .outcome_discovery import (
+    _artifact_content_path_at,
+    _artifact_id_has_controls,
+    _contained_under,
+    _linked_worktree_skill_roots,
+    _resolve_root,
+    _safe_path_component,
+    _skill_bundle_fingerprint,
+    _skill_names_at,
+)
 
 _LOCK_WAIT_SECONDS = 30.0
 _LOCK_SENTINEL_BYTE = b"\0"
-# Align with Brigade public/slug identifiers (no arbitrary length cap).
-_SAFE_SKILL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _WARNING_LABEL_LIMIT = 80
 
 # Generic fallback when no exercised skill/card is known. Prefer a real artifact
@@ -102,59 +109,9 @@ def load_status(target: Path) -> dict[str, dict]:
     return artifacts if isinstance(artifacts, dict) else {}
 
 
-def _artifact_id_has_controls(artifact_id: str) -> bool:
-    """True when artifact_id contains Unicode control (Cc) or format (Cf) characters."""
-    return any(unicodedata.category(ch) in {"Cc", "Cf"} for ch in artifact_id)
-
-
-def _safe_path_component(artifact_id: str) -> str | None:
-    """Return artifact_id only when it is a single safe on-disk path component."""
-    if not artifact_id or artifact_id in {".", ".."}:
-        return None
-    if any(sep in artifact_id for sep in ("/", "\\")):
-        return None
-    if artifact_id.startswith("~") or ":" in artifact_id:
-        return None
-    if any(ch in artifact_id for ch in "*?[]"):
-        return None
-    if _artifact_id_has_controls(artifact_id):
-        return None
-    return artifact_id
-
-
-def _safe_skill_id_component(skill_id: str) -> str | None:
-    """Return skill_id only when it is a single safe slug path component."""
-    safe = _safe_path_component(skill_id)
-    if safe is None:
-        return None
-    if _SAFE_SKILL_ID_RE.fullmatch(safe) is None:
-        return None
-    return safe
-
-
 def _safe_card_id_component(card_id: str) -> str | None:
     """Return card_id when it is a single safe path component (Unicode/spaces ok)."""
     return _safe_path_component(card_id)
-
-
-def _resolve_root(root: Path) -> Path | None:
-    try:
-        return root.expanduser().resolve()
-    except OSError:
-        return None
-
-
-def _contained_under(root_resolved: Path, candidate: Path) -> Path | None:
-    """Return candidate when it resolves to a real file inside root."""
-    try:
-        if not candidate.is_file():
-            return None
-        resolved = candidate.resolve()
-    except OSError:
-        return None
-    if not resolved.is_relative_to(root_resolved):
-        return None
-    return candidate
 
 
 def _contained_card_file(target: Path, candidate: Path) -> Path | None:
@@ -171,49 +128,6 @@ def _contained_card_file(target: Path, candidate: Path) -> Path | None:
     if cards_resolved is None or not cards_resolved.is_relative_to(target_resolved):
         return None
     return _contained_under(cards_resolved, candidate)
-
-
-def _skill_names_at(root: Path) -> set[str]:
-    """Skill ids present under one checkout: harness installs or registry dirs."""
-    names: set[str] = set()
-    root_resolved = _resolve_root(root)
-    if root_resolved is None:
-        return names
-    for skill_md in root.glob(".*/skills/*/SKILL.md"):
-        skill_id = _safe_skill_id_component(skill_md.parent.name)
-        if skill_id is None:
-            continue
-        if _contained_under(root_resolved, skill_md) is None:
-            continue
-        names.add(skill_id)
-    registry = root / ".brigade" / "skills" / "registry"
-    if registry.is_dir():
-        for child in registry.iterdir():
-            skill_id = _safe_skill_id_component(child.name)
-            if skill_id is None:
-                continue
-            skill_md = child / "SKILL.md"
-            if _contained_under(root_resolved, skill_md) is None:
-                continue
-            names.add(skill_id)
-    return names
-
-
-def _linked_worktree_skill_roots(target: Path) -> list[Path]:
-    """Target first, then linked-worktree parent. Never global home skill dirs."""
-    roots = [target]
-    from . import roster
-
-    parent = roster._linked_worktree_parent(target)
-    if parent is None:
-        return roots
-    try:
-        if parent.resolve() == target.expanduser().resolve():
-            return roots
-    except OSError:
-        return roots
-    roots.append(parent)
-    return roots
 
 
 def _known_skill_names(target: Path) -> list[str]:
@@ -248,24 +162,6 @@ def _artifact_known(target: Path, artifact_id: str, kind: str) -> bool:
     if kind == "card":
         return artifact_id in _known_card_names(target)
     return artifact_id in _known_skill_names(target)
-
-
-def _artifact_content_path_at(root: Path, artifact_id: str) -> Path | None:
-    """Harness-installed copy first, then registry master, under one root."""
-    skill_id = _safe_skill_id_component(artifact_id)
-    if skill_id is None:
-        return None
-    root_resolved = _resolve_root(root)
-    if root_resolved is None:
-        return None
-    # Enumerate harness skill roots without interpolating the untrusted id into glob.
-    for skills_root in sorted(path for path in root.glob(".*/skills") if path.is_dir()):
-        candidate = skills_root / skill_id / "SKILL.md"
-        contained = _contained_under(root_resolved, candidate)
-        if contained is not None:
-            return contained
-    registry_md = root / ".brigade" / "skills" / "registry" / skill_id / "SKILL.md"
-    return _contained_under(root_resolved, registry_md)
 
 
 def _artifact_content_path(target: Path, artifact_id: str, kind: str) -> Path | None:
@@ -391,54 +287,6 @@ def _unknown_artifact_warning(target: Path, artifact_id: str, artifact_kind: str
     return message
 
 
-# Files inside a skill bundle that are not part of its logic: OS cruft and the
-# install-time metadata sidecar (which changes on every install, not on edit).
-_BUNDLE_IGNORED_NAMES = frozenset({".DS_Store", "skill.json"})
-
-
-def _bundle_fingerprint(skill_dir: Path) -> str | None:
-    """sha256 over a skill's whole bundle, reducing to sha256(SKILL.md) for a lone file.
-
-    CocoIndex's logic_tracking walks the fingerprint through nested calls so
-    editing a helper invalidates its callers. A skill is a directory, not just
-    SKILL.md, so a bundled helper is that skill's "helper": hashing only SKILL.md
-    leaves a signal vouching for a bundle whose script has since changed. This
-    folds every bundle file (path + content) into the fingerprint.
-
-    A skill whose only content file is SKILL.md hashes to *exactly*
-    ``sha256(SKILL.md)`` - byte-identical to the pre-bundle fingerprint - so
-    existing single-file records are never invalidated. Only a genuinely
-    multi-file bundle takes the composite path.
-
-    Symlinks that resolve outside the selected skill directory are excluded so
-    the fingerprint never hashes external dependency bytes.
-    """
-    skill_root = _resolve_root(skill_dir)
-    if skill_root is None:
-        return None
-    files = sorted(
-        p
-        for p in skill_dir.rglob("*")
-        if p.name not in _BUNDLE_IGNORED_NAMES and _contained_under(skill_root, p) is not None
-    )
-    if not files:
-        return None
-    skill_md = skill_dir / "SKILL.md"
-    try:
-        if files == [skill_md]:
-            return hashlib.sha256(skill_md.read_bytes()).hexdigest()
-        digest = hashlib.sha256()
-        for path in files:
-            rel = path.relative_to(skill_dir).as_posix()
-            digest.update(rel.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii"))
-            digest.update(b"\0")
-        return digest.hexdigest()
-    except OSError:
-        return None
-
-
 def _link_target_slug(raw: str) -> str:
     """Reduce a raw ``[[wiki-link]]`` body to the card stem it points at.
 
@@ -539,7 +387,7 @@ def artifact_fingerprint(target: Path, artifact_id: str, kind: str) -> str | Non
         return None
     if kind == "card":
         return _card_fingerprint(path)
-    return _bundle_fingerprint(path.parent)
+    return _skill_bundle_fingerprint(target, path.parent)
 
 
 # --- Runtime context manifest (Phase 1: capture and surface, no scoring) -------

@@ -309,6 +309,8 @@ def _installed_tree_snapshot(
         if not installed_dir.is_dir():
             return [], {}
         return registry._collect_source_tree(installed_dir)
+    if any(part in {"", ".", ".."} for part in parts):
+        return [], {}
 
     def _collect(held: registry._StateRootAnchor) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
         if registry._state_entry_kind(held, *parts) != "dir":
@@ -587,32 +589,41 @@ def install(
                     for error in render_errors:
                         print(f"error: {install_target}: {error}", file=sys.stderr)
                 return 1
-            if dest.exists() and not force:
+            install_rel = str(_adapter_map(workspace)[install_target]["install_path"]).format(skill_id=skill_id)
+            under_state_root = install_rel.startswith(".brigade/")
+            state_parts = tuple(part for part in install_rel.split("/") if part)[1:]
+            if under_state_root:
+                dest_kind = registry._state_entry_kind(state_anchor, *state_parts)
+                dest_present = dest_kind != "missing"
+            else:
+                dest_kind = "dir" if dest.exists() else "missing"
+                dest_present = dest.exists()
+            if dest_present and not force:
                 print(f"error: installed skill already exists: {dest}", file=sys.stderr)
                 return 2
             state_anchor.revalidate()
             receipt_name = f"{skill_id}-{install_target}.json"
             receipt_path = registry._installs_root(workspace) / receipt_name
-            install_rel = str(_adapter_map(workspace)[install_target]["install_path"]).format(skill_id=skill_id)
-            under_state_root = install_rel.startswith(".brigade/")
-            state_parts = tuple(part for part in install_rel.split("/") if part)[1:]
             # Refuse redirected state paths before anything is mutated.
             registry._require_plain_state_dirs(state_anchor, "skills", "installs")
             registry._require_plain_state_dirs(state_anchor, "skills", "rollback")
             previous_receipt = _previous_install_receipt(state_anchor, skill_id=skill_id, harness=install_target)
             rollback_snapshot: str | None = None
             rollback_snapshot_fingerprint: str | None = None
-            if dest.exists():
+            if dest_present:
                 stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-")
                 rollback_dir = registry._rollback_root(workspace, skill_id, install_target) / stamp
-                # Collect the about-to-be-replaced copy once and materialize
-                # the snapshot from those bytes; the snapshot fingerprint is
-                # recorded in the new receipt so rollback can prove the
-                # snapshot it restores is byte-identical to what was captured.
-                # dest is normally a trusted harness dir; for custom adapters
-                # installing under .brigade it is state-root content captured
-                # to the rollback bar (accepted residual, see docstring).
-                replaced_dirs, replaced_files = registry._collect_source_tree(dest)
+                # State-backed destinations are snapshotted through the held
+                # anchor. Existence uses _state_entry_kind so a parent
+                # directory symlink is refused before dest.exists() can
+                # follow it; a non-plain subtree is not copied into rollback.
+                if under_state_root:
+                    if dest_kind == "dir" and _anchor_subtree_is_plain(state_anchor, *state_parts):
+                        replaced_dirs, replaced_files = _installed_tree_snapshot(workspace, dest, anchor=state_anchor)
+                    else:
+                        replaced_dirs, replaced_files = [], {}
+                else:
+                    replaced_dirs, replaced_files = registry._collect_source_tree(dest)
                 registry._write_collected_tree_into_anchor(
                     replaced_dirs, replaced_files, state_anchor, "skills", "rollback", skill_id, install_target, stamp
                 )
