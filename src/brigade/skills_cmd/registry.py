@@ -369,12 +369,12 @@ def _changelog_payload(skill_dir: Path, metadata: dict[str, Any], *, contain: bo
     candidates: list[Path] = []
     if isinstance(configured, str) and configured.strip():
         configured_path = Path(configured).expanduser()
-        # Contained mode (state-root served content) never reaches outside the
-        # skill directory for auxiliary files: an absolute or escaping
-        # changelog_path would launder outside file content into payloads.
+        # Never reach outside the skill directory for auxiliary files: an
+        # absolute or escaping changelog_path would launder outside file
+        # content into payloads, including path-based linting (contain=False).
         escapes = configured_path.is_absolute() or ".." in configured_path.parts
-        if not (contain and escapes):
-            candidates.append(configured_path if configured_path.is_absolute() else skill_dir / configured_path)
+        if not escapes:
+            candidates.append(skill_dir / configured_path)
     candidates.append(skill_dir / "CHANGELOG.md")
     path = next((candidate for candidate in candidates if candidate.is_file()), None)
     headings: list[str] = []

@@ -590,6 +590,85 @@ def test_skills_inbox_add_diff_accept_and_reject(tmp_path, capsys):
     assert rejected["reason"] == "duplicate"
 
 
+def test_inbox_add_same_second_distinct_proposals(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, summary="first", json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, summary="second", json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+
+    assert first["proposal_id"] != second["proposal_id"]
+    inbox = tmp_path / ".brigade" / "skills" / "inbox"
+    assert (inbox / first["proposal_id"]).is_dir()
+    assert (inbox / second["proposal_id"]).is_dir()
+    assert first["status"] == "pending"
+    assert second["status"] == "pending"
+
+
+def test_inbox_reject_after_accept_fails(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, summary="review me", json_output=True) == 0
+    proposal_id = json.loads(capsys.readouterr().out)["proposal_id"]
+    assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=proposal_id, json_output=True) == 0
+    capsys.readouterr()
+
+    rc = skills_cmd.inbox_reject(target=tmp_path, proposal_id=proposal_id, reason="too late")
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "pending" in captured.err
+    meta = json.loads((tmp_path / ".brigade" / "skills" / "inbox" / proposal_id / "proposal.json").read_text())
+    assert meta["status"] == "accepted"
+    assert (tmp_path / ".brigade" / "skills" / "registry" / "security-review" / "SKILL.md").is_file()
+
+
+def test_inbox_accept_rereads_current_state(tmp_path, capsys, monkeypatch):
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, summary="review me", json_output=True) == 0
+    proposal_id = json.loads(capsys.readouterr().out)["proposal_id"]
+    meta_path = tmp_path / ".brigade" / "skills" / "inbox" / proposal_id / "proposal.json"
+    holds = {"n": 0}
+    real_held = skills_cmd._held_state_root
+
+    @contextlib.contextmanager
+    def flip_before_accept_hold(target):
+        holds["n"] += 1
+        if holds["n"] == 2:
+            current = json.loads(meta_path.read_text())
+            current["status"] = "rejected"
+            current["reason"] = "flipped-before-lock"
+            meta_path.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
+        with real_held(target) as anchor:
+            yield anchor
+
+    monkeypatch.setattr(skills_cmd, "_held_state_root", flip_before_accept_hold)
+
+    rc = skills_cmd.inbox_accept(target=tmp_path, proposal_id=proposal_id)
+
+    assert rc == 2
+    assert "pending" in capsys.readouterr().err
+    meta = json.loads(meta_path.read_text())
+    assert meta["status"] == "rejected"
+    assert meta["reason"] == "flipped-before-lock"
+    assert not (tmp_path / ".brigade" / "skills" / "registry" / "security-review").exists()
+
+
+def test_changelog_payload_rejects_escaping_path_when_not_contained(tmp_path):
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# Skill\n")
+    secret = tmp_path / "secret-changelog.md"
+    secret.write_text("# Secret heading\n\noutside file\n")
+
+    payload = skills_cmd._changelog_payload(skill_dir, {"changelog_path": "../secret-changelog.md"}, contain=False)
+
+    assert payload["present"] is False
+    assert payload["path"] is None
+    assert payload["fingerprint"] is None
+    assert payload["headings"] == []
+
+
 def test_skills_cli_inbox_and_adapters(tmp_path, capsys):
     source = _write_skill(tmp_path / "source")
     assert cli.main(["skills", "inbox", "add", str(source), "--target", str(tmp_path), "--json"]) == 0
