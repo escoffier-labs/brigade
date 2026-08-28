@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from . import grokbot_mcp, grokbot_ops
+from . import grokbot_cerebro, grokbot_mcp, grokbot_ops
 
 PACK_SCHEMA = "brigade.grokbot.connector-pack.v1"
 INSTANCE_SCHEMA = "brigade.grokbot.connector-instance.v1"
@@ -39,6 +39,10 @@ DEFAULT_BINDS = {
     "operator": "127.0.0.1:8766",
     "repository-scout": "127.0.0.1:8767",
 }
+CONNECTOR_DEFAULT_BINDS = {
+    "cerebro-memory": "127.0.0.1:8770",
+}
+CONNECTOR_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"cli_executable", "workdir"})
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 PUBLIC_ROUTE_RE = re.compile(r"^$|^/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*$")
@@ -66,7 +70,23 @@ def _queue_pack(instance: str) -> dict[str, Any]:
     }
 
 
-_PACKAGED = tuple(_queue_pack(instance) for instance in sorted(DEFAULT_BINDS))
+def _connector_pack(pack_id: str) -> dict[str, Any]:
+    return {
+        "schema": PACK_SCHEMA,
+        "id": pack_id,
+        "version": "1.0.0",
+        "kind": "connector",
+        "instance": pack_id,
+        "default_bind": CONNECTOR_DEFAULT_BINDS[pack_id],
+        "public_route": "",
+        "tools": sorted(grokbot_cerebro.TOOLS if pack_id == "cerebro-memory" else ()),
+    }
+
+
+_PACKAGED = tuple(
+    [_queue_pack(instance) for instance in sorted(DEFAULT_BINDS)]
+    + [_connector_pack(pack_id) for pack_id in sorted(CONNECTOR_DEFAULT_BINDS)]
+)
 
 
 def packaged_manifests() -> tuple[dict[str, Any], ...]:
@@ -124,6 +144,8 @@ def preview_setup(
     bearer_env: str | None = None,
     bearer_file: Path | None = None,
     bearer: dict[str, Any] | None = None,
+    cli_executable: str | Path | None = None,
+    workdir: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
         target,
@@ -135,6 +157,8 @@ def preview_setup(
         bearer_env=bearer_env,
         bearer_file=bearer_file,
         bearer=bearer,
+        cli_executable=cli_executable,
+        workdir=workdir,
     )
 
 
@@ -148,6 +172,8 @@ def apply_setup(
     bearer_env: str | None = None,
     bearer_file: Path | None = None,
     bearer: dict[str, Any] | None = None,
+    cli_executable: str | Path | None = None,
+    workdir: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
         target,
@@ -159,26 +185,48 @@ def apply_setup(
         bearer_env=bearer_env,
         bearer_file=bearer_file,
         bearer=bearer,
+        cli_executable=cli_executable,
+        workdir=workdir,
     )
 
 
 def doctor(target: Path, pack_id: str) -> list[dict[str, str]]:
     pack = show_pack(pack_id)
-    return grokbot_ops.doctor(target, pack["instance"])
+    if pack["kind"] == "queue-role":
+        return grokbot_ops.doctor(target, pack["instance"])
+    from . import grokbot_cerebro
+
+    return grokbot_cerebro.doctor(target)
 
 
 def canary(target: Path, pack_id: str) -> dict[str, Any]:
     pack = show_pack(pack_id)
-    return grokbot_ops.canary(target, pack["instance"])
+    if pack["kind"] == "queue-role":
+        return grokbot_ops.canary(target, pack["instance"])
+    from . import grokbot_cerebro
+
+    return grokbot_cerebro.canary(target)
 
 
 def render_install_service(target: Path, pack_id: str) -> str:
     pack = show_pack(pack_id)
     try:
-        config = grokbot_ops.load_config(target, pack["instance"])
-        return grokbot_ops.render_unit(config, python=sys.executable, exec_root=target)
+        if pack["kind"] == "queue-role":
+            config = grokbot_ops.load_config(target, pack["instance"])
+            return grokbot_ops.render_unit(config, python=sys.executable, exec_root=target)
+        from . import grokbot_cerebro
+
+        return grokbot_cerebro.render_unit(target, python=sys.executable)
+    except PackError:
+        raise
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
         raise PackError("unsafe-path") from exc
+    except Exception as exc:
+        from . import grokbot_cerebro
+
+        if isinstance(exc, grokbot_cerebro.CerebroError):
+            raise PackError("unsafe-path") from exc
+        raise
 
 
 def apply_install_service(
@@ -190,10 +238,23 @@ def apply_install_service(
 ) -> dict[str, Any]:
     pack = show_pack(pack_id)
     try:
-        config = grokbot_ops.load_config(target, pack["instance"])
-        path = grokbot_ops.write_unit(config, out_dir, exec_root=target, force=force)
+        if pack["kind"] == "queue-role":
+            config = grokbot_ops.load_config(target, pack["instance"])
+            path = grokbot_ops.write_unit(config, out_dir, exec_root=target, force=force)
+        else:
+            from . import grokbot_cerebro
+
+            path = grokbot_cerebro.write_unit(target, out_dir, force=force)
+    except PackError:
+        raise
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
         raise PackError("unsafe-path") from exc
+    except Exception as exc:
+        from . import grokbot_cerebro
+
+        if isinstance(exc, grokbot_cerebro.CerebroError):
+            raise PackError("unsafe-path") from exc
+        raise
     return {"action": "install-service", "apply": True, "pack_id": pack_id, "unit": path.name}
 
 
@@ -224,6 +285,8 @@ def _setup(
     bearer_env: str | None,
     bearer_file: Path | None,
     bearer: dict[str, Any] | None,
+    cli_executable: str | Path | None,
+    workdir: str | Path | None,
 ) -> dict[str, Any]:
     pack = show_pack(pack_id)
     reference = _bearer_reference(bearer_env=bearer_env, bearer_file=bearer_file, bearer=bearer)
@@ -241,12 +304,19 @@ def _setup(
         "public_route": pack["public_route"],
         "bearer": reference,
     }
+    if pack["kind"] == "queue-role":
+        if cli_executable is not None or workdir is not None:
+            raise PackError("unexpected-key")
+    else:
+        payload["cli_executable"] = _connector_path_reference(cli_executable, kind="executable")
+        payload["workdir"] = _connector_path_reference(workdir, kind="directory")
+        if payload["cli_executable"] == payload["workdir"]:
+            raise PackError("unsafe-path")
     _validate_instance_config(payload, pack_id)
     _assert_setup_bind_available(target, pack_id, chosen_bind)
-    writes = [
-        str(instance_config_path(Path("."), pack_id)),
-        str(grokbot_ops.config_path(Path("."), pack["instance"])),
-    ]
+    writes = [str(instance_config_path(Path("."), pack_id))]
+    if pack["kind"] == "queue-role":
+        writes.append(str(grokbot_ops.config_path(Path("."), pack["instance"])))
     result = {"action": "setup", "apply": apply, "pack_id": pack_id, "bind": chosen_bind, "writes": writes}
     if not apply:
         return result
@@ -254,6 +324,7 @@ def _setup(
         target,
         pack_id,
         instance=pack["instance"],
+        kind=pack["kind"],
         payload=payload,
         bind=chosen_bind,
         hosts=hosts,
@@ -268,6 +339,7 @@ def _apply_setup_configs(
     pack_id: str,
     *,
     instance: str,
+    kind: str,
     payload: dict[str, Any],
     bind: str,
     hosts: list[str],
@@ -275,25 +347,28 @@ def _apply_setup_configs(
     reference: Mapping[str, str],
 ) -> None:
     pack_path = instance_config_path(target, pack_id)
-    legacy_path = grokbot_ops.config_path(target, instance)
+    destinations: list[Path] = [pack_path]
     _assert_config_destination_safe(pack_path)
-    _assert_config_destination_safe(legacy_path)
-    pack_snapshot = _snapshot_regular_file(pack_path)
-    legacy_snapshot = _snapshot_regular_file(legacy_path)
+    if kind == "queue-role":
+        legacy_path = grokbot_ops.config_path(target, instance)
+        _assert_config_destination_safe(legacy_path)
+        destinations.append(legacy_path)
+    snapshots = [_snapshot_regular_file(path) for path in destinations]
     try:
         _write_instance_config(target, pack_id, payload)
-        grokbot_ops.save_config(
-            target,
-            instance=instance,
-            bind=bind,
-            allowed_hosts=hosts,
-            allowed_origins=origins,
-            bearer_env=reference["name"] if reference["kind"] == "env" else None,
-            bearer_file=Path(reference["path"]) if reference["kind"] == "file" else None,
-        )
+        if kind == "queue-role":
+            grokbot_ops.save_config(
+                target,
+                instance=instance,
+                bind=bind,
+                allowed_hosts=hosts,
+                allowed_origins=origins,
+                bearer_env=reference["name"] if reference["kind"] == "env" else None,
+                bearer_file=Path(reference["path"]) if reference["kind"] == "file" else None,
+            )
     except (grokbot_mcp.ConfigurationError, OSError, PackError) as exc:
         rollback_failed = False
-        for dest, snap in ((pack_path, pack_snapshot), (legacy_path, legacy_snapshot)):
+        for dest, snap in zip(destinations, snapshots, strict=True):
             try:
                 _restore_regular_file(dest, snap)
             except PackError:
@@ -355,9 +430,10 @@ def _removal_paths(target: Path, pack: Mapping[str, Any], unit_dir: Path | None)
     pack_path = instance_config_path(target, pack["id"])
     if _exists_or_link(pack_path):
         candidates.append((pack_path, True))
-    legacy = grokbot_ops.config_path(target, pack["instance"])
-    if _exists_or_link(legacy):
-        candidates.append((legacy, True))
+    if pack["kind"] == "queue-role":
+        legacy = grokbot_ops.config_path(target, pack["instance"])
+        if _exists_or_link(legacy):
+            candidates.append((legacy, True))
     if unit_dir is not None:
         candidates.append((unit_dir / grokbot_ops.unit_name(pack["instance"]), False))
     paths: list[Path] = []
@@ -485,9 +561,10 @@ def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
         pack_port = _bind_port_from_existing_config(instance_config_path(target, pack["id"]))
         if pack_port is not None:
             ports.add(pack_port)
-        legacy_port = _bind_port_from_existing_config(grokbot_ops.config_path(target, pack["instance"]))
-        if legacy_port is not None:
-            ports.add(legacy_port)
+        if pack["kind"] == "queue-role":
+            legacy_port = _bind_port_from_existing_config(grokbot_ops.config_path(target, pack["instance"]))
+            if legacy_port is not None:
+                ports.add(legacy_port)
     return ports
 
 
@@ -552,13 +629,21 @@ def _validate_pack(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise PackError("unexpected-key")
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise PackError("invalid-version")
-    if kind != "queue-role" or instance != pack_id or instance not in grokbot_mcp.INSTANCES:
+    if kind == "queue-role":
+        if instance != pack_id or instance not in grokbot_mcp.INSTANCES:
+            raise PackError("unexpected-key")
+        expected_tools = grokbot_mcp.tools_for_instance(instance)
+    elif kind == "connector":
+        if pack_id not in CONNECTOR_DEFAULT_BINDS or instance != pack_id:
+            raise PackError("unexpected-key")
+        expected_tools = grokbot_cerebro.TOOLS if pack_id == "cerebro-memory" else frozenset()
+    else:
         raise PackError("unexpected-key")
     if not isinstance(route, str) or not PUBLIC_ROUTE_RE.fullmatch(route):
         raise PackError("overlapping-public-route" if route else "unexpected-key")
     if not isinstance(tools, list) or any(not isinstance(name, str) for name in tools):
         raise PackError("inventory-mismatch")
-    if set(tools) != grokbot_mcp.tools_for_instance(instance) or len(tools) != len(set(tools)):
+    if set(tools) != expected_tools or len(tools) != len(set(tools)):
         raise PackError("inventory-mismatch")
     bind = raw.get("default_bind")
     if not isinstance(bind, str):
@@ -577,7 +662,9 @@ def _validate_pack(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[str, Any]:
-    if set(payload) != INSTANCE_KEYS or payload.get("schema") != INSTANCE_SCHEMA:
+    pack = show_pack(pack_id)
+    expected_keys = INSTANCE_KEYS if pack["kind"] == "queue-role" else CONNECTOR_INSTANCE_KEYS
+    if set(payload) != expected_keys or payload.get("schema") != INSTANCE_SCHEMA:
         raise PackError("unexpected-key")
     if payload.get("pack_id") != pack_id:
         raise PackError("unexpected-key")
@@ -600,6 +687,11 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
     if not isinstance(route, str) or not PUBLIC_ROUTE_RE.fullmatch(route):
         raise PackError("unexpected-key")
     _validate_bearer_reference(payload.get("bearer"))
+    if pack["kind"] == "connector":
+        _connector_path_reference(payload.get("cli_executable"), kind="executable")
+        workdir = _connector_path_reference(payload.get("workdir"), kind="directory")
+        if payload.get("cli_executable") == workdir:
+            raise PackError("unsafe-path")
     return dict(payload)
 
 
@@ -635,6 +727,22 @@ def _validate_bearer_reference(reference: object) -> dict[str, str]:
             grokbot_ops._systemd_quote(path)
             return {"kind": "file", "path": path}
     raise PackError("weak-secret-reference")
+
+
+def _connector_path_reference(value: object, *, kind: str) -> str:
+    if value is None:
+        raise PackError("missing-path-reference")
+    if not isinstance(value, (str, Path)) or (isinstance(value, str) and not value):
+        raise PackError("unsafe-path")
+    from . import grokbot_cerebro
+
+    try:
+        text = str(value)
+        if kind == "executable":
+            return grokbot_cerebro.validate_cli_executable(text)
+        return grokbot_cerebro.validate_workdir(text)
+    except grokbot_cerebro.CerebroError as exc:
+        raise PackError("unsafe-path") from exc
 
 
 def _parse_default_bind(value: str) -> tuple[str, int]:
